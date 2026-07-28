@@ -1,8 +1,7 @@
-# Throwaway branch-scoped probe. The real CI log already named the stuck binary
-# (crates/nub-sandbox/tests/proxy.rs, tests `correct_token_still_forwards` and
-# `decider_seam_is_consulted_for_target_and_sni`); this run reproduces it in
-# isolation and dumps native thread stacks + socket state so the block point is
-# measured rather than inferred. Delete this file once the answer is recorded.
+# Throwaway branch-scoped probe. Round 2: the hang in crates/nub-sandbox/tests/proxy.rs
+# reproduces 3/3 under default parallelism and passes with --test-threads=1, so this run
+# captures native stacks at the block point and bisects which co-running test the two
+# stuck tests interact with. Delete this file once the answer is recorded.
 name: win-hang-probe
 
 on:
@@ -29,67 +28,85 @@ jobs:
           save-if: false
       - name: Build the proxy test binary
         run: cargo test -p nub-sandbox --test proxy --no-run
-      - name: Reproduce and dump
+      - name: Reproduce, dump stacks, bisect the interaction
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
+          $env:_NT_SYMBOL_PATH = ''
 
-          $exe = Get-ChildItem target\debug\deps\proxy-*.exe |
-                   Where-Object { $_.Name -notlike '*.pdb' } |
-                   Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          Write-Host "test binary: $($exe.FullName)"
-
+          $exe = (Get-ChildItem target\debug\deps\proxy-*.exe |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
           $cdb = 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe'
-          Write-Host "cdb present: $(Test-Path $cdb)"
+          Write-Host "test binary: $exe"
 
-          function Invoke-Attempt($label, $extraArgs, $timeoutSec) {
-            Write-Host "########## $label (args: $extraArgs) ##########"
-            $out = Join-Path $env:RUNNER_TEMP "$label.log"
-            $err = Join-Path $env:RUNNER_TEMP "$label.err.log"
-            $argList = @('--nocapture') + $extraArgs
-            $p = Start-Process -FilePath $exe.FullName -ArgumentList $argList `
-                   -RedirectStandardOutput $out -RedirectStandardError $err `
+          # Read a file another process still holds open for writing.
+          function Read-Live($path) {
+            if (-not (Test-Path $path)) { return '' }
+            try {
+              $fs = [System.IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+              $sr = New-Object System.IO.StreamReader($fs)
+              $t = $sr.ReadToEnd(); $sr.Close(); $fs.Close(); return $t
+            } catch { return "<<unreadable: $_>>" }
+          }
+
+          function Invoke-Attempt($label, $extraArgs, $timeoutSec, $dumpStacks) {
+            Write-Host "########## $label :: $($extraArgs -join ' ') ##########"
+            $out = Join-Path $env:RUNNER_TEMP "$label.out.txt"
+            $p = Start-Process -FilePath $exe -ArgumentList $extraArgs `
+                   -RedirectStandardOutput $out -RedirectStandardError "$out.err" `
                    -PassThru -NoNewWindow
             $deadline = (Get-Date).AddSeconds($timeoutSec)
-            while (-not $p.HasExited -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 5 }
+            while (-not $p.HasExited -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 3 }
+            $stdout = Read-Live $out
             if ($p.HasExited) {
-              Write-Host "$label COMPLETED, exit=$($p.ExitCode)"
-              Get-Content $out -Tail 40
-              Get-Content $err -Tail 20
+              $done = ([regex]::Matches($stdout, '\.\.\. ok')).Count
+              Write-Host "RESULT $label = COMPLETED exit=$($p.ExitCode) (ok-count=$done)"
               return $false
             }
-            Write-Host "$label HUNG after ${timeoutSec}s"
-            Write-Host '--- stdout so far ---'; Get-Content $out -Tail 60
-            Write-Host '--- stderr so far ---'; Get-Content $err -Tail 30
-            $proc = Get-Process -Id $p.Id
-            Write-Host "--- thread count: $($proc.Threads.Count) ---"
-            Write-Host '--- sockets owned by the test process ---'
-            (netstat -ano) | Select-String " $($p.Id)$"
-            if (Test-Path $cdb) {
-              Write-Host '--- native stacks (all threads) ---'
-              & $cdb -p $p.Id -c '~*kv; !locks; q' 2>&1 | Select-Object -Last 400
+            Write-Host "RESULT $label = HUNG after ${timeoutSec}s"
+            Write-Host '--- stdout captured so far ---'
+            Write-Host $stdout
+            Write-Host '--- stderr ---'
+            Write-Host (Read-Live "$out.err")
+            Write-Host "--- threads: $((Get-Process -Id $p.Id).Threads.Count) ---"
+            Write-Host '--- sockets ---'
+            (netstat -ano) -match "\s$($p.Id)\s*$" | Select-Object -First 40 | ForEach-Object { $_ }
+            if ($dumpStacks -and (Test-Path $cdb)) {
+              $dump = Join-Path $env:RUNNER_TEMP "$label.cdb.txt"
+              & $cdb -p $p.Id -logo $dump -c '.symfix; .reload; ~*kvn; q' | Out-Null
+              Write-Host '--- native stacks ---'
+              Write-Host (Read-Live $dump)
             }
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 3
             return $true
           }
 
-          $hangs = 0
-          foreach ($i in 1..3) {
-            if (Invoke-Attempt "parallel-$i" @() 180) { $hangs++ }
+          # Baseline + stacks.
+          Invoke-Attempt 'baseline' @('--nocapture') 120 $true | Out-Null
+
+          # Which co-running test does the pair interact with? Skip one at a time.
+          $suspects = @(
+            'dropping_proxy_stops_the_listener',
+            'stalled_tls_tunnel_fails_closed',
+            'build_jail_gate_admits_the_download_set_and_refuses_everything_else',
+            'build_jail_proxy_refuses_a_tunnel_to_an_unlisted_upstream',
+            'http_connect_hostname_target_resolves_and_forwards',
+            'non_tls_stream_to_admitted_target_forwards'
+          )
+          foreach ($s in $suspects) {
+            Invoke-Attempt "skip-$s" @('--nocapture','--skip',$s) 100 $false | Out-Null
           }
-          Write-Host "########## parallel hangs: $hangs / 3 ##########"
 
-          $serialHung = Invoke-Attempt 'serial' @('--test-threads=1') 240
-          Write-Host "########## serial hung: $serialHung ##########"
+          # Thread-count sensitivity.
+          foreach ($n in 2,4,8) {
+            Invoke-Attempt "threads-$n" @('--nocapture',"--test-threads=$n") 100 $false | Out-Null
+          }
 
-          # Just the two named tests, isolated from the rest of the binary.
-          Invoke-Attempt 'pair-only' @('--test-threads=2','correct_token_still_forwards','decider_seam_is_consulted_for_target_and_sni') 120 | Out-Null
-
-          Copy-Item (Join-Path $env:RUNNER_TEMP '*.log') $env:GITHUB_WORKSPACE -Force
+          Copy-Item (Join-Path $env:RUNNER_TEMP '*.txt') $env:GITHUB_WORKSPACE -Force
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         if: always()
         with:
           name: win-hang-probe-logs
-          path: '*.log'
+          path: '*.txt'
           if-no-files-found: warn
