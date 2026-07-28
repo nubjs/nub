@@ -850,3 +850,96 @@ fn hardlink_to_denied_secret_leaks_via_alias() {
         "no hardlink: the path-deny denies the secret"
     );
 }
+
+#[test]
+fn child_path_entries_are_canonicalized() {
+    // Seatbelt denies with EPERM, and `posix_spawnp` — the spawner libuv uses, so the one
+    // every Node build script reaches through `child_process` — treats EPERM as FATAL,
+    // unlike the ENOENT/EACCES it skips. (libc `execvp` skips it, which is why the same
+    // PATH works from `/usr/bin/env` and fails from Node.) So ONE ungranted symlinked
+    // PATH entry aborts the whole search, masking every later entry including /usr/bin:
+    // node-gyp's bare `make` died with `spawn EPERM` while /usr/bin/make ran by absolute
+    // path. Canonicalizing the child PATH removes the symlink hop, which is what demotes
+    // such an entry from fatal to skippable. Asserted on the PATH the child actually
+    // observes, since that is the thing the kernel resolves.
+    let f = fixture();
+    let real = f.root.join("outside/realbin");
+    let link = f.root.join("outside/linkbin");
+    fs::create_dir_all(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let path = format!("{}:/usr/bin:/bin:/usr/bin", s(&link));
+    let policy = compile(
+        &serde_json::json!({ "fs": [], "net": false, "vars": true }),
+        &f.ctx(&[("PATH", path.as_str())]),
+    )
+    .expect("policy compiles");
+    let out = apply(
+        &policy,
+        CommandSpec::new("/bin/sh")
+            .args(["-c", "printf %s \"$PATH\""])
+            .cwd(&f.proj),
+    )
+    .expect("apply")
+    .output()
+    .expect("spawn");
+    let observed = String::from_utf8(out.stdout).expect("PATH is utf8");
+    let entries: Vec<&str> = observed.split(':').collect();
+
+    assert!(
+        !entries.contains(&s(&link).as_str()),
+        "the symlinked entry must not survive into the child PATH: {observed}"
+    );
+    assert!(
+        entries.contains(&s(&real).as_str()),
+        "it must survive as its resolved target, keeping the entry usable: {observed}"
+    );
+    // Duplicates collapse once aliases resolve onto each other, and PATH order — which is
+    // precedence — is preserved.
+    assert_eq!(
+        entries,
+        vec![s(&real).as_str(), "/usr/bin", "/bin"],
+        "order preserved, aliases de-duplicated: {observed}"
+    );
+}
+
+#[test]
+fn inherited_descriptors_are_closed_at_exec() {
+    // SBPL governs what the child may OPEN, never what it INHERITS: an fd that is already
+    // open at spawn is a live handle that bypasses the profile entirely. Everything nub
+    // opens is CLOEXEC by construction, so this guards the one-mistake-wide case — a
+    // `dup()` or a raw socket that isn't.
+    use std::os::unix::io::AsRawFd;
+
+    let f = fixture();
+    let secret = f.root.join("outside/leaked.txt");
+    fs::write(&secret, "LEAKEDVIAFD").unwrap();
+    let handle = fs::File::open(&secret).unwrap();
+    let fd = handle.as_raw_fd();
+    // Rust opens CLOEXEC; clear it to stage exactly the leak this sweep exists to catch.
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) }, 0);
+    // `<&N` dup2s the inherited descriptor onto stdin — no path is resolved, so the
+    // profile's read rules cannot be what decides this. Only whether the fd survived exec.
+    let read_fd = format!("cat <&{fd}");
+
+    // Control FIRST: the descriptor really is open and inheritable, so a failure in the
+    // confined arm is the sweep working rather than a broken fixture.
+    let inherited = std::process::Command::new("/bin/sh")
+        .args(["-c", &read_fd])
+        .output()
+        .expect("spawn control");
+    assert_eq!(
+        String::from_utf8_lossy(&inherited.stdout),
+        "LEAKEDVIAFD",
+        "control: an un-CLOEXEC'd fd is inherited by an unconfined child"
+    );
+
+    assert!(
+        !f.allowed(
+            serde_json::json!({ "fs": [], "net": false, "vars": true }),
+            "/bin/sh",
+            &["-c", &read_fd],
+        ),
+        "a confined child must not inherit an open descriptor"
+    );
+}

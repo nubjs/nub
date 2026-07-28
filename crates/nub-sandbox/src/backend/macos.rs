@@ -31,7 +31,9 @@
 //! prefix by the compiler (`canonicalize_glob_prefix`), and Seatbelt checks the
 //! CANONICAL path — so a `/tmp/…` (firmlink) allow that was NOT canonicalized would
 //! be inert (silently denied). The confstr scratch dirs this backend adds ARE
-//! canonicalized here (incl. not-yet-existing) for the same reason.
+//! canonicalized here (incl. not-yet-existing) for the same reason. The same rule
+//! binds the child's `PATH`, which is a path list the child hands back to the kernel
+//! — see [`canonicalize_path_var`].
 
 use crate::backend::{CommandSpec, Degradation, Prepared};
 use crate::matcher::path::canonicalize_including_nonexistent;
@@ -106,8 +108,16 @@ pub fn apply(
     // fix: a fresh Command inherits the parent environ, so env_clear is mandatory.)
     wrapped.env_clear();
     for (k, v) in &policy.env.constructed {
-        wrapped.env(k, v);
+        if k == "PATH" {
+            wrapped.env(k, canonicalize_path_var(v));
+        } else {
+            wrapped.env(k, v);
+        }
     }
+    // Descriptors already open at spawn are outside the profile's reach — SBPL governs
+    // what the child may OPEN, never what it INHERITS. The Linux backend sweeps them;
+    // this is the Seatbelt twin.
+    install_fd_sweep(&mut wrapped);
     // Point the child at the loopback proxy (cooperative hint; the Seatbelt carve is
     // the real boundary). Set AFTER env_clear so it survives an enforced env scrub.
     if let Some(port) = proxy_port {
@@ -133,6 +143,135 @@ pub fn apply(
         redact_stdout: false,
         redact_stderr: false,
     })
+}
+
+/// Rewrite a `PATH` value so every absolute entry is the kernel's CANONICAL path.
+///
+/// Seatbelt matches its rules against the resolved path, so a lookup that traverses an
+/// UNGRANTED symlink is denied — and Seatbelt denies with `EPERM`, which `posix_spawnp`
+/// treats as FATAL. It skips the `ENOENT`/`EACCES` an ordinary miss yields, but `EPERM`
+/// aborts the search outright. That is libuv's spawner, so it is the one every Node build
+/// script reaches through `child_process`; libc `execvp` skips the same entry, which is
+/// why an identical PATH works from `/usr/bin/env` and fails from Node.
+///
+/// One symlinked, ungranted entry therefore MASKS EVERY LATER ENTRY, `/usr/bin` included:
+/// a build script spawning a bare `make` / `sh` / `cc` dies with `spawn EPERM` even though
+/// the tool is present, granted, and executable by absolute path. (Measured:
+/// `/opt/homebrew/opt/openjdk/bin` — a Homebrew `opt/<pkg>` link — killed node-gyp's
+/// `make` at entry 10 of 56. The same directory reached by its real `Cellar/…` path is
+/// skipped harmlessly.) Homebrew `opt` links and version-manager shims make this the
+/// common case on a developer machine, not a corner.
+///
+/// Canonicalizing removes the symlink hop, demoting an unusable entry from fatal to
+/// skippable. Order is preserved (PATH order is precedence) and entries that resolve onto
+/// one another are de-duplicated. A RELATIVE entry is passed through untouched: it
+/// resolves against the CHILD's cwd, which is not ours to resolve against, and it carries
+/// no symlinked absolute prefix for the kernel to reject.
+fn canonicalize_path_var(path: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for entry in path.split(':') {
+        let resolved = if Path::new(entry).is_absolute() {
+            canonicalize_including_nonexistent(Path::new(entry))
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            entry.to_string()
+        };
+        if seen.insert(resolved.clone()) {
+            out.push(resolved);
+        }
+    }
+    out.join(":")
+}
+
+/// Close every inherited descriptor at exec, so the child starts with stdio and nothing
+/// else.
+///
+/// The profile confines what the child may OPEN; it says nothing about a descriptor that
+/// is ALREADY OPEN when it starts. A leaked fd is a live handle to a file, socket, or pipe
+/// the policy would otherwise deny, and it bypasses the sandbox entirely — measured on the
+/// Linux side, where an inherited socket egressed straight through both Landlock and
+/// seccomp. Everything nub opens is CLOEXEC by construction today, which makes this a
+/// backstop against a single future `dup()` or `socket2::Socket::new_raw` that isn't —
+/// one mistake wide, so the backstop is not optional.
+///
+/// macOS has no `close_range`, and nub raises `RLIMIT_NOFILE` to the hard limit (~1M), so
+/// the fd-table walk the Linux backend gets from the kernel must be done by hand — and a
+/// blind `3..rlimit` loop would cost ~1M syscalls per spawn. `PROC_PIDLISTFDS` enumerates
+/// only the OPEN descriptors instead. It runs in the CHILD, after fork, where the process
+/// is single-threaded and the list cannot race; the buffer is sized in the PARENT because
+/// the post-fork closure must not allocate.
+///
+/// CLOEXEC rather than `close()` is deliberate, matching Linux: it leaves std's own
+/// post-fork plumbing (the exec-error report pipe) intact and takes effect exactly at
+/// exec. Descriptors below 3 are skipped — std redirects stdio onto them before this
+/// closure runs, and the child needs them.
+///
+/// Not installed on the unwrapped path ([`base_command`]): with no policy to confine, an
+/// inherited fd conveys no access the child lacked, and `pre_exec` would force std off
+/// `posix_spawn` onto fork+exec for nothing.
+fn install_fd_sweep(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    // Sized in the parent from a live count, doubled plus slack: more descriptors may open
+    // before fork, and a too-small buffer silently TRUNCATES the list (once a buffer is
+    // supplied the kernel reports bytes written, not bytes needed).
+    let probed = unsafe {
+        libc::proc_pidinfo(
+            std::process::id() as i32,
+            libc::PROC_PIDLISTFDS,
+            0,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    let entries = if probed > 0 {
+        (probed as usize / size_of::<libc::proc_fdinfo>()) * 2 + 256
+    } else {
+        1024
+    };
+    let mut buf = vec![
+        libc::proc_fdinfo {
+            proc_fd: 0,
+            proc_fdtype: 0,
+        };
+        entries
+    ];
+    let bytes = (entries * size_of::<libc::proc_fdinfo>()) as i32;
+
+    // SAFETY: the closure runs between fork and exec, so it may touch only async-signal-safe
+    // primitives. `proc_pidinfo` and `fcntl` are bare syscall wrappers and `buf` is already
+    // allocated — no allocation, no locks, no libc state.
+    unsafe {
+        command.pre_exec(move || {
+            let got = libc::proc_pidinfo(
+                libc::getpid(),
+                libc::PROC_PIDLISTFDS,
+                0,
+                buf.as_mut_ptr().cast(),
+                bytes,
+            );
+            if got <= 0 {
+                // Enumeration is the only mechanism available here, and aborting would kill
+                // a spawn that is otherwise fine — fail open onto the CLOEXEC-by-construction
+                // baseline rather than turning a diagnostic gap into an outage.
+                return Ok(());
+            }
+            let count = (got as usize / size_of::<libc::proc_fdinfo>()).min(buf.len());
+            for info in &buf[..count] {
+                let fd = info.proc_fd;
+                if fd < 3 {
+                    continue;
+                }
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+                    libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+                }
+            }
+            Ok(())
+        });
+    }
 }
 
 /// The unwrapped command (program + args + cwd + env-scrub) for the no-confinement
