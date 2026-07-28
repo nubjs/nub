@@ -161,7 +161,8 @@ jobs:
       # main saves; save-if gates writes to main only, so PRs/tags are read-only and
       # don't churn the 10GB/repo budget (the default per-(job,ref) key let every PR
       # write its own cache). Per job-family because compiled artifacts differ by
-      # build profile (check=--all-targets debug vs test profile vs pnp debug build).
+      # build profile (check=--all-targets fast, plus the nub-phantom leg on the
+      # default profile, vs test profile vs pnp debug build).
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           shared-key: ci-check
