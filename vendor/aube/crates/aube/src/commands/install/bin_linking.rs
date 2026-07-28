@@ -546,19 +546,20 @@ pub(crate) fn link_dep_bins(
             continue;
         }
         // Both endpoints stay in PROJECT coordinates (`.aube/<dep_path>/…`),
-        // never the machine-global store's `<dep_path>-<graph-hash>` spelling,
-        // even though the symlink means the shim FILE lands in that store.
-        // The shim is a `/bin/sh` script whose `basedir=$(dirname "$0")` is
-        // purely lexical, and the only consumer — the lifecycle runner, which
-        // puts `<dep_modules_dir>/.bin` on PATH — derives that dir project-side
-        // (see `run_dep_lifecycles`). So a store-spelled relative target names
-        // `.store/<dep_path>-<hash>/…`, which exists in neither namespace, and
-        // every transitive CLI a build script shells out to (`node-gyp-build`,
-        // `prebuild-install`, `node-pre-gyp`) dies with `Cannot find module`.
+        // never the shared store's `<dep_path>-<graph-hash>` spelling, even
+        // though under the GVS the symlink puts the shim FILE in that store.
+        // The two link kinds sharing this directory resolve differently and so
+        // need different coordinates: a SYMLINK is walked by the kernel from
+        // its physical parent (store), while a SHIM's `basedir=$(dirname "$0")`
+        // is lexical over the INVOCATION path — and the only consumer,
+        // `run_dep_lifecycle_scripts`, puts `<dep_modules_dir>/.bin` on PATH
+        // un-canonicalized. A store-spelled shim target therefore names a
+        // hash-suffixed directory the project namespace never has.
         // Project spelling stays correct for every OTHER project sharing the
-        // entry too: the store key hashes the whole dep-graph SUBTREE, so any
-        // two projects reaching this entry resolve their children to identical
-        // `dep_path`s (see `aube_lockfile::graph_hash`).
+        // entry: the store key hashes the whole dep-graph SUBTREE, so any two
+        // projects reaching this entry resolve identical child `dep_path`s
+        // (`aube_lockfile::graph_hash`) — the same invariant the entry's own
+        // sibling symlinks already rely on.
         let dep_modules_dir = dep_modules_dir_for(&pkg_dir, &pkg.name);
         let bin_dir = dep_modules_dir.join(".bin");
         // Don't `create_dir_all(&bin_dir)` here — most deps have
@@ -1053,23 +1054,13 @@ mod tests {
             .unwrap_or_else(|e| panic!("no shim at {}: {e}", shim.display()));
         let target =
             aube_linker::parse_posix_shim_target(&body).expect("shim must carry its target marker");
-        // `$basedir` is `dirname "$0"` — lexical, and Node then collapses the
-        // `..` segments of the path it is handed with `path.resolve`, i.e.
-        // WITHOUT consulting the filesystem. So the check has to be lexical
-        // too: letting the OS walk `.bin/../../..` would resolve the
-        // `.aube/<dep_path>` symlink first and land in the store, silently
-        // measuring a geometry no consumer ever sees.
+        // `normalize_path` is the resolver production uses on shim-embedded
+        // targets: it collapses `..` LEXICALLY, matching Node's `path.resolve`.
+        // Letting the OS walk `.bin/../../..` instead would resolve the
+        // `.aube/<dep_path>` symlink first and land in the store — the very
+        // geometry no consumer sees, and the premise that shipped this bug.
         let basedir = shim.parent().unwrap();
-        let mut resolved = basedir.to_path_buf();
-        for part in Path::new(&target).components() {
-            match part {
-                std::path::Component::ParentDir => {
-                    resolved.pop();
-                }
-                std::path::Component::CurDir => {}
-                other => resolved.push(other),
-            }
-        }
+        let resolved = aube_linker::normalize_path(&basedir.join(&target));
         assert!(
             resolved.exists(),
             "shim target must resolve from the project-side `.bin` the \
@@ -1078,11 +1069,17 @@ mod tests {
             resolved.display()
         );
 
-        // A shim in the SHARED store is read by every project that shares the
-        // entry, so its NODE_PATH must not name one project's tree either.
+        // Every path a store-resident shim embeds is read by all sharers, so
+        // none may be absolute. Pin the emitted values rather than merely
+        // asserting one project's prefix is absent — a relative target is the
+        // property that actually makes the file shareable.
         assert!(
-            !body.contains(dir.path().join("node_modules").to_str().unwrap()),
-            "store-resident shim leaked a project path into NODE_PATH:\n{body}"
+            !target.starts_with('/'),
+            "shim target must be relative to be shareable, got {target}"
+        );
+        assert!(
+            body.contains(r#"export NODE_PATH="$basedir/..:$basedir/../../../node_modules""#),
+            "NODE_PATH must stay relative to $basedir:\n{body}"
         );
     }
 
