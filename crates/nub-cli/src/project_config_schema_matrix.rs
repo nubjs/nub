@@ -21,7 +21,7 @@ fn golden_full_surface_config_parses_with_all_three_sandbox_positions() {
           "dlx": {
             "consent": "never",
             "sandbox": "publish-jail",
-            "env": false
+            "envFile": false
           }
         }"#,
     )
@@ -40,7 +40,7 @@ fn golden_full_surface_config_parses_with_all_three_sandbox_positions() {
         cfg.dlx.sandbox,
         Some(SandboxSetting::Preset("publish-jail".into()))
     );
-    assert_eq!(cfg.dlx.env, Some(EnvSetting::Disabled));
+    assert_eq!(cfg.dlx.env_file, Some(EnvFileSetting::Disabled));
 }
 
 #[test]

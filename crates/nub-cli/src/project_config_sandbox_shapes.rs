@@ -67,7 +67,7 @@ fn runtime_projection_with_any_sandbox_shape_equals_the_no_sandbox_baseline() {
     let base_values = ProjectConfig {
         preload: Some(vec!["./preload.mjs".into()]),
         node_options: Some(vec!["--stack-trace-limit=7".into()]),
-        env: Some(EnvSetting::Disabled),
+        env_file: Some(EnvFileSetting::Disabled),
         ..ProjectConfig::default()
     };
     let baseline = resolve_effective_config(
@@ -101,11 +101,11 @@ fn runtime_projection_with_any_sandbox_shape_equals_the_no_sandbox_baseline() {
 
 #[test]
 fn dlx_projection_with_any_sandbox_shape_equals_the_no_sandbox_baseline() {
-    // A real dlx layer (env disabled ⇒ Some(empty), consent set) so the equality
-    // compares live projections, not two Nones.
+    // A real dlx layer (envFile disabled ⇒ Some(empty), consent set) so the
+    // equality compares live projections, not two Nones.
     let base_dlx = DlxConfig {
         consent: Some(ImplicitDlx::Never),
-        env: Some(EnvSetting::Disabled),
+        env_file: Some(EnvFileSetting::Disabled),
         sandbox: None,
     };
     let baseline_snapshot = resolve_effective_config(

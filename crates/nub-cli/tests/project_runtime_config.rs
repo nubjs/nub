@@ -45,7 +45,7 @@ impl Fixture {
               "preload": ["./preload.mjs"],
               "nodeOptions": ["--stack-trace-limit=23"],
               "v8Flags": ["--max-old-space-size=256"],
-              "env": "./runtime.env",
+              "envFile": "./runtime.env",
               "define": { "CONFIG_WORD": "\"defined\"" },
               "loader": { ".blob": "text", ".view": "jsx" },
               "conditions": ["runtime-config"],
@@ -220,7 +220,7 @@ fn inherited_runtime_snapshot_ignores_all_sandbox_config_positions() {
       "preload": [],
       "nodeOptions": [],
       "v8Flags": [],
-      "env": { "kind": "default" },
+      "envFile": { "kind": "default" },
       "define": {},
       "loader": {},
       "conditions": [],
@@ -389,7 +389,7 @@ fn watch_composes_explicit_config_env_sources_before_cli_env_file() {
     std::fs::write(config_root.join("second.env"), "SHARED=second\n").unwrap();
     std::fs::write(
         config_root.join("nub.jsonc"),
-        r#"{ "env": ["./first.env", "./second.env"] }"#,
+        r#"{ "envFile": ["./first.env", "./second.env"] }"#,
     )
     .unwrap();
     let cli_env = fixture.project.join("cli.env");

@@ -3002,7 +3002,7 @@ fn load_runtime_env_sources_raw(paths: &[PathBuf]) -> Result<HashMap<String, Str
     for path in paths {
         let content = nub_core::workspace::env::read_env_file(path).with_context(|| {
             format!(
-                "nub.jsonc `env` source is not a readable regular file: {}",
+                "nub.jsonc `envFile` source is not a readable regular file: {}",
                 path.display()
             )
         })?;
@@ -3041,19 +3041,26 @@ fn runtime_child_env(
     let base = if compat_mode {
         HashMap::new()
     } else {
-        match &runtime.env {
-            crate::project_config::RuntimeEnv::Default if !env_file_flag_present() => project_root
-                .map(nub_core::workspace::env::load_env_files)
-                .unwrap_or_default(),
-            crate::project_config::RuntimeEnv::Sources(paths) => load_runtime_env_sources(paths)?,
-            crate::project_config::RuntimeEnv::Default
-            | crate::project_config::RuntimeEnv::Disabled => HashMap::new(),
+        match &runtime.env_file {
+            crate::project_config::RuntimeEnvFile::Default if !env_file_flag_present() => {
+                project_root
+                    .map(nub_core::workspace::env::load_env_files)
+                    .unwrap_or_default()
+            }
+            crate::project_config::RuntimeEnvFile::Sources(paths) => {
+                load_runtime_env_sources(paths)?
+            }
+            crate::project_config::RuntimeEnvFile::Default
+            | crate::project_config::RuntimeEnvFile::Disabled => HashMap::new(),
         }
     };
     // CLI --env-file remains the strongest env-file layer and composes with an
     // explicit config source list; for the default cascade it retains its
     // established suppression semantics.
-    if matches!(&runtime.env, crate::project_config::RuntimeEnv::Default) {
+    if matches!(
+        &runtime.env_file,
+        crate::project_config::RuntimeEnvFile::Default
+    ) {
         return Ok(merge_child_env(
             base,
             env_file_flag_present(),
@@ -5158,18 +5165,21 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     {
         return Ok(code);
     }
-    let config_env_sources = matches!(&runtime.env, crate::project_config::RuntimeEnv::Sources(_));
+    let config_env_sources = matches!(
+        &runtime.env_file,
+        crate::project_config::RuntimeEnvFile::Sources(_)
+    );
     let env_file_paths = if no_env_file || compat_mode {
         Vec::new()
     } else {
-        match &runtime.env {
-            crate::project_config::RuntimeEnv::Default if !env_file_present => project
+        match &runtime.env_file {
+            crate::project_config::RuntimeEnvFile::Default if !env_file_present => project
                 .as_ref()
                 .map(|p| nub_core::workspace::env::discover_env_files(&p.root))
                 .unwrap_or_default(),
-            crate::project_config::RuntimeEnv::Default => Vec::new(),
-            crate::project_config::RuntimeEnv::Sources(paths) => paths.clone(),
-            crate::project_config::RuntimeEnv::Disabled => Vec::new(),
+            crate::project_config::RuntimeEnvFile::Default => Vec::new(),
+            crate::project_config::RuntimeEnvFile::Sources(paths) => paths.clone(),
+            crate::project_config::RuntimeEnvFile::Disabled => Vec::new(),
         }
     };
     // Explicit `--env-file` flags forward to the watched Node too (#479), so
@@ -5278,16 +5288,16 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     let base_raw_env = if no_env_file {
         HashMap::new()
     } else {
-        match &runtime.env {
-            crate::project_config::RuntimeEnv::Default if !env_file_present => project
+        match &runtime.env_file {
+            crate::project_config::RuntimeEnvFile::Default if !env_file_present => project
                 .as_ref()
                 .map(|p| nub_core::workspace::env::load_env_files_raw_warning(&p.root))
                 .unwrap_or_default(),
-            crate::project_config::RuntimeEnv::Default => HashMap::new(),
-            crate::project_config::RuntimeEnv::Sources(paths) => {
+            crate::project_config::RuntimeEnvFile::Default => HashMap::new(),
+            crate::project_config::RuntimeEnvFile::Sources(paths) => {
                 load_runtime_env_sources_raw(paths)?
             }
-            crate::project_config::RuntimeEnv::Disabled => HashMap::new(),
+            crate::project_config::RuntimeEnvFile::Disabled => HashMap::new(),
         }
     };
     // Pre-expand the config/automatic base to the same map the direct file

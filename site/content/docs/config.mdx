@@ -17,7 +17,7 @@ The file uses JSON with comments and trailing commas. Unknown keys and invalid v
   "preload": ["./instrumentation.ts"],       // modules loaded before the entry file
   "nodeOptions": ["--enable-source-maps"],   // Node options for every run
   "v8Flags": ["--expose-gc"],                // V8 flags, via NODE_OPTIONS
-  "env": ["./env/base.env", "./env/local.env"], // true | false | path | path[]
+  "envFile": ["./env/base.env", "./env/local.env"], // true | false | path | path[]
   "define": { "APP_VERSION": "\"1.4.0\"" },  // compile-time identifier replacement
   "loader": { ".txt": "text" },              // extension → loader
   "conditions": ["development"],             // extra package export conditions
@@ -38,7 +38,7 @@ The file uses JSON with comments and trailing commas. Unknown keys and invalid v
   // ── Temporary package runs ──
   "dlx": {
     "consent": "prompt",                     // prompt | never
-    "env": "./env/tools.env"                 // same forms as the top-level env
+    "envFile": "./env/tools.env"             // same forms as the top-level envFile
   }
 }
 ```
@@ -171,14 +171,14 @@ Flags reach Node through `NODE_OPTIONS`, so the accepted set is the one your Nod
 nub.jsonc `v8Flags` option `--harmony` is not supported by Node 26.5.0
 ```
 
-### `env`
+### `envFile`
 
 Keep automatic environment-file discovery with `true`.
 
 ```jsonc title="nub.jsonc"
 {
   // ...
-  "env": true
+  "envFile": true
 }
 ```
 
@@ -187,7 +187,7 @@ Disable environment-file loading with `false`.
 ```jsonc title="nub.jsonc"
 {
   // ...
-  "env": false
+  "envFile": false
 }
 ```
 
@@ -196,7 +196,7 @@ Read one exact file instead of the automatic set.
 ```jsonc title="nub.jsonc"
 {
   // ...
-  "env": "./env/development.env"
+  "envFile": "./env/development.env"
 }
 ```
 
@@ -205,7 +205,7 @@ Compose several files in order. Later files replace earlier values.
 ```jsonc title="nub.jsonc"
 {
   // ...
-  "env": [
+  "envFile": [
     "./env/base.env",
     "./env/development.env",
     "./env/local.env"
@@ -220,7 +220,7 @@ Paths also expand `${VAR}` and `$VAR` against the environment, which a config fi
 ```jsonc title="nub.jsonc"
 {
   // ...
-  "env": "./env/.env.${APP_ENV}"
+  "envFile": "./env/.env.${APP_ENV}"
 }
 ```
 
@@ -562,7 +562,7 @@ Disable implicit registry fetches.
 
 Explicit `nub dlx` runs still work because the command itself supplies consent.
 
-### `dlx.env`
+### `dlx.envFile`
 
 Use a separate environment file for temporary tools.
 
@@ -570,7 +570,7 @@ Use a separate environment file for temporary tools.
 {
   // ...
   "dlx": {
-    "env": "./env/tools.env"
+    "envFile": "./env/tools.env"
   }
 }
 ```
@@ -581,9 +581,9 @@ Disable environment-file loading for temporary tools.
 {
   // ...
   "dlx": {
-    "env": false
+    "envFile": false
   }
 }
 ```
 
-The field accepts the same boolean, string, and string-array forms as the top-level `env` field.
+The field accepts the same boolean, string, and string-array forms as the top-level `envFile` field.

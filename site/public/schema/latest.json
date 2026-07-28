@@ -27,8 +27,8 @@
       "$ref": "#/$defs/stringArray",
       "description": "V8 flags applied to runtime commands."
     },
-    "env": {
-      "$ref": "#/$defs/envSetting",
+    "envFile": {
+      "$ref": "#/$defs/envFileSetting",
       "description": "Environment-file loading for runtime commands."
     },
     "define": {
@@ -138,8 +138,8 @@
           ],
           "description": "Whether an implicit nubx registry fetch may be confirmed."
         },
-        "env": {
-          "$ref": "#/$defs/envSetting",
+        "envFile": {
+          "$ref": "#/$defs/envFileSetting",
           "description": "Environment-file loading for nubx and nub dlx."
         }
       }
@@ -158,7 +158,7 @@
         "type": "string"
       }
     },
-    "envSetting": {
+    "envFileSetting": {
       "oneOf": [
         {
           "type": "boolean"

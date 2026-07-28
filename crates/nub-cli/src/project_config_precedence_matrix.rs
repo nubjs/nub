@@ -98,13 +98,13 @@ fn specs() -> Vec<KeySpec> {
             is_empty: Some(|c| c.v8_flags == Some(Vec::new())),
         },
         KeySpec {
-            key: ConfigKey::Env,
-            name: "env",
-            set: |c, t| c.env = Some(EnvSetting::Sources(strings(t))),
-            matches: |c, t| c.env == Some(EnvSetting::Sources(strings(t))),
-            // `env: false` — the explicit disable — must beat a lower source list.
-            set_empty: Some(|c| c.env = Some(EnvSetting::Disabled)),
-            is_empty: Some(|c| c.env == Some(EnvSetting::Disabled)),
+            key: ConfigKey::EnvFile,
+            name: "envFile",
+            set: |c, t| c.env_file = Some(EnvFileSetting::Sources(strings(t))),
+            matches: |c, t| c.env_file == Some(EnvFileSetting::Sources(strings(t))),
+            // `envFile: false` — the explicit disable — must beat a lower source list.
+            set_empty: Some(|c| c.env_file = Some(EnvFileSetting::Disabled)),
+            is_empty: Some(|c| c.env_file == Some(EnvFileSetting::Disabled)),
         },
         KeySpec {
             key: ConfigKey::Define,
@@ -240,14 +240,14 @@ fn specs() -> Vec<KeySpec> {
             is_empty: Some(|c| c.dlx.sandbox == Some(SandboxSetting::Disabled)),
         },
         KeySpec {
-            key: ConfigKey::DlxEnv,
-            name: "dlx.env",
-            set: |c, t| c.dlx.env = Some(EnvSetting::Sources(strings(t))),
-            matches: |c, t| c.dlx.env == Some(EnvSetting::Sources(strings(t))),
+            key: ConfigKey::DlxEnvFile,
+            name: "dlx.envFile",
+            set: |c, t| c.dlx.env_file = Some(EnvFileSetting::Sources(strings(t))),
+            matches: |c, t| c.dlx.env_file == Some(EnvFileSetting::Sources(strings(t))),
             // The explicit-empty source list (distinct from `false`, covered on
-            // the top-level `env`) must beat a lower non-empty list.
-            set_empty: Some(|c| c.dlx.env = Some(EnvSetting::Sources(Vec::new()))),
-            is_empty: Some(|c| c.dlx.env == Some(EnvSetting::Sources(Vec::new()))),
+            // the top-level `envFile`) must beat a lower non-empty list.
+            set_empty: Some(|c| c.dlx.env_file = Some(EnvFileSetting::Sources(Vec::new()))),
+            is_empty: Some(|c| c.dlx.env_file == Some(EnvFileSetting::Sources(Vec::new()))),
         },
     ]
 }
@@ -260,7 +260,7 @@ fn ordinal(key: ConfigKey) -> usize {
         ConfigKey::Preload => 1,
         ConfigKey::NodeOptions => 2,
         ConfigKey::V8Flags => 3,
-        ConfigKey::Env => 4,
+        ConfigKey::EnvFile => 4,
         ConfigKey::Define => 5,
         ConfigKey::Loader => 6,
         ConfigKey::Conditions => 7,
@@ -276,7 +276,7 @@ fn ordinal(key: ConfigKey) -> usize {
         ConfigKey::InstallSandbox => 17,
         ConfigKey::DlxConsent => 18,
         ConfigKey::DlxSandbox => 19,
-        ConfigKey::DlxEnv => 20,
+        ConfigKey::DlxEnvFile => 20,
     }
 }
 

@@ -35,7 +35,7 @@ const ROOT_KEYS: &[&str] = &[
     "preload",
     "nodeOptions",
     "v8Flags",
-    "env",
+    "envFile",
     "define",
     "loader",
     "conditions",
@@ -54,7 +54,7 @@ const INSTALL_KEYS: &[&str] = &[
     "nodeOptions",
     "sandbox",
 ];
-const DLX_KEYS: &[&str] = &["consent", "sandbox", "env"];
+const DLX_KEYS: &[&str] = &["consent", "sandbox", "envFile"];
 const SANDBOX_AXIS_KEYS: &[&str] = &["fs", "net", "env"];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -118,7 +118,7 @@ pub struct ProjectConfig {
     pub preload: Option<Vec<String>>,
     pub node_options: Option<Vec<String>>,
     pub v8_flags: Option<Vec<String>>,
-    pub env: Option<EnvSetting>,
+    pub env_file: Option<EnvFileSetting>,
     pub define: Option<BTreeMap<String, String>>,
     pub loader: Option<BTreeMap<String, String>>,
     pub conditions: Option<Vec<String>>,
@@ -139,7 +139,7 @@ impl ProjectConfig {
     pub fn builtin_defaults() -> Self {
         Self {
             node_compat: Some(false),
-            env: Some(EnvSetting::Default),
+            env_file: Some(EnvFileSetting::Default),
             verify_deps_before_run: Some(VerifyDepsBeforeRun::Warn),
             dlx: DlxConfig {
                 consent: Some(ImplicitDlx::Prompt),
@@ -150,13 +150,15 @@ impl ProjectConfig {
     }
 }
 
-/// The `env` field's tri-state (merged `env` + `envFile`, per the spec):
-/// `true` = today's default discovery, `false` = disable all env loading,
-/// string / string[] = an exclusive source list (old `envFile` semantics).
+/// The `envFile` field's tri-state (the spec's separate `env` + `envFile` knobs
+/// collapsed into one): `true` = today's default discovery, `false` = disable all
+/// env-file loading, string / string[] = an exclusive source list. The `env` name
+/// is reserved for the future per-VARIABLE allowlist grammar, so this file-
+/// selection knob owns `envFile` alone.
 /// Source strings are stored RAW; `${VAR}`/`$VAR` expansion is applied at the
 /// wiring boundary (it references the process env, which the parser must not).
 #[derive(Debug, Clone, PartialEq)]
-pub enum EnvSetting {
+pub enum EnvFileSetting {
     /// `true` — default `.env*` discovery.
     Default,
     /// `false` — disable all env-file loading.
@@ -211,12 +213,12 @@ pub enum Hoist {
 }
 
 /// The `dlx` block — nubx's own security posture. `consent` reuses the global
-/// file's [`ImplicitDlx`] enum; `env` reuses the top-level tri-state.
+/// file's [`ImplicitDlx`] enum; `envFile` reuses the top-level tri-state.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct DlxConfig {
     pub consent: Option<ImplicitDlx>,
     pub sandbox: Option<SandboxSetting>,
-    pub env: Option<EnvSetting>,
+    pub env_file: Option<EnvFileSetting>,
 }
 
 /// Where a configuration value came from. File-backed sources retain both the
@@ -270,7 +272,7 @@ pub enum ConfigKey {
     Preload,
     NodeOptions,
     V8Flags,
-    Env,
+    EnvFile,
     Define,
     Loader,
     Conditions,
@@ -286,7 +288,7 @@ pub enum ConfigKey {
     InstallSandbox,
     DlxConsent,
     DlxSandbox,
-    DlxEnv,
+    DlxEnvFile,
 }
 
 /// Process-local overlays. Every field remains optional so an explicit false or
@@ -319,7 +321,7 @@ pub(crate) struct RuntimeConfig {
     pub preload: Vec<String>,
     pub node_options: Vec<String>,
     pub v8_flags: Vec<String>,
-    pub env: RuntimeEnv,
+    pub env_file: RuntimeEnvFile,
     pub define: BTreeMap<String, String>,
     pub loader: BTreeMap<String, String>,
     pub conditions: Vec<String>,
@@ -328,7 +330,7 @@ pub(crate) struct RuntimeConfig {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", content = "sources", rename_all = "camelCase")]
-pub(crate) enum RuntimeEnv {
+pub(crate) enum RuntimeEnvFile {
     Default,
     Disabled,
     Sources(Vec<PathBuf>),
@@ -341,7 +343,7 @@ impl Default for RuntimeConfig {
             preload: Vec::new(),
             node_options: Vec::new(),
             v8_flags: Vec::new(),
-            env: RuntimeEnv::Default,
+            env_file: RuntimeEnvFile::Default,
             define: BTreeMap::new(),
             loader: BTreeMap::new(),
             conditions: Vec::new(),
@@ -556,11 +558,11 @@ pub fn effective_dlx_env() -> Option<BTreeMap<String, String>> {
 }
 
 fn dlx_env_for(config: &EffectiveConfig) -> Option<BTreeMap<String, String>> {
-    let setting = config.values.dlx.env.as_ref()?;
-    let source = config.sources.get(&ConfigKey::DlxEnv)?;
+    let setting = config.values.dlx.env_file.as_ref()?;
+    let source = config.sources.get(&ConfigKey::DlxEnvFile)?;
     let mut values = match setting {
-        EnvSetting::Disabled => BTreeMap::new(),
-        EnvSetting::Default => {
+        EnvFileSetting::Disabled => BTreeMap::new(),
+        EnvFileSetting::Default => {
             let root = nub_core::workspace::detect::detect_project(&config.cwd)
                 .map(|project| project.root)
                 .unwrap_or_else(|| config.cwd.clone());
@@ -568,7 +570,7 @@ fn dlx_env_for(config: &EffectiveConfig) -> Option<BTreeMap<String, String>> {
                 .into_iter()
                 .collect()
         }
-        EnvSetting::Sources(paths) => {
+        EnvFileSetting::Sources(paths) => {
             let mut values = BTreeMap::new();
             for raw in paths {
                 let mut expansion = std::collections::HashMap::from([(
@@ -677,15 +679,15 @@ impl EffectiveConfig {
             })
             .collect();
 
-        let env = match values.env.as_ref().unwrap_or(&EnvSetting::Default) {
-            EnvSetting::Default => RuntimeEnv::Default,
-            EnvSetting::Disabled => RuntimeEnv::Disabled,
-            EnvSetting::Sources(sources) => RuntimeEnv::Sources(
+        let env_file = match values.env_file.as_ref().unwrap_or(&EnvFileSetting::Default) {
+            EnvFileSetting::Default => RuntimeEnvFile::Default,
+            EnvFileSetting::Disabled => RuntimeEnvFile::Disabled,
+            EnvFileSetting::Sources(sources) => RuntimeEnvFile::Sources(
                 sources
                     .iter()
                     .map(|source| {
                         let expanded = expand_runtime_path(source);
-                        self.resolve_path(ConfigKey::Env, &expanded)
+                        self.resolve_path(ConfigKey::EnvFile, &expanded)
                     })
                     .collect(),
             ),
@@ -720,7 +722,7 @@ impl EffectiveConfig {
             preload,
             node_options: values.node_options.clone().unwrap_or_default(),
             v8_flags: values.v8_flags.clone().unwrap_or_default(),
-            env,
+            env_file,
             define: values.define.clone().unwrap_or_default(),
             loader: values.loader.clone().unwrap_or_default(),
             conditions: values.conditions.clone().unwrap_or_default(),
@@ -818,7 +820,7 @@ fn merge_layer(
         ConfigKey::NodeOptions
     );
     merge_field!(values, sources, layer, source, v8_flags, ConfigKey::V8Flags);
-    merge_field!(values, sources, layer, source, env, ConfigKey::Env);
+    merge_field!(values, sources, layer, source, env_file, ConfigKey::EnvFile);
     merge_field!(values, sources, layer, source, define, ConfigKey::Define);
     merge_field!(values, sources, layer, source, loader, ConfigKey::Loader);
     merge_field!(
@@ -924,8 +926,8 @@ fn merge_layer(
         sources,
         layer.dlx,
         source,
-        env,
-        ConfigKey::DlxEnv
+        env_file,
+        ConfigKey::DlxEnvFile
     );
 }
 
@@ -1057,8 +1059,8 @@ fn validate_root(obj: &serde_json::Map<String, Value>) -> Result<ProjectConfig> 
     if let Some(v) = obj.get("v8Flags") {
         cfg.v8_flags = Some(as_string_array(v, "v8Flags")?);
     }
-    if let Some(v) = obj.get("env") {
-        cfg.env = Some(validate_env_setting(v, "env")?);
+    if let Some(v) = obj.get("envFile") {
+        cfg.env_file = Some(validate_env_file_setting(v, "envFile")?);
     }
     if let Some(v) = obj.get("define") {
         cfg.define = Some(as_string_map(v, "define")?);
@@ -1087,13 +1089,13 @@ fn validate_root(obj: &serde_json::Map<String, Value>) -> Result<ProjectConfig> 
     Ok(cfg)
 }
 
-/// `env` / `dlx.env`: `true` | `false` | string | string[].
-fn validate_env_setting(v: &Value, path: &str) -> Result<EnvSetting> {
+/// `envFile` / `dlx.envFile`: `true` | `false` | string | string[].
+fn validate_env_file_setting(v: &Value, path: &str) -> Result<EnvFileSetting> {
     match v {
-        Value::Bool(true) => Ok(EnvSetting::Default),
-        Value::Bool(false) => Ok(EnvSetting::Disabled),
-        Value::String(s) => Ok(EnvSetting::Sources(vec![s.clone()])),
-        Value::Array(_) => Ok(EnvSetting::Sources(as_string_array(v, path)?)),
+        Value::Bool(true) => Ok(EnvFileSetting::Default),
+        Value::Bool(false) => Ok(EnvFileSetting::Disabled),
+        Value::String(s) => Ok(EnvFileSetting::Sources(vec![s.clone()])),
+        Value::Array(_) => Ok(EnvFileSetting::Sources(as_string_array(v, path)?)),
         _ => Err(ConfigError::Type {
             path: path.into(),
             expected: "a boolean, string, or array of strings",
@@ -1199,8 +1201,8 @@ fn validate_dlx(v: &Value, path: &str) -> Result<DlxConfig> {
     if let Some(v) = obj.get("sandbox") {
         dlx.sandbox = Some(validate_sandbox(v, &child(path, "sandbox"))?);
     }
-    if let Some(v) = obj.get("env") {
-        dlx.env = Some(validate_env_setting(v, &child(path, "env"))?);
+    if let Some(v) = obj.get("envFile") {
+        dlx.env_file = Some(validate_env_file_setting(v, &child(path, "envFile"))?);
     }
     Ok(dlx)
 }
@@ -1445,7 +1447,7 @@ mod tests {
             source: ConfigSource::file(ConfigSourceKind::Project, &project_root.join(FILE_NAME)),
             values: ProjectConfig {
                 preload: Some(vec!["./preload.mjs".into(), "bare-package".into()]),
-                env: Some(EnvSetting::Sources(vec!["./custom.env".into()])),
+                env_file: Some(EnvFileSetting::Sources(vec!["./custom.env".into()])),
                 tsconfig: Some("./runtime.jsonc".into()),
                 ..ProjectConfig::default()
             },
@@ -1472,8 +1474,8 @@ mod tests {
             ]
         );
         assert_eq!(
-            snapshot.env,
-            RuntimeEnv::Sources(vec![project_root.join("./custom.env")])
+            snapshot.env_file,
+            RuntimeEnvFile::Sources(vec![project_root.join("./custom.env")])
         );
         assert_eq!(
             snapshot.tsconfig.as_deref(),
@@ -1487,16 +1489,22 @@ mod tests {
     }
 
     #[test]
-    fn env_tristate_covers_all_arms() {
-        assert_eq!(parse(r#"{ "env": true }"#).env, Some(EnvSetting::Default));
-        assert_eq!(parse(r#"{ "env": false }"#).env, Some(EnvSetting::Disabled));
+    fn env_file_tristate_covers_all_arms() {
         assert_eq!(
-            parse(r#"{ "env": ".env.local" }"#).env,
-            Some(EnvSetting::Sources(vec![".env.local".into()]))
+            parse(r#"{ "envFile": true }"#).env_file,
+            Some(EnvFileSetting::Default)
         );
         assert_eq!(
-            parse(r#"{ "env": [".env", ".env.local"] }"#).env,
-            Some(EnvSetting::Sources(vec![
+            parse(r#"{ "envFile": false }"#).env_file,
+            Some(EnvFileSetting::Disabled)
+        );
+        assert_eq!(
+            parse(r#"{ "envFile": ".env.local" }"#).env_file,
+            Some(EnvFileSetting::Sources(vec![".env.local".into()]))
+        );
+        assert_eq!(
+            parse(r#"{ "envFile": [".env", ".env.local"] }"#).env_file,
+            Some(EnvFileSetting::Sources(vec![
                 ".env".into(),
                 ".env.local".into()
             ]))
@@ -1644,12 +1652,12 @@ mod tests {
               "dlx": {
                 "consent": "never",
                 "sandbox": { "net": ["registry.npmjs.org"] },
-                "env": false
+                "envFile": false
               }
             }"#,
         );
         assert_eq!(cfg.dlx.consent, Some(ImplicitDlx::Never));
-        assert_eq!(cfg.dlx.env, Some(EnvSetting::Disabled));
+        assert_eq!(cfg.dlx.env_file, Some(EnvFileSetting::Disabled));
         assert!(matches!(cfg.dlx.sandbox, Some(SandboxSetting::Granular(_))));
     }
 
@@ -1918,7 +1926,7 @@ mod tests {
     }
 
     #[test]
-    fn project_dlx_env_sources_anchor_to_the_winning_file() {
+    fn project_dlx_env_file_sources_anchor_to_the_winning_file() {
         let dir = tempfile::tempdir().unwrap();
         let project_root = dir.path().join("project");
         let cwd = project_root.join("packages/app");
@@ -1926,7 +1934,7 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         std::fs::write(
             project_root.join(FILE_NAME),
-            r#"{ "dlx": { "env": ["./config/first.env", "./config/second.env"] } }"#,
+            r#"{ "dlx": { "envFile": ["./config/first.env", "./config/second.env"] } }"#,
         )
         .unwrap();
         std::fs::write(
@@ -1946,16 +1954,19 @@ mod tests {
         assert_eq!(values.get("DLX_VALUE").map(String::as_str), Some("second"));
         assert_eq!(values.get("CHAIN").map(String::as_str), Some("expanded"));
         assert_eq!(
-            snapshot.sources.get(&ConfigKey::DlxEnv).unwrap().root,
+            snapshot.sources.get(&ConfigKey::DlxEnvFile).unwrap().root,
             project_root
         );
     }
 
     #[test]
-    fn dlx_env_disabled_empty_and_sandbox_only_are_inert() {
-        for (env, expected) in [
-            (Some(EnvSetting::Disabled), Some(BTreeMap::new())),
-            (Some(EnvSetting::Sources(Vec::new())), Some(BTreeMap::new())),
+    fn dlx_env_file_disabled_empty_and_sandbox_only_are_inert() {
+        for (env_file, expected) in [
+            (Some(EnvFileSetting::Disabled), Some(BTreeMap::new())),
+            (
+                Some(EnvFileSetting::Sources(Vec::new())),
+                Some(BTreeMap::new()),
+            ),
             (None, None),
         ] {
             let snapshot = resolve_effective_config(
@@ -1968,7 +1979,7 @@ mod tests {
                     ),
                     values: ProjectConfig {
                         dlx: DlxConfig {
-                            env,
+                            env_file,
                             sandbox: Some(SandboxSetting::Enabled),
                             ..DlxConfig::default()
                         },
@@ -2179,7 +2190,7 @@ mod tests {
                 "preload",
                 "nodeOptions",
                 "v8Flags",
-                "env",
+                "envFile",
                 "define",
                 "loader",
                 "conditions",
@@ -2196,7 +2207,7 @@ mod tests {
           "preload": [],
           "nodeOptions": [],
           "v8Flags": [],
-          "env": false,
+          "envFile": false,
           "define": {},
           "loader": {},
           "conditions": [],
@@ -2212,7 +2223,7 @@ mod tests {
             "nodeOptions": [],
             "sandbox": false
           },
-          "dlx": { "consent": "prompt", "sandbox": false, "env": false }
+          "dlx": { "consent": "prompt", "sandbox": false, "envFile": false }
         }"#;
         let dir = tempfile::tempdir().unwrap();
         let project_path = dir.path().join("project.jsonc");
