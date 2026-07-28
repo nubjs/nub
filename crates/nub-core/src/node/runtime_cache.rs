@@ -885,10 +885,10 @@ mod tests {
         fs::remove_dir_all(&base).unwrap();
     }
 
-    /// Set a dir's mtime via libc `utimes` (unix) — dep-free. On platforms where
-    /// this isn't wired the GC age-test is skipped by leaving mtime as-is, which
-    /// would make the eviction assertion fail loudly rather than silently pass, so
-    /// keep it unix-gated.
+    /// Set a dir's mtime via libc `utimes` (unix) — dep-free. Its only caller,
+    /// `gc_evicts_stale_keeps_current_and_tmp`, is itself `#[cfg(unix)]`-gated (a
+    /// no-op mtime write off unix would leave the stale dir fresh and fail the
+    /// eviction assertion), so no non-unix stub is needed here.
     #[cfg(unix)]
     fn filetime_set(path: &Path, time: SystemTime) {
         use std::os::unix::ffi::OsStrExt;
@@ -906,7 +906,4 @@ mod tests {
             libc::utimes(c.as_ptr(), times.as_ptr());
         }
     }
-
-    #[cfg(not(unix))]
-    fn filetime_set(_path: &Path, _time: SystemTime) {}
 }

@@ -3220,6 +3220,10 @@ mod tests {
     // flips the global out from under the other's `current()` assertion (an
     // intermittent CI failure). Serialize them behind this guard. Poison-tolerant
     // so a panic in one doesn't cascade into a spurious failure in the other.
+    // Every caller is `#[cfg(unix)]` (or the narrower linux/macos PTY tests, a
+    // subset of unix), so the guard itself is unix-gated to match — unused on
+    // Windows otherwise.
+    #[cfg(unix)]
     static CTRL_C_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[cfg(unix)]
