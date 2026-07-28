@@ -3755,6 +3755,54 @@ fn wait_for_watch_snapshot(
     );
 }
 
+/// Write `content` to a file `nub --watch` is watching, then wait for the
+/// resulting restart to produce `needle`, re-delivering the write if it doesn't.
+///
+/// Node's own watch supervisor (`internal/watch_mode/files_watcher.js`) only
+/// arms an `fs.watch` on a file after the running child's `watch:require`/
+/// `watch:import` IPC message reaches it — a real round trip after spawn, not
+/// an instant side effect of it. A write landing before that round trip
+/// completes fires a change event with nobody listening, so it is dropped, not
+/// merely delayed. Under CPU contention that window can outlast a single
+/// write, so this redelivers the same content on a fixed cadence until the
+/// child observes it. That hardens the STIMULUS only — every returned
+/// snapshot still comes from a real restart and is checked in full by the
+/// caller, so a duplicate restart from an extra redelivery is harmless.
+fn write_watched_file_and_wait_for_snapshot(
+    target: &Path,
+    content: &str,
+    snapshots: &Path,
+    needle: &str,
+    child: &mut std::process::Child,
+    stderr: &Path,
+) -> String {
+    std::fs::write(target, content).unwrap();
+    for attempt in 0..150 {
+        if attempt > 0 && attempt % 10 == 0 {
+            std::fs::write(target, content).unwrap();
+        }
+        if let Ok(snapshot) = std::fs::read_to_string(snapshots)
+            && snapshot.contains(needle)
+        {
+            return snapshot;
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            finish_watch_probe(child);
+            panic!(
+                "watch probe exited {status} before writing {needle:?}; stderr: {:?}",
+                std::fs::read_to_string(stderr).ok()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    finish_watch_probe(child);
+    panic!(
+        "watch probe never wrote {needle:?} despite repeated redelivery; last snapshot: {:?}; stderr: {:?}",
+        std::fs::read_to_string(snapshots).ok(),
+        std::fs::read_to_string(stderr).ok()
+    );
+}
+
 fn node_supports_watch_env_files() -> bool {
     target_node_version() >= (20, 6, 0)
 }
@@ -4040,17 +4088,18 @@ fn watch_filters_late_runtime_control_env_keys_but_reloads_ordinary_vars() {
         "first child: {first}"
     );
 
-    std::fs::write(
-        dir.join(".env"),
+    let snapshots_text = write_watched_file_and_wait_for_snapshot(
+        &dir.join(".env"),
         "NODE_OPTIONS=--require ./attacker.cjs\n\
          NODE_TLS_REJECT_UNAUTHORIZED=0\n\
          NODE_EXTRA_CA_CERTS=/definitely/not/a/ca.pem\n\
          node_repl_external_module=./attacker.cjs\n\
          ORDINARY=two\n",
-    )
-    .unwrap();
-    let snapshots_text =
-        wait_for_watch_snapshot(&snapshots, r#""ordinary":"two""#, &mut child, &stderr);
+        &snapshots,
+        r#""ordinary":"two""#,
+        &mut child,
+        &stderr,
+    );
     finish_watch_probe(&mut child);
 
     for line in snapshots_text.lines() {
@@ -4113,8 +4162,14 @@ fn watch_reloads_explicit_env_file_across_restarts() {
 
     // Changed values AND keys added after startup must both reach the
     // restarted child (the #479 failure froze the startup snapshot).
-    std::fs::write(dir.join("custom.env"), "ORDINARY=two\nADDED=three\n").unwrap();
-    let reloaded = wait_for_watch_snapshot(&snapshots, r#""ordinary":"two""#, &mut child, &stderr);
+    let reloaded = write_watched_file_and_wait_for_snapshot(
+        &dir.join("custom.env"),
+        "ORDINARY=two\nADDED=three\n",
+        &snapshots,
+        r#""ordinary":"two""#,
+        &mut child,
+        &stderr,
+    );
     finish_watch_probe(&mut child);
 
     assert!(
