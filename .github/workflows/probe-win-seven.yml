@@ -117,8 +117,13 @@ jobs:
         with:
           shared-key: probe-win-seven-main
           save-if: true
+      # Split so the run step's timeout measures the RUN. A combined step spent its
+      # whole 20 minutes on the cold build and never reached the test.
+      - name: Build the test binary at main
+        shell: bash
+        run: cargo test -p nub-cli --test upgrade_windows --no-run
       - name: upgrade_windows at main
         continue-on-error: true
-        timeout-minutes: 20
+        timeout-minutes: 10
         shell: bash
         run: cargo test -p nub-cli --test upgrade_windows -- --nocapture
