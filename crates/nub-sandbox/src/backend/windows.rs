@@ -789,8 +789,7 @@ pub(super) mod launch {
         SetHandleInformation, WAIT_OBJECT_0,
     };
     use windows_sys::Win32::NetworkManagement::WindowsFirewall::{
-        NetworkIsolationFreeAppContainers, NetworkIsolationGetAppContainerConfig,
-        NetworkIsolationSetAppContainerConfig,
+        NetworkIsolationGetAppContainerConfig, NetworkIsolationSetAppContainerConfig,
     };
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetEffectiveRightsFromAclW,
@@ -811,6 +810,7 @@ pub(super) mod launch {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
         SetInformationJobObject,
     };
+    use windows_sys::Win32::System::Memory::{GetProcessHeap, HeapFree};
     use windows_sys::Win32::System::Threading::{
         CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateMutexW, CreateProcessW,
         DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
@@ -1061,9 +1061,22 @@ pub(super) mod launch {
                     },
                 )
             };
-            // Free the got list AFTER Set (new_list borrowed its Sid pointers).
+            // Free AFTER Set — `new_list` borrows these Sid pointers. The Get hands back
+            // N+1 separate process-heap blocks (the array, plus one per entry's `Sid`);
+            // MSDN's `FreeAppContainerConfig` sample is this exact loop. NOT
+            // `NetworkIsolationFreeAppContainers` — despite the name that releases
+            // `NetworkIsolationEnumAppContainers` output, a different element type, and the
+            // `.cast()` that let it compile type-confused firewallapi into freeing a garbage
+            // pointer (0xC0000374 at teardown on every elevated per-host run).
             if !arr.is_null() {
-                unsafe { NetworkIsolationFreeAppContainers(arr.cast()) };
+                // SAFETY: Set has consumed the Sid pointers; this is their last use. Iterate
+                // `existing`, NOT `new_list` — the caller's `sid` is FreeSid/Rust-owned, so
+                // freeing that here would be a wrong-allocator free plus a later double free.
+                let heap = unsafe { GetProcessHeap() };
+                for e in existing {
+                    unsafe { HeapFree(heap, 0, e.Sid.cast()) };
+                }
+                unsafe { HeapFree(heap, 0, arr.cast()) };
             }
             if set_rc != 0 {
                 return Err(io::Error::from_raw_os_error(set_rc as i32));
