@@ -177,20 +177,22 @@ mod win {
         }
     }
 
-    /// The engine's clean-root predicate, re-derived: walk up until an ancestor grants
-    /// AAP (fail) or carries a protected DACL (pass). Independent of the code under test,
-    /// so a broken `verify_clean_root` cannot make this probe agree with it.
+    /// The engine's clean-root predicate, re-derived independently so a broken
+    /// `verify_clean_root` cannot make this probe agree with it: the WORKING ROOT must have
+    /// no AAP reach at all; a STRICT ANCESTOR disqualifies only when its AAP ace is
+    /// inheritable (a this-folder-only grant cannot reach the tree the child runs in); a
+    /// protected ancestor is an early accept; running out of ancestors is an accept.
     fn qualifies(start: &Path) -> bool {
-        for p in start.ancestors() {
+        for (i, p) in start.ancestors().enumerate() {
             let Ok(f) = dacl_facts(p) else { return false };
-            if f.aap_rights != 0 {
+            if f.aap_rights != 0 && (i == 0 || f.aap_inheritable) {
                 return false;
             }
             if f.protected {
                 return true;
             }
         }
-        false
+        true
     }
 
     // ── the survey that explains WHY the precondition was unsatisfiable ──────────────
