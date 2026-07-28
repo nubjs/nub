@@ -687,7 +687,10 @@ fn sandbox_activation_requires_the_exact_run_flag_position() {
         String::from_utf8_lossy(&exact.stderr)
     );
 
-    let mut last_output = None;
+    // Every run is recorded, not just the last: the marker assertion below is about the
+    // FIRST TWO forms, so a diagnostic carrying only the third would name the one run that
+    // is not expected to write it.
+    let mut runs = Vec::new();
     for args in [
         vec!["run", "probe", "--sandbox", policy.to_str().unwrap()],
         vec!["run", "--", "probe", "--sandbox", policy.to_str().unwrap()],
@@ -703,19 +706,17 @@ fn sandbox_activation_requires_the_exact_run_flag_position() {
             "misplaced {args:?} activated the hidden sandbox: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        last_output = Some(output);
+        runs.push(format!(
+            "{args:?} -> exit {:?}\n  stdout: {}\n  stderr: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
     assert!(
         marker.exists(),
-        "post-positional and -- forms must run the script; last run: {}",
-        last_output
-            .map(|o| format!(
-                "exit {:?}\nstdout: {}\nstderr: {}",
-                o.status.code(),
-                String::from_utf8_lossy(&o.stdout),
-                String::from_utf8_lossy(&o.stderr)
-            ))
-            .unwrap_or_default()
+        "post-positional and -- forms must run the script:\n{}",
+        runs.join("\n")
     );
 }
 

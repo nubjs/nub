@@ -98,6 +98,31 @@ jobs:
         shell: bash
         run: cargo test -p nub-sandbox --test matcher
 
+      # net_trusted_set's probe PRINTS "ALLOWED" and then the process dies with
+      # 0xC0000374 (STATUS_HEAP_CORRUPTION). Isolate the ONE variable that separates it
+      # from the passing net-coarse-deny fixture: the per-host `$trusted` net tier, which
+      # is the only one that stands up nub's loopback MITM proxy.
+      - name: net tier differential
+        continue-on-error: true
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set +e
+          powershell -Command '$id=[System.Security.Principal.WindowsIdentity]::GetCurrent(); Write-Host "IsElevated:" (New-Object System.Security.Principal.WindowsPrincipal($id)).IsInRole([System.Security.Principal.WindowsBuiltinRole]::Administrator)'
+          nub="$GITHUB_WORKSPACE/target/debug/nub.exe"
+          probe="$GITHUB_WORKSPACE/target/debug/nub-sandbox-probe.exe"
+          work=$(mktemp -d); mkdir -p "$work/proj"; printf '{}' > "$work/proj/package.json"
+          for tier in per-host coarse off; do
+            case $tier in
+              per-host) net='["$trusted"]' ;;
+              coarse)   net='true' ;;
+              off)      net='false' ;;
+            esac
+            printf '{ "net": %s, "fs": true, "vars": true }' "$net" > "$work/proj/policy.json"
+            ( cd "$work/proj" && "$nub" run --sandbox policy.json -- "$probe" env PATH )
+            echo "net=$tier exit=$?"
+          done
+
   # upgrade_windows is the only one of the seven whose FILE exists at origin/main.
   # The other six are epic-introduced, so "does it fail at main" is unanswerable
   # for them by construction.

@@ -69,6 +69,11 @@ const FAKE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The PE overlay that makes the "released" binary byte-distinct from the installed one.
 const NEW_MARKER: &[u8] = b"NEW-NUB-RELEASE-BYTES";
 
+/// Inert bytes for the cases that never reach the staged binary (the tampered archive
+/// is refused at the checksum, the dry run downloads nothing), so only the ONE test that
+/// actually executes the release pays to round-trip a ~100 MB debug binary.
+const INERT_PAYLOAD: &[u8] = b"NOT-A-REAL-EXECUTABLE";
+
 fn new_bytes() -> Vec<u8> {
     let mut bytes = std::fs::read(nub_binary()).unwrap();
     bytes.extend_from_slice(NEW_MARKER);
@@ -76,17 +81,17 @@ fn new_bytes() -> Vec<u8> {
 }
 
 /// Build the fake release channel: `<root>/v<version>/nub-<target>.zip` (containing
-/// `bin/nub.exe` = [`new_bytes`]) + its `.sha256` sidecar. The zip is created with
+/// `bin/nub.exe` = `payload`) + its `.sha256` sidecar. The zip is created with
 /// the same System32 bsdtar the upgrade extracts with (`-a` picks zip from the
 /// suffix), so the fixture proves the round-trip through the real tooling.
-fn make_fake_release(root: &Path) -> String {
+fn make_fake_release(root: &Path, payload: &[u8]) -> String {
     let archive_name = format!("nub-{}.zip", target_token());
     let version_dir = root.join(format!("v{FAKE_VERSION}"));
     std::fs::create_dir_all(&version_dir).unwrap();
 
     let build = tmp("zip-build");
     std::fs::create_dir_all(build.join("bin")).unwrap();
-    std::fs::write(build.join("bin").join("nub.exe"), new_bytes()).unwrap();
+    std::fs::write(build.join("bin").join("nub.exe"), payload).unwrap();
     let zip_path = version_dir.join(&archive_name);
     let status = Command::new("tar")
         .args(["-a", "-c", "-f"])
@@ -123,10 +128,9 @@ fn make_selfowned_install(root: &Path) -> PathBuf {
 fn selfowned_upgrade_swaps_the_running_exe_via_the_rename_dance() {
     let root = tmp("swap");
     let release_root = tmp("swap-rel");
-    make_fake_release(&release_root);
+    make_fake_release(&release_root, &new_bytes());
     let install = make_selfowned_install(&root);
     let bin = install.join("bin");
-    let old_bytes = std::fs::read(nub_binary()).unwrap();
 
     // A stale .old from a "previous" upgrade must not block the dance — the
     // pre-swap GC removes (or the rename replaces) it.
@@ -147,17 +151,29 @@ fn selfowned_upgrade_swaps_the_running_exe_via_the_rename_dance() {
 
     // The live nub.exe is the release's bytes; the pre-upgrade binary moved
     // aside to .old (deletion is impossible while it was executing); the nubx
-    // copy was refreshed from the new binary.
-    assert_eq!(std::fs::read(bin.join("nub.exe")).unwrap(), new_bytes());
-    assert_eq!(std::fs::read(bin.join("nub.exe.old")).unwrap(), old_bytes);
-    assert_eq!(std::fs::read(bin.join("nubx.exe")).unwrap(), new_bytes());
+    // copy was refreshed from the new binary. Compared by DIGEST: the operands are
+    // whole ~100 MB binaries, and `assert_eq!` Debug-dumps both sides on failure —
+    // which would bury the regression it is meant to report under gigabytes of log.
+    let new_digest = sha256_hex(&new_bytes());
+    let old_digest = sha256_hex(&std::fs::read(nub_binary()).unwrap());
+    let digest_of = |p: PathBuf| sha256_hex(&std::fs::read(p).unwrap());
+    assert_eq!(digest_of(bin.join("nub.exe")), new_digest, "live nub.exe");
+    assert_eq!(
+        digest_of(bin.join("nub.exe.old")),
+        old_digest,
+        "pre-upgrade binary moved aside"
+    );
+    assert_eq!(digest_of(bin.join("nubx.exe")), new_digest, "nubx alias");
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&release_root);
 }
 
 #[test]
 fn selfowned_upgrade_rejects_a_tampered_archive_and_leaves_the_install_untouched() {
     let root = tmp("tamper");
     let release_root = tmp("tamper-rel");
-    let archive_name = make_fake_release(&release_root);
+    let archive_name = make_fake_release(&release_root, INERT_PAYLOAD);
     let version_dir = release_root.join(format!("v{FAKE_VERSION}"));
     std::fs::write(
         version_dir.join(format!("{archive_name}.sha256")),
@@ -167,7 +183,7 @@ fn selfowned_upgrade_rejects_a_tampered_archive_and_leaves_the_install_untouched
 
     let install = make_selfowned_install(&root);
     let bin = install.join("bin");
-    let old_bytes = std::fs::read(nub_binary()).unwrap();
+    let old_digest = sha256_hex(&std::fs::read(nub_binary()).unwrap());
 
     let out = Command::new(bin.join("nub.exe"))
         .args(["upgrade", "--version", FAKE_VERSION])
@@ -182,8 +198,14 @@ fn selfowned_upgrade_rejects_a_tampered_archive_and_leaves_the_install_untouched
         "expected a checksum refusal, got: {stderr}"
     );
     // Verification precedes any swap: the install is byte-identical, no .old.
-    assert_eq!(std::fs::read(bin.join("nub.exe")).unwrap(), old_bytes);
+    assert_eq!(
+        sha256_hex(&std::fs::read(bin.join("nub.exe")).unwrap()),
+        old_digest
+    );
     assert!(!bin.join("nub.exe.old").exists());
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&release_root);
 }
 
 #[test]
@@ -208,4 +230,6 @@ fn selfowned_dry_run_prints_the_zip_artifact() {
         stdout.contains(&expected),
         "expected the {expected} artifact URL, got: {stdout}"
     );
+
+    let _ = std::fs::remove_dir_all(&root);
 }
