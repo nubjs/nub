@@ -5000,7 +5000,9 @@ fn target_child_main(
     target_child_fail(error_writer_fd, TargetSetupStage::Execve, child_errno());
 }
 
-pub(super) fn install_target_seccomp(program: &[seccompiler::sock_filter]) -> Result<(), libc::c_int> {
+pub(super) fn install_target_seccomp(
+    program: &[seccompiler::sock_filter],
+) -> Result<(), libc::c_int> {
     let len = u16::try_from(program.len()).map_err(|_| libc::E2BIG)?;
     let filter = libc::sock_fprog {
         len,

@@ -20,8 +20,8 @@
 use super::linux_grants::{MountAccess, MountGrant, compile_mount_plan};
 use crate::policy::SandboxPolicy;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::process::Command;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const SYS_LANDLOCK_CREATE_RULESET: libc::c_long = 444;
 const SYS_LANDLOCK_ADD_RULE: libc::c_long = 445;
@@ -360,10 +360,9 @@ fn reject_narrowing_grants(plan: &[MountGrant]) -> Result<(), String> {
         if grant.access != MountAccess::ReadOnly {
             continue;
         }
-        if let Some(wider) = plan[..index]
-            .iter()
-            .find(|earlier| earlier.access == MountAccess::ReadWrite && grant.path.starts_with(&earlier.path))
-        {
+        if let Some(wider) = plan[..index].iter().find(|earlier| {
+            earlier.access == MountAccess::ReadWrite && grant.path.starts_with(&earlier.path)
+        }) {
             return Err(format!(
                 "landlock cannot express the read-only cap {} inside the writable grant {}: \
                  rules union, so the cap would not restrict",
@@ -404,7 +403,12 @@ pub(crate) fn build(
     let fd = RawFd::try_from(raw)
         .ok()
         .filter(|fd| *fd >= 0)
-        .ok_or_else(|| format!("landlock_create_ruleset: {}", std::io::Error::last_os_error()))?;
+        .ok_or_else(|| {
+            format!(
+                "landlock_create_ruleset: {}",
+                std::io::Error::last_os_error()
+            )
+        })?;
     // SAFETY: the syscall returned a fresh, owned descriptor.
     let ruleset = unsafe { OwnedFd::from_raw_fd(fd) };
 
@@ -523,14 +527,7 @@ unsafe fn drop_all_capabilities() -> Result<(), std::io::Error> {
         pid: 0,
     };
     let data = [CapData::default(); 2];
-    if unsafe {
-        libc::syscall(
-            libc::SYS_capset,
-            &header as *const CapHeader,
-            data.as_ptr(),
-        )
-    } != 0
-    {
+    if unsafe { libc::syscall(libc::SYS_capset, &header as *const CapHeader, data.as_ptr()) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())

@@ -588,7 +588,6 @@ fn unjailed(ctx: &CompileCtx) -> SandboxPolicy {
         },
         pid: Default::default(),
         build_jail: false,
-
     }
 }
 
