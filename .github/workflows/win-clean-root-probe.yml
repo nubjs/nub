@@ -1,19 +1,20 @@
 # Branch-scoped Windows probe for the clean-DACL working root (no PR required).
 #
-# Answers two things a green `cargo test` on this repo cannot:
-#   1. What a STOCK Windows machine's ancestor chain actually looks like for
-#      `ALL APPLICATION PACKAGES` + `SE_DACL_PROTECTED` — the survey the fix rests on.
-#   2. Whether establishing the protected root needs ADMIN. The windows-latest job user
-#      is an administrator, so the admin leg alone cannot answer that; the second job
-#      creates a standard local user and re-runs the same binary as that user.
+# Answers what a green `cargo test` on this repo cannot: what a STOCK Windows machine's
+# ancestor chain actually looks like for `ALL APPLICATION PACKAGES` + `SE_DACL_PROTECTED`,
+# and whether the shipped predicate accepts ordinary directories for an unprivileged user
+# (the windows-latest job user is an administrator, so the admin leg alone cannot answer
+# the second half; the `unprivileged` job creates a standard local user for it).
 #
-# ANSWERS (run 30321816008, both jobs green):
-#   1. Volume roots are not uniform — `C:\` grants AAP nothing, `D:\` grants 0x001200a9,
-#      `C:\Users` grants 0x001200a9. EVERY AAP ace found is NON-INHERITABLE, and
-#      `C:\Users\<name>` is SE_DACL_PROTECTED. So a path under the profile already
-#      qualified; a path on another volume or at a volume root never could.
-#   2. No admin. The standard user (BUILTIN\Users, Medium IL, no S-1-5-32-544) secured
-#      roots on both volumes and kept its own read+write.
+# MEASURED (run 30321816008 and successors, both jobs green):
+#   - Volume roots are not uniform: `C:\` grants AAP nothing, `D:\` grants 0x001200a9,
+#     `C:\Users` grants 0x001200a9. EVERY AAP ace found is NON-INHERITABLE, and
+#     `C:\Users\<name>` is SE_DACL_PROTECTED — which is why a project under the profile
+#     already passed while one on another volume, or at a volume root, never could.
+#   - Protecting a working root (the REJECTED fix) severs inheritance into it: a protected
+#     dir took none of a later inheritable grant on its parent while an unprotected sibling
+#     took all of it. That would strand the build jail, whose per-package cwd sits under the
+#     `node_modules` it read-grants.
 #
 # Delete this file before the change graduates to a PR.
 name: win-clean-root-probe
