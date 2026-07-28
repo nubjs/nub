@@ -950,6 +950,17 @@ pub struct SandboxScope<'a> {
     /// What the jail's project read grant expands against. For a dependency build this
     /// is the user's project; for a fetched checkout it is the checkout itself.
     pub project_root: &'a Path,
+    /// The INSTALLER-RESOLVED name of the package whose script this is — the same
+    /// identity `BuildPolicy` decides on, not the manifest's self-declared `name`.
+    ///
+    /// Set ONLY when `project_root` is also the CONSUMER's own project root; that pairing
+    /// is the guarantee, and it is what lets an embedder look this package up in
+    /// root-authored config. `None` whenever aube's root is a checkout it FETCHED — both
+    /// the root script of one (`RootProvenance::Fetched`) and the deps of the nested
+    /// install `run_git_dep_prepare` roots at the clone dir, where `project_root` is
+    /// attacker-authored. Handing over a name there would invite the embedder to read a
+    /// dependency's own manifest as if it were the consumer's.
+    pub package_name: Option<&'a str>,
 }
 
 /// Holds the real stderr fd saved before `aube` redirects fd 2 to
@@ -1252,11 +1263,18 @@ pub async fn run_script(
     // embedder that installs the hook also gates aube's own jail off
     // (`embedder_owns_lifecycle_sandbox`), so `jail` is `None` on this path. A `None`
     // hook (or no scope) falls through to the normal aube spawn.
-    let status = match sandbox.and_then(|scope| {
-        aube_util::engine_context()
-            .lifecycle_sandbox
-            .map(|hook| (scope, hook))
-    }) {
+    // A hook that declines this package (`confines` false) falls through to the ordinary
+    // arm below, so an unconfined dependency script is spawned by the SAME code path as
+    // an uninterposed aube — descendant reaping included — instead of a second
+    // implementation living in the embedder.
+    let status = match sandbox
+        .and_then(|scope| {
+            aube_util::engine_context()
+                .lifecycle_sandbox
+                .map(|hook| (scope, hook))
+        })
+        .filter(|(scope, hook)| hook.confines(scope.package_name, scope.project_root))
+    {
         Some((scope, hook)) => {
             let spawn =
                 lifecycle_sandbox_spawn(&cmd, script_dir, scope.project_root, scope.package_dir);
@@ -1362,6 +1380,10 @@ pub async fn run_root_script_by_name(
             .then_some(SandboxScope {
                 package_dir: checkout_root,
                 project_root: checkout_root,
+                // A fetched checkout's only name is the one it wrote into its own
+                // manifest, and its `project_root` is itself — so there is no consumer
+                // identity here for an embedder to key root-authored policy on.
+                package_name: None,
             }),
     };
     run_script(
@@ -1589,6 +1611,7 @@ pub async fn run_dep_hook(
     hook: LifecycleHook,
     tool_bin_dirs: &[&Path],
     jail: Option<&ScriptJail>,
+    package_name: Option<&str>,
 ) -> Result<bool, Error> {
     let name = hook.script_name();
     let script_cmd: &str = match manifest.scripts.get(name) {
@@ -1614,6 +1637,11 @@ pub async fn run_dep_hook(
         .then_some(SandboxScope {
             package_dir,
             project_root,
+            // The caller's resolved name (`registry_name`), NOT `manifest.name` — the
+            // manifest is the dependency's own file and could claim any identity. The
+            // caller passes `None` when `project_root` is not the consumer's own, which
+            // is what keeps the pair's guarantee true.
+            package_name,
         });
     run_script(
         package_dir,

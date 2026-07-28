@@ -428,6 +428,12 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     // gates which ones actually run. Match is by `pkg.name`, matching
     // pnpm's `pnpm rebuild <name>`.
     selected_names: Option<&std::collections::HashSet<String>>,
+    // Whether `project_dir` is the USER's own project root rather than a checkout aube
+    // fetched. `run_git_dep_prepare` points a nested install's `project_dir` at the
+    // clone dir, so on that path `project_dir` is attacker-authored — and an embedder
+    // that keys per-package confinement policy off the root manifest must not read it.
+    // Derived from the same `RootProvenance` the root-script exemption uses.
+    root_is_user_authored: bool,
 ) -> miette::Result<usize> {
     // Pass 1 (serial, cheap): walk the graph, keep only the packages
     // the policy allows AND that actually define at least one dep
@@ -732,6 +738,13 @@ pub(crate) async fn run_dep_lifecycle_scripts(
                     hook,
                     &tool_dirs,
                     jail.as_ref(),
+                    // The same identity `BuildPolicy`/`jail_for` decide on, so an
+                    // embedder's per-package confinement policy and aube's own
+                    // allow/deny rules cannot disagree about which package this is.
+                    // Withheld entirely under a fetched root: there `project_dir` is the
+                    // checkout, so handing over a name would invite the embedder to look
+                    // this package up in a manifest the dependency wrote.
+                    root_is_user_authored.then_some(job.registry_name.as_str()),
                 )
                 .await
                 .map_err(|e| {

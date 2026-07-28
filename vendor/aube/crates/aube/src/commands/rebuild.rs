@@ -213,6 +213,9 @@ pub async fn run(
                 &jail_policy,
                 None,
                 selected.as_ref(),
+                // `rebuild` is user-invoked against the user's own project — the same
+                // premise its root hooks already assert below with `UserAuthored`.
+                true,
             )
             .await?;
         }

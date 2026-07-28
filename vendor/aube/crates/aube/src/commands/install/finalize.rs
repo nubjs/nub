@@ -311,6 +311,7 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
             jail_policy,
             lifecycle_delta_filter.as_ref(),
             None,
+            matches!(root_provenance, aube_scripts::RootProvenance::UserAuthored),
         )
         .await?;
         if ran > 0 {

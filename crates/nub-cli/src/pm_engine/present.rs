@@ -56,7 +56,6 @@ pub(crate) fn exit_code(report: &miette::Report) -> i32 {
 
 /// Warning passthrough for family verbs (stderr, rewritten). Use for
 /// non-fatal engine-adjacent notices.
-#[allow(dead_code)] // first consumers land with the family fill-ins
 pub(crate) fn warn(msg: &str) {
     eprintln!("{}", rewrite(msg));
 }
