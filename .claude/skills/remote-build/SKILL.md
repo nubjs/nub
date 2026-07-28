@@ -78,6 +78,17 @@ own disk**, which is where the relief comes from. Adding local cores would not h
 - **Under `--all-features`, `crates/nub-core/build.rs` panics** unless `runtime/addons/nub-native.node`
   is staged. The job script stages a placeholder, the same trick CI uses for its addon-less job.
 - **`cmake` is mandatory** on the builder — `libz-ng-sys` fails ~35s in without it.
+- **zig gives you a macOS libc, NOT Apple's frameworks.** nub's darwin tree links
+  `-lcompression -framework Security -framework SystemConfiguration -framework CoreFoundation
+  -liconv` through `rustls-native-certs` → `reqwest` and `lzma-sys`. Neither `security-framework`
+  nor `core-foundation` is a DIRECT dependency in any `Cargo.toml`, so a manifest grep says
+  "no framework linkage" and is wrong — check the resolved target tree. Without the symbol-only
+  stub TBDs in `scripts/darwin-stubs/` the build dies at LINK time, after a full compile.
+- **`--job build` produces the CLI *and* the N-API addon.** The CLI alone is a partial artifact
+  that looks complete: it reports a version and installs packages, then dies on the first `.ts`
+  file with `nubNative.transformCached is not a function`. The 11-byte placeholder satisfies
+  `build.rs`'s integrity hash and cannot be loaded. Both are pulled; the addon is staged into
+  `runtime/addons/` (gitignored, same place `make addon-fast` puts it).
 - **Deployment target comes out macOS 13.0, not 11.0.** cargo-zigbuild forces
   `-platform_version macos 13.0.0` and `MACOSX_DEPLOYMENT_TARGET` does not override it. Fine for
   a dev binary; **this must be solved before cross-compiled artifacts go anywhere near a release.**
@@ -134,6 +145,15 @@ toolchain or the dependency graph moves substantially; day to day it just sits t
   a single-developer tool, not an oversight — but know it rather than discover it.
 - **`StrictHostKeyChecking=no`.** Unavoidable with ephemeral VMs on recycled IPs, and the same
   pattern `gcloud-vm` already uses. Closing it properly means `--no-address` + IAP tunnelling.
+
+## Known gap: the image is registry-warm, not artifact-warm
+
+The bake's warm step currently stops after `cargo fetch` — exit 0, image published, no compile.
+The `bash -s` stdin-truncation fix resolved this for the JOB path (a real `--job clippy` runs all
+three legs to completion) but **not** for the bake, so the root cause there is still unknown and
+`set -euxo` tracing is on to name the last command executed. Consequence: builders cold-compile,
+so clippy takes ~250s rather than the ~35s the warm path would give, and a darwin build ~560s.
+Correctness is unaffected — every measured timing here is pessimistic, not wrong.
 
 ## Cost
 
