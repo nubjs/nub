@@ -22,10 +22,8 @@ mod reuse;
 pub use preset::compile_build_jail;
 pub use resolve::{CommandRunner, ShellRunner};
 
-/// The `$downloads` host set, re-exported for the EMBEDDER's out-of-jail prefetch alone.
-/// Prefetch derives its fetch allowlist FROM this array rather than restating it, so
-/// "nub contacts only hosts confined code could already reach" holds by construction
-/// instead of by keeping two lists in agreement by hand.
+/// The `$downloads` host set, re-exported for the EMBEDDER's out-of-jail prefetch alone,
+/// which derives its fetch allowlist FROM this array rather than restating it.
 pub use builtin_sets::DOWNLOAD_HOSTS;
 
 /// The secret-file deny floor, re-exported for the Linux backend ALONE — it recognizes

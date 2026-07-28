@@ -56,9 +56,7 @@ use serde_json::Value;
 
 use super::build_jail::ProbeScope;
 
-/// The UNRATIFIED widening of the fetch allowlist past `$downloads`, compiled in only
-/// under the off-by-default `prefetch-github-hosts` feature. See the module doc for why it
-/// is gated; enabling it is a maintainer decision about nub's network-trust surface.
+/// The unratified widening past `$downloads` — see the module doc for why it is gated.
 ///
 /// THE REDIRECT TARGETS ARE LOAD-BEARING ENTRIES, not conveniences. [`fetch`] re-applies
 /// the allowlist to every hop, so a `github.com` release-asset URL only resolves if the
@@ -116,7 +114,18 @@ pub(super) fn prefetch(
     let Some(family) = detect_family(&spawn.args) else {
         return Vec::new();
     };
-    let Some(manifest) = read_manifest(&spawn.package_dir) else {
+    // ANCHOR: `bin.js:7` does `require(path.resolve('package.json'))` BEFORE the
+    // `chdir(rc.path)` on line 20, so prebuild-install reads its manifest from the script's
+    // original cwd, not from the package dir. The two coincide for an ordinary dependency
+    // hook and diverge for a git-dependency's root script; reading the wrong one derives a
+    // URL for the wrong package, so the pickup silently misses. node-pre-gyp resolves its
+    // own module root instead, and is left on `package_dir`.
+    let manifest_dir = match family {
+        Family::PrebuildInstall => &spawn.cwd,
+        Family::NodePreGyp => &spawn.package_dir,
+    };
+    let Some(manifest) = read_manifest(manifest_dir).or_else(|| read_manifest(&spawn.package_dir))
+    else {
         return Vec::new();
     };
     let Some(node) = node_facts(ambient, probe) else {
@@ -160,9 +169,21 @@ fn detect_family(args: &[std::ffi::OsString]) -> Option<Family> {
     }
 }
 
+/// Parse a `package.json`, refusing an implausibly large one.
+///
+/// The cap bounds WORK, not trust. Every template string downstream is manifest-derived,
+/// and `expand` makes ~25 sequential `String::replace` passes while `github_from_package`
+/// serialises the whole document — all of it unconfined, on the install's critical path,
+/// before any network call. A real prebuilt-addon manifest is a few KB, so a dependency
+/// shipping megabytes of JSON is buying compute, not describing a package.
 fn read_manifest(package_dir: &Path) -> Option<Value> {
-    let raw = std::fs::read_to_string(package_dir.join("package.json")).ok()?;
-    serde_json::from_str(&raw).ok()
+    const MAX_MANIFEST: u64 = 1024 * 1024;
+    let path = package_dir.join("package.json");
+    if std::fs::metadata(&path).ok()?.len() > MAX_MANIFEST {
+        tracing::debug!(path = %path.display(), "prefetch: manifest over the size cap");
+        return None;
+    }
+    serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()
 }
 
 // ── the running interpreter's build identity ───────────────────────────────────
@@ -200,6 +221,14 @@ fn node_facts(
     ambient: &BTreeMap<String, String>,
     probe: &ProbeScope,
 ) -> Option<&'static NodeFacts> {
+    // PROCESS-WIDE memo against a PER-SPAWN `probe`: the first package to reach here
+    // decides for the whole install. Deliberate — one install provisions one Node, so the
+    // answer is invariant, and the alternative (a keyed map) buys nothing. What it is NOT
+    // is a capability leak: the memo holds parsed version strings, and the execution that
+    // produced them already passed the scope that authorized it. A later spawn whose scope
+    // would have refused simply inherits inert data. If the execpath ever did vary
+    // mid-install, the stale facts would derive a wrong ABI and the prefetch would miss —
+    // fail-soft, like every other decline here.
     static FACTS: OnceLock<Option<NodeFacts>> = OnceLock::new();
     FACTS
         .get_or_init(|| {
@@ -220,8 +249,7 @@ fn node_facts(
         .as_ref()
 }
 
-/// Split the probe's single line. Separated from the spawn so the parse is unit-testable
-/// without a Node on disk.
+/// Separated from the spawn so the parse is unit-testable without a Node on disk.
 fn parse_node_facts(stdout: &str) -> Option<NodeFacts> {
     let line = stdout.lines().next()?;
     let f: Vec<&str> = line.split_whitespace().collect();
@@ -1751,6 +1779,24 @@ mod tests {
         );
         assert!(parse_node_facts("").is_none());
         assert!(parse_node_facts("26.0.0 140\n").is_none());
+    }
+
+    /// A manifest big enough to be buying compute rather than describing a package is
+    /// refused before `expand`'s ~25 replace passes ever run on its strings.
+    #[test]
+    fn an_oversized_manifest_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("package.json");
+
+        std::fs::write(&path, br#"{"name":"ok","version":"1.0.0"}"#).unwrap();
+        assert!(read_manifest(tmp.path()).is_some());
+
+        let bloat = format!(
+            r#"{{"name":"big","version":"1.0.0","x":"{}"}}"#,
+            "a".repeat(2 * 1024 * 1024)
+        );
+        std::fs::write(&path, bloat).unwrap();
+        assert!(read_manifest(tmp.path()).is_none());
     }
 
     /// Serve ONE verbatim HTTP/1.1 response on an ephemeral port, then close. Raw bytes so
