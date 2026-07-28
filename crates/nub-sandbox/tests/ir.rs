@@ -385,7 +385,8 @@ fn apply_degradation_reflects_backend_capability() {
             assert!(
                 degradation.lost.contains(&"fs-root".to_string())
                     || degradation.lost.contains(&"fs-read-deny".to_string()),
-                "Windows must fail either the clean-root precondition or the nested read deny"
+                "Windows must fail the nested read deny (the clean-root precondition is now \
+                 built by apply, not demanded, so fs-root is no longer reachable here)"
             );
             return;
         }

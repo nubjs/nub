@@ -233,8 +233,9 @@ mod win {
 
     /// Give the fixture root a PROTECTED DACL: strip inherited ACEs and grant only the
     /// current user full control, so a not-granted file carries no AC-SID/AAP grant and the
-    /// LowBox access check denies it. The backend verifies this exact precondition before
-    /// every filesystem-confined launch. `icacls` is the reliable one-shot test setup.
+    /// LowBox access check denies it. This is the state the backend would otherwise build
+    /// for itself before a filesystem-confined launch; pre-securing keeps the fixture's ACL
+    /// under the fixture's control. `icacls` is the reliable one-shot test setup.
     fn secure_root(root: &Path) {
         let user = std::env::var("USERNAME").expect("USERNAME set on Windows");
         let status = std::process::Command::new("icacls")

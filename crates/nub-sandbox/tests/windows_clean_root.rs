@@ -368,6 +368,91 @@ mod win {
         }
     }
 
+    /// Does protecting a directory sever a LATER inheritable grant placed on its parent?
+    ///
+    /// This is the load-bearing question for the whole approach, because the build jail
+    /// grants the dependency-tree READ on `<project>/node_modules` — an ancestor — while
+    /// each lifecycle script's cwd is `node_modules/<pkg>`. If protecting `<pkg>` blocks
+    /// propagation from `node_modules`, then once package `a`'s script has run, EVERY later
+    /// package's script is granted `node_modules` but cannot read `node_modules/a`, in that
+    /// install and every install after it. `b` is the control: same parent, never protected,
+    /// so a "severed" verdict cannot be an artefact of the grant failing to apply at all.
+    ///
+    /// Reported, never asserted — the answer decides a design fork the maintainer owns, and
+    /// either outcome is information rather than a regression in this file.
+    fn inheritance_severing_case(fails: &mut u32) {
+        // Must be OUTSIDE the user profile: under `%USERPROFILE%` the root already qualifies
+        // and `apply` deliberately writes nothing, so `a` would never get protected.
+        let base = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
+        let nm = base.join(format!("nub-nm-{:x}", nonce()));
+        let (a, b) = (nm.join("a"), nm.join("b"));
+        for d in [&a, &b] {
+            if std::fs::create_dir_all(d).is_err() {
+                println!(
+                    "SKIP inheritance-severing: cannot create a fixture under {}",
+                    nm.display()
+                );
+                return;
+            }
+        }
+
+        let policy = read_confine(&[&a], &[&a]);
+        let spec = CommandSpec::new("cmd.exe")
+            .args(["/c", "exit", "0"])
+            .cwd(&a);
+        if let Err(d) = apply(&policy, spec) {
+            *fails += 1;
+            eprintln!(
+                "FAIL inheritance-severing setup: apply rejected {}: {d:?}",
+                a.display()
+            );
+            let _ = std::fs::remove_dir_all(&nm);
+            return;
+        }
+        let a_protected = dacl_facts(&a).map(|f| f.protected).unwrap_or(false);
+
+        // Now place an inheritable AAP grant on the PARENT, exactly as a later launch would
+        // place its inheritable read grant on `node_modules`. AAP is the trustee because the
+        // probe can already measure its effective rights on any path.
+        let ok = std::process::Command::new("icacls")
+            .arg(&nm)
+            .arg("/grant")
+            .arg("*S-1-15-2-1:(OI)(CI)RX")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            println!("SKIP inheritance-severing: icacls could not grant on the parent");
+            let _ = std::fs::remove_dir_all(&nm);
+            return;
+        }
+
+        let a_rights = dacl_facts(&a).map(|f| f.aap_rights).unwrap_or(0);
+        let b_rights = dacl_facts(&b).map(|f| f.aap_rights).unwrap_or(0);
+        println!(
+            "PROBE inheritance-severing a_protected={a_protected} \
+             a_inherits_parent_grant={} b_inherits_parent_grant={} (a=0x{a_rights:08x} b=0x{b_rights:08x})",
+            a_rights != 0,
+            b_rights != 0
+        );
+        match (a_rights != 0, b_rights != 0) {
+            (false, true) => println!(
+                "VERDICT inheritance-severing CONFIRMED: a protected working root does NOT \
+                 receive a later inheritable grant placed on its parent — a cross-run \
+                 ancestor grant cannot reach a previously-confined package dir"
+            ),
+            (true, true) => println!(
+                "VERDICT inheritance-severing REFUTED: the protected root still received the \
+                 parent's inheritable grant"
+            ),
+            (_, false) => println!(
+                "VERDICT inheritance-severing INCONCLUSIVE: the control did not inherit \
+                 either, so the parent grant never propagated at all"
+            ),
+        }
+        let _ = std::fs::remove_dir_all(&nm);
+    }
+
     pub fn run() -> Result<(), u32> {
         let mut fails = 0u32;
         println!(
@@ -423,6 +508,8 @@ mod win {
         // The system volume, which the earlier investigation also measured failing
         // (`C:\nubfx`) — so the fix is shown to be volume-independent, not a D:-only patch.
         case("system-volume-root-dir", PathBuf::from("C:\\"));
+
+        inheritance_severing_case(&mut fails);
 
         if fails == 0 { Ok(()) } else { Err(fails) }
     }

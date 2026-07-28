@@ -992,7 +992,8 @@ pub(super) mod launch {
         Ok(())
     }
 
-    /// The calling process's user SID, as owned bytes.
+    /// The calling process's user SID. Owned, because the token handle it is read through
+    /// is closed before the SID is used.
     fn current_user_sid() -> io::Result<Vec<u8>> {
         let mut token: HANDLE = std::ptr::null_mut();
         // SAFETY: query-only handle into our own process token.
@@ -1021,9 +1022,7 @@ pub(super) mod launch {
         if sid.is_null() {
             return Err(io::Error::other("token reported a null user SID"));
         }
-        let sid_len = unsafe { GetLengthSid(sid) } as usize;
-        // SAFETY: GetLengthSid reports the SID's exact byte length.
-        Ok(unsafe { std::slice::from_raw_parts(sid.cast::<u8>(), sid_len) }.to_vec())
+        copy_sid(sid)
     }
 
     /// Verify that `cwd` is rooted beneath a protected DACL and that neither it nor any
