@@ -22,9 +22,21 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Default)]
 struct Recorder {
     phases: Mutex<Vec<String>>,
+    /// What the opt-out gate was asked about. The identity has to survive the whole
+    /// `run_dep_hook` → `SandboxScope` → `confines` path or nub's per-package opt-out
+    /// silently degrades to "no package ever opts out".
+    gated: Mutex<Vec<Option<String>>>,
 }
 
 impl aube_util::LifecycleSandbox for Recorder {
+    fn confines(&self, package_name: Option<&str>, _project_root: &std::path::Path) -> bool {
+        self.gated
+            .lock()
+            .expect("recorder lock")
+            .push(package_name.map(str::to_string));
+        true
+    }
+
     fn run(
         &self,
         spawn: aube_util::LifecycleSandboxSpawn,
@@ -143,6 +155,7 @@ fn preinstall_install_and_postinstall_all_reach_the_build_jail() {
                 hook,
                 &[],
                 None,
+                Some("evil"),
             ))
             .unwrap_or_else(|e| match e {
                 // The fixture scripts are `exit 1`, so a non-zero exit means the real
@@ -155,6 +168,18 @@ fn preinstall_install_and_postinstall_all_reach_the_build_jail() {
             });
         assert!(ran, "`{phase}` is declared in the fixture but did not run");
     }
+
+    assert_eq!(
+        recorder.gated.lock().expect("recorder lock").clone(),
+        vec![
+            Some("evil".to_string()),
+            Some("evil".to_string()),
+            Some("evil".to_string())
+        ],
+        "the resolved package identity must reach the opt-out gate on every phase; \
+         `None` here means nub can no longer tell which package it is being asked about \
+         and every opt-out silently stops working"
+    );
 
     let seen = recorder.phases.lock().expect("recorder lock").clone();
     assert_eq!(

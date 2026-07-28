@@ -41,6 +41,32 @@ A policy file holds the axes object directly, or under a `sandbox` key. Unspecif
 Nub excludes the policy file itself from the filesystem grant. A confined process can never read or rewrite the policy that confines it.
 </Callout>
 
+## Dependency build scripts
+
+Every approved dependency build script runs under the `build-jail` preset, with no configuration. Writes reach the package's own directory, reads reach the dependency tree, and the network reaches only the hosts installers download binaries from.
+
+A package that cannot build under those limits is exempted from the project root's `package.json`, through the same neutral `dependenciesMeta` field yarn and pnpm already read:
+
+```json title="package.json"
+{
+  "dependenciesMeta": {
+    "some-native-addon": { "sandbox": false }
+  }
+}
+```
+
+Nub names the package on every install that runs it unconfined:
+
+```
+warning: some-native-addon build scripts are running without the build sandbox (dependenciesMeta.some-native-addon.sandbox is false in package.json)
+```
+
+Only an explicit `false` exempts a package — `true` and absence both confine. Nub reads the field from your project's own root manifest and nowhere else. A dependency that sets it in its own `package.json` is ignored, and so is a git dependency that sets it for the packages its nested install builds.
+
+<Callout type="warn">
+Exempting a package does not approve it. Build scripts still run only for packages you have approved, and this field decides only whether an approved script is confined.
+</Callout>
+
 ## Rule order
 
 A rule set is an array or an object, and either way the rules apply in order — the last matching rule wins. (JSON preserves key order, so an object's keys are ordered too.) A broad rule early in the set becomes a default that a later, narrower rule overrides. An empty set, or an omitted axis, allows nothing — but a set of *only* deny rules is rejected as a likely mistake: it also allows nothing, so write `[]` if that is the intent, or add the allow rule you meant.

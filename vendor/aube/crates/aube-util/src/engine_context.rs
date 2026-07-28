@@ -66,6 +66,20 @@ pub struct LifecycleSandboxSpawn {
 pub trait LifecycleSandbox: Send + Sync + std::fmt::Debug {
     /// Spawn `spawn` fully confined, wait for it, and return its exit status.
     fn run(&self, spawn: LifecycleSandboxSpawn) -> std::io::Result<std::process::ExitStatus>;
+
+    /// Whether this hook wants to confine `package_name`'s script at all. `false` routes
+    /// the spawn back through aube's ORDINARY unconfined path — the identical spawn +
+    /// descendant-reaping wait an uninterposed aube performs — rather than asking the
+    /// embedder to reimplement it.
+    ///
+    /// A `None` name means `project_root` is NOT the consumer's own project, so an
+    /// embedder keying policy off the root manifest must read it as "no policy" rather
+    /// than "no confinement". Defaults to `true`: an embedder that does not override this
+    /// confines everything exactly as before.
+    fn confines(&self, package_name: Option<&str>, project_root: &std::path::Path) -> bool {
+        let _ = (package_name, project_root);
+        true
+    }
 }
 
 /// Per-invocation values an embedder computes and hands to aube.
