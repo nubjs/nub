@@ -483,6 +483,14 @@ mod tests {
                 &crate::matcher::path::canonicalize_including_nonexistent(p).to_string_lossy(),
             ))
         };
+        // The jail's own HOME is materialized at compile time under the cache root this
+        // fixture does create, so it is part of the plan. Read it back rather than
+        // recomputing its hashed name.
+        let jail_home = std::fs::read_dir(home.join(".cache/nub/jail-home"))
+            .expect("the per-package jail home is materialized")
+            .map(|e| e.expect("entry").path())
+            .collect::<Vec<_>>();
+        assert_eq!(jail_home.len(), 1, "one home per package: {jail_home:?}");
         assert_eq!(
             plan.iter()
                 .map(|grant| (grant.path.clone(), grant.access))
@@ -492,10 +500,12 @@ mod tests {
                     as_compiled(&project.join("node_modules")),
                     MountAccess::ReadOnly,
                 ),
+                (as_compiled(&jail_home[0]), MountAccess::ReadWrite),
                 (as_compiled(&package_dir), MountAccess::ReadWrite),
             ],
             "dropping the absent cache dirs must leave the confinement intact — the \
-             dependency tree read-only and the package dir the only writable subtree"
+             dependency tree read-only, and the only writable subtrees the package dir \
+             plus the package's own private home"
         );
         // `as_compiled` shares the normalizer with the code under test, so on Windows the
         // comparison above would stay green if BOTH sides regressed together. Pin the
