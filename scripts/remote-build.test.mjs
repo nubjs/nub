@@ -10,7 +10,7 @@
 //      were real bugs during development.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseArgs, jobScript, instanceCreateArgs, filterSourceFiles, rsyncPushArgs, placementCandidates, isStray } from "./remote-build.ts";
+import { parseArgs, jobScript, instanceCreateArgs, filterSourceFiles, rsyncPushArgs, placementCandidates, isStray, remoteJobCommand } from "./remote-build.ts";
 
 // GCE returns ZONE_RESOURCE_POOL_EXHAUSTED for a specific shape in a specific zone, and it
 // took out the first image bake. A 10-way fanout requests ten instances at once, so a
@@ -114,6 +114,20 @@ test("every job sources cargo's env, since a non-interactive ssh shell never doe
   for (const job of ["build", "clippy", "test"]) {
     assert.match(jobScript(job, "fast"), /\. "\$HOME\/\.cargo\/env"/, `${job} would die with cargo: command not found`);
   }
+});
+
+// The worst bug found during development, because every observable signal said "fine":
+// `bash -s` reads the script from stdin as it executes, so a stdin-reading command inside it
+// (npm, cargo) swallows the rest of the un-executed script. bash then hits EOF and exits 0.
+// A real bake stopped after `cargo fetch`, skipped the whole warm compile, and still
+// published a golden image. The script must therefore never arrive via stdin.
+test("the remote job runs from a FILE, never from stdin", () => {
+  const cmd = remoteJobCommand("echo hi", Buffer.from("echo hi").toString("base64"));
+  assert.doesNotMatch(cmd, /bash\s+-s/, "bash -s reads the script from stdin and can be truncated by it");
+  assert.match(cmd, /base64 -d > "\$f"/, "script must be landed on disk");
+  assert.match(cmd, /bash "\$f"/, "and executed from that file");
+  assert.match(cmd, /exit \$rc/, "the job's real exit status must propagate, not rm's");
+  assert.match(cmd, /rm -f "\$f"/, "must not litter /tmp on the builder");
 });
 
 test("filterSourceFiles drops entries missing from the worktree and de-dupes the union", () => {

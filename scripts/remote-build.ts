@@ -420,11 +420,30 @@ cargo test`;
 ls -la target/aarch64-apple-darwin/${profile}/nub`;
 }
 
+// `bash -s` reads the script FROM STDIN, incrementally, as it executes. Any command inside
+// that also reads stdin (npm, cargo, anything that prompts) consumes the remainder of the
+// un-executed script; bash then hits EOF and exits 0 — a SILENTLY TRUNCATED job that reports
+// success. This is not hypothetical: a bake stopped dead right after `cargo fetch`, skipped
+// the entire warm compile, and still published a golden image. Nothing in the exit code, the
+// stderr, or the streamed output said so.
+//
+// So the script is shipped as a base64 ARGUMENT, landed on disk, and run from a FILE. stdin
+// is then never the script's source, and `ssh -n` additionally points the session's stdin at
+// /dev/null so a stdin-reading command gets EOF instead of eating the job.
+export function remoteJobCommand(script: string, b64: string) {
+  return (
+    `f=$(mktemp /tmp/remote-build-XXXXXX.sh); ` +
+    `printf %s '${b64}' | base64 -d > "$f" || exit 1; ` +
+    `bash "$f"; rc=$?; rm -f "$f"; exit $rc`
+  );
+}
+
 async function runJob(ip: string, script: string, onLine: (s: string) => void) {
+  const b64 = Buffer.from(script, "utf8").toString("base64");
   return await new Promise<void>((resolve, reject) => {
     const child = execFile(
       "ssh",
-      ["-i", SSH_KEY, ...SSH_OPTS, `${SSH_USER}@${ip}`, "bash -s"],
+      ["-n", "-i", SSH_KEY, ...SSH_OPTS, `${SSH_USER}@${ip}`, remoteJobCommand(script, b64)],
       { maxBuffer: 64 * 1024 * 1024 },
       (err, _stdout, stderr) => {
         if (err) reject(new Error(`remote job failed: ${stderr || err.message}`));
@@ -433,7 +452,6 @@ async function runJob(ip: string, script: string, onLine: (s: string) => void) {
     );
     child.stdout?.on("data", (d) => String(d).split("\n").forEach((l) => l && onLine(l)));
     child.stderr?.on("data", (d) => String(d).split("\n").forEach((l) => l && onLine(l)));
-    child.stdin?.end(script);
   });
 }
 
@@ -648,6 +666,10 @@ cargo zigbuild --target aarch64-apple-darwin -p nub-cli --profile fast
 cargo build -p nub-cli --profile fast || echo "WARM-WARN: linux warm-up failed; builders will cold-compile"
 (cd crates/nub-native && cargo build) || echo "WARM-WARN: addon warm-up failed"
 rm -rf ~/src
+# Fail the bake if the warm compile produced nothing. Without this a truncated or skipped
+# warm step publishes a cold image that looks identical to a warm one until every builder
+# is mysteriously slow.
+test -d "$CARGO_TARGET_DIR/aarch64-apple-darwin" || { echo "BAKE-FAIL: no darwin artifacts in $CARGO_TARGET_DIR" >&2; exit 4; }
 echo "warm target dir: $(du -sh "$CARGO_TARGET_DIR" | cut -f1)"
 `;
     await runJob(ip, warm, (l) => process.stdout.write(`  ${l}\n`));
