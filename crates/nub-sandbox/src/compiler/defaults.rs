@@ -460,6 +460,14 @@ const BUILD_JAIL_EXTRA_PREFIXES: &[&str] = &["npm_package_", "npm_lifecycle_"];
 /// the binary in the same change — see `build_jail_withholds_the_node_gyp_trampoline_exe`.
 const BUILD_JAIL_EXTRA_EXACT: &[&str] = &[
     "NODE",
+    // The jail STAMPS this (`build_jail.rs`), so it must survive the scrub. A dependency's
+    // lifecycle script runs on vanilla Node: nub's preload is a developer-facing
+    // augmentation a published postinstall never asked for, and loading nub's runtime —
+    // including the dlopen'd native addon — into untrusted code is surface the jail exists
+    // to remove. Bubblewrap already behaved this way by accident (its mount view hides
+    // nub's runtime dir, so preload discovery found nothing and degraded); Landlock leaves
+    // the dir VISIBLE-but-unreadable, so discovery succeeded and the read then hard-failed.
+    "NODE_COMPAT",
     "npm_node_execpath",
     "INIT_CWD",
     "http_proxy",
@@ -1057,6 +1065,10 @@ mod tests {
             ("HOME", "/home/u"),
             ("TMPDIR", "/tmp"),
             ("NODE", "/n/node"),
+            // The jail STAMPS this to keep a dependency's script on vanilla Node; the
+            // scrubber dropping it would silently restore augmentation, and with it the
+            // unreadable-preload abort under Landlock.
+            ("NODE_COMPAT", "1"),
             ("npm_node_execpath", "/n/node"),
             ("INIT_CWD", "/proj"),
             ("npm_package_name", "left-pad"),
@@ -1093,6 +1105,7 @@ mod tests {
             "HOME",
             "TMPDIR",
             "NODE",
+            "NODE_COMPAT",
             "npm_node_execpath",
             "INIT_CWD",
             "npm_package_name",

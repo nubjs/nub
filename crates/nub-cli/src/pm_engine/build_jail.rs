@@ -60,6 +60,20 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // ambient-env capture; a build script never needs a non-UTF-8 var.
         let mut ambient = reconstruct_child_env(&spawn.env_delta);
 
+        // A dependency's lifecycle script runs on VANILLA Node — nub's augmentation is a
+        // developer-facing feature for the user's own code, and a published postinstall
+        // neither asked for it nor can rely on it. Unconditional, not set-if-absent: this
+        // is the jail's contract, not a default an ambient value may relax.
+        //
+        // It is also what makes the mechanisms agree. Under bubblewrap the preload was
+        // never loaded — nub's runtime dir is outside the child's mount view, so discovery
+        // found nothing and silently ran unaugmented. Landlock has no mount namespace, so
+        // that same dir is VISIBLE but ungranted (Landlock denies with EACCES, never
+        // ENOENT): discovery SUCCEEDED, nub injected `--import …/preload.mjs`, and Node
+        // died on the unreadable file. Stating the intent here fixes it at the source
+        // instead of widening the allowlist to grant nub's own runtime into untrusted code.
+        ambient.insert("NODE_COMPAT".to_string(), "1".to_string());
+
         // The interpreter closure to grant READ. nub provisions its own Node under its
         // store (not `/usr`), so the tight-read base can't reach it. Under nub a bare
         // `node` resolves via the PATH-prepended shim (`NODE`) which re-execs the real
