@@ -946,7 +946,16 @@ mod tests {
             r#"{"name":"node-gyp-build-optional-packages","version":"5.2.0","bin":{"node-gyp-build-optional-packages":"bin/build.js"}}"#,
         )
         .unwrap();
-        std::fs::write(child_dir.join("bin/build.js"), "#!/usr/bin/env node\n").unwrap();
+        // Runnable, and runnable BY NODE specifically: `detect_interpreter`
+        // reads this shebang into the shim, and node is the only interpreter
+        // that collapses the target's `..` segments lexically rather than
+        // walking them through the store symlink. A shim that can be executed
+        // is what lets the store-key test assert on a real invocation.
+        std::fs::write(
+            child_dir.join("bin/build.js"),
+            "#!/usr/bin/env node\nconsole.log('ngb-ok')\n",
+        )
+        .unwrap();
 
         let mut parent = locked("lmdb", "3.0.0", BTreeMap::new());
         parent.dependencies.insert(
@@ -995,13 +1004,25 @@ mod tests {
     /// node-pre-gyp — the whole native-addon family) dies with
     /// `Cannot find module`.
     ///
-    /// The assertion is deliberately on RESOLUTION FROM THE PROJECT SIDE
-    /// rather than on the target's spelling — that is the coordinate system
-    /// the shim is actually read in, and pinning the consumer's geometry is
-    /// what makes this fail for any future scheme that reintroduces a
-    /// cross-namespace path. (Asserting resolution from the shim's PHYSICAL
-    /// store directory instead is the inverted premise that let the
-    /// store-spelled target ship green.)
+    /// The test RUNS the shim through the project-side path rather than
+    /// inspecting the target's spelling, so it pins the whole agreement — the
+    /// emitted target, the `$basedir` the shim derives, and node's lexical
+    /// collapse of the two — instead of one side of it. That makes it fail in
+    /// BOTH directions: for a target respelled into store coordinates (the
+    /// regression), and for any future `$basedir` that is resolved physically
+    /// (`cd -P`), which would leave the project-spelled target naming a
+    /// directory under the store root. Asserting resolution from the shim's
+    /// PHYSICAL store directory instead is the inverted premise that let the
+    /// store-spelled target ship green — and a store-side invocation is not a
+    /// geometry production has: every shim the jailed lifecycle runner invokes
+    /// carries a project-side `$0`, even though the jail canonicalizes the
+    /// child's CWD into the store.
+    ///
+    /// Node is load-bearing as the interpreter, not incidental. It collapses
+    /// the target's `..` with `path.resolve` BEFORE opening it, which keeps the
+    /// walk in project coordinates; a non-node interpreter is handed the
+    /// `..`-bearing path and the kernel walks it through the `.aube` symlink
+    /// into the store, where the un-hashed name does not exist.
     #[test]
     #[cfg(unix)]
     fn dep_bin_shims_resolve_when_the_entry_is_a_symlink_into_a_hashed_store() {
@@ -1044,30 +1065,38 @@ mod tests {
         )
         .unwrap();
 
-        // Read the shim through the PROJECT-side path the lifecycle runner
-        // puts on PATH — the same bytes as the store-side file, but the
-        // coordinate system `$basedir` is actually expanded in.
+        // RUN the shim through the PROJECT-side path the lifecycle runner puts
+        // on PATH. Executing rather than stat-ing the resolved target is what
+        // makes this non-tautological: `$basedir` is `dirname "$0"`, so only a
+        // real invocation expands it in the coordinate system a consumer uses.
         let shim = aube_dir
             .join("lmdb@3.0.0")
             .join("node_modules/.bin/node-gyp-build-optional-packages");
         let body = std::fs::read_to_string(&shim)
             .unwrap_or_else(|e| panic!("no shim at {}: {e}", shim.display()));
+        // The two namespaces have to genuinely diverge or the run below proves
+        // nothing: the shim FILE is physically in the hashed store, reachable
+        // from the path invoked above only through the `.aube` symlink.
+        let physical = std::fs::canonicalize(shim.parent().unwrap()).unwrap();
+        assert!(
+            physical.starts_with(std::fs::canonicalize(&store).unwrap()),
+            "fixture must leave the shim physically in the hashed store, else \
+             the invocation below cannot tell the two namespaces apart; got {}",
+            physical.display()
+        );
+        let out = std::process::Command::new(&shim)
+            .output()
+            .unwrap_or_else(|e| panic!("could not spawn {}: {e}", shim.display()));
+        assert!(
+            out.status.success() && String::from_utf8_lossy(&out.stdout).contains("ngb-ok"),
+            "shim must run when invoked through the project-side `.bin` the \
+             lifecycle runner puts on PATH; status {:?}\nstdout: {}\nstderr: {}\nshim:\n{body}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
         let target =
             aube_linker::parse_posix_shim_target(&body).expect("shim must carry its target marker");
-        // `normalize_path` is the resolver production uses on shim-embedded
-        // targets: it collapses `..` LEXICALLY, matching Node's `path.resolve`.
-        // Letting the OS walk `.bin/../../..` instead would resolve the
-        // `.aube/<dep_path>` symlink first and land in the store — the very
-        // geometry no consumer sees, and the premise that shipped this bug.
-        let basedir = shim.parent().unwrap();
-        let resolved = aube_linker::normalize_path(&basedir.join(target));
-        assert!(
-            resolved.exists(),
-            "shim target must resolve from the project-side `.bin` the \
-             lifecycle runner puts on PATH; {} + {target} = {} does not exist",
-            basedir.display(),
-            resolved.display()
-        );
 
         // Every path a store-resident shim embeds is read by all sharers, so
         // none may be absolute. Pin the emitted values rather than merely
