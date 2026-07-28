@@ -178,8 +178,6 @@ pub(crate) struct LinuxPreflight {
 
 struct LandlockPreflight {
     abi: u32,
-    /// Recorded when the policy asked for a per-host net tier the mechanism cannot carry.
-    net_tightened: bool,
 }
 
 struct ConfinedPreflight {
@@ -212,24 +210,30 @@ pub(crate) fn preflight(
             landlock: None,
         });
     }
-    // THE mechanism decision. Landlock is primary because it is the only one of the two
-    // that works unprivileged with no user namespace — the case bubblewrap fails closed on
-    // (Ubuntu's `apparmor_restrict_unprivileged_userns=1`, and every container). Taken
-    // BEFORE the runtime image and bubblewrap admission below, both of which are
-    // bubblewrap-only costs.
+    // THE BUILD JAIL'S ONLY MECHANISM. There is no bubblewrap arm below this for a build-jail
+    // policy — bubblewrap needs a user namespace, which is not universally available
+    // unprivileged, and universal unprivileged operation is what defines this product.
+    // Landlock or nothing, decided here and nowhere else.
     match super::linux_landlock::landlock_availability(policy) {
         Ok(abi) => {
             return Ok(LinuxPreflight {
                 confined: None,
-                landlock: Some(LandlockPreflight {
-                    abi,
-                    net_tightened: policy.net.enforce
-                        && policy.net.mode != crate::policy::ProxyMode::Disabled,
-                }),
+                landlock: Some(LandlockPreflight { abi }),
             });
         }
+        // FAIL CLOSED. A dependency's install script is the code the jail exists to contain,
+        // so an unconfinable host must refuse it rather than run it unconfined. The one
+        // escape is the internal differential pin, which deliberately routes to bubblewrap.
+        Err(super::linux_landlock::LandlockUnavailable::PinnedToBubblewrap) => {}
+        Err(super::linux_landlock::LandlockUnavailable::NotABuildJail) => {}
         Err(reason) => {
-            tracing::debug!(?reason, "landlock unavailable; falling back to bubblewrap");
+            return Err(Degradation {
+                lost: vec!["fs".to_string(), "net".to_string()],
+                reason: Some(format!(
+                    "the dependency build jail requires Landlock (Linux 5.13+), which this \
+                     kernel does not provide: {reason:?}"
+                )),
+            });
         }
     }
     let runtime = runtime.ok_or_else(|| Degradation {
@@ -531,7 +535,12 @@ pub fn apply(
 
     Ok(Prepared {
         command,
-        degradation,
+        // Fully enforced. The build jail's network axis is BINARY — on or off — so coarse
+        // deny is the model, not a reduction of one. A per-host tier was never a capability
+        // of this product (it needs a namespace to confine egress to the proxy, which this
+        // mechanism does not have by design); a package that would have needed a specific
+        // host is served by prefetch instead, before the jail starts.
+        degradation: Degradation::full(),
         proxy: None,
         net_bridge: None,
         _inherited_files: setup_files,
@@ -2963,15 +2972,13 @@ unsafe fn cloexec_open_fds_from_proc() -> std::io::Result<()> {
 
 /// Launch under Landlock + seccomp — no namespace, no helper process, no bubblewrap.
 ///
-/// NETWORK IS COARSE DENY-ALL HERE, and that is a deliberate capability reduction rather
-/// than an oversight. The per-host tier works under bubblewrap because `--unshare-net` puts
-/// the child in an EMPTY network namespace whose only route out is the trusted in-netns
-/// bridge to nub's egress proxy; the seccomp filter can then safely re-permit AF_INET so the
-/// child can reach that bridge. Landlock has no namespace, so re-permitting AF_INET would
-/// let the child dial any host directly and simply ignore the proxy — the allowlist would
-/// become decorative. Denying every socket family is the only honest ceiling without a
-/// netns, so a policy that asked for `$downloads` is TIGHTENED to deny-all and the loss is
-/// reported. Stricter than requested is safe; the reverse would not be.
+/// NETWORK IS BINARY — on or off — and coarse deny is the build jail's accepted model, not a
+/// shortfall against some richer tier. Confining egress to a per-host allowlist requires an
+/// empty network namespace whose only route out is a trusted bridge to nub's proxy; that
+/// needs a user namespace, which is exactly what this product cannot require. Re-permitting
+/// `AF_INET` without one would let a script dial any host directly and ignore the proxy,
+/// making the allowlist decorative. So every socket family is denied, and a package that
+/// genuinely needs a remote artifact is served by prefetch before the jail starts.
 fn apply_landlock(
     policy: &SandboxPolicy,
     spec: CommandSpec,
@@ -3018,18 +3025,6 @@ fn apply_landlock(
         reason: Some(reason),
     })?;
 
-    let degradation = if plan.net_tightened {
-        Degradation {
-            lost: vec!["net-per-host".to_string()],
-            reason: Some(
-                "landlock has no network namespace, so per-host egress cannot be confined to \
-                 the proxy; network is denied entirely instead"
-                    .to_string(),
-            ),
-        }
-    } else {
-        Degradation::full()
-    };
     tracing::debug!(
         abi = plan.abi,
         rules = ruleset.rules_added,
