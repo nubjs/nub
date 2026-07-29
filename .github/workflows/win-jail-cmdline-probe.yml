@@ -29,7 +29,7 @@ name: win-jail-cmdline-probe
 
 on:
   push:
-    branches: [sandbox/win-verbatim-cmdline]
+    branches: [sandbox/win-verbatim-cmdline, sandbox/win-interp-exec]
   workflow_dispatch:
 
 jobs:
@@ -163,19 +163,31 @@ jobs:
               need poisoned.log "prop:$v/script-ran=FAIL" "poisoned/windows"
               need poisoned.log "prop:$v/mangled-signature=PASS" "poisoned/windows"
             done
-            # `script-ran` in the FIXED arm is NOT gated on Windows, and that is a
-            # deliberate, documented exclusion rather than a lowered bar. Run 30440103670
-            # showed the confined shell reaching `node` and nub then failing with
-            # `failed to detect Node version: C:\hostedtoolcache\...\node.exe: Access is
-            # denied (os error 5)` — the AppContainer withholds execute on the toolcache
-            # interpreter. That is a SEPARATE defect this branch uncovered by clearing the
-            # command line in front of it, and gating on it here would only re-measure it.
-            # It is printed below so it stays visible instead of being designed around.
-            echo "---- diagnostic: the confined script's own body, not gated on Windows ----"
-            grep -hE "prop:jailed-[a-z]+/(shell-echoed|script-ran|confinement-as-configured|cwd-is-package-dir)=" fixed.log \
-              || echo "(no lines)"
-            grep -hF "failed to detect Node version" fixed.log | head -2 \
-              || echo "(the downstream Node-execute defect did not reproduce)"
+            # THE SCRIPT'S OWN BODY IS NOW GATED ON WINDOWS TOO. It was excluded while a
+            # further defect sat behind the command line: the confined shell reached `node`
+            # and nub died with `failed to detect Node version: …\node.exe: Access is denied
+            # (os error 5)`. That was never an execute denial on the interpreter — a LowBox
+            # token is refused the `NUL` device, and `Command::output()` redirects stdin to
+            # it, so nub's version detection failed before the interpreter was opened
+            # (`nub-sandbox/tests/windows_interpreter_exec.rs` measures each object). With
+            # detection off `NUL`, the script body runs, so its marker is a gate rather than
+            # a diagnostic — and `cwd-is-package-dir` becomes the first behavioural
+            # confirmation on Windows of the sibling `strip_verbatim_prefix` fix, which until
+            # now had only symptom-level evidence.
+            for v in jailed-quoted jailed-plain; do
+              need fixed.log "prop:$v/shell-echoed=PASS" "fixed/windows"
+              need fixed.log "prop:$v/script-ran=PASS" "fixed/windows"
+              need fixed.log "prop:$v/tag-round-trip=PASS" "fixed/windows"
+              need fixed.log "prop:$v/confinement-as-configured=PASS" "fixed/windows"
+              need fixed.log "prop:$v/cwd-is-package-dir=PASS" "fixed/windows"
+            done
+            echo "---- the defect this replaced must not reappear ----"
+            if grep -hF "failed to detect Node version" fixed.log; then
+              echo "REGRESSED: Node-version detection is refused inside the jail again"
+              fail=1
+            else
+              echo "OK   no Node-version detection failure in the fixed arm"
+            fi
           else
             # POSIX behavior must be preserved exactly: there is no cmd.exe and the tail was
             # always ordinary argv, so reverting the fix must change nothing. The confined

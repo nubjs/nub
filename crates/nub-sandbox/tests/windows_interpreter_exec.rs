@@ -1,31 +1,38 @@
-//! Windows: can an AppContainer child EXECUTE the granted interpreter?
+//! Windows: what does an AppContainer child actually refuse?
 //!
-//! THE DEFECT THIS ISOLATES. With the verbatim command line landed, a confined `cmd.exe`
-//! reaches `node` and nub's shim then dies spawning the real binary:
+//! THE DEFECT THIS RESOLVED. With the verbatim command line landed, a confined `cmd.exe`
+//! reached `node` and nub's shim then died spawning the real binary:
 //!
 //! ```text
 //! failed to detect Node version:
 //!   "C:\hostedtoolcache\windows\node\22.23.1\x64\node.exe": Access is denied. (os error 5)
 //! ```
 //!
-//! Access-denied on a CreateProcess of a path the build jail believes it granted. Two
-//! candidate causes, and they need different fixes: the ACE never reached that file (a
-//! derivation or application problem), or it reached it and an AppContainer still cannot
-//! execute the image from there (a mechanism problem, e.g. the `C:\`-rooted ancestor chain
-//! granting `ALL APPLICATION PACKAGES` nothing). Every arm below changes exactly one of
-//! those variables, so the pair of verdicts names the cause instead of ranking guesses.
+//! It reads as an execute denial on the interpreter, and it is not. `ERROR_ACCESS_DENIED`
+//! surfaces at the `Command` API for every object a spawn touches, and a captured-output
+//! spawn touches several before `CreateProcessW` runs at all. So each object is measured
+//! here on its own rather than inferred from a spawn that used all of them at once:
 //!
-//! `in-place` is the real PATH interpreter on the runner, at its own location. `copied` is a
-//! byte copy of the same image inside the fixture's protected root. They differ only in WHERE
-//! the file lives, so a pass on one and a fail on the other is a location verdict; both
-//! failing is a mechanism verdict; both passing means the production grant set is what is
-//! wrong and the ACL dump says how.
+//! | measured | verdict |
+//! | --- | --- |
+//! | read the `ALL APPLICATION PACKAGES`-granted System32 image | permitted |
+//! | read the interpreter nub granted by ACE | permitted |
+//! | `CreateProcessW`, zeroed STARTUPINFOW, no inherited handles | permitted |
+//! | `Command::status()` with stdio inherited | permitted |
+//! | `CreatePipe`, and a spawn capturing stdout through one | permitted |
+//! | open the `NUL` device, for read or for write | **REFUSED** |
+//! | `CreateNamedPipeW` under `\\.\pipe\` | **REFUSED** |
+//!
+//! `Command::output()` redirects stdin to `Stdio::null()`, which opens `NUL` — so nub's own
+//! Node-version detection failed before the interpreter was ever opened, and reported it
+//! against the interpreter's path. The grant was correct the whole time, which
+//! `production_grant_shape` prints from the real `compile_build_jail` policy.
 //!
 //! Every property is read off a marker file the CHILD wrote, never off a status the harness
 //! reported about itself, and every path the child touches is baked in as an absolute
 //! literal argument. `interpreter-ungranted-refused` is the both-directions control: the
-//! identical fixture with the interpreter grant removed must be REFUSED, so the probe cannot
-//! go green by being permissive.
+//! same fixture and the same inherited-stdio spawn, with the interpreter grant removed, must
+//! be REFUSED — so the probe cannot go green by being permissive.
 //!
 //! CI IS THE ONLY VENUE. AppContainer cannot be launched over SSH (session 0 has no window
 //! station; every launch returns 0xC0000142). Runs branch-scoped via
@@ -631,9 +638,9 @@ mod win {
         let (code, text) = run_child(&f, &policy, "opennul", &m, &[]);
         report(
             fails,
-            "opens-the-nul-device",
-            code == 0,
-            &format!("exit={code} marker={text}"),
+            "opens-the-nul-device-refused",
+            code == 5,
+            &format!("exit={code} marker={text} (5 ⇒ a LowBox child cannot open NUL)"),
         );
 
         println!("  arm creates-an-anonymous-pipe:");
@@ -765,12 +772,12 @@ mod win {
         );
     }
 
-    /// THE WORKING-DIRECTORY VARIABLE, isolated. `CreateProcessW` duplicates a handle to the
-    /// CALLER's current directory into the child, so a confined process standing in a
-    /// directory it was not granted cannot spawn ANYTHING — and the error is
-    /// `ERROR_ACCESS_DENIED` on the spawn, which at the `Command` API is indistinguishable
-    /// from the image being refused. Same fixture, same policy, same image, one variable:
-    /// the directory the caller stands in.
+    /// THE WORKING-DIRECTORY VARIABLE, isolated — and it turns out NOT to matter. The
+    /// caller's own directory was a live suspect while every spawn was failing, because
+    /// `CreateProcessW` hands the child a handle to it. Measured both ways with stdio
+    /// inherited, a confined process spawns fine from a directory the policy never granted,
+    /// so the cwd is not access-checked on the spawn path. Kept because "not a variable" is
+    /// worth pinning: it was assumed twice.
     fn spawn_cwd_differential(fails: &mut u32) {
         let f = Fixture::new("cwd");
         let policy = jail_shaped(&f, Vec::new());
@@ -793,15 +800,15 @@ mod win {
             &format!("exit={code} marker={text}"),
         );
 
-        println!("  arm spawn-from-ungranted-cwd-refused:");
+        println!("  arm spawn-from-ungranted-cwd:");
         let ungranted = f.work.join("cwd-ungranted.txt");
         let (code, text) =
             run_child_in(&f, &policy, &f.root.clone(), "execinherit", &ungranted, &argv);
         report(
             fails,
-            "spawn-from-ungranted-cwd-refused",
-            code == 5,
-            &format!("exit={code} (want 5) marker={text}"),
+            "spawn-from-ungranted-cwd",
+            code == 0,
+            &format!("exit={code} marker={text} (the cwd is not checked on the spawn path)"),
         );
     }
 

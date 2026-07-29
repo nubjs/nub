@@ -900,6 +900,26 @@ fn which_node_in(
     Err(DiscoveryError::NoNodeOnPath)
 }
 
+/// [`Command::output`] with a CLOSED PIPE for stdin in place of the `NUL` device.
+///
+/// `output()` redirects stdin to `Stdio::null()`, which on Windows opens `NUL`. A LowBox
+/// (AppContainer) token is refused that device outright — measured on windows-latest, both
+/// read and write, while ordinary pipes and `CreateProcessW` itself are permitted
+/// (`nub-sandbox/tests/windows_interpreter_exec.rs`). So every captured-output spawn nub
+/// made from inside its OWN build sandbox failed with `Access is denied` before the child
+/// existed, and reported it against the interpreter's path as though the image had been
+/// refused. A pipe dropped before the wait presents the child the same immediate EOF.
+fn output_with_closed_stdin(cmd: &mut Command) -> std::io::Result<std::process::Output> {
+    use std::process::Stdio;
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    drop(child.stdin.take());
+    child.wait_with_output()
+}
+
 /// Run `node --version` and parse the output, with a disk cache
 /// keyed on the binary's path + mtime to avoid spawning on repeat calls.
 fn detect_version(node_path: &Path) -> Result<NodeVersion, DiscoveryError> {
@@ -907,9 +927,7 @@ fn detect_version(node_path: &Path) -> Result<NodeVersion, DiscoveryError> {
         return Ok(cached);
     }
 
-    let output = Command::new(node_path)
-        .arg("--version")
-        .output()
+    let output = output_with_closed_stdin(Command::new(node_path).arg("--version"))
         .map_err(|e| DiscoveryError::VersionDetection(format!("{node_path:?}: {e}")))?;
 
     if !output.status.success() {
@@ -1178,12 +1196,13 @@ pub fn accepted_env_flags(node_path: &Path) -> Option<std::collections::BTreeSet
     // of the binary, independent of NODE_OPTIONS — so removing it makes the probe
     // deterministic and side-effect-free. (Pollution could only ADD tokens, never
     // drop a real flag, so this is defense-in-depth, not a correctness fix.)
-    let output = Command::new(node_path)
-        .arg("-e")
-        .arg("process.stdout.write([...process.allowedNodeEnvironmentFlags].join(\"\\n\"))")
-        .env_remove("NODE_OPTIONS")
-        .output()
-        .ok()?;
+    let output = output_with_closed_stdin(
+        Command::new(node_path)
+            .arg("-e")
+            .arg("process.stdout.write([...process.allowedNodeEnvironmentFlags].join(\"\\n\"))")
+            .env_remove("NODE_OPTIONS"),
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
