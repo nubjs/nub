@@ -125,56 +125,39 @@ the end-to-end verdicts.
 
 ## What clearing this blocker exposed
 
-Run `30440103670` is the measurement that settled it, and the two arms differ exactly where
-they should:
+Run `30442989023` on `windows-latest` is the measurement, and the two arms differ exactly
+where they should — for both jailed fixtures, quoted and unquoted alike:
 
-| Fixture | Poisoned | Fixed |
+| Property | Poisoned | Fixed |
 | --- | --- | --- |
-| `jailed-quoted` | `The system cannot find the path specified.` — cmd.exe could not parse the line | the line ran; `node` was reached |
-| `jailed-plain` | `'\" node …\""' is not recognized as an internal or external command` | the line ran; `node` was reached |
-| `unjailed-quoted` | full pass | full pass |
+| `shell-ran-the-line` | FAIL | **PASS** |
+| `shell-echoed` | FAIL | **PASS** |
+| `mangled-signature` | PASS | FAIL (absent) |
+| `script-ran` | FAIL | FAIL — see below |
 
-So the command line is fixed. What the fixed arm hits **next** is a different defect, one
-this branch uncovered by clearing the thing in front of it:
+The poisoned arm carries the original defect byte for byte:
+
+```
+'\""' is not recognized as an internal or external command,
+```
+
+The fixed arm carries no such message, and the confined `cmd.exe` gets far enough to
+invoke `node`. What it hits **next** is a different defect, one this branch uncovered by
+clearing the thing in front of it:
 
 ```
 Error: failed to detect Node version:
   "C:\hostedtoolcache\windows\node\22.23.1\x64\node.exe": Access is denied. (os error 5)
 ```
 
-The confined shell reached `node`, and nub's own version detection was then refused execute
-on the toolchain interpreter under the AppContainer. That is why `script-ran` is **not**
-gated in the Windows fixed arm — gating on it would re-measure someone else's bug — and why
-the gated property is the shell's rather than the script's. Both are printed as diagnostics
-so neither is designed around.
+nub's own version detection is refused execute on the toolchain interpreter under the
+AppContainer, so the script's body never runs. That is why `script-ran` is **not** gated in
+the Windows fixed arm — gating on it would re-measure someone else's bug — and why the
+gated property is the shell's rather than the script's. Both are printed as diagnostics so
+neither is designed around.
 
-The same run makes the sibling `strip_verbatim_prefix` fix verifiable at last: with the
-command line clear, cmd.exe accepts the working directory it is handed and no
-`UNC paths are not supported` message appears in either arm. `cwd-is-package-dir` records
-it on POSIX today and will on Windows once the interpreter defect above clears.
-
-## Regenerating `poison.patch`
-
-The patch is generated from the committed tree, never hand-written. It reverts **one**
-function so that the verbatim plumbing stays compiled in both arms and the only variable is
-whether aube reports the encoded line at all:
-
-```
-# with the fix committed and the tree clean
-<edit verbatim_tail's #[cfg(windows)] body to return None>
-git diff -- vendor/aube/crates/aube-scripts/src/lib.rs > tests/win-jail-cmdline/poison.patch
-git checkout -- vendor/aube/crates/aube-scripts/src/lib.rs
-```
-
-Reverting there rather than in nub reproduces the pre-fix behaviour exactly, through the
-real code path: `lifecycle_sandbox_spawn` falls back to `Command::get_args`, which yields
-the three `raw_arg` pieces with their rawness erased — which is the erasure the whole defect
-came from.
-
-## A separate, still-open Windows defect this probe works around
-
-`nub install` exits `0xC00000FD` (`STATUS_STACK_OVERFLOW`, `thread 'main' has overflowed
-its stack`) on Windows under the unoptimized `fast` profile — a debug-build artifact of
-Windows's 1MB main-thread stack against Linux's 8MB. The workflow links the probe binary
-with `-C link-arg=/STACK:8388608`, as the sibling lane did. That is a harness
-accommodation, not a product change; the product defect is open and unowned.
+The same run says something about the sibling `strip_verbatim_prefix` fix: cmd.exe's
+`UNC paths are not supported` refusal appears in **neither** arm, so it is accepting the
+working directory it is handed. That is symptom-level confirmation, not the full property —
+`cwd-is-package-dir` is read from inside the script's body, which the interpreter defect
+above still blocks on Windows.
