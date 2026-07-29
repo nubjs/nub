@@ -172,3 +172,101 @@ fn diff_graphs(
         .collect();
     (removed, added)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aube_lockfile::{LockedPackage, LockfileGraph};
+
+    fn pkg(dep_path: &str, name: &str, version: &str, alias_of: Option<&str>) -> LockedPackage {
+        LockedPackage {
+            name: name.to_string(),
+            version: version.to_string(),
+            dep_path: dep_path.to_string(),
+            alias_of: alias_of.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    fn graph(pkgs: Vec<LockedPackage>) -> LockfileGraph {
+        let mut g = LockfileGraph::default();
+        for p in pkgs {
+            g.packages.insert(p.dep_path.clone(), p);
+        }
+        g
+    }
+
+    /// The #578 contract, at the layer that turns the graph shape into the
+    /// user-visible symptom. The pnpm reader used to leave the canonical
+    /// `is-number@7.0.0` alongside the alias clone while a fresh resolve
+    /// emitted only the clone, so this diff reported a removal on every
+    /// run and `dedupe --check` failed forever on a byte-identical
+    /// lockfile. The reader now sweeps the orphan; both sides agree.
+    #[test]
+    fn npm_alias_parses_and_resolves_to_the_same_key_set() {
+        let parsed = graph(vec![pkg(
+            "number-alias@7.0.0",
+            "number-alias",
+            "7.0.0",
+            Some("is-number"),
+        )]);
+        let fresh = graph(vec![pkg(
+            "number-alias@7.0.0",
+            "number-alias",
+            "7.0.0",
+            Some("is-number"),
+        )]);
+        assert_eq!(
+            diff_graphs(Some(&parsed), &fresh),
+            (Vec::new(), Vec::new()),
+            "an aliased dep must not read as a change on a re-resolve"
+        );
+    }
+
+    /// The shape the reader must never hand back: a lingering canonical
+    /// entry the fresh resolve has no counterpart for is exactly what
+    /// reopens #578, so pin that this diff would in fact report it.
+    #[test]
+    fn a_lingering_alias_target_would_report_a_phantom_removal() {
+        let parsed = graph(vec![
+            pkg("is-number@7.0.0", "is-number", "7.0.0", None),
+            pkg(
+                "number-alias@7.0.0",
+                "number-alias",
+                "7.0.0",
+                Some("is-number"),
+            ),
+        ]);
+        let fresh = graph(vec![pkg(
+            "number-alias@7.0.0",
+            "number-alias",
+            "7.0.0",
+            Some("is-number"),
+        )]);
+        let (removed, added) = diff_graphs(Some(&parsed), &fresh);
+        assert_eq!(removed, vec!["is-number@7.0.0".to_string()]);
+        assert!(added.is_empty());
+    }
+
+    /// An alias target a second consumer also depends on is present in
+    /// BOTH graphs, so it stays out of the diff — the case that makes the
+    /// reader's sweep conditional rather than unconditional.
+    #[test]
+    fn a_shared_alias_target_is_not_a_change() {
+        let shared = || {
+            vec![
+                pkg("string-width@4.2.3", "string-width", "4.2.3", None),
+                pkg(
+                    "string-width-cjs@4.2.3",
+                    "string-width-cjs",
+                    "4.2.3",
+                    Some("string-width"),
+                ),
+            ]
+        };
+        assert_eq!(
+            diff_graphs(Some(&graph(shared())), &graph(shared())),
+            (Vec::new(), Vec::new())
+        );
+    }
+}

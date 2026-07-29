@@ -138,12 +138,19 @@ fn run_project(cwd: &Path, all: bool, packages: Vec<String>) -> miette::Result<V
     for entry in &entries {
         println!("  {}", entry.display_spec());
     }
-    Ok(dedupe(
+    Ok(rebuild_handoff_names(&entries))
+}
+
+/// The names to hand `rebuild` for a set of approved entries: the GRAPH
+/// spelling, which is the alias for an `npm:`-aliased dep and so differs
+/// from the real name the entry was reported and approved under.
+fn rebuild_handoff_names(entries: &[&super::ignored_builds::IgnoredEntry]) -> Vec<String> {
+    dedupe(
         entries
             .iter()
             .flat_map(|e| e.graph_names.iter().cloned())
             .collect(),
-    ))
+    )
 }
 
 /// The `IgnoredEntry`s whose bare `name` the caller selected, preserving
@@ -484,17 +491,15 @@ mod tests {
             suspicions: Vec::new(),
             graph_names: vec!["eb".to_string(), "eb2".to_string()],
         };
-        let entries = vec![&entry];
-        let handoff = super::dedupe(
-            entries
-                .iter()
-                .flat_map(|e| e.graph_names.iter().cloned())
-                .collect(),
+        // Both aliases must be handed over: one approved build can back
+        // several graph nodes, and `rebuild` names each one separately.
+        assert_eq!(
+            super::rebuild_handoff_names(&[&entry]),
+            vec!["eb".to_string(), "eb2".to_string()],
         );
-        assert_eq!(handoff, vec!["eb".to_string(), "eb2".to_string()]);
         assert!(
-            !handoff.contains(&"esbuild".to_string()),
-            "the registry name is not a graph node and would not match"
+            !super::rebuild_handoff_names(&[&entry]).contains(&entry.name),
+            "the approved registry name is not a graph node and would not match"
         );
     }
 
