@@ -206,6 +206,21 @@ impl CommandArgs {
         }
     }
 
+    /// The argv elements, or `None` for a verbatim line.
+    ///
+    /// For a launcher that `execve`s the target directly — the Linux PID-1 monitor,
+    /// which serializes argv across its handshake — rather than building a command line.
+    /// A verbatim tail has no representation there at all, so the caller must FAIL on
+    /// `None` rather than substitute an empty argv, which would silently launch the
+    /// shell with no script.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn argv(&self) -> Option<&[std::ffi::OsString]> {
+        match self {
+            Self::Argv(v) => Some(v),
+            Self::Verbatim(_) => None,
+        }
+    }
+
     /// Apply to a plain `std::process::Command` (the paths that spawn without a custom
     /// `CreateProcessW`).
     pub(crate) fn apply_to(&self, command: &mut Command) {
