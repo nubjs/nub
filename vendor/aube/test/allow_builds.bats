@@ -100,46 +100,61 @@ JSON
 	assert_file_not_exists aube-builds-marker.txt
 }
 
-@test "aube add DOES rerun unchanged dep build scripts under node-linker=hoisted" {
-	# The inverse of the test above, and deliberately so. Skipping the rerun is
-	# correct only for a layout that leaves an unchanged package directory
-	# alone. Hoisted wipes and refills every placed package on each relink, and
-	# the refill restores published tarball contents — never build output — so
-	# skipping there deletes a package's build artifacts and never puts them
-	# back. The marker is absent after the add on the unfixed code.
+@test "hoisted add preserves an unchanged package's directory" {
+	# nubjs/nub#610. The hoisted pass used to wipe and refill EVERY placed
+	# package on every relink, and the refill restores published tarball
+	# contents — so anything a postinstall produced (build/Release/*.node, a
+	# downloaded binary) was deleted and never put back. npm and pnpm both
+	# leave an unchanged package directory alone; so does aube now.
 	#
-	# `disable_delta_build_caches` also turns the side-effects cache off, which
-	# is what makes this observable: with the cache on the fix restores the
-	# artifact instead of rerunning, and no marker would be written.
-	disable_delta_build_caches
+	# The stand-in artifact is a file the tarball does not contain, which is
+	# exactly the shape of real build output.
 	cat >package.json <<'JSON'
 {
-  "name": "allow-builds-hoisted-delta-test",
+  "name": "hoisted-preserve-test",
   "version": "1.0.0",
   "dependencies": {
-    "aube-test-builds-marker": "^1.0.0"
-  },
-  "pnpm": {
-    "allowBuilds": {
-      "aube-test-builds-marker": true
-    }
+    "abbrev": "4.0.0"
   }
 }
 JSON
 	run aube install --node-linker=hoisted
 	assert_success
-	assert_file_exists aube-builds-marker.txt
+	echo BUILT >node_modules/abbrev/build-artifact.txt
 
-	# Only clear the marker — do NOT poison the installed copy the way the
-	# isolated test does. Hoisted refills the package dir from the store, so a
-	# poisoned manifest would be replaced before the script ever ran.
-	rm -f aube-builds-marker.txt
-
-	run aube add abbrev@4.0.0 --node-linker=hoisted
+	run aube add is-odd@3.0.1 --node-linker=hoisted
 	assert_success
-	assert_file_exists aube-builds-marker.txt
-	run cat aube-builds-marker.txt
-	assert_output "ran:aube-test-builds-marker@1.0.0"
+	assert_file_exists node_modules/abbrev/build-artifact.txt
+}
+
+@test "hoisted add refuses to reuse a tree an interrupted link left behind" {
+	# The safety half of the reuse above. Reuse keys on a sentinel that is
+	# written before the linker touches node_modules and cleared only once the
+	# install finishes, because the install state alone cannot distinguish a
+	# complete tree from one a killed install abandoned halfway — state written
+	# by an earlier SUCCESSFUL install outlives a later failed one.
+	cat >package.json <<'JSON'
+{
+  "name": "hoisted-interrupted-test",
+  "version": "1.0.0",
+  "dependencies": {
+    "abbrev": "4.0.0"
+  }
+}
+JSON
+	run aube install --node-linker=hoisted
+	assert_success
+	echo BUILT >node_modules/abbrev/build-artifact.txt
+
+	# Exactly what a link that died partway leaves on disk.
+	state_dir="$(find node_modules -maxdepth 3 -type d -name '*-state' | head -n 1)"
+	[ -n "$state_dir" ]
+	touch "$state_dir/link-in-progress"
+
+	run aube add is-odd@3.0.1 --node-linker=hoisted
+	assert_success
+	# Wiped and refilled rather than reused, so the unverifiable tree is healed.
+	assert_file_not_exists node_modules/abbrev/build-artifact.txt
 }
 
 @test "aube remove does not rerun unchanged allowlisted dep build scripts" {

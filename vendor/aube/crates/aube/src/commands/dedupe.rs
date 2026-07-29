@@ -143,9 +143,7 @@ fn diff_graphs(
     existing: Option<&aube_lockfile::LockfileGraph>,
     new: &aube_lockfile::LockfileGraph,
 ) -> (Vec<String>, Vec<String>) {
-    fn serialized_keys(
-        pkgs: &BTreeMap<String, aube_lockfile::LockedPackage>,
-    ) -> BTreeSet<&String> {
+    fn serialized_keys(pkgs: &BTreeMap<String, aube_lockfile::LockedPackage>) -> BTreeSet<&String> {
         use aube_lockfile::LocalSource;
         pkgs.iter()
             .filter(|(_, pkg)| {

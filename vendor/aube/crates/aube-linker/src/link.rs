@@ -43,6 +43,7 @@ impl Linker {
             no_integrity_read_keys: self.no_integrity_read_keys.clone(),
             link_progress: self.link_progress.clone(),
             disk_materialize: self.disk_materialize.clone(),
+            reusable_hoisted: self.reusable_hoisted.clone(),
         }
     }
 

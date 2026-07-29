@@ -95,30 +95,18 @@ fn lifecycle_delta_filter(
     default_trust_floor: &super::default_trust::DefaultTrustFloor,
     dep_build_policy_hash: &str,
     virtual_store_only: bool,
-    node_linker: aube_linker::NodeLinker,
 ) -> Option<BTreeSet<String>> {
     if virtual_store_only {
         return None;
     }
     // The filter's premise is "content hash unchanged ⇒ this package still has
-    // whatever its build left behind". That holds only for a layout that LEAVES
-    // an unchanged package directory alone.
-    //
-    // Hoisted does not. Its materialize wipes and refills every placed package
-    // on every relink (`aube-linker/src/hoisted.rs`), and the refill comes from
-    // the store index — published tarball contents, not `build/Release/*.node`,
-    // not a downloaded binary, not anything a postinstall produced. A package
-    // excluded here has therefore had its build output deleted and gets neither
-    // a rebuild nor a side-effects-cache restore, because the exclusion happens
-    // before a build job (and so before the restore) exists at all.
-    //
-    // Falling back to the full scan puts every package back on the restore
-    // path, which is a cheap cache hit when the side-effects cache is on and a
-    // real rebuild only when there is genuinely nothing to restore from.
-    if matches!(node_linker, aube_linker::NodeLinker::Hoisted) {
-        tracing::debug!("delta: hoisted layout refills package dirs; running full eligible scan");
-        return None;
-    }
+    // whatever its build left behind". That premise is upheld on the linker
+    // side: the hoisted pass reuses a placement whenever the driver can prove
+    // the fingerprint is unchanged AND the previous link completed (see
+    // `reusable_hoisted_dep_paths`), and anything it cannot prove gets wiped
+    // and refilled — which also moves that package's fingerprint, so it lands
+    // in `selected` here and is rebuilt. The two halves have to stay in step;
+    // loosening either one silently deletes build output (nubjs/nub#610).
     let prior_policy_hash = state::read_state_dep_build_policy_hash(cwd)?;
     if prior_policy_hash != dep_build_policy_hash {
         tracing::debug!("delta: dep build policy changed; running full eligible build scan");
@@ -274,7 +262,6 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
             default_trust_floor,
             &dep_build_policy_hash,
             virtual_store_only,
-            node_linker,
         )
     };
 
@@ -574,6 +561,13 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         .wrap_err("failed to write install state")?;
         phase_timings.record("state", phase_start.elapsed());
     }
+
+    // The tree now matches the state just written, so the next hoisted
+    // install may reuse placements. Deliberately after the state write: if
+    // that failed we bailed above and the sentinel stays, which costs a
+    // wipe-and-refill next time rather than trusting a tree we cannot
+    // describe.
+    state::clear_link_in_progress(cwd);
 
     // 8a. Sweep orphaned `.aube/<dep_path>` entries older than
     //     `modulesCacheMaxAge`. The "in use" set is built from the
