@@ -98,3 +98,41 @@ The patch is generated from the committed tree, never hand-written:
 git diff -- crates/nub-cli/src/pm_engine > tests/win-jail-native-build/poison.patch
 git checkout -- crates/nub-cli/src/pm_engine
 ```
+
+## Status on Windows — three further defects sit in front of the headers chain
+
+Running this probe on `windows-latest` uncovered three defects UPSTREAM of the
+header/`nodedir` chain it was written for. Each appeared identically in the **fixed and
+poisoned arms**, which is what establishes that none of them belongs to the derivation
+change — a defect that reproduces without the fix present cannot have been caused by it.
+
+| # | Symptom (from the child's own output) | Status |
+| --- | --- | --- |
+| 1 | `nub install` exits `0xC00000FD` — `thread 'main' has overflowed its stack` | Worked around in the harness (`RUSTFLAGS: -C link-arg=/STACK:8388608`); **product defect still open** |
+| 2 | `CMD.EXE was started with the above path as the current directory. UNC paths are not supported.` | **Fixed** — `strip_verbatim_prefix` in `backend/windows.rs` |
+| 3 | `'\""' is not recognized as an internal or external command` | **Open — the current blocker** |
+
+**#1** is a debug-build artifact of Windows's 1MB main-thread stack (Linux gives 8MB) at
+`opt-level = 0`. Whether the optimized release binary clears it is untested.
+
+**#2** was `std::fs::canonicalize` returning an extended-length `\\?\C:\…` path that went
+straight to the child as its working directory. cmd.exe refuses one and silently runs in
+the Windows directory, so every jailed lifecycle script started somewhere it could not see
+its own package. The canonical form is still what the DACL preflight sees; only the child's
+copy sheds the prefix.
+
+**#3** is the remaining blocker, and it is root-caused. aube builds the cmd.exe line with
+`raw_arg` on purpose (`aube-scripts/src/lib.rs`, `spawn_shell_with_settings`), because
+Rust's standard argv encoder escapes interior quotes as `\"` and cmd.exe does not
+understand that spelling. The pieces it hands over are literally `/d /s /c "`, the script,
+and `"`. But a jailed spawn does not go through `spawn_shell` — nub rebuilds the command as
+`CommandSpec::new(program).args(args)` (`pm_engine/build_jail.rs`), and the Windows launcher
+re-encodes that argv through the ordinary encoder (`backend/windows.rs`,
+`Command::args`/the AppContainer launch block). The `raw_arg` intent is lost, so cmd.exe
+receives `\""` as its first token and reports exactly that.
+
+Closing it means carrying a verbatim command line through `CommandSpec` into the
+`CreateProcessW` call site rather than re-encoding an argv that was never meant to be
+re-encoded. Until then a dependency lifecycle script cannot run under the build jail on
+Windows at all — a strictly larger blocker than the headers chain, and the reason this
+probe cannot yet produce its artifact-on-disk verdict there.
