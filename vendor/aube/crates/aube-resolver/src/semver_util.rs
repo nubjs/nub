@@ -11,7 +11,29 @@ pub enum PickResult<'a> {
     /// Strict mode (or any caller treating the cutoff as a hard wall):
     /// at least one version satisfied the range, but all of them were
     /// filtered out by the cutoff.
-    AgeGated,
+    AgeGated(AgeGateCause),
+}
+
+/// Why every satisfying version failed the cutoff. The two cases are the
+/// same refusal for opposite reasons and have disjoint remedies — one is
+/// fixed by waiting or widening the window, the other by getting publish
+/// times out of the registry — so the caller reports them under separate
+/// error codes rather than one "blocked by age gate".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgeGateCause {
+    /// At least one candidate carried a publish time later than the cutoff.
+    TooNew,
+    /// No candidate's age could be established at all (#581): the packument
+    /// dated none of them, and its `modified` timestamp did not vouch for
+    /// the document either.
+    Undeterminable,
+}
+
+/// A version's standing against the cutoff that applies to it.
+pub(crate) enum AgeVerdict {
+    Clears,
+    TooNew,
+    Undeterminable,
 }
 
 #[cfg(test)]
@@ -109,9 +131,32 @@ pub(crate) fn version_clears_cutoff(
     effective: Option<&str>,
     strict: bool,
 ) -> bool {
-    let Some(c) = effective else { return true };
+    matches!(
+        classify_version_age(packument, ver, effective, strict),
+        AgeVerdict::Clears
+    )
+}
+
+/// [`version_clears_cutoff`] with the rejection reason kept. Callers that only
+/// need the yes/no answer go through the predicate; [`pick_version`] uses this
+/// so the error it raises can name which of the two refusals happened.
+pub(crate) fn classify_version_age(
+    packument: &Packument,
+    ver: &str,
+    effective: Option<&str>,
+    strict: bool,
+) -> AgeVerdict {
+    let Some(c) = effective else {
+        return AgeVerdict::Clears;
+    };
     match packument.time.get(ver) {
-        Some(t) => t.as_str() <= c,
+        Some(t) => {
+            if t.as_str() <= c {
+                AgeVerdict::Clears
+            } else {
+                AgeVerdict::TooNew
+            }
+        }
         // npm's FULL `time` map always carries the `created`/`modified`
         // bookkeeping keys beside the version keys, so a raw `is_empty()` would
         // misread a mirror serving only those as "populated, with holes" and
@@ -123,7 +168,11 @@ pub(crate) fn version_clears_cutoff(
                 .any(|k| k != "created" && k != "modified");
             let modified_proves_maturity =
                 !has_version_times && packument.modified.as_deref().is_some_and(|m| m <= c);
-            modified_proves_maturity || !strict
+            if modified_proves_maturity || !strict {
+                AgeVerdict::Clears
+            } else {
+                AgeVerdict::Undeterminable
+            }
         }
     }
 }
@@ -225,13 +274,16 @@ pub(crate) fn pick_version<'a>(
     // A version's effective cutoff: exempt versions answer to the
     // time-based wall (`exempt_cutoff`) only; everyone else answers to
     // the merged `cutoff`.
-    let passes_cutoff = |ver: &str, parsed: Option<&node_semver::Version>| -> bool {
+    let classify_cutoff = |ver: &str, parsed: Option<&node_semver::Version>| -> AgeVerdict {
         let effective = if is_age_exempt(ver, parsed) {
             exempt_cutoff
         } else {
             cutoff
         };
-        passes_effective_cutoff(ver, effective)
+        classify_version_age(packument, ver, effective, strict)
+    };
+    let passes_cutoff = |ver: &str, parsed: Option<&node_semver::Version>| -> bool {
+        matches!(classify_cutoff(ver, parsed), AgeVerdict::Clears)
     };
 
     // Prefer locked version if it satisfies and clears the cutoff.
@@ -264,8 +316,11 @@ pub(crate) fn pick_version<'a>(
 
     // Track whether *any* version satisfied the range — if so but
     // every one was rejected by the cutoff, the failure is age-gate
-    // related, not a real "no match in range".
-    let mut had_satisfying_but_age_gated = false;
+    // related, not a real "no match in range". A provably-too-new
+    // candidate outranks an undateable one: waiting or widening the
+    // window is a real remedy for the former, so the diagnostic must not
+    // hide it behind the latter.
+    let mut gated_cause: Option<AgeGateCause> = None;
 
     let mut best: Option<(node_semver::Version, &'a aube_registry::VersionMetadata)> = None;
     let mut fallback_lowest: Option<(node_semver::Version, &'a aube_registry::VersionMetadata)> =
@@ -289,12 +344,16 @@ pub(crate) fn pick_version<'a>(
             fallback_lowest = Some((v.clone(), meta));
         }
 
-        if passes_cutoff(ver_str, Some(&v)) {
-            if outranks(&v, meta, best.as_ref(), pick_lowest) {
-                best = Some((v, meta));
+        match classify_cutoff(ver_str, Some(&v)) {
+            AgeVerdict::Clears => {
+                if outranks(&v, meta, best.as_ref(), pick_lowest) {
+                    best = Some((v, meta));
+                }
             }
-        } else {
-            had_satisfying_but_age_gated = true;
+            AgeVerdict::TooNew => gated_cause = Some(AgeGateCause::TooNew),
+            AgeVerdict::Undeterminable => {
+                gated_cause.get_or_insert(AgeGateCause::Undeterminable);
+            }
         }
     }
 
@@ -306,10 +365,9 @@ pub(crate) fn pick_version<'a>(
     // failures so the caller can surface a meaningful error instead of
     // pretending the range itself was wrong.
     if strict || cutoff.is_none() {
-        return if had_satisfying_but_age_gated {
-            PickResult::AgeGated
-        } else {
-            PickResult::NoMatch
+        return match gated_cause {
+            Some(cause) => PickResult::AgeGated(cause),
+            None => PickResult::NoMatch,
         };
     }
 
@@ -324,10 +382,9 @@ pub(crate) fn pick_version<'a>(
     // time-based wall excluded every satisfying version. Report the age
     // gate in the latter case so the caller surfaces a meaningful error
     // rather than a bogus "no matching version".
-    if had_satisfying_but_age_gated {
-        PickResult::AgeGated
-    } else {
-        PickResult::NoMatch
+    match gated_cause {
+        Some(cause) => PickResult::AgeGated(cause),
+        None => PickResult::NoMatch,
     }
 }
 

@@ -421,15 +421,14 @@ Publish dates come from the registry's `time` metadata, so the gate is only as s
 | No per-version dates, document older than the window | Allowed — the document's own timestamp bounds every version in it |
 | No per-version dates, document newer than the window | Blocked |
 
-Loosening strictness reverses both blocked rows: an undateable version becomes eligible again, and the lowest satisfying one is picked.
-
-Registries that publish no dates at all — some private mirrors, older Verdaccio — hit the last row, and the error names that as the cause rather than reporting a missed cutoff. Three ways through:
+Registries that publish no dates at all — some private mirrors, older Verdaccio — hit the last row. That refusal is its own error, `ERR_NUB_RELEASE_AGE_MISSING_TIME`, kept separate from a version being too new because no window would ever have admitted these versions. Two ways through:
 
 ```ini
 minimumReleaseAgeExclude=internal-pkg   # exempt one package (comma-separated)
-minimumReleaseAgeStrict=false           # fall back to the lowest satisfying version
 minimumReleaseAge=0                     # turn the window off
 ```
+
+Loosening strictness is a third, and it is not a smaller window. With `minimumReleaseAgeStrict=false` an undateable version counts as clearing the gate, so the newest version matching your range is installed with no age checked at all. Where versions *are* dated and all of them are too new, the same setting instead falls back to the lowest satisfying version.
 
 ### Default-trust floor
 
