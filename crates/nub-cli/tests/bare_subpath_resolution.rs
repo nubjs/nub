@@ -183,12 +183,16 @@ console.log("from:" + s.from);
 /// the load hooks refuse. Node's CJS resolver loads `sub/index.js` here, and so
 /// must nub.
 ///
-/// FAST TIER ONLY, and the reason is a separate pre-existing divergence rather
-/// than anything this probe does. Below 22.15 nub registers a `.ts` handler in
-/// `require.extensions`, so Node's OWN CJS resolver finds `sub.ts` during
-/// LOAD_AS_FILE and never reaches LOAD_AS_DIRECTORY — the additive resolver has
-/// already declined the file by then. Verified against nub v0.5.0, which predates
-/// this branch and behaves identically on 20.11 and 18.19.
+/// FAST TIER ONLY, and the reason is a separate pre-existing bug rather than
+/// anything this probe does. Below 22.15 nub registers a classic
+/// `require.extensions` handler for the TS family, so Node's OWN CJS resolver
+/// finds `sub.ts` during LOAD_AS_FILE and never reaches LOAD_AS_DIRECTORY — the
+/// additive resolver has already declined the file by then. That handler carries
+/// no `node_modules` bail, unlike its `.js`/`.cjs` sibling, so the outcome is not
+/// merely a different error: the dependency's unshipped source is transpiled and
+/// returned, and `require("pkg/sub")` hands back `sub.ts`'s exports where plain
+/// Node hands back `sub/index.js`'s. Verified against nub v0.5.0, which predates
+/// this branch and is identical on 20.11 and 18.19.
 #[test]
 fn directory_index_outranks_an_unloadable_ts_sibling() {
     if !on_fast_tier() {
