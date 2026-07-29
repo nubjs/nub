@@ -525,14 +525,12 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
     }
     #[cfg(windows)]
     {
-        // WINDOWS ONLY, and safe only because the jail STAMPS it: `build_jail.rs` inserts
-        // nub's own value into `ambient` before this scrub runs, so an ambient user value is
-        // already overwritten and can never ride this entry in. `NODE_OPTIONS` carries
-        // `--import`, so admitting an ambient one would hand a dependency's lifecycle script
-        // an arbitrary-code channel. No other platform stamps it, and none may admit it.
-        if key.eq_ignore_ascii_case("NODE_OPTIONS") {
-            return true;
-        }
+        // `NODE_OPTIONS` is deliberately NOT admitted. It was, briefly, to carry a Windows
+        // realpath repair nub stamped — safe only because that stamp OVERWROTE any ambient
+        // value first. The stamp is gone (see `windows_realpath_node_options`), so admitting
+        // the key would now let an AMBIENT `NODE_OPTIONS` through, and it carries `--import`:
+        // an arbitrary-code channel into every dependency's lifecycle script. If a future
+        // repair reinstates the stamp, this entry comes back WITH it, never before.
         BUILD_JAIL_EXTRA_EXACT
             .iter()
             .any(|e| e.eq_ignore_ascii_case(key))
@@ -568,18 +566,44 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
 /// handle the jail allows, so pointing the JS realpath at it buys nothing. Both realpath
 /// implementations are unavailable, which leaves only NOT CALLING one.
 ///
-/// WHAT THIS DOES. `--preserve-symlinks-main` clears the realpath in `resolveMainPath`
+/// WHAT IT WOULD DO. `--preserve-symlinks-main` clears the realpath in `resolveMainPath`
 /// (`internal/modules/run_main.js`) and `--preserve-symlinks` clears the ones in `_findPath`
 /// and the ESM `finalizeResolution`, so module resolution never walks a path to the volume
-/// root.
+/// root. Measured on Windows CI (run 30463527647), that is sufficient: the entry point runs,
+/// dependency `require`s resolve, and a lifecycle script body completes under the real
+/// build-jail policy.
 ///
-/// THE COST, stated plainly because it is a real one: with `--preserve-symlinks`, a
-/// dependency reached through a SYMLINK resolves under its link path rather than its real
-/// path. An isolated (pnpm-style) `node_modules` depends on the real path to find a package's
-/// private dependencies, so lifecycle scripts in that layout can resolve differently — or
-/// fail — under the jail. nub's default linker is hoisted, where the tree holds no symlinks
-/// and the flag is a no-op, so the common case is unaffected. The alternative is not a
-/// better-behaved jail; it is a jail in which no Node lifecycle script runs at all.
+/// WHY IT IS NOT STAMPED ANYWAY — the disqualifying measurement. nub's DEFAULT node-linker is
+/// `Isolated` (`aube-linker/src/lib.rs`), which materialises each package in its own store
+/// cell and wires dependencies as symlinks. `--preserve-symlinks` makes a dependency resolve
+/// under its LINK path, so the parent-directory walk from `node_modules/<pkg>` skips the store
+/// cell that holds that package's private dependencies and lands on the project's top-level
+/// `node_modules` instead. Against a fixture mirroring the real
+/// `.aube/<dep_path>/node_modules/<name>` layout, a package whose private dependency is
+/// `bar@2.0.0` resolved `bar@1.0.0` — the unrelated top-level copy — and threw NOTHING:
+///
+/// ```text
+/// without the flag:  foo sees bar@2.0.0
+/// with the flag:     foo sees bar@1.0.0
+/// ```
+///
+/// A lifecycle script that builds against the wrong dependency version and exits 0 is worse
+/// than one that cannot start. The jail's current loud failure is the better of the two, so
+/// this stays unwired. (`preserve_symlinks_isolated_layout` is the standing regression test.)
+///
+/// WHAT SURVIVES, for whoever takes this next:
+///  - Scope the flag to HOISTED installs only, detected at policy-compile time. Safe, but it
+///    leaves the default layout with no working jail, so it does not deliver default-on.
+///  - A `module.registerHooks()` resolve hook that resolves symlinks itself with `readlink`
+///    on granted leaves, never walking to the volume root. Unproven and real work, but it is
+///    the mechanism nub is architecturally built on, and preload delivery already works
+///    (`node-shim-executed=PASS` proves a `data:` `--import` evaluates inside the jail).
+///  - The dedicated-account backend, which has no LowBox check at all — at the cost of a
+///    one-time elevated setup, forfeiting default-on for Windows.
+///
+/// Note that blocker 2 constrains this independently: a piped `child_process` spawn under the
+/// jail HANGS, and every `node-gyp` configure pipes, so native builds stay blocked on Windows
+/// regardless of which route above is taken.
 #[cfg(windows)]
 pub fn windows_realpath_node_options() -> String {
     "--preserve-symlinks-main --preserve-symlinks".to_string()

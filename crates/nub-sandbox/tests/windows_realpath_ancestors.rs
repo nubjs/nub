@@ -39,7 +39,11 @@
 //! too, `EPERM ... realpath` on a file the jail GRANTED and Node reads successfully in the
 //! same run. `GetFinalPathNameByHandleW` needs more than the leaf handle the jail allows, so
 //! both realpath implementations are unavailable and only NOT CALLING one is left — which is
-//! `--preserve-symlinks`, at the cost of symlinked dependency resolution.
+//! `--preserve-symlinks`. That is measured here and it WORKS, but it is NOT shipped: under
+//! nub's default `Isolated` linker it silently binds the wrong package version rather than
+//! failing (`preserve_symlinks_isolated_layout`), which is worse than the loud failure it
+//! replaces. So the `lifecycle` arm stamps NODE_OPTIONS itself, as a hypothetical the product
+//! does not carry.
 //!
 //! That refuted arm is KEPT as a standing differential rather than deleted: `node-shim-executed`
 //! proves the preload evaluated, so `realpath-native-refused-in-jail` is the OS refusing, not
@@ -1058,11 +1062,7 @@ put("done=ok");
             cache: f.root.join("cache"),
             project: project.clone(),
         };
-        let mut env = os_essential_env();
-        // Exactly what `build_jail.rs` stamps on Windows, inserted BEFORE compile so this arm
-        // also proves the lifecycle env scrub ADMITS it: a dropped `NODE_OPTIONS` would look
-        // identical to a shim that simply does not work.
-        env.insert("NODE_OPTIONS".to_string(), shim_node_options());
+        let env = os_essential_env();
         let policy = match nub_sandbox::compile_build_jail(
             homes,
             &pkg,
@@ -1094,6 +1094,15 @@ put("done=ok");
         // plus the harness's own binary.
         let mut policy = policy;
         policy.fs.rules.entries.push(read_rule(&f.child));
+        // HYPOTHETICAL, and stamped here rather than in the product: `build_jail.rs` no longer
+        // sets NODE_OPTIONS (the repair is disqualified — it silently resolves the wrong
+        // package under the default isolated layout), and the lifecycle env allowlist no longer
+        // admits the key. Injecting it directly into the compiled policy keeps the measurement
+        // — "IF the jail stamped this, does a real script body run?" — without shipping it.
+        policy
+            .env
+            .constructed
+            .insert("NODE_OPTIONS".to_string(), shim_node_options());
         let code = run_child_in(f, &policy, &pkg, "noderun", &argv);
         let marker_text = std::fs::read_to_string(&marker).unwrap_or_else(|_| "<no marker>".into());
         let log_text = std::fs::read_to_string(&log).unwrap_or_else(|_| "<no log>".into());
@@ -1101,12 +1110,6 @@ put("done=ok");
         println!("      -- marker --\n{}", indent(&marker_text));
         println!("      -- node stdio --\n{}", indent(&log_text));
 
-        report(
-            fails,
-            "lifecycle-env-scrub-keeps-node-options",
-            marker_text.contains("nodeopts=--preserve-symlinks-main"),
-            "the stamp is useless if the default-deny env allowlist drops it",
-        );
         report(
             fails,
             "lifecycle-script-body-completed",
