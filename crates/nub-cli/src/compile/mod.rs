@@ -103,16 +103,17 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         .unwrap_or_else(|| PathBuf::from("."));
     let (pin, raw, source) = determine_target(opts.target.as_deref(), &pin_cwd)?;
 
-    let (node_version, node_range, node_blob, node_sha) = if opts.smol {
-        // Smol keeps a range: bake the acceptance FLOOR the launcher enforces
-        // (`discovered >= floor`) and record the raw requirement for provenance.
+    let (node_version, node_blob, node_sha) = if opts.smol {
+        // Smol bakes the acceptance FLOOR the launcher enforces (`discovered >=
+        // floor`) — and ONLY that. A range's upper bound is deliberately not
+        // carried into the artifact (gap 8), so the raw spec is echoed here for
+        // the compiling user and goes no further.
         let floor = version_management::pin_floor(&pin, &cache_root)?;
-        let range = non_exact_spec(&pin, &raw);
         eprintln!(
             "Using Node.js {} (resolved from {source}; satisfied at runtime)",
-            range.clone().unwrap_or_else(|| floor.to_string())
+            non_exact_spec(&pin, &raw).unwrap_or_else(|| floor.to_string())
         );
-        (floor, range, Vec::new(), String::new())
+        (floor, Vec::new(), String::new())
     } else {
         // Embed bakes ONE exact version — a range/major/alias collapses to the
         // newest satisfying release at compile time. (`build_node_blob` →
@@ -122,7 +123,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         let exact =
             version_management::resolve_pin_for_platform(&pin, os, arch, musl, &cache_root)?;
         let (blob, sha) = build_node_blob(&exact, &target, &cache_root, &source)?;
-        (exact, None, blob, sha)
+        (exact, blob, sha)
     };
 
     // 3. Manifest + payload.
@@ -130,7 +131,6 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         shape,
         entry: entry_name,
         node_version: node_version.to_string(),
-        node_range,
         triple: target.triple(),
         node_sha256: node_sha,
         app_sha256: app_sha,
@@ -232,7 +232,7 @@ fn install_message(opts: &CompileOptions) -> String {
         .unwrap_or_else(|| DEFAULT_INSTALL_MESSAGE.to_string())
 }
 
-/// The raw requirement to record for `--smol` — `None` for a bare exact version
+/// The raw requirement to ECHO for `--smol` — `None` for a bare exact version
 /// (the floor already captures it), else the original spec string.
 fn non_exact_spec(pin: &VersionPin, raw: &str) -> Option<String> {
     match pin {
