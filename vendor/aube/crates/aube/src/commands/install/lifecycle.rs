@@ -717,6 +717,31 @@ pub(crate) async fn run_dep_lifecycle_scripts(
                     ran_here += 1;
                 }
             }
+            if ran_here > 0 {
+                // A dep build writes its output in place — `node-gyp` emits
+                // `build/Release/*.node` right here — and those inodes are
+                // created by child processes that inherited this one's
+                // quarantine flags. A locally built addon is ad-hoc signed at
+                // best, so Gatekeeper refuses to load it, and without this the
+                // install that *built* the addon ships it unusable while only a
+                // later cache restore heals it.
+                //
+                // This does NOT make the cache entry saved below clean: `save`
+                // copies with `CopyMode::Copy`, so `fs::copy` mints inodes the
+                // kernel stamps again regardless of the now-clean source (route
+                // 2 in `aube-linker`'s module doc). The restore-side strip is
+                // what covers that, and remains load-bearing.
+                //
+                // Off the async worker like every other filesystem step here: a
+                // node-gyp `build/` tree can hold thousands of files, and this
+                // walks all of them. Best-effort, so a join error is ignored
+                // rather than failing an otherwise-complete build.
+                let package_dir = job.package_dir.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    aube_linker::strip_quarantine_from_tree(&package_dir)
+                })
+                .await;
+            }
             if should_save_side_effects_cache
                 && ran_here > 0
                 && let Some(cache_entry) = job.cache_entry.clone()

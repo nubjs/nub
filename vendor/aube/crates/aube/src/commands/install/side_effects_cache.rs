@@ -135,6 +135,17 @@ impl SideEffectsCacheEntry {
                 self.path.display()
             )
         })?;
+        // Build output is locally compiled, so on macOS it is ad-hoc
+        // signed at best and Gatekeeper refuses it outright once
+        // quarantined. Both restore modes carry the attribute in: a
+        // hardlink shares the cache entry's inode and therefore its
+        // xattrs, and the `fs::copy` fallback is `fcopyfile` with
+        // `COPYFILE_ALL`. The copy also mints a new inode, which a
+        // quarantine-enabled process has stamped whatever the source
+        // was — so this belongs after the restore rather than once when
+        // the entry is written. Walk-driven because this output was
+        // never in a package index. No-op off macOS.
+        aube_linker::strip_quarantine_from_tree(package_dir);
         // The copy carries the entry's own marker across, so restamping is
         // a no-op except for an entry saved before markers named an engine
         // — that one would fail every future match and re-copy forever.
