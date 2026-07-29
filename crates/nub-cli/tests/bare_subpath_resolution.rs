@@ -320,6 +320,43 @@ module.exports = { who: v };
     );
 }
 
+/// Naming a dependency's TypeScript by explicit path skips resolution entirely, so
+/// the "deps are never transpiled" invariant has to hold at the LOAD step too. nub
+/// hands the file to Node's own `.js` handler — the same fallback Node uses for an
+/// extension it does not register — so the failure is Node's, not one nub invented.
+/// The exact error differs by version (a raw-JS `SyntaxError` below 22.15, type-
+/// stripping's own refusal above it), so this pins the invariant: the dependency's
+/// TypeScript never becomes a loaded module.
+#[test]
+fn explicit_path_require_of_dep_ts_is_not_transpiled() {
+    let dir = fixture("explicit-dep-ts");
+    write(
+        &dir.join("node_modules/xp/package.json"),
+        r#"{"name":"xp","main":"index.js"}"#,
+    );
+    write(&dir.join("node_modules/xp/index.js"), "module.exports={};");
+    write(
+        &dir.join("node_modules/xp/inner.ts"),
+        r#"const v: string = "dep-ts-explicit";
+module.exports = { who: v };
+"#,
+    );
+    write(
+        &dir.join("entry.cjs"),
+        r#"try {
+  console.log("who:" + require("./node_modules/xp/inner.ts").who);
+} catch {
+  console.log("refused");
+}
+"#,
+    );
+    let (stdout, stderr) = run(&dir, "entry.cjs");
+    assert!(
+        !stdout.contains("who:dep-ts-explicit"),
+        "a dependency's TypeScript was transpiled through an explicit path: {stdout} / {stderr}"
+    );
+}
+
 /// A published package shipping ONLY TypeScript source must surface Node's own
 /// ERR_MODULE_NOT_FOUND. Resolving the `.ts` would hand back a file nub declines
 /// to transpile, turning a clear "no such module" into a type-stripping error

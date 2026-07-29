@@ -824,24 +824,28 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       for (const [ext, handler] of saved) module_._extensions[ext] = handler;
     }
   };
-  const isDepTsHit = (filename) => {
+  // "Is this really a dependency?" — the ONE definition the resolve-side retry and
+  // the load-side bail both use, so the two layers cannot drift into disagreeing.
+  //
+  // A path that doesn't even mention node_modules is project source, answered
+  // without touching the disk. Only a path that LOOKS like a dependency pays a stat,
+  // and it has to: under `--preserve-symlinks` Node hands back un-realpathed paths,
+  // so a workspace package symlinked into node_modules still carries a
+  // `/node_modules/` segment and would otherwise be misread as a dependency —
+  // costing it the TypeScript that IS its build output.
+  const isDependencyPath = (filename) => {
     if (typeof filename !== "string") return false;
-    if (!TS_CLASSIC_EXTS.includes(pathExtname(filename))) return false;
-    // Decide on where the file REALLY lives, not on the path Node happened to hand
-    // back. Under `--preserve-symlinks` Node's `tryFile` skips `toRealPath`, so a
-    // workspace package symlinked into node_modules still carries a `/node_modules/`
-    // segment and would read as a dependency — costing it the TS source that IS its
-    // build output. Resolving first makes the test independent of Node's symlink
-    // policy rather than coincidentally agreeing with the default. Only TS-extension
-    // hits get here, so the extra stat is off the hot path.
-    let real = filename;
+    if (!core.isNodeModules(pathToFileURL(filename).href)) return false;
     try {
-      real = realpathSync(filename);
+      return core.isNodeModules(pathToFileURL(realpathSync(filename)).href);
     } catch {
-      /* unreadable: fall back to the literal path */
+      return true; // unreadable: trust the literal path
     }
-    return core.isNodeModules(pathToFileURL(real).href);
   };
+  const isDepTsHit = (filename) =>
+    typeof filename === "string" &&
+    TS_CLASSIC_EXTS.includes(pathExtname(filename)) &&
+    isDependencyPath(filename);
 
   module_._resolveFilename = function (request, parent, isMain, options) {
     let resolved = null;
@@ -918,7 +922,20 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   // decorator guard, and module-format detection are all identical to the fast
   // tier. The path is already a real TS file (Module._resolveFilename ran first).
   // A module-format source can't be _compile'd as CJS — same clean error as above.
+  //
+  // A dependency's TypeScript is never transpiled — the same invariant the `.js`/
+  // `.cjs` handler below states as its case (1). The resolution-side retry keeps
+  // most dep TS from ever reaching here, but an explicit path (`require(
+  // "./node_modules/pkg/inner.ts")`) names the file directly and skips resolution
+  // entirely, so the bail has to live at the load step too. Delegating to the native
+  // `.js` handler rather than throwing is what Node itself does: an extension it has
+  // no handler for falls back to `.js` via `findLongestRegisteredExtension`, so this
+  // reproduces plain Node's own error instead of inventing one nub would have to own.
+  const nativeJs = module_._extensions[".js"];
   const transpileExtension = (mod, filename) => {
+    if (isDependencyPath(filename)) {
+      return nativeJs.call(module_._extensions, mod, filename);
+    }
     const { source, format } = core.loadTranspile(pathToFileURL(filename).href, pathExtname(filename));
     if (format === "module") throw requireEsmError(filename);
     mod._compile(source, filename);
@@ -943,7 +960,7 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   //       native CJS behavior is byte-identical.
   // `.mjs` is ESM-only; Node registers no require.extensions handler for it, so a
   // `require()` of `.mjs` throws ERR_REQUIRE_ESM as before — we don't override it.
-  const nativeJs = module_._extensions[".js"];
+  // (`nativeJs` is captured above, before the TS handlers are registered.)
   for (const ext of [".js", ".cjs"]) {
     const origExtension = module_._extensions[ext] || nativeJs;
     module_._extensions[ext] = (mod, filename) => {
