@@ -211,6 +211,8 @@ fn private_home_dir(homes: &Homes, package_dir: &Path) -> Option<PathBuf> {
 /// Create `dir` owner-only. The home holds one package's install scratch; nothing else on
 /// the machine has business in it, and the umask default (0755) would publish it.
 fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    // Only the `unix` arm mutates the builder; elsewhere the binding is immutable.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {

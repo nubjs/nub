@@ -189,6 +189,12 @@ harness = false
 name = "windows_realpath_ancestors"
 harness = false
 
+# Self-reexecs as the jailed probe child to create one named pipe per cell, and to run Node
+# under an EXTERNAL bound — libuv's retry loop cannot be broken from inside the process.
+[[test]]
+name = "windows_pipe_shapes"
+harness = false
+
 # OPT-IN ONLY. This probe is not a unit test: on an unprovisioned machine it exits non-zero
 # by design, and when run elevated it CREATES a local account, a local group, four persistent
 # WFP filters and a Winlogon registry value. Left ungated, bare `cargo test` on a
