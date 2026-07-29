@@ -9,6 +9,10 @@
 //! package. It also bought nothing — the abort SIGKILLs each sibling's shell and
 //! nothing else, so its `node-gyp`/`make`/`cc` reparent to init and keep writing.
 //!
+//! The orphan property is asserted on BOTH lifecycle paths — `sandbox: false` below for
+//! the unconfined one, and `nothing_keeps_writing_on_the_confined_path` for nub's DEFAULT
+//! one, where the build jail owns the spawn and aube's own reaper never sees the child.
+//!
 //! WHY `sandbox: false`. This has to run on the UNCONFINED lifecycle path. When
 //! nub's build jail confines the spawn, aube hands it to the embedder hook via
 //! `spawn_blocking`, which is not cancellable — the script runs to completion
@@ -43,15 +47,23 @@ fn nub_binary() -> PathBuf {
 /// beyond ordinary hygiene: a warm side-effects cache would RESTORE a previously
 /// built package dir — marker included — without the script ever running, which
 /// would make the assertion below pass while proving nothing.
+///
+/// Stdio is DISCARDED rather than captured, and that is about the failure mode, not
+/// tidiness. `output()` reads the child's pipes to EOF — which an orphan holding the
+/// inherited write end never reaches. Regressing the reaping then WEDGED this test
+/// indefinitely instead of failing it (observed: the harness blocked while the orphan
+/// appended, the same inherited-pipe stall that hung a build container for 30 minutes).
+/// A null fd cannot be held open against us, so a regression fails with its assertion.
 fn run(dir: &Path, args: &[&str]) -> i32 {
     Command::new(nub_binary())
         .args(args)
         .current_dir(dir)
         .env("XDG_DATA_HOME", dir.join("xdg-data"))
         .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
-        .output()
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
         .expect("failed to spawn nub")
-        .status
         .code()
         .unwrap_or(-1)
 }
@@ -162,5 +174,100 @@ fn nothing_keeps_writing_after_the_install_command_returns() {
         after, at_return,
         "a process the postinstall spawned was still writing into the package \
          dir after the command returned ({at_return} -> {after} bytes)"
+    );
+}
+
+/// The same property on nub's DEFAULT path, where the build jail confines the script.
+///
+/// The unconfined test above proves aube's reaper; this one proves the jail's, and they
+/// are different code. A confined spawn never reaches `run_command_killing_descendants`
+/// — aube hands it to the embedder hook, which launches it through nub-sandbox — so the
+/// process group has to be established and swept by the backend instead. Measured before
+/// it was: the writer below survived with PPID 1, in nub's OWN process group, still
+/// appending after the command had returned.
+///
+/// macOS-only, and that is the point rather than a limitation: it is the platform whose
+/// confined path had no reaping mechanism at all. Linux's confined path needs bubblewrap
+/// or Landlock on the host and fails closed without it, and Windows reaps through a job
+/// object with no process group involved.
+#[test]
+#[cfg(target_os = "macos")]
+fn nothing_keeps_writing_on_the_confined_path() {
+    let dir = std::env::temp_dir().join(format!("nub-jail-orphan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let orphan = dir.join("deps/dep-orphan");
+    let control = dir.join("deps/dep-control");
+    std::fs::create_dir_all(&orphan).unwrap();
+    std::fs::create_dir_all(&control).unwrap();
+
+    // Outside the jail's read set. The orphan script's attempt to read it is the arm
+    // check: if the jail silently declined, the script would run on the UNCONFINED path,
+    // where aube's own reaper already passes this assertion and the test would prove
+    // nothing about the jail.
+    let secret = dir.join("outside-secret.txt");
+    std::fs::write(&secret, "SECRET").unwrap();
+
+    // No `dependenciesMeta` — the default, which is confined.
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"jail-orphan-root","version":"1.0.0",
+            "dependencies":{"dep-orphan":"file:./deps/dep-orphan",
+                            "dep-control":"file:./deps/dep-control"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        orphan.join("package.json"),
+        format!(
+            r#"{{"name":"dep-orphan","version":"1.0.0","scripts":{{"postinstall":
+               "(cat {secret} > ./READ-OUTSIDE 2>/dev/null || echo DENIED > ./READ-OUTSIDE); sh -c 'while :; do echo x >> ./ORPHAN-LOG; sleep 0.05; done' & sleep 0.6"}}}}"#,
+            secret = secret.display()
+        ),
+    )
+    .unwrap();
+    // Reaping a group must not become killing indiscriminately: an ordinary confined
+    // script still has to reach its own end. This marker fails in exactly that case,
+    // and passes in both arms of the fix, so it cannot mask the assertion above.
+    std::fs::write(
+        control.join("package.json"),
+        r#"{"name":"dep-control","version":"1.0.0","scripts":{"postinstall":"sleep 0.3; printf ran > ./CONTROL-MARKER"}}"#,
+    )
+    .unwrap();
+
+    assert_eq!(run(&dir, &["install"]), 0, "install should link both deps");
+    assert_eq!(
+        run(&dir, &["approve-builds", "--all"]),
+        0,
+        "both fixture scripts exit 0; this test is about the success path"
+    );
+
+    let orphan_dir = store_package_dir(&dir, "dep-orphan").expect("store materialized dep-orphan");
+    let confinement = std::fs::read_to_string(orphan_dir.join("READ-OUTSIDE")).unwrap_or_default();
+    let log = orphan_dir.join("ORPHAN-LOG");
+    let at_return = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    let after = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+    let control_ran =
+        store_package_dir(&dir, "dep-control").is_some_and(|d| d.join("CONTROL-MARKER").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(
+        confinement.trim(),
+        "DENIED",
+        "the script read a file outside the jail — it ran UNCONFINED, so this \
+         fixture exercised aube's reaper rather than the build jail's"
+    );
+    assert!(
+        at_return > 0,
+        "the fixture never wrote anything — the test would pass vacuously"
+    );
+    assert!(
+        control_ran,
+        "an ordinary confined script did not reach its own end — reaping the \
+         script's process group is killing more than the script left running"
+    );
+    assert_eq!(
+        after, at_return,
+        "a process the confined postinstall spawned was still writing into the \
+         package dir after the command returned ({at_return} -> {after} bytes)"
     );
 }

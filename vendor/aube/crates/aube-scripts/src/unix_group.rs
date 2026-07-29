@@ -166,6 +166,57 @@ impl Drop for ProcessGroupReaper {
     }
 }
 
+/// Arm the terminate-signal reaper ahead of a spawn an EMBEDDER owns.
+///
+/// aube arms it inside [`group_on_spawn`], which the embedder-confined path never reaches
+/// — that spawn belongs to the host sandbox. Called BEFORE the spawn for the same reason
+/// `group_on_spawn` calls it there: the child leaves the foreground process group the
+/// instant it starts, and until the handler exists a terminal Ctrl-C reaches neither the
+/// script nor anything that would reap it.
+///
+/// The `SIG_DFL`-only probe behind it is a ONE-SHOT (`Once`), so an embedder that arms a
+/// chaining registrar such as `signal-hook` before its first confined spawn forfeits
+/// enrolment for the whole process rather than for one script. Nothing on nub's install
+/// path does today; a future one would have to arm this first.
+pub fn arm_group_reaper() {
+    install_signal_handler();
+}
+
+/// Enrol a process group an EMBEDDER created in the same registry the handler sweeps, so a
+/// `SIGINT`/`SIGTERM`/`SIGHUP` that kills aube reaps the group instead of orphaning it.
+/// `None` if the group is not enrollable (see below) or the registry is full — both
+/// degrade to the embedder's own teardown, never to a wrong kill.
+///
+/// REGISTRATION ONLY: the returned guard clears the slot and does NOT kill. The embedder
+/// owns the ordinary exits through its own launch handle; this covers the one path no RAII
+/// guard can, where the signal's default action kills the process before any `Drop` runs.
+///
+/// `pgid` MUST be a group the caller confirmed its child leads. The two checks here are a
+/// backstop for that contract, not a substitute for it — the handler issues `kill(-pgid)`,
+/// so a pgid naming aube's OWN group would SIGKILL the installer and every sibling script.
+pub fn register_embedder_group(pgid: libc::pid_t) -> Option<EmbedderGroupRegistration> {
+    // SAFETY: both are plain reads of process state, valid to call at any time.
+    let own_group = unsafe { libc::getpgrp() };
+    if pgid <= 0 || pgid == own_group || unsafe { libc::getpgid(pgid) } != pgid {
+        return None;
+    }
+    // Idempotent (`Once`), and a no-op when `arm_group_reaper` already ran. Kept so a
+    // caller that only registers is still covered rather than silently unreaped.
+    install_signal_handler();
+    register(pgid).map(|slot| EmbedderGroupRegistration { slot })
+}
+
+/// The registry slot held by [`register_embedder_group`], released on drop.
+pub struct EmbedderGroupRegistration {
+    slot: usize,
+}
+
+impl Drop for EmbedderGroupRegistration {
+    fn drop(&mut self) {
+        REGISTRY[self.slot].store(0, Ordering::SeqCst);
+    }
+}
+
 fn register(pgid: libc::pid_t) -> Option<usize> {
     REGISTRY.iter().position(|slot| {
         slot.compare_exchange(0, pgid, Ordering::SeqCst, Ordering::SeqCst)
@@ -253,3 +304,55 @@ extern "C" fn reap_and_resignal(signo: libc::c_int) {
 // SIGKILLs that process's group. Writing the test is the hazard, which is why
 // `arm` takes `&Child` instead of a bare pid. The reaping behaviour it guards is
 // covered end-to-end by `unix_process_group_tests` in `lib.rs`.
+//
+// `register_embedder_group`'s rejection branch IS testable, because registration
+// only READS process state — it neither relocates a process nor signals one, so a
+// misuse test is inert rather than lethal.
+#[cfg(test)]
+mod embedder_group_tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+
+    /// The guard that keeps a `kill(-pgid)` from naming the installer's own group and
+    /// killing aube along with every sibling script.
+    #[test]
+    fn refuses_a_group_the_installer_belongs_to() {
+        // SAFETY: a read of this process's own group id.
+        let own = unsafe { libc::getpgrp() };
+        assert!(register_embedder_group(own).is_none());
+        // Whichever of the two guards catches it, a pid that does not lead its own
+        // group is never enrollable either.
+        assert!(register_embedder_group(std::process::id() as libc::pid_t).is_none());
+        assert!(register_embedder_group(0).is_none());
+        assert!(register_embedder_group(-1).is_none());
+    }
+
+    #[test]
+    fn enrols_a_confirmed_leader_and_releases_its_slot_on_drop() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "sleep 5"]);
+        // SAFETY: `setpgid` is async-signal-safe and touches no parent state.
+        unsafe {
+            command.pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().expect("spawn group leader");
+        let pgid = child.id() as libc::pid_t;
+
+        let registration = register_embedder_group(pgid).expect("a confirmed leader enrols");
+        let slot = registration.slot;
+        assert_eq!(REGISTRY[slot].load(Ordering::SeqCst), pgid);
+        drop(registration);
+        assert_eq!(
+            REGISTRY[slot].load(Ordering::SeqCst),
+            0,
+            "the slot must be free again, or a later script cannot enrol"
+        );
+
+        // SAFETY: the group this test created, which it owns.
+        unsafe { libc::kill(-pgid, libc::SIGKILL) };
+        let _ = child.wait();
+    }
+}

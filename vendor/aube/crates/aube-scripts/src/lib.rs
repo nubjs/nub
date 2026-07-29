@@ -22,8 +22,12 @@ mod linux_jail;
 #[cfg(windows)]
 mod windows_job;
 
+// Public for its EMBEDDER surface only (`arm_group_reaper` / `register_embedder_group`):
+// an embedder that owns the lifecycle spawn creates the process group itself and must be
+// able to enrol it in the same terminate-signal reaper aube uses for its own. Everything
+// aube's own spawn path uses stays `pub(crate)`.
 #[cfg(unix)]
-mod unix_group;
+pub mod unix_group;
 
 pub use content_sniff::{Suspicion, SuspicionKind, sniff_lifecycle};
 pub use default_trust::is_default_trusted;
