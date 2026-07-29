@@ -247,6 +247,13 @@ impl Linker {
         if pkg_nm_dir.exists() {
             trace!("virtual store hit: {dep_path}");
             stats.packages_cached += 1;
+            // A cache hit skips materialization, so the cold-path strip
+            // never runs — and the global virtual store outlives
+            // `rm -rf node_modules`, so an entry written by a pre-fix
+            // build would stay quarantined forever. Stripping here too
+            // makes the invariant hold for every package the linker
+            // touches, cold or warm.
+            crate::quarantine::strip_from_native_binaries(&pkg_nm_dir, index);
             return Ok(());
         }
 
@@ -409,6 +416,7 @@ impl Linker {
         let final_entry = aube_dir.join(&subdir);
         if final_entry.exists() {
             stats.packages_cached += 1;
+            crate::quarantine::strip_cached_entry(&final_entry, &pkg.name, index);
             return Ok(());
         }
 

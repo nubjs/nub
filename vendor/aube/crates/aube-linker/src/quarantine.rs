@@ -31,6 +31,32 @@
 //! the CAS, so Gatekeeper's unverified-download provenance adds nothing
 //! on top. Only `com.apple.quarantine` is touched; every other xattr on
 //! the file is left alone.
+//!
+//! ## Why the warm path strips too
+//!
+//! The strip runs on cache hits as well as fresh materializations. The
+//! global virtual store is on by default and lives outside the project,
+//! so an entry written by a pre-fix build survives `rm -rf node_modules`
+//! and would be re-linked, still quarantined, forever — which is exactly
+//! the state #575 reports. Stripping at both seams makes one invariant
+//! hold: every package the linker touches has its native binaries
+//! stripped, whether or not this run created them. That is deliberately
+//! preferred over a one-shot migration marker, which would have to
+//! choose between sweeping the whole store and marking it swept while
+//! most entries were never visited.
+//!
+//! ## Known boundaries
+//!
+//! - An install that relinks nothing at all (the frozen fast path, which
+//!   short-circuits before the linker) strips nothing. Removing
+//!   `node_modules` invalidates that path and heals the store on the
+//!   next install.
+//! - The index is the tarball's file list, so files written into a
+//!   package *after* linking are invisible here: `node-gyp` output
+//!   (`build/Release/*.node`) and side-effects-cache restores, which
+//!   hardlink or `fcopyfile` a cached build tree into an already-linked
+//!   package. Both are real and both are out of this module's reach by
+//!   construction — do not assume this seam covers build output.
 
 use aube_store::StoredFile;
 use std::path::Path;
@@ -136,6 +162,14 @@ mod imp {
                 remove_quarantine(&pkg_dir.join(rel_path));
             }
         }
+    }
+
+    /// Warm-path counterpart, for a virtual-store entry that already
+    /// existed so nothing was materialized and the cold-path strip never
+    /// ran. `entry_dir` holds the package at `node_modules/<name>` — the
+    /// layout `materialize_into` writes.
+    pub(crate) fn strip_cached_entry(entry_dir: &Path, pkg_name: &str, index: &PackageIndex) {
+        strip_from_native_binaries(&entry_dir.join("node_modules").join(pkg_name), index);
     }
 
     /// Behavioural coverage for the strip itself. macOS-only by
@@ -297,12 +331,20 @@ mod imp {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) use imp::strip_from_native_binaries;
+pub(crate) use imp::{strip_cached_entry, strip_from_native_binaries};
 
 /// Quarantine is a macOS concept; every other platform links without it.
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn strip_from_native_binaries(
     _pkg_dir: &std::path::Path,
+    _index: &aube_store::PackageIndex,
+) {
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn strip_cached_entry(
+    _entry_dir: &std::path::Path,
+    _pkg_name: &str,
     _index: &aube_store::PackageIndex,
 ) {
 }

@@ -256,6 +256,7 @@ impl Linker {
                 )?;
             } else {
                 stats.packages_cached += 1;
+                crate::quarantine::strip_cached_entry(&aube_entry, &pkg.name, index);
             }
         }
 
@@ -998,6 +999,7 @@ impl Linker {
             }
             if aube_entry.exists() {
                 stats.packages_cached += 1;
+                crate::quarantine::strip_cached_entry(&aube_entry, &pkg.name, index);
                 continue;
             }
             self.materialize_into(
