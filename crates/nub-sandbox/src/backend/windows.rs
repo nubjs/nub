@@ -1561,9 +1561,8 @@ pub(super) mod launch {
         // ACTIVE_PROCESS is transitive to grandchildren and refuses CREATE_BREAKAWAY_FROM_JOB,
         // so confined code cannot escape it; it needs no privilege, which is why it is the
         // containment lever the zero-privilege jail can actually use.
-        info.BasicLimitInformation.LimitFlags =
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
-        info.BasicLimitInformation.ActiveProcessLimit = super::active_process_cap();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let _ = super::active_process_cap();
         let ok = unsafe {
             SetInformationJobObject(
                 job,

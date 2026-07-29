@@ -5,7 +5,7 @@ name: win-proc-cap-probe
 
 on:
   push:
-    branches: [sandbox/win-active-process-cap]
+    branches: [sandbox/win-active-process-cap-revert]
   workflow_dispatch:
 
 permissions:
