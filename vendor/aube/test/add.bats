@@ -753,6 +753,7 @@ JSON
 	#
 	# The stand-in artifact is a file the tarball does not contain, which is
 	# exactly the shape of real build output.
+	echo "node-linker=hoisted" >>.npmrc
 	cat >package.json <<'JSON'
 {
   "name": "hoisted-preserve-test",
@@ -762,11 +763,11 @@ JSON
   }
 }
 JSON
-	run aube install --node-linker=hoisted
+	run aube install
 	assert_success
 	echo BUILT >node_modules/abbrev/build-artifact.txt
 
-	run aube add is-odd@3.0.1 --node-linker=hoisted
+	run aube add is-odd@3.0.1
 	assert_success
 	assert_file_exists node_modules/abbrev/build-artifact.txt
 }
@@ -777,6 +778,7 @@ JSON
 	# install finishes, because the install state alone cannot distinguish a
 	# complete tree from one a killed install abandoned halfway — state written
 	# by an earlier SUCCESSFUL install outlives a later failed one.
+	echo "node-linker=hoisted" >>.npmrc
 	cat >package.json <<'JSON'
 {
   "name": "hoisted-interrupted-test",
@@ -786,7 +788,7 @@ JSON
   }
 }
 JSON
-	run aube install --node-linker=hoisted
+	run aube install
 	assert_success
 	echo BUILT >node_modules/abbrev/build-artifact.txt
 
@@ -795,7 +797,7 @@ JSON
 	[ -n "$state_dir" ]
 	touch "$state_dir/link-in-progress"
 
-	run aube add is-odd@3.0.1 --node-linker=hoisted
+	run aube add is-odd@3.0.1
 	assert_success
 	# Wiped and refilled rather than reused, so the unverifiable tree is healed.
 	assert_file_not_exists node_modules/abbrev/build-artifact.txt
