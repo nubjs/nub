@@ -968,11 +968,51 @@ mod tests {
         );
     }
 
-    // Upstream v1.35.0 adds `bin_command_executes_native_target_behind_generated_shim`
-    // here, asserting a native target under `preferSymlinkedExecutables: false`
-    // produces a *generated* shim whose NODE_PATH survives into the exec.
-    // nub #394 forces the symlink layout for native targets regardless of that
-    // setting (see `aube-linker::sys::create_bin_shim`), so the scenario is
-    // unreachable on Unix here and the invariant is pinned in sys.rs instead.
-    // Re-evaluate if nub adopts upstream's `BinLaunch::Direct` shim.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bin_command_executes_native_target_behind_generated_shim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("node_modules/.bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let hidden_modules = tmp.path().join("node_modules/.aube/node_modules");
+        std::fs::create_dir_all(&hidden_modules).unwrap();
+        let target = std::path::Path::new("/bin/echo");
+        aube_linker::create_bin_shim(
+            &bin_dir,
+            "native-echo",
+            target,
+            aube_linker::BinShimOptions {
+                extend_node_path: true,
+                prefer_symlinked_executables: Some(false),
+                hidden_modules_dir: Some(&hidden_modules),
+            },
+        )
+        .unwrap();
+
+        let shim = bin_dir.join("native-echo");
+        let mut command = build_bin_command(
+            tmp.path(),
+            &shim,
+            "native-echo",
+            &["launched-directly".to_string()],
+            &[],
+            false,
+        );
+        let node_path = command
+            .as_std()
+            .get_envs()
+            .find_map(|(key, value)| (key == "NODE_PATH").then_some(value).flatten())
+            .unwrap();
+        assert_eq!(
+            node_path,
+            std::env::join_paths([tmp.path().join("node_modules"), hidden_modules.clone()])
+                .unwrap()
+        );
+        let output = command.output().await.unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "launched-directly\n"
+        );
+    }
 }

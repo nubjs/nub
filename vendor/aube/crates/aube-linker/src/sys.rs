@@ -208,14 +208,7 @@ pub fn create_bin_shim(
     validate_bin_name(name)?;
     #[cfg(unix)]
     {
-        // A native-executable target must never be wrapped in a `node`
-        // shim (it isn't JS). A bare symlink is the correct, npm-matching
-        // form — the kernel execs the target directly, and NODE_PATH
-        // (the only reason to prefer a shim) is meaningless for a
-        // non-node binary. So force the symlink layout for native targets
-        // regardless of `preferSymlinkedExecutables`. See #394.
-        let write_shim = matches!(opts.prefer_symlinked_executables, Some(false))
-            && !is_native_executable_target(target);
+        let write_shim = matches!(opts.prefer_symlinked_executables, Some(false));
         let link_path = bin_dir.join(name);
         let link_parent = link_path.parent().unwrap_or(bin_dir);
         std::fs::create_dir_all(link_parent)?;
@@ -270,29 +263,9 @@ pub fn create_bin_shim(
         let rel_backslash = rel.replace('/', "\\");
         let rel_fwdslash = rel.replace('\\', "/");
 
-        // Windows can't take the symlink escape (real symlinks need
-        // Developer Mode / admin), so a native-executable target gets
-        // direct-exec wrappers that run the binary itself instead of
-        // `node <target>`. No NODE_PATH — it's meaningless for a
-        // non-node binary. See #394 and the Unix branch above.
-        if is_native_executable_target(target) {
-            write_shim_file(
-                &bin_dir.join(format!("{name}.cmd")),
-                generate_cmd_shim_direct(&rel_backslash).as_bytes(),
-            )?;
-            write_shim_file(
-                &bin_dir.join(format!("{name}.ps1")),
-                generate_ps1_shim_direct(&rel_fwdslash).as_bytes(),
-            )?;
-            write_shim_file(
-                &bin_dir.join(name),
-                generate_sh_shim_direct(&rel_fwdslash).as_bytes(),
-            )?;
-            return Ok(());
-        }
-
-        // Computed after the native-executable early return above, which
-        // needs no interpreter classification.
+        // Classifies a native-executable target as `BinLaunch::Direct`, so
+        // each wrapper below execs the binary itself rather than handing it
+        // to `node` (#394).
         let launch = detect_bin_launch(target);
         // cmd.exe wants backslash paths; PowerShell + the Git-Bash `.sh`
         // wrapper want forward-slash paths. NODE_PATH itself is parsed by
@@ -769,19 +742,6 @@ pub fn is_native_executable(bytes: &[u8]) -> bool {
     bytes.len() >= 4 && MACHO_MAGICS.iter().any(|m| bytes.starts_with(*m))
 }
 
-/// Read the first bytes of `target` and classify it as a native
-/// executable. Returns `false` when the file is absent or unreadable —
-/// callers fall back to the JS/interpreter shim, matching the prior
-/// behavior for self-bin build outputs that don't exist at link time.
-pub fn is_native_executable_target(target: &Path) -> bool {
-    use std::io::Read;
-    let mut buf = [0u8; 4];
-    let n = std::fs::File::open(target)
-        .and_then(|mut f| f.read(&mut buf))
-        .unwrap_or(0);
-    is_native_executable(&buf[..n])
-}
-
 /// Run-time substitute for any `prog` that reaches a shim generator
 /// without passing `is_safe_prog`. Every caller in this crate goes
 /// through `detect_bin_launch` and never trips this branch, but a
@@ -944,46 +904,6 @@ fn generate_sh_shim(
     )
 }
 
-/// Direct-exec cmd wrapper for a native-executable target: run the
-/// binary itself, no `node`. The `rel_target` is a fixed relative path
-/// this crate computed (never attacker-derived), so no interpreter
-/// splicing is possible here. See #394.
-#[cfg(windows)]
-fn generate_cmd_shim_direct(rel_target_backslash: &str) -> String {
-    format!("@\"%~dp0\\{rel_target_backslash}\" %*\r\n")
-}
-
-#[cfg(windows)]
-fn generate_ps1_shim_direct(rel_target_fwdslash: &str) -> String {
-    format!(
-        "#!/usr/bin/env pwsh\n\
-         $basedir=Split-Path $MyInvocation.MyCommand.Definition -Parent\n\
-         if ($MyInvocation.ExpectingInput) {{\n\
-         \x20 $input | & \"$basedir/{rel_target_fwdslash}\" $args\n\
-         }} else {{\n\
-         \x20 & \"$basedir/{rel_target_fwdslash}\" $args\n\
-         }}\n\
-         exit $LASTEXITCODE\n"
-    )
-}
-
-#[cfg(windows)]
-fn generate_sh_shim_direct(rel_target_fwdslash: &str) -> String {
-    format!(
-        "#!/bin/sh\n\
-         basedir=$(dirname \"$(echo \"$0\" | sed -e 's,\\\\,/,g')\")\n\
-         \n\
-         case `uname` in\n\
-         \x20\x20\x20 *CYGWIN*|*MINGW*|*MSYS*)\n\
-         \x20\x20\x20\x20\x20\x20\x20 if command -v cygpath > /dev/null 2>&1; then\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20 basedir=`cygpath -w \"$basedir\"`\n\
-         \x20\x20\x20\x20\x20\x20\x20 fi\n\
-         \x20\x20\x20 ;;\n\
-         esac\n\
-         \n\
-         exec \"$basedir/{rel_target_fwdslash}\" \"$@\"\n"
-    )
-}
 
 /// Marker the POSIX shim writer stamps into every generated file so
 /// [`parse_posix_shim_target`] can unambiguously identify our shims and
@@ -1732,40 +1652,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
-    fn create_bin_shim_forces_symlink_for_native_target_despite_opt_out() {
-        // #394: `preferSymlinkedExecutables: false` does NOT apply to native
-        // targets — a symlink is the only correct form, so the opt-out is
-        // overridden. Upstream v1.35.0 instead writes a direct-exec shim here
-        // (`BinLaunch::Direct`), which is why its own exec test for this case
-        // does not hold on nub; the divergence is deliberate, so pin it.
-        let dir = tempfile::tempdir().unwrap();
-        let bin_dir = dir.path().join("node_modules/.bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-
-        let target = std::path::Path::new("/bin/echo");
-        assert!(is_native_executable_target(target), "fixture must be native");
-
-        create_bin_shim(
-            &bin_dir,
-            "native-echo",
-            target,
-            BinShimOptions {
-                extend_node_path: true,
-                prefer_symlinked_executables: Some(false),
-                hidden_modules_dir: None,
-            },
-        )
-        .unwrap();
-
-        let link = bin_dir.join("native-echo");
-        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
-        // A symlink carries no NODE_PATH, which is the behavioral cost of the
-        // divergence and the thing upstream's shim preserves.
-        assert_eq!(resolve_bin_shim(&link).unwrap(), None);
-    }
-
-    #[test]
     fn is_native_executable_classifies_magic_bytes() {
         // Native formats → true.
         assert!(is_native_executable(b"\x7FELF\x02\x01\x01"));
@@ -1784,10 +1670,12 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn create_bin_shim_symlinks_native_target_despite_shim_optout() {
-        // #394: a native-executable target must never get a `node` shim,
-        // even when `preferSymlinkedExecutables=false` requests shims —
-        // a symlink is the only correct form (the kernel execs it directly).
+    fn create_bin_shim_direct_execs_native_target_on_shim_optout() {
+        // #394: a native-executable target must never get a `node` shim (the
+        // kernel has to exec it directly). nub used to force the symlink
+        // layout here, overriding `preferSymlinkedExecutables=false`.
+        // `BinLaunch::Direct` reaches the same end while honoring the opt-out
+        // and keeping NODE_PATH, which a symlink cannot carry.
         let dir = tempfile::tempdir().unwrap();
         let bin_dir = dir.path().join("node_modules/.bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
@@ -1810,16 +1698,20 @@ mod tests {
         .unwrap();
 
         let path = bin_dir.join("esbuild");
-        let meta = path.symlink_metadata().unwrap();
+        assert!(!path.symlink_metadata().unwrap().file_type().is_symlink());
+        let content = std::fs::read_to_string(&path).unwrap();
         assert!(
-            meta.file_type().is_symlink(),
-            "native target must be symlinked, not wrapped in a node shim"
+            content.contains("exec \"$basedir/../../pkg/esbuild\""),
+            "native target must be exec'd directly:\n{content}"
         );
-        assert_eq!(
-            std::fs::read_link(&path).unwrap(),
-            Path::new("../../pkg/esbuild")
+        assert!(
+            !content.contains("$basedir/node\""),
+            "native target must not be wrapped in a node shim:\n{content}"
         );
-        assert!(path.exists(), "relative target must resolve");
+        assert!(
+            content.contains("export NODE_PATH="),
+            "the direct-exec shim carries NODE_PATH the symlink could not:\n{content}"
+        );
     }
 
     #[cfg(unix)]
