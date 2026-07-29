@@ -38,6 +38,19 @@ pub fn resolve_ts(
     preserve_symlinks: Option<bool>,
 ) -> Option<String> {
     let preserve_symlinks = preserve_symlinks.unwrap_or(false);
+    // Classify and DISCOVER from where the importer really lives. Under
+    // `--preserve-symlinks` Node hands over the un-realpathed path, so a file inside a
+    // workspace package symlinked into node_modules would read as a dependency and
+    // lose the additive resolution its own imports get without the flag. Both uses
+    // have to move together: `parent_dir` drives tsconfig discovery and the
+    // node_modules walk, so testing the real path while discovering from the symlink
+    // would find the project root's tsconfig instead of the package's own. What the
+    // resolver RETURNS is a separate question, settled per-case below.
+    let parent_path = if preserve_symlinks && !parent_path.is_empty() {
+        real_path(&parent_path)
+    } else {
+        parent_path
+    };
     let parent_ext = extname(&parent_path);
     let parent_dir = if parent_path.is_empty() {
         std::env::current_dir().ok()?.to_string_lossy().into_owned()

@@ -572,6 +572,55 @@ console.log("got:" + x);
     );
 }
 
+/// Every other `--preserve-symlinks` fixture here uses the workspace package as the
+/// import TARGET. This one makes it the IMPORTER, which is the other half: the
+/// resolver has to classify the importing file the same way the load gates do, or a
+/// symlinked workspace package reads as a dependency and its own imports silently
+/// lose the additive resolution they get without the flag.
+#[cfg(unix)]
+#[test]
+fn preserve_symlinks_keeps_additive_resolution_inside_a_workspace_package() {
+    let dir = fixture("ws-importer");
+    write(
+        &dir.join("packages/lib/package.json"),
+        r#"{"name":"@repro/lib","main":"./index.ts"}"#,
+    );
+    write(
+        &dir.join("packages/lib/index.ts"),
+        r#"import p from "thirdparty/components/prism-python";
+export const lang: string = p.lang;
+"#,
+    );
+    std::fs::create_dir_all(dir.join("node_modules/@repro")).unwrap();
+    std::os::unix::fs::symlink(
+        dir.join("packages/lib"),
+        dir.join("node_modules/@repro/lib"),
+    )
+    .unwrap();
+    write(
+        &dir.join("entry.ts"),
+        r#"import { lang } from "@repro/lib";
+console.log("lang:" + lang);
+"#,
+    );
+    let out = Command::new(nub_binary())
+        .arg(dir.join("entry.ts").to_str().unwrap())
+        .current_dir(&dir)
+        .env("NODE_OPTIONS", "--preserve-symlinks")
+        .env(
+            "XDG_CACHE_HOME",
+            std::env::temp_dir().join(format!("nub-subpath-cache-{}", std::process::id())),
+        )
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("lang:python"),
+        "a symlinked workspace package lost additive resolution for its own imports: {stdout} / {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// THE ENCAPSULATION GUARD. A package that declares `exports` owns its subpath
 /// map; probing must never reach a path it withheld. Without this, #562's fix
 /// would be a sandbox escape out of every `exports` map on disk.
