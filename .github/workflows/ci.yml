@@ -666,9 +666,13 @@ jobs:
         with:
           shared-key: ci-test-${{ runner.os }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          # vendor/aube is its own workspace with its own target dir, so without
+          # an entry here the linker-semantics step below pays a cold dep build
+          # on every leg.
           workspaces: |
             .
             crates/nub-native
+            vendor/aube
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320  # v5
         with:
           version: 10
