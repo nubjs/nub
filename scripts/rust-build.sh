@@ -98,6 +98,15 @@ if [ "${NUB_BUILD_FG:-}" != "1" ] && [ "$(uname)" = "Darwin" ] \
   qos="taskpolicy -c utility"
 fi
 
+# `--print-target` resolves the target dir the SAME way a real build would and
+# prints it, so callers that must locate the artifact afterwards (make
+# install-dev symlinking nub-dev) follow the shared/isolated decision instead of
+# hardcoding a path that is only right in one of the two cases.
+if [ "${1:-}" = "--print-target" ]; then
+  printf '%s\n' "$target"
+  exit 0
+fi
+
 printf 'rust-build: %s\n  CARGO_TARGET_DIR=%s jobs=%s qos=%s\n' \
   "$why" "$target" "${CARGO_BUILD_JOBS:-default}" "${qos:-none}" >&2
 # NUB_* vars are routing input for this wrapper, not part of the command's

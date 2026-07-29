@@ -2250,6 +2250,134 @@ async fn primer_range_miss_heals_past_a_304_on_the_seeded_full_cache() {
     let _ = std::fs::remove_dir_all(base);
 }
 
+/// The ABBREVIATED tier needs the same validator-dropping as the full tier
+/// above. It is the tier in play whenever `needs_time` is false — no
+/// `minimumReleaseAge`, no `NoDowngrade`, or `registry-supports-time-field`
+/// set — and it was seeded WITH the primer's ETag until this was fixed.
+///
+/// The seed writes `fresh: false`, so the entry is stale immediately and the
+/// NEXT resolve revalidates it. Carrying the primer's validators makes that
+/// revalidation conditional, the registry answers `304`, and the *truncated*
+/// primer body is resurrected as authoritative — and because a disk-cache hit
+/// is not flagged primer-seeded, the driver's range-miss heal never fires, so
+/// a version the registry plainly has fails with `ERR_AUBE_NO_MATCHING_VERSION`.
+/// Two resolves against one cache dir is what reproduces it.
+#[tokio::test]
+async fn primer_seeded_abbreviated_cache_does_not_strand_a_range_miss_behind_a_304() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // A primer entry with a DEPENDENCY-FREE version: the mock registry below
+    // serves one synthetic body, so any transitive edge would resolve against
+    // a packument that cannot satisfy it and fail pass 1 for unrelated reasons.
+    let Some((name, primer_version)) = crate::primer::names().find_map(|n| {
+        let packument = crate::primer::get(n)?.packument();
+        let (version, _) = packument.versions.iter().find(|(_, meta)| {
+            meta.dependencies.is_empty()
+                && meta.optional_dependencies.is_empty()
+                && meta.peer_dependencies.is_empty()
+        })?;
+        Some((n.to_string(), version.clone()))
+    }) else {
+        return;
+    };
+    let healed_version = "99999.0.0";
+    let live = make_packument(&name, &[healed_version], healed_version);
+    let live_body = serde_json::to_vec(&live).unwrap();
+
+    let conditional_hits = Arc::new(AtomicUsize::new(0));
+    let conditional_seen = conditional_hits.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let registry = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let live_body = live_body.clone();
+            let conditional_seen = conditional_seen.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0_u8; 8192];
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+                if req.contains("if-none-match:") || req.contains("if-modified-since:") {
+                    conditional_seen.fetch_add(1, Ordering::Relaxed);
+                    let response = "HTTP/1.1 304 Not Modified\r\netag: \"primer\"\r\nconnection: close\r\n\r\n";
+                    let _ = socket.write_all(response.as_bytes()).await;
+                } else {
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\netag: \"live\"\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        live_body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.write_all(&live_body).await;
+                }
+            });
+        }
+    });
+
+    let base = std::env::temp_dir().join(format!(
+        "aube-resolver-primer-abbrev-304-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let cache_dir = base.join("packuments");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+
+    // Pass 1 must be SATISFIED BY THE PRIMER: a range miss or a live-edge
+    // freshness refetch both heal by REPLACING the cache with the live body,
+    // which would repair the very state pass 2 needs to exercise.
+    //
+    // Pass 1: served from the primer, which seeds the abbreviated cache.
+    {
+        let client = Arc::new(aube_registry::client::RegistryClient::new(&registry));
+        let mut resolver = Resolver::new(client)
+            .with_packument_cache(cache_dir.clone())
+            .with_registry_supports_time_field(true)
+            .with_force_metadata_primer(true);
+        let mut manifest = PackageJson::default();
+        manifest
+            .dependencies
+            .insert(name.clone(), format!("={primer_version}"));
+        resolver
+            .resolve(&manifest, None)
+            .await
+            .expect("pass 1 should resolve straight from the primer");
+    }
+
+    // Pass 2: the seeded entry is stale (`fresh: false`), so it revalidates.
+    // With the primer's validators attached that revalidation is conditional,
+    // the registry 304s, and the truncated body comes back as authoritative —
+    // and a disk hit is not primer-seeded, so no heal rescues it.
+    let client = Arc::new(aube_registry::client::RegistryClient::new(&registry));
+    let mut resolver = Resolver::new(client)
+        .with_packument_cache(cache_dir.clone())
+        .with_registry_supports_time_field(true)
+        .with_force_metadata_primer(true);
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert(name.clone(), format!("={healed_version}"));
+    let graph = resolver.resolve(&manifest, None).await.unwrap_or_else(|e| {
+        panic!(
+            "pass 2 failed to resolve {name}@{healed_version}: {e} — the seeded \
+             abbreviated cache was resurrected behind a 304 ({} conditional \
+             request(s) seen)",
+            conditional_hits.load(Ordering::Relaxed)
+        )
+    });
+    assert!(
+        graph_has_package(&graph, &name, healed_version),
+        "pass 2 did not resolve {name}@{healed_version}"
+    );
+
+    server.abort();
+    let _ = std::fs::remove_dir_all(base);
+}
+
 /// Regression: when both `minimumReleaseAge` and `trustPolicy=NoDowngrade`
 /// are active, the resolver must use a full packument with `time`;
 /// using an abbreviated corgi packument would make the trust check fail

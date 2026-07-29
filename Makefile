@@ -51,12 +51,19 @@ addon:
 # The fast profile rebuilds it in a fraction of that. addon-fast builds the
 # native addon under the same profile so a single `cargo build --profile fast`
 # pass serves both.
+# Builds through scripts/rust-build.sh and symlinks to the target dir IT picked.
+# Hardcoding $(CURDIR)/target left nub-dev pointing at a stale binary: every
+# documented rebuild path (the post-merge refresh, the dev-loop) goes through the
+# wrapper, which normally writes to the SHARED dir, so nothing updated
+# ./target/fast/nub and `nub-dev` silently served whatever was built last time
+# make ran. `--print-target` re-resolves the same shared/isolated decision.
 install-dev: addon-fast qos-global
-	$(CARGO) build --profile fast
-	ln -sf $(CURDIR)/target/fast/nub $(BIN_DIR)/nub-dev
-	ln -sf $(CURDIR)/target/fast/nub $(BIN_DIR)/nubx-dev
-	@echo "Installed: $(BIN_DIR)/nub-dev -> target/fast/nub"
-	@echo "Installed: $(BIN_DIR)/nubx-dev -> target/fast/nub"
+	scripts/rust-build.sh build --profile fast
+	@t=$$(scripts/rust-build.sh --print-target); \
+	  ln -sf $$t/fast/nub $(BIN_DIR)/nub-dev; \
+	  ln -sf $$t/fast/nub $(BIN_DIR)/nubx-dev; \
+	  echo "Installed: $(BIN_DIR)/nub-dev -> $$t/fast/nub"; \
+	  echo "Installed: $(BIN_DIR)/nubx-dev -> $$t/fast/nub"
 	@echo ""
 	@nub-dev --version
 
