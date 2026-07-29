@@ -269,13 +269,11 @@ module.exports = { who: v };
 /// load-side node_modules gate refuses the symlinked package's TS under this flag,
 /// which nub v0.5.0 exhibits identically and which is not what this pins.
 ///
-/// COUPLING, for whoever adds the load-side gate: the classic TS-family
-/// `require.extensions` handler transpiles unconditionally today, and this package
-/// loads through it on a path that still reads `/node_modules/` under this flag.
-/// Gating that handler on the LITERAL filename would break this test and quietly
-/// undo the resolution-side fix. Resolve the path there the way `isDepTsHit` does —
-/// better, factor the one "is this really a dependency?" predicate both layers call,
-/// so the two definitions cannot drift apart.
+/// COUPLING with the load side: the classic TS-family `require.extensions` handler
+/// bails on a dependency through the same `isDependencyPath` predicate the
+/// resolve-side retry uses, so it decides on the file's REAL location too. Testing
+/// the literal filename there would break this test and quietly undo the
+/// resolution-side fix.
 #[cfg(unix)]
 #[test]
 fn preserve_symlinks_keeps_a_workspace_package_loadable() {
@@ -354,6 +352,10 @@ module.exports = { who: v };
     assert!(
         !stdout.contains("who:dep-ts-explicit"),
         "a dependency's TypeScript was transpiled through an explicit path: {stdout} / {stderr}"
+    );
+    assert!(
+        stdout.contains("refused"),
+        "the require neither loaded nor threw — the run produced nothing: {stdout} / {stderr}"
     );
 }
 
