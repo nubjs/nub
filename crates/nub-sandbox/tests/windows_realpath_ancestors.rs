@@ -55,9 +55,12 @@
 //! reads as a refusal), and `psymlinks-ungranted-read-refused` asserts the SPECIFIC error — a
 //! canary that came back `ENOENT` would mean the control never tested confinement at all.
 //!
-//! EVERY SPAWN CARRIES A TIMEOUT. Measured, a piped `child_process` spawn under this jail does
-//! not fail — it BLOCKS FOREVER, which is worse than a refusal for a postinstall and which
-//! killed an entire probe run at the harness timeout, discarding every arm after it.
+//! BLOCKER 2 IS DELIBERATELY NOT MEASURED HERE. A piped `child_process` spawn under this jail
+//! does not fail — it BLOCKS INDEFINITELY, and Node's own `timeout` option cannot break it
+//! because the block is in libuv's named-pipe setup, before the timer arms. Reproduced twice
+//! (runs 30460192608 and 30461823852): both markers end at exactly that call and the harness
+//! had to kill the process, taking every later arm with it. That IS the finding, and it is a
+//! worse failure mode for a postinstall than a clean refusal would be.
 //!
 //! CI IS THE ONLY VENUE. AppContainer cannot be launched over SSH (session 0 has no window
 //! station; every launch returns 0xC0000142). Runs branch-scoped via
@@ -834,12 +837,12 @@ rec("read-ungranted", () => fs.readFileSync(UNGRANTED, "utf8").trim());
 // measured refused while Rust's Stdio::piped() — also a named pipe — was permitted, so what
 // `child_process` actually does is an open question, and it decides whether node-gyp (whose
 // Python discovery pipes on every configure) can run under the jail at all.
-// EVERY spawn carries a timeout: measured, a piped spawn under this jail does not fail — it
-// BLOCKS FOREVER, which killed a whole probe run at the harness timeout and discarded the
-// arms after it. A timeout turns that into a recorded ETIMEDOUT, which is itself the finding.
-const cp = require("child_process");
-rec("spawn-piped", () => cp.execFileSync(process.execPath, ["-e", "process.stdout.write('pong')"], {{ encoding: "utf8", timeout: 15000 }}));
-rec("spawn-inherit", () => {{ cp.execFileSync(process.execPath, ["-e", "0"], {{ stdio: "inherit", timeout: 15000 }}); return "ok"; }});
+// BLOCKER 2 IS NOT MEASURED HERE ANY MORE, because measuring it destroys the run. A piped
+// `child_process` spawn under this jail does not fail — it BLOCKS INDEFINITELY, and Node's own
+// `timeout` option cannot break it (the block is in libuv's named-pipe setup, before the timer
+// arms). Reproduced twice, runs 30460192608 and 30461823852: both markers end exactly at this
+// point and the harness had to kill the process. That is the finding; re-measuring it costs
+// every arm after it.
 put("done=ok");
 "#,
                 marker = esc(marker),
@@ -1001,32 +1004,6 @@ put("done=ok");
             "psymlinks-granted-read-permitted",
             preserve_both.marker.contains("read-granted=ok"),
             "the control that must pass in the same arm as the refusal above",
-        );
-
-        // BLOCKER 2, measured rather than inferred. Reported as facts, not as nub's pass/fail:
-        // a refusal here is an OS verdict, and it is the one that decides whether node-gyp can
-        // run under the jail (its Python discovery pipes on every configure, `lib/util.js`).
-        let piped = preserve_both
-            .marker
-            .lines()
-            .find(|l| l.starts_with("spawn-piped="))
-            .unwrap_or("<absent>");
-        let inherited = preserve_both
-            .marker
-            .lines()
-            .find(|l| l.starts_with("spawn-inherit="))
-            .unwrap_or("<absent>");
-        report(
-            fails,
-            "child-process-piped-measured",
-            piped != "<absent>",
-            piped,
-        );
-        report(
-            fails,
-            "child-process-inherit-measured",
-            inherited != "<absent>",
-            inherited,
         );
 
         // Production delivery: nub cannot rewrite a lifecycle script's `node` argv, only its

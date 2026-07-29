@@ -122,7 +122,6 @@ jobs:
                    realpath-native-refused-in-jail \
                    psymlinks-ungranted-read-refused psymlinks-granted-read-permitted \
                    node-shim-via-node-options lifecycle-policy-compiles \
-                   child-process-piped-measured child-process-inherit-measured \
                    lifecycle-env-scrub-keeps-node-options \
                    lifecycle-script-body-completed lifecycle-cwd-is-package-dir; do
             grep -q "prop:$p=" probe.log || { echo "MISS property $p never reported"; fail=1; }
