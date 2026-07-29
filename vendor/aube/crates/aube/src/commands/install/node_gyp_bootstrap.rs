@@ -607,8 +607,7 @@ mod tests {
     #[test]
     fn the_path_fallback_refuses_to_resolve_back_into_itself() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let (shim, bin_dir, tally) =
-            staged_path_node_gyp(tmp.path(), "exec node \"$0.js\" \"$@\"");
+        let (shim, bin_dir, tally) = staged_path_node_gyp(tmp.path(), "exec node \"$0.js\" \"$@\"");
         // `$0.js` is the tallying stub re-execing the shim beside it, which is
         // exactly npm's stub bouncing back through `npm_config_node_gyp`.
         let link = bin_dir.join("node-gyp.js");
@@ -621,7 +620,9 @@ mod tests {
             stderr.contains("Refusing to recurse"),
             "must name the cycle it refused; got: {stderr}"
         );
-        let hops = std::fs::read_to_string(&tally).map(|t| t.lines().count()).unwrap_or(0);
+        let hops = std::fs::read_to_string(&tally)
+            .map(|t| t.lines().count())
+            .unwrap_or(0);
         assert!(
             hops <= 4,
             "re-entry must be bounded; the stub ran {hops} times"
@@ -644,7 +645,9 @@ mod tests {
             "the fallback must still reach a real node-gyp; stderr: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let hops = std::fs::read_to_string(&tally).map(|t| t.lines().count()).unwrap_or(0);
+        let hops = std::fs::read_to_string(&tally)
+            .map(|t| t.lines().count())
+            .unwrap_or(0);
         assert_eq!(hops, 1, "the real node-gyp must run exactly once");
     }
 }
