@@ -578,27 +578,6 @@ pub(super) fn link_bins_for_workspace_dep(
     Ok(())
 }
 
-/// Write per-dep `.bin/` directories holding shims for each package's
-/// *own* declared dependencies. Mirrors pnpm's post-link pass that
-/// populates `node_modules/.pnpm/<dep_path>/node_modules/.bin/`.
-///
-/// Without this, a dep's lifecycle script (e.g. `unrs-resolver`'s
-/// postinstall that calls `prebuild-install`) can't find transitive
-/// binaries on PATH — the project-level `node_modules/.bin` only holds
-/// shims for the root's *direct* deps. `run_dep_hook` prepends the
-/// dep-local `.bin` (via `dep_modules_dir_for`) before the
-/// project-level one so the dep's own transitive bins always win.
-///
-/// Isolated mode only. Under hoisted, `link_hoisted_placement_bins` already
-/// puts every placed package's bins in the `.bin` beside it, which is where
-/// Node resolves that copy from; a nested child's bins therefore sit in the
-/// requester's own `node_modules/.bin`, and `run_dep_hook` puts that
-/// directory on PATH ahead of the shared one. Running this pass under
-/// hoisted would instead write a nested child's bins into the *enclosing*
-/// (often root) `.bin` — a shared directory whose contents are decided by
-/// pass order inside `link_all_bins`, which standalone callers like
-/// `rebuild` do not reproduce. Skipping keeps that directory owned by the
-/// ordered passes alone.
 /// Gate + run the per-dep `.bin` linking pass.
 ///
 /// The link site in `run_link_phase` and the lifecycle site in
@@ -642,6 +621,24 @@ pub(crate) fn maybe_link_dep_bins(
     )
 }
 
+/// Write per-dep `.bin/` directories holding shims for each package's
+/// *own* declared dependencies. Mirrors pnpm's post-link pass that
+/// populates `node_modules/.pnpm/<dep_path>/node_modules/.bin/`.
+///
+/// Without this, a dep's lifecycle script (e.g. `unrs-resolver`'s
+/// postinstall that calls `prebuild-install`) can't find transitive
+/// binaries on PATH — the project-level `node_modules/.bin` only holds
+/// shims for the root's *direct* deps. `run_dep_hook` walks the enclosing
+/// `.bin` chain closest-first, so the dep's own transitive bins win.
+///
+/// Isolated mode only. Under hoisted, `link_hoisted_placement_bins` already
+/// puts every placed package's bins in the `.bin` beside it, which is where
+/// Node resolves that copy from, and `run_dep_hook`'s chain walk reaches
+/// every one of those directories. Running this pass under hoisted would
+/// instead write a nested child's bins into the *enclosing* (often root)
+/// `.bin` — a shared directory whose contents are decided by pass order
+/// inside `link_all_bins`, which standalone callers like `rebuild` do not
+/// reproduce. Skipping keeps that directory owned by the ordered passes.
 pub(crate) fn link_dep_bins(
     aube_dir: &std::path::Path,
     graph: &aube_lockfile::LockfileGraph,

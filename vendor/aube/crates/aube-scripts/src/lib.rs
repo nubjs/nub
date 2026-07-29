@@ -1434,14 +1434,12 @@ fn unshare_one_file(path: &Path, mode: u32) -> std::io::Result<()> {
 /// `node_modules/.aube/<dep_path>/node_modules/<name>`). The manifest
 /// is the dependency's own `package.json`, *not* the project root's.
 ///
-/// `dep_modules_dir` is the dep's sibling `node_modules/` — i.e.
-/// `package_dir`'s parent for unscoped packages, or `package_dir`'s
-/// grandparent for scoped (`@scope/name`). `<dep_modules_dir>/.bin`
-/// is prepended to `PATH` so the dep's postinstall can spawn tools
-/// declared in its own `dependencies` (the transitive-bin case —
-/// `prebuild-install`, `node-gyp`, `napi-postinstall`). The install
-/// driver writes shims there via `link_dep_bins`; `rebuild` mirrors
-/// the same pass.
+/// Every `<modules_dir>/.bin` from the package's own out to the project
+/// root is prepended to `PATH`, closest first, so the dep's postinstall
+/// can spawn tools declared in its own `dependencies` (the transitive-bin
+/// case — `prebuild-install`, `node-gyp`, `napi-postinstall`). The install
+/// driver writes those shims via `link_dep_bins` (isolated) and
+/// `link_hoisted_placement_bins` (hoisted).
 ///
 /// For the `install` hook specifically, if the manifest leaves both
 /// `install` and `preinstall` empty but the package has a top-level
@@ -1457,10 +1455,42 @@ fn unshare_one_file(path: &Path, mode: u32) -> std::io::Result<()> {
 ///
 /// The caller is responsible for gating on `BuildPolicy` and
 /// `--ignore-scripts`. Returns `Ok(false)` if the hook wasn't defined.
+/// The `.bin` chain Node's own resolution implies for a package's
+/// lifecycle script: the package's own `<modules_dir>/.bin`, then every
+/// enclosing `<modules_dir>/.bin` out to `project_root`. Closest first, so
+/// a nearer copy shadows a farther one — npm/pnpm semantics.
+///
+/// Walking (rather than taking a fixed pair of levels) is load-bearing
+/// under the hoisted layout: a conflicting version nests under whichever
+/// ancestor still had the name free, so the dependency a script reaches
+/// for can sit at ANY level between the package and the root. A package at
+/// `a/<md>/b/<md>/c` whose dependency was placed at `a/<md>/` is invisible
+/// to its own level, its parent's, and the root's alike — the exact 127
+/// this chain exists to prevent.
+///
+/// Under the isolated layout this yields the dep's own
+/// `.aube/<dep_path>/<modules_dir>/.bin` plus the project root and nothing
+/// else, since no other directory on the way up carries the name.
+/// `run_script` appends the project root's `.bin` after these, so the
+/// duplicate entry there is harmless.
+fn dep_bin_chain(package_dir: &Path, project_root: &Path, modules_dir_name: &str) -> Vec<PathBuf> {
+    let mut chain = vec![package_dir.join(modules_dir_name).join(".bin")];
+    let mut cursor = Some(package_dir);
+    while let Some(dir) = cursor {
+        if dir == project_root {
+            break;
+        }
+        if dir.file_name().is_some_and(|n| n == modules_dir_name) {
+            chain.push(dir.join(".bin"));
+        }
+        cursor = dir.parent();
+    }
+    chain
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_dep_hook(
     package_dir: &Path,
-    dep_modules_dir: &Path,
     project_root: &Path,
     modules_dir_name: &str,
     manifest: &PackageJson,
@@ -1479,19 +1509,9 @@ pub async fn run_dep_hook(
             _ => return Ok(false),
         },
     };
-    // Closest-ancestor-first, matching npm/pnpm's `.bin` chain. The
-    // hoisted layout nests a version conflict under the requester, so a
-    // package's own `node_modules/` can hold children that live nowhere
-    // else; their bins sit in THAT directory's `.bin` (see
-    // `link_hoisted_placement_bins`), which is exactly where Node resolves
-    // the nested copy from — so the script has to look there too, and
-    // first. Absent under the isolated layout and in the flat hoisted
-    // case, where it is simply an inert PATH entry.
-    let nested_bin_dir = package_dir.join("node_modules").join(".bin");
-    let dep_bin_dir = dep_modules_dir.join(".bin");
-    let mut bin_dirs: Vec<&Path> = Vec::with_capacity(tool_bin_dirs.len() + 2);
-    bin_dirs.push(&nested_bin_dir);
-    bin_dirs.push(&dep_bin_dir);
+    let chain = dep_bin_chain(package_dir, project_root, modules_dir_name);
+    let mut bin_dirs: Vec<&Path> = Vec::with_capacity(chain.len() + tool_bin_dirs.len());
+    bin_dirs.extend(chain.iter().map(PathBuf::as_path));
     bin_dirs.extend(tool_bin_dirs.iter().copied());
     run_script(
         package_dir,
@@ -2183,5 +2203,79 @@ mod break_cas_hardlinks_tests {
             std::path::Path::new("real.txt")
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+}
+
+#[cfg(test)]
+mod dep_bin_chain_tests {
+    use super::dep_bin_chain;
+    use std::path::{Path, PathBuf};
+
+    /// The depth->=3 shape a two-level approximation misses. Package `c`
+    /// sits at `a/node_modules/b/node_modules/c`; a dependency the hoister
+    /// placed at `a/node_modules/` is reachable from NEITHER `c`'s own
+    /// level, NOR its enclosing `b/node_modules`, NOR the project root, so
+    /// omitting the intermediate ancestor is a live 127 rather than a
+    /// cosmetic gap. Order is load-bearing too: closest first, so a nearer
+    /// copy shadows a farther one.
+    #[test]
+    fn dep_bin_chain_covers_every_intermediate_ancestor_closest_first() {
+        let root = Path::new("/p");
+        let chain = dep_bin_chain(
+            Path::new("/p/node_modules/a/node_modules/b/node_modules/c"),
+            root,
+            "node_modules",
+        );
+        assert_eq!(
+            chain,
+            vec![
+                PathBuf::from("/p/node_modules/a/node_modules/b/node_modules/c/node_modules/.bin"),
+                PathBuf::from("/p/node_modules/a/node_modules/b/node_modules/.bin"),
+                PathBuf::from("/p/node_modules/a/node_modules/.bin"),
+                PathBuf::from("/p/node_modules/.bin"),
+            ],
+            "every enclosing modules dir must appear, closest first"
+        );
+    }
+
+    /// The isolated layout must be unaffected: the virtual-store hop is
+    /// the only intermediate directory carrying the name, so the walk
+    /// reproduces exactly the dep-local `.bin` plus the project root.
+    #[test]
+    fn dep_bin_chain_is_inert_under_the_isolated_layout() {
+        let chain = dep_bin_chain(
+            Path::new("/p/node_modules/.aube/lmdb@3.0.0/node_modules/lmdb"),
+            Path::new("/p"),
+            "node_modules",
+        );
+        assert_eq!(
+            chain,
+            vec![
+                PathBuf::from("/p/node_modules/.aube/lmdb@3.0.0/node_modules/lmdb/node_modules/.bin"),
+                PathBuf::from("/p/node_modules/.aube/lmdb@3.0.0/node_modules/.bin"),
+                PathBuf::from("/p/node_modules/.bin"),
+            ]
+        );
+    }
+
+    /// A custom `modulesDir` renames every level, including the scoped
+    /// case: `@scope/name` adds a directory hop that is NOT named after
+    /// the modules dir, so it must not contribute an entry.
+    #[test]
+    fn dep_bin_chain_honors_a_custom_modules_dir_and_skips_the_scope_hop() {
+        let chain = dep_bin_chain(
+            Path::new("/p/mods/@scope/name"),
+            Path::new("/p"),
+            "mods",
+        );
+        assert_eq!(
+            chain,
+            vec![
+                PathBuf::from("/p/mods/@scope/name/mods/.bin"),
+                PathBuf::from("/p/mods/.bin"),
+            ],
+            "the `@scope` directory is not a modules dir and contributes nothing"
+        );
     }
 }
