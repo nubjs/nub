@@ -1337,10 +1337,15 @@ try {{
             let _ = std::io::stdout().flush();
         };
 
-        step("ancestor_repair");
-        ancestor_repair(&mut fails, node.as_path());
+        // require_shapes FIRST, deliberately. It is the blast-radius measurement, it writes no
+        // ancestor ace at all (every cell is repair-OFF), and it therefore cannot trigger the
+        // DACL-propagation stall that has taken the later groups down. Ordering a group that
+        // cannot stall behind one that can is how three runs lost the answer they were for.
         step("require_shapes");
         require_shapes(&mut fails, node.as_path());
+
+        step("ancestor_repair");
+        ancestor_repair(&mut fails, node.as_path());
 
         step("stdio_shim");
         stdio_shim(&mut fails, node.as_path());
