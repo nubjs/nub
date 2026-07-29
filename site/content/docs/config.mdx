@@ -45,12 +45,12 @@ Every field, with its full value set. Each has its own section below.
 
   // ── installs — only when Nub is the project's package manager ──
   "install": {
-    // symlink (default) | isolated | hoisted
-    // "pnp" parses and is rejected at install time
-    "nodeLinker": "symlink",
+    // "global" (default) | "isolated" | "hoisted" | "pnp" (rejected on install)
+    // the object form adds the one knob that layout takes:
+    //   global → "eject": string[]  ·  isolated → "hoist": boolean | string[]
+    "linker": { "strategy": "global", "eject": ["electron"] },
 
-    "symlinkDisablePattern": ["electron"],  // symlink layout only
-    "hoist": false,                // boolean | string[]; isolated only
+    "publicHoist": ["@types/*"],     // boolean | string[]; any layout
 
     // <integer><s|m|h|d|w>; a bare number is rejected
     "minimumReleaseAge": "3d",
@@ -372,109 +372,95 @@ The install block configures Nub's package manager.
 
 It applies when Nub is the project's package manager. A project with an `npm`, `pnpm`, `yarn`, or `bun` lockfile keeps that tool's own configuration, and this block is ignored.
 
-### `install.nodeLinker`
+### `install.linker`
 
-Use Nub's shared symlink layout.
-
-```jsonc title="nub.jsonc"
-{
-  // ...
-  "install": {
-    "nodeLinker": "symlink"
-  }
-}
-```
-
-Use a project-local isolated store.
+Pick the dependency layout. Name a strategy as a string when you want its defaults.
 
 ```jsonc title="nub.jsonc"
 {
   // ...
   "install": {
-    "nodeLinker": "isolated"
+    "linker": "hoisted"
   }
 }
 ```
 
-Use a flat, real-directory layout.
+| strategy | layout |
+| --- | --- |
+| `global` | one machine-shared store, symlinked into each project. The default. |
+| `isolated` | a store inside the project, still symlinked. |
+| `hoisted` | flat real directories, the npm and Yarn shape. |
+
+Each strategy accepts one knob, and the object form is how you set it. A knob belongs to exactly one strategy, so it can only be written under that one.
 
 ```jsonc title="nub.jsonc"
 {
   // ...
   "install": {
-    "nodeLinker": "hoisted"
+    "linker": {
+      "strategy": "global",
+      "eject": ["electron", "@company/native-*"]
+    }
   }
 }
 ```
 
-The `"pnp"` value is reserved for future Plug'n'Play support. An install that uses it is rejected until support lands.
+Ejected packages are written into the project as real directories instead of linked out of the shared store. Reach for it when a package resolves paths relative to its own location on disk, which native builds and self-extracting binaries tend to do.
+
+Under `isolated`, `hoist` fills the hidden fallback tree that your dependencies reach when they import something they never declared. It takes `true`, `false`, or a list.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "install": {
+    "linker": {
+      "strategy": "isolated",
+      "hoist": ["*eslint*", "@types/*"]
+    }
+  }
+}
+```
+
+`false` is strict: an undeclared import fails instead of resolving. `true` matches everything, which is pnpm's default.
+
+Writing a knob under the wrong strategy is an error, and the message names the strategy that takes it.
 
 ```text
-nub: `install.nodeLinker: "pnp"` is reserved and not supported yet [ERR_NUB_CONFIG_UNSUPPORTED]
+`install.linker.hoist` in nub.jsonc: not valid with `strategy: "global"` — it configures the
+"isolated" layout. Either switch to `strategy: "isolated"` or drop this key.
 ```
 
-### `install.symlinkDisablePattern`
-
-Materialize selected packages inside the project instead of linking them from the shared store.
-
-```jsonc title="nub.jsonc"
-{
-  // ...
-  "install": {
-    "symlinkDisablePattern": [
-      "electron",
-      "@company/native-*"
-    ]
-  }
-}
-```
-
-### `install.hoist`
-
-Fill the hidden fallback tree that packages reach when they import something they never declared. It applies to the isolated layout only, so set `nodeLinker` alongside it.
-
-```jsonc title="nub.jsonc"
-{
-  // ...
-  "install": {
-    "nodeLinker": "isolated",
-    "hoist": true
-  }
-}
-```
-
-Keep the strict layout, where an undeclared import fails.
-
-```jsonc title="nub.jsonc"
-{
-  // ...
-  "install": {
-    "nodeLinker": "isolated",
-    "hoist": false
-  }
-}
-```
-
-Hoist only matching packages.
-
-```jsonc title="nub.jsonc"
-{
-  // ...
-  "install": {
-    "nodeLinker": "isolated",
-    "hoist": [
-      "*eslint*",
-      "@types/*"
-    ]
-  }
-}
-```
-
-Nub rejects the field under any other layout rather than accepting a setting it would ignore.
+`"pnp"` is reserved for future Plug'n'Play support. An install that names it is rejected until support lands.
 
 ```text
-nub: `install.hoist` is supported only with `install.nodeLinker: "isolated"` [ERR_NUB_CONFIG_UNSUPPORTED]
+nub: `install.linker: "pnp"` is reserved and not supported yet [ERR_NUB_CONFIG_UNSUPPORTED]
 ```
+
+### `install.publicHoist`
+
+Put packages in the project's top-level `node_modules` without declaring them. Use it for tools that resolve from the project root rather than through a dependency's own lookup — TypeScript finding `@types/*`, a linter loading its plugins.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "install": {
+    "publicHoist": ["@types/*", "*eslint*"]
+  }
+}
+```
+
+`true` lifts everything, matching pnpm's `shamefully-hoist`.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "install": {
+    "publicHoist": true
+  }
+}
+```
+
+This sits outside `linker` because it means the same thing under every strategy: it writes the project's own `node_modules`, which exists wherever the store lives.
 
 ### `install.minimumReleaseAge`
 

@@ -29,7 +29,7 @@ const RESTRICTIVE_PROJECT: &str = r#"{
 const RESTRICTIVE_PROJECT_PROBED: &str = r#"{
   "sandbox": { "fs": false, "net": false, "env": false },
   "install": {
-    "nodeLinker": "pnp",
+    "linker": "pnp",
     "sandbox": { "fs": false, "net": false, "env": false }
   }
 }"#;
@@ -44,7 +44,7 @@ const RESTRICTIVE_GLOBAL: &str = r#"{
 const RESTRICTIVE_GLOBAL_PROBED: &str = r#"{
   "sandbox": { "fs": false, "net": false, "env": false },
   "install": {
-    "nodeLinker": "pnp",
+    "linker": "pnp",
     "sandbox": { "fs": false, "net": false, "env": false }
   },
   "dlx": { "sandbox": { "fs": false, "net": false, "env": false } }
@@ -117,7 +117,7 @@ fn run_offline_lifecycle_install(
 }
 
 /// The liveness half: re-plant the SAME config body with one live install knob
-/// added — `install.nodeLinker: "pnp"`, rejected while the install lowers config
+/// added — `install.linker: "pnp"`, rejected while the install lowers config
 /// into engine settings — and require the install to abort on it. A file at this
 /// exact path is therefore both parsed and consulted by the install path, which
 /// is what stops the "nothing changed" comparisons from being vacuous. Reusing
@@ -148,7 +148,7 @@ fn assert_config_reaches_install_path(
     );
     assert!(
         reported.contains("ERR_NUB_CONFIG_UNSUPPORTED"),
-        "the install must abort on the config's `nodeLinker: \"pnp\"`, \
+        "the install must abort on the config's `linker: \"pnp\"`, \
          not on something else; output: {reported}"
     );
 }

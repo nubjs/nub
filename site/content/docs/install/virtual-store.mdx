@@ -114,28 +114,48 @@ The `enableGlobalVirtualStore=false` form keeps isolation and its phantom-depend
 
 ## Project configuration
 
-A project [`nub.jsonc`](/docs/config) picks the layout with one [`nodeLinker`](/docs/config#installnodelinker) field — `symlink` for the shared symlink layout (the default), `isolated` for a project-local store, or `hoisted` for a flat, real-directory tree. The block applies only when Nub is the project's package manager; under an npm, pnpm, Yarn, or Bun lockfile the neutral `.npmrc` keys above are the lever.
+A project [`nub.jsonc`](/docs/config) picks the layout with one [`linker`](/docs/config#installlinker) field — `global` for the shared store (the default), `isolated` for a project-local one, or `hoisted` for a flat, real-directory tree. The block applies only when Nub is the project's package manager; under an npm, pnpm, Yarn, or Bun lockfile the neutral `.npmrc` keys above are the lever.
 
 ```jsonc title="nub.jsonc"
 {
   // ...
   "install": {
-    "nodeLinker": "isolated",          // hoist applies to this layout only
-    "hoist": ["*eslint*", "@types/*"]  // the hidden fallback tree
+    "linker": "isolated"
   }
 }
 ```
 
-The [`hoist`](/docs/config#installhoist) field fills the hidden fallback tree that packages reach for an undeclared import, and takes `true`, `false`, or a pattern list. Nub rejects it under any other layout rather than accept a setting it would ignore. Under the default `symlink` layout, [`symlinkDisablePattern`](/docs/config#installsymlinkdisablepattern) materializes matching packages inside the project instead of linking them from the shared store:
+Each strategy accepts one knob, written in the object form. Under `isolated` that knob is `hoist`, which fills the hidden fallback tree at `node_modules/.store/node_modules/` — the directory your dependencies reach when they import something they never declared. It takes `true`, `false`, or a pattern list.
 
 ```jsonc title="nub.jsonc"
 {
   // ...
   "install": {
-    "symlinkDisablePattern": ["electron", "@company/native-*"]
+    "linker": {
+      "strategy": "isolated",
+      "hoist": ["*eslint*", "@types/*"]
+    }
   }
 }
 ```
+
+Under `global` the knob is `eject`, which writes matching packages into the project as real directories instead of linking them out of the shared store.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "install": {
+    "linker": {
+      "strategy": "global",
+      "eject": ["electron", "@company/native-*"]
+    }
+  }
+}
+```
+
+The two are not interchangeable, and the config shape says so: `hoist` fills a directory that only exists when the store is project-local, and a package linked out of a shared store never walks through the project on the way to it. Naming one under the other strategy is rejected where you wrote it.
+
+[`publicHoist`](/docs/config#installpublichoist) is the separate lever, and it sits outside `linker` because it applies under every strategy — it puts packages in the project's own top-level `node_modules` for tools that resolve from the project root, like TypeScript looking for `@types/*`.
 ## GYP-based native builds
 
 Some packages that compile native code with node-gyp fail to build under the isolated layout. The trigger is a `binding.gyp` that names another package as a GYP build-file dependency:

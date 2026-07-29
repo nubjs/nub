@@ -50,9 +50,8 @@ const ROOT_KEYS: &[&str] = &[
     "dlx",
 ];
 const INSTALL_KEYS: &[&str] = &[
-    "nodeLinker",
-    "symlinkDisablePattern",
-    "hoist",
+    "linker",
+    "publicHoist",
     "minimumReleaseAge",
     "minimumReleaseAgeExclude",
     "sandbox",
@@ -210,35 +209,58 @@ pub enum VerifyDeps {
     Prompt,
 }
 
-/// The `install` block. `node_linker` is the collapsed flat layout enum. The
-/// native PM consumes the non-sandbox fields through its aube settings bridge;
-/// `sandbox` remains inert until the sandbox execution slice lands.
+/// The `install` block. The native PM consumes the non-sandbox fields through
+/// its aube settings bridge; `sandbox` remains inert until the sandbox execution
+/// slice lands.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct InstallConfig {
-    pub node_linker: Option<NodeLinker>,
-    pub symlink_disable_pattern: Option<Vec<String>>,
-    pub hoist: Option<Hoist>,
+    pub linker: Option<LinkerConfig>,
+    pub public_hoist: Option<PublicHoist>,
     pub minimum_release_age: Option<Duration>,
     pub minimum_release_age_exclude: Option<Vec<String>>,
     pub sandbox: Option<SandboxSetting>,
 }
 
-/// The flat layout enum (collapsed 2026-07-08). `symlink` (nub's default global
-/// virtual store) / `isolated` (pnpm-parity project-local) / `hoisted` (flat real
-/// dirs). `pnp` is reserved for PnP-write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NodeLinker {
-    Symlink,
-    Isolated,
+/// The layout, discriminated on `strategy`, carrying only the knob that layout
+/// admits (replaced the flat `nodeLinker`/`hoist`/`symlinkDisablePattern` trio
+/// 2026-07-28). Each knob is meaningless — not merely ignored — outside its own
+/// strategy: `hoist` fills a hidden tree that a shared store's residents can
+/// never reach on their walk-up, and `eject` names packages to pull OUT of a
+/// shared store that a project-local layout does not have. Modelling that as a
+/// union rejects the combination where it is written instead of at install time.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LinkerConfig {
+    /// Nub's default: one machine-shared store, every package symlinked out of
+    /// it. `eject` names packages that must be real project-local bytes instead
+    /// (native builds, anything that resolves relative to its own realpath).
+    Global { eject: Option<Vec<String>> },
+    /// pnpm-parity project-local store, still symlinked. `hoist` fills the
+    /// hidden fallback tree that rescues a dependency's undeclared imports.
+    Isolated { hoist: Option<Hoist> },
+    /// Flat real directories, npm/yarn-shaped. Everything is already at the
+    /// root, so neither knob has anything to say.
     Hoisted,
+    /// Reserved for PnP-write; rejected at install time.
     Pnp,
 }
 
-/// `hoist` — pnpm-literal `boolean | string[]`. `Bool(false)` = strict,
+/// `linker.hoist` — pnpm-literal `boolean | string[]`. `Bool(false)` = strict,
 /// `Bool(true)` ≡ pnpm `['*']`, `Patterns` = the pattern list.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Hoist {
     Bool(bool),
+    Patterns(Vec<String>),
+}
+
+/// `publicHoist` — what is forced into the project's ROOT `node_modules`
+/// without being declared, for tools that resolve from the project root rather
+/// than through a dependency's own walk-up (tsc finding `@types/*`, a linter
+/// loading plugins). It sits OUTSIDE [`LinkerConfig`] because it means the same
+/// thing under every strategy: the root `node_modules` exists wherever the store
+/// lives. `All(true)` ≡ pnpm `shamefully-hoist`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PublicHoist {
+    All(bool),
     Patterns(Vec<String>),
 }
 
@@ -308,9 +330,8 @@ pub enum ConfigKey {
     Tsconfig,
     VerifyDeps,
     Sandbox,
-    InstallNodeLinker,
-    InstallSymlinkDisablePattern,
-    InstallHoist,
+    InstallLinker,
+    InstallPublicHoist,
     InstallMinimumReleaseAge,
     InstallMinimumReleaseAgeExclude,
     InstallSandbox,
@@ -880,24 +901,16 @@ fn merge_layer(
         sources,
         layer.install,
         source,
-        node_linker,
-        ConfigKey::InstallNodeLinker
+        linker,
+        ConfigKey::InstallLinker
     );
     merge_field!(
         values.install,
         sources,
         layer.install,
         source,
-        symlink_disable_pattern,
-        ConfigKey::InstallSymlinkDisablePattern
-    );
-    merge_field!(
-        values.install,
-        sources,
-        layer.install,
-        source,
-        hoist,
-        ConfigKey::InstallHoist
+        public_hoist,
+        ConfigKey::InstallPublicHoist
     );
     merge_field!(
         values.install,
@@ -1168,37 +1181,134 @@ fn validate_verify_deps(v: &Value, path: &str) -> Result<VerifyDeps> {
     }
 }
 
+/// Per-strategy key sets. A key absent from its strategy's set but present in
+/// another's is reported against THAT strategy rather than as a bare unknown
+/// key — the whole reason the union exists is that "hoist under global" is a
+/// recognizable mistake with a specific answer, not a typo.
+const LINKER_STRATEGY_KEYS: &[(&str, &[&str])] = &[
+    ("global", &["strategy", "eject"]),
+    ("isolated", &["strategy", "hoist"]),
+    ("hoisted", &["strategy"]),
+    ("pnp", &["strategy"]),
+];
+
+fn validate_linker(v: &Value, path: &str) -> Result<LinkerConfig> {
+    // String shorthand: the strategies that admit no knob are the common case,
+    // and `"linker": "hoisted"` should not have to be spelled as an object.
+    let obj = match v {
+        Value::String(_) => {
+            return linker_without_options(as_str(v, path)?, path, path);
+        }
+        _ => as_object(v, path)?,
+    };
+
+    let strategy_path = child(path, "strategy");
+    let Some(strategy) = obj.get("strategy") else {
+        return Err(ConfigError::Value {
+            path: path.into(),
+            message:
+                "missing `strategy` (one of \"global\", \"isolated\", \"hoisted\", or \"pnp\")"
+                    .into(),
+        });
+    };
+    let strategy = as_str(strategy, &strategy_path)?.to_string();
+
+    let Some((_, allowed)) = LINKER_STRATEGY_KEYS
+        .iter()
+        .find(|(name, _)| *name == strategy)
+    else {
+        return Err(unknown_strategy(&strategy, &strategy_path, path));
+    };
+    for key in obj.keys() {
+        if allowed.contains(&key.as_str()) {
+            continue;
+        }
+        let owner = LINKER_STRATEGY_KEYS
+            .iter()
+            .find(|(_, keys)| keys.contains(&key.as_str()));
+        return Err(ConfigError::Value {
+            path: child(path, key),
+            message: match owner {
+                Some((owner, _)) => format!(
+                    "not valid with `strategy: \"{strategy}\"` — it configures the \
+                     \"{owner}\" layout. Either switch to `strategy: \"{owner}\"` or drop this key."
+                ),
+                None => format!("unknown key (`strategy: \"{strategy}\"` accepts {})", {
+                    let mut names = allowed.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>();
+                    names.sort();
+                    names.join(", ")
+                }),
+            },
+        });
+    }
+
+    Ok(match strategy.as_str() {
+        "global" => LinkerConfig::Global {
+            eject: match obj.get("eject") {
+                Some(v) => Some(as_string_array(v, &child(path, "eject"))?),
+                None => None,
+            },
+        },
+        "isolated" => LinkerConfig::Isolated {
+            hoist: match obj.get("hoist") {
+                Some(v) => {
+                    let p = child(path, "hoist");
+                    Some(match v {
+                        Value::Bool(b) => Hoist::Bool(*b),
+                        Value::Array(_) => Hoist::Patterns(as_string_array(v, &p)?),
+                        _ => {
+                            return Err(ConfigError::Type {
+                                path: p,
+                                expected: "a boolean or array of strings",
+                            });
+                        }
+                    })
+                }
+                None => None,
+            },
+        },
+        "hoisted" => LinkerConfig::Hoisted,
+        "pnp" => LinkerConfig::Pnp,
+        _ => unreachable!("strategy validated against LINKER_STRATEGY_KEYS above"),
+    })
+}
+
+/// The string shorthand — every strategy with its knob left unset.
+fn linker_without_options(strategy: &str, value_path: &str, at: &str) -> Result<LinkerConfig> {
+    match strategy {
+        "global" => Ok(LinkerConfig::Global { eject: None }),
+        "isolated" => Ok(LinkerConfig::Isolated { hoist: None }),
+        "hoisted" => Ok(LinkerConfig::Hoisted),
+        "pnp" => Ok(LinkerConfig::Pnp),
+        other => Err(unknown_strategy(other, value_path, at)),
+    }
+}
+
+/// `value_path` carries the bad value; `at` is the `linker` node the
+/// object-form suggestion hangs off (they coincide under the string shorthand).
+fn unknown_strategy(strategy: &str, value_path: &str, at: &str) -> ConfigError {
+    ConfigError::Value {
+        path: value_path.into(),
+        message: format!(
+            "unknown strategy `{strategy}` (expected \"global\", \"isolated\", \"hoisted\", \
+             or \"pnp\"); `{at}` accepts either that string or an object with a `strategy` key"
+        ),
+    }
+}
+
 fn validate_install(v: &Value, path: &str) -> Result<InstallConfig> {
     let obj = as_object(v, path)?;
     reject_unknown_keys(obj, path, INSTALL_KEYS)?;
 
     let mut install = InstallConfig::default();
-    if let Some(v) = obj.get("nodeLinker") {
-        let p = child(path, "nodeLinker");
-        install.node_linker = Some(match as_str(v, &p)? {
-            "symlink" => NodeLinker::Symlink,
-            "isolated" => NodeLinker::Isolated,
-            "hoisted" => NodeLinker::Hoisted,
-            "pnp" => NodeLinker::Pnp,
-            other => {
-                return Err(ConfigError::Value {
-                    path: p,
-                    message: format!(
-                        "unknown linker `{other}` (expected \"symlink\", \"isolated\", \"hoisted\", or \"pnp\")"
-                    ),
-                });
-            }
-        });
+    if let Some(v) = obj.get("linker") {
+        install.linker = Some(validate_linker(v, &child(path, "linker"))?);
     }
-    if let Some(v) = obj.get("symlinkDisablePattern") {
-        install.symlink_disable_pattern =
-            Some(as_string_array(v, &child(path, "symlinkDisablePattern"))?);
-    }
-    if let Some(v) = obj.get("hoist") {
-        let p = child(path, "hoist");
-        install.hoist = Some(match v {
-            Value::Bool(b) => Hoist::Bool(*b),
-            Value::Array(_) => Hoist::Patterns(as_string_array(v, &p)?),
+    if let Some(v) = obj.get("publicHoist") {
+        let p = child(path, "publicHoist");
+        install.public_hoist = Some(match v {
+            Value::Bool(b) => PublicHoist::All(*b),
+            Value::Array(_) => PublicHoist::Patterns(as_string_array(v, &p)?),
             _ => {
                 return Err(ConfigError::Type {
                     path: p,
@@ -1615,22 +1725,22 @@ mod tests {
         let cfg = parse(
             r#"{
               "install": {
-                "nodeLinker": "isolated",
-                "symlinkDisablePattern": ["@corp/tool-*"],
-                "hoist": ["*types*"],
+                "linker": { "strategy": "isolated", "hoist": ["*types*"] },
+                "publicHoist": ["@types/*"],
                 "minimumReleaseAge": "3d",
                 "minimumReleaseAgeExclude": ["@myorg/*"]
               }
             }"#,
         );
-        assert_eq!(cfg.install.node_linker, Some(NodeLinker::Isolated));
         assert_eq!(
-            cfg.install.symlink_disable_pattern,
-            Some(vec!["@corp/tool-*".into()])
+            cfg.install.linker,
+            Some(LinkerConfig::Isolated {
+                hoist: Some(Hoist::Patterns(vec!["*types*".into()]))
+            })
         );
         assert_eq!(
-            cfg.install.hoist,
-            Some(Hoist::Patterns(vec!["*types*".into()]))
+            cfg.install.public_hoist,
+            Some(PublicHoist::Patterns(vec!["@types/*".into()]))
         );
         assert_eq!(
             cfg.install.minimum_release_age,
@@ -1643,25 +1753,84 @@ mod tests {
     }
 
     #[test]
-    fn node_linker_rejects_unknown_value() {
-        let err =
-            parse_project_config(r#"{ "install": { "nodeLinker": "hardlink" } }"#).unwrap_err();
-        match err {
-            ConfigError::Value { path, .. } => assert_eq!(path, "install.nodeLinker"),
-            other => panic!("expected Value error, got {other:?}"),
+    fn linker_string_shorthand_equals_the_knobless_object() {
+        assert_eq!(
+            parse(r#"{ "install": { "linker": "hoisted" } }"#)
+                .install
+                .linker,
+            Some(LinkerConfig::Hoisted)
+        );
+        assert_eq!(
+            parse(r#"{ "install": { "linker": "global" } }"#)
+                .install
+                .linker,
+            parse(r#"{ "install": { "linker": { "strategy": "global" } } }"#)
+                .install
+                .linker,
+        );
+    }
+
+    #[test]
+    fn linker_rejects_an_unknown_strategy_in_either_form() {
+        for (src, at) in [
+            (
+                r#"{ "install": { "linker": "hardlink" } }"#,
+                "install.linker",
+            ),
+            (
+                r#"{ "install": { "linker": { "strategy": "hardlink" } } }"#,
+                "install.linker.strategy",
+            ),
+        ] {
+            match parse_project_config(src).unwrap_err() {
+                ConfigError::Value { path, .. } => assert_eq!(path, at, "{src}"),
+                other => panic!("expected Value error for {src}, got {other:?}"),
+            }
+        }
+    }
+
+    /// The union's whole reason for existing: a knob belonging to a DIFFERENT
+    /// strategy is a recognizable mistake with exactly one answer, so the error
+    /// names that strategy instead of reporting an anonymous unknown key.
+    #[test]
+    fn a_knob_from_another_strategy_names_that_strategy() {
+        for (src, key, expected) in [
+            (
+                r#"{ "install": { "linker": { "strategy": "global", "hoist": true } } }"#,
+                "install.linker.hoist",
+                "isolated",
+            ),
+            (
+                r#"{ "install": { "linker": { "strategy": "isolated", "eject": ["x"] } } }"#,
+                "install.linker.eject",
+                "global",
+            ),
+        ] {
+            match parse_project_config(src).unwrap_err() {
+                ConfigError::Value { path, message } => {
+                    assert_eq!(path, key, "{src}");
+                    assert!(
+                        message.contains(expected),
+                        "message must point at `{expected}`: {message}"
+                    );
+                }
+                other => panic!("expected Value error for {src}, got {other:?}"),
+            }
         }
     }
 
     #[test]
     fn hoist_bool_and_array_forms() {
+        let hoist = |src: &str| match parse(src).install.linker {
+            Some(LinkerConfig::Isolated { hoist }) => hoist,
+            other => panic!("expected an isolated linker, got {other:?}"),
+        };
         assert_eq!(
-            parse(r#"{ "install": { "hoist": false } }"#).install.hoist,
+            hoist(r#"{ "install": { "linker": { "strategy": "isolated", "hoist": false } } }"#),
             Some(Hoist::Bool(false))
         );
         assert_eq!(
-            parse(r#"{ "install": { "hoist": ["a", "b"] } }"#)
-                .install
-                .hoist,
+            hoist(r#"{ "install": { "linker": { "strategy": "isolated", "hoist": ["a","b"] } } }"#),
             Some(Hoist::Patterns(vec!["a".into(), "b".into()]))
         );
     }
@@ -2324,9 +2493,8 @@ mod tests {
           "verifyDeps": false,
           "sandbox": false,
           "install": {
-            "nodeLinker": "symlink",
-            "symlinkDisablePattern": [],
-            "hoist": false,
+            "linker": { "strategy": "isolated", "hoist": false },
+            "publicHoist": false,
             "minimumReleaseAge": "1d",
             "minimumReleaseAgeExclude": [],
             "sandbox": false

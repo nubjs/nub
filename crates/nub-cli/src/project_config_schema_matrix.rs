@@ -24,7 +24,7 @@ fn golden_full_surface_config_parses_with_all_three_sandbox_positions() {
           "nodeCompat": false,
           "sandbox": { "fs": false, "net": ["registry.npmjs.org"], "env": true },
           "install": {
-            "nodeLinker": "isolated",
+            "linker": { "strategy": "isolated", "hoist": false },
             "sandbox": "./install-policy.json"
           },
           "dlx": {

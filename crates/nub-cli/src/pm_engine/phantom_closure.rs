@@ -72,7 +72,7 @@ pub(crate) fn register() {
 }
 
 /// nub's own embedder-default names that may seed the eject set. Native
-/// `install.symlinkDisablePattern` entries are admitted separately; incumbent
+/// `install.linker.eject` entries are admitted separately; incumbent
 /// `.npmrc`/env/workspace values remain ignored. Standalone aube installs no
 /// hook and honors its full `diskMaterializePackages` knob unchanged.
 ///

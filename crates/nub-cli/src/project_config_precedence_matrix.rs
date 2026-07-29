@@ -47,13 +47,19 @@ fn verify_deps(tag: usize) -> VerifyDeps {
         .clone()
 }
 
-fn linker(tag: usize) -> NodeLinker {
-    [
-        NodeLinker::Symlink,
-        NodeLinker::Isolated,
-        NodeLinker::Hoisted,
-        NodeLinker::Pnp,
-    ][tag % 4]
+/// One variant per strategy, and the two that carry a knob carry a tagged one —
+/// so a layer that wins must win the whole union, tag and payload together.
+fn linker(tag: usize) -> LinkerConfig {
+    match tag % 4 {
+        0 => LinkerConfig::Global {
+            eject: Some(strings(tag)),
+        },
+        1 => LinkerConfig::Isolated {
+            hoist: Some(Hoist::Patterns(strings(tag))),
+        },
+        2 => LinkerConfig::Hoisted,
+        _ => LinkerConfig::Pnp,
+    }
 }
 
 fn consent(tag: usize) -> ImplicitDlx {
@@ -154,29 +160,32 @@ fn specs() -> Vec<KeySpec> {
             is_empty: Some(|c| c.sandbox == Some(SandboxSetting::Disabled)),
         },
         KeySpec {
-            key: ConfigKey::InstallNodeLinker,
-            name: "install.nodeLinker",
-            set: |c, t| c.install.node_linker = Some(linker(t)),
-            matches: |c, t| c.install.node_linker == Some(linker(t)),
-            set_empty: None,
-            is_empty: None,
+            key: ConfigKey::InstallLinker,
+            name: "install.linker",
+            set: |c, t| c.install.linker = Some(linker(t)),
+            matches: |c, t| c.install.linker == Some(linker(t)),
+            // `hoist: false` (strict) must beat a lower pattern list, and it is
+            // only reachable under `isolated` — so the empty form pins the tag too.
+            set_empty: Some(|c| {
+                c.install.linker = Some(LinkerConfig::Isolated {
+                    hoist: Some(Hoist::Bool(false)),
+                })
+            }),
+            is_empty: Some(|c| {
+                c.install.linker
+                    == Some(LinkerConfig::Isolated {
+                        hoist: Some(Hoist::Bool(false)),
+                    })
+            }),
         },
         KeySpec {
-            key: ConfigKey::InstallSymlinkDisablePattern,
-            name: "install.symlinkDisablePattern",
-            set: |c, t| c.install.symlink_disable_pattern = Some(strings(t)),
-            matches: |c, t| c.install.symlink_disable_pattern == Some(strings(t)),
-            set_empty: Some(|c| c.install.symlink_disable_pattern = Some(Vec::new())),
-            is_empty: Some(|c| c.install.symlink_disable_pattern == Some(Vec::new())),
-        },
-        KeySpec {
-            key: ConfigKey::InstallHoist,
-            name: "install.hoist",
-            set: |c, t| c.install.hoist = Some(Hoist::Patterns(strings(t))),
-            matches: |c, t| c.install.hoist == Some(Hoist::Patterns(strings(t))),
-            // `hoist: false` (strict) must beat a lower pattern list.
-            set_empty: Some(|c| c.install.hoist = Some(Hoist::Bool(false))),
-            is_empty: Some(|c| c.install.hoist == Some(Hoist::Bool(false))),
+            key: ConfigKey::InstallPublicHoist,
+            name: "install.publicHoist",
+            set: |c, t| c.install.public_hoist = Some(PublicHoist::Patterns(strings(t))),
+            matches: |c, t| c.install.public_hoist == Some(PublicHoist::Patterns(strings(t))),
+            // `publicHoist: false` — the explicit opt-out — must beat a lower list.
+            set_empty: Some(|c| c.install.public_hoist = Some(PublicHoist::All(false))),
+            is_empty: Some(|c| c.install.public_hoist == Some(PublicHoist::All(false))),
         },
         KeySpec {
             key: ConfigKey::InstallMinimumReleaseAge,
@@ -251,15 +260,14 @@ fn ordinal(key: ConfigKey) -> usize {
         ConfigKey::Tsconfig => 7,
         ConfigKey::VerifyDeps => 8,
         ConfigKey::Sandbox => 9,
-        ConfigKey::InstallNodeLinker => 10,
-        ConfigKey::InstallSymlinkDisablePattern => 11,
-        ConfigKey::InstallHoist => 12,
-        ConfigKey::InstallMinimumReleaseAge => 13,
-        ConfigKey::InstallMinimumReleaseAgeExclude => 14,
-        ConfigKey::InstallSandbox => 15,
-        ConfigKey::DlxConsent => 16,
-        ConfigKey::DlxSandbox => 17,
-        ConfigKey::DlxEnvFile => 18,
+        ConfigKey::InstallLinker => 10,
+        ConfigKey::InstallPublicHoist => 11,
+        ConfigKey::InstallMinimumReleaseAge => 12,
+        ConfigKey::InstallMinimumReleaseAgeExclude => 13,
+        ConfigKey::InstallSandbox => 14,
+        ConfigKey::DlxConsent => 15,
+        ConfigKey::DlxSandbox => 16,
+        ConfigKey::DlxEnvFile => 17,
     }
 }
 
@@ -297,8 +305,8 @@ fn resolve(layers: [Option<ProjectConfig>; 5]) -> EffectiveConfig {
 #[test]
 fn spec_table_covers_every_config_key_exactly_once() {
     let specs = specs();
-    assert_eq!(specs.len(), 19, "one spec per ConfigKey variant");
-    let mut seen = [false; 19];
+    assert_eq!(specs.len(), 18, "one spec per ConfigKey variant");
+    let mut seen = [false; 18];
     for spec in &specs {
         let idx = ordinal(spec.key);
         assert!(!seen[idx], "duplicate spec for {}", spec.name);

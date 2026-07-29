@@ -855,7 +855,7 @@ fn engine_session_inner(
     phantom_closure::set_native_config_seed(
         native_install
             .as_ref()
-            .map(|config| config.symlink_disable_pattern.clone())
+            .map(|config| config.eject.clone())
             .unwrap_or_default(),
     );
     // Route the engine's lifecycle scripts through nub's runtime augmentation
@@ -876,7 +876,9 @@ fn engine_session_inner(
 #[derive(Debug, Default, PartialEq, Eq)]
 struct NativeInstallSettings {
     settings: Vec<(String, String)>,
-    symlink_disable_pattern: Vec<String>,
+    /// `linker.eject` — also seeded into the phantom closure, which is why it
+    /// is carried out of band rather than only as a lowered engine setting.
+    eject: Vec<String>,
 }
 
 fn native_install_settings(
@@ -913,57 +915,69 @@ fn lower_native_install_settings(
     install: &crate::project_config::InstallConfig,
     embedder_defaults: &[(String, String)],
 ) -> Result<NativeInstallSettings> {
-    use crate::project_config::{Hoist, NodeLinker};
+    use crate::project_config::{Hoist, LinkerConfig, PublicHoist};
 
-    let linker = install.node_linker.unwrap_or(NodeLinker::Symlink);
-    if linker == NodeLinker::Pnp {
+    // Only `pnp` still bails here. The pairings the old flat trio rejected at
+    // install time — hoist under a shared store, eject under a project-local one
+    // — are now unrepresentable in `linker`, so they fail at the line the user
+    // wrote instead of after a resolve.
+    if matches!(install.linker, Some(LinkerConfig::Pnp)) {
         anyhow::bail!(
-            "nub: `install.nodeLinker: \"pnp\"` is reserved and not supported yet [ERR_NUB_CONFIG_UNSUPPORTED]"
-        );
-    }
-    if install.hoist.is_some() && linker != NodeLinker::Isolated {
-        anyhow::bail!(
-            "nub: `install.hoist` is supported only with `install.nodeLinker: \"isolated\"` [ERR_NUB_CONFIG_UNSUPPORTED]"
-        );
-    }
-    if install.symlink_disable_pattern.is_some() && linker != NodeLinker::Symlink {
-        anyhow::bail!(
-            "nub: `install.symlinkDisablePattern` is supported only with `install.nodeLinker: \"symlink\"` [ERR_NUB_CONFIG_UNSUPPORTED]"
+            "nub: `install.linker: \"pnp\"` is reserved and not supported yet [ERR_NUB_CONFIG_UNSUPPORTED]"
         );
     }
 
     let mut settings = Vec::new();
-    if install.node_linker.is_some() {
+    let mut eject_patterns: Option<Vec<String>> = None;
+    if let Some(linker) = install.linker.as_ref() {
+        // Both symlink layouts are aube's `isolated`; they differ only in where
+        // the store lives, which is `enableGlobalVirtualStore`.
         settings.push((
             "nodeLinker".to_string(),
             match linker {
-                NodeLinker::Symlink | NodeLinker::Isolated => "isolated",
-                NodeLinker::Hoisted => "hoisted",
-                NodeLinker::Pnp => unreachable!("pnp rejected above"),
+                LinkerConfig::Global { .. } | LinkerConfig::Isolated { .. } => "isolated",
+                LinkerConfig::Hoisted => "hoisted",
+                LinkerConfig::Pnp => unreachable!("pnp rejected above"),
             }
             .to_string(),
         ));
-        if linker == NodeLinker::Isolated {
-            settings.push(("enableGlobalVirtualStore".to_string(), "false".to_string()));
-        }
-    }
-
-    if let Some(hoist) = install.hoist.as_ref() {
-        match hoist {
-            Hoist::Bool(enabled) => {
-                settings.push(("hoist".to_string(), enabled.to_string()));
-                if *enabled {
-                    settings.push(("hoistPattern".to_string(), "*".to_string()));
+        match linker {
+            LinkerConfig::Isolated { hoist } => {
+                settings.push(("enableGlobalVirtualStore".to_string(), "false".to_string()));
+                match hoist {
+                    Some(Hoist::Bool(enabled)) => {
+                        settings.push(("hoist".to_string(), enabled.to_string()));
+                        if *enabled {
+                            settings.push(("hoistPattern".to_string(), "*".to_string()));
+                        }
+                    }
+                    Some(Hoist::Patterns(patterns)) => {
+                        settings.push(("hoist".to_string(), "true".to_string()));
+                        settings.push(("hoistPattern".to_string(), patterns.join(",")));
+                    }
+                    None => {}
                 }
             }
-            Hoist::Patterns(patterns) => {
-                settings.push(("hoist".to_string(), "true".to_string()));
-                settings.push(("hoistPattern".to_string(), patterns.join(",")));
-            }
+            LinkerConfig::Global { eject } => eject_patterns = eject.clone(),
+            LinkerConfig::Hoisted | LinkerConfig::Pnp => {}
         }
     }
 
-    if let Some(patterns) = install.symlink_disable_pattern.as_ref() {
+    match install.public_hoist.as_ref() {
+        Some(PublicHoist::All(enabled)) => {
+            settings.push(("shamefullyHoist".to_string(), enabled.to_string()));
+        }
+        Some(PublicHoist::Patterns(patterns)) => {
+            settings.push(("publicHoistPattern".to_string(), patterns.join(",")));
+        }
+        None => {}
+    }
+
+    // ADDITIVE, deliberately: the merge seeds from the embedder's own ejects —
+    // the packages known to break when their realpath is outside the project —
+    // and only appends. A project can grow that set, never shrink it, so an
+    // explicit `[]` writes the embedder's value back rather than clearing it.
+    if let Some(patterns) = eject_patterns.as_ref() {
         for key in [
             "disableGlobalVirtualStoreForPackages",
             "diskMaterializePackages",
@@ -1001,7 +1015,7 @@ fn lower_native_install_settings(
 
     Ok(NativeInstallSettings {
         settings,
-        symlink_disable_pattern: install.symlink_disable_pattern.clone().unwrap_or_default(),
+        eject: eject_patterns.unwrap_or_default(),
     })
 }
 
@@ -2376,7 +2390,7 @@ fn nub_setting_defaults(
     // this embedder default carries ONLY the #315 vite eject; empty otherwise
     // (aube's `parse_string_list` drops the empty entry). nub exposes no direct
     // user-facing `diskMaterializePackages` knob: native
-    // `install.symlinkDisablePattern` contributes an explicit seed, while nub's
+    // `install.linker.eject` contributes an explicit seed, while nub's
     // hook drops incumbent `.npmrc`/env/workspace seed names and retains only the
     // native seed plus this internal vite entry. Standalone aube installs no hook
     // and still honors its setting unchanged.
@@ -3006,7 +3020,7 @@ pub(crate) fn with_fd_captured<T>(_fd: i32, f: impl FnOnce() -> T) -> (T, String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project_config::{Hoist, InstallConfig, NodeLinker};
+    use crate::project_config::{Hoist, InstallConfig, LinkerConfig, PublicHoist};
 
     fn get<'a>(defaults: &'a [(String, String)], key: &str) -> Option<&'a str> {
         defaults
@@ -3047,40 +3061,69 @@ mod tests {
         );
     }
 
-    #[test]
-    fn native_install_fields_lower_to_engine_settings() {
-        let install = InstallConfig {
-            node_linker: Some(NodeLinker::Isolated),
-            hoist: Some(Hoist::Patterns(vec![
-                "@types/*".into(),
-                "!@types/node".into(),
-            ])),
-            minimum_release_age: Some(std::time::Duration::from_secs(61)),
-            minimum_release_age_exclude: Some(Vec::new()),
-            ..InstallConfig::default()
-        };
-        let lowered = lower_native_install_settings(&install, &[]).unwrap();
+    fn lower(install: InstallConfig, defaults: &[(String, String)]) -> NativeInstallSettings {
+        lower_native_install_settings(&install, defaults).unwrap()
+    }
 
-        assert_eq!(get(&lowered.settings, "nodeLinker"), Some("isolated"));
-        assert_eq!(
-            get(&lowered.settings, "enableGlobalVirtualStore"),
-            Some("false")
-        );
-        assert_eq!(get(&lowered.settings, "hoist"), Some("true"));
-        assert_eq!(
-            get(&lowered.settings, "hoistPattern"),
-            Some("@types/*,!@types/node")
-        );
-        assert_eq!(get(&lowered.settings, "minimumReleaseAge"), Some("2"));
-        assert_eq!(
-            get(&lowered.settings, "minimumReleaseAgeStrict"),
-            Some("true")
-        );
-        assert_eq!(get(&lowered.settings, "minimumReleaseAgeExclude"), Some(""));
+    fn with_linker(linker: LinkerConfig) -> InstallConfig {
+        InstallConfig {
+            linker: Some(linker),
+            ..InstallConfig::default()
+        }
     }
 
     #[test]
-    fn symlink_disable_patterns_extend_internal_fallbacks() {
+    fn linker_strategy_lowers_to_a_layout_plus_a_store_location() {
+        // Both symlink strategies are aube's `isolated` layout — they differ
+        // only in WHERE the store lives, so `global` (the shared store) must
+        // leave `enableGlobalVirtualStore` at the engine's default.
+        for (linker, node_linker, gvs) in [
+            (LinkerConfig::Global { eject: None }, "isolated", None),
+            (
+                LinkerConfig::Isolated { hoist: None },
+                "isolated",
+                Some("false"),
+            ),
+            (LinkerConfig::Hoisted, "hoisted", None),
+        ] {
+            let lowered = lower(with_linker(linker.clone()), &[]);
+            assert_eq!(
+                get(&lowered.settings, "nodeLinker"),
+                Some(node_linker),
+                "{linker:?}"
+            );
+            assert_eq!(
+                get(&lowered.settings, "enableGlobalVirtualStore"),
+                gvs,
+                "{linker:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn isolated_hoist_lowers_to_the_pnpm_hoist_pattern_pair() {
+        for (hoist, enabled, pattern) in [
+            (Hoist::Bool(true), "true", Some("*")),
+            (Hoist::Bool(false), "false", None),
+            (
+                Hoist::Patterns(vec!["@types/*".into(), "!@types/node".into()]),
+                "true",
+                Some("@types/*,!@types/node"),
+            ),
+        ] {
+            let lowered = lower(
+                with_linker(LinkerConfig::Isolated {
+                    hoist: Some(hoist.clone()),
+                }),
+                &[],
+            );
+            assert_eq!(get(&lowered.settings, "hoist"), Some(enabled), "{hoist:?}");
+            assert_eq!(get(&lowered.settings, "hoistPattern"), pattern, "{hoist:?}");
+        }
+    }
+
+    #[test]
+    fn global_eject_extends_both_embedder_default_lists() {
         let defaults = vec![
             (
                 "disableGlobalVirtualStoreForPackages".into(),
@@ -3088,15 +3131,15 @@ mod tests {
             ),
             ("diskMaterializePackages".into(), "vite".into()),
         ];
-        let install = InstallConfig {
-            node_linker: Some(NodeLinker::Symlink),
-            symlink_disable_pattern: Some(vec!["@corp/tool-*".into(), "next".into()]),
-            ..InstallConfig::default()
-        };
-        let lowered = lower_native_install_settings(&install, &defaults).unwrap();
+        let lowered = lower(
+            with_linker(LinkerConfig::Global {
+                eject: Some(vec!["@corp/tool-*".into(), "next".into()]),
+            }),
+            &defaults,
+        );
 
-        assert_eq!(get(&lowered.settings, "nodeLinker"), Some("isolated"));
-        assert_eq!(get(&lowered.settings, "enableGlobalVirtualStore"), None);
+        // Additive and deduped on top of the compat-required embedder ejects —
+        // a project can add to them but cannot un-eject one.
         assert_eq!(
             get(&lowered.settings, "disableGlobalVirtualStoreForPackages"),
             Some("next,react-native,@corp/tool-*")
@@ -3105,55 +3148,106 @@ mod tests {
             get(&lowered.settings, "diskMaterializePackages"),
             Some("vite,@corp/tool-*,next")
         );
+        // Also carried out of band: the phantom closure is seeded from it.
         assert_eq!(
-            lowered.symlink_disable_pattern,
+            lowered.eject,
             vec!["@corp/tool-*".to_string(), "next".to_string()]
         );
     }
 
     #[test]
-    fn explicit_false_and_empty_install_values_survive_lowering() {
-        let install = InstallConfig {
-            node_linker: Some(NodeLinker::Isolated),
-            hoist: Some(Hoist::Bool(false)),
-            minimum_release_age_exclude: Some(Vec::new()),
-            ..InstallConfig::default()
-        };
-        let lowered = lower_native_install_settings(&install, &[]).unwrap();
-        assert_eq!(get(&lowered.settings, "hoist"), Some("false"));
-        assert_eq!(get(&lowered.settings, "minimumReleaseAgeExclude"), Some(""));
+    fn public_hoist_lowers_independently_of_the_linker_strategy() {
+        for (public_hoist, key, value) in [
+            (PublicHoist::All(true), "shamefullyHoist", "true"),
+            (PublicHoist::All(false), "shamefullyHoist", "false"),
+            (
+                PublicHoist::Patterns(vec!["@types/*".into(), "eslint-*".into()]),
+                "publicHoistPattern",
+                "@types/*,eslint-*",
+            ),
+        ] {
+            let lowered = lower(
+                InstallConfig {
+                    public_hoist: Some(public_hoist.clone()),
+                    ..InstallConfig::default()
+                },
+                &[],
+            );
+            assert_eq!(get(&lowered.settings, key), Some(value), "{public_hoist:?}");
+            // It sits outside `linker` because it means the same thing under
+            // every strategy — including none written at all.
+            assert_eq!(
+                get(&lowered.settings, "nodeLinker"),
+                None,
+                "{public_hoist:?}"
+            );
+        }
     }
 
     #[test]
-    fn reserved_install_combinations_fail_loudly() {
-        for (install, needle) in [
-            (
-                InstallConfig {
-                    node_linker: Some(NodeLinker::Pnp),
-                    ..InstallConfig::default()
-                },
-                "reserved",
-            ),
-            (
-                InstallConfig {
-                    node_linker: Some(NodeLinker::Hoisted),
-                    hoist: Some(Hoist::Bool(true)),
-                    ..InstallConfig::default()
-                },
-                "install.hoist",
-            ),
-            (
-                InstallConfig {
-                    node_linker: Some(NodeLinker::Isolated),
-                    symlink_disable_pattern: Some(vec!["pkg".into()]),
-                    ..InstallConfig::default()
-                },
-                "install.symlinkDisablePattern",
-            ),
-        ] {
-            let err = lower_native_install_settings(&install, &[]).unwrap_err();
-            assert!(err.to_string().contains(needle), "{err:#}");
-        }
+    fn minimum_release_age_rounds_up_to_whole_minutes() {
+        let lowered = lower(
+            InstallConfig {
+                minimum_release_age: Some(std::time::Duration::from_secs(61)),
+                minimum_release_age_exclude: Some(vec!["@internal/*".into(), "left-pad".into()]),
+                ..InstallConfig::default()
+            },
+            &[],
+        );
+        assert_eq!(get(&lowered.settings, "minimumReleaseAge"), Some("2"));
+        assert_eq!(
+            get(&lowered.settings, "minimumReleaseAgeStrict"),
+            Some("true")
+        );
+        assert_eq!(
+            get(&lowered.settings, "minimumReleaseAgeExclude"),
+            Some("@internal/*,left-pad")
+        );
+    }
+
+    #[test]
+    fn explicit_false_and_empty_install_values_survive_lowering() {
+        // An explicitly-written `false` / `[]` is a VALUE, not an absence: it
+        // must reach the engine so it overrides what the default would be.
+        let lowered = lower(
+            InstallConfig {
+                linker: Some(LinkerConfig::Isolated {
+                    hoist: Some(Hoist::Bool(false)),
+                }),
+                minimum_release_age_exclude: Some(Vec::new()),
+                ..InstallConfig::default()
+            },
+            &[],
+        );
+        assert_eq!(get(&lowered.settings, "hoist"), Some("false"));
+        assert_eq!(get(&lowered.settings, "minimumReleaseAgeExclude"), Some(""));
+
+        // `eject: []` still WRITES both list keys — at the embedder's own value,
+        // since the merge is additive — where no `eject` key writes neither.
+        let defaults = vec![("diskMaterializePackages".to_string(), "vite".to_string())];
+        let empty = lower(
+            with_linker(LinkerConfig::Global {
+                eject: Some(Vec::new()),
+            }),
+            &defaults,
+        );
+        let absent = lower(with_linker(LinkerConfig::Global { eject: None }), &defaults);
+        assert_eq!(
+            get(&empty.settings, "diskMaterializePackages"),
+            Some("vite")
+        );
+        assert_eq!(get(&absent.settings, "diskMaterializePackages"), None);
+    }
+
+    #[test]
+    fn pnp_linker_is_reserved_and_aborts_the_install() {
+        // `tests/project_config_sandbox_inert.rs` uses this abort as its
+        // liveness probe that project config reaches the install at all — the
+        // code, not just the failure, is load-bearing.
+        let err = lower_native_install_settings(&with_linker(LinkerConfig::Pnp), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ERR_NUB_CONFIG_UNSUPPORTED"), "{err}");
     }
 
     #[test]
@@ -3209,8 +3303,8 @@ mod tests {
             dir.path().join("nub.jsonc"),
             r#"{
               "install": {
-                "nodeLinker": "isolated",
-                "hoist": false,
+                "linker": { "strategy": "isolated", "hoist": false },
+                "publicHoist": ["@types/*"],
                 "minimumReleaseAge": "3d",
                 "minimumReleaseAgeExclude": ["@internal/*"]
               }
@@ -3244,7 +3338,15 @@ mod tests {
 
         let lowered = lower_native_install_settings(&snapshot.values.install, &[]).unwrap();
         assert_eq!(get(&lowered.settings, "nodeLinker"), Some("isolated"));
+        assert_eq!(
+            get(&lowered.settings, "enableGlobalVirtualStore"),
+            Some("false")
+        );
         assert_eq!(get(&lowered.settings, "hoist"), Some("false"));
+        assert_eq!(
+            get(&lowered.settings, "publicHoistPattern"),
+            Some("@types/*")
+        );
         assert_eq!(get(&lowered.settings, "minimumReleaseAge"), Some("4320"));
         assert_eq!(
             get(&lowered.settings, "minimumReleaseAgeExclude"),

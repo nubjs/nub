@@ -79,20 +79,134 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "nodeLinker": {
-          "enum": [
-            "symlink",
-            "isolated",
-            "hoisted",
-            "pnp"
+        "linker": {
+          "oneOf": [
+            {
+              "enum": [
+                "global",
+                "isolated",
+                "hoisted",
+                "pnp"
+              ]
+            },
+            {
+              "type": "object",
+              "required": [
+                "strategy"
+              ],
+              "properties": {
+                "strategy": {
+                  "enum": [
+                    "global",
+                    "isolated",
+                    "hoisted",
+                    "pnp"
+                  ],
+                  "description": "The layout to use."
+                }
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "required": [
+                      "strategy"
+                    ],
+                    "properties": {
+                      "strategy": {
+                        "const": "global"
+                      }
+                    }
+                  },
+                  "then": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "strategy": {
+                        "const": "global"
+                      },
+                      "eject": {
+                        "$ref": "#/$defs/stringArray",
+                        "description": "Packages to materialize as project-local directories instead of symlinks into the shared store."
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "required": [
+                      "strategy"
+                    ],
+                    "properties": {
+                      "strategy": {
+                        "const": "isolated"
+                      }
+                    }
+                  },
+                  "then": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "strategy": {
+                        "const": "isolated"
+                      },
+                      "hoist": {
+                        "oneOf": [
+                          {
+                            "type": "boolean"
+                          },
+                          {
+                            "$ref": "#/$defs/stringArray"
+                          }
+                        ],
+                        "description": "Packages hoisted into the hidden fallback tree that resolves a dependency's undeclared imports. true hoists every package."
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "required": [
+                      "strategy"
+                    ],
+                    "properties": {
+                      "strategy": {
+                        "const": "hoisted"
+                      }
+                    }
+                  },
+                  "then": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "strategy": {
+                        "const": "hoisted"
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "required": [
+                      "strategy"
+                    ],
+                    "properties": {
+                      "strategy": {
+                        "const": "pnp"
+                      }
+                    }
+                  },
+                  "then": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "strategy": {
+                        "const": "pnp"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
           ],
-          "description": "The node_modules layout."
+          "description": "The node_modules layout. Each strategy accepts only its own options."
         },
-        "symlinkDisablePattern": {
-          "$ref": "#/$defs/stringArray",
-          "description": "Packages to materialize as project-local directories instead of symlinks."
-        },
-        "hoist": {
+        "publicHoist": {
           "oneOf": [
             {
               "type": "boolean"
@@ -101,7 +215,7 @@
               "$ref": "#/$defs/stringArray"
             }
           ],
-          "description": "Enable hoisting or select package-name patterns to hoist."
+          "description": "Packages forced into the root node_modules for tools that resolve from the project root. true hoists every package."
         },
         "minimumReleaseAge": {
           "type": "string",
