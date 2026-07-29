@@ -1663,6 +1663,7 @@ mod tests {
     /// lands in a directory the confined `preinstall` may write. `fs::copy` would have
     /// opened it O_CREAT|O_TRUNC and followed the link, writing through it as the USER.
     #[test]
+    #[cfg(unix)]
     fn a_symlinked_staged_temp_is_refused_not_followed() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("package");
