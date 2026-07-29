@@ -389,6 +389,26 @@ mod win {
         CommandSpec::new(f.child.as_os_str()).args(a).cwd(cwd)
     }
 
+    /// CI shows no output until a job ends, so a stalled launch is invisible unless the line
+    /// before it has already left the buffer. Called before anything that could hang.
+    fn flush() {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+    }
+
+    /// The total character count of the environment block a policy would hand `CreateProcessW`,
+    /// counted the way the OS does: `KEY=VALUE\0` per entry, plus the block's own terminator.
+    /// The documented ceiling is 32767.
+    fn env_block_chars(policy: &SandboxPolicy) -> usize {
+        policy
+            .env
+            .constructed
+            .iter()
+            .map(|(k, v)| k.chars().count() + v.chars().count() + 2)
+            .sum::<usize>()
+            + 1
+    }
+
     fn report(fails: &mut u32, prop: &str, ok: bool, detail: &str) {
         println!(
             "  prop:{prop}={}  {detail}",
@@ -855,11 +875,46 @@ fs.writeFileSync({marker}, "done cwd=" + process.cwd() + " read=" + body);
 
         let extra = vec![read_rule(node)];
         let shimmed = jail_shaped(&f, extra.clone(), &[("NODE_OPTIONS", options)]);
-        let unshimmed = jail_shaped(&f, extra, &[]);
+        let unshimmed = jail_shaped(&f, extra.clone(), &[]);
 
         let dir = f.work.join("shim");
         std::fs::create_dir_all(&dir).unwrap();
         seed_package(&dir);
+
+        // THE ENV-BLOCK SIZE CONTROL, and the reason this arm ran before any Node did.
+        //
+        // A `CreateProcessW` environment block is capped at 32767 CHARACTERS in total, and the
+        // percent-encoded shim alone is ~23.8 KB of that — so the shimmed policy sits close
+        // enough to the ceiling that a real install's `npm_config_*` and `PATH` could cross it.
+        // Two earlier runs died in this group with no output past the byte count, which is
+        // consistent with the size and not with anything the shim does, so the two candidates
+        // are separated here rather than argued: `tiny` carries a NODE_OPTIONS the size of a
+        // flag, `shimmed` carries the real one, and both run the same trivial launch. If tiny
+        // passes and shimmed does not, the payload is too large for this delivery and the shim
+        // belongs in a FILE — which Fix 1 has just made loadable — rather than a `data:` URL.
+        println!("  fact:env-block-chars={}", env_block_chars(&shimmed));
+        let tiny = jail_shaped(&f, extra, &[("NODE_OPTIONS", "--title=nub".to_string())]);
+        for (id, policy) in [("tiny", &tiny), ("full", &shimmed)] {
+            flush();
+            let probe = fsprobe(
+                &f,
+                policy,
+                &format!("size-{id}"),
+                &[(
+                    "workwrite".to_string(),
+                    "write",
+                    dir.join(format!("size-{id}.txt"))
+                        .to_string_lossy()
+                        .into_owned(),
+                )],
+            );
+            report(
+                fails,
+                &format!("node-options-{id}-launches"),
+                line(&probe, "workwrite").starts_with("ok:"),
+                &line(&probe, "workwrite"),
+            );
+        }
 
         // Liveness for this arm, measured before any spawn shape: if a jailed child cannot
         // write into the granted work dir, the arm is broken rather than restrictive.
