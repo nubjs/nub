@@ -12,10 +12,12 @@
 #
 # THE CONTROLS. `deelevated-can-write-own-dacl` must pass in BOTH the ambient and de-elevated
 # arms, so a refusal on `C:\` is evidence about `C:\` rather than about a broken impersonation;
-# `deelevated-context-is-nonadmin` is access-checked (`OpenSCManagerW`), never read off
-# `TokenIsElevated`, which `CreateRestrictedToken` copies rather than recomputes.
+# `deelevated-context-is-nonadmin` evaluates real group state (`CheckTokenMembership`, which
+# reports a deny-only SID as not a member), never the `TokenIsElevated` flag that
+# `CreateRestrictedToken` copies rather than recomputes — and never an RPC issued while
+# impersonating a restricted token, which is how an earlier revision hung.
 # `node-plain-fails` is the both-directions control on the treatment arms: the defect must
-# still reproduce in the same run, or a green shim arm is measuring nothing.
+# still reproduce in the same run, or a green treatment arm is measuring nothing.
 #
 # Every step is `if: always()`, because a red step early in the job must never hide the
 # verdicts this job exists to produce.
@@ -37,12 +39,13 @@ jobs:
       # crt-static matches sandbox-conformance's windows leg: it makes the self-reexec probe
       # child self-contained, so it starts cleanly under the LowBox token.
       #
-      # BYTE-IDENTICAL to the sibling Windows probes ON PURPOSE. RUSTFLAGS is part of every
-      # cargo fingerprint, so adding even one flag here misses the shared `Swatinem/rust-cache`
-      # entry and forces a full cold rebuild of the whole dependency graph — measured: this job
-      # ran 35+ minutes with an extra `-C link-arg=/STACK:8388608` where the sibling probes
-      # finish in 2-3. That stack bump is an inherited workaround for `nub install`'s 0xC00000FD
-      # exit, and this probe never runs `nub install`, so it bought nothing and cost the cache.
+      # Kept BYTE-IDENTICAL to the sibling Windows probes: RUSTFLAGS is part of every cargo
+      # fingerprint, so a flag that differs here can only cost cache hits. An earlier revision
+      # carried `-C link-arg=/STACK:8388608` — an inherited workaround for `nub install`'s
+      # 0xC00000FD exit that this probe, which never runs `nub install`, had no use for.
+      # (The first runs' 35+ minute builds were NOT mainly that flag: `Swatinem/rust-cache`
+      # keys on the workflow/job, so a NEW workflow starts cold whatever its RUSTFLAGS. Once
+      # this workflow has completed once, its own cache entry makes later runs fast.)
       RUSTFLAGS: "-C target-feature=+crt-static"
     steps:
       - uses: actions/checkout@v4
@@ -114,9 +117,10 @@ jobs:
                    deelevated-cannot-write-dacl-c-users jail-lstat-c-root-refused \
                    jail-lstat-granted-work-permitted jail-lstat-ungranted-refused \
                    node-plain-fails node-preserve-main-lets-entry-run \
-                   node-preserve-main-alone-leaves-dep-broken node-shim-runs-and-requires-dep \
-                   node-shim-executed realpath-native-permitted-in-jail \
-                   shim-ungranted-read-refused shim-granted-read-permitted \
+                   node-preserve-main-alone-leaves-dep-broken node-preserve-symlinks-resolves-dep \
+                   node-preserve-symlinks-completes node-shim-executed \
+                   realpath-native-refused-in-jail \
+                   psymlinks-ungranted-read-refused psymlinks-granted-read-permitted \
                    node-shim-via-node-options lifecycle-policy-compiles \
                    child-process-piped-measured child-process-inherit-measured \
                    lifecycle-env-scrub-keeps-node-options \
@@ -128,7 +132,7 @@ jobs:
           need "prop:deelevated-context-is-nonadmin=PASS"
           need "prop:deelevated-can-write-own-dacl=PASS"
           need "prop:node-plain-fails=PASS"
-          need "prop:shim-ungranted-read-refused=PASS"
+          need "prop:psymlinks-ungranted-read-refused=PASS"
           echo "---- recorded verdicts ----"
           grep -E '^(PROBE |  prop:|    |interpreter: |shim: |WINDOWS )' probe.log || true
           exit $fail

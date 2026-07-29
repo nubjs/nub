@@ -20,7 +20,7 @@ mod resolve;
 mod reuse;
 
 #[cfg(windows)]
-pub use defaults::windows_realpath_node_options;
+pub use defaults::{windows_native_realpath_shim_node_options, windows_realpath_node_options};
 pub use preset::compile_build_jail;
 pub use resolve::{CommandRunner, ShellRunner};
 

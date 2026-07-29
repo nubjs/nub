@@ -25,29 +25,39 @@
 //! context OWNS, so a refusal on `C:\` is evidence about `C:\` rather than about a broken
 //! impersonation.
 //!
-//! THE ROUTE OUT, if the ACE is disqualified. Node reaches its JS `realpathSync` through two
-//! seams it deliberately keeps monkey-patchable (`internal/modules/helpers.js` says so in a
-//! comment: "Import all of `fs` so that it can be monkey-patched"), and both call it as a
-//! live property lookup on the `fs` module object:
+//! THE ROUTE OUT. Node reaches its JS `realpathSync` through two gated seams:
 //!
 //! | seam | gate |
 //! | --- | --- |
 //! | `resolveMainPath` (`run_main.js`) | `--preserve-symlinks-main` |
 //! | `_findPath` / `finalizeResolution` (CJS + ESM) | `--preserve-symlinks` |
 //!
-//! `--import` preloads run AFTER `resolveMainPath`, so a preload alone cannot rescue the
-//! ENTRY point — `--preserve-symlinks-main` has to clear that one call. Everything after it
-//! can be rescued without changing resolution semantics at all, by pointing `fs.realpathSync`
-//! at `fs.realpathSync.native`: the native one is `GetFinalPathNameByHandleW` on a handle to
-//! the LEAF, so it resolves symlinks identically while opening exactly the object the jail
-//! already granted. `node_matrix` measures each of those pieces on its own, so the report can
-//! say what each flag buys rather than that some combination worked.
+//! The first candidate was to keep resolution semantics intact by redirecting
+//! `fs.realpathSync` at its NATIVE twin through a `data:` preload — Node keeps that seam
+//! monkey-patchable on purpose (`internal/modules/helpers.js`: "Import all of `fs` so that it
+//! can be monkey-patched"). It is REFUTED: `fs.realpathSync.native` is refused under this jail
+//! too, `EPERM ... realpath` on a file the jail GRANTED and Node reads successfully in the
+//! same run. `GetFinalPathNameByHandleW` needs more than the leaf handle the jail allows, so
+//! both realpath implementations are unavailable and only NOT CALLING one is left — which is
+//! `--preserve-symlinks`, at the cost of symlinked dependency resolution.
+//!
+//! That refuted arm is KEPT as a standing differential rather than deleted: `node-shim-executed`
+//! proves the preload evaluated, so `realpath-native-refused-in-jail` is the OS refusing, not
+//! the preload failing to arrive. If a future Windows grants that call under an AppContainer,
+//! the arm flips and the semantics-preserving route reopens.
+//!
+//! `node_matrix` measures each piece on its own, so the report can say what each flag buys
+//! rather than that some combination worked.
 //!
 //! EVERY VERDICT IS A MARKER THE CHILD WROTE. Nothing is read off a status the harness
 //! reported about itself, every path the child touches is baked in as an absolute LITERAL
 //! (the jail strips the environment, and a `readFileSync(undefined)` throws in a way that
-//! reads as a refusal), and `shim-ungranted-read-refused` asserts the SPECIFIC error — a
+//! reads as a refusal), and `psymlinks-ungranted-read-refused` asserts the SPECIFIC error — a
 //! canary that came back `ENOENT` would mean the control never tested confinement at all.
+//!
+//! EVERY SPAWN CARRIES A TIMEOUT. Measured, a piped `child_process` spawn under this jail does
+//! not fail — it BLOCKS FOREVER, which is worse than a refusal for a postinstall and which
+//! killed an entire probe run at the harness timeout, discarding every arm after it.
 //!
 //! CI IS THE ONLY VENUE. AppContainer cannot be launched over SSH (session 0 has no window
 //! station; every launch returns 0xC0000142). Runs branch-scoped via
@@ -769,14 +779,14 @@ mod win {
         nub_sandbox::windows_realpath_node_options()
     }
 
-    /// The same shim as a bare `--import` argument, for the arms that pass flags on argv
-    /// instead of through the environment. Kept derived from the production string so the two
-    /// cannot drift.
+    /// The REFUTED native-realpath shim as a bare `--import` argument, for the differential arm
+    /// that passes flags on argv. Derived from the shipped-alongside function rather than
+    /// restated, so the arm keeps measuring the exact string that was rejected.
     fn shim_import_arg() -> String {
-        shim_node_options()
+        nub_sandbox::windows_native_realpath_shim_node_options()
             .split(" --import ")
             .nth(1)
-            .expect("the stamped NODE_OPTIONS carries an --import")
+            .expect("the native-realpath shim carries an --import")
             .to_string()
     }
 
@@ -824,9 +834,12 @@ rec("read-ungranted", () => fs.readFileSync(UNGRANTED, "utf8").trim());
 // measured refused while Rust's Stdio::piped() — also a named pipe — was permitted, so what
 // `child_process` actually does is an open question, and it decides whether node-gyp (whose
 // Python discovery pipes on every configure) can run under the jail at all.
+// EVERY spawn carries a timeout: measured, a piped spawn under this jail does not fail — it
+// BLOCKS FOREVER, which killed a whole probe run at the harness timeout and discarded the
+// arms after it. A timeout turns that into a recorded ETIMEDOUT, which is itself the finding.
 const cp = require("child_process");
-rec("spawn-piped", () => cp.execFileSync(process.execPath, ["-e", "process.stdout.write('pong')"], {{ encoding: "utf8" }}));
-rec("spawn-inherit", () => {{ cp.execFileSync(process.execPath, ["-e", "0"], {{ stdio: "inherit" }}); return "ok"; }});
+rec("spawn-piped", () => cp.execFileSync(process.execPath, ["-e", "process.stdout.write('pong')"], {{ encoding: "utf8", timeout: 15000 }}));
+rec("spawn-inherit", () => {{ cp.execFileSync(process.execPath, ["-e", "0"], {{ stdio: "inherit", timeout: 15000 }}); return "ok"; }});
 put("done=ok");
 "#,
                 marker = esc(marker),
@@ -914,6 +927,33 @@ put("done=ok");
             "a non-main require still walks the JS realpath",
         );
 
+        // THE ONLY REMAINING CANDIDATE, and it is measured BEFORE the shim arm because the
+        // shim's premise is already refuted: `fs.realpathSync.native` is refused in the jail
+        // too (`realpath-native=err:EPERM` on a file the jail GRANTED and Node can read), so
+        // redirecting realpath at the native twin cannot help. Only avoiding realpath outright
+        // can, and `--preserve-symlinks` is the one lever that does it — at the cost of
+        // dependency resolution no longer resolving symlinks, which an isolated node_modules
+        // depends on. That cost is why this needs a measurement and a decision, not a default.
+        let preserve_both = node_arm(
+            f,
+            node,
+            "psboth",
+            &["--preserve-symlinks-main", "--preserve-symlinks"],
+            &[],
+        );
+        report(
+            fails,
+            "node-preserve-symlinks-resolves-dep",
+            preserve_both.marker.contains("require-dep=ok"),
+            "the only lever that avoids the JS realpath entirely",
+        );
+        report(
+            fails,
+            "node-preserve-symlinks-completes",
+            preserve_both.marker.contains("done=ok"),
+            "the script body must run to completion, not merely start",
+        );
+
         let shimmed = node_arm(
             f,
             node,
@@ -921,12 +961,11 @@ put("done=ok");
             &["--preserve-symlinks-main", "--import", shim.as_str()],
             &[],
         );
-        report(
-            fails,
-            "node-shim-runs-and-requires-dep",
-            shimmed.marker.contains("require-dep=ok"),
-            "THE CANDIDATE ROUTE",
-        );
+        // The refuted candidate, kept as a standing differential. `node-shim-executed` proves
+        // the data: preload really did evaluate, so the failure below is the OS refusing the
+        // native realpath rather than the preload never arriving — without it the two are
+        // indistinguishable. If a future Windows grants GetFinalPathNameByHandleW under an
+        // AppContainer, this arm flips and the semantics-preserving route becomes available.
         report(
             fails,
             "node-shim-executed",
@@ -935,15 +974,15 @@ put("done=ok");
         );
         report(
             fails,
-            "realpath-native-permitted-in-jail",
-            shimmed.marker.contains("realpath-native=ok"),
-            "the linchpin: a leaf-only realpath is reachable under the jail",
+            "realpath-native-refused-in-jail",
+            shimmed.marker.contains("realpath-native=err"),
+            "the measured OS fact that disqualifies redirecting realpath at its native twin",
         );
 
         // The anti-vacuous control, asserting the SPECIFIC error. An `ENOENT` here would mean
         // the canary never tested confinement — that exact false green has been paid for once
         // already, when a canary path arrived through an env var the jail strips.
-        let ungranted_line = shimmed
+        let ungranted_line = preserve_both
             .marker
             .lines()
             .find(|l| l.starts_with("read-ungranted="))
@@ -953,26 +992,26 @@ put("done=ok");
             || ungranted_line.contains("EBUSY");
         report(
             fails,
-            "shim-ungranted-read-refused",
+            "psymlinks-ungranted-read-refused",
             denied && !ungranted_line.contains("ENOENT"),
             ungranted_line,
         );
         report(
             fails,
-            "shim-granted-read-permitted",
-            shimmed.marker.contains("read-granted=ok"),
+            "psymlinks-granted-read-permitted",
+            preserve_both.marker.contains("read-granted=ok"),
             "the control that must pass in the same arm as the refusal above",
         );
 
         // BLOCKER 2, measured rather than inferred. Reported as facts, not as nub's pass/fail:
         // a refusal here is an OS verdict, and it is the one that decides whether node-gyp can
         // run under the jail (its Python discovery pipes on every configure, `lib/util.js`).
-        let piped = shimmed
+        let piped = preserve_both
             .marker
             .lines()
             .find(|l| l.starts_with("spawn-piped="))
             .unwrap_or("<absent>");
-        let inherited = shimmed
+        let inherited = preserve_both
             .marker
             .lines()
             .find(|l| l.starts_with("spawn-inherit="))
@@ -1006,23 +1045,7 @@ put("done=ok");
             "NODE_OPTIONS is the only channel nub has over a script's own node invocation",
         );
 
-        // The fallback route, measured so the report can compare rather than assert.
-        let preserve_both = node_arm(
-            f,
-            node,
-            "psboth",
-            &["--preserve-symlinks-main", "--preserve-symlinks"],
-            &[],
-        );
-        println!(
-            "    [fallback --preserve-symlinks] require-dep line: {}",
-            preserve_both
-                .marker
-                .lines()
-                .find(|l| l.starts_with("require-dep="))
-                .unwrap_or("<absent>")
-        );
-        let _ = preserve_both.code;
+        let _ = shimmed.code;
     }
 
     /// THE SUCCESS CRITERION. Not rc=0 and not "no denial logged": a lifecycle-shaped script
@@ -1131,7 +1154,8 @@ put("done=ok");
             .map(|p| unverbatim(&p))
             .unwrap_or(node);
         println!("interpreter: {}", node.display());
-        println!("shim: {}", shim_import_arg());
+        println!("refuted-shim: {}", shim_import_arg());
+        println!("stamped NODE_OPTIONS: {}", shim_node_options());
 
         // Each arm announces itself, flushed, BEFORE it runs. CI logs are unavailable until a
         // job finishes, so a stalled arm is otherwise invisible — the job just sits there and
