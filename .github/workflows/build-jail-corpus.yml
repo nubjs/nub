@@ -113,6 +113,9 @@ jobs:
             cp "$d"/report.json "$d"/verdicts.json "evidence/$n/" 2>/dev/null || true
             grep -iE 'EPERM|EACCES|EROFS|Cannot find module|not permitted|arm_effect|optout_warnings|node_gyp_identity' \
               "$d"/run.log > "evidence/$n/failures.txt" 2>/dev/null || true
+            # The full log, capped. A grep-filtered extract can say a denominator
+            # failed but never why, which is exactly the question a failed A0 poses.
+            tail -c 2000000 "$d"/run.log > "evidence/$n/run.log" 2>/dev/null || true
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
