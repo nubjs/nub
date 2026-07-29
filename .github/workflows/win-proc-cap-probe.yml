@@ -1,0 +1,45 @@
+# Branch-scoped ad-hoc probe for the Windows Job-Object active-process cap.
+# No PR required (see .claude/skills/ci-adhoc-test/SKILL.md). Delete once the cap
+# lands and sandbox-conformance's windows leg covers it on main.
+name: win-proc-cap-probe
+
+on:
+  push:
+    branches: [sandbox/win-active-process-cap]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      # Matches sandbox-conformance's windows leg: crt-static makes the self-reexec
+      # probe child self-contained, so it starts cleanly under the LowBox token.
+      RUSTFLAGS: "-C target-feature=+crt-static"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Runner baseline
+        shell: powershell
+        run: |
+          Write-Host "cores=$([System.Environment]::ProcessorCount) os=$([System.Environment]::OSVersion.VersionString)"
+
+      - name: Windows AppContainer enforcement (incl. the proc-cap arms)
+        shell: bash
+        run: cargo test -p nub-sandbox --test windows_enforcement 2>&1 | tee probe.log
+
+      # The false-green guard this study keeps needing: a job that exits 0 having
+      # measured nothing is worse than a red one. Both proc-cap arms must have
+      # actually reported, or this step fails the run.
+      - name: Assert both proc-cap arms ran
+        shell: bash
+        run: |
+          fail=0
+          grep -q 'PASS proc-cap: bounded at' probe.log || { echo "MISSING: the cap arm never reported"; fail=1; }
+          grep -q 'PASS proc-cap control:' probe.log || { echo "MISSING: the legitimate-build control never reported"; fail=1; }
+          grep -E 'PASS proc-cap' probe.log
+          exit $fail
