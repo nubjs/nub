@@ -118,7 +118,7 @@ $ nub node ls
   20.11.0
 ```
 
-Only Nub's own download cache is shown — `ls` doesn't enumerate your `nvm` / `fnm` / system installs. The `→` marker appears only when the resolved version is one Nub has cached.
+Only Nub's own download cache is shown — `ls` doesn't enumerate your `nvm` / `fnm` / system installs.
 
 ## `nub node uninstall`
 
@@ -181,7 +181,7 @@ node shim in /Users/you/.nub/node-shim (created)
   restart your shell, or run: source /Users/you/.zshrc
 ```
 
-The shimmed `node` runs stock Node, unchanged. It resolves and provisions the version — the [precedence above](#version-precedence) — but adds nothing else: no TypeScript, no injected globals, no automatic `.env`. A bare `node` behaves like `node`; `nub` is what adds the runtime features. So `node app.ts` type-strips exactly as stock Node does, while `nub app.ts` transpiles and runs it.
+The shimmed `node` runs stock Node, unchanged. It resolves and provisions the version — the [precedence above](#version-precedence) — but adds nothing else: no TypeScript, no injected globals, no automatic `.env`. So `node app.ts` type-strips exactly as stock Node does, while `nub app.ts` transpiles and runs it.
 
 This is opt-in and reversible, the same shape as [`nub pm shim`](/docs/pm/pm-shim). It installs a `node` link in `~/.nub/node-shim` and adds that directory to your PATH; because that comes first, a Node you install later (`brew install node`) is shadowed until you unshim. Re-run `nub node shim` after `nub upgrade` to re-link.
 

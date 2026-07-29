@@ -24,7 +24,7 @@ The prefixed name is resolved in two places, in order:
 - `node_modules/.bin` — the project-local bin, walking up from the current directory (the same chain `nub run` and `nubx` use).
 - `PATH` — a globally-installed plugin.
 
-Only the prefixed `nub-<verb>` name is ever probed — never the bare verb. A mistyped command like `nub bnuild` resolves nothing and prints the usual not-a-command error; it can't fall through to a random `bnuild` binary on your PATH.
+Only the prefixed `nub-<verb>` name is ever probed — never the bare verb.
 
 ## Built-ins always win
 

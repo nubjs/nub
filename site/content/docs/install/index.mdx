@@ -247,7 +247,7 @@ Runtime augmentation is reversible. Passing `--node`, or setting a truthy `NODE_
 
 ### Project configuration
 
-A project [`nub.jsonc`](/docs/config) carries an [`install`](/docs/config#install) block. It applies only when Nub is the project's package manager — a project with an npm, pnpm, Yarn, or Bun lockfile keeps that tool's own configuration, and the block is ignored.
+A project [`nub.jsonc`](/docs/config) carries an [`install`](/docs/config#install) block. It applies only when Nub is the project's package manager — a project with an npm, pnpm, Yarn, or Bun lockfile keeps that tool's own configuration.
 
 ```jsonc title="nub.jsonc"
 {
@@ -487,7 +487,7 @@ A foreign lockfile that carries no publish-time data — notably an incumbent `b
 
 ### Advisory gate
 
-The OSV check queries `api.osv.dev` on a fresh resolve. A confirmed `MAL-*` hit is a **hard block** — the install aborts with `ERR_NUB_MALICIOUS_PACKAGE`, never a skip-and-warn, because a malicious-package advisory isn't a judgement call. An osv.dev **outage** is treated differently: the check fails *open*, warning and proceeding so a network blip can't brick an offline install. That asymmetry is deliberate — a hit always blocks, an outage never does. To fail closed on outages too, set `advisoryCheck=required` (also bundled into `paranoid` below).
+The OSV check queries `api.osv.dev` on a fresh resolve. A confirmed `MAL-*` hit is a **hard block** — the install aborts with `ERR_NUB_MALICIOUS_PACKAGE`, never a skip-and-warn, because a malicious-package advisory isn't a judgement call. An osv.dev **outage** is treated differently: the check fails *open*, warning and proceeding so a network blip can't brick an offline install. To fail closed on outages too, set `advisoryCheck=required` (also bundled into `paranoid` below).
 
 Frozen reinstalls — `nub ci`, `--frozen-lockfile`, a teammate's clone — inherit the advisory vetting recorded when the lockfile was written and skip the per-install round-trip, but still enforce the cooling and provenance gates on every install.
 
@@ -543,8 +543,6 @@ In CI, and under `nub ci`, each project gets its own self-contained virtual stor
 ```ini
 enableGlobalVirtualStore=false
 ```
-
-Either layout resolves the same packages — including type packages (`@types/*`) pulled in transitively but not declared, which stay reachable in both.
 
 A few packages statically import a backend you pick at runtime — `@hookform/resolvers/zod` imports the `zod` your app installs, without declaring it. Under the shared store the adapter's real path sits outside the project, so Node's directory walk can't reach that backend and the import throws. Nub materializes those adapters into the project automatically so they resolve, while the rest of the tree keeps sharing.
 
