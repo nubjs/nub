@@ -493,16 +493,37 @@ mod win {
         if ok == 0 {
             return Err(err);
         }
+        // `CreateRestrictedToken` hands back a handle carrying only the source handle's
+        // rights, and `SetTokenInformation(TokenIntegrityLevel)` needs TOKEN_ADJUST_DEFAULT
+        // (ACCESS_DENIED without it, run 30424678530). Re-open the token we already own at
+        // full access rather than widening the process-token handle above.
+        let mut full: HANDLE = std::ptr::null_mut();
+        // SAFETY: duplicating a token handle we own into a full-access primary token.
+        let dup = unsafe {
+            DuplicateTokenEx(
+                restricted,
+                TOKEN_ALL_ACCESS,
+                std::ptr::null(),
+                SecurityImpersonation,
+                TokenPrimary,
+                &mut full,
+            )
+        };
+        let dup_err = std::io::Error::last_os_error();
+        unsafe { CloseHandle(restricted) };
+        if dup == 0 {
+            return Err(dup_err);
+        }
         // Fail rather than measure at High integrity: an arm that kept the elevated token's
         // IL would be weaker than a standard user, which is the one direction this
         // substitution must never go.
-        set_medium_integrity(restricted).map_err(|e| {
-            unsafe { CloseHandle(restricted) };
+        set_medium_integrity(full).map_err(|e| {
+            unsafe { CloseHandle(full) };
             std::io::Error::other(format!(
                 "could not drop the restricted token to medium IL: {e}"
             ))
         })?;
-        Ok((restricted, "restricted-token+medium-il"))
+        Ok((full, "restricted-token+medium-il"))
     }
 
     /// Spawn `argv` under `token` in THIS session/window station and return its exit code.
