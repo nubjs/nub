@@ -5,12 +5,14 @@
 //! **The boundary is load-bearing.** [`resolve_ts`] returns `Some(absolute path)`
 //! ONLY for the additive cases nub owns: tsconfig `paths` aliases, `.ts/.tsx/.mts/
 //! .cts/.jsx` extension probing, the `.js`→`.ts` (and `.jsx→.tsx`, `.mjs→.mts`,
-//! `.cjs→.cts`) emit-convention swap, directory-index probing, and reading a
-//! directory's `package.json#main` (main ONLY). For EVERYTHING else — node_modules
-//! resolution, `exports`/`imports` maps, export conditions, scoped packages, bare
-//! specifiers — it returns `None`, and the JS hook turns that into
-//! `nextResolve(...)` / `origResolveFilename(...)`. Reimplementing Node's own
-//! resolution here is forbidden; `None` is where byte-for-byte compat is preserved.
+//! `.cjs→.cts`) emit-convention swap, directory-index probing, reading a
+//! directory's `package.json#main` (main ONLY), and — see
+//! [`resolve_bare_subpath`] — extension probing of a bare package SUBPATH into a
+//! dependency that declares no `exports`. For EVERYTHING else — package-name
+//! resolution, `exports`/`imports` maps, export conditions — it returns `None`,
+//! and the JS hook turns that into `nextResolve(...)` /
+//! `origResolveFilename(...)`. Reimplementing Node's own resolution here is
+//! forbidden; `None` is where byte-for-byte compat is preserved.
 //!
 //! The `node:`/`data:`/builtin guards, the nub-internal-graph bypass, vendored
 //! packages, and the clobber map all stay in JS and run BEFORE this is called.
@@ -45,20 +47,21 @@ pub fn resolve_ts(specifier: String, parent_path: String) -> Option<String> {
     if !is_relative && !is_absolute && !is_file_url && !is_node_modules(&parent_path) {
         let candidates = tsconfig::match_paths(&parent_dir, &specifier);
         for candidate in candidates {
-            if let Some(resolved) = try_resolve_file(&candidate, &parent_ext, true) {
+            if let Some(resolved) = try_resolve_file(&candidate, true, probe_order(&parent_ext)) {
                 return Some(resolved);
             }
         }
-        // A bare package with no matching alias → let Node resolve from
-        // node_modules. NEVER probe node_modules ourselves.
-        return None;
+        // No alias matched. A bare package NAME still belongs entirely to Node
+        // (`main`/`exports`); only a SUBPATH into an `exports`-less dependency is
+        // ours to probe.
+        return resolve_bare_subpath(&specifier, &parent_dir);
     }
 
     // Extensionless / emit-swap branch — only when the importer is itself a TS
     // file and the specifier is relative.
     if is_ts_parent(&parent_ext) && is_relative {
         let target = path_join_resolve(&parent_dir, &specifier);
-        if let Some(resolved) = try_resolve_file(&target, &parent_ext, true) {
+        if let Some(resolved) = try_resolve_file(&target, true, probe_order(&parent_ext)) {
             return Some(resolved);
         }
     }
@@ -66,9 +69,99 @@ pub fn resolve_ts(specifier: String, parent_path: String) -> Option<String> {
     None
 }
 
+/// Extension probing for a bare package SUBPATH (`pkg/sub`, `@scope/pkg/a/b`).
+///
+/// Node's ESM resolver gives a subpath no probing at all, so `import
+/// "prismjs/components/prism-python"` is a hard `ERR_MODULE_NOT_FOUND` on plain
+/// Node even though the CJS `require()` of the same specifier works. tsc accepts
+/// it, tsx resolves it, and a TS monorepo whose workspace packages point `main`
+/// at `.ts` source depends on it — so this is nub's additive layer. (#562)
+///
+/// THE ENCAPSULATION RULE: a dependency that declares `exports` owns its own
+/// subpath map completely — we return `None` and let Node apply it, so a probe
+/// can never reach a path the package deliberately did not export. Only the
+/// legacy `exports`-less shape, where a subpath is just a path join, is probed.
+/// tsx draws the line in the same place.
+///
+/// Not gated on a TS importer: a `checkJs`/`allowJs` project's `.js` files sit in
+/// the same graph as its `.ts` files and import the same package subpaths, so
+/// gating would split resolution down the middle of one project.
+fn resolve_bare_subpath(specifier: &str, parent_dir: &str) -> Option<String> {
+    // `#foo` is an `imports` specifier — the package's own private map, Node's.
+    if specifier.starts_with('#') {
+        return None;
+    }
+
+    let mut segs = specifier.split('/');
+    let first = segs.next()?;
+    let pkg = if first.starts_with('@') {
+        format!("{first}/{}", segs.next()?)
+    } else {
+        first.to_string()
+    };
+    let subpath = segs.collect::<Vec<_>>().join("/");
+    // A bare NAME (no subpath) resolves through `main`/`exports` — never ours.
+    // A traversing subpath would escape the package root.
+    if subpath.is_empty() || subpath.split('/').any(|s| s == "..") {
+        return None;
+    }
+
+    let pkg_dir = tsconfig::find_up_dir(parent_dir, &format!("node_modules/{pkg}"))?;
+    let pkg_json = Path::new(&pkg_dir).join("package.json");
+    let text = std::fs::read_to_string(&pkg_json).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
+    // The mere PRESENCE of the key hands the package its own subpath map. Note
+    // `"exports": null` is the deliberate "export nothing" form, not an absent
+    // map — so this tests presence, never truthiness.
+    if manifest.get("exports").is_some() {
+        return None;
+    }
+
+    let target = path_join_resolve(&pkg_dir, &subpath);
+    let resolved = try_resolve_file(&target, true, &NODE_MODULES_PROBE)?;
+    // Node realpaths a resolved module by default, and nub's load hooks REFUSE to
+    // transpile anything still under a `node_modules/` path. A workspace package
+    // symlinked into node_modules (the `main: ./index.ts` monorepo shape) is only
+    // loadable once that hop is resolved away — without this the probe would trade
+    // ERR_MODULE_NOT_FOUND for ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING.
+    Some(real_path(&resolved))
+}
+
+/// Probe order for a bare package subpath — JS FIRST, and deliberately NOT
+/// parent-extension-aware like [`probe_order`].
+///
+/// What decides the right file inside a dependency is the package's own shape,
+/// not the importer's extension. In a PUBLISHED package a `.ts` sibling is
+/// unshipped source that nub declines to transpile (the `!isNodeModules` gate in
+/// the load hooks), so preferring it would resolve to an unloadable file; in a
+/// symlinked WORKSPACE package there is no `.js` at all, so JS-first still lands
+/// on the `.ts`. Both shapes want the same order. Matches tsx's set exactly —
+/// `.mjs`/`.cjs`/`.mts`/`.cts` are not probed, as an extensionless import of one
+/// is not a pattern that occurs.
+const NODE_MODULES_PROBE: [&str; 4] = [".js", ".json", ".ts", ".tsx"];
+
+/// Resolve symlinks, keeping a plain path on Windows (`std::fs::canonicalize`
+/// yields a `\\?\` verbatim path there, which Node and `pathToFileURL` choke on).
+/// Falls back to the input when the path cannot be canonicalized.
+fn real_path(path: &str) -> String {
+    let Ok(canonical) = std::fs::canonicalize(path) else {
+        return path.to_string();
+    };
+    let s = canonical.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(stripped) => stripped.to_string(),
+        None => s.into_owned(),
+    }
+}
+
 /// Port of the JS `tryResolveFile`: existing-extension hit, emit-convention
-/// swaps, extensionless probing, and directory `main`/index resolution.
-fn try_resolve_file(target: &str, parent_ext: &str, allow_dir_main: bool) -> Option<String> {
+/// swaps, extensionless probing, and directory `main`/index resolution. `probe`
+/// is the extensionless-probe order (see [`probe_order`], [`NODE_MODULES_PROBE`]).
+fn try_resolve_file(
+    target: &str,
+    allow_dir_main: bool,
+    probe: &'static [&'static str],
+) -> Option<String> {
     let existing_ext = extname(target);
 
     // 1. Existing extension that exists → use it (a real .cjs beats a sibling .cts).
@@ -111,7 +204,6 @@ fn try_resolve_file(target: &str, parent_ext: &str, allow_dir_main: bool) -> Opt
 
     // 3. Extensionless: probe in parent-ext-aware order.
     if existing_ext.is_empty() || !TS_PARENT_EXTS.contains(&existing_ext.as_str()) {
-        let probe = probe_order(parent_ext);
         for ext in probe {
             let candidate = format!("{target}{ext}");
             if is_file(&candidate) {
@@ -125,7 +217,7 @@ fn try_resolve_file(target: &str, parent_ext: &str, allow_dir_main: bool) -> Opt
                     let main_target = path_join_resolve(target, &main);
                     // Node's LOAD_AS_DIRECTORY does NOT recurse a main target's
                     // own nested main → allow_dir_main=false.
-                    if let Some(resolved) = try_resolve_file(&main_target, parent_ext, false) {
+                    if let Some(resolved) = try_resolve_file(&main_target, false, probe) {
                         return Some(resolved);
                     }
                 }
