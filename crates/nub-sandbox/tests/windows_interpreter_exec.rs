@@ -64,10 +64,7 @@ mod win {
 
     /// Classify a spawn failure into the probe's exit contract: 5 access-denied, 9 other.
     fn spawn_err(marker: &Path, e: &std::io::Error) -> i32 {
-        let _ = std::fs::write(
-            marker,
-            format!("spawnerr {e:?} raw={:?}", e.raw_os_error()),
-        );
+        let _ = std::fs::write(marker, format!("spawnerr {e:?} raw={:?}", e.raw_os_error()));
         if e.kind() == std::io::ErrorKind::PermissionDenied {
             5
         } else {
@@ -150,8 +147,7 @@ mod win {
                     WaitForSingleObject,
                 };
                 let marker = Path::new(&a[1]);
-                let mut cmdline: Vec<u16> =
-                    a[2].encode_utf16().chain(std::iter::once(0)).collect();
+                let mut cmdline: Vec<u16> = a[2].encode_utf16().chain(std::iter::once(0)).collect();
                 let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
                 si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
                 let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
@@ -208,8 +204,10 @@ mod win {
                         }
                     }
                     Err(e) => {
-                        let _ =
-                            std::fs::write(marker, format!("openerr {e:?} raw={:?}", e.raw_os_error()));
+                        let _ = std::fs::write(
+                            marker,
+                            format!("openerr {e:?} raw={:?}", e.raw_os_error()),
+                        );
                         if e.kind() == std::io::ErrorKind::PermissionDenied {
                             5
                         } else {
@@ -302,11 +300,23 @@ mod win {
                     .chain(std::iter::once(0))
                     .collect();
                 // PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE, byte mode, one instance.
-                let h = unsafe { CreateNamedPipeW(name.as_ptr(), 0x0000_0001 | 0x0008_0000, 0, 1, 4096, 4096, 0, std::ptr::null()) };
+                let h = unsafe {
+                    CreateNamedPipeW(
+                        name.as_ptr(),
+                        0x0000_0001 | 0x0008_0000,
+                        0,
+                        1,
+                        4096,
+                        4096,
+                        0,
+                        std::ptr::null(),
+                    )
+                };
                 let marker = Path::new(&a[1]);
                 if h.is_null() || h == (-1isize as *mut std::ffi::c_void) {
                     let e = std::io::Error::last_os_error();
-                    let _ = std::fs::write(marker, format!("pipeerr {e:?} raw={:?}", e.raw_os_error()));
+                    let _ =
+                        std::fs::write(marker, format!("pipeerr {e:?} raw={:?}", e.raw_os_error()));
                     5
                 } else {
                     unsafe { windows_sys::Win32::Foundation::CloseHandle(h) };
@@ -792,7 +802,8 @@ mod win {
 
         println!("  arm spawn-from-granted-cwd:");
         let granted = f.work.join("cwd-granted.txt");
-        let (code, text) = run_child_in(&f, &policy, &f.work.clone(), "execinherit", &granted, &argv);
+        let (code, text) =
+            run_child_in(&f, &policy, &f.work.clone(), "execinherit", &granted, &argv);
         report(
             fails,
             "spawn-from-granted-cwd",
@@ -802,8 +813,14 @@ mod win {
 
         println!("  arm spawn-from-ungranted-cwd:");
         let ungranted = f.work.join("cwd-ungranted.txt");
-        let (code, text) =
-            run_child_in(&f, &policy, &f.root.clone(), "execinherit", &ungranted, &argv);
+        let (code, text) = run_child_in(
+            &f,
+            &policy,
+            &f.root.clone(),
+            "execinherit",
+            &ungranted,
+            &argv,
+        );
         report(
             fails,
             "spawn-from-ungranted-cwd",
