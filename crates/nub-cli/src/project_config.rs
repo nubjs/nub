@@ -1203,10 +1203,11 @@ fn validate_verify_deps(v: &Value, path: &str) -> Result<VerifyDeps> {
 
 /// Per-strategy key sets. A key absent from its strategy's set but present in
 /// another's is reported against THAT strategy rather than as a bare unknown
-/// key — the whole reason the union exists is that "hoist under global" is a
-/// recognizable mistake with a specific answer, not a typo.
+/// key — the whole reason the union exists is that "hoist under
+/// global-virtual-store" is a recognizable mistake with a specific answer, not
+/// a typo.
 const LINKER_STRATEGY_KEYS: &[(&str, &[&str])] = &[
-    ("global", &["strategy", "eject"]),
+    ("global-virtual-store", &["strategy", "eject"]),
     ("isolated", &["strategy", "hoist"]),
     ("hoisted", &["strategy"]),
     ("pnp", &["strategy"]),
@@ -1226,9 +1227,9 @@ fn validate_linker(v: &Value, path: &str) -> Result<LinkerConfig> {
     let Some(strategy) = obj.get("strategy") else {
         return Err(ConfigError::Value {
             path: path.into(),
-            message:
-                "missing `strategy` (one of \"global\", \"isolated\", \"hoisted\", or \"pnp\")"
-                    .into(),
+            message: "missing `strategy` (one of \"global-virtual-store\", \"isolated\", \
+                      \"hoisted\", or \"pnp\")"
+                .into(),
         });
     };
     let strategy = as_str(strategy, &strategy_path)?.to_string();
@@ -1263,7 +1264,7 @@ fn validate_linker(v: &Value, path: &str) -> Result<LinkerConfig> {
     }
 
     Ok(match strategy.as_str() {
-        "global" => LinkerConfig::Global {
+        "global-virtual-store" => LinkerConfig::Global {
             eject: match obj.get("eject") {
                 Some(v) => Some(as_string_array(v, &child(path, "eject"))?),
                 None => None,
@@ -1296,7 +1297,7 @@ fn validate_linker(v: &Value, path: &str) -> Result<LinkerConfig> {
 /// The string shorthand — every strategy with its knob left unset.
 fn linker_without_options(strategy: &str, value_path: &str, at: &str) -> Result<LinkerConfig> {
     match strategy {
-        "global" => Ok(LinkerConfig::Global { eject: None }),
+        "global-virtual-store" => Ok(LinkerConfig::Global { eject: None }),
         "isolated" => Ok(LinkerConfig::Isolated { hoist: None }),
         "hoisted" => Ok(LinkerConfig::Hoisted),
         "pnp" => Ok(LinkerConfig::Pnp),
@@ -1310,8 +1311,9 @@ fn unknown_strategy(strategy: &str, value_path: &str, at: &str) -> ConfigError {
     ConfigError::Value {
         path: value_path.into(),
         message: format!(
-            "unknown strategy `{strategy}` (expected \"global\", \"isolated\", \"hoisted\", \
-             or \"pnp\"); `{at}` accepts either that string or an object with a `strategy` key"
+            "unknown strategy `{strategy}` (expected \"global-virtual-store\", \"isolated\", \
+             \"hoisted\", or \"pnp\"); `{at}` accepts either that string or an object with a \
+             `strategy` key"
         ),
     }
 }
@@ -1705,10 +1707,10 @@ mod tests {
             Some(LinkerConfig::Hoisted)
         );
         assert_eq!(
-            parse(r#"{ "install": { "linker": "global" } }"#)
+            parse(r#"{ "install": { "linker": "global-virtual-store" } }"#)
                 .install
                 .linker,
-            parse(r#"{ "install": { "linker": { "strategy": "global" } } }"#)
+            parse(r#"{ "install": { "linker": { "strategy": "global-virtual-store" } } }"#)
                 .install
                 .linker,
         );
@@ -1740,14 +1742,14 @@ mod tests {
     fn a_knob_from_another_strategy_names_that_strategy() {
         for (src, key, expected) in [
             (
-                r#"{ "install": { "linker": { "strategy": "global", "hoist": true } } }"#,
+                r#"{ "install": { "linker": { "strategy": "global-virtual-store", "hoist": true } } }"#,
                 "install.linker.hoist",
                 "isolated",
             ),
             (
                 r#"{ "install": { "linker": { "strategy": "isolated", "eject": ["x"] } } }"#,
                 "install.linker.eject",
-                "global",
+                "global-virtual-store",
             ),
         ] {
             match parse_project_config(src).unwrap_err() {

@@ -83,7 +83,7 @@
           "oneOf": [
             {
               "enum": [
-                "global",
+                "global-virtual-store",
                 "isolated",
                 "hoisted",
                 "pnp"
@@ -97,7 +97,7 @@
               "properties": {
                 "strategy": {
                   "enum": [
-                    "global",
+                    "global-virtual-store",
                     "isolated",
                     "hoisted",
                     "pnp"
@@ -113,7 +113,7 @@
                     ],
                     "properties": {
                       "strategy": {
-                        "const": "global"
+                        "const": "global-virtual-store"
                       }
                     }
                   },
@@ -121,7 +121,7 @@
                     "additionalProperties": false,
                     "properties": {
                       "strategy": {
-                        "const": "global"
+                        "const": "global-virtual-store"
                       },
                       "eject": {
                         "$ref": "#/$defs/stringArray",

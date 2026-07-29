@@ -3098,7 +3098,7 @@ mod tests {
     fn linker_strategy_lowers_to_a_layout_plus_a_store_location() {
         // Both symlink strategies are aube's `isolated` layout — they differ
         // only in WHERE the store lives, so each must PIN that half rather than
-        // inherit it. Leaving `global` silent would let a lower-tier
+        // inherit it. Leaving the `Global` arm silent would let a lower-tier
         // `enableGlobalVirtualStore=false` win over an explicit request.
         for (linker, node_linker, gvs) in [
             (
