@@ -792,6 +792,56 @@ fn test_link_file_fresh_reports_missing_cas_shard_and_invalidates_cache() {
 }
 
 #[test]
+fn failed_materialize_leaves_no_entry_to_be_mistaken_for_a_complete_one() {
+    // nubjs/nub#552. Step 1 of the non-GVS link used to materialize straight
+    // into the final `.aube/<dep_path>` with no staging, and the parent-dir
+    // pre-pass creates that directory BEFORE any file is linked. So a failure
+    // partway through left a half-populated entry that every later run's
+    // `if aube_entry.exists() { cached }` gate reported as already linked —
+    // the tree never converged and `rm -rf node_modules` was the only fix.
+    //
+    // Any mid-materialize failure exercises the invariant; a missing CAS shard
+    // is the one that reproduces deterministically. `PackageIndex` iterates in
+    // hash order, so whether the good file links before the bad one is
+    // unspecified — that does not matter, because the directory is created up
+    // front either way.
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let (store, indices) = setup_store_with_files(dir.path());
+    let pkgjson_store_path = indices
+        .get("foo@1.0.0")
+        .unwrap()
+        .get("package.json")
+        .unwrap()
+        .store_path
+        .clone();
+    std::fs::remove_file(&pkgjson_store_path).unwrap();
+
+    // GVS off: the branch whose five call sites wrote directly into the final
+    // entry. GVS-on packages were always staged through the shared store.
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, false);
+    linker
+        .link_all(&project_dir, &make_graph(), &indices)
+        .expect_err("link must fail when a referenced CAS shard is gone");
+
+    let entry = project_dir
+        .join("node_modules/.aube")
+        .join(dep_path_to_filename(
+            "foo@1.0.0",
+            DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH,
+        ));
+    assert!(
+        !entry.exists(),
+        "a failed materialize must leave NO entry behind — {} survived, and the \
+         next install's exists() gate would report this half-written package as \
+         complete",
+        entry.display()
+    );
+}
+
+#[test]
 #[cfg(unix)]
 fn test_link_file_fresh_hardlink_short_circuits_when_source_missing() {
     // Hardlink path used to silently fall through to `std::fs::copy`

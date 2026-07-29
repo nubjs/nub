@@ -43,6 +43,58 @@ pub fn sweep_stale_tmp_dirs(virtual_store: &Path) {
     }
 }
 
+/// Whether a Windows filesystem error is the transient
+/// somebody-else-holds-a-handle kind that backing off will clear:
+/// `ERROR_SHARING_VIOLATION` (32) or `ERROR_ACCESS_DENIED` (5), raised
+/// whenever another process has the file open — Defender mid-scan, the
+/// search indexer, a dev server, a `--watch` task, an editor.
+///
+/// Test the RAW code, never `ErrorKind` alone. Rust maps
+/// `ERROR_ACCESS_DENIED` to `PermissionDenied` but has NO mapping for
+/// `ERROR_SHARING_VIOLATION` — it falls through `decode_error_kind` into
+/// `Uncategorized`, which no `matches!` arm can name. An `ErrorKind`-only
+/// predicate therefore silently never fires for the single most common
+/// transient on Windows, which is how the rename retry in
+/// `place_materialized_entry` came to be dead code for os 32 (#552).
+#[cfg(windows)]
+pub(crate) fn is_transient_fs_error(e: &std::io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(5 | 32))
+}
+
+/// Retry ladder shared by every operation that can lose a race with
+/// another process's handle: 10 attempts, 50ms doubling to a 2s cap,
+/// ~10s worst case. Long enough to outlast an AV scan, short enough that
+/// a genuinely stuck file fails the install rather than hanging it.
+///
+/// Unix is a straight passthrough — the failure mode does not exist there
+/// (an open file can be replaced or unlinked freely), so behavior off
+/// Windows is byte-for-byte unchanged.
+pub(crate) fn with_transient_retry<T>(
+    mut op: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    #[cfg(not(windows))]
+    {
+        op()
+    }
+    #[cfg(windows)]
+    {
+        const ATTEMPTS: u32 = 10;
+        for attempt in 0..ATTEMPTS {
+            match op() {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    if !is_transient_fs_error(&e) || attempt == ATTEMPTS - 1 {
+                        return Err(e);
+                    }
+                    let delay = (50u64 << attempt.min(6)).min(2000);
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                }
+            }
+        }
+        unreachable!("the loop returns on the final attempt")
+    }
+}
+
 /// Remove a directory with retry on Windows sharing violations.
 ///
 /// Windows does not let you delete a file while another process holds
@@ -51,10 +103,6 @@ pub fn sweep_stale_tmp_dirs(virtual_store: &Path) {
 /// 32 (SHARING_VIOLATION) or ERROR 5 (ACCESS_DENIED, AV scanner
 /// mid-scan) and leaves a half-deleted virtual store. pnpm, npm,
 /// rimraf all retry with backoff. Do the same. Unix passthrough.
-///
-/// Retries 10 times with exponential backoff starting at 50ms. Total
-/// worst case around 10 seconds which is tolerable for an install
-/// already paying for filesystem work.
 pub fn remove_dir_all_with_retry(path: &Path) -> std::io::Result<()> {
     #[cfg(not(windows))]
     {
@@ -62,29 +110,12 @@ pub fn remove_dir_all_with_retry(path: &Path) -> std::io::Result<()> {
     }
     #[cfg(windows)]
     {
-        use std::io::ErrorKind;
-        let mut delay_ms = 50u64;
-        for attempt in 0..10 {
-            match std::fs::remove_dir_all(path) {
-                Ok(()) => return Ok(()),
-                Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
-                Err(e) => {
-                    // Sharing violation and PermissionDenied both
-                    // map to retriable Windows errors. Bail on
-                    // attempt 10.
-                    let retriable =
-                        matches!(e.kind(), ErrorKind::PermissionDenied | ErrorKind::Other)
-                            || e.raw_os_error() == Some(32);
-                    if !retriable || attempt == 9 {
-                        return Err(e);
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                    delay_ms = (delay_ms * 2).min(2000);
-                }
-            }
+        // Already gone — including a concurrent remover winning the race —
+        // is success, not failure.
+        match with_transient_retry(|| std::fs::remove_dir_all(path)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
         }
-        // Unreachable, loop always returns by attempt 10.
-        Ok(())
     }
 }
 

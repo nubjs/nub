@@ -42,13 +42,42 @@ fn place_materialized_entry(src: &Path, dst: &Path) -> io::Result<MaterializePla
 }
 
 fn is_transient_rename_error(err: &io::Error) -> bool {
-    matches!(
+    if matches!(
         err.kind(),
         io::ErrorKind::AlreadyExists
             | io::ErrorKind::PermissionDenied
             | io::ErrorKind::Interrupted
             | io::ErrorKind::WouldBlock
-    )
+    ) {
+        return true;
+    }
+    // `ERROR_SHARING_VIOLATION` (32) has no `ErrorKind` mapping in std — it
+    // decodes to `Uncategorized`, which no `matches!` arm can name — so the
+    // list above was silently blind to the most common transient this rename
+    // hits (#552). Gated to Windows because raw 32 is EPIPE on Unix, an
+    // unrelated errno that must not be treated as a retriable rename.
+    #[cfg(windows)]
+    {
+        return crate::sweep::is_transient_fs_error(err);
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+/// The terminal byte-transfer of a materialized file, retried through
+/// transient Windows sharing violations.
+///
+/// Every strategy in `link_file_fresh` ends here: reflink and hardlink both
+/// degrade to a copy, and `LinkStrategy::Copy` starts here. That makes this
+/// the one place where a lost race with another process's handle is FATAL to
+/// the whole install rather than recoverable — a single `ERROR_SHARING_VIOLATION`
+/// on any one of tens of thousands of files aborted the entire link (#552),
+/// while the junction and directory-removal paths had carried a retry all
+/// along. The upstream `hard_link`/`reflink` attempts deliberately do NOT
+/// retry: they already fall through to this copy, so retrying them too would
+/// double the worst-case stall per file for no added recovery.
+fn copy_through_transients(src: &Path, dst: &Path) -> io::Result<u64> {
+    crate::sweep::with_transient_retry(|| std::fs::copy(src, dst))
 }
 
 /// Test-only switch that forces the reflink attempt in
@@ -792,8 +821,7 @@ impl Linker {
 
     /// Hardlink-or-copy a file into a freshly-created destination.
     /// Assumes `dst` does not exist — callers (`materialize_into`)
-    /// always write into a `.tmp-<pid>-...` staging dir or a
-    /// just-wiped per-project `.aube/<dep_path>`, so the defensive
+    /// always write into a `.tmp-<pid>-...` staging dir, so the defensive
     /// `remove_file(dst)` an idempotent variant would need is skipped.
     /// Eliminates one syscall per linked file (~45k on the medium
     /// benchmark fixture).
@@ -834,7 +862,7 @@ impl Linker {
                 let auto = matches!(self.strategy, LinkStrategy::ReflinkAuto);
                 #[cfg(target_os = "macos")]
                 if matches!(stored.size, Some(size) if size <= SMALL_FILE_COPY_MAX) {
-                    std::fs::copy(&stored.store_path, dst).map_err(map_io)?;
+                    copy_through_transients(&stored.store_path, dst).map_err(map_io)?;
                     if let Some(t0) = diag_t0 {
                         aube_util::diag::event(
                             aube_util::diag::Category::Linker,
@@ -910,7 +938,7 @@ impl Linker {
                         if !auto {
                             trace!("reflink failed, falling back to copy: {e}");
                         }
-                        std::fs::copy(&stored.store_path, dst).map_err(map_io)?;
+                        copy_through_transients(&stored.store_path, dst).map_err(map_io)?;
                         realized = "reflink_fallback_copy";
                     }
                 } else {
@@ -925,14 +953,14 @@ impl Linker {
                     }
                     // Fall back to copy on cross-filesystem errors (EXDEV)
                     trace!("hardlink failed, falling back to copy: {e}");
-                    std::fs::copy(&stored.store_path, dst).map_err(map_io)?;
+                    copy_through_transients(&stored.store_path, dst).map_err(map_io)?;
                     realized = "hardlink_fallback_copy";
                 } else {
                     realized = "hardlink";
                 }
             }
             LinkStrategy::Copy => {
-                std::fs::copy(&stored.store_path, dst).map_err(map_io)?;
+                copy_through_transients(&stored.store_path, dst).map_err(map_io)?;
                 realized = "copy";
             }
         }
@@ -1385,6 +1413,35 @@ fn is_safe_package_component(component: &str) -> bool {
                 | std::path::Component::Prefix(_)
         )
     })
+}
+
+#[cfg(test)]
+mod transient_error_tests {
+    use super::*;
+
+    #[test]
+    fn sharing_violation_is_retriable_only_on_windows() {
+        // Rust maps ERROR_SHARING_VIOLATION (32) to no `ErrorKind` at all — it
+        // decodes to `Uncategorized` — so the ErrorKind-only predicate this
+        // guards silently never fired for the most common Windows transient
+        // (#552). Raw 32 is EPIPE on Unix, an unrelated errno that must NOT
+        // become a retriable rename.
+        assert_eq!(
+            is_transient_rename_error(&io::Error::from_raw_os_error(32)),
+            cfg!(windows),
+            "os 32 = SHARING_VIOLATION on Windows (retriable), EPIPE on Unix (not)"
+        );
+    }
+
+    #[test]
+    fn mapped_error_kinds_stay_retriable_everywhere() {
+        assert!(is_transient_rename_error(&io::Error::from(
+            io::ErrorKind::AlreadyExists
+        )));
+        assert!(!is_transient_rename_error(&io::Error::from(
+            io::ErrorKind::NotFound
+        )));
+    }
 }
 
 #[cfg(test)]

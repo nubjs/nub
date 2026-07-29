@@ -242,21 +242,23 @@ impl Linker {
                     ));
                 }
             }
-            if !aube_entry.exists() {
-                self.materialize_into(
-                    &aube_dir,
-                    &aube_dir,
-                    dep_path,
-                    graph,
-                    pkg,
-                    index,
-                    &mut stats,
-                    false,
-                    nested_link_targets.as_ref(),
-                )?;
-            } else {
-                stats.packages_cached += 1;
-            }
+            // Staged through `.tmp-<pid>-<id>` + atomic rename rather than
+            // written straight into the final entry. A direct write that fails
+            // partway leaves a half-populated `<dep_path>/` behind — and every
+            // later run's `exists()` gate then reports that package as already
+            // linked, so the tree never converges and `rm -rf node_modules` is
+            // the only way out (#552). Staging makes the failure atomic: the
+            // remains are a `.tmp-*` dir, which `sweep_stale_tmp_dirs` reclaims
+            // on the next install.
+            self.ensure_in_aube_dir(
+                &aube_dir,
+                dep_path,
+                graph,
+                pkg,
+                index,
+                &mut stats,
+                nested_link_targets.as_ref(),
+            )?;
         }
 
         if self.use_global_virtual_store {
@@ -430,9 +432,26 @@ impl Linker {
                                 // Drop a stale shared-store symlink/junction left by
                                 // a prior GVS install or the fetch prewarm before
                                 // materializing the real project-local dir.
+                                //
+                                // The removal must be checked, not best-effort:
+                                // `ensure_in_aube_dir` opens with an `exists()` gate,
+                                // and `exists()` FOLLOWS a symlink. A surviving link
+                                // whose target is live would read as "already
+                                // materialized" and silently skip the ejection — the
+                                // package would stay a store symlink, which is exactly
+                                // what disk-materialize exists to prevent. Fail loudly
+                                // instead.
                                 if std::fs::read_link(&local_aube_entry).is_ok() {
-                                    let _ = std::fs::remove_dir(&local_aube_entry)
-                                        .or_else(|_| std::fs::remove_file(&local_aube_entry));
+                                    try_remove_entry(&local_aube_entry);
+                                    if std::fs::symlink_metadata(&local_aube_entry).is_ok() {
+                                        return Err(Error::Io(
+                                            local_aube_entry.clone(),
+                                            std::io::Error::other(
+                                                "failed to remove stale shared-store link before \
+                                                 disk-materializing the package",
+                                            ),
+                                        ));
+                                    }
                                 }
                                 // Undeclared imports this ejected package makes are
                                 // resolved by the collective project-local hidden
@@ -441,15 +460,16 @@ impl Linker {
                                 // so Node's upward walk from inside it reaches
                                 // `.aube/node_modules/`. So materialize the copy with
                                 // its own edges; no per-importer sibling injection.
-                                self.materialize_into(
-                                    &aube_dir,
+                                // Staged (see the note in step 1) so a partial
+                                // failure leaves no entry to be mistaken for a
+                                // complete one.
+                                self.ensure_in_aube_dir(
                                     &aube_dir,
                                     dep_path,
                                     graph,
                                     pkg,
                                     index,
                                     &mut local_stats,
-                                    false,
                                     nested_link_targets.as_ref(),
                                 )?;
                                 return Ok(local_stats);
@@ -590,15 +610,17 @@ impl Linker {
                                     &owned_index
                                 }
                             };
-                            self.materialize_into(
-                                &aube_dir,
+                            // Staged (see the note in `link_all` step 1). The
+                            // `exists()` fast path above stays — it is what
+                            // keeps a warm run off `load_index` — and the
+                            // re-check inside costs one stat on the cold path.
+                            self.ensure_in_aube_dir(
                                 &aube_dir,
                                 dep_path,
                                 graph,
                                 pkg,
                                 index,
                                 &mut local_stats,
-                                false,
                                 nested_link_targets.as_ref(),
                             )?;
                             Ok(local_stats)
@@ -918,6 +940,12 @@ impl Linker {
         mkdirp(&aube_dir)?;
         mkdirp(&root_nm)?;
 
+        // Mirrors `link_all`. A crash or Ctrl+C between materialize and the
+        // atomic rename strands a `.tmp-<pid>-*` dir, and nothing else
+        // reclaims them — `link_workspace` was missing this sweep entirely, so
+        // its staged materializations leaked one per aborted install.
+        sweep_stale_tmp_dirs(&aube_dir);
+
         let mut stats = LinkStats::default();
 
         // Patch reconciliation. Mirrors `link_all`'s logic: wipe
@@ -996,19 +1024,15 @@ impl Linker {
                     ));
                 }
             }
-            if aube_entry.exists() {
-                stats.packages_cached += 1;
-                continue;
-            }
-            self.materialize_into(
-                &aube_dir,
+            // Staged (see the note in `link_all` step 1); `ensure_in_aube_dir`
+            // owns the exists-is-cached check as well.
+            self.ensure_in_aube_dir(
                 &aube_dir,
                 dep_path,
                 graph,
                 pkg,
                 index,
                 &mut stats,
-                false,
                 nested_link_targets.as_ref(),
             )?;
         }
@@ -1155,15 +1179,17 @@ impl Linker {
                                     &owned_index
                                 }
                             };
-                            self.materialize_into(
-                                &aube_dir,
+                            // Staged (see the note in `link_all` step 1). The
+                            // `exists()` fast path above stays — it is what
+                            // keeps a warm run off `load_index` — and the
+                            // re-check inside costs one stat on the cold path.
+                            self.ensure_in_aube_dir(
                                 &aube_dir,
                                 dep_path,
                                 graph,
                                 pkg,
                                 index,
                                 &mut local_stats,
-                                false,
                                 nested_link_targets.as_ref(),
                             )?;
                             Ok(local_stats)
