@@ -152,11 +152,17 @@ snap() {
 # relative one and a "successful write" silently lands in the cwd.
 FORCE=""
 [ "$LEVER" = "npm_config_build_from_source=true" ] && FORCE="npm_config_build_from_source=true"
+# `timeout` is GNU coreutils and is ABSENT from a stock macOS. A Mac with Homebrew
+# coreutils has it, so a local run succeeds while a clean runner returns 127
+# ("command not found") for every invocation — which reads as "nothing installed"
+# rather than "the harness is broken". Resolve a real one or run without it.
+TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
+[ -n "$TIMEOUT_BIN" ] || echo "note: no timeout(1) available; running unbounded" >> "$LOG"
 runnub() {
   ( cd "$PROJ" && env -i \
       PATH="$STUDY_PATH" HOME="$H" TMPDIR="$TMPD" \
       NUB_CACHE_DIR="$CACHE" npm_config_cache="$CACHE/npm" \
-      ${FORCE:+$FORCE} timeout 3000 "$NUB" "$@" ) >> "$LOG" 2>&1
+      ${FORCE:+$FORCE} ${TIMEOUT_BIN:+"$TIMEOUT_BIN" 3000} "$NUB" "$@" ) >> "$LOG" 2>&1
   return $?
 }
 
@@ -175,7 +181,16 @@ snap "$OUT/post.ndjson"
 # ── ARM-EFFECT ASSERTION — the control that makes every number admissible ──────
 WARN_COUNT=$(grep -c "running without the build sandbox" "$LOG" || true)
 ARM_EFFECT=unknown
-if [ "$ARM" = "A0" ]; then
+# THE PROD ASSERTION IS VACUOUSLY SATISFIABLE ON ITS OWN, so it carries a
+# precondition. "No opt-out warning was printed" is true when the jail is
+# correctly enforcing AND when nub never ran at all — a run where the binary was
+# not found produced zero warnings and self-reported `confirmed` while installing
+# nothing. A positive control that also passes when the experiment did not happen
+# is not a control, so require evidence the install actually did work first.
+INSTALLED_ANY=$(ls "$PROJ/node_modules" 2>/dev/null | grep -c . || true)
+if [ "$RC_INSTALL" -ne 0 ] || [ "$INSTALLED_ANY" -eq 0 ]; then
+  ARM_EFFECT="FAILED-install-did-not-run(rc=$RC_INSTALL,installed=$INSTALLED_ANY)"
+elif [ "$ARM" = "A0" ]; then
   [ "$WARN_COUNT" -gt 0 ] && ARM_EFFECT=confirmed || ARM_EFFECT=FAILED-no-optout-warning
 else
   [ "$WARN_COUNT" -eq 0 ] && ARM_EFFECT=confirmed || ARM_EFFECT=FAILED-optout-leaked
@@ -205,3 +220,10 @@ ARM_EFFECT="$ARM_EFFECT" WARN_COUNT="$WARN_COUNT" GYP_ID="$GYP_ID" PLATFORM="$PL
   LEVER="${LEVER:-none}" NONCE="$NONCE" \
   node "$HARNESS/lib/errsig.mjs" "$LOG" "$MANIFEST" "$OUT/verdicts.json" "$OUT/report.json"
 echo "OUT=$OUT  arm_effect=$ARM_EFFECT  node_gyp=${GYP_ID:-none}"
+
+# A run that produced no admissible data must FAIL its caller. Reporting success
+# on a run that installed nothing is how a green CI job comes to mean nothing.
+if [ "$ARM_EFFECT" != "confirmed" ]; then
+  echo "FATAL: arm effect not confirmed ($ARM_EFFECT) — this run is INADMISSIBLE" >&2
+  exit 8
+fi
