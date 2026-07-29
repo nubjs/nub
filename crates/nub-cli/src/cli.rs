@@ -5299,12 +5299,15 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         let mut node_args = vec!["--watch".to_string(), "--watch-preserve-output".to_string()];
         node_args.push(file.to_string());
         node_args.extend(args.iter().cloned());
-        let status = std::process::Command::new(node.path.as_str())
-            .args(&node_args)
+        let mut cmd = std::process::Command::new(node.path.as_str());
+        cmd.args(&node_args)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status()?;
+            .stderr(std::process::Stdio::inherit());
+        // Not `.status()` — see the note on the augmented path below. `node --watch`
+        // never exits on its own, so a bare status() leaks the supervisor and its
+        // watched child on leader death.
+        let status = nub_core::node::spawn::status_forwarding_signals(&mut cmd)?;
         return Ok(nub_core::node::spawn::exit_code_from_status(&status));
     }
     let runtime_node_options = runtime_node_options(&runtime, &node)?;
@@ -5580,7 +5583,19 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
             cmd.env("NODE_OPTIONS", parts.join(" "));
         }
     }
-    let status = cmd.status()?;
+    // NOT `cmd.status()`. Every other long-lived spawn in nub goes through a
+    // process-group + reaper path; watch was the sole exception, and it is the one
+    // that matters most: `node --watch` is a supervisor that by design never exits,
+    // and it spawns a watched grandchild of its own. A bare `status()` leaves both
+    // outside nub's group, so when the leader dies (a killed agent session, a test
+    // harness that gives up, a closed terminal) they reparent to launchd and run
+    // forever, each holding an fsevents watch on a source tree. They accumulate
+    // monotonically — 99 such orphans were found on the dev host, the oldest 17h
+    // old, none of them rustc or cargo. `status_forwarding_signals` is the
+    // signal-faithful equivalent of `status()`: own process group, the #480
+    // SIGKILL-on-leader reaper held across the wait, and terminating signals
+    // forwarded to the whole subtree.
+    let status = nub_core::node::spawn::status_forwarding_signals(&mut cmd)?;
 
     // PATH shim cleanup is handled once at the top level (see `run`).
     Ok(nub_core::node::spawn::exit_code_from_status(&status))
@@ -6876,8 +6891,9 @@ fn ensure_bin_executable(path: &Path) -> Result<()> {
 /// from a terminal that inherited quarantine flags (one embedded in a
 /// Gatekeeper-enabled app), everything they write is stamped: the upgrade
 /// would install a nub that cannot start, and the self-shim would exec one.
-/// Both archives are checksum-verified before use, so clearing the attribute
-/// afterwards is the trade Homebrew makes for a verified download.
+/// Both archives are checksum-verified before use, and the attribute is not
+/// a judgement about them — it reflects only which terminal the upgrade was
+/// run from. See `nub_core::quarantine` for the full rationale.
 ///
 /// Best-effort by the resilience contract in `perform_selfowned_upgrade`:
 /// the binary is already swapped and executable, so a failure warns with the

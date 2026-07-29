@@ -43,6 +43,7 @@ impl Linker {
             no_integrity_read_keys: self.no_integrity_read_keys.clone(),
             link_progress: self.link_progress.clone(),
             disk_materialize: self.disk_materialize.clone(),
+            reusable_hoisted: self.reusable_hoisted.clone(),
         }
     }
 
@@ -1131,9 +1132,15 @@ impl Linker {
                                 nested_link_targets.as_ref(),
                             )?;
 
+                            // Same `Stale` shapes as `link_all`'s step 1, and
+                            // the same reason a non-recursive `remove_dir`
+                            // cannot clear them — see the comment there. This
+                            // arm is the workspace twin of that code and was
+                            // left on the old removal, so a workspace wedged
+                            // permanently on os-183 where a single-package
+                            // project self-healed.
                             if matches!(state, EntryState::Stale) {
-                                let _ = std::fs::remove_dir(&local_aube_entry)
-                                    .or_else(|_| std::fs::remove_file(&local_aube_entry));
+                                try_remove_entry(&local_aube_entry);
                             }
                             // Parent dirs were pre-created above the
                             // par_iter; no per-package `mkdirp` here.
@@ -1862,7 +1869,10 @@ impl Linker {
 /// symlink, Windows normalizes to an absolute path before calling
 /// `junction::create`. A plain `read_link == expected` check that
 /// works on Unix would miss every warm run on Windows.
-fn reconcile_top_level_link(link_path: &Path, expected_target: &Path) -> Result<bool, Error> {
+pub(crate) fn reconcile_top_level_link(
+    link_path: &Path,
+    expected_target: &Path,
+) -> Result<bool, Error> {
     #[cfg(windows)]
     {
         // NTFS junctions store normalized absolute targets
@@ -1916,8 +1926,26 @@ fn reconcile_top_level_link(link_path: &Path, expected_target: &Path) -> Result<
         // mid-scan. Failure here is FATAL to the install (the `Err` arm below),
         // so an unretried sharing violation aborts a whole reinstall over a
         // handle that would have cleared in milliseconds.
+        //
+        // A POPULATED REAL directory is neither of those two shapes:
+        // `remove_dir` answers `ERROR_DIR_NOT_EMPTY` and `remove_file` then
+        // answers `ERROR_ACCESS_DENIED`. That is os 5, which
+        // `is_transient_fs_error` counts as transient, so the pair burns the
+        // whole ~10s ladder and then fails the install — on any project whose
+        // `node_modules` an incumbent npm or yarn wrote. Reclaiming that tree
+        // is the linker's job, and the Unix branch below has always recursed
+        // for it. Gating on `is_real_dir` keeps the recursion aimed at exactly
+        // that shape and away from a junction, whose target must survive.
         let removed = crate::sweep::with_transient_retry(|| {
-            std::fs::remove_dir(link_path).or_else(|_| std::fs::remove_file(link_path))
+            std::fs::remove_dir(link_path)
+                .or_else(|e| {
+                    if aube_util::fs::is_real_dir(link_path) {
+                        std::fs::remove_dir_all(link_path)
+                    } else {
+                        Err(e)
+                    }
+                })
+                .or_else(|_| std::fs::remove_file(link_path))
         });
         match removed {
             Ok(()) => Ok(false),

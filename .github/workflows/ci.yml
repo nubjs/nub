@@ -161,7 +161,8 @@ jobs:
       # main saves; save-if gates writes to main only, so PRs/tags are read-only and
       # don't churn the 10GB/repo budget (the default per-(job,ref) key let every PR
       # write its own cache). Per job-family because compiled artifacts differ by
-      # build profile (check=--all-targets debug vs test profile vs pnp debug build).
+      # build profile (check=--all-targets fast, plus the nub-phantom leg on the
+      # default profile, vs test profile vs pnp debug build).
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           shared-key: ci-check
@@ -170,8 +171,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # 1.95.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
         with:
           toolchain: 1.95.0
-      - run: cargo check --all-targets
-      - run: cd crates/nub-native && cargo check --locked --all-targets --all-features
+      # --profile fast, matching the dev loop and `make verify`. The analysis
+      # gates emit no artifact a later step references by path, so they can share
+      # ONE profile with local iteration instead of maintaining a second full
+      # dependency build under `dev`. `fast` inherits `dev` — same opt-level,
+      # debug-assertions and overflow checks — and differs only in debuginfo
+      # (line-tables-only), which no lint reads. The test jobs deliberately stay
+      # on `dev`: they reuse the debug addon/binary artifacts by path.
+      # nub-phantom (above) stays too — its workspace defines no `fast` profile.
+      - run: cargo check --all-targets --profile fast
+      - run: cd crates/nub-native && cargo check --locked --all-targets --all-features --profile fast
       # Real Windows compile + test coverage is the windows-latest leg of the
       # `test` job. The previous fast `x86_64-pc-windows-gnu` cross-check needed
       # mingw-w64 + ring's C build, which was fragile on the runner; the native
@@ -206,13 +215,15 @@ jobs:
         run: |
           mkdir -p runtime/addons
           printf 'placeholder-addon' > runtime/addons/nub-native.node
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      # --profile fast so this shares one artifact universe with the dev loop and
+      # `make verify` (see the check job above for the rationale).
+      - run: cargo clippy --all-targets --all-features --profile fast -- -D warnings
       # nub-native is its OWN workspace (split so the CLI uses panic=abort while
       # the cdylib stays panic=unwind), `exclude`d from the root workspace — so the
       # root clippy above does NOT cover it. Lint it from inside the crate so its
       # own dbg_macro/todo/unimplemented lints (Cargo.toml [workspace.lints]) are
       # still enforced. (No --all-targets: the cdylib sets test=false/doctest=false.)
-      - run: cd crates/nub-native && cargo clippy --all-features -- -D warnings
+      - run: cd crates/nub-native && cargo clippy --all-features --profile fast -- -D warnings
       # Static brand-boundary gate: no AUBE_*-branded env-var READS in nub crate
       # source (the embedded engine's brand is never nub's config surface). Cheap
       # grep, no build — runs alongside clippy on the same run_rust gate.

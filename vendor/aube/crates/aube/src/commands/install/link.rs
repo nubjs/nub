@@ -93,6 +93,40 @@ pub(super) struct LinkPhaseOutput {
     pub(super) patch_hashes: BTreeMap<String, String>,
 }
 
+/// Dep paths whose hoisted placement can be left in place rather than wiped
+/// and refilled. See the call site for why each condition is load-bearing.
+///
+/// Returns empty on any doubt — a missing state file, a layout switch, an
+/// interrupted previous link — which degrades exactly to the unconditional
+/// wipe this replaces.
+fn reusable_hoisted_dep_paths(
+    cwd: &std::path::Path,
+    graph: &aube_lockfile::LockfileGraph,
+    patch_hashes: &BTreeMap<String, String>,
+) -> std::collections::HashSet<String> {
+    use crate::state::InstallLayoutMode;
+
+    if !crate::state::link_completed_cleanly(cwd) {
+        tracing::debug!("hoisted: previous link did not complete; refusing to reuse placements");
+        return Default::default();
+    }
+    if !matches!(
+        crate::state::read_state_layout_linker(cwd),
+        Some(InstallLayoutMode::Hoisted)
+    ) {
+        return Default::default();
+    }
+    let Some(prior) = crate::state::read_state_package_content_hashes(cwd) else {
+        return Default::default();
+    };
+    let (current, _) = super::delta::compute_leaf_and_subtree_hashes(graph, patch_hashes, cwd);
+    current
+        .into_iter()
+        .filter(|(dep_path, hash)| prior.get(dep_path) == Some(hash))
+        .map(|(dep_path, _)| dep_path)
+        .collect()
+}
+
 pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPhaseOutput> {
     let LinkPhaseInput {
         cwd,
@@ -368,6 +402,40 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     if !patches_for_linker.is_empty() {
         linker = linker.with_patches(patches_for_linker);
     }
+
+    // Hoisted relinks used to wipe and refill EVERY placed package, which
+    // deletes whatever a postinstall left behind (`build/Release/*.node`, a
+    // downloaded binary) because the refill restores published tarball
+    // contents and nothing else. Vouch for the packages that provably do not
+    // need touching so the linker can leave them alone, matching what npm and
+    // pnpm already do.
+    //
+    // Three conditions, and all three are needed:
+    //   * the last link ran to COMPLETION — the install state is written at
+    //     the end of a successful install but survives a later one that died
+    //     partway, so state alone would happily vouch for a half-written tree;
+    //   * the last install used the SAME layout, since an isolated tree's
+    //     directories are not where the hoisted pass expects them;
+    //   * the package's content fingerprint is UNCHANGED, so the bytes a
+    //     refill would write are the bytes already there.
+    // Any doubt and the dep path is simply left out, which is exactly today's
+    // wipe-and-refill.
+    //
+    // Only computed for hoisted, so the isolated default pays nothing.
+    if matches!(node_linker, aube_linker::NodeLinker::Hoisted) {
+        let reusable = reusable_hoisted_dep_paths(cwd, graph_for_link, &patch_hashes);
+        tracing::debug!(
+            "hoisted: reusing {} of {} placements (rest wiped + refilled)",
+            reusable.len(),
+            graph_for_link.packages.len()
+        );
+        linker = linker.with_reusable_hoisted(reusable);
+    }
+
+    // From here until the install finishes, the tree on disk is not
+    // trustworthy. Cleared in `finalize`.
+    crate::state::mark_link_in_progress(cwd);
+
     let stats = if has_workspace {
         linker
             .link_workspace(cwd, graph_for_link, package_indices, ws_dirs)

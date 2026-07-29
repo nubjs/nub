@@ -2321,6 +2321,64 @@ fn gvs_relink_replaces_a_populated_real_dir_in_the_entry_slot() {
     assert!(entry.join("node_modules/bar/index.js").exists());
 }
 
+// The workspace twin of the test above. `link_all` and `link_workspace`
+// carry near-duplicate step-1 GVS-populate loops, and the fix for
+// nub#566 / nub#576 landed only in `link_all` — so the identical
+// `EntryState::Stale` arm here kept its non-recursive removal and a
+// WORKSPACE wedged permanently on os-183 where a single-package project
+// recovered. Confirmed on a real Windows box against
+// `0.6.0-canary.20260729.129`: same fixture, same perturbation, same
+// command — single package exit 0, workspace exit 1 with
+// `failed to link workspace node_modules`.
+//
+// Reached deliberately rather than naturally: the mode-change wipe in
+// `detect_aube_dir_gvs_mode` normally pre-empts a mixed tree, and that
+// wipe is a DIFFERENT layer. Any other source of one — a partial cache
+// restore, a crash, external tooling — lands straight here.
+#[test]
+fn gvs_workspace_relink_replaces_a_populated_real_dir_in_the_entry_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let root_dir = dir.path().join("workspace");
+    let (store, indices) = setup_store_with_files(dir.path());
+
+    // Two members sharing one dependency, so the entry under test is
+    // reached from more than one importer.
+    let mut graph = make_graph();
+    let foo = graph.importers.get(".").cloned().unwrap_or_default();
+    graph
+        .importers
+        .insert("packages/a".to_string(), foo.clone());
+    graph.importers.insert("packages/b".to_string(), foo);
+
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true).with_hoist(false);
+    linker
+        .link_workspace(&root_dir, &graph, &indices, &BTreeMap::new())
+        .unwrap();
+
+    // Rewrite one shared entry into the per-project shape.
+    let entry = root_dir
+        .join("node_modules/.aube")
+        .join(dep_path_to_filename(
+            "bar@2.0.0",
+            DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH,
+        ));
+    try_remove_entry(&entry);
+    let pkg_dir = entry.join("node_modules/bar");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::write(pkg_dir.join("index.js"), b"stale per-project copy").unwrap();
+    assert!(aube_util::fs::is_real_dir(&entry));
+
+    linker
+        .link_workspace(&root_dir, &graph, &indices, &BTreeMap::new())
+        .expect("workspace relink must reclaim a populated per-project entry, not collide with it");
+
+    assert!(
+        std::fs::read_link(&entry).is_ok(),
+        "entry must end up a link into the shared store"
+    );
+    assert!(entry.join("node_modules/bar/index.js").exists());
+}
+
 // `is_real_dir` exists to tell a plain directory apart from a
 // directory-SHAPED link, so the link case is the whole point — and it is
 // only meaningful against the real primitive: `create_dir_link` writes a
@@ -2341,6 +2399,72 @@ fn is_real_dir_distinguishes_a_plain_dir_from_a_dir_shaped_link() {
     assert!(!aube_util::fs::is_real_dir(&link));
     assert!(!aube_util::fs::is_real_dir(&file));
     assert!(!aube_util::fs::is_real_dir(&tmp.path().join("missing")));
+}
+
+// `node_modules/<name>` written by an incumbent npm or yarn is a POPULATED
+// REAL directory, and reclaiming that slot is the linker's job — unlike the
+// generic-helper case below, this caller OWNS the entry. On Windows
+// `remove_dir` cannot evict one and the `remove_file` fallback answers os 5,
+// which the retry ladder reads as transient, so `nub install` over an npm
+// tree burned ~10s and then aborted with a bare `Access is denied`.
+// Reproduced on 0.6.0 and canary.
+//
+// NOTE: on Unix this exercises the `cfg(not(windows))` branch, which has
+// always recursed — so it passes with or without the fix here. Its value is
+// the windows-latest leg of `aube-parity`; do not read a local green as
+// evidence the fix works.
+#[test]
+fn reconcile_top_level_link_reclaims_an_incumbent_package_manager_tree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_pkg = tmp.path().join("store/express");
+    std::fs::create_dir_all(&store_pkg).unwrap();
+    std::fs::write(store_pkg.join("index.js"), b"//ours").unwrap();
+
+    // What `npm install` leaves behind: a real directory holding real files.
+    let link_path = tmp.path().join("node_modules/express");
+    std::fs::create_dir_all(link_path.join("lib")).unwrap();
+    std::fs::write(link_path.join("package.json"), b"{}").unwrap();
+
+    assert!(
+        !crate::link::reconcile_top_level_link(&link_path, &store_pkg).unwrap(),
+        "an incumbent tree must be reclaimed, not reported as already correct"
+    );
+    assert!(
+        link_path.symlink_metadata().is_err(),
+        "incumbent tree survived, so the create_dir_link that follows would collide"
+    );
+
+    // The slot is free and the real link lands in it.
+    sys::create_dir_link(&store_pkg, &link_path).unwrap();
+    assert_eq!(
+        std::fs::read(link_path.join("index.js")).unwrap(),
+        b"//ours"
+    );
+}
+
+// A junction is the other shape reaching that removal, and its TARGET must
+// survive being unlinked — the recursion is gated on `is_real_dir` precisely
+// so it cannot follow one.
+#[test]
+fn reconcile_top_level_link_unlinks_a_stale_link_without_touching_its_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let old_target = tmp.path().join("store/old");
+    std::fs::create_dir_all(&old_target).unwrap();
+    std::fs::write(old_target.join("keep.js"), b"keep").unwrap();
+    let new_target = tmp.path().join("store/new");
+    std::fs::create_dir_all(&new_target).unwrap();
+
+    let link_path = tmp.path().join("node_modules/pkg");
+    std::fs::create_dir_all(link_path.parent().unwrap()).unwrap();
+    sys::create_dir_link(&old_target, &link_path).unwrap();
+
+    assert!(!crate::link::reconcile_top_level_link(&link_path, &new_target).unwrap());
+    assert!(link_path.symlink_metadata().is_err(), "link not reclaimed");
+    assert_eq!(
+        std::fs::read(old_target.join("keep.js")).unwrap(),
+        b"keep",
+        "reclaiming the link recursed through it and destroyed the old target"
+    );
 }
 
 // `create_dir_link` is the last writer before the install aborts, so it

@@ -13,9 +13,17 @@
 //! Clearing it is sound because each caller has already verified the bytes:
 //! the self-upgrade checks the archive's SHA-256 against the published
 //! checksum, and the embedded runtime checks each entrypoint against a
-//! BLAKE3 digest baked in at build time. That is the same trade Homebrew
-//! makes for a verified download — Gatekeeper's unverified-provenance
-//! signal adds nothing on top of a hash the artifact already had to match.
+//! BLAKE3 digest baked in at build time. The attribute is also not a
+//! judgement about the artifact — it lands only when this process
+//! inherited the flags, so an upgrade run from a GUI Git client's
+//! terminal produces a binary that cannot start while the identical
+//! upgrade from Terminal.app produces one that can.
+//!
+//! (Homebrew is often cited as precedent for stripping after
+//! verification. It is not: brew *adds* quarantine to casks deliberately
+//! and warns that `--no-quarantine` reduces system security. Its
+//! formula/bottle path — the comparable case, a verified artifact the
+//! package manager fetched itself — never involves the attribute at all.)
 //!
 //! Note that content verification cannot substitute for this: an xattr does
 //! not change a file's bytes, so a digest check passes on a quarantined file
