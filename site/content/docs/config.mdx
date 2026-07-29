@@ -20,7 +20,7 @@ Both files take the same fields, except [`dlx`](#dlx), which is global-only.
 
 ## Reference
 
-Every field, with its full value set. Each has its own section below.
+Every field, with its full value set. Each has its own section below. Paths are resolved from the directory containing `nub.jsonc`, not the shell's current directory.
 
 ```jsonc title="nub.jsonc"
 {
@@ -100,8 +100,6 @@ Load one or more modules before the entry file.
   ]
 }
 ```
-
-Paths are resolved from the directory containing `nub.jsonc`.
 
 ```ts title="instrumentation.ts"
 globalThis.performance.mark("app-start");
@@ -184,7 +182,7 @@ This is the project-wide form of the `--node` escape hatch. Nub does not load it
 
 ### `envFile`
 
-Keep automatic environment-file discovery with `true`.
+Keep [automatic environment-file discovery](/docs/runtime/env#file-precedence) with `true`.
 
 ```jsonc title="nub.jsonc"
 {
@@ -224,9 +222,7 @@ Compose several files in order. Later files replace earlier values.
 }
 ```
 
-Paths are resolved from the directory containing `nub.jsonc`, not the shell's current directory.
-
-Paths also expand `${VAR}` and `$VAR` against the environment, which a config file never gets from the shell.
+Paths expand `${VAR}` and `$VAR` against the environment, which a config file never gets from the shell.
 
 ```jsonc title="nub.jsonc"
 {
