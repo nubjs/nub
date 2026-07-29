@@ -82,7 +82,7 @@ Corollary: **a review/verify sub-agent must reuse the implementer's already-warm
 
 - **A worktree that edits aube pays a cold build even with no sibling diverging aube concurrently.** The invariant is "match origin/main," which doesn't depend on observing volatile sibling state — that's what makes it robust. Isolating-only-when-a-sibling-also-diverges would save a cold build for a lone aube editor but is racy; the simple rule wins.
 - **Concurrent builds in two sharing worktrees serialize** on cargo's target-dir lock (one waits). That's a latency cost, never a correctness one — unrelated to the contamination above. Need two builds at once? An isolated worktree (diverge a lib crate, or set a private `CARGO_TARGET_DIR`) runs in parallel.
-- **`NUB_SHARED_TARGET`** overrides the shared path if you need a different location.
+- **`NUB_SHARED_TARGET`** relocates the target dir, and the path is used **exactly as given** — it is *not* content-keyed, because a caller naming a specific path is asking for that path (`make verify` relies on this to reach `$(CURDIR)/target`). So the value must be **private to one checkout**. Pointing two worktrees at the same relocated path puts them in one unkeyed multi-tenant dir with no content protection, which is the phantom-`E0063` clobber described above. To relocate a cache several worktrees share, leave this unset and move `~/.cache/nub` itself, so the content-keyed buckets still apply.
 - Cleanup is unchanged: `git worktree remove <path> --force` drops the worktree and its private `target/`; the shared dir is intentionally left in place for the next worktree.
 
 ## Relationship to the worktree + dev-loop skills

@@ -138,6 +138,12 @@ seed_from() {
   mkdir "$_claim" 2>/dev/null || return 1
   if cp -c -a "$1/." "$_claim/" 2>/dev/null \
     || cp -a --reflink=always "$1/." "$_claim/" 2>/dev/null; then
+    # A racer that lost the claim returns 1, and the caller's `mkdir -p "$target"`
+    # then creates the destination EMPTY — which would otherwise make this publish
+    # fail and leave BOTH processes cold, worse than no claim at all. `rmdir` only
+    # succeeds on an empty dir, so it clears that placeholder and never touches a
+    # destination something is already building in.
+    [ -d "$2" ] && rmdir "$2" 2>/dev/null
     if [ ! -e "$2" ] && mv "$_claim" "$2" 2>/dev/null; then
       return 0
     fi
@@ -146,11 +152,15 @@ seed_from() {
   return 1
 }
 
-# The newest bucket on disk, or nothing. Buckets are only ever created by
-# NON-diverged worktrees, so every bucket name is a base-content key.
+# The newest COMPLETE bucket on disk, or nothing. Buckets are only ever created
+# by non-diverged worktrees, so every bucket name is a base-content key. The
+# `.seeding` filter is load-bearing: a claim dir shares the `$shared-` prefix and
+# `-t` sorts newest-first, so an actively-filling claim would be the MOST likely
+# pick — seeding from a half-copied tree pairs a fresh-looking fingerprint with a
+# truncated rlib, the exact failure this design exists to prevent.
 newest_bucket() {
   # shellcheck disable=SC2012  # names are ours and contain no newlines
-  ls -dt "$shared"-* 2>/dev/null | head -1
+  ls -dt "$shared"-* 2>/dev/null | grep -v '\.seeding$' | head -1
 }
 
 if [ -n "$diverged" ] || [ -n "$untracked" ]; then
