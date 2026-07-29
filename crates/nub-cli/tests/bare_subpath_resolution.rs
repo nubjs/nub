@@ -65,6 +65,23 @@ fn fixture(name: &str) -> PathBuf {
     dir
 }
 
+/// `(major, minor)` of the `node` first on PATH. 22.15 is the fast-tier floor,
+/// and one test below is a fast-tier-only contract.
+fn path_node_version() -> Option<(u32, u32)> {
+    let out = Command::new("node").arg("--version").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v = String::from_utf8_lossy(&out.stdout);
+    let v = v.trim().trim_start_matches('v');
+    let mut parts = v.split('.');
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+fn on_fast_tier() -> bool {
+    matches!(path_node_version(), Some((m, n)) if (m, n) >= (22, 15))
+}
+
 fn run(dir: &Path, entry: &str) -> (String, String) {
     let out = Command::new(nub_binary())
         .arg(dir.join(entry).to_str().unwrap())
@@ -165,8 +182,18 @@ console.log("from:" + s.from);
 /// directory, so `sub.ts` would beat `sub/index.js`, and the `.ts` is then a path
 /// the load hooks refuse. Node's CJS resolver loads `sub/index.js` here, and so
 /// must nub.
+///
+/// FAST TIER ONLY, and the reason is a separate pre-existing divergence rather
+/// than anything this probe does. Below 22.15 nub registers a `.ts` handler in
+/// `require.extensions`, so Node's OWN CJS resolver finds `sub.ts` during
+/// LOAD_AS_FILE and never reaches LOAD_AS_DIRECTORY — the additive resolver has
+/// already declined the file by then. Verified against nub v0.5.0, which predates
+/// this branch and behaves identically on 20.11 and 18.19.
 #[test]
 fn directory_index_outranks_an_unloadable_ts_sibling() {
+    if !on_fast_tier() {
+        return;
+    }
     let dir = fixture("dir-vs-ts");
     write(
         &dir.join("node_modules/pkg/package.json"),
