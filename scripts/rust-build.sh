@@ -59,7 +59,21 @@
 set -eu
 
 root=$(git rev-parse --show-toplevel)
-shared="${NUB_SHARED_TARGET:-$HOME/.cache/nub/shared-target}"
+# An EXPLICIT NUB_SHARED_TARGET is honored verbatim — no content key appended.
+# Keying exists to make SHARING sound (same path implies same content across the
+# worktrees that all converge on the one default cache); a caller naming a
+# specific path is not sharing, and silently redirecting the path it named breaks
+# every consumer that knows where its artifacts land. `make verify` is exactly
+# that caller: it points at a repo-local $(CURDIR)/target precisely to be
+# isolated from the shared cache, and its addon recipe then copies from
+# target/<profile>/.
+if [ -n "${NUB_SHARED_TARGET:-}" ]; then
+  shared="$NUB_SHARED_TARGET"
+  keyed=0
+else
+  shared="$HOME/.cache/nub/shared-target"
+  keyed=1
+fi
 
 # Leaf artifacts nothing links, so a divergence here cannot clobber a sharer.
 # Kept in one variable because the same set must apply to every query below —
@@ -97,7 +111,11 @@ untracked=$(git -C "$root" ls-files --others --exclude-standard -- \
 # shellcheck disable=SC2086
 key=$(git -C "$root" ls-files -s -- vendor/aube crates $leaves 2>/dev/null \
   | shasum 2>/dev/null | cut -c1-12 || true)
-bucket="$shared${key:+-$key}"
+if [ "$keyed" = 1 ]; then
+  bucket="$shared${key:+-$key}"
+else
+  bucket="$shared"
+fi
 
 # CoW-clone $1 into $2. The caller runs cargo against $2 no matter what this
 # returns, so $2 must never be visible half-copied — cargo would find fingerprints
