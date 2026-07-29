@@ -71,13 +71,24 @@ jobs:
           icacls "C:\Program Files"
           whoami /groups | findstr /i "Mandatory Administrators"
 
+      # BUILD AND RUN ARE SEPARATE STEPS so the RUN can carry a timeout that the build's
+      # (unbounded, and on a cold cache genuinely long) duration would otherwise swallow. With
+      # them fused, a probe that HANGS is indistinguishable from one still compiling, and the
+      # job timeout then cancels the job and discards `probe.log` entirely — which is exactly
+      # how the first two runs of this workflow ended with no evidence at all.
+      - name: Build the probe
+        if: always()
+        shell: bash
+        run: cargo test -p nub-sandbox --test windows_realpath_ancestors --no-run
+
       - name: Probe — realpath ancestors under AppContainer
         if: always()
         shell: bash
         run: |
           rc=0
-          cargo test -p nub-sandbox --test windows_realpath_ancestors > probe.log 2>&1 || rc=$?
-          echo "probe exit=$rc"
+          timeout -k 30 600 cargo test -p nub-sandbox --test windows_realpath_ancestors \
+            > probe.log 2>&1 || rc=$?
+          echo "probe exit=$rc (124 ⇒ the probe itself hung; the last STEP line below names the arm)"
           cat probe.log
 
       # The verdict is read off the log, never off a step's exit status: a property whose

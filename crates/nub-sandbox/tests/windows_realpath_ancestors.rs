@@ -377,6 +377,34 @@ mod win {
         }
     }
 
+    /// Whether `token` carries `BUILTIN\Administrators` as an ENABLED group, evaluated against
+    /// the token handle directly.
+    ///
+    /// This is the de-elevated arm's oracle, and it is deliberately NOT the SCM probe above:
+    /// `OpenSCManagerW` is an RPC, and issuing one while impersonating a restricted token is
+    /// the likeliest way for this probe to stall indefinitely — which is a bad trade when a
+    /// purely local check answers the same question. It is also not the `TokenIsElevated` flag
+    /// that `CreateRestrictedToken` copies rather than recomputes: `CheckTokenMembership`
+    /// evaluates the ACTUAL group state and, by contract, reports a DENY-ONLY SID as NOT a
+    /// member — which is exactly the reduction the restricted token applies.
+    fn has_admin_group(token: windows_sys::Win32::Foundation::HANDLE) -> Option<bool> {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+        use windows_sys::Win32::Security::{CheckTokenMembership, PSID};
+        let text: Vec<u16> = "S-1-5-32-544".encode_utf16().chain([0]).collect();
+        let mut sid: PSID = std::ptr::null_mut();
+        // SAFETY: converts a well-formed SDDL SID string; freed below.
+        if unsafe { ConvertStringSidToSidW(text.as_ptr(), &mut sid) } == 0 {
+            return None;
+        }
+        let mut is_member: i32 = 0;
+        // SAFETY: `token` is an impersonation token owned by the caller; `sid` outlives it.
+        let ok = unsafe { CheckTokenMembership(token, sid, &mut is_member) };
+        // SAFETY: `sid` came from ConvertStringSidToSidW.
+        unsafe { LocalFree(sid.cast()) };
+        (ok != 0).then_some(is_member != 0)
+    }
+
     /// An IMPERSONATION token for the same user with administrative authority removed and the
     /// integrity level dropped to medium.
     ///
@@ -605,19 +633,21 @@ mod win {
         };
         report(fails, "deelevated-token-available", true, "");
 
+        // The admin verdict is taken against the token handle OUTSIDE the impersonation block,
+        // so no RPC is ever issued under a restricted token.
+        let deelev_admin_group = has_admin_group(token);
         let measured = impersonating(token, || {
-            let admin = admin_authority();
             let rows: Vec<(String, Result<(), u32>)> = targets
                 .iter()
                 .filter(|(_, p)| p.exists())
                 .map(|(n, p)| ((*n).to_string(), can_write_dacl(p)))
                 .collect();
-            (admin, rows)
+            rows
         });
         // SAFETY: the token handle is ours; closing it after the impersonation block.
         unsafe { windows_sys::Win32::Foundation::CloseHandle(token) };
 
-        let (deelev_admin, rows) = match measured {
+        let rows = match measured {
             Ok(v) => v,
             Err(e) => {
                 report(
@@ -635,8 +665,11 @@ mod win {
         report(
             fails,
             "deelevated-context-is-nonadmin",
-            !deelev_admin,
-            &format!("admin_authority under impersonation = {deelev_admin}"),
+            deelev_admin_group == Some(false),
+            &format!(
+                "CheckTokenMembership(BUILTIN\\Administrators) on the de-elevated token = \
+                 {deelev_admin_group:?} (ambient SCM admin_authority = {ambient_admin})"
+            ),
         );
 
         for (name, outcome) in &rows {
