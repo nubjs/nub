@@ -78,6 +78,48 @@ pub fn pick_version_for_add<'a>(
     )
 }
 
+/// Does `ver` clear `effective`, the publish-age cutoff that applies to it?
+/// `None` means no wall is in effect, so everything clears.
+///
+/// A missing publish time is NOT a silent bypass (#581): the gate is only as
+/// strong as the metadata feeding it, so an undeterminable age FAILS CLOSED.
+/// Three cases, matching pnpm's `pickPackageFromMeta` +
+/// `filterPkgMetadataByPublishDate`:
+///
+/// - **time known** — compare it.
+/// - **times present, this one absent** — block. A hole in an otherwise
+///   populated map is anomalous, never a reason to admit a version.
+/// - **no per-version times at all** — fall back to the packument's `modified`,
+///   an UPPER BOUND on every version's publish time: `modified <= cutoff`
+///   proves the whole document predates the wall, so every version in it is
+///   mature. This is what keeps abbreviated (corgi) metadata usable without a
+///   full-packument fetch for the dormant majority of a dependency tree. When
+///   `modified` is absent or itself too new, nothing is provable — block.
+///
+/// Shared with the vulnerability re-pick (`resolve::vulnerable`), which applies
+/// the same wall and must not drift from it.
+pub(crate) fn version_clears_cutoff(
+    packument: &Packument,
+    ver: &str,
+    effective: Option<&str>,
+) -> bool {
+    let Some(c) = effective else { return true };
+    match packument.time.get(ver) {
+        Some(t) => t.as_str() <= c,
+        // npm's FULL `time` map always carries the `created`/`modified`
+        // bookkeeping keys beside the version keys, so a raw `is_empty()` would
+        // misread a mirror serving only those as "populated, with holes" and
+        // gate every version. Key on any non-bookkeeping entry instead.
+        None => {
+            let has_version_times = packument
+                .time
+                .keys()
+                .any(|k| k != "created" && k != "modified");
+            !has_version_times && packument.modified.as_deref().is_some_and(|m| m <= c)
+        }
+    }
+}
+
 /// Pick the best version from a packument that satisfies the given range.
 ///
 /// `pick_lowest` flips the scan order — used by
@@ -166,41 +208,8 @@ pub(crate) fn pick_version<'a>(
         }
     };
 
-    // Whether the packument carries per-version publish times at all. npm's
-    // FULL `time` map always includes the `created`/`modified` bookkeeping keys
-    // alongside the version keys, so a raw `is_empty()` would misread a mirror
-    // serving only those as "has times, with holes" and gate every version.
-    // Keyed on the presence of any non-bookkeeping key instead.
-    let has_version_times = packument
-        .time
-        .keys()
-        .any(|k| k != "created" && k != "modified");
-
-    // Does `ver` clear `effective` (the cutoff that applies to it)?
-    // `None` => no wall, keep the version. A missing publish time is NOT a
-    // silent bypass (#581): the gate's guarantee is only as strong as the
-    // metadata feeding it, so an undeterminable age FAILS CLOSED. Three cases,
-    // matching pnpm's `pickPackageFromMeta` + `filterPkgMetadataByPublishDate`:
-    //   - time known                -> compare it
-    //   - times present, this one    -> block. An anomalous hole in an otherwise
-    //     absent                        populated map, never a reason to admit.
-    //   - no per-version times at all-> fall back to the packument's `modified`,
-    //                                   an UPPER BOUND on every version's publish
-    //                                   time: `modified <= cutoff` proves the whole
-    //                                   document predates the wall, so every version
-    //                                   is mature. This is what keeps abbreviated
-    //                                   (corgi) metadata usable without a full fetch
-    //                                   for the dormant majority of a tree. When
-    //                                   `modified` is absent or too new, nothing is
-    //                                   provable and the version is blocked.
-    let passes_effective_cutoff = |ver: &str, effective: Option<&str>| -> bool {
-        let Some(c) = effective else { return true };
-        match packument.time.get(ver) {
-            Some(t) => t.as_str() <= c,
-            None if has_version_times => false,
-            None => packument.modified.as_deref().is_some_and(|m| m <= c),
-        }
-    };
+    let passes_effective_cutoff =
+        |ver: &str, effective: Option<&str>| version_clears_cutoff(packument, ver, effective);
 
     // A version's effective cutoff: exempt versions answer to the
     // time-based wall (`exempt_cutoff`) only; everyone else answers to

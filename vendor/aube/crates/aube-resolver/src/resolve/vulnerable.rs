@@ -41,18 +41,18 @@ pub(super) fn prefer_non_vulnerable_pick<'a>(
     // waves a version past the minimumReleaseAge gate here too (still
     // subject to `exempt_cutoff`, the time-based wall), otherwise the
     // re-pick could discard the exempt safe version and keep the
-    // vulnerable one.
+    // vulnerable one. The wall itself is the shared
+    // [`crate::semver_util::version_clears_cutoff`] — this path had its own
+    // copy of the comparison and so kept the missing-time fail-open after
+    // `pick_version` dropped it (#581); sharing the helper is what stops the
+    // two drifting again.
     let passes_cutoff = |ver: &str, parsed: Option<&node_semver::Version>| -> bool {
         let effective = if is_age_exempt(ver, parsed) {
             exempt_cutoff
         } else {
             cutoff
         };
-        let Some(c) = effective else { return true };
-        match packument.time.get(ver) {
-            Some(t) => t.as_str() <= c,
-            None => true,
-        }
+        crate::semver_util::version_clears_cutoff(packument, ver, effective)
     };
     let mut best: Option<(node_semver::Version, &'a aube_registry::VersionMetadata)> = None;
     for (ver_str, meta) in &packument.versions {
