@@ -426,6 +426,16 @@ impl Linker {
                                     // Project-local dir was already correct; only the
                                     // store copy needed (re)placing, done above.
                                     local_stats.packages_cached += 1;
+                                    // The call above already stripped the shared-store
+                                    // copy. This ejected project-local one is what
+                                    // resolution actually reaches, and the index is
+                                    // still in hand here, so strip it too rather than
+                                    // leave the two halves of one branch inconsistent.
+                                    crate::quarantine::strip_cached_entry(
+                                        &local_aube_entry,
+                                        &pkg.name,
+                                        index,
+                                    );
                                     return Ok(local_stats);
                                 }
                                 // Drop a stale shared-store symlink/junction left by
