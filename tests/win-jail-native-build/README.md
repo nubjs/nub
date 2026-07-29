@@ -33,13 +33,24 @@ cargo build -p nub-cli --profile fast
 node tests/win-jail-native-build/probe.mjs target/fast/nub
 ```
 
-The probe builds its own fixture (a plain N-API C addon with a `binding.gyp`, consumed as
-a `file:` dependency) under `~/.nub-jail-native-probe-<pid>`, installs it, and prints one
-`prop:<name>=PASS|FAIL` line per property.
+The probe builds its own fixture (a plain N-API C addon with a `binding.gyp`) under
+`~/.nub-jail-native-probe-<pid>`, installs it, and prints one
+`prop:<shape>/<name>=PASS|FAIL` line per property.
+
+It installs that same fixture through **two delivery shapes**, because the shape is not
+neutral on Windows:
+
+- `tarball` — `npm pack`ed and consumed as a `file:` tarball, the ordinary
+  fetch-and-extract path. **This is the shape the verdict rides.**
+- `dir` — consumed as a `file:` *directory* dependency. On Windows this crashes
+  `nub install` outright (`thread 'main' has overflowed its stack`, rc `0xC00000FD`),
+  identically in the fixed and poisoned arms — so it is a pre-existing defect in another
+  area, not something this branch introduced. It is still run and logged so it stays
+  visible, but gating on it would only re-measure someone else's bug.
 
 ## The four properties
 
-| Property | What it establishes |
+| Property (per shape) | What it establishes |
 | --- | --- |
 | `jailed-child-ran` | The confined script wrote a marker into its package dir — the one place it may write. It ran. |
 | `jail-enforced` | That same script tried to read a canary outside every grant and was refused. It ran *confined*. |

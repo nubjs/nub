@@ -105,27 +105,37 @@ jobs:
             fi
           done
 
+          # The verdict rides the TARBALL shape. The `file:` DIRECTORY shape crashes
+          # `nub install` on Windows (`thread 'main' has overflowed its stack`, rc
+          # 0xC00000FD) in BOTH arms, which makes it a pre-existing defect elsewhere rather
+          # than anything this branch touches — it is still run and logged, so it stays
+          # visible, but gating on it would only re-measure someone else's bug.
+          S=tarball
+
           # Controls — identical in both arms, so neither arm can go green (or red) merely
           # by being permissive, and a launch regression is told apart from a header one.
           for f in fixed.log poisoned.log; do
-            need "$f" "prop:jailed-child-ran=PASS" "control/$f"
-            need "$f" "prop:jail-enforced=PASS" "control/$f"
+            need "$f" "prop:$S/jailed-child-ran=PASS" "control/$f"
+            need "$f" "prop:$S/jail-enforced=PASS" "control/$f"
           done
 
           # The fixed arm must build and load a real addon on every platform.
-          need fixed.log "prop:addon-artifact=PASS" "fixed"
-          need fixed.log "prop:addon-loads=PASS" "fixed"
+          need fixed.log "prop:$S/addon-artifact=PASS" "fixed"
+          need fixed.log "prop:$S/addon-loads=PASS" "fixed"
 
           if [ "${{ runner.os }}" = "Windows" ]; then
             # The differential. Without the fix, node-gyp is pointed one level above the
             # distribution root, finds no headers, and cannot fetch any (net deny-all).
-            need poisoned.log "prop:addon-artifact=FAIL" "poisoned/windows"
+            need poisoned.log "prop:$S/addon-artifact=FAIL" "poisoned/windows"
           else
-            # POSIX behavior must be BYTE-FOR-BYTE preserved: the old derivation was already
+            # POSIX behavior must be preserved exactly: the old derivation was already
             # correct for `<root>/bin/node`, so reverting the fix must change nothing.
-            need poisoned.log "prop:addon-artifact=PASS" "poisoned/posix"
-            need poisoned.log "prop:addon-loads=PASS" "poisoned/posix"
+            need poisoned.log "prop:$S/addon-artifact=PASS" "poisoned/posix"
+            need poisoned.log "prop:$S/addon-loads=PASS" "poisoned/posix"
           fi
+
+          echo "---- diagnostic: the file:-directory shape, not gated ----"
+          grep -hE "prop:dir/|dir/install rc=" fixed.log poisoned.log || echo "(no dir-shape lines)"
 
           echo "----"
           if [ "$fail" = 0 ]; then

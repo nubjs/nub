@@ -31,7 +31,7 @@
 //
 // Usage: node probe.mjs <path-to-nub-binary>
 
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -57,10 +57,8 @@ const work = join(homedir(), `.nub-jail-native-probe-${process.pid}`);
 rmSync(work, { recursive: true, force: true });
 
 const addon = join(work, "addon");
-const consumer = join(work, "consumer");
 const canary = join(work, "canary-secret.txt");
 mkdirSync(addon, { recursive: true });
-mkdirSync(consumer, { recursive: true });
 writeFileSync(canary, "the-confined-build-must-not-read-this\n");
 
 writeFileSync(
@@ -73,6 +71,7 @@ writeFileSync(
       // whether or not the compile that follows succeeds — which is the whole point: in
       // the poisoned arm the compile must fail while the controls still hold.
       scripts: { install: "node preflight.cjs && node-gyp rebuild" },
+      files: ["addon.cc", "binding.gyp", "preflight.cjs"],
     },
     null,
     2,
@@ -114,8 +113,8 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, Init)
 // replaces the env axis with the engine's constructed lifecycle env), so an env-carried
 // path arrived `undefined`, `readFileSync(undefined)` threw ERR_INVALID_ARG_TYPE, and a
 // naive "did it throw?" test read that as a refusal. That is a control that confirms
-// enforcement without testing it — the worst kind. The marker now records the path and the
-// error CODE, and the assertion demands the code a real denial produces.
+// enforcement without testing it — the worst kind. The marker records the error CODE, and
+// the assertion demands the code a real denial produces.
 writeFileSync(
   join(addon, "preflight.cjs"),
   `// Runs INSIDE the jail, before the compile. Writes both controls to a marker file in the
@@ -138,42 +137,29 @@ fs.writeFileSync(
 `,
 );
 
-writeFileSync(
-  join(consumer, "package.json"),
-  JSON.stringify(
-    {
-      name: "nub-jail-probe-consumer",
-      version: "1.0.0",
-      private: true,
-      dependencies: { "nub-jail-probe-addon": `file:${addon.replace(/\\/g, "/")}` },
-    },
-    null,
-    2,
-  ),
-);
+const posix = (p) => p.replace(/\\/g, "/");
 
-const run = (label, args) => {
-  const r = spawnSync(nub, args, { cwd: consumer, encoding: "utf8" });
-  console.log(
-    `${label} rc=${r.status} signal=${r.signal ?? "none"} error=${r.error ? r.error.message : "none"}`,
-  );
-  console.log(`---- ${label} stdout ----\n${r.stdout ?? ""}`);
-  console.log(`---- ${label} stderr ----\n${r.stderr ?? ""}`);
-  return r;
-};
-
-// The default-trust floor is a curated allowlist and a probe fixture is on no curated
-// list, so the first install DECLINES to run the build script and names it. Approving is
-// a second, explicit step by design; `--all` is itself the consent, so it needs no TTY.
-// Going through `approve-builds` rather than hand-writing an `allowBuilds` entry lets nub
-// derive the source-backed approval key itself — a `file:` dep is authorized by its source
-// spec, whose spelling differs between platforms.
-run("install", ["install", "--no-frozen-lockfile"]);
-run("approve-builds", ["approve-builds", "--all"]);
-
-const installed = join(consumer, "node_modules", "nub-jail-probe-addon");
-const marker = join(installed, "probe-marker.json");
-const artifact = join(installed, "build", "Release", "nub_jail_probe.node");
+// TWO DELIVERY SHAPES for the identical fixture, because the shape is not neutral on
+// Windows. A `file:` DIRECTORY dependency crashes `nub install` outright there — measured
+// on this harness's first run: `thread 'main' has overflowed its stack`, rc 0xC00000FD,
+// identically in the fixed and poisoned arms, so it is a pre-existing defect elsewhere and
+// not something this branch introduced. A packed TARBALL takes the ordinary
+// fetch-and-extract path instead. Both are reported so the crash stays visible rather
+// than being quietly designed around; only `tarball` gates the verdict.
+const shapes = [];
+try {
+  const packed = execFileSync("npm", ["pack", addon, "--pack-destination", work, "--silent"], {
+    encoding: "utf8",
+    shell: process.platform === "win32",
+  })
+    .trim()
+    .split(/\r?\n/)
+    .pop();
+  shapes.push({ name: "tarball", spec: `file:${posix(join(work, packed))}` });
+} catch (err) {
+  console.log(`shape:tarball=UNAVAILABLE (npm pack failed: ${err.message})`);
+}
+shapes.push({ name: "dir", spec: `file:${posix(addon)}` });
 
 const results = [];
 const record = (name, ok, detail) => {
@@ -181,41 +167,82 @@ const record = (name, ok, detail) => {
   console.log(`prop:${name}=${ok ? "PASS" : "FAIL"} ${detail}`);
 };
 
-let markerData = null;
-if (existsSync(marker)) {
-  try {
-    markerData = JSON.parse(readFileSync(marker, "utf8"));
-  } catch (err) {
-    console.log(`marker unparseable: ${err.message}`);
+for (const shape of shapes) {
+  console.log(`\n======== shape: ${shape.name} (${shape.spec}) ========`);
+  const consumer = join(work, `consumer-${shape.name}`);
+  mkdirSync(consumer, { recursive: true });
+  writeFileSync(
+    join(consumer, "package.json"),
+    JSON.stringify(
+      {
+        name: "nub-jail-probe-consumer",
+        version: "1.0.0",
+        private: true,
+        dependencies: { "nub-jail-probe-addon": shape.spec },
+      },
+      null,
+      2,
+    ),
+  );
+
+  const run = (label, args) => {
+    const r = spawnSync(nub, args, { cwd: consumer, encoding: "utf8" });
+    console.log(
+      `${shape.name}/${label} rc=${r.status} signal=${r.signal ?? "none"} error=${r.error ? r.error.message : "none"}`,
+    );
+    console.log(`---- ${label} stdout ----\n${r.stdout ?? ""}`);
+    console.log(`---- ${label} stderr ----\n${r.stderr ?? ""}`);
+    return r;
+  };
+
+  // The default-trust floor is a curated allowlist and a probe fixture is on no curated
+  // list, so the first install DECLINES to run the build script and names it. Approving is
+  // a second, explicit step by design; `--all` is itself the consent, so it needs no TTY.
+  // Going through `approve-builds` rather than hand-writing an `allowBuilds` entry lets nub
+  // derive the source-backed approval key itself, whose spelling differs between platforms.
+  run("install", ["install", "--no-frozen-lockfile"]);
+  run("approve-builds", ["approve-builds", "--all"]);
+
+  const installed = join(consumer, "node_modules", "nub-jail-probe-addon");
+  const marker = join(installed, "probe-marker.json");
+  const artifact = join(installed, "build", "Release", "nub_jail_probe.node");
+
+  let markerData = null;
+  if (existsSync(marker)) {
+    try {
+      markerData = JSON.parse(readFileSync(marker, "utf8"));
+    } catch (err) {
+      console.log(`marker unparseable: ${err.message}`);
+    }
   }
+  record(`${shape.name}/jailed-child-ran`, markerData !== null, `marker=${marker}`);
+
+  // A REAL denial only. `ERR_INVALID_ARG_TYPE` means the path never arrived and nothing was
+  // tested; `ENOENT` means the canary is missing rather than withheld. Both are probe bugs,
+  // and both must read FAIL rather than quietly confirming enforcement.
+  const denials = ["EPERM", "EACCES"];
+  const canaryRead = markerData?.canaryRead ?? "<no marker>";
+  record(
+    `${shape.name}/jail-enforced`,
+    denials.some((code) => canaryRead === `refused:${code}`),
+    `canaryRead=${canaryRead} (a pass needs exactly one of ${denials.map((c) => `refused:${c}`).join(", ")})`,
+  );
+  console.log(`observed ${shape.name} npm_config_nodedir=${markerData?.nodedir ?? "<no marker>"}`);
+
+  const artifactSize = existsSync(artifact) ? statSync(artifact).size : -1;
+  record(`${shape.name}/addon-artifact`, artifactSize > 0, `path=${artifact} size=${artifactSize}`);
+
+  const load = spawnSync(
+    process.execPath,
+    ["-e", `process.stdout.write(require(${JSON.stringify(artifact)}).probe())`],
+    { encoding: "utf8" },
+  );
+  record(
+    `${shape.name}/addon-loads`,
+    load.status === 0 && (load.stdout ?? "").includes("nub-jail-probe-ok"),
+    `rc=${load.status} out=${JSON.stringify((load.stdout ?? "").slice(0, 120))} err=${JSON.stringify((load.stderr ?? "").slice(0, 400))}`,
+  );
 }
-record("jailed-child-ran", markerData !== null, `marker=${marker}`);
-
-// A REAL denial only. `ERR_INVALID_ARG_TYPE` means the path never arrived and nothing was
-// tested; `ENOENT` means the canary is missing rather than withheld. Both are probe bugs,
-// and both must read FAIL rather than quietly confirming enforcement.
-const denials = ["EPERM", "EACCES"];
-const canaryRead = markerData?.canaryRead ?? "<no marker>";
-record(
-  "jail-enforced",
-  denials.some((code) => canaryRead === `refused:${code}`),
-  `canaryRead=${canaryRead} (a pass needs exactly one of ${denials.map((c) => `refused:${c}`).join(", ")})`,
-);
-console.log(`observed npm_config_nodedir=${markerData?.nodedir ?? "<no marker>"}`);
-
-const artifactSize = existsSync(artifact) ? statSync(artifact).size : -1;
-record("addon-artifact", artifactSize > 0, `path=${artifact} size=${artifactSize}`);
-
-const load = spawnSync(
-  process.execPath,
-  ["-e", `process.stdout.write(require(${JSON.stringify(artifact)}).probe())`],
-  { encoding: "utf8" },
-);
-record(
-  "addon-loads",
-  load.status === 0 && (load.stdout ?? "").includes("nub-jail-probe-ok"),
-  `rc=${load.status} out=${JSON.stringify((load.stdout ?? "").slice(0, 120))} err=${JSON.stringify((load.stderr ?? "").slice(0, 400))}`,
-);
 
 rmSync(work, { recursive: true, force: true });
 
