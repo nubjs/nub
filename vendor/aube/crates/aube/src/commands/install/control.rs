@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use miette::miette;
@@ -65,10 +66,45 @@ pub trait InstallReporter: Send + Sync + 'static {
     fn report(&self, event: InstallEvent);
 }
 
+/// A confirmation requested by an embedded aube operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InstallPrompt {
+    SimilarPackageName {
+        package: String,
+        suggested_package: String,
+        popularity_rank: usize,
+        edit_distance: u8,
+    },
+    LowDownloadPackage {
+        package: String,
+        weekly_downloads: u64,
+        threshold: u64,
+    },
+    NewPackageName {
+        package: String,
+        created_at: String,
+        minimum_age_minutes: u64,
+    },
+}
+
+/// Future returned by an [`InstallPromptHandler`].
+pub type InstallPromptFuture<'a> = Pin<Box<dyn Future<Output = miette::Result<bool>> + Send + 'a>>;
+
+/// Host-provided destination for interactive confirmation requests.
+///
+/// Embedded aube operations never read process stdin themselves. When no
+/// handler is configured, an operation that needs confirmation fails with
+/// its normal structured error.
+pub trait InstallPromptHandler: Send + Sync + 'static {
+    fn confirm(&self, prompt: InstallPrompt) -> InstallPromptFuture<'_>;
+}
+
 #[derive(Clone)]
 pub struct InstallControl {
     output: InstallOutputMode,
     reporter: Option<Arc<dyn InstallReporter>>,
+    prompt_handler: Option<Arc<dyn InstallPromptHandler>>,
     cancellation: tokio_util::sync::CancellationToken,
 }
 
@@ -77,6 +113,7 @@ impl std::fmt::Debug for InstallControl {
         f.debug_struct("InstallControl")
             .field("output", &self.output)
             .field("has_reporter", &self.reporter.is_some())
+            .field("has_prompt_handler", &self.prompt_handler.is_some())
             .field("cancelled", &self.is_cancelled())
             .finish()
     }
@@ -87,6 +124,7 @@ impl Default for InstallControl {
         Self {
             output: InstallOutputMode::Human,
             reporter: None,
+            prompt_handler: None,
             cancellation: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -97,6 +135,7 @@ impl InstallControl {
         Self {
             output: InstallOutputMode::Events,
             reporter: Some(reporter),
+            prompt_handler: None,
             cancellation: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -110,6 +149,11 @@ impl InstallControl {
 
     pub fn output_mode(&self) -> InstallOutputMode {
         self.output
+    }
+
+    pub fn with_prompt_handler(mut self, handler: Arc<dyn InstallPromptHandler>) -> Self {
+        self.prompt_handler = Some(handler);
+        self
     }
 
     pub fn cancel(&self) {
@@ -126,6 +170,15 @@ impl InstallControl {
 
     pub(crate) fn reporter(&self) -> Option<Arc<dyn InstallReporter>> {
         self.reporter.clone()
+    }
+
+    pub(crate) async fn confirm(&self, prompt: InstallPrompt) -> Option<miette::Result<bool>> {
+        let handler = self.prompt_handler.clone()?;
+        Some(tokio::select! {
+            biased;
+            _ = self.cancelled() => self.check_cancelled().map(|()| false),
+            result = handler.confirm(prompt) => result,
+        })
     }
 
     pub(crate) fn check_cancelled(&self) -> miette::Result<()> {

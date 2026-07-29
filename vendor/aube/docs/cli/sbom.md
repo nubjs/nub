@@ -2,6 +2,7 @@
 # `aube sbom`
 
 - **Usage**: `aube sbom [FLAGS]`
+- **Effect**: read-only
 
 Generate a Software Bill of Materials (CycloneDX or SPDX)
 

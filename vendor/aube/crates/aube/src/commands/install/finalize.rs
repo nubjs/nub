@@ -8,7 +8,7 @@ use super::side_effects_cache::{
 use super::summary::{print_direct_dependency_summary, should_print_human_install_summary};
 use super::sweep::sweep_orphaned_aube_entries;
 use super::workspace::importer_project_dir;
-use super::{InstallPhaseTimings, delta, unreviewed_builds};
+use super::{InstallPhaseTimings, delta, gvs, unreviewed_builds};
 use crate::state;
 use miette::{Context, IntoDiagnostic, miette};
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,6 +32,7 @@ pub(super) struct FinalizePhaseInput<'a> {
     pub(super) jail_policy: &'a JailBuildPolicy,
     pub(super) stats: &'a aube_linker::LinkStats,
     pub(super) node_linker: aube_linker::NodeLinker,
+    pub(super) planned_gvs: bool,
     pub(super) virtual_store_only: bool,
     pub(super) current_leaf_hashes: Option<BTreeMap<String, String>>,
     pub(super) current_subtree_hashes: Option<BTreeMap<String, String>>,
@@ -180,6 +181,7 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         jail_policy,
         stats,
         node_linker,
+        planned_gvs,
         virtual_store_only,
         current_leaf_hashes,
         current_subtree_hashes,
@@ -216,7 +218,34 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
     // block and the branded line as redundant twins.
     let install_is_noop = stats.packages_linked == 0 && stats.top_level_linked == 0;
     if let Some(p) = prog_ref {
-        p.finish(!install_is_noop);
+        let tty_behavior = if install_is_noop {
+            crate::progress::TtyFinishBehavior::Clear
+        } else {
+            crate::progress::TtyFinishBehavior::Preserve
+        };
+        p.finish(!install_is_noop, tty_behavior);
+    }
+
+    if !virtual_store_only {
+        let virtual_store_dir = if planned_gvs && node_linker == aube_linker::NodeLinker::Isolated {
+            store.virtual_store_dir()
+        } else {
+            aube_dir.to_path_buf()
+        };
+        gvs::write_modules_metadata(cwd, graph_for_link, modules_dir_name, &virtual_store_dir)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("failed to write {modules_dir_name}/.modules.yaml"))?;
+        if planned_gvs && node_linker == aube_linker::NodeLinker::Isolated {
+            gvs::patch_legacy_vite_copies(
+                aube_dir,
+                graph_for_link,
+                virtual_store_dir_max_length,
+                &store.virtual_store_dir(),
+                modules_dir_name,
+            )
+            .into_diagnostic()
+            .wrap_err("failed to backport Vite global virtual store support")?;
+        }
     }
 
     if !ignore_scripts && strict_dep_builds_setting && !virtual_store_only {

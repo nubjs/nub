@@ -1,0 +1,68 @@
+# Instruction-counted benchmarks, measured by tak (https://github.com/jdx/tak).
+#
+# These complement the hyperfine matrix in `benchmarks/`, which measures
+# installs — network and filesystem work whose variance is orders of magnitude
+# larger than any CPU regression. Everything here is pure CPU against a
+# committed fixture: no registry access, no writes, no clock, so cachegrind can
+# count it to ~0.02% where wall clock on the same hardware moves 4-20%.
+#
+# Hermeticity was checked by running each of these with the registry pointed at
+# a dead port; all three succeed unchanged. `aube --version` deliberately is not
+# here: it is documented as "print version and check for updates", and a command
+# that talks to the network retires a different number of instructions depending
+# on conditions that have nothing to do with the code under test.
+#
+# `startup` is the control. It does no package work, so it measures the fixed
+# cost every invocation pays — process start, settings load, workspace
+# discovery. The other two are that same cost plus real graph work. When all
+# three move together the regression is in startup; when only one moves it is in
+# that command's path. Reading them without the control tells you much less.
+#
+# `fixtures/medium` is a 10-dependency, 28KB lockfile — small, but it separates
+# well: measured against a debug build, `startup` is 6.7ms where `graph` and
+# `tree` are 11.8ms and 11.1ms, so the package work is around 40% of each. A
+# larger fixture would raise that fraction if this ever feels blunt.
+
+# Fixed cost of any invocation: startup, settings, workspace discovery.
+[bench.startup]
+cmd = ["./target/release/aube", "-C", "fixtures/medium", "prefix"]
+
+# Parse the lockfile, walk the whole dependency graph, serialize every package.
+# Output is byte-identical run to run.
+[bench.graph]
+cmd = ["./target/release/aube", "-C", "fixtures/medium", "sbom"]
+
+# The other major read path over the same graph: resolve and render the tree.
+# `--depth 20` is past the fixture's real depth, so nothing is truncated.
+[bench.tree]
+cmd = ["./target/release/aube", "-C", "fixtures/medium", "list", "--depth", "20"]
+
+# Install, on the path people actually hit most: everything is already present
+# and aube has to prove it. Every CI job with a warm cache and every redundant
+# `aube install` a developer types pays exactly this, and at ~106ms it is the
+# heaviest thing here.
+#
+# `--offline` is what makes it measurable. Plain `install --frozen-lockfile`
+# contacts the registry even when nothing needs fetching — verified by pointing
+# it at a dead port, where it spends 70s retrying before failing. `--offline`
+# against the same dead port succeeds unchanged, so no measurement here can be
+# perturbed by the network.
+#
+# The store must already hold the fixture's packages; `mise run perf` warms it
+# with one networked install before handing over to tak.
+#
+# Not covered: the fresh-link path, where node_modules is deleted first — that
+# is the 571ms number in `benchmarks/results.json`. It cannot be repeated
+# without resetting the directory between runs, and tak has no per-benchmark
+# setup hook. `aube ci` looked like the answer since it deletes node_modules
+# itself, but it takes neither `--offline` nor `npm_config_offline`, so it
+# cannot be made hermetic. A setup hook in tak is the real fix.
+[bench.install]
+cmd = [
+  "./target/release/aube",
+  "-C",
+  "fixtures/medium",
+  "install",
+  "--frozen-lockfile",
+  "--offline",
+]

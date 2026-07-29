@@ -1,0 +1,241 @@
+name: perf-backfill
+
+# Seeds refs/notes/tak with measurements of already-published aube binaries, so
+# the performance history starts with a real series instead of one point.
+#
+# The alternative is rebuilding aube at 64 historical commits, which is hours of
+# compute and fails outright on old commits whose dependencies no longer
+# resolve. Downloading what was already published takes minutes and measures the
+# exact artifact users installed.
+#
+# Dispatch-only, and effectively idempotent: release binaries are immutable, so
+# a second run produces byte-identical records that cat_sort_uniq collapses on
+# merge. Re-running is harmless, just pointless.
+#
+# Split into two jobs so the repository-write token is never present while
+# downloaded binaries are executing. `measure` runs 64 historical executables
+# and holds only a read token; `publish` holds the write token and runs nothing
+# but git.
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Most recent releases to measure
+        required: false
+        default: "64"
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: perf-backfill
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    name: Measure released binaries
+    # Same runner class as perf.yml. Absolute instruction counts shift between
+    # machine types by more than a real regression does, so the backfilled
+    # series and the ongoing one have to come from the same kind of machine.
+    runs-on: namespace-profile-endev-linux-amd64
+    timeout-minutes: 60
+    permissions:
+      contents: read # listing releases and downloading assets; no write here
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # tak resolves each release tag to the commit it points at, so a
+          # measurement lands on the commit that produced it rather than on
+          # HEAD. That needs the tags, and a shallow checkout has none.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+        env:
+          MISE_LOCKED: "1"
+
+      - name: Install valgrind
+        run: |
+          command -v valgrind || {
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends valgrind
+          }
+          valgrind --version
+
+      # `sbom` rather than tak's default of `--version`. aube's `-V` is
+      # documented as "print version and check for updates", and a subject that
+      # talks to the network cannot hold a stable instruction count.
+      #
+      # `sbom` reads only the committed lockfile — no node_modules, no store, no
+      # registry — so it needs no setup and cannot be perturbed. It was checked
+      # against releases sampled across the whole range, back to v1.0.0-beta.1,
+      # and works on all of them; `prefix` does not exist that far back.
+      #
+      # Separate bench name from the CI series on purpose. These are release
+      # artifacts built by the release pipeline; perf.yml measures a plain
+      # `cargo build --release`. Plotting them on one axis would compare build
+      # configurations, not commits.
+      #
+      # The fixture path is absolute so it does not depend on the working
+      # directory tak happens to run each downloaded binary from.
+      #
+      # This step executes 64 binaries downloaded from the releases API. The
+      # token in scope is read-only, so what they inherit is worth nothing
+      # beyond what a public clone already grants.
+      - name: Backfill from published releases
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LIMIT: ${{ inputs.limit }}
+        run: |
+          tak backfill --bench release-graph --limit "$LIMIT" -- \
+            -C "$GITHUB_WORKSPACE/fixtures/medium" sbom
+
+      # A bundle is how the notes reach the publish job: it carries the ref and
+      # its object closure in one file, and `git fetch` restores it exactly.
+      # Passing the records as text would mean re-deriving the ref on the far
+      # side and getting the cat_sort_uniq byte-ordering right by hand.
+      - name: Bundle the notes
+        run: |
+          git bundle create notes.bundle refs/notes/tak
+          git bundle verify notes.bundle
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tak-notes
+          path: notes.bundle
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Summary
+        env:
+          LIMIT: ${{ inputs.limit }}
+        run: |
+          {
+            echo "Measured up to ${LIMIT} releases as \`release-graph\`."
+            echo
+            echo '```'
+            tak history 2>&1 | head -40
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish measurements
+    needs: measure
+    # Only main publishes. workflow_dispatch can be pointed at any branch or
+    # tag, and refs/notes/tak is a shared baseline. A dispatch from a branch
+    # still measures and still prints its numbers in the summary above — it
+    # just keeps them out of the shared series, which matters because a branch
+    # may have changed the fixture or the subject while keeping the bench name.
+    if: github.ref == 'refs/heads/main'
+    runs-on: namespace-profile-endev-linux-amd64
+    timeout-minutes: 10
+    permissions:
+      contents: write # pushing refs/notes/tak is a write to this repository
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Tags, so the validation below can check that every note attaches to
+          # a commit some release tag points at. Fetched here rather than
+          # trusted from the measure job's checkout, which untrusted binaries
+          # ran inside.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+        env:
+          MISE_LOCKED: "1"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tak-notes
+
+      # The measure job runs 64 downloaded executables in a writable checkout,
+      # so anything it hands over is untrusted input crossing into a job that
+      # can write to the repository. Everything below runs before the write
+      # token is in scope.
+      #
+      # What this defends is the shape and placement of the data, not its
+      # truthfulness. A subject that lies about its own performance cannot be
+      # caught here, and no arrangement of jobs could catch it, because the
+      # subject *is* the measurement. What it stops is a tampered bundle
+      # carrying extra refs, notes on unrelated objects, records for another
+      # benchmark, or non-numeric metrics into this repository.
+      - name: Verify the bundle carries only measurements
+        env:
+          EXPECTED_BENCH: release-graph
+        run: |
+          git bundle verify notes.bundle
+
+          refs=$(git bundle list-heads notes.bundle | awk '{print $2}')
+          if [ "$refs" != "refs/notes/tak" ]; then
+            echo "::error::bundle carries unexpected refs:"
+            printf '%s\n' "$refs"
+            exit 1
+          fi
+
+          git fetch notes.bundle 'refs/notes/tak:refs/notes/tak'
+
+          # Notes may only attach to a commit a release tag resolves to.
+          # Backfill measures published releases and nothing else, so a note
+          # anywhere else was not written by the run we asked for.
+          #
+          # Peeled commits only. tak resolves a tag with `rev-parse tag^{commit}`
+          # and records against that, so an annotated tag's own object is
+          # somewhere tak never writes — accepting it would leave a slot for a
+          # valid-looking record on an object the measurement never touched.
+          # The %(if) picks the peeled commit for annotated tags and the object
+          # itself for lightweight ones, where they are the same thing.
+          git for-each-ref refs/tags \
+            --format='%(if)%(*objectname)%(then)%(*objectname)%(else)%(objectname)%(end)' \
+            | grep -v '^$' | sort -u > /tmp/tag-objects
+
+          git notes --ref=tak list > /tmp/note-list
+          bad=0
+          notes=0
+          records=0
+          while read -r _blob target; do
+            notes=$((notes + 1))
+            if ! grep -qx "$target" /tmp/tag-objects; then
+              echo "::error::note on $target, which no release tag points at"
+              bad=1
+              continue
+            fi
+            # Shape alone would accept a forged record, so this also pins the
+            # schema version, the benchmark name, and that metrics are numbers.
+            git notes --ref=tak show "$target" > /tmp/note-body
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              records=$((records + 1))
+              printf '%s' "$line" | jq -e --arg want "$EXPECTED_BENCH" '
+                type == "object"
+                and .v == 1
+                and .bench == $want
+                and (.metrics | type == "object")
+                and (.metrics | length > 0)
+                and ([.metrics[] | type] | all(. == "number"))
+              ' > /dev/null 2>&1 || { echo "::error::rejected on $target: $line"; bad=1; }
+            done < /tmp/note-body
+          done < /tmp/note-list
+
+          if [ "$bad" -ne 0 ]; then exit 1; fi
+          if [ "$records" -eq 0 ]; then
+            echo "::error::the bundle contains no measurements"
+            exit 1
+          fi
+          echo "verified $records records across $notes tagged commits"
+
+      # `tak push` rather than a plain `git push`: it re-fetches and merges with
+      # cat_sort_uniq when it loses a race, which it can against perf.yml.
+      #
+      # persist-credentials: false means the push needs its own auth. Same
+      # pattern as perf.yml and bench-refresh.yml: re-point origin rather than
+      # pushing to a one-shot URL, so tak's retry path has a remote to fetch
+      # from.
+      - name: Push measurements
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPOSITORY}.git"
+          tak push

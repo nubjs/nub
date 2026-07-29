@@ -3,6 +3,7 @@
 
 - **Usage**: `aube dist-tag [FLAGS] <SUBCOMMAND>`
 - **Aliases**: `dist-tags`
+- **Effect**: read-only
 
 Manage package distribution tags on the registry
 

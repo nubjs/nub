@@ -2,11 +2,12 @@
 
 # Auto-disable of the global virtual store when any package listed in
 # `disableGlobalVirtualStoreForPackages` is present in an importer's
-# deps. Default list is `["next"]` — Next.js's Turbopack canonicalizes
-# every `node_modules/<pkg>` symlink and rejects targets outside the
-# project root, which aube's gvs layout produces by default. The
-# setting is the extension point: add any tool with the same
-# restriction, or set to `[]` to disable the heuristic.
+# deps. Next.js's Turbopack canonicalizes every `node_modules/<pkg>`
+# symlink and rejects targets outside the project root, which aube's
+# gvs layout produces by default. Vite is deliberately absent because
+# 8.1+ reads the `.modules.yaml` metadata aube writes. The setting is
+# the extension point: add any tool with the same restriction, or set
+# to `[]` to disable the heuristic.
 #
 # These tests use a `link:` local dep so detection fires without
 # needing a real tarball — the scan only reads dependency names, not
@@ -92,6 +93,53 @@ JSON
 	assert_success
 	refute_output --partial "disableGlobalVirtualStoreForPackages"
 	refute_output --partial "disabling global virtual store"
+}
+
+@test "vite keeps global virtual store enabled and receives compatibility metadata" {
+	_make_fake_dep vite
+	mkdir -p app
+	cd app
+	cat >package.json <<'JSON'
+{"name":"app","version":"0.0.0","devDependencies":{"vite":"link:../fake-vite","is-odd":"3.0.1"}}
+JSON
+
+	run aube install
+	assert_success
+	refute_output --partial "disableGlobalVirtualStoreForPackages"
+	[ -L node_modules/.aube/is-odd@3.0.1 ]
+
+	run sed -n 's/.*"virtualStoreDir": "\(.*\)".*/\1/p' node_modules/.modules.yaml
+	assert_success
+	[[ "$output" == /*/aube/virtual-store ]]
+
+	rm node_modules/.modules.yaml
+	run aube install
+	assert_success
+	[ -f node_modules/.modules.yaml ]
+}
+
+@test "vite compatibility metadata is written for nested workspace importers" {
+	_make_fake_dep vite
+	cat >package.json <<'JSON'
+{"name":"workspace","version":"0.0.0","private":true}
+JSON
+	cat >aube-workspace.yaml <<'YAML'
+packages:
+  - packages/*
+YAML
+	mkdir -p packages/app
+	cat >packages/app/package.json <<'JSON'
+{"name":"app","version":"0.0.0","devDependencies":{"vite":"link:../../fake-vite","is-odd":"3.0.1"}}
+JSON
+
+	run aube install
+	assert_success
+	refute_output --partial "disableGlobalVirtualStoreForPackages"
+	[ -L node_modules/.aube/is-odd@3.0.1 ]
+
+	run sed -n 's/.*"virtualStoreDir": "\(.*\)".*/\1/p' packages/app/node_modules/.modules.yaml
+	assert_success
+	[[ "$output" == /*/aube/virtual-store ]]
 }
 
 @test "disableGlobalVirtualStoreForPackages=[] opts out of the auto-disable" {

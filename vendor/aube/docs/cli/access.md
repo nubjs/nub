@@ -2,6 +2,7 @@
 # `aube access`
 
 - **Usage**: `aube access [FLAGS] <SUBCOMMAND>`
+- **Effect**: read-only
 
 Manage package access and visibility on the registry
 

@@ -2,6 +2,7 @@
 # `aube import`
 
 - **Usage**: `aube import [--force] [--lockfile-only]`
+- **Effect**: modifies state
 
 Convert a supported lockfile into aube-lock.yaml
 

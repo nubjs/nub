@@ -51,9 +51,10 @@ Examples:
 pub struct AuditArgs {
     /// Only print advisories at or above this severity.
     ///
-    /// One of: `info`, `low`, `moderate`, `high`, `critical`. Default: `low`.
-    #[arg(long, value_enum, default_value_t = Severity::Low)]
-    pub audit_level: Severity,
+    /// One of: `info`, `low`, `moderate`, `high`, `critical`.
+    /// Defaults to `audit.level` (or legacy `auditLevel`), then `low`.
+    #[arg(long, value_enum)]
+    pub audit_level: Option<Severity>,
 
     /// Only audit `devDependencies`.
     #[arg(short = 'D', long, conflicts_with = "prod")]
@@ -153,6 +154,7 @@ pub enum FixMode {
 pub async fn run(args: AuditArgs) -> miette::Result<Option<i32>> {
     args.network.install_overrides();
     let cwd = crate::dirs::project_root()?;
+    let audit_level = resolve_audit_level(&cwd, args.audit_level)?;
 
     let manifest = super::load_manifest(&cwd.join("package.json"))?;
 
@@ -185,7 +187,7 @@ pub async fn run(args: AuditArgs) -> miette::Result<Option<i32>> {
             // so `.advisories` / `.metadata` are always present.
             let report = build_audit_report(
                 &serde_json::json!({}),
-                args.audit_level,
+                audit_level,
                 count_dependencies(&graph, filter, args.no_optional, &closure),
             );
             let out = serde_json::to_string_pretty(&report).into_diagnostic()?;
@@ -239,7 +241,7 @@ pub async fn run(args: AuditArgs) -> miette::Result<Option<i32>> {
         }
     };
 
-    let ignored_ids = configured_audit_ignores(&manifest, &args.ignore);
+    let ignored_ids = configured_audit_ignores(&cwd, &manifest, &args.ignore)?;
 
     // `--ignore` / auditConfig ignores are cheap JSON filters. Run
     // them first so we don't bother fetching packuments for advisories
@@ -258,14 +260,14 @@ pub async fn run(args: AuditArgs) -> miette::Result<Option<i32>> {
         filter_unfixable(
             &raw,
             &client,
-            unfixable_filter_threshold(args.json, args.audit_level),
+            unfixable_filter_threshold(args.json, audit_level),
         )
         .await?
     } else {
         raw
     };
 
-    let rows = flatten_advisories(&raw, args.audit_level);
+    let rows = flatten_advisories(&raw, audit_level);
 
     if args.interactive && args.json {
         return Err(miette!("--interactive cannot be used with --json"));
@@ -319,7 +321,7 @@ pub async fn run(args: AuditArgs) -> miette::Result<Option<i32>> {
         // additionally level-filtered.
         let report = build_audit_report(
             &raw,
-            args.audit_level,
+            audit_level,
             count_dependencies(&graph, filter, args.no_optional, &closure),
         );
         let out = serde_json::to_string_pretty(&report).into_diagnostic()?;
@@ -423,21 +425,73 @@ fn build_client(cwd: &std::path::Path, registry_override: Option<&str>) -> Regis
 /// so users can pass either `GHSA-abcd-...` or the same in uppercase
 /// / lowercase, or the CVE form. Packages whose advisories all get
 /// filtered out drop from the response entirely.
-fn configured_audit_ignores(manifest: &aube_manifest::PackageJson, cli: &[String]) -> Vec<String> {
+fn configured_audit_ignores(
+    cwd: &std::path::Path,
+    manifest: &aube_manifest::PackageJson,
+    cli: &[String],
+) -> miette::Result<Vec<String>> {
     let mut out = cli.to_vec();
-    let Some(config) = manifest
-        .extra
-        .get("auditConfig")
-        .and_then(|v| v.as_object())
-    else {
-        return out;
-    };
-    for key in ["ignoreGhsas", "ignoreCves"] {
-        if let Some(values) = config.get(key).and_then(|v| v.as_array()) {
-            out.extend(values.iter().filter_map(|v| v.as_str().map(str::to_string)));
+    let canonical = with_audit_settings_ctx(cwd, aube_settings::resolved::audit_ignore)?;
+    if let Some(canonical) = canonical {
+        out.extend(canonical);
+    } else {
+        if let Some(config) = manifest
+            .extra
+            .get("auditConfig")
+            .and_then(|v| v.as_object())
+        {
+            for key in ["ignoreGhsas", "ignoreCves"] {
+                if let Some(values) = config.get(key).and_then(|v| v.as_array()) {
+                    out.extend(values.iter().filter_map(|v| v.as_str().map(str::to_string)));
+                }
+            }
         }
+        with_audit_settings_ctx(cwd, |ctx| {
+            out.extend(aube_settings::resolved::audit_config_ignore_ghsas(ctx).unwrap_or_default());
+            out.extend(aube_settings::resolved::audit_config_ignore_cves(ctx).unwrap_or_default());
+        })?;
     }
-    out
+    Ok(out)
+}
+
+fn resolve_audit_level(cwd: &std::path::Path, cli: Option<Severity>) -> miette::Result<Severity> {
+    if let Some(level) = cli {
+        return Ok(level);
+    }
+    let configured = with_audit_settings_ctx(cwd, aube_settings::resolved::audit_level)?
+        .map(|value| ("audit.level", value))
+        .or_else(|| {
+            let yaml_root =
+                crate::dirs::find_workspace_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+            let raw = aube_manifest::workspace::load_raw(&yaml_root).ok()?;
+            aube_settings::workspace_yaml_value(&raw, "auditLevel")
+                .and_then(yaml_serde::Value::as_str)
+                .map(|value| ("auditLevel", value.to_string()))
+        });
+    configured.map_or(Ok(Severity::Low), |(key, raw)| {
+        raw.parse::<Severity>().map_err(|_| {
+            miette!("invalid {key} {raw:?}; expected one of: info, low, moderate, high, critical")
+        })
+    })
+}
+
+fn with_audit_settings_ctx<T>(
+    cwd: &std::path::Path,
+    f: impl FnOnce(&aube_settings::ResolveCtx<'_>) -> T,
+) -> miette::Result<T> {
+    let yaml_root = crate::dirs::find_workspace_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    let files = crate::commands::FileSources::load(&yaml_root);
+    let raw_workspace = aube_manifest::workspace::load_raw(&yaml_root).unwrap_or_else(|error| {
+        tracing::debug!(
+            %error,
+            workspace_root = %yaml_root.display(),
+            "ignoring invalid workspace config while resolving audit settings"
+        );
+        BTreeMap::new()
+    });
+    let env = aube_settings::values::process_env();
+    let ctx = files.ctx(&raw_workspace, env, &[]);
+    Ok(f(&ctx))
 }
 
 fn filter_ignored_ids(v: &serde_json::Value, ignore: &[String]) -> serde_json::Value {
@@ -1398,8 +1452,9 @@ mod tests {
 
     #[test]
     fn configured_audit_ignores_reads_ghsa_and_legacy_cve_keys() {
+        let dir = tempfile::tempdir().unwrap();
         let manifest = aube_manifest::PackageJson::parse(
-            std::path::Path::new("package.json"),
+            &dir.path().join("package.json"),
             r#"{
               "name": "demo",
               "version": "1.0.0",
@@ -1411,7 +1466,8 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let ignores = configured_audit_ignores(&manifest, &["1404".to_string()]);
+        let ignores =
+            configured_audit_ignores(dir.path(), &manifest, &["1404".to_string()]).unwrap();
         assert_eq!(
             ignores,
             vec![
@@ -1420,6 +1476,108 @@ mod tests {
                 "CVE-2099-0001".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn malformed_workspace_yaml_does_not_block_legacy_audit_ignores() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pnpm-workspace.yaml"), "packages: [\n").unwrap();
+        let manifest = aube_manifest::PackageJson::parse(
+            &dir.path().join("package.json"),
+            r#"{"auditConfig":{"ignoreGhsas":["GHSA-legacy"]}}"#.to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            configured_audit_ignores(dir.path(), &manifest, &[]).unwrap(),
+            vec!["GHSA-legacy".to_string()]
+        );
+    }
+
+    #[test]
+    fn reads_canonical_audit_workspace_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages: []\naudit:\n  level: critical\n  ignore:\n    - GHSA-aaaa-bbbb-cccc\n",
+        )
+        .unwrap();
+        let manifest = aube_manifest::PackageJson::default();
+
+        assert_eq!(
+            resolve_audit_level(dir.path(), None).unwrap(),
+            Severity::Critical
+        );
+        assert_eq!(
+            configured_audit_ignores(dir.path(), &manifest, &[]).unwrap(),
+            vec!["GHSA-aaaa-bbbb-cccc".to_string()]
+        );
+    }
+
+    #[test]
+    fn canonical_audit_ignore_replaces_package_json_legacy_values() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages: []\naudit:\n  ignore:\n    - GHSA-canonical\n",
+        )
+        .unwrap();
+        let manifest = aube_manifest::PackageJson::parse(
+            &dir.path().join("package.json"),
+            r#"{"auditConfig":{"ignoreGhsas":["GHSA-legacy"]}}"#.to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            configured_audit_ignores(dir.path(), &manifest, &["CLI-IGNORE".to_string()]).unwrap(),
+            vec!["CLI-IGNORE".to_string(), "GHSA-canonical".to_string()]
+        );
+    }
+
+    #[test]
+    fn audit_cli_level_overrides_workspace_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages: []\naudit:\n  level: critical\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_audit_level(dir.path(), Some(Severity::Low)).unwrap(),
+            Severity::Low
+        );
+    }
+
+    #[test]
+    fn reads_legacy_top_level_audit_level() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages: []\nauditLevel: high\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_audit_level(dir.path(), None).unwrap(),
+            Severity::High
+        );
+    }
+
+    #[test]
+    fn invalid_legacy_audit_level_names_key_and_expected_values() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages: []\nauditLevel: severe\n",
+        )
+        .unwrap();
+
+        let error = resolve_audit_level(dir.path(), None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid auditLevel \"severe\""));
+        assert!(error.contains("info, low, moderate, high, critical"));
     }
 
     #[test]

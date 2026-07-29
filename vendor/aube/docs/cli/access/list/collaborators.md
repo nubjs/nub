@@ -2,6 +2,7 @@
 # `aube access list collaborators`
 
 - **Usage**: `aube access list collaborators <PACKAGE> [USER]`
+- **Effect**: read-only
 
 List collaborators for a package, optionally filtering to one user
 

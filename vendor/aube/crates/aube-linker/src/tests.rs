@@ -745,6 +745,107 @@ fn no_collective_hidden_hoist_when_ejected_set_empty_under_gvs() {
 }
 
 #[test]
+fn selected_package_materializes_locally_while_dependencies_keep_using_gvs() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let (store, indices) = setup_store_with_files(dir.path());
+    let graph = make_graph();
+    Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .link_all(&project_dir, &graph, &indices)
+        .unwrap();
+    let initial_foo = project_dir.join("node_modules/.aube/foo@1.0.0");
+    assert!(
+        std::fs::read_link(&initial_foo).is_ok(),
+        "fixture should start with an existing GVS symlink"
+    );
+
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .with_project_local_dep_paths(["foo@1.0.0".to_string()]);
+    linker.link_all(&project_dir, &graph, &indices).unwrap();
+
+    let aube_dir = project_dir.join("node_modules/.aube");
+    let foo = aube_dir.join("foo@1.0.0");
+    let bar = aube_dir.join("bar@2.0.0");
+    assert!(foo.is_dir());
+    assert!(
+        std::fs::read_link(&foo).is_err(),
+        "selected package must be a real project-local directory"
+    );
+    assert!(
+        std::fs::read_link(&bar).is_ok(),
+        "unselected dependency must remain linked to the GVS"
+    );
+    assert_eq!(
+        std::fs::read_to_string(foo.join("node_modules/foo/index.js")).unwrap(),
+        "module.exports = 'foo';"
+    );
+
+    let second = linker.link_all(&project_dir, &graph, &indices).unwrap();
+    assert_eq!(second.packages_linked, 0);
+    assert_eq!(second.packages_cached, 2);
+}
+
+#[test]
+fn workspace_selected_package_materializes_locally_while_dependencies_use_gvs() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(project_dir.join("packages/app")).unwrap();
+
+    let (store, indices) = setup_store_with_files(dir.path());
+    let mut graph = make_graph();
+    graph.importers.insert(
+        "packages/app".to_string(),
+        vec![DirectDep {
+            name: "foo".to_string(),
+            dep_path: "foo@1.0.0".to_string(),
+            dep_type: DepType::Dev,
+            specifier: None,
+        }],
+    );
+    let workspace_dirs = BTreeMap::new();
+    Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .link_workspace(&project_dir, &graph, &indices, &workspace_dirs)
+        .unwrap();
+    let aube_dir = project_dir.join("node_modules/.aube");
+    assert!(std::fs::read_link(aube_dir.join("foo@1.0.0")).is_ok());
+
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .with_project_local_dep_paths(["foo@1.0.0".to_string()]);
+    linker
+        .link_workspace(&project_dir, &graph, &indices, &workspace_dirs)
+        .unwrap();
+
+    let foo = aube_dir.join("foo@1.0.0");
+    let bar = aube_dir.join("bar@2.0.0");
+    assert!(foo.is_dir());
+    assert!(
+        std::fs::read_link(&foo).is_err(),
+        "selected workspace package must be project-local"
+    );
+    assert!(
+        std::fs::read_link(&bar).is_ok(),
+        "unselected workspace dependency must stay in the GVS"
+    );
+    assert!(
+        project_dir
+            .join("packages/app/node_modules/foo/index.js")
+            .exists()
+    );
+
+    let second = linker
+        .link_workspace(&project_dir, &graph, &indices, &workspace_dirs)
+        .unwrap();
+    assert_eq!(second.packages_linked, 0);
+    assert_eq!(second.packages_cached, 2);
+}
+
+#[test]
 fn test_link_file_fresh_reports_missing_cas_shard_and_invalidates_cache() {
     // Reproduces jdx/aube#393: a partially corrupt CAS leaves the
     // cached package index pointing at a missing shard. Materialize

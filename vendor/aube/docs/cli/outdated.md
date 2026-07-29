@@ -2,6 +2,7 @@
 # `aube outdated`
 
 - **Usage**: `aube outdated [FLAGS] [PATTERN]`
+- **Effect**: read-only
 
 Report dependencies whose installed version lags behind the registry
 

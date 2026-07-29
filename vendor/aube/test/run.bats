@@ -571,3 +571,147 @@ JSON
 	assert_success
 	assert_output --partial "cli-bin"
 }
+
+@test "aube run --complete lists package.json scripts for shell completion" {
+	cat >package.json <<'JSON'
+{
+  "name": "complete-scripts",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p .",
+    "test:unit": "vitest run"
+  }
+}
+JSON
+	run aube run --complete
+	assert_success
+	assert_line "build:tsc -p ."
+	# usage splits each line on the first unescaped colon, so a colon in the
+	# script name has to survive as `\:`.
+	assert_line 'test\:unit:vitest run'
+}
+
+@test "aube run --complete finds the project root from a subdirectory" {
+	cat >package.json <<'JSON'
+{ "name": "root", "version": "1.0.0", "scripts": { "build": "echo hi" } }
+JSON
+	mkdir -p src/deep
+	run aube -C src/deep run --complete
+	assert_success
+	assert_line "build:echo hi"
+}
+
+@test "aube run --complete stays quiet outside a project" {
+	mkdir -p empty
+	run aube -C empty run --complete
+	assert_success
+	assert_output ""
+}
+
+@test "aube run --complete answers before the useStderr redirect and guards" {
+	# `useStderr=true` dup2s stdout onto stderr at startup, and a foreign
+	# `packageManager` pin trips the guardrail — both before command
+	# dispatch. The completion probe has to return ahead of both, or
+	# `usage` reads an empty stdout.
+	cat >package.json <<'JSON'
+{
+  "name": "guarded",
+  "version": "1.0.0",
+  "packageManager": "pnpm@9.0.0",
+  "scripts": { "build": "tsc -p ." }
+}
+JSON
+	echo "useStderr=true" >.npmrc
+	run --separate-stderr aube run --complete
+	assert_success
+	assert_output "build:tsc -p ."
+}
+
+@test "aube run --complete honors -C" {
+	# The chdir that normally applies `-C` runs after the completion probe
+	# returns, so the probe resolves the directory itself.
+	cat >package.json <<'JSON'
+{ "name": "root", "version": "1.0.0", "scripts": { "root-build": "echo root" } }
+JSON
+	mkdir -p packages/api
+	cat >packages/api/package.json <<'JSON'
+{ "name": "api", "version": "1.0.0", "scripts": { "api-serve": "node server.js" } }
+JSON
+	run aube -C packages/api run --complete
+	assert_success
+	assert_output "api-serve:node server.js"
+
+	run aube --dir "$PWD/packages/api" run --complete
+	assert_success
+	assert_output "api-serve:node server.js"
+
+	run aube run --complete
+	assert_success
+	assert_output "root-build:echo root"
+}
+
+@test "aube run --complete resolves a symlinked -C to its target" {
+	# A real run chdirs and reads the cwd back, which resolves symlinks, so
+	# the ancestor walk starts from the target's hierarchy. The probe has to
+	# match or it searches the link's parents instead.
+	mkdir -p real/nested outer
+	cat >real/package.json <<'JSON'
+{ "name": "real", "version": "1.0.0", "scripts": { "real-build": "echo real" } }
+JSON
+	cat >outer/package.json <<'JSON'
+{ "name": "outer", "version": "1.0.0", "scripts": { "outer-build": "echo outer" } }
+JSON
+	ln -s "$PWD/real/nested" outer/deep
+
+	run aube -C outer/deep run --complete
+	assert_success
+	assert_output "real-build:echo real"
+}
+
+@test "aube run --complete stays quiet when -C is not a usable directory" {
+	# The ancestor walk is lexical, so falling back to the unresolved path
+	# would surface the parent project's scripts and complete a command
+	# that can't run — the real chdir rejects the directory.
+	cat >package.json <<'JSON'
+{ "name": "root", "version": "1.0.0", "scripts": { "root-build": "echo root" } }
+JSON
+	run aube -C does-not-exist run --complete
+	assert_success
+	assert_output ""
+
+	# Same for a target that exists but isn't a directory.
+	touch README.md
+	run aube -C README.md run --complete
+	assert_success
+	assert_output ""
+
+	# ...and for one the process can't enter. root ignores the mode bits.
+	if [ "$(id -u)" -ne 0 ]; then
+		mkdir -p locked
+		chmod 000 locked
+		run aube -C locked run --complete
+		chmod 755 locked
+		assert_success
+		assert_output ""
+
+		# An execute-only directory is enterable, though, so a real run
+		# would work there and completion must not decline it.
+		mkdir -p searchable
+		echo '{ "name": "s", "scripts": { "s-build": "echo s" } }' >searchable/package.json
+		chmod 111 searchable
+		run aube -C searchable run --complete
+		chmod 755 searchable
+		assert_success
+		assert_output "s-build:echo s"
+	fi
+}
+
+@test "aube run --complete skips a script name containing a newline" {
+	# The protocol is one candidate per line, so such a name would split
+	# into several candidates, none of which names a real script.
+	printf '{ "name": "nl", "scripts": { "ok": "echo ok", "bad\\nname": "echo bad" } }' >package.json
+	run aube run --complete
+	assert_success
+	assert_output "ok:echo ok"
+}

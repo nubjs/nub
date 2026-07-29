@@ -14,6 +14,7 @@
 
 mod argv;
 pub mod cli_args;
+pub mod command_effects;
 pub mod commands;
 mod dep_chain;
 mod deprecations;
@@ -68,7 +69,7 @@ pub(crate) struct Cli {
     /// Currently honored by `run`, `test`, `start`, `stop`, `restart`,
     /// `install`, `exec`, `list`, `publish`, `deploy`, `add`, `remove`,
     /// `update`, `why`, and implicit-script invocations.
-    #[arg(short = 'F', long, global = true, value_name = "PATTERN")]
+    #[arg(short = 'F', long, global = true, value_name = "WORKSPACE")]
     filter: Vec<String>,
 
     /// Run the command across every workspace package.
@@ -443,7 +444,7 @@ enum Commands {
     /// Link a local package globally, or into the current project
     #[command(visible_alias = "ln")]
     Link(commands::link::LinkArgs),
-    /// Print the installed dependency tree
+    /// Print the resolved dependency tree
     #[command(visible_alias = "ls", after_long_help = commands::list::AFTER_LONG_HELP)]
     List(commands::list::ListArgs),
     /// Alias for `list --long` (hidden; prefer `list --long`)
@@ -543,6 +544,8 @@ enum Commands {
     /// Manage registry auth tokens (not implemented — use `npm token`)
     #[command(hide = true)]
     Token(commands::npm_fallback::FallbackArgs),
+    /// Inspect npm package publishing trust
+    Trust(commands::trust::TrustArgs),
     /// Clear an existing deprecation on the registry
     Undeprecate(commands::undeprecate::UndeprecateArgs),
     /// Unlink a package (remove linked entries from node_modules)
@@ -704,6 +707,42 @@ fn inner_main() -> miette::Result<i32> {
             .get_matches_from(lift_per_subcommand_flags(rewrite_multicall_argv(argv)));
         Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
     };
+
+    // Shell-completion probes return here — ahead of every piece of startup
+    // that would either cost a TAB press real time or swallow the candidate
+    // list outright:
+    //
+    //   - `useStderr` dup2s stdout onto stderr, and `usage` reads the
+    //     child's stdout, so the completions would vanish;
+    //   - `self_version::maybe_switch` can download and re-exec a
+    //     different aube for a keypress;
+    //   - `enforce_package_manager_guardrails` hard-errors in a project
+    //     that pins a different package manager.
+    //
+    // None of those are things a completion helper should do.
+    //
+    // `-C` is honored explicitly, since the chdir that normally applies it
+    // happens further down: completing `aube -C packages/api run <TAB>`
+    // has to offer that package's scripts, not the shell's cwd's.
+    if let Some(Commands::Run(args)) = cli.command.as_ref()
+        && args.complete
+    {
+        commands::run::print_script_completions(cli.dir.as_deref());
+        return Ok(0);
+    }
+    if let Some(Commands::Completion(args)) = cli.command.as_ref()
+        && args.is_probe()
+    {
+        // Package search is async, but a completion probe does not need the
+        // full multi-thread runtime and blocking pool used by installs.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .into_diagnostic()
+            .wrap_err("failed to build completion runtime")?;
+        runtime.block_on(args.run_probe(cli.dir.as_deref()));
+        return Ok(0);
+    }
 
     // `--color` / `--no-color` take effect before anything else touches
     // color state: we translate the flags into the env vars that miette,
@@ -1180,6 +1219,7 @@ async fn async_main(cli: Cli) -> miette::Result<Option<i32>> {
         Some(Commands::Token(args)) => {
             return Ok(Some(commands::npm_fallback::run("token", &args)?));
         }
+        Some(Commands::Trust(args)) => commands::trust::run(args).await?,
         Some(Commands::Undeprecate(args)) => commands::undeprecate::run(args).await?,
         Some(Commands::Unlink(args)) => commands::unlink::run(args).await?,
         Some(Commands::Unpublish(args)) => commands::unpublish::run(args).await?,
@@ -1581,6 +1621,10 @@ mod multicall_tests {
             rewrite_multicall_argv(os(&["aube", "node", "--version"])),
             os(&["aube", "node", "--", "--version"])
         );
+        assert_eq!(
+            rewrite_multicall_argv(os(&["aube", "__aube-shim", "node", "--version"])),
+            os(&["aube", "node", "--", "--version"])
+        );
     }
 
     #[test]
@@ -1612,6 +1656,24 @@ mod multicall_tests {
         assert_eq!(
             rewrite_multicall_argv(os(&["pnpx", "cowsay", "hi"])),
             os(&["aube", "dlx", "cowsay", "hi"])
+        );
+        assert_eq!(
+            rewrite_multicall_argv(os(&[
+                "aube",
+                "__aube-shim",
+                "pnpm",
+                "install",
+                "--frozen-lockfile",
+            ])),
+            os(&["aube", "install", "--frozen-lockfile"])
+        );
+    }
+
+    #[test]
+    fn dispatcher_marker_rejects_unknown_tool_names() {
+        assert_eq!(
+            rewrite_multicall_argv(os(&["aube", "__aube-shim", "shell", "arg"])),
+            os(&["aube", "__aube-shim", "shell", "arg"])
         );
     }
 

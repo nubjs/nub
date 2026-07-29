@@ -2,6 +2,7 @@
 # `aube cat-file`
 
 - **Usage**: `aube cat-file <HASH>`
+- **Effect**: read-only
 
 Print a file from the global store by integrity or hex hash
 

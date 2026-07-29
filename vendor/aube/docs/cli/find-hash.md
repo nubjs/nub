@@ -2,6 +2,7 @@
 # `aube find-hash`
 
 - **Usage**: `aube find-hash [FLAGS] <HASH>`
+- **Effect**: read-only
 
 List packages whose cached index references a given file hash
 

@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.35.0](https://github.com/jdx/aube/compare/aube-linker-v1.34.0...aube-linker-v1.35.0) - 2026-07-28
+
+### Fixed
+
+- launch native package bins directly ([#1141](https://github.com/jdx/aube/pull/1141))
+
+### Other
+
+- refresh benchmarks for v1.34.0 ([#1124](https://github.com/jdx/aube/pull/1124))
+
+## [1.34.0](https://github.com/jdx/aube/compare/aube-linker-v1.33.1...aube-linker-v1.34.0) - 2026-07-27
+
+### Fixed
+
+- *(linker)* execute native bin targets directly ([#1138](https://github.com/jdx/aube/pull/1138))
+
+## [1.33.0](https://github.com/jdx/aube/compare/aube-linker-v1.32.0...aube-linker-v1.33.0) - 2026-07-25
+
+### Fixed
+
+- *(linker)* expose global virtual store to Vite ([#1106](https://github.com/jdx/aube/pull/1106))
+- *(linker)* apply registry-name patches to npm-aliased installs ([#1085](https://github.com/jdx/aube/pull/1085))
+
+### Other
+
+- refresh benchmarks for v1.32.0 ([#1080](https://github.com/jdx/aube/pull/1080))
+
 ## [1.32.0](https://github.com/jdx/aube/compare/aube-linker-v1.31.0...aube-linker-v1.32.0) - 2026-07-22
 
 ### Other

@@ -3,6 +3,7 @@
 
 - **Usage**: `aube remove [FLAGS] [PACKAGES]…`
 - **Aliases**: `rm`
+- **Effect**: destructive — may delete or irreversibly overwrite
 
 Remove a dependency
 

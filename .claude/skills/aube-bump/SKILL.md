@@ -245,12 +245,18 @@ applies. Reverting was correct. Let the tests arbitrate; don't defend a graft.
 Grep after every bump — if one vanished, a resolution was wrong:
 
 ```sh
-grep -rn "workspace_markers\|lockfile_basename\|EmbedderProfile\|read_branded_pnpm_config\|env_prefix\|cache_namespace\|engine_context\|env_overlay\|path_prepends\|runtime_node\|cold_path" vendor/aube/crates
+grep -rn "workspace_markers\|lockfile_basename\|virtual_store_subdir\|branded_env_alias_enabled\|read_branded_pnpm_config\|env_prefix\|cache_namespace\|engine_context\|env_overlay\|path_prepends\|runtime_node\|cold_path" vendor/aube/crates
 ```
 
 - **Embedder profile plumbing** — `env_prefix`, `cache_namespace`, `lockfile_basename`,
-  `workspace_markers`, `read_branded_pnpm_config` gating. Holds the brand + config boundary. Largely
-  upstreamed, so it usually converges rather than conflicts.
+  `workspace_markers`, `virtual_store_subdir`, `read_branded_pnpm_config` gating. Holds the brand +
+  config boundary. Largely upstreamed, so it usually converges rather than conflicts. The profile type
+  is `Embedder` (`aube-util/src/identity.rs`), reached via `aube_util::embedder()`.
+  `virtual_store_subdir` earns its place in the grep: the v1.35 bump auto-merged two upstream call sites
+  that hardcoded `aube_store::VIRTUAL_STORE_SUBDIR` (`"virtual-store"`) over nub's profile-named leaf,
+  with **no conflict markers** — it would have shipped silently. `branded_env_alias_enabled`
+  (`aube-util/src/env.rs`) is the single switch gating every `AUBE_*` alias in `settings.toml`, so each
+  bump's new branded settings inherit the boundary from it alone.
 - **Linker** — GVS, collective hidden tree as the sole phantom mechanism, per-package
   force-materialization (`diskMaterializePackages`), workspace-spanning hoisted planning, memoized
   clonedir probes, whole-dir `clonefile` on macOS, direct-exec of native bins.

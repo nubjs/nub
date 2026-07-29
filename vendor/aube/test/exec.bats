@@ -9,6 +9,26 @@ teardown() {
 	_common_teardown
 }
 
+@test "aube exec launches a native package bin directly" {
+	case "$(uname -s)" in
+	Darwin | Linux) ;;
+	*) skip "native fixture requires a Unix executable" ;;
+	esac
+	cat >package.json <<'EOF'
+{"name":"native-root","version":"1.0.0","bin":{"native-echo":"native-echo"}}
+EOF
+	ln -s /bin/echo native-echo
+
+	run aube install
+	assert_success
+	run aube exec --no-install native-echo launched-directly
+	assert_success
+	assert_output "launched-directly"
+	run aube run --no-install native-echo launched-through-run
+	assert_success
+	assert_output "launched-through-run"
+}
+
 @test "aube exec --parallel fans out across workspace packages" {
 	cat >pnpm-workspace.yaml <<'EOF'
 packages:

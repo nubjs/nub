@@ -1,4 +1,4 @@
-use super::ensure_installed;
+use super::ensure_installed_in;
 use aube_manifest::PackageJson;
 use clap::Args;
 use miette::{Context, IntoDiagnostic, miette};
@@ -16,6 +16,12 @@ pub struct RunArgs {
     /// Arguments to pass to the script
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub args: Vec<String>,
+    /// Print the nearest `package.json`'s scripts for shell completion.
+    ///
+    /// Consumed by the `complete "script"` node in the usage spec, not
+    /// meant to be typed by hand.
+    #[arg(long, hide = true)]
+    pub complete: bool,
     /// Don't error if the script is missing from package.json
     #[arg(long)]
     pub if_present: bool,
@@ -137,6 +143,7 @@ pub async fn run(
     let RunArgs {
         script,
         args,
+        complete: _,
         no_install,
         no_sort,
         if_present,
@@ -186,6 +193,7 @@ pub async fn run(
     };
     run_script_with(
         &script, &args, &node_args, no_install, if_present, parallel, silent, &filter, recursive,
+        None,
     )
     .await
 }
@@ -294,10 +302,25 @@ fn prompt_for_script() -> miette::Result<Option<String>> {
     }
     let mut picker = demand::Select::new("Select a script to run")
         .description("package.json scripts")
-        .filterable(true);
+        .filterable(true)
+        .filtering(true);
+    let terminal = terminal_width();
+    let widest_name = scripts
+        .iter()
+        .map(|(name, _)| console::measure_text_width(name))
+        .max()
+        .unwrap_or(0);
+    let name_column = name_column_width(widest_name, terminal);
+    let command_column = command_column_width(name_column, terminal);
     for (name, cmd) in &scripts {
-        let label = format!("{name}: {cmd}");
-        picker = picker.option(demand::DemandOption::new(name.clone()).label(&label));
+        let ellipsis = if name_column > 0 { "…" } else { "" };
+        let label = console::truncate_str(name, name_column, ellipsis);
+        let mut option = demand::DemandOption::new(name.clone()).label(&label);
+        if command_column > 0 {
+            let cmd = single_line(cmd);
+            option = option.description(&console::truncate_str(&cmd, command_column, "…"));
+        }
+        picker = picker.option(option);
     }
     match picker.run() {
         Ok(name) => Ok(Some(name)),
@@ -309,6 +332,136 @@ fn prompt_for_script() -> miette::Result<Option<String>> {
             .into_diagnostic()
             .wrap_err("failed to read script selection"),
     }
+}
+
+/// How many columns the picker's name text may occupy.
+///
+/// A name-only `demand` row still has a one-column cursor and a space
+/// before its label. Truncating only commands would therefore leave long
+/// script names able to wrap on their own.
+fn name_column_width(widest_name: usize, terminal: usize) -> usize {
+    widest_name.min(terminal.saturating_sub(2))
+}
+
+/// How many columns the picker's command text may occupy, or `0` when
+/// there's no room worth spending on it (very narrow terminal, very long
+/// script names) and the rows should show truncated script names alone.
+///
+/// `demand` renders each row as `❯ ` + the name padded to the widest
+/// name + two spaces + the description, and clears the previous frame by
+/// counting *logical* lines. A row wider than the terminal wraps into
+/// physical rows the clear never erases, so every keypress stacks another
+/// copy of the frame on screen. Keeping rows inside the width is what
+/// makes the picker usable, not just tidy.
+fn command_column_width(name_column: usize, terminal: usize) -> usize {
+    /// Below this a truncated command is all ellipsis and no information.
+    const MIN_COMMAND_COLUMN: usize = 12;
+    // `❯ ` before the name, two spaces between the columns.
+    let row_overhead = 2 + name_column + 2;
+    match terminal.saturating_sub(row_overhead) {
+        w if w >= MIN_COMMAND_COLUMN => w,
+        _ => 0,
+    }
+}
+
+/// Width of the terminal the picker draws on.
+///
+/// Queried from stderr, because that's where `demand` renders and what it
+/// sizes itself against — budgeting rows against anything else is how they
+/// end up disagreeing. `$COLUMNS` is only a fallback for when the size
+/// can't be read: it's an inherited value that goes stale on resize, and
+/// trusting it over a live `ioctl` would put rows past the real edge and
+/// bring the wrapping right back. 80 when neither is available.
+fn terminal_width() -> usize {
+    console::Term::stderr()
+        .size_checked()
+        .map(|(_rows, cols)| cols as usize)
+        .or_else(|| {
+            std::env::var("COLUMNS")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+        })
+        .filter(|cols| *cols > 0)
+        .unwrap_or(80)
+}
+
+/// Collapse every run of whitespace to a single space so a multi-line
+/// script command still occupies exactly one row.
+fn single_line(cmd: &str) -> String {
+    cmd.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Print the nearest `package.json`'s scripts for the `complete "script"`
+/// node in the usage spec, one `name:command` line each.
+///
+/// Searches upward from `dir` when the invocation carried `-C`, and from
+/// the process cwd otherwise.
+///
+/// Best-effort by design: a missing, unreadable, or malformed
+/// `package.json` prints nothing rather than erroring, because the caller
+/// is a TAB press and completion noise is worse than no completions.
+pub(crate) fn print_script_completions(dir: Option<&Path>) {
+    // Establish where to search *without* chdir'ing. `cli_main` is a
+    // library entry point, so an embedding host is driving this in-process
+    // and would keep any cwd change we made.
+    //
+    // Getting this wrong is worse than declining to answer: a real run
+    // chdirs into `-C`, and `find_project_root` walks ancestors lexically,
+    // so a target the chdir would reject still surfaces the *parent*
+    // project's scripts and completes a command that can't run.
+    //
+    // Resolving also collapses symlinks, so the walk starts in the
+    // target's hierarchy the way `getcwd` would report it after a real
+    // chdir. The `try_exists` probe stands in for the permission half:
+    // it stats a path *inside* the directory, so it needs the same search
+    // bit `chdir` does, and reports `Err` exactly when that bit is
+    // missing. (`read_dir` would test the read bit instead and reject
+    // execute-only directories a real run handles fine.)
+    let Some(start) = super::completion_start_dir(dir) else {
+        return;
+    };
+    let Some(root) = crate::dirs::find_project_root(&start) else {
+        return;
+    };
+    let Ok(scripts) = read_scripts_in_order(&root) else {
+        return;
+    };
+    let mut out = String::new();
+    for (name, cmd) in &scripts {
+        // JSON keys can hold a newline, and the protocol is one candidate
+        // per line — such a name would split into several bogus
+        // candidates, none of which names a real script. Nothing sane can
+        // be offered for it, so skip it.
+        if name.contains(['\n', '\r']) {
+            continue;
+        }
+        out.push_str(&completion_line(name, cmd));
+        out.push('\n');
+    }
+    // `write_all` rather than `print!`: the latter panics if stdout is
+    // gone, and a completion helper whose reader closed the pipe should
+    // just stop, not abort with a panic message.
+    let _ = std::io::Write::write_all(&mut std::io::stdout(), out.as_bytes());
+}
+
+/// Format one `name:command` completion line. `usage` splits each line on
+/// its first *unescaped* colon, so colons inside the name are escaped —
+/// without this a `test:unit` script completes as `test` described by
+/// `unit:vitest …`. The command is folded onto one line so a multi-line
+/// script doesn't turn into several bogus completion candidates.
+///
+/// A name that ends in a backslash gets no description at all. The
+/// separator immediately after it would read as escaped, and `usage` would
+/// swallow the whole line into the candidate — `weird\:echo hi` completes
+/// as the script `weird:echo hi`. Escaping the backslash doesn't help,
+/// since the escape grammar only covers `\:`. Dropping the description is
+/// the one form that still yields the right name.
+fn completion_line(name: &str, cmd: &str) -> String {
+    let name = name.replace(':', "\\:");
+    if name.ends_with('\\') {
+        return name;
+    }
+    format!("{name}:{}", single_line(cmd))
 }
 
 /// Read `package.json` and return its `scripts` entries in the order
@@ -352,6 +505,36 @@ pub(crate) async fn run_script(
         silent,
         filter,
         RecursiveOpts::default(),
+        None,
+    )
+    .await
+}
+
+/// Run a script rooted at an explicit `base_dir` instead of the process
+/// cwd — the in-process embedding entry. Resolves the project runtime and
+/// the project root from `base_dir`, so concurrent embed calls in
+/// different projects don't race on process-global cwd.
+pub(crate) async fn run_script_in(
+    base_dir: std::path::PathBuf,
+    script: &str,
+    args: &[String],
+    no_install: bool,
+    if_present: bool,
+    filter: &aube_workspace::selector::EffectiveFilter,
+) -> miette::Result<Option<i32>> {
+    crate::runtime::ensure_for_cwd(&base_dir).await?;
+    let silent = super::global_output_flags().silent;
+    run_script_with(
+        script,
+        args,
+        &[],
+        no_install,
+        if_present,
+        false,
+        silent,
+        filter,
+        RecursiveOpts::default(),
+        Some(base_dir),
     )
     .await
 }
@@ -367,8 +550,12 @@ pub(crate) async fn run_script_with(
     silent: bool,
     filter: &aube_workspace::selector::EffectiveFilter,
     recursive: RecursiveOpts,
+    base_dir: Option<std::path::PathBuf>,
 ) -> miette::Result<Option<i32>> {
-    let initial_cwd = crate::dirs::cwd()?;
+    let initial_cwd = match base_dir {
+        Some(dir) => dir,
+        None => crate::dirs::cwd()?,
+    };
     // Walk upward to the nearest `package.json` so `aube run` from a
     // subdirectory picks up the project root's scripts, matching pnpm.
     // Filtered/recursive runs accept a yaml-only workspace root —
@@ -414,7 +601,7 @@ pub(crate) async fn run_script_with(
 
     let manifest = load_manifest(&cwd)?;
     if !manifest.scripts.contains_key(script) {
-        ensure_installed(no_install).await?;
+        ensure_installed_in(no_install, Some(&cwd)).await?;
         let bin_path = super::project_modules_dir(&cwd).join(".bin").join(script);
         if bin_path.exists() {
             return super::exec::exec_bin_with_node_args(
@@ -440,7 +627,7 @@ pub(crate) async fn run_script_with(
         return Err(miette!("script not found: {script}\n  {hint}"));
     }
 
-    ensure_installed(no_install).await?;
+    ensure_installed_in(no_install, Some(&cwd)).await?;
     exec_script_chain(
         &cwd,
         &manifest,
@@ -492,7 +679,7 @@ async fn run_script_filtered(
     // isolated linker already materializes every workspace package's
     // deps in a single pass, so per-package reinstalls would just
     // re-check the same lockfile N times.
-    ensure_installed(no_install).await?;
+    ensure_installed_in(no_install, Some(cwd)).await?;
 
     if let Some(concurrency) = effective_concurrency(parallel, recursive.workspace_concurrency) {
         return run_filtered_parallel(
@@ -1151,8 +1338,8 @@ async fn exec_script_status_with_node_args(
 #[cfg(test)]
 mod tests {
     use super::{
-        RecursiveOpts, effective_concurrency, inject_node_args, node_args_from_run_flags,
-        order_matched_packages,
+        RecursiveOpts, command_column_width, completion_line, effective_concurrency,
+        inject_node_args, name_column_width, node_args_from_run_flags, order_matched_packages,
     };
     use aube_manifest::PackageJson;
     use aube_workspace::selector::SelectedPackage;
@@ -1311,5 +1498,70 @@ mod tests {
             inject_node_args("node-gyp rebuild", &args),
             "node-gyp rebuild"
         );
+    }
+
+    #[test]
+    fn completion_line_escapes_colons_in_the_script_name() {
+        // usage splits on the first unescaped colon, so only the name is
+        // escaped — a colon in the command is part of the description.
+        assert_eq!(
+            completion_line("test:unit", "vitest run --reporter=x:y"),
+            "test\\:unit:vitest run --reporter=x:y"
+        );
+    }
+
+    /// `cli_main` is a library entry point, so an embedding host is
+    /// driving the probe in-process. Resolving `-C` must not leave the
+    /// host's working directory somewhere else.
+    #[test]
+    fn completion_probe_leaves_the_working_directory_alone() {
+        let before = std::env::current_dir().unwrap();
+        super::print_script_completions(Some(std::path::Path::new("..")));
+        assert_eq!(std::env::current_dir().unwrap(), before);
+    }
+
+    #[test]
+    fn completion_line_drops_the_description_after_a_trailing_backslash() {
+        // The separator would look escaped and usage would fold the
+        // command into the candidate. Verified against usage 3.2 and 3.5:
+        // the bare name is the only form that round-trips.
+        assert_eq!(completion_line("weird\\", "echo hi"), "weird\\");
+        // A backslash anywhere else is fine — the split still lands on the
+        // first unescaped colon.
+        assert_eq!(
+            completion_line("mid\\slash", "echo mid"),
+            "mid\\slash:echo mid"
+        );
+    }
+
+    #[test]
+    fn completion_line_folds_a_multiline_command_onto_one_line() {
+        assert_eq!(
+            completion_line("deploy", "node deploy.mjs \\\n  --yes\n"),
+            "deploy:node deploy.mjs \\ --yes"
+        );
+    }
+
+    #[test]
+    fn command_column_takes_what_the_name_column_leaves() {
+        // "❯ " + 6-wide name column + "  " = 10 columns of overhead.
+        assert_eq!(command_column_width(6, 80), 70);
+    }
+
+    #[test]
+    fn command_column_collapses_when_the_row_would_wrap() {
+        // Nothing useful fits, so the picker shows script names alone
+        // rather than rows that wrap and corrupt the redraw.
+        assert_eq!(command_column_width(60, 64), 0);
+        assert_eq!(command_column_width(6, 12), 0);
+    }
+
+    #[test]
+    fn name_column_stays_inside_the_terminal() {
+        // The option value remains the full script name; only its label is
+        // truncated to leave room for demand's cursor and separating space.
+        assert_eq!(name_column_width(100, 64), 62);
+        assert_eq!(name_column_width(6, 64), 6);
+        assert_eq!(name_column_width(6, 2), 0);
     }
 }

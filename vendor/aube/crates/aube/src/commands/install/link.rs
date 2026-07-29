@@ -1,6 +1,6 @@
 use super::sweep::invalidate_changed_aube_entries;
 use super::{InstallPhaseTimings, lifecycle::resolve_link_strategy};
-use super::{bin_linking, delta};
+use super::{bin_linking, delta, gvs};
 use crate::commands::inject;
 use crate::state;
 use miette::{Context, IntoDiagnostic, miette};
@@ -207,6 +207,10 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
             graph_for_link.packages.values(),
         ))
         .with_disk_materialize(&dm_plan.names);
+    if planned_gvs && node_linker == aube_linker::NodeLinker::Isolated {
+        linker = linker
+            .with_project_local_dep_paths(gvs::legacy_vite_project_local_closure(graph_for_link));
+    }
     if let Some(enabled) = use_global_virtual_store_override {
         linker = linker.with_use_global_virtual_store(enabled);
     }

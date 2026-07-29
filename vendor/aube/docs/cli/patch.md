@@ -2,6 +2,7 @@
 # `aube patch`
 
 - **Usage**: `aube patch [--edit-dir <DIR>] [--ignore-existing] <PACKAGE>`
+- **Effect**: modifies state
 
 Extract a package into an edit directory so it can be patched
 

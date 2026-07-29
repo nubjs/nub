@@ -2,6 +2,7 @@
 # `aube stage`
 
 - **Usage**: `aube stage [FLAGS]`
+- **Effect**: read-only
 
 Stage packages for publishing (not implemented — use `npm stage`)
 

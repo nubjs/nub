@@ -53,7 +53,8 @@
 //! `cmd-shim`, and it avoids the need for Developer Mode or admin
 //! rights entirely.
 
-use std::io;
+use std::ffi::OsString;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
 /// Create a directory link from `link` to `target`.
@@ -168,6 +169,16 @@ pub struct BinShimOptions<'a> {
     pub hidden_modules_dir: Option<&'a Path>,
 }
 
+/// Target and environment recovered from an aube-generated bin wrapper.
+///
+/// Paths are resolved against the wrapper's parent. `node_path` is an
+/// OS-native path list ready to pass to [`std::process::Command::env`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct ResolvedBinShim {
+    pub target: PathBuf,
+    pub node_path: Option<OsString>,
+}
+
 /// Create bin shims for a package binary.
 ///
 /// - Unix (default / `prefer_symlinked_executables != Some(false)`):
@@ -175,8 +186,9 @@ pub struct BinShimOptions<'a> {
 ///   chmod'd to 755. The link stores a relative path — see
 ///   [`symlink_bin_target`] for which directory it is relative to.
 /// - Unix (`prefer_symlinked_executables = Some(false)`): a shell
-///   wrapper that `exec`s `target` via its detected interpreter. If
-///   `extend_node_path` is set, the wrapper exports `NODE_PATH` first.
+///   wrapper that `exec`s `target` directly or via its detected
+///   interpreter. If `extend_node_path` is set, the wrapper exports
+///   `NODE_PATH` first.
 /// - Windows: three wrapper scripts in `bin_dir`:
 ///   - `<name>.cmd` — batch wrapper for cmd.exe
 ///   - `<name>.ps1` — PowerShell wrapper
@@ -213,13 +225,16 @@ pub fn create_bin_shim(
             let node_path = opts
                 .extend_node_path
                 .then(|| shim_node_path(link_parent, bin_dir, opts.hidden_modules_dir, "/", ":"));
-            let prog = detect_interpreter(target);
+            let launch = detect_bin_launch(target);
             std::fs::write(
                 &link_path,
-                generate_posix_shim(&prog, &rel, node_path.as_deref()),
+                generate_posix_shim(&launch, &rel, node_path.as_deref()),
             )?;
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&link_path, std::fs::Permissions::from_mode(0o755))?;
+            if matches!(launch, BinLaunch::Direct) && target.exists() {
+                let _ = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755));
+            }
         } else {
             std::os::unix::fs::symlink(symlink_bin_target(link_parent, target), &link_path)?;
             use std::os::unix::fs::PermissionsExt;
@@ -276,7 +291,9 @@ pub fn create_bin_shim(
             return Ok(());
         }
 
-        let prog = detect_interpreter(target);
+        // Computed after the native-executable early return above, which
+        // needs no interpreter classification.
+        let launch = detect_bin_launch(target);
         // cmd.exe wants backslash paths; PowerShell + the Git-Bash `.sh`
         // wrapper want forward-slash paths. NODE_PATH itself is parsed by
         // Node.js, which on Windows always splits on `;` (`path.delimiter`)
@@ -292,15 +309,15 @@ pub fn create_bin_shim(
 
         write_shim_file(
             &bin_dir.join(format!("{name}.cmd")),
-            generate_cmd_shim(&prog, &rel_backslash, node_path_backslash.as_deref()).as_bytes(),
+            generate_cmd_shim(&launch, &rel_backslash, node_path_backslash.as_deref()).as_bytes(),
         )?;
         write_shim_file(
             &bin_dir.join(format!("{name}.ps1")),
-            generate_ps1_shim(&prog, &rel_fwdslash, node_path_fwdslash.as_deref()).as_bytes(),
+            generate_ps1_shim(&launch, &rel_fwdslash, node_path_fwdslash.as_deref()).as_bytes(),
         )?;
         write_shim_file(
             &bin_dir.join(name),
-            generate_sh_shim(&prog, &rel_fwdslash, node_path_fwdslash.as_deref()).as_bytes(),
+            generate_sh_shim(&launch, &rel_fwdslash, node_path_fwdslash.as_deref()).as_bytes(),
         )?;
     }
     #[cfg(not(any(unix, windows)))]
@@ -626,18 +643,26 @@ fn shim_node_path(
     entries.join(list_sep)
 }
 
-/// Read the shebang line of `target` to determine the interpreter.
-/// Falls back to `"node"` for `.js` / `.cjs` / `.mjs` files, or if
-/// the target doesn't exist or has no shebang.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BinLaunch {
+    Direct,
+    Interpreter(String),
+}
+
+/// Read the shebang line of `target` to determine how a bin shim
+/// launches it. Known script extensions retain their interpreter
+/// fallback. Existing targets with native executable magic are launched
+/// directly, as are `.exe` targets that a postinstall may replace with a
+/// host-native executable after the shim has already been written.
 ///
 /// Only reads the first 256 bytes — enough for any realistic shebang
 /// line without pulling large bundled scripts into memory.
-fn detect_interpreter(target: &Path) -> String {
-    use std::io::Read;
+fn detect_bin_launch(target: &Path) -> BinLaunch {
     let mut buf = [0u8; 256];
-    let n = std::fs::File::open(target)
-        .and_then(|mut f| f.read(&mut buf))
-        .unwrap_or(0);
+    let (n, target_exists) = match std::fs::File::open(target) {
+        Ok(mut file) => (file.read(&mut buf).unwrap_or(0), true),
+        Err(_) => (0, false),
+    };
     let content = &buf[..n];
     if n > 2
         && content.starts_with(b"#!")
@@ -669,7 +694,7 @@ fn detect_interpreter(target: &Path) -> String {
         // is not shell-safe on every supported platform and fall
         // through to the extension-based default.
         if is_safe_prog(prog) {
-            return prog.to_string();
+            return BinLaunch::Interpreter(prog.to_string());
         }
         // Unsafe shebang. Log it rather than rewriting silently so
         // the fall-through is visible in install output. Both path
@@ -678,7 +703,11 @@ fn detect_interpreter(target: &Path) -> String {
         // escaped literals rather than acted on by the terminal.
         tracing::warn!("ignoring unsafe shebang interpreter in {target:?}: {prog:?}");
     }
-    default_interpreter_for_extension(target)
+    default_launch_for_target(
+        target,
+        content,
+        target_exists && !content.starts_with(b"#!"),
+    )
 }
 
 /// The character class `prog` is allowed to draw from. Derived from
@@ -704,13 +733,15 @@ fn is_safe_prog(prog: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
 }
 
-fn default_interpreter_for_extension(target: &Path) -> String {
+fn default_launch_for_target(target: &Path, content: &[u8], allow_direct: bool) -> BinLaunch {
     match target.extension().and_then(|e| e.to_str()) {
-        Some("js" | "cjs" | "mjs") | None => "node".to_string(),
-        Some("cmd" | "bat") => "cmd".to_string(),
-        Some("ps1") => "pwsh".to_string(),
-        Some("sh") => "sh".to_string(),
-        Some(_) => "node".to_string(),
+        Some("js" | "cjs" | "mjs") => BinLaunch::Interpreter("node".to_string()),
+        Some("cmd" | "bat") => BinLaunch::Interpreter("cmd".to_string()),
+        Some("ps1") => BinLaunch::Interpreter("pwsh".to_string()),
+        Some("sh") => BinLaunch::Interpreter("sh".to_string()),
+        Some(ext) if allow_direct && ext.eq_ignore_ascii_case("exe") => BinLaunch::Direct,
+        _ if allow_direct && is_native_executable(content) => BinLaunch::Direct,
+        _ => BinLaunch::Interpreter("node".to_string()),
     }
 }
 
@@ -722,13 +753,15 @@ fn default_interpreter_for_extension(target: &Path) -> String {
 /// (#394: esbuild's postinstall replaces its JS launcher with the native
 /// binary, and the pre-existing `node` shim then chokes on it).
 pub fn is_native_executable(bytes: &[u8]) -> bool {
-    const MACHO_MAGICS: [&[u8; 4]; 6] = [
+    const MACHO_MAGICS: [&[u8; 4]; 8] = [
         b"\xFE\xED\xFA\xCE", // Mach-O 32-bit BE
         b"\xFE\xED\xFA\xCF", // Mach-O 64-bit BE
         b"\xCE\xFA\xED\xFE", // Mach-O 32-bit LE
         b"\xCF\xFA\xED\xFE", // Mach-O 64-bit LE
         b"\xCA\xFE\xBA\xBE", // fat/universal BE
         b"\xBE\xBA\xFE\xCA", // fat/universal LE
+        b"\xCA\xFE\xBA\xBF", // fat/universal 64-bit BE
+        b"\xBF\xBA\xFE\xCA", // fat/universal 64-bit LE
     ];
     if bytes.starts_with(b"\x7FELF") || bytes.starts_with(b"MZ") {
         return true;
@@ -751,7 +784,7 @@ pub fn is_native_executable_target(target: &Path) -> bool {
 
 /// Run-time substitute for any `prog` that reaches a shim generator
 /// without passing `is_safe_prog`. Every caller in this crate goes
-/// through `detect_interpreter` and never trips this branch, but a
+/// through `detect_bin_launch` and never trips this branch, but a
 /// future caller that bypasses that path would otherwise produce a
 /// shim with attacker-controlled bytes. A `tracing::error!` is emitted
 /// so the regression is visible in release builds too, not only in
@@ -770,10 +803,22 @@ fn safe_prog(prog: &str) -> &str {
 
 #[cfg(windows)]
 fn generate_cmd_shim(
-    prog: &str,
+    launch: &BinLaunch,
     rel_target_backslash: &str,
     node_path_value: Option<&str>,
 ) -> String {
+    if matches!(launch, BinLaunch::Direct) {
+        let node_path =
+            node_path_value.map_or(String::new(), |val| format!("@SET NODE_PATH={val}\r\n"));
+        return format!(
+            "@SETLOCAL\r\n\
+             {node_path}\
+             @\"%~dp0\\{rel_target_backslash}\" %*\r\n"
+        );
+    }
+    let BinLaunch::Interpreter(prog) = launch else {
+        unreachable!();
+    };
     let prog = safe_prog(prog);
     let node_path =
         node_path_value.map_or(String::new(), |val| format!("@SET NODE_PATH={val}\r\n"));
@@ -791,10 +836,30 @@ fn generate_cmd_shim(
 
 #[cfg(windows)]
 fn generate_ps1_shim(
-    prog: &str,
+    launch: &BinLaunch,
     rel_target_fwdslash: &str,
     node_path_value: Option<&str>,
 ) -> String {
+    if matches!(launch, BinLaunch::Direct) {
+        let node_path =
+            node_path_value.map_or(String::new(), |val| format!("$env:NODE_PATH=\"{val}\"\n"));
+        return format!(
+            "#!/usr/bin/env pwsh\n\
+             $basedir=Split-Path $MyInvocation.MyCommand.Definition -Parent\n\
+             {node_path}\
+             $ret=0\n\
+             if ($MyInvocation.ExpectingInput) {{\n\
+             \x20 $input | & \"$basedir/{rel_target_fwdslash}\" $args\n\
+             }} else {{\n\
+             \x20 & \"$basedir/{rel_target_fwdslash}\" $args\n\
+             }}\n\
+             $ret=$LASTEXITCODE\n\
+             exit $ret\n"
+        );
+    }
+    let BinLaunch::Interpreter(prog) = launch else {
+        unreachable!();
+    };
     let prog = safe_prog(prog);
     let node_path =
         node_path_value.map_or(String::new(), |val| format!("$env:NODE_PATH=\"{val}\"\n"));
@@ -829,10 +894,32 @@ fn generate_ps1_shim(
 
 #[cfg(windows)]
 fn generate_sh_shim(
-    prog: &str,
+    launch: &BinLaunch,
     rel_target_fwdslash: &str,
     node_path_value: Option<&str>,
 ) -> String {
+    if matches!(launch, BinLaunch::Direct) {
+        let node_path =
+            node_path_value.map_or(String::new(), |val| format!("export NODE_PATH=\"{val}\"\n"));
+        return format!(
+            "#!/bin/sh\n\
+             basedir=$(dirname \"$(echo \"$0\" | sed -e 's,\\\\,/,g')\")\n\
+             \n\
+             case `uname` in\n\
+             \x20\x20\x20 *CYGWIN*|*MINGW*|*MSYS*)\n\
+             \x20\x20\x20\x20\x20\x20\x20 if command -v cygpath > /dev/null 2>&1; then\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20 basedir=`cygpath -w \"$basedir\"`\n\
+             \x20\x20\x20\x20\x20\x20\x20 fi\n\
+             \x20\x20\x20 ;;\n\
+             esac\n\
+             \n\
+             {node_path}\
+             exec \"$basedir/{rel_target_fwdslash}\" \"$@\"\n"
+        );
+    }
+    let BinLaunch::Interpreter(prog) = launch else {
+        unreachable!();
+    };
     let prog = safe_prog(prog);
     let node_path =
         node_path_value.map_or(String::new(), |val| format!("export NODE_PATH=\"{val}\"\n"));
@@ -914,13 +1001,25 @@ pub const POSIX_SHIM_MARKER_PREFIX: &str = "# aube-bin-shim v1 target=";
 /// the shell body.
 #[cfg(unix)]
 fn generate_posix_shim(
-    prog: &str,
+    launch: &BinLaunch,
     rel_target_fwdslash: &str,
     node_path_value: Option<&str>,
 ) -> String {
-    let prog = safe_prog(prog);
     let node_path =
         node_path_value.map_or(String::new(), |val| format!("export NODE_PATH=\"{val}\"\n"));
+    if matches!(launch, BinLaunch::Direct) {
+        return format!(
+            "#!/bin/sh\n\
+             {POSIX_SHIM_MARKER_PREFIX}{rel_target_fwdslash}\n\
+             basedir=$(dirname \"$0\")\n\
+             {node_path}\
+             exec \"$basedir/{rel_target_fwdslash}\" \"$@\"\n"
+        );
+    }
+    let BinLaunch::Interpreter(prog) = launch else {
+        unreachable!();
+    };
+    let prog = safe_prog(prog);
     format!(
         "#!/bin/sh\n\
          {POSIX_SHIM_MARKER_PREFIX}{rel_target_fwdslash}\n\
@@ -947,6 +1046,166 @@ pub fn parse_posix_shim_target(content: &str) -> Option<&str> {
         }
     }
     None
+}
+
+/// Maximum wrapper size accepted by [`resolve_bin_shim`]. Generated wrappers
+/// are normally under 2 KiB; the larger cap accommodates long Windows paths
+/// without reading arbitrary foreign files into memory.
+const MAX_BIN_SHIM_BYTES: u64 = 64 * 1024;
+
+#[derive(Clone, Copy)]
+enum BinShimStyle {
+    Posix,
+    Cmd,
+}
+
+/// Decode an aube-generated wrapper without executing it.
+///
+/// Only regular files at most 64 KiB are inspected. POSIX wrappers must carry
+/// aube's versioned marker; cmd wrappers must match the generated `@SETLOCAL`
+/// and local-interpreter branch shape. Symlinks and unrecognized wrappers
+/// return `Ok(None)`.
+pub fn resolve_bin_shim(path: &Path) -> io::Result<Option<ResolvedBinShim>> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_BIN_SHIM_BYTES {
+        return Ok(None);
+    }
+
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    std::fs::File::open(path)?
+        .take(MAX_BIN_SHIM_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_BIN_SHIM_BYTES {
+        return Ok(None);
+    }
+    let Ok(content) = std::str::from_utf8(&bytes) else {
+        return Ok(None);
+    };
+    let Some(parent) = path.parent() else {
+        return Ok(None);
+    };
+
+    let parsed = if let Some(target) = parse_posix_shim_target(content) {
+        Some((
+            BinShimStyle::Posix,
+            target,
+            content.lines().find_map(|line| {
+                line.strip_prefix("export NODE_PATH=\"")
+                    .and_then(|value| value.strip_suffix('"'))
+            }),
+        ))
+    } else {
+        parse_cmd_shim_target(content).map(|target| {
+            (
+                BinShimStyle::Cmd,
+                target,
+                content
+                    .lines()
+                    .find_map(|line| line.strip_prefix("@SET NODE_PATH="))
+                    .map(|value| value.trim_end_matches('\r')),
+            )
+        })
+    };
+    let Some((style, target, raw_node_path)) = parsed else {
+        return Ok(None);
+    };
+    let Some(target) = resolve_shim_relative_path(parent, target, style) else {
+        return Ok(None);
+    };
+
+    let node_path = match raw_node_path {
+        Some(value) => {
+            let Some(node_path) = resolve_shim_node_path(parent, value, style) else {
+                return Ok(None);
+            };
+            Some(node_path)
+        }
+        None => None,
+    };
+
+    Ok(Some(ResolvedBinShim { target, node_path }))
+}
+
+fn parse_cmd_shim_target(content: &str) -> Option<&str> {
+    let mut lines = content.lines();
+    if lines.next()?.trim_end_matches('\r') != "@SETLOCAL" {
+        return None;
+    }
+
+    let mut line = lines.next()?.trim_end_matches('\r');
+    if line.starts_with("@SET NODE_PATH=") {
+        line = lines.next()?.trim_end_matches('\r');
+    }
+
+    let if_prefix = "@IF EXIST \"%~dp0\\";
+    let program = line.strip_prefix(if_prefix)?.strip_suffix(".exe\" (")?;
+    if !is_safe_prog(program) {
+        return None;
+    }
+
+    let local_line = lines.next()?.trim_end_matches('\r');
+    let target = local_line
+        .strip_prefix("  \"%~dp0\\")?
+        .strip_prefix(program)?
+        .strip_prefix(".exe\" \"%~dp0\\")?
+        .strip_suffix("\" %*")?;
+    if lines.next()?.trim_end_matches('\r') != ") ELSE ("
+        || lines.next()?.trim_end_matches('\r') != "  @SET PATHEXT=%PATHEXT:;.JS;=;%"
+    {
+        return None;
+    }
+
+    let fallback_target = lines
+        .next()?
+        .trim_end_matches('\r')
+        .strip_prefix("  ")?
+        .strip_prefix(program)?
+        .strip_prefix(" \"%~dp0\\")?
+        .strip_suffix("\" %*")?;
+    if fallback_target != target || lines.next()?.trim_end_matches('\r') != ")" {
+        return None;
+    }
+    lines.next().is_none().then_some(target)
+}
+
+fn resolve_shim_relative_path(
+    parent: &Path,
+    relative: &str,
+    style: BinShimStyle,
+) -> Option<PathBuf> {
+    if relative.is_empty()
+        || relative.contains('\0')
+        || relative.starts_with('/')
+        || relative.starts_with('\\')
+        || relative.len() >= 2 && relative.as_bytes()[1] == b':'
+    {
+        return None;
+    }
+    let relative = match style {
+        BinShimStyle::Posix => relative.to_string(),
+        BinShimStyle::Cmd => relative.replace('\\', std::path::MAIN_SEPARATOR_STR),
+    };
+    Some(normalize_path(&parent.join(relative)))
+}
+
+fn resolve_shim_node_path(parent: &Path, value: &str, style: BinShimStyle) -> Option<OsString> {
+    // Windows extensionless shims use a semicolon-delimited NODE_PATH even
+    // though their shell syntax otherwise resembles the POSIX wrapper.
+    if matches!(style, BinShimStyle::Posix) && value.contains(';') {
+        return None;
+    }
+    let (separator, prefix) = match style {
+        BinShimStyle::Posix => (':', "$basedir/"),
+        BinShimStyle::Cmd => (';', "%~dp0"),
+    };
+    let paths = value
+        .split(separator)
+        .map(|entry| {
+            let relative = entry.strip_prefix(prefix)?;
+            resolve_shim_relative_path(parent, relative, style)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    std::env::join_paths(paths).ok()
 }
 
 /// Collapse `.` / `..` components without touching the filesystem.
@@ -1073,7 +1332,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("cli.js");
         std::fs::write(&script, "#!/usr/bin/env node\nconsole.log('hi');\n").unwrap();
-        assert_eq!(detect_interpreter(&script), "node");
+        assert_eq!(
+            detect_bin_launch(&script),
+            BinLaunch::Interpreter("node".to_string())
+        );
     }
 
     #[test]
@@ -1085,7 +1347,10 @@ mod tests {
             "#!/usr/bin/env -S node --harmony\nconsole.log('hi');\n",
         )
         .unwrap();
-        assert_eq!(detect_interpreter(&script), "node");
+        assert_eq!(
+            detect_bin_launch(&script),
+            BinLaunch::Interpreter("node".to_string())
+        );
     }
 
     #[test]
@@ -1093,7 +1358,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("cli.js");
         std::fs::write(&script, "#!/usr/bin/node\nconsole.log('hi');\n").unwrap();
-        assert_eq!(detect_interpreter(&script), "node");
+        assert_eq!(
+            detect_bin_launch(&script),
+            BinLaunch::Interpreter("node".to_string())
+        );
     }
 
     #[test]
@@ -1101,7 +1369,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("cli.py");
         std::fs::write(&script, "#!/usr/bin/env python3\nprint('hi')\n").unwrap();
-        assert_eq!(detect_interpreter(&script), "python3");
+        assert_eq!(
+            detect_bin_launch(&script),
+            BinLaunch::Interpreter("python3".to_string())
+        );
     }
 
     #[test]
@@ -1113,7 +1384,10 @@ mod tests {
             "#!/usr/bin/env NODE_OPTIONS=--max-old-space-size=4096 node\nconsole.log('hi');\n",
         )
         .unwrap();
-        assert_eq!(detect_interpreter(&script), "node");
+        assert_eq!(
+            detect_bin_launch(&script),
+            BinLaunch::Interpreter("node".to_string())
+        );
     }
 
     #[test]
@@ -1121,14 +1395,55 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("cli.js");
         std::fs::write(&script, "console.log('hi');\n").unwrap();
-        assert_eq!(detect_interpreter(&script), "node");
+        assert_eq!(
+            detect_bin_launch(&script),
+            BinLaunch::Interpreter("node".to_string())
+        );
     }
 
     #[test]
     fn detect_interpreter_nonexistent_file_defaults_to_node() {
         assert_eq!(
-            detect_interpreter(Path::new("/nonexistent/file.js")),
-            "node"
+            detect_bin_launch(Path::new("/nonexistent/file.js")),
+            BinLaunch::Interpreter("node".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_launch_uses_direct_mode_for_no_shebang_native_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("native.exe");
+        std::fs::write(&target, b"\x7fELF").unwrap();
+        assert_eq!(detect_bin_launch(&target), BinLaunch::Direct);
+    }
+
+    #[test]
+    fn detect_launch_uses_direct_mode_for_extensionless_native_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("native");
+        std::fs::write(&target, b"\xcf\xfa\xed\xfe").unwrap();
+        assert_eq!(detect_bin_launch(&target), BinLaunch::Direct);
+    }
+
+    #[test]
+    fn detect_launch_keeps_extensionless_javascript_on_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("cli");
+        std::fs::write(&target, b"console.log('hi')\n").unwrap();
+        assert_eq!(
+            detect_bin_launch(&target),
+            BinLaunch::Interpreter("node".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_launch_keeps_unknown_text_extension_on_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("cli.custom");
+        std::fs::write(&target, b"console.log('hi')\n").unwrap();
+        assert_eq!(
+            detect_bin_launch(&target),
+            BinLaunch::Interpreter("node".to_string())
         );
     }
 
@@ -1417,6 +1732,40 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn create_bin_shim_forces_symlink_for_native_target_despite_opt_out() {
+        // #394: `preferSymlinkedExecutables: false` does NOT apply to native
+        // targets — a symlink is the only correct form, so the opt-out is
+        // overridden. Upstream v1.35.0 instead writes a direct-exec shim here
+        // (`BinLaunch::Direct`), which is why its own exec test for this case
+        // does not hold on nub; the divergence is deliberate, so pin it.
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("node_modules/.bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        let target = std::path::Path::new("/bin/echo");
+        assert!(is_native_executable_target(target), "fixture must be native");
+
+        create_bin_shim(
+            &bin_dir,
+            "native-echo",
+            target,
+            BinShimOptions {
+                extend_node_path: true,
+                prefer_symlinked_executables: Some(false),
+                hidden_modules_dir: None,
+            },
+        )
+        .unwrap();
+
+        let link = bin_dir.join("native-echo");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        // A symlink carries no NODE_PATH, which is the behavioral cost of the
+        // divergence and the thing upstream's shim preserves.
+        assert_eq!(resolve_bin_shim(&link).unwrap(), None);
+    }
+
+    #[test]
     fn is_native_executable_classifies_magic_bytes() {
         // Native formats → true.
         assert!(is_native_executable(b"\x7FELF\x02\x01\x01"));
@@ -1559,6 +1908,46 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn posix_shim_executes_non_script_target_replaced_after_linking() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("node_modules/.bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let pkg_dir = dir.path().join("pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        let target = pkg_dir.join("native.exe");
+        std::fs::write(&target, "postinstall has not run yet\n").unwrap();
+
+        create_bin_shim(
+            &bin_dir,
+            "native",
+            &target,
+            BinShimOptions {
+                extend_node_path: true,
+                prefer_symlinked_executables: Some(false),
+                hidden_modules_dir: None,
+            },
+        )
+        .unwrap();
+
+        let shim = bin_dir.join("native");
+        let content = std::fs::read_to_string(&shim).unwrap();
+        assert!(content.contains("exec \"$basedir/../../pkg/native.exe\" \"$@\""));
+        assert!(!content.contains("exec node"));
+
+        std::fs::write(&target, "#!/bin/sh\nprintf 'native-%s\\n' \"$1\"\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let output = std::process::Command::new(&shim)
+            .arg("ok")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"native-ok\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn parse_posix_shim_target_round_trips_generator_output() {
         // The parser and generator live together so this loop-back
         // guards the format contract end-to-end: anything that
@@ -1605,6 +1994,88 @@ mod tests {
         assert!(
             parse_posix_shim_target("#!/bin/sh\nexec node \"$basedir/../pkg/cli.js\" \"$@\"\n",)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn resolve_bin_shim_rejects_oversized_and_foreign_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let oversized = dir.path().join("oversized");
+        std::fs::write(&oversized, vec![b'x'; MAX_BIN_SHIM_BYTES as usize + 1]).unwrap();
+        assert_eq!(resolve_bin_shim(&oversized).unwrap(), None);
+
+        let foreign = dir.path().join("foreign.cmd");
+        std::fs::write(
+            &foreign,
+            "@SETLOCAL\r\n\
+             @IF EXIST \"%~dp0\\node.exe\" (\r\n\
+             \x20 \"%~dp0\\node.exe\" \"%~dp0\\payload.exe\" %*\r\n\
+             ) ELSE (\r\n\
+             \x20 @SET PATHEXT=%PATHEXT:;.JS;=;%\r\n\
+             \x20 node \"%~dp0\\payload.exe\" %*\r\n\
+             )\r\n\
+             @ECHO foreign behavior\r\n",
+        )
+        .unwrap();
+        assert_eq!(resolve_bin_shim(&foreign).unwrap(), None);
+
+        let malformed_env = dir.path().join("malformed-env");
+        std::fs::write(
+            &malformed_env,
+            "#!/bin/sh\n\
+             # aube-bin-shim v1 target=pkg/tool\n\
+             export NODE_PATH=\"not-basedir-relative\"\n",
+        )
+        .unwrap();
+        assert_eq!(resolve_bin_shim(&malformed_env).unwrap(), None);
+
+        let windows_env = dir.path().join("windows-env");
+        std::fs::write(
+            &windows_env,
+            "#!/bin/sh\n\
+             # aube-bin-shim v1 target=pkg/tool\n\
+             export NODE_PATH=\"$basedir/..;$basedir/../.aube/node_modules\"\n",
+        )
+        .unwrap();
+        assert_eq!(resolve_bin_shim(&windows_env).unwrap(), None);
+    }
+
+    #[test]
+    fn resolve_bin_shim_decodes_cmd_target_and_multi_entry_node_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("node_modules/.bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let shim = bin_dir.join("tool.cmd");
+        std::fs::write(
+            &shim,
+            "@SETLOCAL\r\n\
+             @SET NODE_PATH=%~dp0..;%~dp0..\\.aube\\node_modules\r\n\
+             @IF EXIST \"%~dp0\\node.exe\" (\r\n\
+             \x20 \"%~dp0\\node.exe\" \"%~dp0\\..\\pkg\\tool.exe\" %*\r\n\
+             ) ELSE (\r\n\
+             \x20 @SET PATHEXT=%PATHEXT:;.JS;=;%\r\n\
+             \x20 node \"%~dp0\\..\\pkg\\tool.exe\" %*\r\n\
+             )\r\n",
+        )
+        .unwrap();
+
+        let resolved = resolve_bin_shim(&shim).unwrap().unwrap();
+        assert_eq!(
+            resolved.target,
+            dir.path().join("node_modules/pkg/tool.exe")
+        );
+        assert_eq!(
+            resolved.node_path,
+            Some(
+                std::env::join_paths([
+                    dir.path().join("node_modules"),
+                    dir.path()
+                        .join("node_modules")
+                        .join(".aube")
+                        .join("node_modules"),
+                ])
+                .unwrap()
+            )
         );
     }
 
@@ -1670,6 +2141,12 @@ mod tests {
         assert!(
             content.contains("export NODE_PATH=\"$basedir/..:$basedir/../.aube/node_modules\""),
             "expected two-entry NODE_PATH, got:\n{content}"
+        );
+        let resolved = resolve_bin_shim(&bin_dir.join("mycli")).unwrap().unwrap();
+        assert_eq!(resolved.target, script);
+        assert_eq!(
+            resolved.node_path,
+            Some(std::env::join_paths([dir.path().join("node_modules"), hidden]).unwrap())
         );
     }
 
@@ -1812,7 +2289,7 @@ mod tests {
     // ---------------------------------------------------------------
     // Shebang sanitization (defense against shim-injection RCE).
     //
-    // `detect_interpreter` feeds `prog` verbatim into the cmd / ps1 /
+    // `detect_bin_launch` feeds `prog` verbatim into the cmd / ps1 /
     // sh shim templates via `format!`. An attacker-published bin
     // script whose shebang carries cmd.exe metacharacters would break
     // out of the quoted path in the generated `.cmd` and execute
@@ -1910,7 +2387,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("cli.js");
         std::fs::write(&script, b"#!/usr/bin/node\"&calc&\"\nbody\n").unwrap();
-        assert_eq!(detect_interpreter(&script), "node");
+        assert_eq!(
+            detect_bin_launch(&script),
+            BinLaunch::Interpreter("node".to_string())
+        );
     }
 
     #[test]
@@ -1918,7 +2398,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("cli.js");
         std::fs::write(&script, b"#!/usr/bin/env \"node&calc&\"\nbody\n").unwrap();
-        assert_eq!(detect_interpreter(&script), "node");
+        assert_eq!(
+            detect_bin_launch(&script),
+            BinLaunch::Interpreter("node".to_string())
+        );
     }
 
     #[test]
@@ -1926,7 +2409,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("cli.js");
         std::fs::write(&script, b"#!/usr/bin/env \"x&calc.exe&\"\nbody\n").unwrap();
-        assert_eq!(detect_interpreter(&script), "node");
+        assert_eq!(
+            detect_bin_launch(&script),
+            BinLaunch::Interpreter("node".to_string())
+        );
     }
 
     #[test]
@@ -1937,7 +2423,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("cli.sh");
         std::fs::write(&script, b"#!/usr/bin/env \"bash&evil&\"\nbody\n").unwrap();
-        assert_eq!(detect_interpreter(&script), "sh");
+        assert_eq!(
+            detect_bin_launch(&script),
+            BinLaunch::Interpreter("sh".to_string())
+        );
     }
 
     #[test]
@@ -1946,7 +2435,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("cli.py");
         std::fs::write(&script, b"#!/usr/bin/env python3.11\n").unwrap();
-        assert_eq!(detect_interpreter(&script), "python3.11");
+        assert_eq!(
+            detect_bin_launch(&script),
+            BinLaunch::Interpreter("python3.11".to_string())
+        );
     }
 
     #[test]
@@ -1958,13 +2450,16 @@ mod tests {
         let long = "a".repeat(128);
         let shebang = format!("#!/usr/bin/env {long}\nbody\n");
         std::fs::write(&script, shebang.as_bytes()).unwrap();
-        assert_eq!(detect_interpreter(&script), "node");
+        assert_eq!(
+            detect_bin_launch(&script),
+            BinLaunch::Interpreter("node".to_string())
+        );
     }
 
     // ---------------------------------------------------------------
     // Production safety net. Even if a future caller hands an unsafe
     // string straight to a shim generator without going through
-    // `detect_interpreter`, `safe_prog` must substitute a harmless
+    // `detect_bin_launch`, `safe_prog` must substitute a harmless
     // default rather than splice attacker bytes into the template.
     // Runs in both debug and release, unlike `debug_assert!`.
     // ---------------------------------------------------------------
@@ -1988,9 +2483,13 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn generate_cmd_shim_never_splices_unsafe_prog() {
-        // Direct call bypassing `detect_interpreter`. The generated
+        // Direct call bypassing `detect_bin_launch`. The generated
         // batch file must not contain the attacker's payload bytes.
-        let shim = generate_cmd_shim("node\"&calc&\"", "..\\pkg\\entry.js", None);
+        let shim = generate_cmd_shim(
+            &BinLaunch::Interpreter("node\"&calc&\"".to_string()),
+            "..\\pkg\\entry.js",
+            None,
+        );
         assert!(
             !shim.contains("&calc&"),
             "unsafe prog spliced into cmd shim:\n{shim}"
@@ -2005,8 +2504,28 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn windows_direct_shims_execute_the_target_without_node() {
+        let cmd = generate_cmd_shim(&BinLaunch::Direct, "..\\pkg\\native.exe", None);
+        assert!(cmd.contains("@\"%~dp0\\..\\pkg\\native.exe\" %*"));
+        assert!(!cmd.contains("node"));
+
+        let ps1 = generate_ps1_shim(&BinLaunch::Direct, "../pkg/native.exe", None);
+        assert!(ps1.contains("& \"$basedir/../pkg/native.exe\" $args"));
+        assert!(!ps1.contains("node"));
+
+        let sh = generate_sh_shim(&BinLaunch::Direct, "../pkg/native.exe", None);
+        assert!(sh.contains("exec \"$basedir/../pkg/native.exe\" \"$@\""));
+        assert!(!sh.contains("node"));
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn generate_ps1_shim_never_splices_unsafe_prog() {
-        let shim = generate_ps1_shim("bash&rm", "../pkg/entry.js", None);
+        let shim = generate_ps1_shim(
+            &BinLaunch::Interpreter("bash&rm".to_string()),
+            "../pkg/entry.js",
+            None,
+        );
         assert!(
             !shim.contains("&rm"),
             "unsafe prog spliced into ps1 shim:\n{shim}"
@@ -2016,7 +2535,11 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn generate_sh_shim_never_splices_unsafe_prog() {
-        let shim = generate_sh_shim("sh;rm", "../pkg/entry.js", None);
+        let shim = generate_sh_shim(
+            &BinLaunch::Interpreter("sh;rm".to_string()),
+            "../pkg/entry.js",
+            None,
+        );
         assert!(
             !shim.contains(";rm"),
             "unsafe prog spliced into sh shim:\n{shim}"
@@ -2026,7 +2549,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn generate_posix_shim_never_splices_unsafe_prog() {
-        let shim = generate_posix_shim("sh;rm", "../pkg/entry.js", None);
+        let shim = generate_posix_shim(
+            &BinLaunch::Interpreter("sh;rm".to_string()),
+            "../pkg/entry.js",
+            None,
+        );
         assert!(
             !shim.contains(";rm"),
             "unsafe prog spliced into posix shim:\n{shim}"

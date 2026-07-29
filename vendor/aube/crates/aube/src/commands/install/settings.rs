@@ -172,15 +172,16 @@ pub(super) fn find_gvs_incompatible_trigger<'a>(
 ///
 /// Symlink-PRIORITY classification: any single symlink entry means the tree
 /// is in global-virtual-store mode. GVS-on trees are NOT necessarily uniform
-/// — `diskMaterializePackages` makes a handful of adapter entries real dirs
-/// while the rest stay shared-store symlinks, a legitimately MIXED tree — so
-/// classifying from the first `read_dir` entry would be order-dependent (a
-/// forced real dir landing first would misread the whole tree as per-project
-/// and trigger a spurious wipe on every install). Per-project mode is the
-/// only mode with NO symlink entries, so `false` is returned only after the
-/// full scan finds real dirs and zero symlinks. For a consistent tree (every
-/// entry the same type — standalone aube's default) the result is identical
-/// to the first-entry classification; only the mixed tree differs.
+/// — `diskMaterializePackages` and the project-local legacy-Vite copies make
+/// a handful of entries real dirs while the rest stay shared-store symlinks, a
+/// legitimately MIXED tree — so classifying from the first `read_dir` entry
+/// would be order-dependent (a forced real dir landing first would misread the
+/// whole tree as per-project and trigger a spurious wipe on every install).
+/// Per-project mode is the only mode with NO symlink entries, so `false` is
+/// returned only after the full scan finds real dirs and zero symlinks. For a
+/// consistent tree (every entry the same type — standalone aube's default) the
+/// result is identical to the first-entry classification; only the mixed tree
+/// differs.
 pub(super) fn detect_aube_dir_gvs_mode(aube_dir: &std::path::Path) -> Option<bool> {
     let entries = std::fs::read_dir(aube_dir).ok()?;
     let mut saw_real_dir = false;
@@ -216,6 +217,30 @@ pub(super) fn detect_aube_dir_gvs_mode(aube_dir: &std::path::Path) -> Option<boo
         }
     }
     saw_real_dir.then_some(false)
+}
+
+#[cfg(test)]
+mod gvs_mode_tests {
+    use super::detect_aube_dir_gvs_mode;
+
+    #[test]
+    fn mixed_project_local_and_linked_entries_still_classify_as_gvs() {
+        let tmp = tempfile::tempdir().expect("tempdir should be created");
+        let aube_dir = tmp.path().join(".aube");
+        let global = tmp.path().join("global/foo");
+        std::fs::create_dir_all(aube_dir.join("vite@7.3.6"))
+            .expect("project-local entry should be created");
+        std::fs::create_dir_all(&global).expect("global entry should be created");
+        aube_linker::sys::create_dir_link(&global, &aube_dir.join("foo@1.0.0"))
+            .expect("global-store link should be created");
+
+        assert_eq!(detect_aube_dir_gvs_mode(&aube_dir), Some(true));
+
+        std::fs::remove_dir(aube_dir.join("foo@1.0.0"))
+            .or_else(|_| std::fs::remove_file(aube_dir.join("foo@1.0.0")))
+            .expect("global-store link should be removed");
+        assert_eq!(detect_aube_dir_gvs_mode(&aube_dir), Some(false));
+    }
 }
 
 /// Honor `cleanupUnusedCatalogs` by pruning declared-but-unreferenced
@@ -922,21 +947,18 @@ pub(crate) fn configure_resolver(
     // pnpm-lock.yaml, aube-lock.yaml, bun.lock, package-lock.json, and
     // npm-shrinkwrap.json are committed, cross-platform artifacts that
     // carry per-package os/cpu metadata.
-    // When the user hasn't declared `pnpm.supportedArchitectures`, record
-    // EVERY optional-dep variant a package declares (`accept_all`) so the
-    // committed lockfile installs cleanly on every contributor's platform
-    // — withholding variants leaves teammates with "Cannot find native
-    // binding". This matches what npm, pnpm, and bun write verbatim (all
-    // 26 `@esbuild/*` / `@rollup/rollup-*` natives, freebsd/ppc64/s390x
-    // and all), so a lockfile aube regenerates stays diff-clean against the
-    // native tool. Install-time filtering (`filter_graph`) and the
-    // streaming-fetch gate run against the unmodified host triple, so
-    // `node_modules` and tarball downloads stay trimmed to the host — the
-    // wider lockfile costs only bytes, never extra installs. Yarn lockfiles
-    // don't carry the same per-package os/cpu metadata, so widening there
-    // would only bloat them — keep the host-only default.
-    let manifest_set_supported_arch =
-        !(sup_os.is_empty() && sup_cpu.is_empty() && sup_libc.is_empty());
+    // Record EVERY optional-dep variant a package declares (`accept_all`) in
+    // portable lockfiles, even when the user configured
+    // `supportedArchitectures`. pnpm applies that setting when deciding what
+    // to install, not when deciding what its lockfile records; narrowing the
+    // resolver here silently removes the variants another platform needs.
+    // This also matches what npm and bun write verbatim (all 26 `@esbuild/*`
+    // / `@rollup/rollup-*` natives, freebsd/ppc64/s390x and all), so a
+    // lockfile aube regenerates stays diff-clean against the native tool.
+    // Install-time filtering (`filter_graph`) and the streaming-fetch gate
+    // still use the configured architectures, so the wider lockfile costs
+    // only bytes, never extra installs. Yarn lockfiles don't carry the same
+    // per-package os/cpu metadata, so widening there would only bloat them.
     let writes_cross_platform_lock = matches!(
         target_lockfile_kind,
         Some(
@@ -947,14 +969,7 @@ pub(crate) fn configure_resolver(
                 | aube_lockfile::LockfileKind::NpmShrinkwrap
         )
     );
-    let supported_architectures = if manifest_set_supported_arch {
-        aube_resolver::SupportedArchitectures {
-            os: sup_os,
-            cpu: sup_cpu,
-            libc: sup_libc,
-            ..Default::default()
-        }
-    } else if writes_cross_platform_lock {
+    let supported_architectures = if writes_cross_platform_lock {
         aube_resolver::SupportedArchitectures {
             accept_all: true,
             ..Default::default()
@@ -1443,7 +1458,7 @@ mod finalize_lockfile_graph_tests {
     use super::*;
 
     fn node_available() -> bool {
-        std::process::Command::new(crate::runtime::node_program())
+        std::process::Command::new(crate::runtime::internal_node_program())
             .arg("--version")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

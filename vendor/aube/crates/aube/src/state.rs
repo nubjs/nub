@@ -834,6 +834,14 @@ pub fn read_state_package_content_hashes(project_dir: &Path) -> Option<BTreeMap<
     Some(state.package_content_hashes)
 }
 
+/// Read the installed layout snapshot used by the install warm path.
+///
+/// Missing layout state means the install predates layout tracking and
+/// should take the normal path once to refresh derived metadata.
+pub fn read_state_layout(project_dir: &Path) -> Option<InstallLayoutState> {
+    read_state(&state_dir(project_dir))?.layout
+}
+
 /// Read the LtHash accumulator digest the last install wrote, if
 /// any. Empty string on fresh state or pre-lthash aube versions.
 pub fn read_state_graph_lthash(project_dir: &Path) -> Option<String> {

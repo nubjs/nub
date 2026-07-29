@@ -2,6 +2,7 @@
 # `aube config get`
 
 - **Usage**: `aube config get [FLAGS] <KEY>`
+- **Effect**: read-only
 
 Print the effective value of a key
 

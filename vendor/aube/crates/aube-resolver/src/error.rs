@@ -171,10 +171,29 @@ impl miette::Diagnostic for Error {
 
 fn format_trust_downgrade_help(d: &TrustDowngradeDetails) -> String {
     format!(
-        "a trust downgrade may indicate a supply-chain incident — the publisher's previous releases carried {evidence} but {name}@{ver} does not.\n\
-         to bypass: pin a version that retains evidence, set `trustPolicy = off` in .npmrc / pnpm-workspace.yaml, \
-         or add `{name}` (or `{name}@{ver}`) to `trustPolicyExclude`.",
-        evidence = d.prior_evidence.label(),
+        "this is a supply-chain trust failure, not an ordinary version-resolution error. \
+         An earlier release carried {prior_evidence}, but {name}@{ver} carries {current_evidence}.\n\
+         \n\
+         This can signal a compromised publisher or tampered release. It can also be benign \
+         release-process drift: a maintainer manually published, backported outside the trusted \
+         workflow, skipped provenance for convenience, or used a registry that stripped metadata.\n\
+         \n\
+         Before bypassing:\n\
+         1. Inspect the package's npm release, source tag/commit, publisher identity, and tarball; \
+         compare the metadata with npmjs.org, and confirm the change is expected and nothing \
+         appears tampered with.\n\
+         2. Report inconsistent evidence to the relevant upstream owner. Package-release drift \
+         belongs with the maintainer; metadata present on npmjs.org but missing from a proxy or \
+         mirror belongs with that registry operator.\n\
+         3. Only after review, pin a version that retains evidence or add the narrow \
+         `{name}@{ver}` exception to `trustPolicyExclude`. A bare `{name}` exempts every version; \
+         `trustPolicy = off` disables this protection for the entire install.\n\
+         \n\
+         Details and known built-in exceptions: https://aube.jdx.dev/trust-policy-exceptions",
+        prior_evidence = d.prior_evidence.label(),
+        current_evidence = d
+            .current_evidence
+            .map_or("no trust evidence", |e| e.label()),
         name = d.name,
         ver = d.picked_version,
     )
@@ -543,5 +562,31 @@ pub(crate) fn classify_registry_error(msg: &str) -> RegistryErrorKind {
         RegistryErrorKind::ResolverBug
     } else {
         RegistryErrorKind::Generic
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trust::TrustEvidence;
+
+    #[test]
+    fn trust_downgrade_help_prioritizes_investigation_and_upstream_reporting() {
+        let help = format_trust_downgrade_help(&TrustDowngradeDetails {
+            name: "@scope/pkg".into(),
+            picked_version: "2.0.0".into(),
+            current_evidence: None,
+            prior_evidence: TrustEvidence::TrustedPublisher,
+            prior_version: "1.9.0".into(),
+        });
+
+        assert!(help.contains("not an ordinary version-resolution error"));
+        assert!(help.contains("carries no trust evidence"));
+        assert!(help.contains("confirm the change is expected and nothing appears tampered with"));
+        assert!(help.contains("Report inconsistent evidence to the relevant upstream owner"));
+        assert!(help.contains("belongs with that registry operator"));
+        assert!(help.contains("`@scope/pkg@2.0.0` exception"));
+        assert!(help.contains("A bare `@scope/pkg` exempts every version"));
+        assert!(help.contains("https://aube.jdx.dev/trust-policy-exceptions"));
     }
 }

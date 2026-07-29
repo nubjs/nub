@@ -1,9 +1,9 @@
-use super::ensure_installed;
+use super::ensure_installed_in;
 use clap::Args;
 use miette::{Context, IntoDiagnostic, miette};
 use std::path::Path;
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub struct ExecArgs {
     /// Binary name
     pub bin: String,
@@ -76,12 +76,29 @@ pub async fn run(
     exec_args: ExecArgs,
     filter: aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<Option<i32>> {
+    run_in(exec_args, filter, None).await
+}
+
+/// `exec` rooted at an explicit `base_dir` instead of the process cwd.
+/// `None` reproduces the CLI behavior (resolve from the process cwd);
+/// `Some(dir)` is the in-process embedding entry — the project is
+/// resolved from `dir`, so concurrent embed calls in different projects
+/// don't race on process-global cwd.
+pub async fn run_in(
+    exec_args: ExecArgs,
+    filter: aube_workspace::selector::EffectiveFilter,
+    base_dir: Option<std::path::PathBuf>,
+) -> miette::Result<Option<i32>> {
     exec_args.network.install_overrides();
     exec_args.lockfile.install_overrides();
     exec_args.virtual_store.install_overrides();
+    let effective_cwd = match base_dir {
+        Some(dir) => dir,
+        None => crate::dirs::cwd()?,
+    };
     // Resolve the project's Node runtime before anything spawns (see
     // run.rs for the warm-path rationale).
-    crate::runtime::ensure_for_cwd(&crate::dirs::cwd()?).await?;
+    crate::runtime::ensure_for_cwd(&effective_cwd).await?;
     let ExecArgs {
         bin,
         args,
@@ -100,9 +117,14 @@ pub async fn run(
         network: _,
         virtual_store: _,
     } = exec_args;
-    let cwd = crate::dirs::project_root()?;
+    let cwd = crate::dirs::find_project_root(&effective_cwd).ok_or_else(|| {
+        miette!(
+            "no package.json found in {} or any parent directory",
+            effective_cwd.display()
+        )
+    })?;
 
-    ensure_installed(no_install).await?;
+    ensure_installed_in(no_install, Some(&cwd)).await?;
 
     if !filter.is_empty() {
         // Same defaulting rule as `aube run`: sort=on unless `--no-sort`
@@ -372,7 +394,7 @@ fn bin_not_found_error(bin: &str) -> miette::Report {
 /// Assemble the `tokio::process::Command` that runs `bin`, shared by the
 /// supervised (`spawn_and_wait`) and image-replacing (`exec_bin_terminal`)
 /// paths. Callers own the bin-exists check.
-fn build_bin_command(
+pub(crate) fn build_bin_command(
     cwd: &Path,
     bin_path: &Path,
     bin: &str,
@@ -380,34 +402,33 @@ fn build_bin_command(
     node_args: &[String],
     shell_mode: bool,
 ) -> tokio::process::Command {
-    let mut command = if let Some(cmd) = node_bin_command(bin_path, args, node_args, shell_mode) {
-        cmd
-    } else if shell_mode {
-        let line = std::iter::once(aube_scripts::shell_quote_arg(bin))
-            .chain(args.iter().map(|arg| aube_scripts::shell_quote_arg(arg)))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let bin_dir = super::project_modules_dir(cwd).join(".bin");
-        let mut path_dirs = vec![bin_dir];
-        path_dirs.extend(crate::runtime::path_entries());
-        let new_path = aube_scripts::prepend_paths(&path_dirs);
-        let mut cmd = aube_scripts::spawn_shell(&line);
-        cmd.env("PATH", &new_path);
-        cmd
-    } else {
-        let exec_path = resolve_exec_shim(bin_path);
-        let mut cmd = tokio::process::Command::new(exec_path);
-        cmd.args(args);
-        // `#!/usr/bin/env node` shebangs resolve through the child's PATH —
-        // put the switched runtime ahead of the inherited one so the bin
-        // (and, on the image-replacing path, the exec'd shim) honors the
-        // project's `.nvmrc` / `devEngines` instead of the ambient node.
-        let runtime_dirs = crate::runtime::path_entries();
-        if !runtime_dirs.is_empty() {
-            cmd.env("PATH", aube_scripts::prepend_paths(&runtime_dirs));
-        }
-        cmd
-    };
+    let mut command =
+        if !shell_mode && let Some(cmd) = resolved_bin_command(bin_path, args, node_args) {
+            cmd
+        } else if shell_mode {
+            let line = std::iter::once(aube_scripts::shell_quote_arg(bin))
+                .chain(args.iter().map(|arg| aube_scripts::shell_quote_arg(arg)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let bin_dir = super::project_modules_dir(cwd).join(".bin");
+            let mut path_dirs = vec![bin_dir];
+            path_dirs.extend(crate::runtime::path_entries());
+            let new_path = aube_scripts::prepend_paths(&path_dirs);
+            let mut cmd = aube_scripts::spawn_shell(&line);
+            cmd.env("PATH", &new_path);
+            cmd
+        } else {
+            let exec_path = resolve_exec_shim(bin_path);
+            let mut cmd = tokio::process::Command::new(exec_path);
+            cmd.args(args);
+            // `#!/usr/bin/env node` shebangs resolve through the child's PATH
+            // so the generated shim must see the project's switched runtime.
+            let runtime_dirs = crate::runtime::path_entries();
+            if !runtime_dirs.is_empty() {
+                cmd.env("PATH", aube_scripts::prepend_paths(&runtime_dirs));
+            }
+            cmd
+        };
     crate::runtime::apply_child_env(&mut command);
     command
         .current_dir(cwd)
@@ -443,48 +464,41 @@ pub(crate) async fn exec_bin_status_with_node_args(
         ));
     }
 
-    let mut command = if let Some(cmd) = node_bin_command(bin_path, args, node_args, shell_mode) {
-        cmd
-    } else if shell_mode {
-        let line = std::iter::once(aube_scripts::shell_quote_arg(bin))
-            .chain(args.iter().map(|arg| aube_scripts::shell_quote_arg(arg)))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let bin_dir = super::project_modules_dir(cwd).join(".bin");
-        let mut path_dirs = vec![bin_dir];
-        path_dirs.extend(crate::runtime::path_entries());
-        let new_path = aube_scripts::prepend_paths(&path_dirs);
-        let mut cmd = aube_scripts::spawn_shell(&line);
-        cmd.env("PATH", &new_path);
-        cmd
-    } else {
-        let exec_path = resolve_exec_shim(bin_path);
-        let mut cmd = tokio::process::Command::new(exec_path);
-        cmd.args(args);
-        // `#!/usr/bin/env node` shebangs resolve through the child's
-        // PATH — put the switched runtime ahead of the inherited one.
+    let command = build_bin_command(cwd, bin_path, bin, args, node_args, shell_mode);
+    super::run_output::run_command(command, output_mode).await
+}
+
+/// Resolve an aube-generated shim (or symlink) to its package target and
+/// choose the launcher that understands that file. Native executable formats
+/// run directly. JavaScript targets are unwrapped only when `node_args` must
+/// be injected; otherwise they and other interpreters retain the established
+/// generated-shim behavior.
+fn resolved_bin_command(
+    bin_path: &Path,
+    args: &[String],
+    node_args: &[String],
+) -> Option<tokio::process::Command> {
+    let target = resolve_bin_target(bin_path);
+    if is_native_executable(&target.path) {
+        let mut cmd = tokio::process::Command::new(&target.path);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.as_std_mut().arg0(bin_path);
+        }
+        if let Some(node_path) = &target.node_path {
+            cmd.env("NODE_PATH", node_path);
+        }
+        // Preserve the generated shim's switched-runtime behavior for native
+        // launchers that spawn Node themselves.
         let runtime_dirs = crate::runtime::path_entries();
         if !runtime_dirs.is_empty() {
             cmd.env("PATH", aube_scripts::prepend_paths(&runtime_dirs));
         }
-        cmd
-    };
-    crate::runtime::apply_child_env(&mut command);
-    command.current_dir(cwd);
-    super::run_output::run_command(command, output_mode).await
-}
-
-fn node_bin_command(
-    bin_path: &Path,
-    args: &[String],
-    node_args: &[String],
-    shell_mode: bool,
-) -> Option<tokio::process::Command> {
-    if shell_mode || node_args.is_empty() {
-        return None;
+        cmd.args(args);
+        return Some(cmd);
     }
-    let target = resolve_node_bin_target(bin_path)?;
-    if !is_node_backed_bin(&target.path) {
+    if node_args.is_empty() || !is_node_backed_bin(&target.path) {
         return None;
     }
     let mut cmd =
@@ -496,103 +510,112 @@ fn node_bin_command(
     Some(cmd)
 }
 
-struct NodeBinTarget {
+struct BinTarget {
     path: std::path::PathBuf,
     node: Option<std::path::PathBuf>,
-    node_path: Option<std::path::PathBuf>,
+    node_path: Option<std::ffi::OsString>,
 }
 
-fn resolve_node_bin_target(bin_path: &Path) -> Option<NodeBinTarget> {
+fn resolve_bin_target(bin_path: &Path) -> BinTarget {
     let path = resolve_exec_shim(bin_path);
-    resolve_node_bin_target_path(&path).or(Some(NodeBinTarget {
+    if let Ok(target) = std::fs::read_link(&path) {
+        let target = if target.is_absolute() {
+            target
+        } else if let Some(parent) = path.parent() {
+            // Keep `..` components intact. Resolving them lexically can change
+            // meaning when an earlier component is itself a symlink.
+            parent.join(target)
+        } else {
+            target
+        };
+        return BinTarget {
+            path: target,
+            node: None,
+            node_path: None,
+        };
+    }
+    if let Ok(Some(shim)) = aube_linker::sys::resolve_bin_shim(&path) {
+        return BinTarget {
+            path: shim.target,
+            node: path.parent().and_then(local_node_program),
+            node_path: shim.node_path,
+        };
+    }
+    BinTarget {
         path,
         node: None,
         node_path: None,
-    }))
-}
-
-fn resolve_node_bin_target_path(path: &Path) -> Option<NodeBinTarget> {
-    if let Ok(target) = std::fs::read_link(path) {
-        let path = if target.is_absolute() {
-            target
-        } else {
-            aube_linker::normalize_path(&path.parent()?.join(target))
-        };
-        return Some(NodeBinTarget {
-            path,
-            node: None,
-            node_path: None,
-        });
     }
-    let content = std::fs::read_to_string(path).ok()?;
-    let parent = path.parent()?;
-    if let Some(rel) = aube_linker::parse_posix_shim_target(&content) {
-        let target = aube_linker::normalize_path(&parent.join(rel));
-        // A shim whose target is a native executable (e.g. esbuild after
-        // its postinstall replaces the JS launcher — #394) must be exec'd
-        // directly, never handed to `node`. This is a runtime safety net
-        // in case a stale `node` shim survives the post-build relink.
-        let native = aube_linker::is_native_executable_target(&target);
-        return Some(NodeBinTarget {
-            node: (!native).then(|| local_node_program(parent)).flatten(),
-            node_path: (!native)
-                .then(|| {
-                    parse_posix_node_path(&content)
-                        .map(|rel| aube_linker::normalize_path(&parent.join(rel)))
-                })
-                .flatten(),
-            path: target,
-        });
-    }
-    let rel = parse_cmd_shim_target(&content)?;
-    let target = aube_linker::normalize_path(&parent.join(rel));
-    let native = aube_linker::is_native_executable_target(&target);
-    Some(NodeBinTarget {
-        node: (!native).then(|| local_node_program(parent)).flatten(),
-        node_path: (!native)
-            .then(|| {
-                parse_cmd_node_path(&content)
-                    .map(|rel| aube_linker::normalize_path(&parent.join(rel)))
-            })
-            .flatten(),
-        path: target,
-    })
-}
-
-fn parse_cmd_shim_target(content: &str) -> Option<&str> {
-    let marker = "\"%~dp0\\";
-    let mut rest = content;
-    while let Some(start) = rest.find(marker) {
-        let after_marker = &rest[start + marker.len()..];
-        let Some(end) = after_marker.find('"') else {
-            break;
-        };
-        let candidate = &after_marker[..end];
-        if !candidate.ends_with(".exe") {
-            return Some(candidate);
-        }
-        rest = &after_marker[end + 1..];
-    }
-    None
-}
-
-fn parse_cmd_node_path(content: &str) -> Option<&str> {
-    let rest = content
-        .lines()
-        .find_map(|line| line.strip_prefix("@SET NODE_PATH=%~dp0"))?;
-    Some(rest.trim_end_matches('\r'))
-}
-
-fn parse_posix_node_path(content: &str) -> Option<&str> {
-    content.lines().find_map(|line| {
-        line.strip_prefix("export NODE_PATH=\"$basedir/")
-            .and_then(|rest| rest.strip_suffix('"'))
-    })
 }
 
 fn local_node_program(parent: &Path) -> Option<std::path::PathBuf> {
     let node = parent.join(if cfg!(windows) { "node.exe" } else { "node" });
     node.exists().then_some(node)
+}
+
+fn is_native_executable(target: &Path) -> bool {
+    use std::io::{Read, Seek};
+
+    let mut header = [0u8; 64];
+    let (mut file, n) = match std::fs::File::open(target) {
+        Ok(mut file) => {
+            let n = file.read(&mut header).unwrap_or(0);
+            (Some(file), n)
+        }
+        Err(_) => (None, 0),
+    };
+    if is_native_magic(&header[..n.min(4)]) {
+        return true;
+    }
+    if n >= 64 && header.starts_with(b"MZ") {
+        let pe_offset =
+            u32::from_le_bytes([header[0x3c], header[0x3d], header[0x3e], header[0x3f]]);
+        let mut signature = [0u8; 4];
+        if let Some(file) = &mut file
+            && file
+                .seek(std::io::SeekFrom::Start(u64::from(pe_offset)))
+                .is_ok()
+            && file.read_exact(&mut signature).is_ok()
+            && signature == *b"PE\0\0"
+        {
+            return true;
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        // A shebang is stronger evidence than a Windows-looking suffix. This
+        // keeps intentionally interpreter-backed polyglot bins on their shim.
+        if header[..n].starts_with(b"#!") {
+            return false;
+        }
+        return target
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                ["exe", "cmd", "bat", "com"]
+                    .iter()
+                    .any(|candidate| ext.eq_ignore_ascii_case(candidate))
+            });
+    }
+
+    #[cfg(not(windows))]
+    false
+}
+
+fn is_native_magic(magic: &[u8]) -> bool {
+    magic.starts_with(b"\x7fELF")
+        || matches!(
+            magic,
+            [0xcf, 0xfa, 0xed, 0xfe]
+                | [0xfe, 0xed, 0xfa, 0xcf]
+                | [0xce, 0xfa, 0xed, 0xfe]
+                | [0xfe, 0xed, 0xfa, 0xce]
+                | [0xca, 0xfe, 0xba, 0xbe]
+                | [0xbe, 0xba, 0xfe, 0xca]
+                | [0xca, 0xfe, 0xba, 0xbf]
+                | [0xbf, 0xba, 0xfe, 0xca]
+        )
 }
 
 fn is_node_backed_bin(target: &Path) -> bool {
@@ -645,11 +668,11 @@ fn is_node_interpreter(raw: &str) -> bool {
 pub(crate) fn resolve_exec_shim(bin_path: &Path) -> std::path::PathBuf {
     #[cfg(windows)]
     {
-        if bin_path.extension().is_none() {
-            let cmd_path = bin_path.with_extension("cmd");
-            if cmd_path.exists() {
-                return cmd_path;
-            }
+        let mut cmd_path = bin_path.as_os_str().to_os_string();
+        cmd_path.push(".cmd");
+        let cmd_path = std::path::PathBuf::from(cmd_path);
+        if cmd_path.exists() {
+            return cmd_path;
         }
     }
     bin_path.to_path_buf()
@@ -657,10 +680,10 @@ pub(crate) fn resolve_exec_shim(bin_path: &Path) -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_node_bin_target;
+    use super::resolve_bin_target;
     use super::{
-        is_node_backed_bin, parse_cmd_node_path, parse_cmd_shim_target, parse_posix_node_path,
-        resolve_exec_shim,
+        build_bin_command, is_native_executable, is_native_magic, is_node_backed_bin,
+        resolve_exec_shim, resolved_bin_command,
     };
 
     #[test]
@@ -682,6 +705,17 @@ mod tests {
         assert_eq!(resolve_exec_shim(&bare), cmd_shim);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn resolve_exec_shim_appends_cmd_to_dotted_bin_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bare = tmp.path().join("tool.exe");
+        let cmd_shim = tmp.path().join("tool.exe.cmd");
+        std::fs::write(&bare, b"#!/bin/sh\n").unwrap();
+        std::fs::write(&cmd_shim, b"@echo off\n").unwrap();
+        assert_eq!(resolve_exec_shim(&bare), cmd_shim);
+    }
+
     #[cfg(unix)]
     #[test]
     fn resolve_exec_shim_keeps_bare_path_on_unix() {
@@ -695,51 +729,31 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn resolve_node_bin_target_follows_symlink() {
+    fn resolve_bin_target_follows_symlink_without_canonicalizing() {
         let tmp = tempfile::tempdir().unwrap();
         let target = tmp.path().join("bin.js");
         let shim = tmp.path().join("shim");
         std::fs::write(&target, b"#!/usr/bin/env node\n").unwrap();
         std::os::unix::fs::symlink("bin.js", &shim).unwrap();
-        let resolved = resolve_node_bin_target(&shim).unwrap();
+        let resolved = resolve_bin_target(&shim);
         assert_eq!(resolved.path, target);
         assert_eq!(resolved.node, None);
         assert_eq!(resolved.node_path, None);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn parse_cmd_shim_target_skips_program_exe() {
-        let content = "@SETLOCAL\r\n\
-             @IF EXIST \"%~dp0\\node.exe\" (\r\n\
-             \x20 \"%~dp0\\node.exe\" \"%~dp0\\pkg\\bin.js\" %*\r\n\
-             ) ELSE (\r\n\
-             \x20 node \"%~dp0\\pkg\\bin.js\" %*\r\n\
-             )\r\n";
+    fn resolve_bin_target_preserves_parent_components_after_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let shim = tmp.path().join("shim");
+        std::os::unix::fs::symlink("pivot/../bin", &shim).unwrap();
 
-        assert_eq!(parse_cmd_shim_target(content), Some("pkg\\bin.js"));
+        let resolved = resolve_bin_target(&shim);
+        assert_eq!(resolved.path, tmp.path().join("pivot/../bin"));
     }
 
     #[test]
-    fn parse_cmd_shim_target_stops_on_truncated_marker() {
-        assert_eq!(parse_cmd_shim_target("\"%~dp0\\node.exe"), None);
-    }
-
-    #[test]
-    fn parse_cmd_node_path_reads_generated_env() {
-        let content = "@SETLOCAL\r\n@SET NODE_PATH=%~dp0..\\..\r\n";
-
-        assert_eq!(parse_cmd_node_path(content), Some("..\\.."));
-    }
-
-    #[test]
-    fn parse_posix_node_path_reads_generated_env() {
-        let content = "#!/bin/sh\nexport NODE_PATH=\"$basedir/../..\"\n";
-
-        assert_eq!(parse_posix_node_path(content), Some("../.."));
-    }
-
-    #[test]
-    fn resolve_node_bin_target_preserves_posix_shim_env() {
+    fn resolve_bin_target_preserves_posix_shim_env() {
         let tmp = tempfile::tempdir().unwrap();
         let target = tmp.path().join("pkg").join("bin.js");
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -761,15 +775,18 @@ mod tests {
         )
         .unwrap();
 
-        let resolved = resolve_node_bin_target(&shim).unwrap();
+        let resolved = resolve_bin_target(&shim);
         assert_eq!(resolved.path, target);
         assert_eq!(resolved.node, Some(local_node));
-        assert_eq!(resolved.node_path, Some(node_path));
+        assert_eq!(
+            resolved.node_path,
+            Some(std::env::join_paths([node_path]).unwrap())
+        );
     }
 
     #[cfg(windows)]
     #[test]
-    fn resolve_node_bin_target_reads_cmd_shim_on_windows() {
+    fn resolve_bin_target_reads_cmd_shim_on_windows() {
         let tmp = tempfile::tempdir().unwrap();
         let target = tmp.path().join("pkg").join("bin.js");
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -791,15 +808,19 @@ mod tests {
               @IF EXIST \"%~dp0\\node.exe\" (\r\n\
               \x20 \"%~dp0\\node.exe\" \"%~dp0\\pkg\\bin.js\" %*\r\n\
               ) ELSE (\r\n\
+              \x20 @SET PATHEXT=%PATHEXT:;.JS;=;%\r\n\
               \x20 node \"%~dp0\\pkg\\bin.js\" %*\r\n\
               )\r\n",
         )
         .unwrap();
 
-        let resolved = resolve_node_bin_target(&bare).unwrap();
+        let resolved = resolve_bin_target(&bare);
         assert_eq!(resolved.path, target);
         assert_eq!(resolved.node, Some(local_node));
-        assert_eq!(resolved.node_path, Some(node_path));
+        assert_eq!(
+            resolved.node_path,
+            Some(std::env::join_paths([node_path]).unwrap())
+        );
     }
 
     #[test]
@@ -834,4 +855,124 @@ mod tests {
         std::fs::write(&target, b"#!/usr/bin/nodejs\nconsole.log(1)\n").unwrap();
         assert!(is_node_backed_bin(&target));
     }
+
+    #[test]
+    fn resolved_bin_command_keeps_js_shim_without_node_args() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("pkg/bin.js");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"#!/usr/bin/env node\n").unwrap();
+        let shim = tmp.path().join("tool");
+        std::fs::write(&shim, "#!/bin/sh\n# aube-bin-shim v1 target=pkg/bin.js\n").unwrap();
+
+        assert!(resolved_bin_command(&shim, &[], &[]).is_none());
+    }
+
+    #[test]
+    fn native_magic_recognizes_supported_executable_formats() {
+        for magic in [
+            b"\x7fELF".as_slice(),
+            b"\xcf\xfa\xed\xfe".as_slice(),
+            b"\xfe\xed\xfa\xcf".as_slice(),
+            b"\xce\xfa\xed\xfe".as_slice(),
+            b"\xfe\xed\xfa\xce".as_slice(),
+            b"\xca\xfe\xba\xbe".as_slice(),
+            b"\xbe\xba\xfe\xca".as_slice(),
+            b"\xca\xfe\xba\xbf".as_slice(),
+            b"\xbf\xba\xfe\xca".as_slice(),
+        ] {
+            assert!(is_native_magic(magic), "unrecognized magic: {magic:x?}");
+        }
+        assert!(!is_native_magic(b"#!/u"));
+    }
+
+    #[test]
+    fn pe_detection_requires_the_pe_signature() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("tool");
+        let mut pe = vec![0u8; 68];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3c..0x40].copy_from_slice(&64u32.to_le_bytes());
+        pe[64..68].copy_from_slice(b"PE\0\0");
+        std::fs::write(&target, pe).unwrap();
+        assert!(is_native_executable(&target));
+
+        std::fs::write(&target, b"MZ = 1; console.log(MZ);\n").unwrap();
+        assert!(!is_native_executable(&target));
+    }
+
+    #[test]
+    fn native_executable_detection_reads_magic_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("tool");
+        std::fs::write(&target, b"\x7fELFpayload").unwrap();
+
+        assert!(is_native_executable(&target));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_executable_detection_accepts_windows_extensions() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["tool.EXE", "tool.cmd", "tool.Bat", "tool.com"] {
+            let target = tmp.path().join(name);
+            std::fs::write(&target, b"not magic").unwrap();
+            assert!(is_native_executable(&target), "rejected {name}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_executable_detection_preserves_shebang_targets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("tool.exe");
+        std::fs::write(&target, b"#!/usr/bin/env node\n").unwrap();
+
+        assert!(!is_native_executable(&target));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn bin_command_executes_windows_target_from_dotted_generated_cmd_shim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("node_modules/.bin");
+        let target = std::env::var_os("COMSPEC")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+        aube_linker::create_bin_shim(
+            &bin_dir,
+            "native-tool.exe",
+            &target,
+            aube_linker::BinShimOptions::default(),
+        )
+        .unwrap();
+
+        let mut command = build_bin_command(
+            tmp.path(),
+            &bin_dir.join("native-tool.exe"),
+            "native-tool.exe",
+            &[
+                "/D".to_string(),
+                "/S".to_string(),
+                "/C".to_string(),
+                "echo launched-directly".to_string(),
+            ],
+            &[],
+            false,
+        );
+        let output = command.output().await.unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "launched-directly"
+        );
+    }
+
+    // Upstream v1.35.0 adds `bin_command_executes_native_target_behind_generated_shim`
+    // here, asserting a native target under `preferSymlinkedExecutables: false`
+    // produces a *generated* shim whose NODE_PATH survives into the exec.
+    // nub #394 forces the symlink layout for native targets regardless of that
+    // setting (see `aube-linker::sys::create_bin_shim`), so the scenario is
+    // unreachable on Unix here and the invariant is pinned in sys.rs instead.
+    // Re-evaluate if nub adopts upstream's `BinLaunch::Direct` shim.
 }

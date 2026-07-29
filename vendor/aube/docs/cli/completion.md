@@ -2,6 +2,7 @@
 # `aube completion`
 
 - **Usage**: `aube completion <SHELL>`
+- **Effect**: read-only
 
 Generate shell completions (bash, zsh, fish)
 

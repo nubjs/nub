@@ -29,11 +29,13 @@ pub use peer_context::{
     hoist_auto_installed_peers, peer_pass_for_import, remove_auto_installed_peers,
 };
 pub use platform::{SupportedArchitectures, is_supported};
-pub use primer::{PruneStats as PrimerPruneStats, prune_cache as prune_primer_cache};
+pub use primer::{
+    PruneStats as PrimerPruneStats, popular_package_names, prune_cache as prune_primer_cache,
+};
 pub use semver_util::{PickResult, pick_version_for_add};
 pub use trust::{
-    MissingTimeDetails as MissingTrustTimeDetails, TrustCheckError, TrustDowngradeDetails,
-    check_no_downgrade,
+    MissingTimeDetails as MissingTrustTimeDetails, PriorTrustEvidence, TrustCheckError,
+    TrustDowngradeDetails, check_no_downgrade, evidence_for, strongest_prior_evidence,
 };
 pub use trust::{PackageVersionPolicy, TrustEvidence, TrustExcludeParseError, TrustExcludeRules};
 pub use types::{

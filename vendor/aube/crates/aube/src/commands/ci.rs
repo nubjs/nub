@@ -64,7 +64,7 @@ pub async fn run(args: CiArgs) -> miette::Result<()> {
     // Propagate --ignore-scripts so root lifecycle hooks are skipped.
     let opts = install::InstallOptions {
         control: install::InstallControl::default(),
-        embedder_node_bin_dir: None,
+        embedder_runtime: None,
         project_dir: None,
         mode: install::FrozenMode::Frozen,
         dep_selection: install::DepSelection::from_flags(false, false, no_optional),

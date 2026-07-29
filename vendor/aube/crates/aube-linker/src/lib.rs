@@ -109,6 +109,11 @@ pub struct Linker {
     /// `allowBuilds` entries flipped, engine version bumped).
     pub(crate) store: Store,
     use_global_virtual_store: bool,
+    /// Exact dep paths that must be materialized into the project's
+    /// `.aube/` tree even while the rest of the graph uses the global
+    /// virtual store. This is reserved for compatibility transforms
+    /// that need to mutate one package without touching shared bytes.
+    project_local_dep_paths: rustc_hash::FxHashSet<String>,
     strategy: LinkStrategy,
     /// Per-`name@version` patch contents applied at materialize
     /// time. Empty when the project has no `pnpm.patchedDependencies`.

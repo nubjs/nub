@@ -2,6 +2,7 @@
 # `aube fetch`
 
 - **Usage**: `aube fetch [FLAGS]`
+- **Effect**: modifies state
 
 Download lockfile dependencies into the store without linking node_modules
 

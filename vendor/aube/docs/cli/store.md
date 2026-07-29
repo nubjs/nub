@@ -2,6 +2,7 @@
 # `aube store`
 
 - **Usage**: `aube store <SUBCOMMAND>`
+- **Effect**: read-only
 
 Manage the global store
 

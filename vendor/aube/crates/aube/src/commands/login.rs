@@ -20,6 +20,8 @@ use miette::{IntoDiagnostic, miette};
 use std::io::{BufRead, IsTerminal};
 use std::time::{Duration, Instant};
 
+const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, Args)]
 pub struct LoginArgs {
     /// Authentication flow: `legacy` (token paste; default) or `web`
@@ -228,11 +230,7 @@ async fn poll_done(client: &reqwest::Client, done_url: &str) -> miette::Result<S
                 tokio::time::sleep(delay).await;
             }
             200 => {
-                let body: serde_json::Value = resp
-                    .json()
-                    .await
-                    .into_diagnostic()
-                    .map_err(|e| miette!("failed to parse doneUrl response: {e}"))?;
+                let body = read_token_response(resp).await?;
                 return body
                     .get("token")
                     .and_then(|v| v.as_str())
@@ -244,6 +242,42 @@ async fn poll_done(client: &reqwest::Client, done_url: &str) -> miette::Result<S
             }
         }
     }
+}
+
+async fn read_token_response(mut resp: reqwest::Response) -> miette::Result<serde_json::Value> {
+    if resp
+        .content_length()
+        .is_some_and(|len| len > MAX_TOKEN_RESPONSE_BYTES as u64)
+    {
+        return Err(miette::miette!(
+            code = aube_codes::errors::ERR_AUBE_WEB_LOGIN_RESPONSE_TOO_LARGE,
+            "web login token response exceeds {MAX_TOKEN_RESPONSE_BYTES} bytes"
+        ));
+    }
+
+    let mut body = bytes::BytesMut::with_capacity(
+        resp.content_length()
+            .map(|len| len as usize)
+            .unwrap_or(1024),
+    );
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .into_diagnostic()
+        .map_err(|e| miette!("failed to read doneUrl response: {e}"))?
+    {
+        if body.len().saturating_add(chunk.len()) > MAX_TOKEN_RESPONSE_BYTES {
+            return Err(miette::miette!(
+                code = aube_codes::errors::ERR_AUBE_WEB_LOGIN_RESPONSE_TOO_LARGE,
+                "web login token response exceeds {MAX_TOKEN_RESPONSE_BYTES} bytes"
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    serde_json::from_slice(&body)
+        .into_diagnostic()
+        .map_err(|e| miette!("failed to parse doneUrl response: {e}"))
 }
 
 /// Best-effort launch the OS's default browser. Failures are intentionally

@@ -45,6 +45,7 @@ pub(crate) fn extract_config_overrides(args: &mut Vec<OsString>) -> Vec<(String,
 /// rewrite the argv so clap sees the equivalent `aube run …` / `aube dlx …`.
 pub(crate) fn rewrite_multicall_argv(mut args: Vec<OsString>) -> Vec<OsString> {
     normalize_npm_interpreter_shim_argv(&mut args);
+    normalize_dispatcher_shim_argv(&mut args);
     let Some(argv0) = args.first() else {
         return args;
     };
@@ -60,6 +61,20 @@ pub(crate) fn rewrite_multicall_argv(mut args: Vec<OsString>) -> Vec<OsString> {
         _ => args,
     };
     protect_node_subcommand_args(rewritten)
+}
+
+fn normalize_dispatcher_shim_argv(args: &mut Vec<OsString>) {
+    if args.get(1).and_then(|arg| arg.to_str()) != Some(crate::tool_shims::DISPATCH_ARG) {
+        return;
+    }
+    let Some(tool) = args.get(2).and_then(|arg| arg.to_str()) else {
+        return;
+    };
+    if !crate::tool_shims::TOOL_SHIMS.contains(&tool) {
+        return;
+    }
+    args[0] = OsString::from(tool);
+    args.drain(1..=2);
 }
 
 fn rewrite_simple_multicall(mut args: Vec<OsString>, subcommand: &str) -> Vec<OsString> {

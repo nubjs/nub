@@ -193,6 +193,110 @@ _make_env_probe_project() {
 	# setting (tested in the config-get test above).
 }
 
+# --- relocating the global virtual store ---
+#
+# The global virtual store is the biggest thing under `cacheDir`, and
+# it hardlinks out of the CAS, so users who move `storeDir` to another
+# volume need to move this with it. Before these settings were honored
+# here, the only lever was `XDG_CACHE_HOME`. `cacheDir` moves the whole
+# cache; `globalVirtualStoreDir` moves only the virtual store.
+
+# Assert `.aube/<dep_path>` is an absolute symlink into `$1`, the
+# expected global virtual store root.
+_assert_links_into_gvs() {
+	local gvs="$1"
+	[ -L node_modules/.aube/is-odd@3.0.1 ]
+	local target
+	target=$(readlink node_modules/.aube/is-odd@3.0.1)
+	[[ "$target" == "$gvs/"* ]]
+}
+
+@test "AUBE_CACHE_DIR relocates the global virtual store" {
+	_setup_basic_fixture
+	local custom_cache="$TEST_TEMP_DIR/custom-cache"
+
+	AUBE_CACHE_DIR="$custom_cache" run aube install
+	assert_success
+
+	assert_dir_exists "$custom_cache/virtual-store"
+	# `.aube/<dep_path>` is a symlink into the relocated global store,
+	# not into the XDG default.
+	_assert_links_into_gvs "$custom_cache/virtual-store"
+	[ ! -d "$HOME/.cache/aube/virtual-store" ]
+}
+
+@test "cacheDir in .npmrc relocates the global virtual store" {
+	_setup_basic_fixture
+	local custom_cache="$TEST_TEMP_DIR/npmrc-cache"
+	echo "cacheDir=$custom_cache" >>"$HOME/.npmrc"
+
+	run aube install
+	assert_success
+	assert_dir_exists "$custom_cache/virtual-store"
+	_assert_links_into_gvs "$custom_cache/virtual-store"
+	[ ! -d "$HOME/.cache/aube/virtual-store" ]
+}
+
+@test "AUBE_GLOBAL_VIRTUAL_STORE_DIR relocates only the virtual store" {
+	_setup_basic_fixture
+	local gvs="$TEST_TEMP_DIR/custom-gvs"
+
+	AUBE_GLOBAL_VIRTUAL_STORE_DIR="$gvs" run aube install
+	assert_success
+
+	# The path is used verbatim — no `virtual-store` suffix appended.
+	_assert_links_into_gvs "$gvs"
+	[ ! -d "$HOME/.cache/aube/virtual-store" ]
+	# The rest of the cache stays put: metadata still lands under the
+	# platform cache dir.
+	assert_dir_exists "$HOME/.cache/aube"
+}
+
+@test "globalVirtualStoreDir in .npmrc wins over cacheDir" {
+	_setup_basic_fixture
+	local custom_cache="$TEST_TEMP_DIR/split-cache"
+	local gvs="$TEST_TEMP_DIR/split-gvs"
+	cat >>"$HOME/.npmrc" <<RC
+cacheDir=$custom_cache
+globalVirtualStoreDir=$gvs
+RC
+
+	run aube install
+	assert_success
+	_assert_links_into_gvs "$gvs"
+	[ ! -d "$custom_cache/virtual-store" ]
+}
+
+@test "reinstall under AUBE_GLOBAL_VIRTUAL_STORE_DIR keeps the layout" {
+	_setup_basic_fixture
+	local gvs="$TEST_TEMP_DIR/custom-gvs"
+
+	AUBE_GLOBAL_VIRTUAL_STORE_DIR="$gvs" run aube install
+	assert_success
+
+	AUBE_GLOBAL_VIRTUAL_STORE_DIR="$gvs" run aube install
+	assert_success
+	refute_output --partial "global virtual store"
+	_assert_links_into_gvs "$gvs"
+}
+
+@test "reinstall under AUBE_CACHE_DIR keeps the layout, no gvs transition wipe" {
+	_setup_basic_fixture
+	local custom_cache="$TEST_TEMP_DIR/custom-cache"
+
+	AUBE_CACHE_DIR="$custom_cache" run aube install
+	assert_success
+
+	# The warm-path layout check must resolve the same relocated global
+	# store the install wrote to. If it looked at the XDG default it
+	# would see an empty dir, decide the layout flipped, and wipe
+	# `node_modules/` on every install.
+	AUBE_CACHE_DIR="$custom_cache" run aube install
+	assert_success
+	refute_output --partial "global virtual store"
+	[ -L node_modules/.aube/is-odd@3.0.1 ]
+}
+
 @test "linkConcurrency in .npmrc is read during install" {
 	_setup_basic_fixture
 	echo "linkConcurrency=0" >>"$HOME/.npmrc"

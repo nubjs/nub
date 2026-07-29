@@ -28,6 +28,7 @@ pub const WARN_AUBE_LTHASH_MISMATCH: &str = "WARN_AUBE_LTHASH_MISMATCH";
 pub const WARN_AUBE_DELTA_INVALIDATE_FAILED: &str = "WARN_AUBE_DELTA_INVALIDATE_FAILED";
 pub const WARN_AUBE_GVS_INCOMPATIBLE: &str = "WARN_AUBE_GVS_INCOMPATIBLE";
 pub const WARN_AUBE_GVS_MODE_CHANGED: &str = "WARN_AUBE_GVS_MODE_CHANGED";
+pub const WARN_AUBE_GVS_CROSS_VOLUME: &str = "WARN_AUBE_GVS_CROSS_VOLUME";
 #[rustfmt::skip] pub const WARN_AUBE_QUARANTINE_STRIP_FAILED: &str = "WARN_AUBE_QUARANTINE_STRIP_FAILED";
 
 // ── settings / config validation ────────────────────────────────────
@@ -111,6 +112,8 @@ pub const WARN_AUBE_WORKSPACE_TOPO_CYCLE: &str = "WARN_AUBE_WORKSPACE_TOPO_CYCLE
 
 // ── supply chain (add-time) ─────────────────────────────────────────
 pub const WARN_AUBE_LOW_DOWNLOAD_PACKAGE: &str = "WARN_AUBE_LOW_DOWNLOAD_PACKAGE";
+pub const WARN_AUBE_SIMILAR_PACKAGE_NAME: &str = "WARN_AUBE_SIMILAR_PACKAGE_NAME";
+pub const WARN_AUBE_NEW_PACKAGE_NAME: &str = "WARN_AUBE_NEW_PACKAGE_NAME";
 pub const WARN_AUBE_ADVISORY_CHECK_FAILED: &str = "WARN_AUBE_ADVISORY_CHECK_FAILED";
 pub const WARN_AUBE_OSV_MIRROR_REFRESH_FAILED: &str = "WARN_AUBE_OSV_MIRROR_REFRESH_FAILED";
 pub const WARN_AUBE_OSV_BLOOM_REFRESH_FAILED: &str = "WARN_AUBE_OSV_BLOOM_REFRESH_FAILED";
@@ -253,6 +256,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_GVS_MODE_CHANGED,
         category: category::INSTALL_LIFECYCLE,
         description: "Switching between gvs-on and gvs-off; removing `node_modules` and reinstalling from scratch.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_GVS_CROSS_VOLUME,
+        category: category::INSTALL_LIFECYCLE,
+        description: "`cacheDir` (global virtual store) and `storeDir` are on different volumes, so linking falls back to per-file copy.",
         exit_code: None,
     },
     CodeMeta {
@@ -586,9 +595,21 @@ pub const ALL: &[CodeMeta] = &[
     },
     // Supply chain (add-time)
     CodeMeta {
+        name: WARN_AUBE_SIMILAR_PACKAGE_NAME,
+        category: category::SUPPLY_CHAIN,
+        description: "`aube add` flagged a package whose name closely resembles a top-100,000 npm package. Interactive sessions prompt for confirmation; non-interactive contexts fail with `ERR_AUBE_SIMILAR_PACKAGE_NAME` unless explicitly allowed.",
+        exit_code: None,
+    },
+    CodeMeta {
         name: WARN_AUBE_LOW_DOWNLOAD_PACKAGE,
         category: category::SUPPLY_CHAIN,
         description: "`aube add` flagged a package whose weekly downloads fall below `lowDownloadThreshold`. Interactive sessions prompt for confirmation; non-interactive contexts fail with `ERR_AUBE_LOW_DOWNLOAD_PACKAGE` unless `--allow-low-downloads` is passed.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_NEW_PACKAGE_NAME,
+        category: category::SUPPLY_CHAIN,
+        description: "`aube add` flagged a package name first published within `minimumPackageAge`. Interactive sessions prompt for confirmation; non-interactive contexts fail with `ERR_AUBE_NEW_PACKAGE_NAME` unless explicitly allowed.",
         exit_code: None,
     },
     CodeMeta {

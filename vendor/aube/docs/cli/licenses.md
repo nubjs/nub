@@ -2,6 +2,7 @@
 # `aube licenses`
 
 - **Usage**: `aube licenses [FLAGS]`
+- **Effect**: read-only
 
 Report the licenses of installed dependencies
 

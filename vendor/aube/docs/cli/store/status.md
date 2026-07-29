@@ -2,6 +2,7 @@
 # `aube store status`
 
 - **Usage**: `aube store status`
+- **Effect**: read-only
 
 Verify the store against cached package indexes.
 
