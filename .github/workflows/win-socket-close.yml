@@ -1,0 +1,22 @@
+name: win-socket-close probe
+
+on:
+  push:
+    branches: [probe/win-socket-close]
+    paths:
+      - 'tests/win-socket-close/**'
+      - '.github/workflows/win-socket-close.yml'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo run --release
+        working-directory: tests/win-socket-close
