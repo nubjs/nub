@@ -331,6 +331,22 @@ fn assemble_app(bundled: &bundle::BundleResult, layout: &assets::Layout) -> Resu
         }
         None => files.push((pkg, br#"{"type":"module"}"#.to_vec())),
     }
+
+    // The launcher refuses any payload name that could escape its extraction dir.
+    // Names are partly user-derived since `--include`, so check the SAME predicate
+    // on the WHOLE set here — the last point where every name exists — rather than
+    // shipping an executable that aborts on someone else's machine. Checked against
+    // the TARGET's rules, since a name that is one component on Linux can be an
+    // escape on Windows.
+    for (name, _) in &files {
+        if !nub_core::compile::is_safe_relative_name(name) {
+            bail!(
+                "this path cannot be embedded: {name:?}. An --include'd path must sit \
+                 inside the tree that holds the entry, and its name must be a plain \
+                 relative path."
+            );
+        }
+    }
     Ok(files)
 }
 

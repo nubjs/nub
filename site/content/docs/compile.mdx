@@ -194,6 +194,8 @@ $ nub compile app.ts --include=data/missing.json
 Error: --include "data/missing.json" matched no files (the path does not exist)
 ```
 
+Embedded bytes are stored as they are, not compressed, so the executable grows by roughly the size of what you embed.
+
 ## `--exclude`
 
 Drop paths from what `--include` selected, for when a directory is almost the right set:

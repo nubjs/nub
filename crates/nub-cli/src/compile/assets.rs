@@ -125,24 +125,6 @@ pub fn plan(
     }
 
     let entry_prefix = relative_slash(&anchor, entry_dir).unwrap_or_default();
-
-    // The launcher refuses any payload name that could escape its extraction dir.
-    // Since `--include` derives names from user paths, check the SAME predicate
-    // here: a rejected name must fail this build, not produce an executable that
-    // aborts on someone else's machine. (`entry_prefix` is empty when the entry
-    // sits at the anchor, which is not a payload name and is always fine.)
-    for name in std::iter::once(&entry_prefix)
-        .filter(|p| !p.is_empty())
-        .chain(collected.keys())
-    {
-        if !nub_core::compile::is_safe_relative_name(name) {
-            bail!(
-                "--include produced a path that cannot be embedded: {name:?}. \
-                 Included paths must sit inside the tree that holds the entry."
-            );
-        }
-    }
-
     Ok(Layout {
         entry_prefix,
         assets: collected
@@ -156,9 +138,16 @@ pub fn plan(
 /// and the optional glob it filters with.
 struct Matcher {
     token: String,
-    /// The deepest directory the pattern is rooted at — the literal leading
-    /// components, resolved into the entry's namespace.
+    /// The deepest directory the pattern is rooted at, with its ANCESTORS in the
+    /// entry's namespace and its final component exactly as the user wrote it.
+    /// This is what anchoring, naming, and walking use.
     root: PathBuf,
+    /// `root` with symlinks fully resolved — a comparison key ONLY, never a name.
+    /// Anchoring and matching genuinely want different namespaces: a name must
+    /// mirror the tree the user described (so a symlinked `public/` stays
+    /// `public/`), while an `--exclude` must still recognize the file an
+    /// `--include` walked even when one of them spelled it through a link.
+    canonical_root: PathBuf,
     /// The glob tail RELATIVE to `root`, when the token had any wildcards.
     /// Relative, not absolute, so the build machine's own directory names can
     /// never be read as glob syntax — a project living in `~/proj[1]` would
@@ -185,10 +174,11 @@ impl Matcher {
         // otherwise a Next.js/Astro route directory (`app/[id]/data.json`) or a
         // browser-numbered download (`report[1].pdf`) could not be named at all.
         if abs.exists() {
-            let root = resolve(&abs);
+            let root = resolve_parent(&abs);
             let is_file = root.is_file();
             return Ok(Self {
                 token: token.to_string(),
+                canonical_root: resolve(&abs),
                 root,
                 pattern: None,
                 is_file,
@@ -216,16 +206,19 @@ impl Matcher {
             }
         }
 
-        let root = resolve(&if lit.is_absolute() {
+        let literal = if lit.is_absolute() {
             lit
         } else {
             cwd.join(lit)
-        });
+        };
+        let root = resolve_parent(&literal);
+        let canonical_root = resolve(&literal);
         if sawglob {
             return Ok(Self {
                 token: token.to_string(),
                 pattern: Some(to_slash(&tail)),
                 root,
+                canonical_root,
                 is_file: false,
             });
         }
@@ -233,6 +226,7 @@ impl Matcher {
         Ok(Self {
             token: token.to_string(),
             root,
+            canonical_root,
             pattern: None,
             is_file,
         })
@@ -270,8 +264,11 @@ impl Matcher {
         let Some(pattern) = &self.pattern else {
             return false;
         };
-        path.strip_prefix(&self.root)
-            .is_ok_and(|rel| glob_match::glob_match(pattern, &to_slash(rel)))
+        path.strip_prefix(&self.root).is_ok_and(|rel| {
+            // An empty remainder means `path` IS the root, which a tail pattern
+            // describes something below — `*` must not prune the root itself.
+            !rel.as_os_str().is_empty() && glob_match::glob_match(pattern, &to_slash(rel))
+        })
     }
 
     /// Whether this token prunes `path`. A literal directory prunes its whole
@@ -283,7 +280,11 @@ impl Matcher {
     fn matches(&self, path: &Path) -> bool {
         match self.pattern {
             Some(_) => self.glob_hits(path),
-            None => path.starts_with(&self.root),
+            // Either spelling counts. Comparing only the as-written form lets an
+            // `--exclude` naming a symlink miss the file its `--include` walked,
+            // and an unmatched exclude is silent — so the miss ships the very
+            // file the user asked to leave out.
+            None => path.starts_with(&self.root) || resolve(path).starts_with(&self.canonical_root),
         }
     }
 }
@@ -292,16 +293,31 @@ fn has_wildcard(s: &str) -> bool {
     s.contains(['*', '?', '[', '{'])
 }
 
-/// Put `path` in the same namespace as the canonicalized entry by resolving its
-/// deepest EXISTING ancestor and re-appending the rest.
+/// Reconcile `path`'s ANCESTORS with the canonicalized entry while leaving the
+/// final component exactly as written.
 ///
-/// Neither half alone is enough. Plain `canonicalize` fails outright on a glob's
-/// non-existent tail; plain lexical normalization leaves a symlinked spelling
-/// (`/tmp` where the entry canonicalized to `/private/tmp`) that then silently
-/// fails to prefix-match a walked path — which disarms an `--exclude` without a
-/// word, so `--include . --exclude "$PWD/.env"` ships the secret. `$PWD` is the
-/// logical path while `current_dir()` is the physical one, so that spelling is
-/// the ordinary one in a build script, not an exotic input.
+/// The leaf is what the user is naming, and naming is what the extracted layout
+/// mirrors: fully resolving `--include public` when `public` is a symlink into a
+/// sibling package drags the anchor out of the project and the app's own
+/// `../public/...` stops resolving. Resolving the ancestors is still required,
+/// because a token spelled `/tmp/...` against an entry canonicalized to
+/// `/private/tmp/...` otherwise shares no common directory at all.
+fn resolve_parent(path: &Path) -> PathBuf {
+    let normalized = normalize(path);
+    match (normalized.parent(), normalized.file_name()) {
+        (Some(parent), Some(name)) => {
+            let mut out = resolve(parent);
+            out.push(name);
+            out
+        }
+        _ => normalized,
+    }
+}
+
+/// Fully resolve `path` — every symlink followed — by canonicalizing its deepest
+/// EXISTING ancestor and re-appending the rest. Used as a comparison key, where
+/// two spellings of one file must compare equal; see [`resolve_parent`] for why
+/// names are not built this way.
 fn resolve(path: &Path) -> PathBuf {
     let normalized = normalize(path);
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
@@ -552,6 +568,51 @@ mod tests {
             "an exclude spelled through a symlink must prune the same files as one spelled directly"
         );
         let _ = fs::remove_file(&link);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_exclude_naming_a_symlinked_file_prunes_the_file_the_include_walked() {
+        // The include walks `assets/` and finds the link by its own path; the
+        // exclude names the same link. Comparing only fully-resolved forms (or
+        // only as-written ones) makes one side miss — and a missed exclude is
+        // silent, so the file it named ships anyway.
+        let d = fixture("symlinked-file");
+        fs::create_dir_all(d.join("secret")).unwrap();
+        fs::write(d.join("secret/prod.json"), "SECRET").unwrap();
+        std::os::unix::fs::symlink("../secret/prod.json", d.join("assets/config.json")).unwrap();
+
+        let plan = plan(
+            &d.join("src"),
+            &d,
+            &["assets".into()],
+            &["assets/config.json".into()],
+        )
+        .unwrap();
+        assert!(
+            !plan.assets.iter().any(|a| a.rel.contains("config.json")),
+            "a symlinked file named by --exclude must not ship: {:?}",
+            plan.assets.iter().map(|a| &a.rel).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_include_naming_a_symlinked_directory_keeps_the_name_the_user_wrote() {
+        // The monorepo shape: `public` is a link into a sibling package. Naming
+        // the link's TARGET would move the asset outside the entry's tree, and
+        // the app's own `../public/...` would stop resolving once compiled.
+        let d = fixture("symlinked-dir");
+        fs::create_dir_all(d.join("shared/public")).unwrap();
+        fs::write(d.join("shared/public/data.json"), "{}").unwrap();
+        std::os::unix::fs::symlink("shared/public", d.join("public")).unwrap();
+
+        let plan = plan(&d.join("src"), &d, &["public".into()], &[]).unwrap();
+        assert_eq!(plan.entry_prefix, "src");
+        assert_eq!(
+            plan.assets.iter().map(|a| &a.rel).collect::<Vec<_>>(),
+            ["public/data.json"]
+        );
     }
 
     #[test]
