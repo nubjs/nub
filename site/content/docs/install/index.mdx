@@ -412,7 +412,7 @@ Which manifest field grants permission tracks the inferred incumbent: pnpm proje
 
 A registry-resolved version must be older than `minimumReleaseAge` — 24 hours by default — before Nub will install it. The window is what keeps a compromised publish out of your tree during the hours between it going up and being caught.
 
-Publish dates come from the registry's `time` metadata, so the gate is only as strong as what the registry serves. An age Nub cannot establish counts as a failure, not a pass:
+Publish dates come from the registry's `time` metadata, so the gate is only as strong as what the registry serves. Under the default `minimumReleaseAgeStrict=true`, an age Nub cannot establish counts as a failure rather than a pass:
 
 | Registry metadata | Outcome |
 |---|---|
@@ -420,6 +420,8 @@ Publish dates come from the registry's `time` metadata, so the gate is only as s
 | Dates for other versions, none for this one | Blocked |
 | No per-version dates, document older than the window | Allowed — the document's own timestamp bounds every version in it |
 | No per-version dates, document newer than the window | Blocked |
+
+Loosening strictness reverses both blocked rows: an undateable version becomes eligible again, and the lowest satisfying one is picked.
 
 Registries that publish no dates at all — some private mirrors, older Verdaccio — hit the last row, and the error names that as the cause rather than reporting a missed cutoff. Three ways through:
 
