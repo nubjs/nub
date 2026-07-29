@@ -206,9 +206,20 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             std::io::Error::other(format!("compiling build-jail for lifecycle script: {e}"))
         })?;
 
-        let mut spec = nub_sandbox::CommandSpec::new(&spawn.program)
-            .args(&spawn.args)
-            .cwd(&spawn.cwd);
+        // The tail crosses TWO re-encodings on Windows (aube's builder → this spec →
+        // the backend's own `CreateProcessW`), and `cmd.exe` survives neither: it does
+        // not implement the `CommandLineToArgvW` rules, so a re-quoted line reaches it
+        // as `\""` and no dependency lifecycle script starts. Carrying aube's
+        // already-encoded line through as-is is the whole point of both enums.
+        let mut spec = match &spawn.args {
+            aube_util::LifecycleSpawnArgs::Argv(args) => {
+                nub_sandbox::CommandSpec::new(&spawn.program).args(args)
+            }
+            aube_util::LifecycleSpawnArgs::WindowsVerbatim(line) => {
+                nub_sandbox::CommandSpec::new(&spawn.program).verbatim_command_line(line)
+            }
+        }
+        .cwd(&spawn.cwd);
         // The `.env*` deny floor is a bounded glob, so the backend needs the dirs whose
         // immediate children it may materialize to enforce it. The PACKAGE DIR is the
         // primary such root: it is the one place the jail both reads and writes. The

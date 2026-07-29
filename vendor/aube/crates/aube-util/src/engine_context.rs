@@ -41,8 +41,8 @@ use std::sync::{Arc, OnceLock, RwLock};
 pub struct LifecycleSandboxSpawn {
     /// The shell program (`sh` / `cmd.exe`) the script line runs through.
     pub program: OsString,
-    /// Its arguments (`-c <script>` / the cmd.exe raw tail).
-    pub args: Vec<OsString>,
+    /// How the shell's argument tail is spelled — see [`LifecycleSpawnArgs`].
+    pub args: LifecycleSpawnArgs,
     /// The working directory (the package dir the script runs in).
     pub cwd: PathBuf,
     /// The project root, for the embedder's project-read grant + `./` anchor.
@@ -53,6 +53,44 @@ pub struct LifecycleSandboxSpawn {
     /// back from the built command. Layered over the inherited aube-process env by the
     /// embedder to reconstruct the effective child env the unconfined spawn would have.
     pub env_delta: Vec<(OsString, Option<OsString>)>,
+}
+
+/// The shell argument tail of a lifecycle spawn, in the shape the embedder must
+/// reproduce to launch the SAME command aube would have.
+///
+/// Two shapes because Windows has no argv. On the default `cmd.exe` path aube builds
+/// the command line itself with `CommandExt::raw_arg` (see `spawn_shell_with_settings`
+/// in `aube-scripts` for why: `cmd.exe` does not implement the `CommandLineToArgvW`
+/// rules Rust's encoder targets, and reads a `\"` escape as two literal characters). A
+/// `Vec<OsString>` cannot carry that distinction — `Command::get_args` yields the raw
+/// pieces with their rawness erased — so an embedder reading the args back would
+/// re-encode them and hand `cmd.exe` a line it cannot parse. This enum is that
+/// distinction, made explicit at the seam.
+#[derive(Debug, Clone)]
+pub enum LifecycleSpawnArgs {
+    /// Ordinary argv: `-c <script>` for `sh`, or for a user-configured `script-shell`.
+    Argv(Vec<OsString>),
+    /// The pre-encoded `cmd.exe` command-line tail, to reach `CreateProcessW` verbatim.
+    WindowsVerbatim(OsString),
+}
+
+impl LifecycleSpawnArgs {
+    /// The tail as one line, for an embedder heuristic that pattern-matches the script
+    /// TEXT (`prebuild-install …`) rather than argv positions.
+    ///
+    /// The two shapes render identically on the Windows default path: `raw_arg` joins
+    /// its pieces with a single space, so space-joining the old three-element argv
+    /// produced exactly the verbatim tail this now carries whole.
+    pub fn command_line(&self) -> String {
+        match self {
+            Self::Argv(v) => v
+                .iter()
+                .map(|a| a.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" "),
+            Self::WindowsVerbatim(line) => line.to_string_lossy().into_owned(),
+        }
+    }
 }
 
 /// An embedder-supplied confiner for dependency lifecycle-script spawns. Set on the

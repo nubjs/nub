@@ -1,0 +1,186 @@
+# Branch-scoped ad-hoc probe: can a dependency lifecycle script RUN under the build jail
+# on Windows at all?
+#
+# Two arms, one probe. The FIXED arm runs the branch as-is. The POISONED arm reverts the
+# fix (tests/win-jail-cmdline/poison.patch), rebuilds, and runs the identical probe.
+#
+# WHAT THE DIFFERENTIAL IS. On WINDOWS a confined script must run with the fix and must NOT
+# without it, and the poisoned arm must carry the exact failure signature (`'\""' is not
+# recognized`) — a script can fail for a hundred reasons and only that one is the bug. On
+# LINUX the fix is a deliberate no-op (there is no cmd.exe; the tail is ordinary `sh -c`
+# argv), so BOTH arms must run every script. That is the control that the diff changed
+# nothing on POSIX, and it independently proves the harness works on a platform where the
+# bug never existed.
+#
+# THE BOTH-ARMS CONTROL, on every platform: `unjailed-quoted` runs the identical quoted
+# script with `dependenciesMeta.<pkg>.sandbox: false`, so aube spawns it unconfined. It
+# must pass in EVERY arm — so the probe cannot go green by being permissive, and a red
+# jailed verdict cannot be a broken harness.
+#
+# Every step is `if: always()`, because a red step early in the job must never hide the
+# end-to-end verdicts — which is the only thing this job exists to produce.
+name: win-jail-cmdline-probe
+
+on:
+  push:
+    branches: [sandbox/win-verbatim-cmdline]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    env:
+      # A HARNESS ACCOMMODATION FOR A SEPARATE, OPEN DEFECT — deliberately not a product
+      # change. Windows gives the main thread a 1MB stack against Linux's 8MB, and the
+      # unoptimized `fast` profile overflows it inside `nub install` before any lifecycle
+      # script runs (rc 3221225725 = 0xC00000FD, STATUS_STACK_OVERFLOW). A sibling lane
+      # measured it identically in its fixed and poisoned arms, which is what makes it
+      # pre-existing. Linking with a Linux-sized stack lets this probe measure the command
+      # line instead of a debug-build frame-size artifact.
+      RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-C link-arg=/STACK:8388608' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Toolchain baseline
+        if: always()
+        shell: bash
+        run: |
+          node -p "process.versions.node + ' ' + process.platform + '/' + process.arch"
+          node -p "require('os').homedir()"
+
+      # ARM 1 — the branch as written.
+      - name: Build nub (fixed)
+        run: cargo build -p nub-cli --profile fast
+
+      - name: Probe (fixed)
+        if: always()
+        shell: bash
+        run: |
+          rc=0
+          node tests/win-jail-cmdline/probe.mjs "$(bash tests/win-jail-native-build/nubpath.sh)" > fixed.log 2>&1 || rc=$?
+          echo "probe exit=$rc"
+          cat fixed.log
+
+      # ARM 2 — the identical probe against a build with the fix reverted. Reverting in the
+      # WORKFLOW rather than behind a runtime flag keeps the shipped binary free of a probe
+      # seam, and makes the differential a property of the SOURCE rather than of a toggle.
+      # The patch touches ONE function in aube, so the verbatim plumbing stays compiled in
+      # both arms and the only variable is whether aube reports the encoded line at all.
+      - name: Poison the fix
+        if: always()
+        shell: bash
+        run: |
+          git apply --verbose tests/win-jail-cmdline/poison.patch
+          git --no-pager diff --stat
+
+      - name: Build nub (poisoned)
+        if: always()
+        run: cargo build -p nub-cli --profile fast
+
+      - name: Probe (poisoned)
+        if: always()
+        shell: bash
+        run: |
+          rc=0
+          node tests/win-jail-cmdline/probe.mjs "$(bash tests/win-jail-native-build/nubpath.sh)" > poisoned.log 2>&1 || rc=$?
+          echo "probe exit=$rc"
+          cat poisoned.log
+
+      # THE VERDICT, read off the two logs rather than off any step's exit status. An
+      # assertion whose `prop:` line is ABSENT fails here — a probe that never ran must not
+      # be indistinguishable from one that passed.
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          fail=0
+          need() { # need <file> <literal-line> <label>
+            if grep -qF "$2" "$1" 2>/dev/null; then
+              echo "OK   [$3] $2"
+            else
+              echo "MISS [$3] $2"
+              fail=1
+            fi
+          }
+          for f in fixed.log poisoned.log; do
+            if [ ! -s "$f" ]; then
+              echo "MISS [$f] the probe produced no output at all"
+              fail=1
+            fi
+          done
+
+          # THE EXPERIMENT RAN. A run on this epic once reported success with rc=127 on
+          # every arm, having executed nothing. Every variant in every arm must show the
+          # dependency materialized on disk before any verdict below means anything.
+          for f in fixed.log poisoned.log; do
+            for v in jailed-quoted jailed-plain unjailed-quoted; do
+              need "$f" "prop:$v/dependency-materialized=PASS" "ran/$f"
+            done
+          done
+
+          # THE BOTH-ARMS CONTROL. Identical script, jail off. Passing here in both arms is
+          # what proves a red jailed verdict is the jail and not the harness — and its
+          # `allowed:` canary read is the positive half of the enforcement differential.
+          for f in fixed.log poisoned.log; do
+            need "$f" "prop:unjailed-quoted/script-ran=PASS" "control/$f"
+            need "$f" "prop:unjailed-quoted/tag-round-trip=PASS" "control/$f"
+            need "$f" "prop:unjailed-quoted/confinement-as-configured=PASS" "control/$f"
+          done
+
+          # The fixed arm must run BOTH confined scripts, confined, in their own package
+          # dir, on every platform.
+          for v in jailed-quoted jailed-plain; do
+            need fixed.log "prop:$v/script-ran=PASS" "fixed"
+            need fixed.log "prop:$v/tag-round-trip=PASS" "fixed"
+            need fixed.log "prop:$v/confinement-as-configured=PASS" "fixed"
+            need fixed.log "prop:$v/cwd-is-package-dir=PASS" "fixed"
+            # The signature must be ABSENT with the fix, on every platform.
+            need fixed.log "prop:$v/mangled-signature=FAIL" "fixed"
+          done
+
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            # THE DIFFERENTIAL. Without the fix the re-encoded tail reaches cmd.exe as
+            # `\""`, so no confined script starts — quoted or not. Asserting the signature
+            # as well as the absence is what distinguishes THIS bug from any other reason a
+            # script might not have run.
+            for v in jailed-quoted jailed-plain; do
+              need poisoned.log "prop:$v/script-ran=FAIL" "poisoned/windows"
+              need poisoned.log "prop:$v/mangled-signature=PASS" "poisoned/windows"
+            done
+          else
+            # POSIX behavior must be preserved exactly: there is no cmd.exe and the tail was
+            # always ordinary argv, so reverting the fix must change nothing.
+            for v in jailed-quoted jailed-plain; do
+              need poisoned.log "prop:$v/script-ran=PASS" "poisoned/posix"
+              need poisoned.log "prop:$v/confinement-as-configured=PASS" "poisoned/posix"
+              need poisoned.log "prop:$v/mangled-signature=FAIL" "poisoned/posix"
+            done
+          fi
+
+          echo "----"
+          if [ "$fail" = 0 ]; then
+            echo "VERDICT: PASS on ${{ matrix.os }}"
+          else
+            echo "VERDICT: FAILED on ${{ matrix.os }} — see the MISS lines above."
+          fi
+          exit $fail
+
+      - name: Upload probe logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-jail-cmdline-${{ matrix.os }}
+          path: |
+            fixed.log
+            poisoned.log
+          if-no-files-found: warn

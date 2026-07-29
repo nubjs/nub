@@ -78,7 +78,7 @@ fn dedupe_windows_env_pairs<'a>(
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) struct AppContainerLaunch {
     program: OsString,
-    args: Vec<OsString>,
+    args: super::CommandArgs,
     cwd: Option<PathBuf>,
     /// Subtrees the AppContainer SID is granted inheritable read-execute.
     read_grants: Vec<PathBuf>,
@@ -566,7 +566,7 @@ pub(crate) fn apply(
     // command path — identical contract to the mac/linux relaxed case.
     if !sandboxing && tmp_lost.is_none() {
         let mut command = std::process::Command::new(&spec.program);
-        command.args(&spec.args);
+        spec.args.apply_to(&mut command);
         if let Some(cwd) = &spec.cwd {
             command.current_dir(cwd);
         }
@@ -1719,18 +1719,35 @@ pub(super) mod launch {
         to_wide(&s)
     }
 
-    /// Build a mutable UTF-16 command line from program + args, quoting each token per
-    /// the CommandLineToArgvW rules std uses. lpApplicationName is NULL, so the child
-    /// gets a conventional argv.
+    /// Build a mutable UTF-16 command line from program + args, quoting each argv token
+    /// per the CommandLineToArgvW rules std uses. lpApplicationName is NULL, so the
+    /// child gets a conventional argv.
+    ///
+    /// THE INVARIANT A VERBATIM TAIL PROTECTS: `cmd.exe` does not parse its line by
+    /// those rules, so re-encoding a line already built for it (aube's `raw_arg` tail —
+    /// see `spawn_shell_with_settings` in `aube-scripts`) escapes `"` as `\"` and hands
+    /// `cmd.exe` a first token of `\""`. Every dependency lifecycle script under the
+    /// build jail passes through here, so that re-encoding broke all of them on Windows.
+    /// A [`CommandArgs::Verbatim`](crate::backend::CommandArgs) tail is therefore copied
+    /// through untouched; the gate that keeps this from being a general quoting bypass
+    /// lives in `validate_apply_inputs`, not here.
     pub(in crate::backend) fn build_command_line(
         program: &std::ffi::OsStr,
-        args: &[std::ffi::OsString],
+        args: &crate::backend::CommandArgs,
     ) -> Vec<u16> {
         let mut line: Vec<u16> = Vec::new();
         append_quoted(&mut line, program);
-        for a in args {
-            line.push(u16::from(b' '));
-            append_quoted(&mut line, a);
+        match args {
+            crate::backend::CommandArgs::Argv(v) => {
+                for a in v {
+                    line.push(u16::from(b' '));
+                    append_quoted(&mut line, a);
+                }
+            }
+            crate::backend::CommandArgs::Verbatim(tail) => {
+                line.push(u16::from(b' '));
+                line.extend(tail.encode_wide());
+            }
         }
         line.push(0);
         line

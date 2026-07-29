@@ -1913,7 +1913,7 @@ fn validate_process_inputs(spec: &CommandSpec) -> Result<(), String> {
         }
     };
     reject_nul("entry program", &spec.program)?;
-    for (index, arg) in spec.args.iter().enumerate() {
+    for (index, arg) in spec.args.tokens().enumerate() {
         reject_nul(&format!("argument {index}"), arg)?;
     }
     if let Some(cwd) = &spec.cwd {
@@ -3063,7 +3063,7 @@ fn apply_landlock(
 
 fn base_command(spec: &CommandSpec, policy: &SandboxPolicy) -> Command {
     let mut command = Command::new(&spec.program);
-    command.args(&spec.args);
+    spec.args.apply_to(&mut command);
     if let Some(cwd) = &spec.cwd {
         command.current_dir(cwd);
     }

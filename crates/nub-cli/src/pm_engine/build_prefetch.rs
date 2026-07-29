@@ -111,7 +111,7 @@ pub(super) fn prefetch(
     ambient: &mut BTreeMap<String, String>,
     probe: &ProbeScope,
 ) -> Vec<PathBuf> {
-    let Some(family) = detect_family(&spawn.args) else {
+    let Some(family) = detect_family(&spawn.args.command_line()) else {
         return Vec::new();
     };
     // ANCHOR: `bin.js:7` does `require(path.resolve('package.json'))` BEFORE the
@@ -144,12 +144,7 @@ pub(super) fn prefetch(
 /// || node-gyp rebuild` is the canonical shape: the fallback never runs when the prefetched
 /// artifact satisfies the first command, so keying on position (not on a fixed precedence)
 /// is what makes a chain resolve to the command that actually decides the outcome.
-fn detect_family(args: &[std::ffi::OsString]) -> Option<Family> {
-    let script = args
-        .iter()
-        .map(|a| a.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(" ");
+fn detect_family(script: &str) -> Option<Family> {
     let prebuild = script.find("prebuild-install");
     // `node-pre-gyp` also appears in `… node-pre-gyp rebuild`, which has no download step
     // to short-circuit; require the install verb before claiming the family.
@@ -504,7 +499,7 @@ fn prebuild_install(
     manifest: &Value,
     node: &NodeFacts,
 ) -> Option<()> {
-    let flags = prebuild_flags(&spawn.args);
+    let flags = prebuild_flags(&spawn.args.command_line());
     // Three flags make a placed file unreadable by construction, so writing one would be
     // pure waste: `--nolocal` returns straight to `download()` ahead of the local probe
     // (`download.js:18`), `--build-from-source` skips the download path outright, and
@@ -554,12 +549,7 @@ fn prebuild_install(
 /// rebuild` is the canonical shape, and letting the fallback's flags leak in would
 /// attribute node-gyp's `--arch` to prebuild-install. Cutting at the first shell operator
 /// errs toward attributing too FEW flags, which is the fail-soft direction.
-fn prebuild_flags(args: &[std::ffi::OsString]) -> BTreeMap<String, String> {
-    let line = args
-        .iter()
-        .map(|a| a.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(" ");
+fn prebuild_flags(line: &str) -> BTreeMap<String, String> {
     let Some(idx) = line.find("prebuild-install") else {
         return BTreeMap::new();
     };
@@ -1454,10 +1444,11 @@ fn best_napi_version(manifest: &Value, interpreter_napi: u32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
 
-    fn args(script: &str) -> Vec<OsString> {
-        vec![OsString::from("-c"), OsString::from(script)]
+    /// The joined script line for a `sh -c <script>` spawn — what the seam's
+    /// `command_line()` hands the family/flag heuristics.
+    fn args(script: &str) -> String {
+        format!("-c {script}")
     }
 
     fn node26() -> NodeFacts {
