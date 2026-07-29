@@ -965,12 +965,29 @@ fn lower_native_install_settings(
                 }
             }
             LinkerConfig::Global { eject } => {
+                // An injected dependency resolves through the hidden hoist tree,
+                // which exists only under a project-local store — so the engine
+                // pushes an explicit `hoist=true` for one and then refuses that
+                // pair outright. Reject it here instead, naming the two things
+                // the user actually wrote; otherwise the install aborts quoting
+                // `enableGlobalVirtualStore` and `hoist`, neither of which
+                // appears in their config.
+                if embedder_defaults
+                    .iter()
+                    .any(|(key, value)| key == "hoist" && value == "true")
+                {
+                    anyhow::bail!(
+                        "nub: `install.linker: \"global-virtual-store\"` cannot be combined with \
+                         `dependenciesMeta.*.injected` — an injected dependency resolves through a \
+                         hidden tree that only a project-local store has. Use \
+                         `\"linker\": \"isolated\"` [ERR_NUB_CONFIG_UNSUPPORTED]"
+                    );
+                }
                 // Written explicitly rather than left to the engine default. The
                 // projectConfig tier outranks `.npmrc`, so staying silent here
-                // let a lower-tier `enableGlobalVirtualStore=false` — or the
-                // implicit `hoist=true` veto — quietly produce a project-local
-                // store under a config that asks for the shared one. `isolated`
-                // pins its half; this is the other.
+                // let a lower-tier `enableGlobalVirtualStore=false` quietly
+                // produce a project-local store under a config that asks for the
+                // shared one. `isolated` pins its half; this is the other.
                 settings.push(("enableGlobalVirtualStore".to_string(), "true".to_string()));
                 eject_patterns = eject.clone();
             }
@@ -3085,6 +3102,36 @@ mod tests {
             linker: Some(linker),
             ..InstallConfig::default()
         }
+    }
+
+    // The engine refuses `enableGlobalVirtualStore=true` alongside an explicit
+    // `hoist=true`, and injected deps are exactly what pushes that hoist. Left
+    // alone, asking for the documented default layout in a project with an
+    // injected dep aborts the install quoting two engine settings the user
+    // never wrote. Reject it in nub's vocabulary instead, and only for that
+    // pair — the same layout without injected deps must still lower cleanly.
+    #[test]
+    fn global_virtual_store_is_rejected_only_when_injected_deps_force_a_hidden_tree() {
+        let injected = [("hoist".to_string(), "true".to_string())];
+        let error = lower_native_install_settings(
+            &with_linker(LinkerConfig::Global { eject: None }),
+            &injected,
+        )
+        .expect_err("global-virtual-store + injected deps must be rejected before the engine sees it")
+        .to_string();
+        assert!(
+            error.contains("install.linker") && error.contains("dependenciesMeta"),
+            "the error must name what the user wrote, got: {error}"
+        );
+
+        let clean = lower(with_linker(LinkerConfig::Global { eject: None }), &[]);
+        assert!(
+            clean
+                .settings
+                .iter()
+                .any(|(k, v)| k == "enableGlobalVirtualStore" && v == "true"),
+            "without injected deps the same layout must still pin the shared store"
+        );
     }
 
     #[test]

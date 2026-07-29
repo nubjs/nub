@@ -3,14 +3,14 @@ title: Config reference
 description: The project file that configures Nub's runtime, dependency installs, and temporary package runs.
 ---
 
-Put `nub.jsonc` at the project root. Nub finds the nearest file by walking up from the command's working directory. The file uses JSON with comments and trailing commas, and an unknown key or invalid value stops the command with an error.
+Put `nub.jsonc` at the project root. Nub finds the nearest file by walking up from the command's working directory. The file uses JSON with comments and trailing commas, and an unknown key or invalid value in it stops the command with an error.
 
 Every setting resolves through the same chain, most specific first:
 
 - **Command-line option** — `nub --node app.ts`
 - **Environment variable** — `NODE_COMPAT=1`
 - **Project `nub.jsonc`** — `"nodeCompat": true`, from the nearest file walking up
-- **Global `nub.jsonc`** — the same field, for personal defaults everywhere. Read from the first of:
+- **Global `nub.jsonc`** — the same field, for personal defaults everywhere. A problem here is reported and the file skipped, so a typo in your own defaults never blocks someone else's project. Read from the first of:
   - `$XDG_CONFIG_HOME/nub/nub.jsonc`, on any platform, when that variable is set
   - `~/.config/nub/nub.jsonc` on macOS and Linux
   - `%APPDATA%\nub\nub.jsonc` on Windows
@@ -462,7 +462,7 @@ Durations use an integer plus one unit.
 2w   # weeks
 ```
 
-The gate fails closed. When no version in a range is old enough the install stops rather than quietly resolving an older one, and a package whose publish time the registry does not report counts as too young. pnpm falls back by default; Nub does not, because a fallback resolves something other than what you asked for without saying so.
+The gate fails closed. When no version in a range is old enough the install stops rather than quietly resolving an older one. pnpm falls back by default; Nub does not, because a fallback resolves something other than what you asked for without saying so.
 
 Exempt the packages that need to move faster, rather than widening the window for everything.
 
