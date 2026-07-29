@@ -73,11 +73,12 @@ Its canary read is also the positive half of the enforcement differential: jaile
 | Property | What it establishes |
 | --- | --- |
 | `dependency-materialized` | The install actually ran. A run on this epic once reported success with `rc=127` on every arm, having executed nothing. |
+| `shell-ran-the-line` | **The gated verdict.** The confined shell parsed its command line and began executing it, evidenced by a marker only a shell builtin wrote — no Node, no interpreter grant, no toolchain. |
 | `script-ran` | The marker file exists — read from disk, never from a status the child reported about itself. |
 | `tag-round-trip` | The argument reached the script intact, so the line was not merely accepted but parsed correctly. |
 | `confinement-as-configured` | The jailed fixtures were refused a canary outside every grant; the unjailed one was allowed it. |
 | `cwd-is-package-dir` | The child started where it was told to. Compared against the store realpath behind `node_modules/<pkg>`. |
-| `mangled-signature` | `'\""' is not recognized` appears in nub's output. Expected ABSENT with the fix, PRESENT without it on Windows. |
+| `mangled-signature` | cmd.exe's own parse-failure message appears in nub's output. Expected ABSENT with the fix, PRESENT without it on Windows. |
 
 Every path the child touches — the canary, its own entry point — is **baked in as an
 absolute literal**. A sibling lane was burned passing a canary path through the
@@ -98,7 +99,8 @@ forces a genuine re-run: the store serves a previously-built copy otherwise, and
 working directory — cmd.exe refuses one and silently runs in the Windows directory instead.
 It had no behavioural coverage on Windows because this blocker stopped every jailed script
 before it could report anything. `cwd-is-package-dir` on the two jailed fixtures is that
-coverage.
+coverage — pending on Windows until the interpreter defect below clears, since it is read
+from a marker only the script's body can write.
 
 ## Running it
 
@@ -111,14 +113,45 @@ node tests/win-jail-cmdline/probe.mjs target/fast/nub
 `ubuntu-latest` — once against the branch, once with `poison.patch` applied. No pull
 request is needed; the workflow is scoped to the branch.
 
-- **Windows** — the differential is the finding: the jailed fixtures must run with the fix,
-  must not without it, and the poisoned arm must carry the signature.
+- **Windows** — the differential is the finding: the jailed fixtures' shell must run the
+  line with the fix, must not without it, and the poisoned arm must carry cmd.exe's own
+  parse-failure message.
 - **Linux** — the fix is a deliberate no-op (no cmd.exe; the tail was always `sh -c` argv),
-  so **both** arms must run every script. That is the control that the diff changed nothing
-  on POSIX.
+  so **both** arms must run every script in full. That is the control that the diff changed
+  nothing on POSIX.
 
 Every workflow step is `if: always()`, because a red gate earlier in the job must never hide
 the end-to-end verdicts.
+
+## What clearing this blocker exposed
+
+Run `30440103670` is the measurement that settled it, and the two arms differ exactly where
+they should:
+
+| Fixture | Poisoned | Fixed |
+| --- | --- | --- |
+| `jailed-quoted` | `The system cannot find the path specified.` — cmd.exe could not parse the line | the line ran; `node` was reached |
+| `jailed-plain` | `'\" node …\""' is not recognized as an internal or external command` | the line ran; `node` was reached |
+| `unjailed-quoted` | full pass | full pass |
+
+So the command line is fixed. What the fixed arm hits **next** is a different defect, one
+this branch uncovered by clearing the thing in front of it:
+
+```
+Error: failed to detect Node version:
+  "C:\hostedtoolcache\windows\node\22.23.1\x64\node.exe": Access is denied. (os error 5)
+```
+
+The confined shell reached `node`, and nub's own version detection was then refused execute
+on the toolchain interpreter under the AppContainer. That is why `script-ran` is **not**
+gated in the Windows fixed arm — gating on it would re-measure someone else's bug — and why
+the gated property is the shell's rather than the script's. Both are printed as diagnostics
+so neither is designed around.
+
+The same run makes the sibling `strip_verbatim_prefix` fix verifiable at last: with the
+command line clear, cmd.exe accepts the working directory it is handed and no
+`UNC paths are not supported` message appears in either arm. `cwd-is-package-dir` records
+it on POSIX today and will on Windows once the interpreter defect above clears.
 
 ## Regenerating `poison.patch`
 

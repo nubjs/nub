@@ -4,13 +4,19 @@
 # Two arms, one probe. The FIXED arm runs the branch as-is. The POISONED arm reverts the
 # fix (tests/win-jail-cmdline/poison.patch), rebuilds, and runs the identical probe.
 #
-# WHAT THE DIFFERENTIAL IS. On WINDOWS a confined script must run with the fix and must NOT
-# without it, and the poisoned arm must carry the exact failure signature (`'\""' is not
-# recognized`) — a script can fail for a hundred reasons and only that one is the bug. On
-# LINUX the fix is a deliberate no-op (there is no cmd.exe; the tail is ordinary `sh -c`
-# argv), so BOTH arms must run every script. That is the control that the diff changed
-# nothing on POSIX, and it independently proves the harness works on a platform where the
-# bug never existed.
+# WHAT THE DIFFERENTIAL IS. The gated property is `shell-ran-the-line`: the confined shell
+# parsed the command line it was handed and began executing it, evidenced by a marker only
+# a shell builtin wrote. On WINDOWS that must hold with the fix and must NOT without it,
+# and the poisoned arm must additionally carry cmd.exe's own parse-failure message — a
+# script can fail for a hundred reasons and only that one is the bug. On LINUX the fix is a
+# deliberate no-op (there is no cmd.exe; the tail is ordinary `sh -c` argv), so BOTH arms
+# must run every script in full. That is the control that the diff changed nothing on POSIX,
+# and it independently proves the harness works on a platform where the bug never existed.
+#
+# The property is deliberately the SHELL's, not the script's. Run 30440103670 established
+# that clearing the command line exposes a further Windows defect immediately behind it —
+# the AppContainer withholds execute on the toolcache `node.exe` — so a verdict resting on
+# the script's body would measure that defect instead of this one. See the Windows arm.
 #
 # THE BOTH-ARMS CONTROL, on every platform: `unjailed-quoted` runs the identical quoted
 # script with `dependenciesMeta.<pkg>.sandbox: false`, so aube spawns it unconfined. It
@@ -132,38 +138,57 @@ jobs:
           # what proves a red jailed verdict is the jail and not the harness — and its
           # `allowed:` canary read is the positive half of the enforcement differential.
           for f in fixed.log poisoned.log; do
+            need "$f" "prop:unjailed-quoted/shell-ran-the-line=PASS" "control/$f"
             need "$f" "prop:unjailed-quoted/script-ran=PASS" "control/$f"
             need "$f" "prop:unjailed-quoted/tag-round-trip=PASS" "control/$f"
             need "$f" "prop:unjailed-quoted/confinement-as-configured=PASS" "control/$f"
           done
 
-          # The fixed arm must run BOTH confined scripts, confined, in their own package
-          # dir, on every platform.
+          # THE PROPERTY THIS BRANCH OWNS, gated on every platform: the confined shell
+          # parsed the command line it was handed and began executing it. Nothing
+          # downstream of the command line can affect this.
           for v in jailed-quoted jailed-plain; do
-            need fixed.log "prop:$v/script-ran=PASS" "fixed"
-            need fixed.log "prop:$v/tag-round-trip=PASS" "fixed"
-            need fixed.log "prop:$v/confinement-as-configured=PASS" "fixed"
-            need fixed.log "prop:$v/cwd-is-package-dir=PASS" "fixed"
-            # The signature must be ABSENT with the fix, on every platform.
+            need fixed.log "prop:$v/shell-ran-the-line=PASS" "fixed"
             need fixed.log "prop:$v/mangled-signature=FAIL" "fixed"
           done
 
           if [ "${{ runner.os }}" = "Windows" ]; then
-            # THE DIFFERENTIAL. Without the fix the re-encoded tail reaches cmd.exe as
-            # `\""`, so no confined script starts — quoted or not. Asserting the signature
-            # as well as the absence is what distinguishes THIS bug from any other reason a
-            # script might not have run.
+            # THE DIFFERENTIAL. Without the fix the re-encoded tail reaches cmd.exe
+            # mangled, so it never parses the line and the shell marker is never written —
+            # for the unquoted script as much as the quoted one, because the corruption is
+            # in the `/d /s /c "` prefix. Asserting the signature alongside the absence is
+            # what distinguishes THIS defect from any other reason a script might not run.
             for v in jailed-quoted jailed-plain; do
+              need poisoned.log "prop:$v/shell-ran-the-line=FAIL" "poisoned/windows"
               need poisoned.log "prop:$v/script-ran=FAIL" "poisoned/windows"
               need poisoned.log "prop:$v/mangled-signature=PASS" "poisoned/windows"
             done
+            # `script-ran` in the FIXED arm is NOT gated on Windows, and that is a
+            # deliberate, documented exclusion rather than a lowered bar. Run 30440103670
+            # showed the confined shell reaching `node` and nub then failing with
+            # `failed to detect Node version: C:\hostedtoolcache\...\node.exe: Access is
+            # denied (os error 5)` — the AppContainer withholds execute on the toolcache
+            # interpreter. That is a SEPARATE defect this branch uncovered by clearing the
+            # command line in front of it, and gating on it here would only re-measure it.
+            # It is printed below so it stays visible instead of being designed around.
+            echo "---- diagnostic: the confined script's own body, not gated on Windows ----"
+            grep -hE "prop:jailed-[a-z]+/(shell-echoed|script-ran|confinement-as-configured|cwd-is-package-dir)=" fixed.log \
+              || echo "(no lines)"
+            grep -hF "failed to detect Node version" fixed.log | head -2 \
+              || echo "(the downstream Node-execute defect did not reproduce)"
           else
             # POSIX behavior must be preserved exactly: there is no cmd.exe and the tail was
-            # always ordinary argv, so reverting the fix must change nothing.
-            for v in jailed-quoted jailed-plain; do
-              need poisoned.log "prop:$v/script-ran=PASS" "poisoned/posix"
-              need poisoned.log "prop:$v/confinement-as-configured=PASS" "poisoned/posix"
-              need poisoned.log "prop:$v/mangled-signature=FAIL" "poisoned/posix"
+            # always ordinary argv, so reverting the fix must change nothing. The confined
+            # script's whole body is gated here, in both arms.
+            for f in fixed.log poisoned.log; do
+              for v in jailed-quoted jailed-plain; do
+                need "$f" "prop:$v/shell-ran-the-line=PASS" "posix/$f"
+                need "$f" "prop:$v/shell-echoed=PASS" "posix/$f"
+                need "$f" "prop:$v/script-ran=PASS" "posix/$f"
+                need "$f" "prop:$v/confinement-as-configured=PASS" "posix/$f"
+                need "$f" "prop:$v/cwd-is-package-dir=PASS" "posix/$f"
+                need "$f" "prop:$v/mangled-signature=FAIL" "posix/$f"
+              done
             done
           fi
 

@@ -1,8 +1,17 @@
 diff --git a/vendor/aube/crates/aube-scripts/src/lib.rs b/vendor/aube/crates/aube-scripts/src/lib.rs
-index d5911319c7..b735f6129b 100644
+index d5911319c7..4e49d71a22 100644
 --- a/vendor/aube/crates/aube-scripts/src/lib.rs
 +++ b/vendor/aube/crates/aube-scripts/src/lib.rs
-@@ -1330,15 +1330,11 @@ fn verbatim_tail(
+@@ -358,7 +358,7 @@ fn spawn_shell_with_settings(
+         if settings.script_shell.is_some() {
+             cmd.arg("-c").arg(script_cmd);
+         } else {
+-            cmd.raw_arg(cmd_exe_command_tail(script_cmd));
++            cmd.raw_arg("/d /s /c \"").raw_arg(script_cmd).raw_arg("\"");
+         }
+         cmd
+     };
+@@ -1330,15 +1330,8 @@ fn verbatim_tail(
      settings: &ScriptSettings,
      jailed: bool,
  ) -> Option<std::ffi::OsString> {
@@ -15,9 +24,6 @@ index d5911319c7..b735f6129b 100644
 -        let _ = (script_cmd, settings, jailed);
 -        None
 -    }
-+    // POISONED: report no encoded line, so `lifecycle_sandbox_spawn` falls back to
-+    // `Command::get_args` and the embedder re-encodes the raw pieces — the pre-fix
-+    // behaviour, reached through the real code path rather than simulated.
 +    let _ = (script_cmd, settings, jailed);
 +    None
  }

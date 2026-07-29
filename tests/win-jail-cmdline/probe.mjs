@@ -74,6 +74,11 @@ writeFileSync(canary, "the-confined-script-must-not-read-this\n");
 
 const posix = (p) => p.replace(/\\/g, "/");
 
+// Written by the SHELL itself, so its presence means the command line parsed.
+const SHELL_MARKER = "cmdline-ok";
+// Echoed rather than written — see the diagnostic note where the script is built.
+const SHELL_ECHO = "cmdline-reached-the-shell";
+
 /** What the child writes into its own package dir — the one place the jail grants write. */
 const jailprobeSource = (variant) => `// Runs as the dependency's \`install\` script. Writes every observation to a marker file
 // in the package dir; nothing is reported back through an exit code or a status bit.
@@ -135,9 +140,22 @@ function buildVariant({ variant, pkg, jailed, quoted }) {
   // THE SHAPE UNDER TEST. `node -e "require('…')('…')"` is verbatim the example aube's own
   // `spawn_shell_with_settings` doc comment names as the case that arrives mangled: an
   // interior double-quoted `-e` argument wrapping single-quoted strings.
-  const script = quoted
+  //
+  // It is PREFIXED with a shell-builtin redirect, which is the property that isolates the
+  // hop this branch fixes. Writing that marker needs only that cmd.exe (or sh) PARSED the
+  // command line and began executing it — no Node, no interpreter grant, no toolchain. So
+  // it stays a valid verdict on the command line even while something further downstream
+  // stops the script's real body, which is exactly the state Windows is in.
+  const shellMarkerName = "cmdline-marker.txt";
+  const body = quoted
     ? `node -e "require('${entry}')('${variant}')"`
     : `node ${entry} ${variant}`;
+  // The bare `echo` before the redirect is a DIAGNOSTIC, not the verdict: it needs no write
+  // grant, so if the file marker goes missing it tells apart "cmd.exe never parsed the line"
+  // from "it parsed but could not write into the package dir". Its own token is weaker
+  // evidence — the string also occurs in the script text — which is why the gated property
+  // stays the file.
+  const script = `echo ${SHELL_ECHO} && echo ${SHELL_MARKER}> ${shellMarkerName} && ${body}`;
 
   writeFileSync(join(src, "jailprobe.cjs"), jailprobeSource(variant));
   writeFileSync(
@@ -179,7 +197,7 @@ function buildVariant({ variant, pkg, jailed, quoted }) {
     ),
   );
 
-  return { variant, pkg, jailed, quoted, script, consumer, installed };
+  return { variant, pkg, jailed, quoted, script, consumer, installed, shellMarkerName };
 }
 
 const results = [];
@@ -225,6 +243,22 @@ for (const spec of variants) {
     `${f.variant}/dependency-materialized`,
     existsSync(join(f.installed, "package.json")),
     `installed=${f.installed} install-rc=${first.rc} approve-rc=${approve.rc}`,
+  );
+
+  // THE PROPERTY THIS BRANCH IS ABOUT. cmd.exe reached the first command on the line, so
+  // the command line it was handed was well-formed. Independent of everything the script
+  // then goes on to need.
+  const shellMarker = join(f.installed, f.shellMarkerName);
+  const shellMarkerText = existsSync(shellMarker) ? readFileSync(shellMarker, "utf8").trim() : "";
+  record(
+    `${f.variant}/shell-ran-the-line`,
+    shellMarkerText === SHELL_MARKER,
+    `path=${shellMarker} content=${JSON.stringify(shellMarkerText)} want=${JSON.stringify(SHELL_MARKER)}`,
+  );
+  record(
+    `${f.variant}/shell-echoed`,
+    combined.includes(SHELL_ECHO),
+    `diagnostic only — distinguishes an unparsed command line from an ungranted write`,
   );
 
   const markerPath = join(f.installed, "marker.json");
@@ -274,10 +308,18 @@ for (const spec of variants) {
 
   // The failure SIGNATURE, asserted by literal rather than inferred from a non-zero exit —
   // a script can fail for a hundred reasons and only this one is the bug under test.
+  // cmd.exe's two ways of saying "the line I was handed does not parse": it either took a
+  // mangled fragment for a command name, or took one for a path. Matching both rather than
+  // one literal token, because the exact fragment depends on where the re-quoting landed —
+  // while either message means precisely this defect and nothing else.
+  const mangleSignatures = [
+    "is not recognized as an internal or external command",
+    "The system cannot find the path specified",
+  ];
   record(
     `${f.variant}/mangled-signature`,
-    combined.includes(`'\\""' is not recognized`),
-    `the re-encoded cmd.exe first token; expected ABSENT with the fix, PRESENT without it`,
+    mangleSignatures.some((sig) => combined.includes(sig)),
+    `cmd.exe could not parse the command line; expected ABSENT with the fix, PRESENT without it`,
   );
 
   console.log(`observed ${f.variant} npm_lifecycle_script=${JSON.stringify(marker?.lifecycleScript ?? null)}`);
