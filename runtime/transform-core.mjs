@@ -467,6 +467,17 @@ export function requireTargetIsEsm(filePath, ext) {
 }
 
 // ── Module-format detection ─────────────────────────────────────────
+// The oxc `lang` for a transpiled extension: the project's `loader` config wins
+// where it names a TS/JSX dialect, otherwise the extension decides. Shared by the
+// format probe and the transform itself so the parse that DECIDES the format and
+// the parse that PRODUCES the output can never disagree about what a file is.
+function langFor(ext) {
+  const configuredLoader = RUNTIME_LOADER[ext];
+  return configuredLoader === "tsx" || configuredLoader === "jsx"
+    ? configuredLoader
+    : ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
+}
+
 // Both signals nub needs to read off a file's syntax — the absent-`type` module
 // format and the Stage-3-decorator guard — come from ONE native call into nub's
 // N-API addon (`detectModuleInfo`, the oxc parser compiled in-process). There is
@@ -518,11 +529,7 @@ function moduleFormatWithInfo(ext, pkgType, filePath, source) {
   if (ext === ".cts" || ext === ".cjs") return { format: "commonjs", info: null };
   if (pkgType === "module") return { format: "module", info: null };
   if (pkgType === "commonjs") return { format: "commonjs", info: null };
-  const configuredLoader = RUNTIME_LOADER[ext];
-  const lang = configuredLoader === "tsx" || configuredLoader === "jsx"
-    ? configuredLoader
-    : ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
-  const info = detectModuleInfo(filePath, source, lang);
+  const info = detectModuleInfo(filePath, source, langFor(ext));
   return { format: info.hasValueEsmSyntax ? "module" : "commonjs", info };
 }
 
@@ -640,10 +647,7 @@ export function loadTranspile(url, ext) {
   // parse (ambiguous ext, no explicit `type`), else null (a no-parse short-circuit).
   const { format, info: moduleInfo } = moduleFormatWithInfo(ext, pkgType, filePath, source);
 
-  const configuredLoader = RUNTIME_LOADER[ext];
-  const lang = configuredLoader === "tsx" || configuredLoader === "jsx"
-    ? configuredLoader
-    : ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
+  const lang = langFor(ext);
 
   const opts = {
     lang,
@@ -693,7 +697,9 @@ export function loadTranspile(url, ext) {
   // type → different format → distinct entry). `cacheDir: null/undefined` is the
   // JS enable/disable signal: native then skips all cache I/O and just transforms.
   const formatByte = format === "commonjs" ? "c" : "m";
-  const runtimeHash = JSON.stringify({ loader: configuredLoader || null, tsconfig: RUNTIME_TSCONFIG || null });
+  // The RAW configured loader, not `lang`: a non-TS/JSX loader (`text`, `json5`)
+  // changes the output without changing `lang`, so the key must see it.
+  const runtimeHash = JSON.stringify({ loader: RUNTIME_LOADER[ext] || null, tsconfig: RUNTIME_TSCONFIG || null });
   const result = nubNative.transformCached(
     filePath, source, opts, ext, `${tsconfigHash || ""}\0${runtimeHash}`, pkgType || "", formatByte, getCacheDir() ?? undefined,
   );

@@ -250,10 +250,9 @@ fn plan_from_flags(
         .collect();
     let is_top_level = |name: &str| root_provided.contains(name);
 
-    // Seed set by NAME: every dynamically-
-    // flagged importer that SURVIVES the precision seed-selection filter. Embedded
-    // vite<8.1 and caller-supplied package-name patterns are seeded by dep_path
-    // below.
+    // Seed set by NAME: every dynamically-flagged importer that SURVIVES the
+    // precision seed-selection filter. Embedded vite<8.1 and caller-supplied
+    // package-name patterns are seeded by dep_path below.
     let mut seed_names_set: HashSet<&str> = HashSet::new();
 
     // Dynamic phantom source (the per-version scanner's sidecars) — the replacement
@@ -309,11 +308,13 @@ fn plan_from_flags(
     // embedded vite<8.1 copy (auto-detected — the #315 residual). Seeding by
     // dep_path keeps the reverse walk anchored to the real copies present.
     let mut seed_dep_paths: HashSet<&str> = HashSet::new();
+    // Compiled once, not per comparison: this loop runs over every package in
+    // the graph, and matching inline re-parsed each pattern on every one.
+    let seed_patterns: Vec<String> = seed_names.iter().map(|s| (*s).to_string()).collect();
+    let seed_matcher = aube_linker::PackageNameMatcher::new(&seed_patterns);
     for (dep_path, pkg) in &graph.packages {
         if seed_names_set.contains(pkg.name.as_str())
-            || seed_names
-                .iter()
-                .any(|pattern| aube_linker::package_name_matches(pattern, &pkg.name))
+            || seed_matcher.matches(&pkg.name)
             || (pkg.name == "vite" && super::vite_compat::vite_lt_8_1(&pkg.version))
         {
             seed_dep_paths.insert(dep_path.as_str());
@@ -341,9 +342,9 @@ fn plan_from_flags(
         );
     }
 
-    // Rung-1 names: every closure member's name ∪ the original seed names (the
-    // executor is name-keyed). Original seed names are kept even if absent from
-    // the graph — the executor simply never matches an absent name.
+    // Rung-1 names: every closure member's name (the executor is name-keyed).
+    // Seeding is dep_path-anchored, so a seed name with no copy in the resolved
+    // graph contributes nothing — there is no package for the executor to eject.
     let mut names: HashSet<String> = HashSet::new();
     for dep_path in &closure {
         if let Some(pkg) = graph.packages.get(dep_path) {

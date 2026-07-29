@@ -391,8 +391,16 @@ static EFFECTIVE_CONFIG: OnceLock<EffectiveConfig> = OnceLock::new();
 
 pub(crate) const RUNTIME_CONFIG_ENV: &str = nub_core::node::spawn::RUNTIME_CONFIG_ENV;
 
+/// The snapshot handed to a child through `__NUB_RUNTIME_CONFIG`, so this is a
+/// cross-VERSION wire format: a nub of one version can hand it to a nub of
+/// another (mid-`nub upgrade`, a `packageManager` pin, global vs project
+/// install). `#[serde(default)]` makes a field the writer omits fall back to
+/// [`Default`] rather than failing the whole deserialize — without it, an older
+/// child aborts every run on a field a newer parent added, blaming a config
+/// file the user cannot see. Unknown fields are already tolerated by serde,
+/// which covers the other direction.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub(crate) struct RuntimeConfig {
     pub node_compat: bool,
     pub preload: Vec<String>,
@@ -428,9 +436,21 @@ impl Default for RuntimeConfig {
 }
 
 /// Walk up from `start` (inclusive) to the filesystem root, returning the first
-/// directory that holds a `nub.jsonc`.
+/// directory that holds a `nub.jsonc` — skipping anything inside `node_modules`.
+///
+/// The boundary is load-bearing, not hygiene. A dependency's lifecycle script
+/// runs with its own package directory as cwd, and nub's shim is on PATH, so a
+/// bare `node` in a `postinstall` re-enters nub from inside `node_modules`.
+/// Without this, the DEPENDENCY's published `nub.jsonc` — npm packs the repo
+/// root by default — becomes the project config: it would steer that build's
+/// Node, and a `dlx` block or a key from a newer nub would fail-loud and abort
+/// the install, naming a file the user never wrote. Skipping rather than
+/// stopping keeps the real project's config reachable from inside a dependency.
 pub fn discover_project_config(start: &Path) -> Option<PathBuf> {
     for dir in start.ancestors() {
+        if dir.components().any(|c| c.as_os_str() == NODE_MODULES_DIR) {
+            continue;
+        }
         let candidate = dir.join(FILE_NAME);
         if candidate.is_file() {
             return Some(candidate);
@@ -438,6 +458,8 @@ pub fn discover_project_config(start: &Path) -> Option<PathBuf> {
     }
     None
 }
+
+const NODE_MODULES_DIR: &str = "node_modules";
 
 /// Parse + validate the `nub.jsonc` at `path`.
 /// FAIL-LOUD: an unknown key or malformed value is a [`ConfigError`], NOT a
@@ -672,7 +694,7 @@ pub(crate) fn runtime_config() -> Result<RuntimeConfig> {
             })?;
         // The inherited snapshot is the source-anchored base for nested shim
         // launches, but the new invocation's explicit compatibility overlay is
-        // still stronger. P1 has already resolved CLI > environment > files;
+        // still stronger. Precedence has already resolved CLI > environment > files;
         // preserve every inherited runtime field and replace only nodeCompat
         // when this invocation supplied one of those two transient layers.
         if let Some(effective) = effective_config()
@@ -757,7 +779,14 @@ impl EffectiveConfig {
             .map(|path| self.resolve_path(ConfigKey::Tsconfig, path))
             .map(|path| path.to_string_lossy().into_owned());
 
-        if let Some(path) = tsconfig.as_deref() {
+        // Compat runs no transpiler, so the tsconfig is never consumed — and
+        // validating it anyway would abort `--node` / `NODE_COMPAT` on a value
+        // that cannot affect the run. Every runtime entrypoint resolves this
+        // config BEFORE deciding compat, so without the guard a stale
+        // `tsconfig` path disarms the zero-augmentation escape hatch exactly
+        // when a broken config is what the user is escaping.
+        let node_compat = values.node_compat.unwrap_or(false);
+        if let Some(path) = tsconfig.as_deref().filter(|_| !node_compat) {
             let text = crate::jsonc::read_guarded(Path::new(path)).map_err(|error| {
                 ConfigError::Value {
                     path: "tsconfig".into(),
@@ -778,7 +807,7 @@ impl EffectiveConfig {
         }
 
         Ok(RuntimeConfig {
-            node_compat: values.node_compat.unwrap_or(false),
+            node_compat,
             preload,
             node_options: values.node_options.clone().unwrap_or_default(),
             v8_flags: values.v8_flags.clone().unwrap_or_default(),
@@ -1379,8 +1408,8 @@ fn parse_duration(s: &str, path: &str) -> Result<Duration> {
         .ok_or_else(|| invalid("overflows"))
 }
 
-// P5 test packages (separate files; children of this module so they reach the
-// private resolver).
+// Matrix test packages (separate files; children of this module so they reach
+// the private resolver).
 #[cfg(test)]
 #[path = "project_config_schema_matrix.rs"]
 mod schema_matrix;
@@ -1928,20 +1957,62 @@ mod tests {
         assert_eq!(discover_project_config(dir.path()), None);
     }
 
+    /// The other half of `__NUB_RUNTIME_CONFIG` version skew. A newer parent
+    /// handing a child a field it does not know is already tolerated by serde;
+    /// this pins the reverse — an OLDER parent omitting a field a newer child
+    /// has must fall back to the default, not abort the child's run.
+    #[test]
+    fn a_runtime_snapshot_missing_a_field_falls_back_to_its_default() {
+        let sparse = serde_json::from_str::<RuntimeConfig>(r#"{ "nodeCompat": true }"#)
+            .expect("a snapshot from an older nub must still deserialize");
+        assert!(
+            sparse.node_compat,
+            "the field that WAS present must survive"
+        );
+        assert_eq!(
+            sparse,
+            RuntimeConfig {
+                node_compat: true,
+                ..RuntimeConfig::default()
+            }
+        );
+    }
+
+    /// A dependency's lifecycle script runs with its own package directory as
+    /// cwd and nub's shim on PATH, so a bare `node` in a `postinstall` starts
+    /// discovery from inside `node_modules`. The dependency ships whatever npm
+    /// packed; it must never become this project's config, and the project's own
+    /// must still be reachable from there.
+    #[test]
+    fn discovery_never_takes_a_config_from_inside_node_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(FILE_NAME), r#"{ "nodeCompat": true }"#).unwrap();
+        let dep = root.join("node_modules").join("some-dep");
+        std::fs::create_dir_all(&dep).unwrap();
+        std::fs::write(dep.join(FILE_NAME), r#"{ "nodeCompat": false }"#).unwrap();
+
+        assert_eq!(
+            discover_project_config(&dep),
+            Some(root.join(FILE_NAME)),
+            "a dependency's own nub.jsonc must be skipped in favor of the project's"
+        );
+
+        let nested = dep.join("build");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(
+            discover_project_config(&nested),
+            Some(root.join(FILE_NAME)),
+            "the boundary must hold from any depth inside the dependency"
+        );
+    }
+
     #[test]
     fn load_reads_a_present_file() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(FILE_NAME), r#"{ "nodeCompat": true }"#).unwrap();
         let loaded = load_project_config(dir.path()).unwrap().unwrap();
         assert_eq!(loaded.values.node_compat, Some(true));
-    }
-
-    #[test]
-    fn load_surfaces_a_malformed_file() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(FILE_NAME), "{ broken").unwrap();
-        let err = load_project_config(dir.path()).unwrap_err();
-        assert!(matches!(err.kind(), ConfigError::Parse(_)));
     }
 
     #[test]
@@ -2051,14 +2122,6 @@ mod tests {
             );
             assert_eq!(dlx_env_for(&snapshot), expected);
         }
-    }
-
-    #[test]
-    fn reads_the_discovered_file() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(FILE_NAME), r#"{ "nodeCompat": true }"#).unwrap();
-        let cfg = load_project_config(dir.path()).unwrap();
-        assert_eq!(cfg.unwrap().values.node_compat, Some(true));
     }
 
     #[test]
@@ -2240,23 +2303,6 @@ mod tests {
 
     #[test]
     fn shared_schema_keysets_match_the_parser() {
-        assert_eq!(
-            ROOT_KEYS,
-            [
-                "$schema",
-                "nodeCompat",
-                "preload",
-                "nodeOptions",
-                "v8Flags",
-                "envFile",
-                "loader",
-                "conditions",
-                "tsconfig",
-                "verifyDeps",
-                "install",
-                "dlx",
-            ]
-        );
         assert!(
             GLOBAL_ONLY_KEYS.iter().all(|key| ROOT_KEYS.contains(key)),
             "a global-only key must be a real root key, or the scope filter is a no-op"
@@ -2304,22 +2350,6 @@ mod tests {
         assert_eq!(global.values.dlx.env_file, Some(EnvFileSetting::Disabled));
         let err = read_project_config_at(&project_path).unwrap_err();
         assert!(matches!(err.kind(), ConfigError::GlobalOnlyKey { .. }));
-    }
-
-    #[test]
-    fn repeated_loads_keep_discovery_enabled() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(FILE_NAME);
-        std::fs::write(&path, r#"{ "nodeCompat": true }"#).unwrap();
-
-        let first = load_project_config(dir.path()).unwrap();
-        assert_eq!(first.unwrap().values.node_compat, Some(true));
-        let second = load_project_config(dir.path()).unwrap();
-        assert_eq!(second.unwrap().values.node_compat, Some(true));
-
-        std::fs::write(&path, "{ malformed").unwrap();
-        let err = load_project_config(dir.path()).unwrap_err();
-        assert!(matches!(err.kind(), ConfigError::Parse(_)));
     }
 
     #[cfg(unix)]

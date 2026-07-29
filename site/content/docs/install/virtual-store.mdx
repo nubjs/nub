@@ -155,7 +155,8 @@ Under `global` the knob is `eject`, which writes matching packages into the proj
 
 The two are not interchangeable, and the config shape says so: `hoist` fills a directory that only exists when the store is project-local, and a package linked out of a shared store never walks through the project on the way to it. Naming one under the other strategy is rejected where you wrote it.
 
-[`publicHoist`](/docs/config#installpublichoist) is the separate lever, and it sits outside `linker` because it applies under every strategy — it puts packages in the project's own top-level `node_modules` for tools that resolve from the project root, like TypeScript looking for `@types/*`.
+The separate lever is [`publicHoist`](/docs/config#installpublichoist), and it sits outside `linker` because it applies under every strategy — it puts packages in the project's own top-level `node_modules` for tools that resolve from the project root, like TypeScript looking for `@types/*`.
+
 ## GYP-based native builds
 
 Some packages that compile native code with node-gyp fail to build under the isolated layout. The trigger is a `binding.gyp` that names another package as a GYP build-file dependency:

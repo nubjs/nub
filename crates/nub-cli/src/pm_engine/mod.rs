@@ -964,16 +964,32 @@ fn lower_native_install_settings(
                     None => {}
                 }
             }
-            LinkerConfig::Global { eject } => eject_patterns = eject.clone(),
+            LinkerConfig::Global { eject } => {
+                // Written explicitly rather than left to the engine default. The
+                // projectConfig tier outranks `.npmrc`, so staying silent here
+                // let a lower-tier `enableGlobalVirtualStore=false` — or the
+                // implicit `hoist=true` veto — quietly produce a project-local
+                // store under a config that asks for the shared one. `isolated`
+                // pins its half; this is the other.
+                settings.push(("enableGlobalVirtualStore".to_string(), "true".to_string()));
+                eject_patterns = eject.clone();
+            }
             LinkerConfig::Hoisted | LinkerConfig::Pnp => {}
         }
     }
 
+    // One nub knob, two aube settings — so BOTH arms write BOTH. Writing only
+    // the one an arm names leaves the other at whatever a lower tier resolved,
+    // which inverts the request: `.npmrc` `shamefully-hoist=true` under a
+    // `publicHoist` pattern list would hoist everything, the opposite of
+    // naming patterns.
     match install.public_hoist.as_ref() {
         Some(PublicHoist::All(enabled)) => {
             settings.push(("shamefullyHoist".to_string(), enabled.to_string()));
+            settings.push(("publicHoistPattern".to_string(), String::new()));
         }
         Some(PublicHoist::Patterns(patterns)) => {
+            settings.push(("shamefullyHoist".to_string(), "false".to_string()));
             settings.push(("publicHoistPattern".to_string(), patterns.join(",")));
         }
         None => {}
@@ -3081,10 +3097,15 @@ mod tests {
     #[test]
     fn linker_strategy_lowers_to_a_layout_plus_a_store_location() {
         // Both symlink strategies are aube's `isolated` layout — they differ
-        // only in WHERE the store lives, so `global` (the shared store) must
-        // leave `enableGlobalVirtualStore` at the engine's default.
+        // only in WHERE the store lives, so each must PIN that half rather than
+        // inherit it. Leaving `global` silent would let a lower-tier
+        // `enableGlobalVirtualStore=false` win over an explicit request.
         for (linker, node_linker, gvs) in [
-            (LinkerConfig::Global { eject: None }, "isolated", None),
+            (
+                LinkerConfig::Global { eject: None },
+                "isolated",
+                Some("true"),
+            ),
             (
                 LinkerConfig::Isolated { hoist: None },
                 "isolated",
@@ -3163,12 +3184,14 @@ mod tests {
 
     #[test]
     fn public_hoist_lowers_independently_of_the_linker_strategy() {
-        for (public_hoist, key, value) in [
-            (PublicHoist::All(true), "shamefullyHoist", "true"),
-            (PublicHoist::All(false), "shamefullyHoist", "false"),
+        // Every arm writes BOTH aube keys. Writing only the one it names would
+        // leave the other at a lower tier's value, which inverts the request.
+        for (public_hoist, shamefully, patterns) in [
+            (PublicHoist::All(true), "true", ""),
+            (PublicHoist::All(false), "false", ""),
             (
                 PublicHoist::Patterns(vec!["@types/*".into(), "eslint-*".into()]),
-                "publicHoistPattern",
+                "false",
                 "@types/*,eslint-*",
             ),
         ] {
@@ -3179,7 +3202,16 @@ mod tests {
                 },
                 &[],
             );
-            assert_eq!(get(&lowered.settings, key), Some(value), "{public_hoist:?}");
+            assert_eq!(
+                get(&lowered.settings, "shamefullyHoist"),
+                Some(shamefully),
+                "{public_hoist:?}"
+            );
+            assert_eq!(
+                get(&lowered.settings, "publicHoistPattern"),
+                Some(patterns),
+                "{public_hoist:?}"
+            );
             // It sits outside `linker` because it means the same thing under
             // every strategy — including none written at all.
             assert_eq!(
@@ -3297,22 +3329,18 @@ mod tests {
             }"#,
         )
         .unwrap();
-        // `load_effective_config` reads the GLOBAL layer, which resolves through
-        // `XDG_CONFIG_HOME` — a process-global. Hold the same lock the mutating
-        // tests hold: `config::with_config_home` calls `unsafe set_var`, and an
-        // unsynchronized `getenv` against it is a data race under edition 2024.
-        // Pointing the var at this test's own dir also stops the developer's real
-        // `~/.config/nub/nub.jsonc` from merging into the snapshot asserted below.
-        let _env = crate::config::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var_os("XDG_CONFIG_HOME");
-        // SAFETY: guarded by test_env_lock; restored before the guard drops.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", dir.path()) };
-        let snapshot = crate::project_config::load_effective_config(
-            dir.path(),
-            crate::project_config::ConfigOverlays::default(),
-        )
+        // `load_effective_config` also reads the GLOBAL layer, which resolves
+        // through `XDG_CONFIG_HOME` — a process-global. `with_config_home` points
+        // it at an empty dir, so the developer's real `~/.config/nub/nub.jsonc`
+        // cannot merge into the snapshot asserted below, and holds the
+        // process-wide env lock every `unsafe set_var` in the suite serializes on
+        // (an unsynchronized `getenv` against one is a data race under 2024).
+        let snapshot = crate::config::with_config_home(|_| {
+            crate::project_config::load_effective_config(
+                dir.path(),
+                crate::project_config::ConfigOverlays::default(),
+            )
+        })
         .unwrap();
         assert_eq!(
             snapshot
@@ -3338,14 +3366,6 @@ mod tests {
             get(&lowered.settings, "minimumReleaseAgeExclude"),
             Some("@internal/*")
         );
-
-        // SAFETY: still under test_env_lock; restores what the process started with.
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                None => std::env::remove_var("XDG_CONFIG_HOME"),
-            }
-        }
     }
 
     #[test]

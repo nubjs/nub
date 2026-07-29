@@ -2206,8 +2206,12 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     // manual sub-verb match rather than clap's generic "invalid subcommand" error,
     // so `nub node script.ts` yields the exact "use 'nub <file>'" guidance and bare
     // `nub node` prints the verb list instead of a clap usage error.
+    // No snapshot here, and none for `pm` below: neither group reads project
+    // config, and the sub-verbs that need an engine session build one
+    // themselves. Initializing would let a malformed `nub.jsonc` in any
+    // ancestor block `nub node install` — one of the commands you reach for
+    // when the toolchain is already broken.
     if subcommand == "node" {
-        initialize_config_snapshot(false, false)?;
         return run_node(&rest[1..]);
     }
 
@@ -2216,7 +2220,6 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     // than a clap `Command` variant, so its bare-usage / invalid-verb messages
     // read like `nub node`'s and it never reaches clap dispatch.
     if subcommand == "pm" {
-        initialize_config_snapshot(false, false)?;
         return run_pm(&rest[1..]);
     }
 
@@ -5407,12 +5410,9 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     let preload_path = nub_core::node::spawn::find_public_preload(&nub_binary);
     // Additivity: nub's own augmentation preload must load AFTER the user's
     // ambient NODE_OPTIONS-derived requires — nub never changes the user's
-    // observable preload order. e3188d2714 regressed this by inserting the token
-    // at the FRONT of the project-config runtime options (which are concatenated
-    // ahead of the ambient NODE_OPTIONS), so nub's preload ran before a user's
-    // `--require`. The token is now placed after the ambient requires but before
-    // the project-config preloads, so those still load with nub's hooks active —
-    // matching the non-watch spawn order (nub preload precedes runtime options).
+    // observable preload order — and BEFORE the project-config preloads, so
+    // those load with nub's hooks already active. Both `NODE_OPTIONS` assemblies
+    // below place the token accordingly, matching the non-watch spawn order.
     let nub_preload_token = preload_path.as_deref().map(|preload| {
         nub_core::node::spawn::preload_injection(preload, &node.version).node_options_token()
     });

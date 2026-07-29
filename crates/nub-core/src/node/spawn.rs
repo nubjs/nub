@@ -756,15 +756,6 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // node bin executes IN that member rather than inheriting the parent's cwd.
     cmd.current_dir(config.cwd);
 
-    // A compat re-entry may arrive through an augmented parent's PATH shim.
-    // Restore the environment captured before that parent installed Nub's
-    // NODE_OPTIONS/NODE_PATH/NODE/compile-cache values, and remove its exact
-    // shim component. This makes a nested `NODE_COMPAT=1 node ...` genuinely
-    // vanilla instead of merely skipping a second augmentation pass.
-    if config.compat_mode {
-        restore_compat_environment(&mut cmd);
-    }
-
     // Permission model detection and auto-grant.
     let has_permission = config.user_args.iter().any(|a| is_permission_flag(a));
     let has_allow_addons = config.user_args.iter().any(|a| a == "--allow-addons");
@@ -815,6 +806,17 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // a single spawn.
     let node_options = env::var("NODE_OPTIONS").ok();
     let is_reentrant = is_reentrant_in(node_options.as_deref(), reentrancy_key.as_deref());
+
+    // A compat re-entry may arrive through an augmented parent's PATH shim.
+    // Restore the environment captured before that parent installed Nub's
+    // NODE_OPTIONS/NODE_PATH/NODE/compile-cache values, and remove its exact
+    // shim component. This makes a nested `NODE_COMPAT=1 node ...` genuinely
+    // vanilla instead of merely skipping a second augmentation pass. Sequenced
+    // after the preload resolution above because the restore needs the injection
+    // token to tell nub's NODE_OPTIONS residue from a user-set value.
+    if config.compat_mode {
+        restore_compat_environment(&mut cmd, reentrancy_key.as_deref());
+    }
 
     // Augment only when we can locate our own preload. If `find_preload` fails —
     // a broken install, or (Windows, A-WIN2) the PATH-shim `node.exe` running
@@ -2141,14 +2143,35 @@ fn install_compat_restore_marker(cmd: &mut Command, marker: &str, name: &str) {
     cmd.env(marker, compat_restore_value(marker, name));
 }
 
-fn restore_compat_environment(cmd: &mut Command) {
+/// Whether the captured pre-augmentation NODE_OPTIONS should overwrite what this
+/// process currently carries. It should only when `current` is nub's OWN residue
+/// — i.e. it still holds the preload token nub injected ([`is_reentrant_in`]).
+/// A value the user set AFTER the parent augmented (a `nub run` script doing
+/// `NODE_OPTIONS=--max-old-space-size=8192 NODE_COMPAT=1 node build.js`) carries
+/// no token; plain Node would honor it, and compat's whole contract is to be
+/// plain Node. With no token resolvable the two are indistinguishable, so the
+/// marker keeps winning — clearing nub's likely-present injection matters more
+/// than preserving a value we cannot attribute.
+fn compat_node_options_marker_wins(current: Option<&str>, nub_token: Option<&str>) -> bool {
+    nub_token.is_none_or(|token| is_reentrant_in(current, Some(token)))
+}
+
+fn restore_compat_environment(cmd: &mut Command, nub_node_options_token: Option<&str>) {
+    let node_options_marker_wins = compat_node_options_marker_wins(
+        env::var("NODE_OPTIONS").ok().as_deref(),
+        nub_node_options_token,
+    );
+
     for (marker, name) in [
         (COMPAT_NODE_OPTIONS_ENV, "NODE_OPTIONS"),
         (COMPAT_NODE_PATH_ENV, "NODE_PATH"),
         (COMPAT_NODE_ENV, "NODE"),
         (COMPAT_NODE_COMPILE_CACHE_ENV, "NODE_COMPILE_CACHE"),
     ] {
-        if let Some(value) = env::var_os(marker) {
+        let marker_wins = marker != COMPAT_NODE_OPTIONS_ENV || node_options_marker_wins;
+        if let Some(value) = env::var_os(marker)
+            && marker_wins
+        {
             if value.is_empty() {
                 cmd.env_remove(name);
             } else {
@@ -4664,6 +4687,31 @@ mod tests {
             "no preload resolved"
         );
         assert!(!is_reentrant_in(Some(""), Some(ours)), "empty NODE_OPTIONS");
+    }
+
+    #[test]
+    fn compat_restore_overwrites_nubs_node_options_residue_but_not_a_user_value() {
+        let token = "--require=/opt/nub/runtime/preload.cjs";
+
+        assert!(
+            compat_node_options_marker_wins(
+                Some(&format!("--enable-source-maps {token}")),
+                Some(token)
+            ),
+            "NODE_OPTIONS still carrying nub's injected token is nub's own residue"
+        );
+        assert!(
+            !compat_node_options_marker_wins(Some("--max-old-space-size=8192"), Some(token)),
+            "a NODE_OPTIONS the user set after augmentation must reach the child untouched"
+        );
+        assert!(
+            !compat_node_options_marker_wins(None, Some(token)),
+            "an unset NODE_OPTIONS is already what plain Node would see"
+        );
+        assert!(
+            compat_node_options_marker_wins(Some("--max-old-space-size=8192"), None),
+            "with no preload resolvable the two are indistinguishable, so the marker still wins"
+        );
     }
 
     #[test]

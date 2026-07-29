@@ -421,7 +421,7 @@ Under `isolated`, `hoist` fills the hidden fallback tree that your dependencies 
 }
 ```
 
-`false` is strict: an undeclared import fails instead of resolving. `true` matches everything, which is pnpm's default.
+Setting `false` is strict: an undeclared import fails instead of resolving. Setting `true` matches everything, which is pnpm's default.
 
 Writing a knob under the wrong strategy is an error, and the message names the strategy that takes it.
 
@@ -430,7 +430,7 @@ Writing a knob under the wrong strategy is an error, and the message names the s
 "isolated" layout. Either switch to `strategy: "isolated"` or drop this key.
 ```
 
-`"pnp"` is reserved for future Plug'n'Play support. An install that names it is rejected until support lands.
+The strategy `"pnp"` is reserved for future Plug'n'Play support. An install that names it is rejected until support lands.
 
 ```text
 nub: `install.linker: "pnp"` is reserved and not supported yet [ERR_NUB_CONFIG_UNSUPPORTED]
@@ -449,7 +449,7 @@ Put packages in the project's top-level `node_modules` without declaring them. U
 }
 ```
 
-`true` lifts everything, matching pnpm's `shamefully-hoist`.
+Setting `true` lifts everything, matching pnpm's `shamefully-hoist`.
 
 ```jsonc title="nub.jsonc"
 {

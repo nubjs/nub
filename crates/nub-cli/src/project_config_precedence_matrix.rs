@@ -1,4 +1,4 @@
-//! P5 — every `ConfigKey` through the full precedence chain
+//! Every `ConfigKey` through the full precedence chain
 //! `CLI > environment > project > global > defaults`, asserting both the
 //! resolved VALUE and its recorded SOURCE, plus the explicit-false / explicit-
 //! empty rule (a `false`/`[]`/`{}` in a higher layer must beat a lower truthy —

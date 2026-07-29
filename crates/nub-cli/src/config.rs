@@ -75,8 +75,23 @@ pub fn config_path() -> Option<PathBuf> {
 /// deliberately best-effort: absent, unreadable, malformed, or invalid input is
 /// treated as no typed layer. The legacy `exec.implicitDlx` hot path below stays
 /// independent until its public config surface is migrated.
+///
+/// A degraded read is announced rather than swallowed. Dropping the layer drops
+/// every key in it, so one typo elsewhere in the file silently WIDENS
+/// `dlx.consent` from `never` back to the `prompt` default — a security posture
+/// loosening from an unrelated mistake. Best-effort means the command still
+/// runs; it does not mean the user should have to guess why their policy stopped
+/// applying. Absence is not a degrade and stays silent.
 pub(crate) fn load_global_config() -> Option<crate::project_config::LoadedConfig> {
-    crate::project_config::read_global_config_at(&config_path()?).ok()
+    let path = config_path()?;
+    match crate::project_config::read_global_config_at(&path) {
+        Ok(loaded) => Some(loaded),
+        Err(_) if !path.exists() => None,
+        Err(error) => {
+            eprintln!("nub: {error}\n\x20\x20ignored — global settings are not applied");
+            None
+        }
+    }
 }
 
 /// Read `exec.implicitDlx`. Absent file / absent key / unparseable value / any
@@ -187,30 +202,48 @@ pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
     &ENV_LOCK
 }
 
+/// Run `f` with the config path pointed at a fresh temp dir. `XDG_CONFIG_HOME`
+/// wins in `config_dir()`, so this both isolates the file and keeps the
+/// developer's real `~/.config/nub/nub.jsonc` out of what the test asserts.
+/// Holds the process-wide [`test_env_lock`] because it mutates a global env var.
+///
+/// Restoration rides a drop guard, not a tail statement: a panicking assertion
+/// inside `f` unwinds, and a tail restore would leave every later test in the
+/// binary pointed at this deleted temp dir.
+#[cfg(test)]
+pub(crate) fn with_config_home<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
+    struct Restore {
+        prev: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            // SAFETY: `_lock` is still held here, so no other test thread reads
+            // or writes the var while it is restored.
+            unsafe {
+                match self.prev.take() {
+                    Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                    None => std::env::remove_var("XDG_CONFIG_HOME"),
+                }
+            }
+        }
+    }
+
+    let lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _restore = Restore {
+        prev: std::env::var_os("XDG_CONFIG_HOME"),
+        _lock: lock,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    // SAFETY: guarded by test_env_lock; `Restore` puts the previous value back.
+    unsafe { std::env::set_var("XDG_CONFIG_HOME", dir.path()) };
+    f(dir.path())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
-
-    /// Point the config path at a temp dir for the duration of the closure.
-    /// `XDG_CONFIG_HOME` wins in `config_dir()`, so this fully isolates the file.
-    /// Holds the process-wide [`test_env_lock`] because it mutates a global env var.
-    fn with_config_home<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
-        let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
-
-        let dir = tempfile::tempdir().unwrap();
-        let prev = std::env::var_os("XDG_CONFIG_HOME");
-        // SAFETY: guarded by test_env_lock; restored before the guard drops.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", dir.path()) };
-        let out = f(dir.path());
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                None => std::env::remove_var("XDG_CONFIG_HOME"),
-            }
-        }
-        out
-    }
 
     #[test]
     fn defaults_to_prompt_when_absent() {

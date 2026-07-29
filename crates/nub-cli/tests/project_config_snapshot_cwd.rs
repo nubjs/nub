@@ -1,4 +1,4 @@
-//! P5 — the effective-config snapshot must initialize from the FINAL working
+//! The effective-config snapshot must initialize from the FINAL working
 //! directory after the GLOBAL `--cwd` is applied, not from the ambient parent.
 //! The ancestor route is covered in integration.rs (`node_argv0_…`), the argv0
 //! PM route in pm_shim.rs, and the verb-local `-C`/`--dir` route in

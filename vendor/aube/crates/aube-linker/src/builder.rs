@@ -43,7 +43,7 @@ impl Linker {
             aube_dir_override: None,
             no_integrity_read_keys: std::collections::BTreeMap::new(),
             link_progress: None,
-            disk_materialize: Vec::new(),
+            disk_materialize: crate::PackageNameMatcher::default(),
         }
     }
 
@@ -53,16 +53,15 @@ impl Linker {
     /// Standalone aube and
     /// every test omit this → the set is empty and the GVS pass is unchanged.
     pub fn with_disk_materialize(mut self, names: &[String]) -> Self {
-        self.disk_materialize = names.to_vec();
+        self.disk_materialize = crate::PackageNameMatcher::new(names);
         self
     }
 
-    /// Whether `pkg_name` is on the disk-materialize list. Consulted only in
-    /// the global-virtual-store link pass; always false when the list is empty.
+    /// Whether `pkg_name` is on the disk-materialize list. Consulted once per
+    /// graph package in the global-virtual-store link pass — hence the
+    /// compiled-once matcher; always false when the list is empty.
     pub(crate) fn disk_materialize_matches(&self, pkg_name: &str) -> bool {
-        self.disk_materialize
-            .iter()
-            .any(|pattern| crate::package_name_matches(pattern, pkg_name))
+        self.disk_materialize.matches(pkg_name)
     }
 
     /// Supply a shared counter the materialize pass bumps once per linked

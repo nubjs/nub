@@ -27,7 +27,7 @@ mod public_hoist_tests;
 mod tests;
 
 pub use disk_materialize::{
-    DiskMaterializePlan, expand_disk_materialize, package_name_matches,
+    DiskMaterializePlan, PackageNameMatcher, expand_disk_materialize, package_name_matches,
     set_disk_materialize_expand_hook,
 };
 pub use error::Error;
@@ -277,7 +277,7 @@ pub struct Linker {
     /// project-local, so Node's upward walk from inside it passes through
     /// `.aube/node_modules/`, a blanket alias for every graph package. That
     /// replaced the former per-importer phantom-target hoist.
-    disk_materialize: Vec<String>,
+    disk_materialize: PackageNameMatcher,
 }
 
 /// Strategy for linking files from the store to node_modules.

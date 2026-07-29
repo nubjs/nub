@@ -1,4 +1,4 @@
-//! P5 — golden matrix over the `nub.jsonc` schema/validator. Complements the
+//! Golden matrix over the `nub.jsonc` schema/validator. Complements the
 //! per-field tests in the sibling `tests` module (unknown root/install keys,
 //! type errors, duration grammar, loader vocabulary): this matrix owns the
 //! `$schema` typing rule, unknown-key rejection in `dlx` (the one object level
