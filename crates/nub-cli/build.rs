@@ -25,23 +25,24 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Cargo's `CARGO_MANIFEST_DIR` read at RUN time, not baked in at compile time.
+/// Cargo's `CARGO_MANIFEST_DIR`, read at RUN time rather than baked in by `env!`.
 ///
-/// `env!` freezes whichever manifest dir compiled the build script into the
-/// binary. Build-script binaries are cached per target dir, and this repo shares
-/// ONE target dir across git worktrees, so an `env!` path stays pinned to the
-/// worktree that built it first.
+/// `env!` freezes the compiling worktree's path into the build-script binary.
+/// Cargo caches those binaries per target dir and this repo shares ONE target
+/// dir across worktrees, so the path outlives the tree that produced it: a
+/// sibling tree reads that tree's files, and once it is deleted the build fails
+/// on a path absent from the current checkout.
 ///
-/// This lookup fixes RESOLUTION only. It is half the fix: cargo will not rerun
-/// a build script it considers fresh, and the recorded `rerun-if-changed` paths
-/// are the first tree's absolutes, so a sibling tree would keep consuming that
-/// tree's generated output without the script ever running. The paired
-/// `cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR` below is what makes cargo
-/// rerun on a tree switch; neither half works without the other.
+/// Measured on cargo 1.95: the run-time lookup alone is sufficient, because the
+/// `rerun-if-changed` path this script emits then differs per tree and cargo
+/// invalidates on that. A review on cargo 1.97 measured the opposite, so the
+/// paired `cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR` below is kept as
+/// version-insurance; it costs nothing in a single tree, where the value never
+/// changes. It is independently load-bearing in `nub-native`, which emits no
+/// path-dependent instruction when there is no git checkout.
 ///
-/// `cargo publish --verify` is unaffected — cargo sets the variable from the
-/// package being built, so it still points inside
-/// `target/package/<crate>-<ver>/`.
+/// `cargo publish --verify` is unaffected: cargo sets the variable from the
+/// package being built, so it still resolves inside `target/package/`.
 fn manifest_dir() -> PathBuf {
     PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR")

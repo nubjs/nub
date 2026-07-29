@@ -97,23 +97,11 @@ struct Sources {
     workspace_yaml: Vec<String>,
 }
 
-/// Cargo's `CARGO_MANIFEST_DIR` read at RUN time, not baked in at compile time.
-///
-/// `env!` freezes whichever manifest dir compiled the build script into the
-/// binary. Build-script binaries are cached per target dir, and this repo shares
-/// ONE target dir across git worktrees, so an `env!` path stays pinned to the
-/// worktree that built it first.
-///
-/// This lookup fixes RESOLUTION only. It is half the fix: cargo will not rerun
-/// a build script it considers fresh, and the recorded `rerun-if-changed` paths
-/// are the first tree's absolutes, so a sibling tree would keep consuming that
-/// tree's generated output without the script ever running. The paired
-/// `cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR` below is what makes cargo
-/// rerun on a tree switch; neither half works without the other.
-///
-/// `cargo publish --verify` is unaffected — cargo sets the variable from the
-/// package being built, so it still points inside
-/// `target/package/<crate>-<ver>/`.
+/// Cargo's `CARGO_MANIFEST_DIR`, read at RUN time rather than baked in by
+/// `env!`. A build-script binary is cached per target dir, so an `env!` path
+/// survives into any other checkout sharing that dir — reading the first
+/// checkout's `settings.toml`, or failing outright once it is gone. Reading the
+/// variable resolves per invocation instead.
 fn manifest_dir() -> PathBuf {
     PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR")
