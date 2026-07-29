@@ -49,6 +49,15 @@ pub struct LifecycleSandboxSpawn {
     pub project_root: PathBuf,
     /// The dependency's own package dir — the one subtree the build may WRITE.
     pub package_dir: PathBuf,
+    /// The INSTALLER-RESOLVED name of the package whose script this is — the same
+    /// identity [`LifecycleSandbox::confines`] is offered, carried through to `run` so a
+    /// hook can key a curated per-package policy on it and not only an accept/decline.
+    ///
+    /// `None` carries the same meaning it does on `confines`: `project_root` is NOT the
+    /// consumer's own project, so there is no consumer-anchored identity here. An
+    /// embedder must read it as "no policy", never as "no confinement" — a fetched
+    /// checkout's only name is the one it wrote into its own manifest.
+    pub package_name: Option<String>,
     /// The command's explicit env operations (set = `Some`, removed = `None`), read
     /// back from the built command. Layered over the inherited aube-process env by the
     /// embedder to reconstruct the effective child env the unconfined spawn would have.

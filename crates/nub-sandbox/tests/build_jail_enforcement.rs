@@ -77,6 +77,7 @@ fn build_jail_confines_writes_and_hides_secrets() {
     let policy = nub_sandbox::compile_build_jail(
         homes(&home, &project),
         &package_dir,
+        None,
         vec![interpreter],
         Vec::new(),
         ambient,
@@ -233,6 +234,7 @@ fn build_jail_blocks_direct_egress_and_leaves_only_the_proxy_reachable() {
     let policy = nub_sandbox::compile_build_jail(
         homes(&home, &project),
         &package_dir,
+        None,
         vec![home.join("Library/Caches/nub/node/bin/node")],
         Vec::new(),
         ambient,
@@ -319,6 +321,7 @@ fn a_fetched_checkout_reads_nothing_outside_itself_through_a_symlink_or_a_steere
         let policy = nub_sandbox::compile_build_jail(
             homes(&home, project),
             &checkout,
+            None,
             Vec::new(),
             Vec::new(),
             ambient.clone(),
@@ -407,6 +410,7 @@ fn build_jail_grants_node_headers_and_nothing_else_under_the_store() {
     let policy = nub_sandbox::compile_build_jail(
         homes(&home, &project),
         &package_dir,
+        None,
         vec![interpreter],
         vec![include_node.clone()],
         ambient,
@@ -476,6 +480,7 @@ fn a_native_compile_still_works_under_the_narrowed_tmp() {
     let policy = nub_sandbox::compile_build_jail(
         homes(&home, &project),
         &package_dir,
+        None,
         vec![home.join("Library/Caches/nub/node/bin/node")],
         Vec::new(),
         [("PATH", "/usr/bin:/bin")]
@@ -520,6 +525,7 @@ fn common_etc_reads_survive_the_leaf_narrowing() {
     let policy = nub_sandbox::compile_build_jail(
         homes(&home, &project),
         &package_dir,
+        None,
         vec![home.join("Library/Caches/nub/node/bin/node")],
         Vec::new(),
         [("PATH", "/usr/bin:/bin")]
@@ -597,6 +603,7 @@ fn build_jail_reads_the_pm_store_and_toolchain_but_not_a_git_dep_clone() {
     let policy = nub_sandbox::compile_build_jail(
         homes(&home, &project),
         &package_dir,
+        None,
         vec![home.join("Library/Caches/nub/node/bin/node")],
         Vec::new(),
         [("PATH", "/usr/bin:/bin")]
@@ -670,6 +677,7 @@ fn build_jail_cannot_read_preferences_through_the_cfprefs_broker() {
     let policy = nub_sandbox::compile_build_jail(
         homes(&home, &project),
         &package_dir,
+        None,
         vec![home.join("Library/Caches/nub/node/bin/node")],
         Vec::new(),
         [("PATH", "/usr/bin:/bin")]

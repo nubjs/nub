@@ -109,6 +109,14 @@ features = [
   "Win32_System_StationsAndDesktops",
 ]
 
+# build.rs bakes data/build-jail-catalog.json into `static` Rust, so the jail's carve-outs
+# have no runtime parse and a malformed catalog fails the BUILD rather than a user's
+# install. serde_json is already a normal dependency above — no new supply-chain surface.
+# `preserve_order` is deliberately NOT requested: the generator emits list order as
+# written, and none of the catalog's objects carry last-match-wins semantics.
+[build-dependencies]
+serde_json = { workspace = true }
+
 [dev-dependencies]
 tempfile = "3"
 # Proxy integration tests build the client-side `Proxy-Authorization: Basic` credential.
