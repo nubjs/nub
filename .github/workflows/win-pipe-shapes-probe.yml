@@ -86,7 +86,8 @@ jobs:
           done
           for c in libuv-exact-outbound libuv-exact-inbound libuv-plus-reject-remote \
                    libuv-flags-flat-name rust-exact rust-minus-reject-remote \
-                   rust-minus-overlapped reject-remote-only original-anchor; do
+                   rust-minus-overlapped reject-remote-only original-anchor \
+                   original-anchor-local-ns libuv-flags-local-ns; do
             need "prop:$c-creatable-unconfined=PASS"
             for a in jail-net-deny jail-net-open unconfined; do
               grep -q "prop:$c-$a-measured=PASS" probe.log || { echo "MISS $c not measured in arm $a"; fail=1; }

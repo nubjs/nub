@@ -5,8 +5,20 @@
 //! Rust `Stdio::piped()` spawn — documented in Rust's own source as a NAMED pipe under the
 //! same prefix — succeeded and returned the child's bytes. One of those says NPFS is closed
 //! to a LowBox token and the other says it is open, so neither could be used until the
-//! variable separating them was named. This probe varies ONE field at a time across nine
+//! variable separating them was named. This probe varies ONE field at a time across eleven
 //! `CreateNamedPipeW` cells that differ only in `dwOpenMode`, `dwPipeMode`, and the name.
+//!
+//! ROUND 1 (run 30467811349) answered the flag half: EVERY cell was refused under the jail,
+//! `ERROR_ACCESS_DENIED`, in both the net-deny and net-unconfined arms — so no `dwOpenMode`
+//! or `dwPipeMode` bit is the gate, and no capability nub can grant changes it either
+//! (`internetClient` is the only one the policy surface reaches). The anonymous `CreatePipe`
+//! was permitted in every arm. That leaves the NAMESPACE as the live hypothesis, which is
+//! also where the independent evidence points: `CreateNamedPipeA`'s reference says an app
+//! container must spell the name `\\.\pipe\LOCAL\…`, and Compiler Explorer hit this exact
+//! wall under an AppContainer (ninja-build/ninja#2354 — "there seems to be no capability
+//! that we can give the AppContainer environment to enable the creation of named pipes").
+//! Round 2 adds the `LOCAL\` cells and asks the succeeding std handle for its own NPFS name,
+//! so what std creates is read off the running binary rather than inferred from its source.
 //!
 //! WHY IT MATTERS. libuv creates a named pipe per piped stdio stream, and
 //! `uv__pipe_server` (`deps/uv/src/win/pipe.c`) treats `ERROR_ACCESS_DENIED` as a NAME
@@ -76,7 +88,11 @@ mod win {
     const ACCESS_OUTBOUND: u32 = 0x0000_0002;
     const FIRST_INSTANCE: u32 = 0x0008_0000;
     const OVERLAPPED: u32 = 0x4000_0000;
-    const REJECT_REMOTE: u32 = 0x0000_0002;
+    // 0x8. The first round of this probe used 0x2, which is PIPE_READMODE_MESSAGE and is
+    // invalid alongside PIPE_TYPE_BYTE — every cell carrying it came back ERROR_INVALID_
+    // PARAMETER (87) UNCONFINED, which is exactly what the unconfined control exists to
+    // catch. A cell nobody can create would otherwise have read as a jail refusal.
+    const REJECT_REMOTE: u32 = 0x0000_0008;
 
     /// One `CreateNamedPipeW` cell. `name` is a template resolved in the CHILD (`{pid}` and
     /// `{n}`), so a pipe name never crosses a command line and cannot be mangled in transit.
@@ -156,6 +172,33 @@ mod win {
             pipe_mode: 0,
             note: "the shape the sibling probe measured REFUSED — the anchor to reproduce",
         },
+        // The `LOCAL\` namespace is the OTHER live hypothesis, and it has independent
+        // support: `CreateNamedPipeA`'s own reference says an app container must spell the
+        // name `\\.\pipe\LOCAL\…`, and Compiler Explorer hit this exact wall under an
+        // AppContainer (ninja-build/ninja#2354, "there seems to be no capability that we can
+        // give the AppContainer environment to enable the creation of named pipes"). These
+        // two cells are the anchor and libuv's flags with ONLY the namespace changed.
+        Cell {
+            id: "original-anchor-local-ns",
+            name: r"\\.\pipe\LOCAL\nub-interp-probe-{pid}-{n}",
+            open_mode: ACCESS_INBOUND | FIRST_INSTANCE,
+            pipe_mode: 0,
+            note: "the refused anchor with ONLY the LOCAL namespace added",
+        },
+        Cell {
+            id: "libuv-flags-local-ns",
+            name: r"\\.\pipe\LOCAL\nubprobe-{pid}-{n}",
+            open_mode: ACCESS_INBOUND | OVERLAPPED | FIRST_INSTANCE,
+            pipe_mode: 0,
+            note: "libuv's flags in the LOCAL namespace — the shape a libuv fix could adopt",
+        },
+        Cell {
+            id: "libuv-uvdir-local-ns",
+            name: r"\\.\pipe\LOCAL\uv\{n}-{pid}",
+            open_mode: ACCESS_INBOUND | OVERLAPPED | FIRST_INSTANCE,
+            pipe_mode: 0,
+            note: "LOCAL plus libuv's own `uv\\` subdirectory — the smallest patch to libuv",
+        },
     ];
 
     fn resolve_name(t: &str, n: u32) -> Vec<u16> {
@@ -215,36 +258,54 @@ mod win {
                     let _ = std::fs::write(marker, format!("REFUSED raw={:?}", e.raw_os_error()));
                     5
                 } else {
+                    let name = object_name(r.cast());
                     unsafe {
                         windows_sys::Win32::Foundation::CloseHandle(r);
                         windows_sys::Win32::Foundation::CloseHandle(w);
                     }
-                    let _ = std::fs::write(marker, "CREATED");
+                    let _ = std::fs::write(marker, format!("CREATED npfs-name={name}"));
                     0
                 }
             }
             // ruststdio <marker> <exe> [args…] — std's own piped spawn, reproduced in the
             // same run as the cells so the comparison is not across probes.
             Some("ruststdio") => {
+                use std::os::windows::io::AsRawHandle;
                 let marker = Path::new(&a[1]);
                 match std::process::Command::new(&a[2])
                     .args(&a[3..])
                     .stdout(std::process::Stdio::piped())
                     .spawn()
                 {
-                    Ok(child) => match child.wait_with_output() {
-                        Ok(o) => {
-                            let _ = std::fs::write(
-                                marker,
-                                format!("CREATED {}", String::from_utf8_lossy(&o.stdout).trim()),
-                            );
-                            0
+                    Ok(child) => {
+                        // THE DECISIVE FACT. Every `CreateNamedPipeW` cell is refused while
+                        // this spawn succeeds, and the two can only be reconciled by what
+                        // std ACTUALLY created. `CreatePipe` names its instances
+                        // `\Win32Pipes.<pid>.<n>`; a `CreateNamedPipeW` call names them
+                        // whatever the caller asked for. Asking the handle removes the last
+                        // inference from the chain.
+                        let name = child
+                            .stdout
+                            .as_ref()
+                            .map(|s| object_name(s.as_raw_handle().cast()))
+                            .unwrap_or_else(|| "<no stdout handle>".to_string());
+                        match child.wait_with_output() {
+                            Ok(o) => {
+                                let _ = std::fs::write(
+                                    marker,
+                                    format!(
+                                        "CREATED npfs-name={name} out={}",
+                                        String::from_utf8_lossy(&o.stdout).trim()
+                                    ),
+                                );
+                                0
+                            }
+                            Err(e) => {
+                                let _ = std::fs::write(marker, format!("waiterr {e:?}"));
+                                9
+                            }
                         }
-                        Err(e) => {
-                            let _ = std::fs::write(marker, format!("waiterr {e:?}"));
-                            9
-                        }
-                    },
+                    }
                     Err(e) => {
                         let _ =
                             std::fs::write(marker, format!("REFUSED raw={:?}", e.raw_os_error()));
@@ -329,6 +390,39 @@ mod win {
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
+    }
+
+    /// The NPFS path behind a handle, relative to `\Device\NamedPipe`. This is what
+    /// separates "std creates a named pipe" from "std creates an anonymous one" — a claim
+    /// the sibling probe took from Rust's source rather than from the running binary.
+    fn object_name(h: windows_sys::Win32::Foundation::HANDLE) -> String {
+        use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandleEx;
+        // FileNameInfo. Declared inline because the buffer must be 4-byte aligned and long
+        // enough for the name, which the generated FILE_NAME_INFO (a 1-element array) is not.
+        const FILE_NAME_INFO: i32 = 2;
+        #[repr(C)]
+        struct NameInfo {
+            length: u32,
+            name: [u16; 512],
+        }
+        let mut info = NameInfo {
+            length: 0,
+            name: [0; 512],
+        };
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                h,
+                FILE_NAME_INFO as _,
+                (&raw mut info).cast(),
+                std::mem::size_of::<NameInfo>() as u32,
+            )
+        };
+        if ok == 0 {
+            let e = std::io::Error::last_os_error();
+            return format!("<query-failed raw={:?}>", e.raw_os_error());
+        }
+        let chars = ((info.length as usize) / 2).min(info.name.len());
+        String::from_utf16_lossy(&info.name[..chars])
     }
 
     /// User + kernel CPU consumed by a live process, in milliseconds.
@@ -442,7 +536,12 @@ mod win {
     /// A build-jail-SHAPED policy. `net_enforce` is the ONE capability lever the public API
     /// exposes: `windows.rs` grants `internetClient` iff `!policy.net.enforce`, so passing
     /// `false` is how this probe asks whether a capability changes the NPFS verdict.
-    fn jail_shaped(f: &Fixture, extra: Vec<FsRule>, net_enforce: bool) -> SandboxPolicy {
+    fn jail_shaped(
+        f: &Fixture,
+        extra: Vec<FsRule>,
+        net_enforce: bool,
+        extra_env: &[(&str, String)],
+    ) -> SandboxPolicy {
         let mut entries = vec![
             FsRule {
                 matcher: CanonGlob(canon(&f.work)),
@@ -453,6 +552,10 @@ mod win {
             read_rule(&f.child),
         ];
         entries.extend(extra);
+        let mut env = os_essential_env();
+        for (k, v) in extra_env {
+            env.insert((*k).to_string(), v.clone());
+        }
         SandboxPolicy {
             fs: FsPolicy {
                 rules: FsRuleSet {
@@ -467,7 +570,17 @@ mod win {
                 default_effect: Effect::Deny,
                 ..Default::default()
             },
-            env: EnvPolicy::resolved(os_essential_env()),
+            // `enforce` MUST be set, not merely `resolved`: the Windows backend hands the
+            // child the constructed map only when the env axis enforces, and otherwise lets
+            // it inherit the parent's. The first round used `resolved` alone, so the node
+            // arms silently ran on the PARENT's environment without NODE_OPTIONS and died
+            // in `resolveMainPath` before reaching the measurement.
+            env: EnvPolicy {
+                resolved: true,
+                enforce: true,
+                constructed: env,
+                ..Default::default()
+            },
             pid: PidPolicy::default(),
             build_jail: true,
         }
@@ -575,8 +688,8 @@ mod win {
     /// (else the cell's arguments are wrong and its jailed refusal says nothing).
     fn pipe_shape_matrix(fails: &mut u32) {
         let f = Fixture::new("matrix");
-        let jail = jail_shaped(&f, Vec::new(), true);
-        let jail_net = jail_shaped(&f, Vec::new(), false);
+        let jail = jail_shaped(&f, Vec::new(), true, &[]);
+        let jail_net = jail_shaped(&f, Vec::new(), false, &[]);
 
         for (label, policy) in [
             ("jail-net-deny", Some(&jail)),
@@ -675,7 +788,17 @@ mod win {
         if let Some(dir) = node.parent() {
             extra.push(read_rule(dir));
         }
-        let jail = jail_shaped(&f, extra, true);
+        // `--preserve-symlinks-main` via NODE_OPTIONS is not optional here: Node realpaths
+        // its main script before running a line of it, and BOTH realpath implementations are
+        // refused under this jail (the sibling probe's finding, landed as
+        // `windows_realpath_node_options`). Without it every node arm dies in
+        // `resolveMainPath` — which is exactly what the first round measured.
+        let jail = jail_shaped(
+            &f,
+            extra,
+            true,
+            &[("NODE_OPTIONS", nub_sandbox::windows_realpath_node_options())],
+        );
 
         // (id, the stdio option source, whether the callee's bytes are recoverable)
         // `piped` runs LAST deliberately: it is the shape that hangs, and an arm that has
