@@ -97,12 +97,29 @@ struct Sources {
     workspace_yaml: Vec<String>,
 }
 
+/// Cargo's `CARGO_MANIFEST_DIR` read at RUN time, not baked in at compile time.
+///
+/// `env!` freezes whichever manifest dir compiled the build script into the
+/// binary. Build-script binaries are cached per target dir, and this repo shares
+/// ONE target dir across git worktrees, so an `env!` path stays pinned to the
+/// worktree that happened to build it first: later builds from a sibling
+/// worktree silently read THAT tree's files, and once it is deleted they fail
+/// outright on a path absent from the current checkout. The runtime lookup
+/// resolves per invocation instead. `cargo publish --verify` is unaffected —
+/// cargo sets the variable from the package being built, so it still points
+/// inside `target/package/<crate>-<ver>/`.
+fn manifest_dir() -> String {
+    std::env::var("CARGO_MANIFEST_DIR")
+        .expect("cargo always sets CARGO_MANIFEST_DIR for build scripts")
+}
+
 fn main() {
     // `settings.toml` lives inside this crate so it ships in the
     // published tarball — `cargo publish --verify` runs the build
     // script from `target/package/aube-settings-<ver>/`, which can
-    // only see files under the crate root.
-    let settings_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("settings.toml");
+    // only see files under the crate root. That property comes from
+    // where the file lives, not from how the path is resolved.
+    let settings_path = PathBuf::from(manifest_dir()).join("settings.toml");
 
     println!("cargo:rerun-if-changed={}", settings_path.display());
 

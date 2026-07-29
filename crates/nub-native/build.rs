@@ -1,7 +1,23 @@
 extern crate napi_build;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Cargo's `CARGO_MANIFEST_DIR` read at RUN time, not baked in at compile time.
+///
+/// `env!` freezes whichever manifest dir compiled the build script into the
+/// binary. Build-script binaries are cached per target dir, and this repo shares
+/// ONE target dir across git worktrees, so an `env!` path stays pinned to the
+/// worktree that happened to build it first: later builds from a sibling
+/// worktree silently read THAT tree's files, and once it is deleted they fail
+/// outright on a path absent from the current checkout. The runtime lookup
+/// resolves per invocation instead. `cargo publish --verify` is unaffected —
+/// cargo sets the variable from the package being built, so it still points
+/// inside `target/package/<crate>-<ver>/`.
+fn manifest_dir() -> String {
+    std::env::var("CARGO_MANIFEST_DIR")
+        .expect("cargo always sets CARGO_MANIFEST_DIR for build scripts")
+}
 
 fn main() {
     napi_build::setup();
@@ -68,7 +84,7 @@ fn git_dir() -> Option<std::path::PathBuf> {
     if dir.is_absolute() {
         Some(dir.to_path_buf())
     } else {
-        Some(Path::new(env!("CARGO_MANIFEST_DIR")).join(dir))
+        Some(PathBuf::from(manifest_dir()).join(dir))
     }
 }
 
@@ -76,7 +92,7 @@ fn git_dir() -> Option<std::path::PathBuf> {
 fn run_git(args: &[&str]) -> Option<String> {
     let out = Command::new("git")
         .args(args)
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .current_dir(manifest_dir())
         .output()
         .ok()?;
     if !out.status.success() {

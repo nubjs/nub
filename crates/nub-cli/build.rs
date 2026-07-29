@@ -25,8 +25,24 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Cargo's `CARGO_MANIFEST_DIR` read at RUN time, not baked in at compile time.
+///
+/// `env!` freezes whichever manifest dir compiled the build script into the
+/// binary. Build-script binaries are cached per target dir, and this repo shares
+/// ONE target dir across git worktrees, so an `env!` path stays pinned to the
+/// worktree that happened to build it first: later builds from a sibling
+/// worktree silently read THAT tree's files, and once it is deleted they fail
+/// outright on a path absent from the current checkout. The runtime lookup
+/// resolves per invocation instead. `cargo publish --verify` is unaffected —
+/// cargo sets the variable from the package being built, so it still points
+/// inside `target/package/<crate>-<ver>/`.
+fn manifest_dir() -> String {
+    std::env::var("CARGO_MANIFEST_DIR")
+        .expect("cargo always sets CARGO_MANIFEST_DIR for build scripts")
+}
+
 fn main() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir = PathBuf::from(manifest_dir());
     let docs_dir = manifest_dir.join("../../site/content/docs");
     let docs_dir = docs_dir
         .canonicalize()
