@@ -1480,10 +1480,13 @@ async fn minimum_release_age_holds_without_full_packument_cache() {
     full.time
         .insert("1.0.0".to_string(), "2024-01-01T00:00:00.000Z".to_string());
     full.time.insert("1.1.0".to_string(), now_iso);
-    // npmjs's corgi document: same versions, NO time map.
+    // npmjs's corgi document: same versions, NO time map. It does carry
+    // `modified` — verified against registry.npmjs.org — and for an actively
+    // published package that timestamp is recent, so it cannot stand in as
+    // the maturity proof a time-less document otherwise gets. Keeping it here
+    // is what stops the fixture passing for the wrong reason.
     let mut corgi = full.clone();
     corgi.time.clear();
-    corgi.modified = None;
     let full_body = serde_json::to_vec(&full).unwrap();
     let corgi_body = serde_json::to_vec(&corgi).unwrap();
 
@@ -1535,6 +1538,7 @@ async fn minimum_release_age_holds_without_full_packument_cache() {
         .with_packument_cache(cache_dir)
         .with_minimum_release_age(Some(MinimumReleaseAge {
             minutes: 1440,
+            strict: true,
             ..Default::default()
         }));
     let mut manifest = PackageJson::default();
