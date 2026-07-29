@@ -123,6 +123,19 @@ jobs:
             need_pass "$p"
           done
 
+          # MEASUREMENTS, NOT REQUIREMENTS. A FAIL here is the finding — these ask how much
+          # breaks in the shipping configuration, so gating on PASS would turn the answer into a
+          # red build. Only ABSENCE is an error: a shape that was never measured tells us nothing.
+          echo "---- blast radius: which shapes survive with the repair OFF ----"
+          for p in shape-eval-only-completes-unrepaired \
+                   shape-eval-then-absolute-require-completes-unrepaired \
+                   shape-eval-then-relative-require-completes-unrepaired \
+                   shape-eval-then-bare-require-through-junction-completes-unrepaired \
+                   shape-entry-file-completes-unrepaired; do
+            grep -q "prop:$p=" probe.log || { echo "MISS $p (never measured)"; fail=1; }
+            grep -E "prop:$p=" probe.log || true
+          done
+
           echo "---- ancestor reachability ----"
           for p in repair-on-lstat-c-root-permitted \
                    repair-on-lstat-chain-permitted \

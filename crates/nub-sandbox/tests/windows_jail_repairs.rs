@@ -152,8 +152,15 @@ mod win {
                 return 9;
             }
         };
-        let spawned = std::process::Command::new(node)
-            .arg(script)
+        // `-e:<code>` runs Node with NO MAIN FILE, which is the only way to get past
+        // `resolveMainPath` without a flag and therefore the only way to ask what a REQUIRE
+        // costs separately from what the entry point costs.
+        let mut command = std::process::Command::new(node);
+        match script.strip_prefix("-e:") {
+            Some(code) => command.arg("-e").arg(code),
+            None => command.arg(script),
+        };
+        let spawned = command
             .stdout(std::process::Stdio::from(out))
             .stderr(std::process::Stdio::from(err))
             .spawn();
@@ -867,6 +874,140 @@ require({dep});
         }
     }
 
+    /// WHICH REQUIRE SHAPES COST A WALK ABOVE THE USER PROFILE — the blast-radius measurement.
+    ///
+    /// Every cell here runs with the repair OFF, which is the UNPRIVILEGED REALITY: a standard
+    /// user owns `%USERPROFILE%` down and can repair that, but `C:\` is owned by TrustedInstaller
+    /// and `C:\Users` by SYSTEM, neither grants a standard group WRITE_DAC, and the capability
+    /// route is closed. So "repair off above the profile" is not a hypothetical arm — it is what
+    /// ships.
+    ///
+    /// The shapes are separated because the source says the entry point ALONE is fatal and that
+    /// needs confirming against a runtime rather than a reading. `resolveMainPath` realpaths the
+    /// main script (`run_main.js`), `_findPath` realpaths every resolved filename including the
+    /// main one (`loader.js`), and `realpathSync` lstats `splitRoot(p)` — `C:\` — before any
+    /// component (`fs.js`). If that is right, `node <file>` cannot start whatever the file
+    /// contains, and no require shape matters because no require is ever reached. `-e` is the
+    /// only way to ask the second question at all: it has no main module, so it is the control
+    /// that separates the ENTRY cost from the REQUIRE cost.
+    ///
+    /// The junction cell is the one that matters most for nub specifically. The default linker is
+    /// `NodeLinker::Isolated`, so a dependency is a LINK into a store cell rather than a real
+    /// directory — exactly the shape that forces a realpath even where a plain directory might
+    /// not. `mklink /J` is used rather than a symlink because a junction needs no privilege,
+    /// which keeps the fixture representative of what an unprivileged install produces.
+    fn require_shapes(fails: &mut u32, node: &Path) {
+        let f = Fixture::new("shapes");
+        let dir = f.work.join("shapes");
+        std::fs::create_dir_all(&dir).unwrap();
+        seed_package(&dir);
+
+        // A dependency reached three ways: by absolute path, by a relative path from cwd, and by
+        // bare specifier through a junction, which is nub's own layout.
+        let store = dir.join("store").join("dep@1.0.0");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(
+            store.join("package.json"),
+            "{\"name\":\"dep\",\"version\":\"1.0.0\",\"main\":\"index.js\"}\n",
+        )
+        .unwrap();
+        let modules = dir.join("node_modules");
+        std::fs::create_dir_all(&modules).unwrap();
+        let junction = modules.join("dep");
+        let linked = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&store)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        println!("  fact:junction-created={linked}");
+
+        let marker = |name: &str| dir.join(format!("{name}.marker"));
+        let dep_body = |name: &str| {
+            format!(
+                "require(\"fs\").writeFileSync({m}, \"dep-loaded\");\nmodule.exports = 1;\n",
+                m = js_literal(&marker(name))
+            )
+        };
+        std::fs::write(store.join("index.js"), dep_body("bare")).unwrap();
+        let flat = dir.join("dep.js");
+        std::fs::write(&flat, dep_body("path")).unwrap();
+
+        let cells: Vec<(&str, String)> = vec![
+            // No main module and no require: does Node start under the jail AT ALL?
+            (
+                "eval-only",
+                format!(
+                    "-e:require('fs').writeFileSync({m}, 'eval-ran')",
+                    m = js_literal(&marker("eval"))
+                ),
+            ),
+            (
+                "eval-then-absolute-require",
+                format!("-e:require({p})", p = js_literal(&flat)),
+            ),
+            (
+                "eval-then-relative-require",
+                "-e:require('./dep.js')".to_string(),
+            ),
+            (
+                "eval-then-bare-require-through-junction",
+                "-e:require('dep')".to_string(),
+            ),
+        ];
+
+        println!("  ---- require shapes, repair OFF (the shipping configuration) ----");
+        for (id, script) in &cells {
+            for m in ["eval", "path", "bare"] {
+                let _ = std::fs::remove_file(marker(m));
+            }
+            let policy = jail_shaped(&f, vec![read_rule(node)], &[]);
+            let run = without_ancestor_repair(|| {
+                node_arm(&f, &policy, id, node, &dir, 30, script.as_str())
+            });
+            let reached = ["eval", "path", "bare"]
+                .iter()
+                .filter(|m| std::fs::read_to_string(marker(m)).is_ok())
+                .count()
+                > 0;
+            report(
+                fails,
+                &format!("shape-{id}-completes-unrepaired"),
+                reached,
+                &format!(
+                    "marker-written={reached} outer={} sink={}",
+                    run.outer, run.sink
+                ),
+            );
+        }
+
+        // The entry-point cell, stated as its own property because it is the one that decides
+        // the blast radius: if `node <file>` cannot start, every shape above is unreachable in
+        // practice regardless of how it scored.
+        let entry = without_ancestor_repair(|| {
+            let policy = jail_shaped(&f, vec![read_rule(node)], &[]);
+            node_arm(
+                &f,
+                &policy,
+                "entry-file",
+                node,
+                &dir,
+                30,
+                &format!(
+                    "require(\"fs\").writeFileSync({m}, \"entry-ran\");\n",
+                    m = js_literal(&marker("entry"))
+                ),
+            )
+        });
+        report(
+            fails,
+            "shape-entry-file-completes-unrepaired",
+            std::fs::read_to_string(marker("entry")).is_ok(),
+            &format!("outer={} sink={}", entry.outer, entry.sink),
+        );
+    }
+
     /// THE SUCCESS CRITERION for repair 1. Not rc=0 and not "no denial logged": a
     /// lifecycle-shaped script body, run in a package directory, reading a granted file and
     /// writing its own marker naming its own cwd.
@@ -1198,6 +1339,9 @@ try {{
 
         step("ancestor_repair");
         ancestor_repair(&mut fails, node.as_path());
+        step("require_shapes");
+        require_shapes(&mut fails, node.as_path());
+
         step("stdio_shim");
         stdio_shim(&mut fails, node.as_path());
         step("done");
