@@ -44,6 +44,12 @@ verbatim tail off Windows, and refuses one whose program is not the Windows comm
 interpreter — the only program nub launches that parses its own line. Both refusals are
 covered by unit tests in `crates/nub-sandbox/src/backend/mod.rs`, which run on any host.
 
+`build_command_line` is shared by both Windows mechanisms, so the dedicated-account
+backend (`backend/windows_account/launch.rs`) carried the same defect and is fixed by the
+same change. This probe does not exercise it: the build jail's policy is a pure allowlist
+with coarse-deny net, which selects the admin-free AppContainer, and the account backend
+additionally needs a one-time elevated provisioning step no runner has.
+
 ## The three fixtures
 
 Each installs a `file:` tarball dependency whose `install` script writes a marker file, and
@@ -62,7 +68,7 @@ marker) and toggles only the jail, so it must pass in **every** arm on **every**
 Its canary read is also the positive half of the enforcement differential: jailed must be
 `refused:EPERM|EACCES`, unjailed must be `allowed:<n>`.
 
-## The five properties, per fixture
+## The six properties, per fixture
 
 | Property | What it establishes |
 | --- | --- |
