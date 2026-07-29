@@ -22,6 +22,9 @@ mod linux_jail;
 #[cfg(windows)]
 mod windows_job;
 
+#[cfg(unix)]
+mod unix_group;
+
 pub use content_sniff::{Suspicion, SuspicionKind, sniff_lifecycle};
 pub use default_trust::is_default_trusted;
 pub use policy::{AllowDecision, BuildPolicy, BuildPolicyError, pattern_matches};
@@ -349,14 +352,12 @@ fn spawn_shell_with_settings(
         cmd
     };
     apply_script_settings_env(&mut cmd, settings);
-    // Aborting the `JoinSet` that drives the parallel lifecycle pass
-    // drops the spawned `Child`, which without `kill_on_drop` would
-    // leave the shell running detached (Discussion #654). On Windows
-    // that's only half the fix — `TerminateProcess` on `cmd.exe`
-    // doesn't reach grandchildren like `node-gyp` → `MSBuild` → `node`;
-    // [`run_command_killing_descendants`] also assigns the shell to a
-    // `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` job object to reap the
-    // whole tree.
+    // Dropping the spawned `Child` without `kill_on_drop` would leave the shell
+    // running detached (Discussion #654). This reaches the SHELL ONLY, on every
+    // platform — killing `sh`/`cmd.exe` does not reach `node-gyp` → `make`/
+    // `MSBuild` → `cc`. [`run_command_killing_descendants`] carries the other
+    // half: a kill-on-job-close job object on Windows, an own process group on
+    // Unix.
     cmd.kill_on_drop(true);
     cmd
 }
@@ -1057,22 +1058,26 @@ pub fn write_line_to_real_stderr(line: &str) {
     eprintln!("{line}");
 }
 
-/// Spawn `cmd`, wait for it, and on Windows attach the shell to a
-/// kill-on-job-close job object so an aborted lifecycle script reaps
-/// its full descendant tree instead of leaving orphans behind.
+/// Spawn `cmd`, wait for it, and reap the shell's whole descendant tree —
+/// through a kill-on-job-close job object on Windows, through its own process
+/// group on Unix.
 ///
 /// `kill_on_drop(true)` on the parent `Command` (set by
-/// [`spawn_shell_with_settings`]) covers `TerminateProcess` /
-/// `SIGKILL` on the direct shell. That alone is enough on Unix
-/// because most build tooling handles the parent dying — and the
-/// shell itself is the foreground process for the subscript pipeline.
-/// On Windows the shell's grandchildren (`node-gyp` → `MSBuild` →
-/// `node`) are *not* part of the shell's job by default, so killing
-/// the shell leaves them running detached. Discussion #654 is the
-/// in-the-wild bug: `aube add --global` failed, aube exited, and
-/// node/MSBuild kept writing to the console.
+/// [`spawn_shell_with_settings`]) covers `TerminateProcess` / `SIGKILL` on the
+/// direct shell, and NOTHING else. The shell's grandchildren (`node-gyp` →
+/// `MSBuild`/`make` → `cc`) are not reachable from its pid on either platform:
+/// they are outside the shell's Windows job by default, and on Unix they simply
+/// reparent to init and run on. Discussion #654 is the Windows bug in the wild
+/// (`aube add --global` failed, aube exited, node/MSBuild kept writing to the
+/// console); the Unix half was measured on a 50-package build corpus, where a
+/// single shard leaked 11,407 lines of build output AFTER the command had
+/// returned its result, still writing into `node_modules`.
 ///
-/// We mitigate by spawning, then assigning the child process handle
+/// A previous revision of this comment asserted the Unix side was "enough …
+/// because most build tooling handles the parent dying." It does not; that
+/// claim is what the corpus measurement refuted.
+///
+/// On Windows we mitigate by spawning, then assigning the child process handle
 /// to a job created with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. The
 /// `_job` binding's `Drop` (called when this future returns, panics,
 /// or is aborted) closes the last job handle, and the kernel kills
@@ -1092,13 +1097,28 @@ pub fn write_line_to_real_stderr(line: &str) {
 /// closed would block lifecycle scripts entirely on those hosts,
 /// which is a worse regression than the orphaning we're trying to
 /// avoid.
+///
+/// The Unix side takes the same fail-open posture for the same reason, but its
+/// gate is a safety check rather than an OS refusal: `kill(-pgid, …)` is only
+/// issued once the child is CONFIRMED to lead its own group, because a negative
+/// target naming aube's own group would kill the installer. See
+/// [`unix_group::ProcessGroupReaper::arm`].
 async fn run_command_killing_descendants(
     mut cmd: tokio::process::Command,
     script_name: &str,
 ) -> Result<std::process::ExitStatus, Error> {
+    #[cfg(unix)]
+    unix_group::group_on_spawn(&mut cmd);
     let mut child = cmd
         .spawn()
         .map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))?;
+    // Declared AFTER `child` so it drops BEFORE it (locals drop in reverse
+    // declaration order): the group kill has to land while the shell is still
+    // unreaped, which is what pins the pgid against reuse.
+    #[cfg(unix)]
+    let _group = child
+        .id()
+        .and_then(|pid| unix_group::ProcessGroupReaper::arm(pid, script_name));
     #[cfg(windows)]
     let _job = match windows_job::JobObject::new() {
         Ok(job) => {
@@ -2386,5 +2406,145 @@ mod break_cas_hardlinks_tests {
             std::path::Path::new("real.txt")
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+// The POSIX twin of `windows_job_object_tests`. A lifecycle script's
+// grandchildren (`node-gyp` → `make` → `cc`) are not reachable from the shell's
+// pid: `kill_on_drop` SIGKILLs `sh` alone and the build tools reparent to init.
+// Measured on a 50-package build corpus, that leaked up to 11,407 lines of build
+// output *after* the command returned, still writing into `node_modules`. Both
+// exits from `run_command_killing_descendants` must reap the whole tree.
+#[cfg(all(test, unix))]
+mod unix_process_group_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn is_process_alive(pid: i32) -> bool {
+        // SAFETY: `kill` with signal 0 probes for existence without delivering.
+        // A zombie still answers, but these grandchildren are reparented to init,
+        // which reaps them — so a live answer means genuinely running.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    async fn wait_until<F: Fn() -> bool>(check: F, timeout: Duration) -> bool {
+        let start = Instant::now();
+        while !check() {
+            if start.elapsed() > timeout {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        true
+    }
+
+    fn pid_file(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!("aube-test-{tag}-{nanos}.pid"))
+    }
+
+    /// `&` detaches the inner shell from the outer one exactly the way
+    /// `node-gyp` detaches `make` — the grandchild outlives a SIGKILL aimed at
+    /// its parent. It writes its OWN pid, so the assertion is on a process the
+    /// test never named, not on anything the outer script reported.
+    fn grandchild_script(pid_file: &std::path::Path, outer_tail: &str) -> String {
+        format!(
+            "sh -c 'echo $$ > {}; sleep 60' & {outer_tail}",
+            pid_file.display()
+        )
+    }
+
+    async fn read_grandchild_pid(pid_file: &std::path::Path) -> i32 {
+        let appeared = wait_until(
+            || {
+                std::fs::read_to_string(pid_file)
+                    .ok()
+                    .and_then(|p| p.trim().parse::<i32>().ok())
+                    .is_some()
+            },
+            Duration::from_secs(20),
+        )
+        .await;
+        assert!(appeared, "grandchild never wrote its pid to {pid_file:?}");
+        let pid: i32 = std::fs::read_to_string(pid_file)
+            .expect("read pid file")
+            .trim()
+            .parse()
+            .expect("pid file parsed once already");
+        assert!(
+            is_process_alive(pid),
+            "grandchild {pid} was not alive immediately after writing its pid"
+        );
+        pid
+    }
+
+    /// Defect A, abort path: the future is dropped mid-`wait`, which is what
+    /// cancelling a lifecycle task does.
+    #[tokio::test]
+    async fn aborting_a_script_reaps_its_grandchildren() {
+        let pid_file = pid_file("abort-grandchild");
+        let script = grandchild_script(&pid_file, "sleep 30");
+        let cmd = spawn_shell_with_settings(&script, &ScriptSettings::default());
+        let task = tokio::spawn(async move {
+            let _ = run_command_killing_descendants(cmd, "test-abort").await;
+        });
+
+        let pid = read_grandchild_pid(&pid_file).await;
+        task.abort();
+        let _ = task.await;
+
+        let reaped = wait_until(|| !is_process_alive(pid), Duration::from_secs(10)).await;
+        let _ = std::fs::remove_file(&pid_file);
+        assert!(
+            reaped,
+            "grandchild {pid} survived the abort — it is reparented to init and \
+             still writing; the process group was not reaped"
+        );
+    }
+
+    /// Defect A, normal-return path — the one the corpus measured, asserted the
+    /// way the corpus measured it: NO SCRIPT OUTPUT MAY ARRIVE AFTER THE COMMAND
+    /// RETURNS. The script succeeds and exits while a grandchild it spawned is
+    /// still writing; unreaped, those writes keep landing in a package dir the
+    /// installer has already reported on and snapshotted.
+    ///
+    /// Asserted on the grandchild's own output rather than on its liveness: a
+    /// just-SIGKILLed process lingers as a zombie for a few milliseconds after
+    /// it can no longer write, so a liveness check would flake on that window
+    /// while proving nothing extra. A zombie writes nothing, and "still writing"
+    /// is the property that matters.
+    #[tokio::test]
+    async fn a_returned_script_leaves_nothing_writing() {
+        let out_file = pid_file("return-writer").with_extension("log");
+        let _ = std::fs::remove_file(&out_file);
+        // Appends at ~20 Hz forever, so any survival at all shows up as growth.
+        let script = format!(
+            "sh -c 'while :; do echo line >> {}; sleep 0.05; done' & sleep 1",
+            out_file.display()
+        );
+        let cmd = spawn_shell_with_settings(&script, &ScriptSettings::default());
+
+        let status = run_command_killing_descendants(cmd, "test-return")
+            .await
+            .expect("script ran");
+        assert!(status.success(), "fixture script should exit 0");
+
+        let at_return = std::fs::metadata(&out_file).map(|m| m.len()).unwrap_or(0);
+        assert!(
+            at_return > 0,
+            "fixture wrote nothing before returning — the test would pass vacuously"
+        );
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let after = std::fs::metadata(&out_file).map(|m| m.len()).unwrap_or(0);
+        let _ = std::fs::remove_file(&out_file);
+        assert_eq!(
+            after, at_return,
+            "grandchild kept writing after the command returned ({at_return} -> \
+             {after} bytes) — it is reparented to init and still touching the \
+             package dir"
+        );
     }
 }
