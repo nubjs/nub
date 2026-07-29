@@ -124,12 +124,18 @@ pub(crate) fn remove_hidden_hoist_tree(path: &Path) {
 }
 
 /// Best-effort unlink of `path` regardless of whether it's a file,
-/// symlink, junction, or directory. Errors are intentionally ignored
-/// because this is a "clear the slot" operation — the caller is about
-/// to place something else here and any residual entry that survives
-/// will surface as a downstream error.
+/// symlink, junction, or populated directory. Errors are intentionally
+/// ignored because this is a "clear the slot" operation — the caller is
+/// about to place something else here and any residual entry that
+/// survives will surface as a downstream error.
+///
+/// Goes through the Windows retry (a plain passthrough on Unix): the
+/// slots this clears live inside `node_modules`, where a dev server,
+/// watcher, or AV scanner holding a handle turns the delete into a
+/// transient os-5/32 failure. Swallowed here, that failure re-emerges
+/// as an `ERROR_ALREADY_EXISTS` from whatever the caller places next.
 pub(crate) fn try_remove_entry(path: &Path) {
-    let _ = std::fs::remove_dir_all(path);
+    let _ = remove_dir_all_with_retry(path);
     let _ = std::fs::remove_file(path);
 }
 

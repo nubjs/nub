@@ -2226,3 +2226,97 @@ fn clonedir_materialize_matches_per_file_byte_for_byte() {
     // Stats parity: the clone counts every index entry as linked.
     assert_eq!(stats.files_linked, index.len());
 }
+
+// nub#566 / nub#576: a POPULATED real directory sitting in a
+// shared-store entry's slot must be replaced by the link, not collide
+// with it. The slot gets that shape whenever a tree materialized
+// per-project (a `CI=1` / project-local-store install, or a package
+// leaving the disk-materialize eject set) is relinked with the shared
+// store on. `classify_entry_state` correctly calls it `Stale`, but the
+// removal that used to run was non-recursive, so it failed silently and
+// the link creation then aborted the whole install with `EEXIST` on
+// Unix / `ERROR_ALREADY_EXISTS` (os 183) on Windows.
+#[test]
+fn gvs_relink_replaces_a_populated_real_dir_in_the_entry_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    let (store, indices) = setup_store_with_files(dir.path());
+    let graph = make_graph();
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true).with_hoist(false);
+
+    linker.link_all(&project_dir, &graph, &indices).unwrap();
+
+    // Rewrite one entry into the per-project shape: a real directory
+    // holding the package, exactly what a GVS-off install leaves behind.
+    let entry = project_dir
+        .join("node_modules/.aube")
+        .join(dep_path_to_filename(
+            "bar@2.0.0",
+            DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH,
+        ));
+    try_remove_entry(&entry);
+    let pkg_dir = entry.join("node_modules/bar");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::write(pkg_dir.join("index.js"), b"stale per-project copy").unwrap();
+    assert!(aube_util::fs::is_real_dir(&entry));
+
+    linker
+        .link_all(&project_dir, &graph, &indices)
+        .expect("relink must reclaim a populated per-project entry, not collide with it");
+
+    assert!(
+        std::fs::read_link(&entry).is_ok(),
+        "entry must end up a link into the shared store"
+    );
+    assert!(entry.join("node_modules/bar/index.js").exists());
+}
+
+// `is_real_dir` exists to tell a plain directory apart from a
+// directory-SHAPED link, so the link case is the whole point — and it is
+// only meaningful against the real primitive: `create_dir_link` writes a
+// Unix symlink on Unix and an NTFS junction on Windows, and a junction
+// reports `is_dir() == true` / `is_symlink() == false`, which is what
+// defeats the obvious file-type test.
+#[test]
+fn is_real_dir_distinguishes_a_plain_dir_from_a_dir_shaped_link() {
+    let tmp = tempfile::tempdir().unwrap();
+    let real = tmp.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let file = tmp.path().join("file");
+    std::fs::write(&file, b"x").unwrap();
+    let link = tmp.path().join("link");
+    sys::create_dir_link(&real, &link).unwrap();
+
+    assert!(aube_util::fs::is_real_dir(&real));
+    assert!(!aube_util::fs::is_real_dir(&link));
+    assert!(!aube_util::fs::is_real_dir(&file));
+    assert!(!aube_util::fs::is_real_dir(&tmp.path().join("missing")));
+}
+
+// `create_dir_link` is the last writer before the install aborts, so it
+// carries its own clear-and-retry for a leftover link in the slot. The
+// restraint is deliberate and load-bearing: a POPULATED directory is a
+// real conflict a generic helper must not silently destroy, and the
+// caller that owns the slot clears it instead (see the test above).
+#[test]
+fn create_dir_link_reclaims_a_leftover_link_but_not_a_populated_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("target");
+    let other = tmp.path().join("other");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::create_dir(&other).unwrap();
+
+    let slot = tmp.path().join("slot");
+    sys::create_dir_link(&other, &slot).unwrap();
+    sys::create_dir_link(&target, &slot).expect("a stale link in the slot is reclaimed");
+
+    let occupied = tmp.path().join("occupied");
+    std::fs::create_dir_all(occupied.join("node_modules/pkg")).unwrap();
+    assert_eq!(
+        sys::create_dir_link(&target, &occupied)
+            .expect_err("a populated dir must surface, not be wiped")
+            .kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    assert!(occupied.join("node_modules/pkg").exists());
+}
