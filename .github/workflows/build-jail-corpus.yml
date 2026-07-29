@@ -27,7 +27,7 @@ jobs:
     # A jailed lifecycle script has been observed spawning unboundedly when a
     # resolution it depends on is denied, so the job carries its own ceiling
     # rather than relying on the runner surviving it.
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
@@ -62,7 +62,15 @@ jobs:
 
       # A0 FIRST — it is the denominator. Without it a package that never reaches
       # its real path scores as "works under the jail", which is worthless.
-      - name: 'Arm A0 (jail off) — the denominator'
+      # One job, every shard: the measured cost is ~5 s/package across BOTH arms,
+      # so 344 packages is ~30 min of arm time against a build that dominates a
+      # single-shard run. A pilot measured this; the pre-measurement guess (build
+      # dominates, so one shard per run) was wrong in both directions.
+      #
+      # `continue-on-error` is deliberately ABSENT. run-shard.sh exits non-zero
+      # when its arm effect is not confirmed, and a shard that measured nothing
+      # must turn the job red rather than contribute an empty slice to a total.
+      - name: 'Run all shards, both arms'
         working-directory: tests/build-jail-corpus
         env:
           NUB_BIN: ${{ steps.prov.outputs.bin }}
@@ -71,21 +79,23 @@ jobs:
           OUTROOT: ${{ runner.temp }}/build-jail-corpus
         run: |
           chmod +x run-shard.sh
-          START=$(date +%s)
-          ./run-shard.sh pilot shard-pilot.tsv A0
-          echo "A0_SECONDS=$(( $(date +%s) - START ))" | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: 'Arm PROD (jail on) — shipped defaults'
-        working-directory: tests/build-jail-corpus
-        env:
-          NUB_BIN: ${{ steps.prov.outputs.bin }}
-          NUB_EXPECT_GIT_SHA: ${{ github.sha }}
-          STUDY_PATH: /usr/bin:/bin:/usr/sbin:/sbin
-          OUTROOT: ${{ runner.temp }}/build-jail-corpus
-        run: |
-          START=$(date +%s)
-          ./run-shard.sh pilot shard-pilot.tsv PROD
-          echo "PROD_SECONDS=$(( $(date +%s) - START ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          FAILED=""
+          for m in shard-default*.tsv; do
+            SHARD="${m%.tsv}"; SHARD="${SHARD#shard-}"
+            for ARM in A0 PROD; do
+              START=$(date +%s)
+              if ./run-shard.sh "$SHARD" "$m" "$ARM"; then
+                echo "$SHARD/$ARM ok $(( $(date +%s) - START ))s" | tee -a "$GITHUB_STEP_SUMMARY"
+              else
+                echo "$SHARD/$ARM INADMISSIBLE (rc=$?)" | tee -a "$GITHUB_STEP_SUMMARY"
+                FAILED="$FAILED $SHARD/$ARM"
+              fi
+              # Each shard's tree is multiple GB; drop it once its snapshots and
+              # verdicts are derived or the runner disk fills part-way through.
+              rm -rf "$OUTROOT/$SHARD-$ARM"/{proj,home,cache,tmp} || true
+            done
+          done
+          [ -z "$FAILED" ] || { echo "INADMISSIBLE ARMS:$FAILED" >&2; exit 1; }
 
       - name: Validity-gated verdict table
         working-directory: tests/build-jail-corpus
