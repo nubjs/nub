@@ -211,6 +211,78 @@ mod win {
                     }
                 }
             }
+            // opennul <marker> — `Stdio::null()` opens the `NUL` device. It is a securable
+            // object like any other, so a spawn that redirects to it can fail for a reason
+            // that has nothing to do with the image.
+            Some("opennul") => {
+                let marker = Path::new(&a[1]);
+                let r = std::fs::File::open("NUL");
+                let w = std::fs::OpenOptions::new().write(true).open("NUL");
+                let text = format!(
+                    "read={} write={}",
+                    match &r {
+                        Ok(_) => "ok".to_string(),
+                        Err(e) => format!("{e:?}"),
+                    },
+                    match &w {
+                        Ok(_) => "ok".to_string(),
+                        Err(e) => format!("{e:?}"),
+                    }
+                );
+                let _ = std::fs::write(marker, &text);
+                i32::from(r.is_err() || w.is_err()) * 5
+            }
+            // anonpipe <marker> — `CreatePipe`, the classic anonymous pipe. It still lives in
+            // NPFS (`\Device\NamedPipe\Win32Pipes.…`), so this says whether the whole device
+            // is refused or only an explicitly named instance under `\\.\pipe\`.
+            Some("anonpipe") => {
+                use windows_sys::Win32::System::Pipes::CreatePipe;
+                let marker = Path::new(&a[1]);
+                let mut r: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
+                let mut w: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
+                let ok = unsafe { CreatePipe(&mut r, &mut w, std::ptr::null(), 0) };
+                if ok == 0 {
+                    let e = std::io::Error::last_os_error();
+                    let _ = std::fs::write(
+                        marker,
+                        format!("anonpipeerr {e:?} raw={:?}", e.raw_os_error()),
+                    );
+                    5
+                } else {
+                    unsafe {
+                        windows_sys::Win32::Foundation::CloseHandle(r);
+                        windows_sys::Win32::Foundation::CloseHandle(w);
+                    }
+                    let _ = std::fs::write(marker, "ok anonpipe");
+                    0
+                }
+            }
+            // pipedstdout <marker> <exe> [args…] — capture only stdout, leaving stdin and
+            // stderr inherited, so the pipe is the sole variable against `execinherit`.
+            Some("pipedstdout") => {
+                let marker = Path::new(&a[1]);
+                let exe = &a[2];
+                let spawned = std::process::Command::new(exe)
+                    .args(&a[3..])
+                    .stdout(std::process::Stdio::piped())
+                    .spawn();
+                match spawned {
+                    Ok(child) => match child.wait_with_output() {
+                        Ok(o) => {
+                            let _ = std::fs::write(
+                                marker,
+                                format!("ok piped {}", String::from_utf8_lossy(&o.stdout).trim()),
+                            );
+                            0
+                        }
+                        Err(e) => {
+                            let _ = std::fs::write(marker, format!("waiterr {e:?}"));
+                            9
+                        }
+                    },
+                    Err(e) => spawn_err(marker, &e),
+                }
+            }
             // namedpipe <marker> — the primitive under `Command::output`, with no process
             // creation in the way at all. Rust's Windows anonymous pipe is a NAMED pipe
             // (`\\.\pipe\__rust_anonymous_pipe1__.<pid>.<n>`, `sys::pal::windows::pipe`), so
@@ -521,6 +593,7 @@ mod win {
         dump_acl_chain("before any grant", &node);
 
         named_pipe_refused(&mut fails);
+        stdio_shapes(&mut fails);
         read_before_exec(&mut fails, node.as_path());
         spawn_shapes(&mut fails);
         spawn_cwd_differential(&mut fails);
@@ -539,6 +612,59 @@ mod win {
             eprintln!("{fails} propert(y/ies) failed");
             1
         }
+    }
+
+    /// THE STDIO SHAPES, each on its own. A spawn that redirects stdio touches TWO securable
+    /// objects before `CreateProcessW` ever runs — the `NUL` device and an NPFS pipe — and a
+    /// refusal of either is reported at the `Command` API as the same `os error 5` an
+    /// unreadable image gives. These arms measure each object directly, so the spawn arms
+    /// below can be read as being about the spawn.
+    fn stdio_shapes(fails: &mut u32) {
+        let f = Fixture::new("stdio");
+        let policy = jail_shaped(&f, Vec::new());
+        let cmd = PathBuf::from(std::env::var("SystemRoot").unwrap_or_default())
+            .join("System32")
+            .join("cmd.exe");
+
+        println!("  arm opens-the-nul-device:");
+        let m = f.work.join("nul.txt");
+        let (code, text) = run_child(&f, &policy, "opennul", &m, &[]);
+        report(
+            fails,
+            "opens-the-nul-device",
+            code == 0,
+            &format!("exit={code} marker={text}"),
+        );
+
+        println!("  arm creates-an-anonymous-pipe:");
+        let m = f.work.join("anonpipe.txt");
+        let (code, text) = run_child(&f, &policy, "anonpipe", &m, &[]);
+        report(
+            fails,
+            "creates-an-anonymous-pipe",
+            code == 0,
+            &format!("exit={code} marker={text}"),
+        );
+
+        println!("  arm spawn-with-piped-stdout:");
+        let m = f.work.join("pipedout.txt");
+        let (code, text) = run_child(
+            &f,
+            &policy,
+            "pipedstdout",
+            &m,
+            &[
+                cmd.to_string_lossy().into_owned(),
+                "/c".to_string(),
+                "ver".to_string(),
+            ],
+        );
+        report(
+            fails,
+            "spawn-with-piped-stdout",
+            code == 0,
+            &format!("exit={code} marker={text}"),
+        );
     }
 
     /// READ before EXEC. Every spawn arm has come back `ERROR_ACCESS_DENIED`, which says
@@ -659,7 +785,7 @@ mod win {
 
         println!("  arm spawn-from-granted-cwd:");
         let granted = f.work.join("cwd-granted.txt");
-        let (code, text) = run_child_in(&f, &policy, &f.work.clone(), "execstatus", &granted, &argv);
+        let (code, text) = run_child_in(&f, &policy, &f.work.clone(), "execinherit", &granted, &argv);
         report(
             fails,
             "spawn-from-granted-cwd",
@@ -670,7 +796,7 @@ mod win {
         println!("  arm spawn-from-ungranted-cwd-refused:");
         let ungranted = f.work.join("cwd-ungranted.txt");
         let (code, text) =
-            run_child_in(&f, &policy, &f.root.clone(), "execstatus", &ungranted, &argv);
+            run_child_in(&f, &policy, &f.root.clone(), "execinherit", &ungranted, &argv);
         report(
             fails,
             "spawn-from-ungranted-cwd-refused",
@@ -714,7 +840,7 @@ mod win {
 
         println!("  arm interpreter-in-place-status-execs (no pipe):");
         let status_marker = f.work.join("inplace-status.txt");
-        let (code, text) = run_child(&f, &policy, "execstatus", &status_marker, &argv);
+        let (code, text) = run_child(&f, &policy, "execinherit", &status_marker, &argv);
         report(
             fails,
             "interpreter-in-place-status-execs",
@@ -741,7 +867,7 @@ mod win {
         let (code, text) = run_child(
             &f,
             &policy,
-            "execstatus",
+            "execinherit",
             &marker,
             &[node.to_string_lossy().into_owned(), "--version".to_string()],
         );
@@ -798,7 +924,7 @@ mod win {
 
         println!("  arm system-exec-baseline (no pipe):");
         let status_marker = f.work.join("sysexec-status.txt");
-        let (code, text) = run_child(&f, &policy, "execstatus", &status_marker, &argv);
+        let (code, text) = run_child(&f, &policy, "execinherit", &status_marker, &argv);
         report(
             fails,
             "system-exec-baseline",
