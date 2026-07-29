@@ -160,6 +160,68 @@ console.log("from:" + s.from);
     assert_eq!(stdout, "from:js", "stderr: {stderr}");
 }
 
+/// A `.ts` that outranks a sibling DIRECTORY Node resolves today would be a
+/// working-to-broken regression: probing settles on a file before it considers a
+/// directory, so `sub.ts` would beat `sub/index.js`, and the `.ts` is then a path
+/// the load hooks refuse. Node's CJS resolver loads `sub/index.js` here, and so
+/// must nub.
+#[test]
+fn directory_index_outranks_an_unloadable_ts_sibling() {
+    let dir = fixture("dir-vs-ts");
+    write(
+        &dir.join("node_modules/pkg/package.json"),
+        r#"{"name":"pkg","main":"index.js"}"#,
+    );
+    write(&dir.join("node_modules/pkg/index.js"), "module.exports={};");
+    write(&dir.join("node_modules/pkg/sub.ts"), "export const x = 1;");
+    write(
+        &dir.join("node_modules/pkg/sub/index.js"),
+        r#"module.exports={who:"dir-index"};"#,
+    );
+    write(
+        &dir.join("entry.cts"),
+        r#"const m = require("pkg/sub");
+console.log("who:" + m.who);
+"#,
+    );
+    let (stdout, stderr) = run(&dir, "entry.cts");
+    assert_eq!(stdout, "who:dir-index", "stderr: {stderr}");
+}
+
+/// A published package shipping ONLY TypeScript source must surface Node's own
+/// ERR_MODULE_NOT_FOUND. Resolving the `.ts` would hand back a file nub declines
+/// to transpile, turning a clear "no such module" into a type-stripping error
+/// that points the reader at the wrong problem.
+#[test]
+fn ts_only_published_package_keeps_nodes_own_error() {
+    let dir = fixture("ts-only");
+    write(
+        &dir.join("node_modules/tsonly/package.json"),
+        r#"{"name":"tsonly","main":"index.js"}"#,
+    );
+    write(
+        &dir.join("node_modules/tsonly/index.js"),
+        "module.exports={};",
+    );
+    write(
+        &dir.join("node_modules/tsonly/deep.ts"),
+        "export const v = 1;",
+    );
+    write(
+        &dir.join("entry.ts"),
+        r#"import "tsonly/deep";
+console.log("LOADED");
+"#,
+    );
+    let (stdout, stderr) = run(&dir, "entry.ts");
+    assert!(!stdout.contains("LOADED"), "unexpectedly loaded: {stdout}");
+    assert!(
+        stderr.contains("ERR_MODULE_NOT_FOUND")
+            && !stderr.contains("ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING"),
+        "expected Node's own ERR_MODULE_NOT_FOUND, got: {stderr}"
+    );
+}
+
 /// THE ENCAPSULATION GUARD. A package that declares `exports` owns its subpath
 /// map; probing must never reach a path it withheld. Without this, #562's fix
 /// would be a sandbox escape out of every `exports` map on disk.

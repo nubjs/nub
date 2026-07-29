@@ -118,13 +118,30 @@ fn resolve_bare_subpath(specifier: &str, parent_dir: &str) -> Option<String> {
     }
 
     let target = path_join_resolve(&pkg_dir, &subpath);
-    let resolved = try_resolve_file(&target, true, &NODE_MODULES_PROBE)?;
+    // An exact-extension hit is not an additive case — Node resolves `pkg/dist/foo.js`
+    // in an `exports`-less package identically, down to its own symlink decision. Leave
+    // it to Node so this function owns only what genuinely needed probing.
+    if !extname(&target).is_empty() && is_file(&target) {
+        return None;
+    }
+
     // Node realpaths a resolved module by default, and nub's load hooks REFUSE to
-    // transpile anything still under a `node_modules/` path. A workspace package
-    // symlinked into node_modules (the `main: ./index.ts` monorepo shape) is only
-    // loadable once that hop is resolved away — without this the probe would trade
-    // ERR_MODULE_NOT_FOUND for ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING.
-    Some(real_path(&resolved))
+    // transpile anything under a `node_modules/` path. A workspace package symlinked
+    // into node_modules (the `main: ./index.ts` monorepo shape) is only loadable once
+    // that hop is resolved away.
+    let resolved = real_path(&try_resolve_file(&target, true, &NODE_MODULES_PROBE)?);
+
+    // A TS hit STILL under node_modules after the symlink hop is unshipped source the
+    // load hooks refuse, so winning here is worse than not resolving at all: it turns
+    // Node's ERR_MODULE_NOT_FOUND into a misleading
+    // ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING, and — because probing settles on a
+    // file before it ever considers a directory — `sub.ts` would outrank a sibling
+    // `sub/index.js` that Node's CJS resolver loads today. Fall through instead, so
+    // Node's own precedence and its own error both survive.
+    if is_node_modules(&resolved) && matches!(extname(&resolved).as_str(), ".ts" | ".tsx") {
+        return None;
+    }
+    Some(resolved)
 }
 
 /// Probe order for a bare package subpath — JS FIRST, and deliberately NOT
@@ -132,22 +149,31 @@ fn resolve_bare_subpath(specifier: &str, parent_dir: &str) -> Option<String> {
 ///
 /// What decides the right file inside a dependency is the package's own shape,
 /// not the importer's extension. In a PUBLISHED package a `.ts` sibling is
-/// unshipped source that nub declines to transpile (the `!isNodeModules` gate in
-/// the load hooks), so preferring it would resolve to an unloadable file; in a
-/// symlinked WORKSPACE package there is no `.js` at all, so JS-first still lands
-/// on the `.ts`. Both shapes want the same order. Matches tsx's set exactly —
-/// `.mjs`/`.cjs`/`.mts`/`.cts` are not probed, as an extensionless import of one
-/// is not a pattern that occurs.
+/// unshipped source, so JS must win; in a symlinked WORKSPACE package there is no
+/// `.js` at all, so JS-first still lands on the `.ts`. Both shapes want the same
+/// order. Matches tsx's set exactly — `.mjs`/`.cjs`/`.mts`/`.cts` are not probed,
+/// as an extensionless import of one is not a pattern that occurs.
+///
+/// Ordering alone is not sufficient: a `.ts` with no `.js` sibling still wins the
+/// probe, which is why [`resolve_bare_subpath`] discards a TS hit that is still
+/// under node_modules after realpathing.
 const NODE_MODULES_PROBE: [&str; 4] = [".js", ".json", ".ts", ".tsx"];
 
 /// Resolve symlinks, keeping a plain path on Windows (`std::fs::canonicalize`
 /// yields a `\\?\` verbatim path there, which Node and `pathToFileURL` choke on).
 /// Falls back to the input when the path cannot be canonicalized.
+///
+/// The UNC arm mirrors `strip_verbatim` in nub-core: a canonicalized network path
+/// is `\\?\UNC\server\share\x`, so stripping only `\\?\` would leave
+/// `UNC\server\share\x` — not an absolute path at all.
 fn real_path(path: &str) -> String {
     let Ok(canonical) = std::fs::canonicalize(path) else {
         return path.to_string();
     };
     let s = canonical.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
     match s.strip_prefix(r"\\?\") {
         Some(stripped) => stripped.to_string(),
         None => s.into_owned(),
