@@ -121,6 +121,7 @@ export default defineConfig({
         text: "Security",
         items: [
           { text: "Overview", link: "/security" },
+          { text: "Trust policy downgrades", link: "/trust-policy-exceptions" },
           { text: "Jailed builds", link: "/package-manager/jailed-builds" },
           { text: "Security scanner", link: "/package-manager/security-scanner" },
         ],

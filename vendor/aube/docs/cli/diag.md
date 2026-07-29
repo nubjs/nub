@@ -2,6 +2,7 @@
 # `aube diag`
 
 - **Usage**: `aube diag <SUBCOMMAND>`
+- **Effect**: read-only
 
 Diagnostic trace analysis (compare/analyze JSONL traces)
 

@@ -2,5 +2,6 @@
 # `aube config tui`
 
 - **Usage**: `aube config tui`
+- **Effect**: modifies state
 
 Browse known settings in an interactive terminal UI

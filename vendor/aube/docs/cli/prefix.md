@@ -2,6 +2,7 @@
 # `aube prefix`
 
 - **Usage**: `aube prefix [-g --global]`
+- **Effect**: read-only
 
 Print the current package prefix directory
 

@@ -2,6 +2,7 @@
 # `aube store add`
 
 - **Usage**: `aube store add <PACKAGES>…`
+- **Effect**: modifies state
 
 Add one or more packages to the global store without linking them into any project.
 

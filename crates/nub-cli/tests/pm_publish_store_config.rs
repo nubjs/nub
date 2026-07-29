@@ -153,6 +153,35 @@ fn store_path_prints_the_nub_namespaced_store() {
     );
 }
 
+/// `nub config path` prints the global settings file under the resolved config
+/// home. The fixture never creates it: the path must print for a machine with no
+/// settings yet (`$EDITOR "$(nub config path)"`), and printing it must not
+/// materialize the file. The `c` alias reaches the same subcommand.
+#[test]
+fn config_path_prints_the_unwritten_global_settings_file() {
+    let ctx = Ctx::new("config-path", MANIFEST);
+    let expected = ctx.home.join("xdg-config/nub/nub.jsonc");
+
+    let (stdout, stderr, code) = ctx.run(&["config", "path"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        stdout.trim().replace('\\', "/"),
+        expected.to_string_lossy().replace('\\', "/"),
+        "config path must resolve through nub's config home"
+    );
+    assert!(
+        !expected.exists(),
+        "printing the path must not create the settings file"
+    );
+
+    let (alias_stdout, _, alias_code) = ctx.run(&["c", "path"]);
+    assert_eq!(alias_code, 0);
+    assert_eq!(
+        alias_stdout, stdout,
+        "the `c` alias must print the same path"
+    );
+}
+
 /// A pnpm-**v11** manifest. v11 reads scalar settings solely from
 /// `pnpm-workspace.yaml`, so non-shared scalars route there.
 const PNPM11_MANIFEST: &str =

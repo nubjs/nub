@@ -191,11 +191,95 @@ fn nub_internal_seed(resolved_seed: &[String]) -> Vec<String> {
 /// closure/seed policy — is unit-tested with injected flags and never touches
 /// the host store. The resolved seed is filtered through [`nub_internal_seed`].
 fn expand(graph: &LockfileGraph, seed_names: &[String]) -> DiskMaterializePlan {
-    plan_from_flags(
-        graph,
-        &nub_internal_seed(seed_names),
-        &dynamic_phantom_flags(graph),
-    )
+    let seed = nub_internal_seed(seed_names);
+    let flags = dynamic_phantom_flags(graph);
+    let plan = plan_from_flags(graph, &seed, &flags);
+    // The install report's digest names what moved and why. Labelling runs as a
+    // second pass over the FINISHED plan rather than inside the planner, so the
+    // planner and its tests stay untouched and the reported SET can never
+    // disagree with the executed one — only a label could ever be off.
+    super::install_report::record_plan(label_plan(graph, &seed, &flags, &plan));
+    plan
+}
+
+/// Attach a reason to every package the plan materializes. Mirrors the planner's
+/// seed conditions in the same order, then falls back to the closure edge —
+/// a plan member nothing seeded directly is there because it imports one that
+/// was, which is the fact worth printing.
+fn label_plan(
+    graph: &LockfileGraph,
+    seed_names: &[String],
+    flags: &[FlaggedImporter],
+    plan: &DiskMaterializePlan,
+) -> Vec<super::install_report::Materialized> {
+    use super::install_report::{Materialized, Reason};
+
+    let planned: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
+    let root_provided: HashSet<&str> = graph
+        .importers
+        .values()
+        .flat_map(|deps| deps.iter().map(|d| d.name.as_str()))
+        .collect();
+    let is_top_level = |name: &str| root_provided.contains(name);
+    let seed_matcher = aube_linker::PackageNameMatcher::new(seed_names);
+
+    // One representative version per planned name — the digest is name-keyed
+    // (so is the linker's eject), so a duplicated name needs one printable spec.
+    let mut version_of: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+    for pkg in graph.packages.values() {
+        if planned.contains(pkg.name.as_str()) {
+            version_of.entry(&pkg.name).or_insert(&pkg.version);
+        }
+    }
+
+    version_of
+        .iter()
+        .map(|(name, version)| {
+            let flag = flags.iter().find(|flag| flag.name == *name);
+            let reason = if let Some(flag) = flag.filter(|flag| {
+                !flag.targets.is_empty()
+                    && should_seed(
+                        &flag.targets,
+                        &direct_dep_names(&flag.dep_path, graph),
+                        is_top_level,
+                    )
+            }) {
+                Reason::Undeclared(flag.targets.clone())
+            } else if flag.is_some_and(|flag| {
+                flag.type_peers
+                    .iter()
+                    .any(|peer| is_top_level(&types_package_name(peer)))
+            }) {
+                Reason::PeerTypes
+            } else if NUB_PROJECT_CONTEXT_EJECT.contains(name) {
+                Reason::ProjectContext
+            } else if *name == "vite" && super::vite_compat::vite_lt_8_1(version) {
+                Reason::LegacyVite
+            } else if seed_matcher.matches(name) {
+                Reason::Configured
+            } else {
+                // The closure edge: whichever declared dependency of this package
+                // is itself in the plan is why this one had to come along.
+                graph
+                    .packages
+                    .values()
+                    .filter(|pkg| pkg.name == *name)
+                    .flat_map(|pkg| pkg.dependencies.keys())
+                    .filter(|dep| dep.as_str() != *name)
+                    .find_map(|dep| {
+                        version_of
+                            .get(dep.as_str())
+                            .map(|dep_version| Reason::ImporterOf(format!("{dep}@{dep_version}")))
+                    })
+                    .unwrap_or(Reason::Configured)
+            };
+            Materialized {
+                name: (*name).to_string(),
+                version: (*version).to_string(),
+                reason,
+            }
+        })
+        .collect()
 }
 
 /// One dynamically-flagged importer the planner may seed. Two INDEPENDENT reasons

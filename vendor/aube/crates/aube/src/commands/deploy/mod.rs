@@ -315,7 +315,7 @@ pub async fn run(
         };
         let opts = InstallOptions {
             control: install::InstallControl::default(),
-            embedder_node_bin_dir: None,
+            embedder_runtime: None,
             project_dir: Some(s.target.clone()),
             mode,
             dep_selection: dep_selection_for_args(&args),

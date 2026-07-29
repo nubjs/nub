@@ -2,6 +2,7 @@
 # `aube check`
 
 - **Usage**: `aube check [--json]`
+- **Effect**: read-only
 
 Verify installed packages can resolve their declared deps.
 

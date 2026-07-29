@@ -90,7 +90,7 @@ pub(super) async fn import_local_source(
                 "buildDir": build_dir,
                 "locator": format!("{pkg_name}@{}", local.specifier()),
             });
-            let status = tokio::process::Command::new(crate::runtime::node_program())
+            let status = tokio::process::Command::new(crate::runtime::internal_node_program())
                 .arg("-e")
                 .arg(aube_resolver::YARN_EXEC_WRAPPER)
                 .arg(&script)
@@ -444,6 +444,7 @@ pub(in crate::commands) async fn fetch_packages(
         &aube_dir,
         /*materialize_tx=*/ None,
         /*skip_already_linked_shortcut=*/ true,
+        /*force_index_dep_paths=*/ &std::collections::BTreeSet::new(),
         virtual_store_dir_max_length,
         ignore_scripts,
         network_concurrency,
@@ -500,6 +501,9 @@ pub(super) async fn fetch_packages_with_root<F>(
     // `store.load_index` → either `Cached` (store has it) or
     // `NeedsFetch` (store is missing the file, download fresh).
     skip_already_linked_shortcut: bool,
+    // Packages selected for project-local compatibility materialization
+    // need an index even when their prior GVS entry still exists.
+    force_index_dep_paths: &std::collections::BTreeSet<String>,
     virtual_store_dir_max_length: usize,
     ignore_scripts: bool,
     network_concurrency: Option<usize>,
@@ -598,7 +602,7 @@ where
         .par_iter()
         .filter(|(_, pkg)| pkg.local_source.is_none())
         .map(|(dep_path, pkg)| {
-            if !skip_already_linked_shortcut {
+            if !skip_already_linked_shortcut && !force_index_dep_paths.contains(dep_path) {
                 let entry_name = dep_path_to_filename(dep_path, virtual_store_dir_max_length);
                 if aube_dir.join(&entry_name).exists() {
                     return (dep_path.clone(), pkg, CheckResult::AlreadyLinked);

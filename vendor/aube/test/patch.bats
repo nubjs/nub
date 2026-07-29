@@ -64,6 +64,46 @@ EOF
 	assert_failure
 }
 
+# A patch declared against a package's registry name must apply when the
+# package is installed under an npm alias. Regression for discussion
+# #1082: the patch map is keyed by the registry selector
+# (`is-odd@3.0.1`) while the aliased entry's `spec_key()` is
+# `odd-alias@3.0.1`, so the apply site missed the patch even though the
+# lockfile recorded it.
+@test "patch keyed by registry name applies to an npm-aliased install" {
+	cat >package.json <<'EOF'
+{
+  "name": "aliased-patch-test",
+  "version": "1.0.0",
+  "dependencies": { "odd-alias": "npm:is-odd@3.0.1" },
+  "pnpm": {
+    "patchedDependencies": { "is-odd@3.0.1": "patches/is-odd@3.0.1.patch" }
+  }
+}
+EOF
+	mkdir patches
+	cat >patches/is-odd@3.0.1.patch <<'EOF'
+diff --git a/index.js b/index.js
+index 79d1f22a8e7a27efb8841bb83cb682ea1ff3a59c..1e33b4cf949b73bde8861ad65de71b4e46360259 100644
+--- a/index.js
++++ b/index.js
+@@ -24,1 +24,2 @@ module.exports = function isOdd(value) {
+ };
++module.exports.patched = 'v1';
+EOF
+
+	run aube install --ignore-scripts
+	assert_success
+
+	# The aliased folder's bytes must carry the patch.
+	run grep -q "module.exports.patched = 'v1';" node_modules/odd-alias/index.js
+	assert_success
+
+	# Requiring through the alias should see the patched export.
+	run node -e 'if (require("odd-alias").patched !== "v1") process.exit(1)'
+	assert_success
+}
+
 @test "aube patch rejects bare names" {
 	cat >package.json <<'EOF'
 { "name": "p", "version": "1.0.0" }

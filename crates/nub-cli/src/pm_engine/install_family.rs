@@ -563,7 +563,7 @@ fn run_dlx(typed: &str, args: &[String]) -> Result<i32> {
     finish_code_quieted(
         &globals.output,
         &session,
-        aube::commands::dlx::run_with_child_env(verb, crate::cli::dlx_child_env(false)),
+        aube::commands::dlx::run_in(verb, None, crate::cli::dlx_child_env()),
     )
 }
 
@@ -595,7 +595,6 @@ pub fn run_dlx_for_nubx(
     bin: &str,
     args: &[String],
     flags: &crate::cli::NubxDlxFlags,
-    compat_mode: bool,
 ) -> Result<(i32, bool)> {
     if flags.quiet {
         // Same knob aube's own startup flips for `--silent`: drop the animated
@@ -612,12 +611,11 @@ pub fn run_dlx_for_nubx(
     // Ok(None)); `Err` = the fetch/install failed before the tool ran. We surface
     // the Err's report exactly as `finish_code` would, but also report the
     // success bit so the consent caller never records a failed fetch.
-    match session
-        .runtime
-        .block_on(aube::commands::dlx::run_with_child_env(
-            verb,
-            crate::cli::dlx_child_env(compat_mode),
-        )) {
+    match session.runtime.block_on(aube::commands::dlx::run_in(
+        verb,
+        None,
+        crate::cli::dlx_child_env(),
+    )) {
         Ok(code) => Ok((code.unwrap_or(0), true)),
         Err(report) => Ok((present::emit_report(&report), false)),
     }
@@ -1538,6 +1536,12 @@ fn run_engine(
     yarn_gated: bool,
     output: &super::output::OutputFlags,
 ) -> Result<i32> {
+    // The two halves of the install report bracket the engine: the resolved
+    // layout prints ahead of the progress display, and the materialization
+    // digest is registered here so the engine fires it after linking — above its
+    // own success line, which stays last. Both are no-ops under `--silent`.
+    super::install_report::print_resolved_layout(&session.cwd, output);
+    super::install_report::register(*output);
     // Hold the output guard only across the engine run (so `--silent` suppresses
     // the progress/summary written during install) and drop it before the match
     // below, so a final error report still reaches the real stderr.

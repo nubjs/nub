@@ -25,11 +25,14 @@
 //! `try_new` picks the renderer from the active embedder profile and the
 //! environment: the in-place TTY renderer when stderr is an interactive,
 //! non-CI terminal **and** the embedder opts in (`Embedder::tty_progress`, or
-//! the `AUBE_TTY_PROGRESS` env override) — otherwise append-only. CI / piped /
-//! non-TTY output is always append-only so a redirected log never carries
-//! cursor-control escapes. It returns `None` only when clx has been forced into
-//! text mode (`--silent`, `-v`, `--reporter=append-only|ndjson`) — those modes
-//! own their own output and we stay out of the way.
+//! the `AUBE_TTY_PROGRESS` env override) — otherwise append-only. CI is
+//! detected via `is_ci::cached()` (Buildkite, GitHub Actions, …) and forced to
+//! append-only even when stderr looks like a TTY: those systems allocate a PTY
+//! so tools emit colors, but their log capturers strip cursor-control escapes
+//! and each animation frame lands as its own log line. It returns `None` only
+//! when clx has been forced into text mode (`--silent`, `-v`,
+//! `--reporter=append-only|ndjson`) — those modes own their own output and we
+//! stay out of the way.
 
 mod ci;
 mod render;
@@ -229,6 +232,12 @@ pub struct InstallProgress {
     files_linked: Arc<AtomicUsize>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum TtyFinishBehavior {
+    Preserve,
+    Clear,
+}
+
 #[derive(Clone)]
 enum Mode {
     Tty {
@@ -420,11 +429,16 @@ impl InstallProgress {
         }
         // In-place animated bar only on an interactive, non-CI terminal, and
         // only when the active embedder opts in (or the `AUBE_TTY_PROGRESS`
-        // override is set). Everything else — CI, a pipe, a redirected log —
-        // takes the append-only renderer so no cursor-control escape ever
-        // lands in a non-TTY stream. The renderer itself is single-line with a
-        // clean progress→summary handoff, so the in-place path is a first-class
-        // UX (nub enables it by default) rather than a debug-only fallback.
+        // override is set). The renderer itself is single-line with a clean
+        // progress→summary handoff, so the in-place path is a first-class UX
+        // (nub enables it by default) rather than a debug-only fallback.
+        //
+        // Everything else — a pipe, a redirected log, and any known CI
+        // environment (`is_ci` checks `CI`, `BUILDKITE`, `GITHUB_ACTIONS`, and
+        // friends) — takes the append-only renderer. CI is excluded even when
+        // stderr looks like a TTY: runners allocate a PTY so children emit
+        // colors, but the log capturer strips cursor-control escapes and each
+        // animation frame becomes its own log line.
         let tty_opt_in = aube_util::embedder().tty_progress || env_truthy("AUBE_TTY_PROGRESS");
         if std::io::stderr().is_terminal() && !is_ci::cached() && tty_opt_in {
             Some(Self::new_tty())
@@ -1064,7 +1078,10 @@ impl InstallProgress {
     /// want the framed summary to remain the end of CI log output. Ignored in
     /// TTY mode, which prints its summary separately via
     /// [`print_install_summary`] after this clears the bar.
-    pub fn finish(&self, print_ci_summary: bool) {
+    ///
+    /// `tty_behavior` is inert under this renderer — see the teardown comment
+    /// below.
+    pub fn finish(&self, print_ci_summary: bool, _tty_behavior: TtyFinishBehavior) {
         match &self.mode {
             Mode::Tty {
                 root,
@@ -1099,6 +1116,11 @@ impl InstallProgress {
                 // idempotent (once `STOPPING` latches and `LINES` is 0 a repeat
                 // erases nothing), covering a double `finish()`.
                 root.set_status(ProgressStatus::Done);
+                // Upstream's `TtyFinishBehavior` is vacuous for this renderer:
+                // the root is `on_done = Hide`, so `Preserve` would leave an
+                // empty row rather than a collapsed summary row. Both arms take
+                // the clearing teardown, which is also the only race-free one
+                // (see above).
                 clx::progress::stop_clear();
             }
             Mode::Ci(s) => s.stop(print_ci_summary),
@@ -1785,7 +1807,7 @@ mod tests {
             progress.set_phase("future-phase");
             progress.inc_downloaded_bytes(512);
             drop(progress.start_fetch("dep", "1.0.0"));
-            progress.finish(false);
+            progress.finish(false, TtyFinishBehavior::Preserve);
         })
         .await;
 
@@ -1834,7 +1856,7 @@ mod tests {
             progress
                 .link_progress_counter()
                 .fetch_add(7, Ordering::Relaxed);
-            progress.finish(false);
+            progress.finish(false, TtyFinishBehavior::Preserve);
         })
         .await;
 

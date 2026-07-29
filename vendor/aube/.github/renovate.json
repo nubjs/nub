@@ -8,6 +8,12 @@
       "matchManagers": ["cargo"],
       "matchPackageNames": ["/^sigstore-/"],
       "groupName": "sigstore crates"
+    },
+    {
+      "description": "decmpfs 0.1.2 fails to compile for musl targets (FICLONE ioctl request typed c_ulong, which is c_int on musl). Hold at 0.1.0 until upstream fixes it.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["decmpfs"],
+      "allowedVersions": "<=0.1.0"
     }
   ]
 }

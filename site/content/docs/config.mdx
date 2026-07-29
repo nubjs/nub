@@ -55,7 +55,6 @@ Every field, with its full value set. Each has its own section below. Paths are 
   "tsconfig": "./tsconfig.runtime.json",
 
   // warn | error | false
-  // "install" and "prompt" parse for pnpm compat, behave as warn
   "verifyDeps": "warn",
 
   // ── installs — Nub reads this block only when it is the project's package manager ──
@@ -77,8 +76,7 @@ Every field, with its full value set. Each has its own section below. Paths are 
   // Reaching the registry is a decision about your machine, not one
   // checkout, so a project nub.jsonc carrying this is an error.
   "dlx": {
-    "consent": "prompt",           // prompt | never
-    "envFile": "./tools.env"       // same forms as the top-level envFile
+    "consent": "prompt"            // prompt | never
   }
 }
 ```
@@ -341,7 +339,7 @@ Skip the check.
 }
 ```
 
-The `"install"` and `"prompt"` values are accepted for pnpm compatibility and currently behave as `"warn"`.
+Nub rejects pnpm's `"install"` and `"prompt"` values, which it does not implement.
 
 ## `install`
 
@@ -485,9 +483,7 @@ Exclude selected packages when they must update immediately.
 
 The dlx block configures temporary package runs through `nubx`, `nub dlx`, and `nub x`. It is read from the global file only: reaching the registry is a decision about your machine, not about one repository, so a project `nub.jsonc` carrying a `dlx` block stops the command rather than loosening a policy you set for yourself.
 
-### `dlx.consent`
-
-Ask before an implicit `nubx` registry fetch.
+Set `consent` to ask before an implicit `nubx` registry fetch.
 
 ```jsonc title="~/.config/nub/nub.jsonc"
 {
@@ -510,29 +506,3 @@ Disable implicit registry fetches.
 ```
 
 Explicit `nub dlx` runs still work because the command itself supplies consent.
-
-### `dlx.envFile`
-
-Use a separate environment file for temporary tools.
-
-```jsonc title="~/.config/nub/nub.jsonc"
-{
-  // ...
-  "dlx": {
-    "envFile": "./tools.env"  // resolved next to the global file
-  }
-}
-```
-
-Disable environment-file loading for temporary tools.
-
-```jsonc title="~/.config/nub/nub.jsonc"
-{
-  // ...
-  "dlx": {
-    "envFile": false
-  }
-}
-```
-
-The field accepts the same boolean, string, and string-array forms as the top-level `envFile` field. Setting it to `true` reads the project's own automatic environment files, the same set a normal run discovers.

@@ -2,6 +2,7 @@
 # `aube doctor`
 
 - **Usage**: `aube doctor [-J --json]`
+- **Effect**: read-only
 
 Run broad install-health diagnostics
 

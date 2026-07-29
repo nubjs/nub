@@ -3,8 +3,9 @@
 
 - **Usage**: `aube list [FLAGS] [PATTERN]`
 - **Aliases**: `ls`
+- **Effect**: read-only
 
-Print the installed dependency tree
+Print the resolved dependency tree
 
 ## Arguments
 
@@ -51,6 +52,10 @@ Output format: one of `default`, `json`, or `parseable`
 Shortcut for `--format json`.
 
 Emit a JSON array of package entries.
+
+### `--lockfile-only`
+
+List packages from the lockfile only, without checking node_modules
 
 ### `--long`
 

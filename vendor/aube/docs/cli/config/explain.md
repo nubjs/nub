@@ -2,6 +2,7 @@
 # `aube config explain`
 
 - **Usage**: `aube config explain <KEY>`
+- **Effect**: read-only
 
 Explain a known setting, including defaults and supported config sources
 

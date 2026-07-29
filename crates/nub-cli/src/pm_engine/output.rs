@@ -186,6 +186,14 @@ impl OutputFlags {
             || self.eff_loglevel() == Some(LogLevel::Silent)
     }
 
+    /// True at `--loglevel debug`, in either position. nub's own install report
+    /// reads this to expand its materialization digest into per-package detail;
+    /// the engine's tracing filter is the separate concern `engine_level`
+    /// handles.
+    pub fn is_debug(&self) -> bool {
+        !self.is_silent() && self.eff_loglevel() == Some(LogLevel::Debug)
+    }
+
     /// True when the progress UI must drop to plain text — silent, the
     /// append-only reporter, or a debug log level (whose lines would
     /// otherwise collide with the progress display). Mirrors the engine's

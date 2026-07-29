@@ -57,6 +57,7 @@ mod expo_compat;
 pub mod identity;
 pub mod info_family;
 pub mod install_family;
+mod install_report;
 pub mod log;
 pub mod min_release_age;
 pub mod output;
@@ -840,30 +841,34 @@ fn engine_session_inner(
     let setting_defaults =
         nub_setting_defaults(detected.as_ref(), truly_fresh, &cwd, store_locality);
     let native_mode = native_pm_mode(detected.as_ref(), truly_fresh, &cwd);
-    // Keyed on native mode ALONE. `noise` decides whether config-SCOPING
-    // WARNINGS print, which is a separate question from whether the project's
-    // `install` block applies — and the read-only families (`why`, `outdated`,
+    // The project's `install` block is scoped by AXIS, not by identity.
+    //
+    // LAYOUT (`linker`, `publicHoist`) is nub's OWN axis: how `node_modules` is
+    // arranged appears in no lockfile, so honoring it under an incumbent cannot
+    // perturb round-trip fidelity with that PM. It applies in EVERY project.
+    // RESOLUTION (`minimumReleaseAge*`) changes which VERSION a range selects,
+    // and that is where the compatibility guarantee lives — under an incumbent
+    // nub mirrors that PM's resolution, so those stay scoped to nub identity.
+    //
+    // `noise` gates only whether a dropped resolution field is ANNOUNCED, never
+    // whether the block applies: the read-only families (`why`, `outdated`,
     // `list`) run Silent precisely so they can report what a real install would
-    // produce. Folding `noise` in here dropped their project-config tier, so
-    // they resolved against a linker and release-age policy no install uses.
-    let native_install = if native_mode {
-        native_install_settings(detected.as_ref(), truly_fresh, &cwd, &setting_defaults)?
-    } else {
-        None
-    };
+    // produce.
+    let install = crate::project_config::effective_config().map(|config| &config.values.install);
+    let native_install = install
+        .map(|install| lower_native_install_settings(install, &setting_defaults))
+        .transpose()?
+        .unwrap_or_default();
+    if !native_mode
+        && noise == ConfigScopeNoise::Warn
+        && let Some(install) = install
+    {
+        warn_resolution_scoped_out(install, detected.as_ref(), &cwd);
+    }
+    let scoped = scoped_install_settings(&native_install, native_mode);
     aube_settings::set_embedder_defaults(setting_defaults);
-    aube_util::update_engine_context(|c| {
-        c.project_config_settings = native_install
-            .as_ref()
-            .map(|config| config.settings.clone())
-            .unwrap_or_default();
-    });
-    phantom_closure::set_native_config_seed(
-        native_install
-            .as_ref()
-            .map(|config| config.eject.clone())
-            .unwrap_or_default(),
-    );
+    aube_util::update_engine_context(move |c| c.project_config_settings = scoped);
+    phantom_closure::set_native_config_seed(native_install.eject);
     // Route the engine's lifecycle scripts through nub's runtime augmentation
     // (project-pinned + augmented Node, shim on PATH, preload) — the SAME
     // augmentation `nub run` / `nub exec` apply, so run / exec / lifecycle
@@ -879,42 +884,96 @@ fn engine_session_inner(
     })
 }
 
+/// The project `install` block, lowered to engine settings and SPLIT BY AXIS.
+/// The split is the whole point: the two halves have different scoping rules
+/// (see [`scoped_install_settings`]), so they are produced separately rather
+/// than filtered back out of one flat list by key name.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct NativeInstallSettings {
-    settings: Vec<(String, String)>,
-    /// `linker.eject` — also seeded into the phantom closure, which is why it
-    /// is carried out of band rather than only as a lowered engine setting.
+    /// How `node_modules` is arranged. nub's own axis — no lockfile records it.
+    layout: Vec<(String, String)>,
+    /// Which version a range selects. The compatibility guarantee.
+    resolution: Vec<(String, String)>,
+    /// `linker.eject` — layout, but also seeded into the phantom closure, which
+    /// is why it is carried out of band rather than only as a lowered setting.
     eject: Vec<String>,
 }
 
-fn native_install_settings(
-    detected: Option<&DetectedLockfile>,
-    truly_fresh: bool,
-    cwd: &Path,
-    embedder_defaults: &[(String, String)],
-) -> Result<Option<NativeInstallSettings>> {
-    if !native_pm_mode(detected, truly_fresh, cwd) {
-        return Ok(None);
+/// Compose the engine-visible settings: layout unconditionally, resolution only
+/// under nub identity.
+fn scoped_install_settings(
+    lowered: &NativeInstallSettings,
+    native_mode: bool,
+) -> Vec<(String, String)> {
+    let mut settings = lowered.layout.clone();
+    if native_mode {
+        settings.extend(lowered.resolution.iter().cloned());
     }
-    let Some(config) = crate::project_config::effective_config() else {
-        return Ok(Some(NativeInstallSettings::default()));
+    settings
+}
+
+/// Announce a RESOLUTION-axis `install` field dropped because the project has an
+/// incumbent package manager. Named in nub's own vocabulary — the author wrote
+/// `minimumReleaseAge`, not the engine key it lowers to — and dim-styled to sit
+/// alongside the config-scoping warnings.
+fn warn_resolution_scoped_out(
+    install: &crate::project_config::InstallConfig,
+    detected: Option<&DetectedLockfile>,
+    cwd: &Path,
+) {
+    let written = resolution_fields_written(install);
+    if written.is_empty() {
+        return;
+    }
+    let Some(pm) = active_role(detected, cwd).map(config_scope::Role::display) else {
+        return;
     };
-    lower_native_install_settings(&config.values.install, embedder_defaults).map(Some)
+    let dim = scope_warning_uses_dim();
+    for field in written {
+        let line = format!(
+            "nub: `{field}` ignored — it selects package versions, and this project resolves as \
+             {pm}. Run `nub pm use nub` to make nub the project's package manager."
+        );
+        if dim {
+            eprintln!("\x1b[2m{line}\x1b[0m");
+        } else {
+            eprintln!("{line}");
+        }
+    }
+}
+
+/// Which RESOLUTION-axis fields the project actually wrote, in nub's vocabulary.
+fn resolution_fields_written(install: &crate::project_config::InstallConfig) -> Vec<&'static str> {
+    let mut written = Vec::new();
+    if install.minimum_release_age.is_some() {
+        written.push("install.minimumReleaseAge");
+    }
+    if install.minimum_release_age_exclude.is_some() {
+        written.push("install.minimumReleaseAgeExclude");
+    }
+    written
+}
+
+/// The project's active-PM role, declaration-first (a declared PM outranks a
+/// stray lockfile), falling back to the detected lockfile kind.
+fn active_role(detected: Option<&DetectedLockfile>, cwd: &Path) -> Option<config_scope::Role> {
+    let declared = detected
+        .and_then(|detected| nub_core::pm::resolve::declared_pm_raw(&detected.dir))
+        .or_else(|| nub_core::pm::resolve::declared_pm_raw(cwd));
+    config_scope::role_of(
+        declared.as_ref().map(|(name, _)| name.as_str()),
+        detected.map(|detected| detected.kind),
+    )
 }
 
 fn native_pm_mode(detected: Option<&DetectedLockfile>, truly_fresh: bool, cwd: &Path) -> bool {
     if truly_fresh {
         return true;
     }
-    let Some(detected) = detected else {
-        return false;
-    };
-    let declared = nub_core::pm::resolve::declared_pm_raw(&detected.dir)
-        .or_else(|| nub_core::pm::resolve::declared_pm_raw(cwd));
-    config_scope::role_of(
-        declared.as_ref().map(|(name, _)| name.as_str()),
-        Some(detected.kind),
-    ) == Some(config_scope::Role::Nub)
+    // A project with no lockfile at all is not nub's unless `truly_fresh` above
+    // already said so — a lone `packageManager: nub` declaration does not make
+    // an otherwise-unresolved tree nub-identity.
+    detected.is_some() && active_role(detected, cwd) == Some(config_scope::Role::Nub)
 }
 
 fn lower_native_install_settings(
@@ -933,12 +992,12 @@ fn lower_native_install_settings(
         );
     }
 
-    let mut settings = Vec::new();
+    let mut layout = Vec::new();
     let mut eject_patterns: Option<Vec<String>> = None;
     if let Some(linker) = install.linker.as_ref() {
         // Both symlink layouts are aube's `isolated`; they differ only in where
         // the store lives, which is `enableGlobalVirtualStore`.
-        settings.push((
+        layout.push((
             "nodeLinker".to_string(),
             match linker {
                 LinkerConfig::Global { .. } | LinkerConfig::Isolated { .. } => "isolated",
@@ -949,17 +1008,17 @@ fn lower_native_install_settings(
         ));
         match linker {
             LinkerConfig::Isolated { hoist } => {
-                settings.push(("enableGlobalVirtualStore".to_string(), "false".to_string()));
+                layout.push(("enableGlobalVirtualStore".to_string(), "false".to_string()));
                 match hoist {
                     Some(Hoist::Bool(enabled)) => {
-                        settings.push(("hoist".to_string(), enabled.to_string()));
+                        layout.push(("hoist".to_string(), enabled.to_string()));
                         if *enabled {
-                            settings.push(("hoistPattern".to_string(), "*".to_string()));
+                            layout.push(("hoistPattern".to_string(), "*".to_string()));
                         }
                     }
                     Some(Hoist::Patterns(patterns)) => {
-                        settings.push(("hoist".to_string(), "true".to_string()));
-                        settings.push(("hoistPattern".to_string(), patterns.join(",")));
+                        layout.push(("hoist".to_string(), "true".to_string()));
+                        layout.push(("hoistPattern".to_string(), patterns.join(",")));
                     }
                     None => {}
                 }
@@ -988,7 +1047,7 @@ fn lower_native_install_settings(
                 // let a lower-tier `enableGlobalVirtualStore=false` quietly
                 // produce a project-local store under a config that asks for the
                 // shared one. `isolated` pins its half; this is the other.
-                settings.push(("enableGlobalVirtualStore".to_string(), "true".to_string()));
+                layout.push(("enableGlobalVirtualStore".to_string(), "true".to_string()));
                 eject_patterns = eject.clone();
             }
             LinkerConfig::Hoisted | LinkerConfig::Pnp => {}
@@ -1001,8 +1060,8 @@ fn lower_native_install_settings(
     // pattern list would hoist everything, the opposite of naming patterns.
     // Naming patterns is always a narrowing, so the blanket flag goes off.
     if let Some(patterns) = install.public_hoist.as_ref() {
-        settings.push(("shamefullyHoist".to_string(), "false".to_string()));
-        settings.push(("publicHoistPattern".to_string(), patterns.join(",")));
+        layout.push(("shamefullyHoist".to_string(), "false".to_string()));
+        layout.push(("publicHoistPattern".to_string(), patterns.join(",")));
     }
 
     // ADDITIVE, deliberately: the merge seeds from the embedder's own ejects —
@@ -1031,22 +1090,25 @@ fn lower_native_install_settings(
                     merged.push(pattern.clone());
                 }
             }
-            settings.push((key.to_string(), merged.join(",")));
+            layout.push((key.to_string(), merged.join(",")));
         }
     }
 
+    // Everything above shapes the TREE; everything below shapes the RESOLVE.
+    let mut resolution = Vec::new();
     if let Some(age) = install.minimum_release_age {
         let seconds = age.as_secs();
         let minutes = seconds / 60 + u64::from(seconds % 60 != 0);
-        settings.push(("minimumReleaseAge".to_string(), minutes.to_string()));
-        settings.push(("minimumReleaseAgeStrict".to_string(), "true".to_string()));
+        resolution.push(("minimumReleaseAge".to_string(), minutes.to_string()));
+        resolution.push(("minimumReleaseAgeStrict".to_string(), "true".to_string()));
     }
     if let Some(exclude) = install.minimum_release_age_exclude.as_ref() {
-        settings.push(("minimumReleaseAgeExclude".to_string(), exclude.join(",")));
+        resolution.push(("minimumReleaseAgeExclude".to_string(), exclude.join(",")));
     }
 
     Ok(NativeInstallSettings {
-        settings,
+        layout,
+        resolution,
         eject: eject_patterns.unwrap_or_default(),
     })
 }
@@ -3117,7 +3179,9 @@ mod tests {
             &with_linker(LinkerConfig::Global { eject: None }),
             &injected,
         )
-        .expect_err("global-virtual-store + injected deps must be rejected before the engine sees it")
+        .expect_err(
+            "global-virtual-store + injected deps must be rejected before the engine sees it",
+        )
         .to_string();
         assert!(
             error.contains("install.linker") && error.contains("dependenciesMeta"),
@@ -3127,7 +3191,7 @@ mod tests {
         let clean = lower(with_linker(LinkerConfig::Global { eject: None }), &[]);
         assert!(
             clean
-                .settings
+                .layout
                 .iter()
                 .any(|(k, v)| k == "enableGlobalVirtualStore" && v == "true"),
             "without injected deps the same layout must still pin the shared store"
@@ -3155,12 +3219,12 @@ mod tests {
         ] {
             let lowered = lower(with_linker(linker.clone()), &[]);
             assert_eq!(
-                get(&lowered.settings, "nodeLinker"),
+                get(&lowered.layout, "nodeLinker"),
                 Some(node_linker),
                 "{linker:?}"
             );
             assert_eq!(
-                get(&lowered.settings, "enableGlobalVirtualStore"),
+                get(&lowered.layout, "enableGlobalVirtualStore"),
                 gvs,
                 "{linker:?}"
             );
@@ -3184,8 +3248,8 @@ mod tests {
                 }),
                 &[],
             );
-            assert_eq!(get(&lowered.settings, "hoist"), Some(enabled), "{hoist:?}");
-            assert_eq!(get(&lowered.settings, "hoistPattern"), pattern, "{hoist:?}");
+            assert_eq!(get(&lowered.layout, "hoist"), Some(enabled), "{hoist:?}");
+            assert_eq!(get(&lowered.layout, "hoistPattern"), pattern, "{hoist:?}");
         }
     }
 
@@ -3208,11 +3272,11 @@ mod tests {
         // Additive and deduped on top of the compat-required embedder ejects —
         // a project can add to them but cannot un-eject one.
         assert_eq!(
-            get(&lowered.settings, "disableGlobalVirtualStoreForPackages"),
+            get(&lowered.layout, "disableGlobalVirtualStoreForPackages"),
             Some("next,react-native,@corp/tool-*")
         );
         assert_eq!(
-            get(&lowered.settings, "diskMaterializePackages"),
+            get(&lowered.layout, "diskMaterializePackages"),
             Some("vite,@corp/tool-*,next")
         );
         // Also carried out of band: the phantom closure is seeded from it.
@@ -3245,22 +3309,18 @@ mod tests {
                 &[],
             );
             assert_eq!(
-                get(&lowered.settings, "shamefullyHoist"),
+                get(&lowered.layout, "shamefullyHoist"),
                 Some(shamefully),
                 "{public_hoist:?}"
             );
             assert_eq!(
-                get(&lowered.settings, "publicHoistPattern"),
+                get(&lowered.layout, "publicHoistPattern"),
                 Some(patterns),
                 "{public_hoist:?}"
             );
             // It sits outside `linker` because it means the same thing under
             // every strategy — including none written at all.
-            assert_eq!(
-                get(&lowered.settings, "nodeLinker"),
-                None,
-                "{public_hoist:?}"
-            );
+            assert_eq!(get(&lowered.layout, "nodeLinker"), None, "{public_hoist:?}");
         }
     }
 
@@ -3274,13 +3334,13 @@ mod tests {
             },
             &[],
         );
-        assert_eq!(get(&lowered.settings, "minimumReleaseAge"), Some("2"));
+        assert_eq!(get(&lowered.resolution, "minimumReleaseAge"), Some("2"));
         assert_eq!(
-            get(&lowered.settings, "minimumReleaseAgeStrict"),
+            get(&lowered.resolution, "minimumReleaseAgeStrict"),
             Some("true")
         );
         assert_eq!(
-            get(&lowered.settings, "minimumReleaseAgeExclude"),
+            get(&lowered.resolution, "minimumReleaseAgeExclude"),
             Some("@internal/*,left-pad")
         );
     }
@@ -3299,8 +3359,11 @@ mod tests {
             },
             &[],
         );
-        assert_eq!(get(&lowered.settings, "hoist"), Some("false"));
-        assert_eq!(get(&lowered.settings, "minimumReleaseAgeExclude"), Some(""));
+        assert_eq!(get(&lowered.layout, "hoist"), Some("false"));
+        assert_eq!(
+            get(&lowered.resolution, "minimumReleaseAgeExclude"),
+            Some("")
+        );
 
         // `eject: []` still WRITES both list keys — at the embedder's own value,
         // since the merge is additive — where no `eject` key writes neither.
@@ -3312,11 +3375,8 @@ mod tests {
             &defaults,
         );
         let absent = lower(with_linker(LinkerConfig::Global { eject: None }), &defaults);
-        assert_eq!(
-            get(&empty.settings, "diskMaterializePackages"),
-            Some("vite")
-        );
-        assert_eq!(get(&absent.settings, "diskMaterializePackages"), None);
+        assert_eq!(get(&empty.layout, "diskMaterializePackages"), Some("vite"));
+        assert_eq!(get(&absent.layout, "diskMaterializePackages"), None);
     }
 
     #[test]
@@ -3356,6 +3416,86 @@ mod tests {
         }
     }
 
+    /// The `install` block a both-axes test writes: a layout half and a
+    /// resolution half, lowered once and scoped two ways.
+    fn both_axes() -> InstallConfig {
+        InstallConfig {
+            linker: Some(LinkerConfig::Hoisted),
+            public_hoist: Some(vec!["@types/*".to_string()]),
+            minimum_release_age: Some(std::time::Duration::from_secs(3600)),
+            minimum_release_age_exclude: Some(vec!["@internal/*".to_string()]),
+        }
+    }
+
+    fn mode_for(kind: LockfileKind, dir: &Path) -> bool {
+        native_pm_mode(
+            Some(&DetectedLockfile {
+                kind,
+                dir: dir.to_path_buf(),
+                fresh: false,
+            }),
+            false,
+            dir,
+        )
+    }
+
+    // LAYOUT is nub's own axis — it appears in no lockfile, so honoring it
+    // cannot perturb round-trip fidelity with the incumbent. It must survive an
+    // npm/pnpm project byte-identically to a nub one.
+    #[test]
+    fn layout_settings_apply_under_an_incumbent_package_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        let lowered = lower(both_axes(), &[]);
+
+        for kind in [LockfileKind::Npm, LockfileKind::Pnpm] {
+            let mode = mode_for(kind, dir.path());
+            assert!(!mode, "{kind:?} must not resolve as nub identity");
+            let scoped = scoped_install_settings(&lowered, mode);
+            assert_eq!(get(&scoped, "nodeLinker"), Some("hoisted"), "{kind:?}");
+            assert_eq!(
+                get(&scoped, "publicHoistPattern"),
+                Some("@types/*"),
+                "{kind:?}"
+            );
+            assert_eq!(get(&scoped, "shamefullyHoist"), Some("false"), "{kind:?}");
+        }
+
+        // The control: identical to what nub identity gets, minus nothing.
+        assert_eq!(
+            scoped_install_settings(&lowered, false),
+            lowered.layout,
+            "an incumbent must not drop or reorder a single layout setting"
+        );
+    }
+
+    // RESOLUTION is the compatibility guarantee: which version a range selects
+    // must mirror the incumbent, so `minimumReleaseAge` reaches the engine only
+    // under nub identity.
+    #[test]
+    fn release_age_settings_stay_scoped_to_nub_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let lowered = lower(both_axes(), &[]);
+
+        for kind in [LockfileKind::Npm, LockfileKind::Pnpm] {
+            let scoped = scoped_install_settings(&lowered, mode_for(kind, dir.path()));
+            assert_eq!(get(&scoped, "minimumReleaseAge"), None, "{kind:?}");
+            assert_eq!(get(&scoped, "minimumReleaseAgeStrict"), None, "{kind:?}");
+            assert_eq!(get(&scoped, "minimumReleaseAgeExclude"), None, "{kind:?}");
+        }
+
+        // Same lowering, nub identity: the fields do apply, so the absence above
+        // is the scoping and not a lowering that never produced them.
+        let native_mode = mode_for(LockfileKind::Aube, dir.path());
+        assert!(native_mode, "nub.lock must resolve as nub identity");
+        let native = scoped_install_settings(&lowered, native_mode);
+        assert_eq!(get(&native, "minimumReleaseAge"), Some("60"));
+        assert_eq!(get(&native, "minimumReleaseAgeStrict"), Some("true"));
+        assert_eq!(
+            get(&native, "minimumReleaseAgeExclude"),
+            Some("@internal/*")
+        );
+    }
+
     #[test]
     fn project_snapshot_reaches_install_lowering() {
         let dir = tempfile::tempdir().unwrap();
@@ -3393,19 +3533,16 @@ mod tests {
         );
 
         let lowered = lower_native_install_settings(&snapshot.values.install, &[]).unwrap();
-        assert_eq!(get(&lowered.settings, "nodeLinker"), Some("isolated"));
+        assert_eq!(get(&lowered.layout, "nodeLinker"), Some("isolated"));
         assert_eq!(
-            get(&lowered.settings, "enableGlobalVirtualStore"),
+            get(&lowered.layout, "enableGlobalVirtualStore"),
             Some("false")
         );
-        assert_eq!(get(&lowered.settings, "hoist"), Some("false"));
+        assert_eq!(get(&lowered.layout, "hoist"), Some("false"));
+        assert_eq!(get(&lowered.layout, "publicHoistPattern"), Some("@types/*"));
+        assert_eq!(get(&lowered.resolution, "minimumReleaseAge"), Some("4320"));
         assert_eq!(
-            get(&lowered.settings, "publicHoistPattern"),
-            Some("@types/*")
-        );
-        assert_eq!(get(&lowered.settings, "minimumReleaseAge"), Some("4320"));
-        assert_eq!(
-            get(&lowered.settings, "minimumReleaseAgeExclude"),
+            get(&lowered.resolution, "minimumReleaseAgeExclude"),
             Some("@internal/*")
         );
     }

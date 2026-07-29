@@ -1,4 +1,4 @@
-//! `aube list` / `ls` — print the installed dependency tree.
+//! `aube list` / `ls` — print the resolved dependency tree.
 //!
 //! Reads `package.json` and the lockfile, walks the resolved graph, and
 //! prints the root importer's direct deps (and optionally their transitive
@@ -93,6 +93,11 @@ pub struct ListArgs {
     #[arg(long, conflicts_with = "format")]
     pub json: bool,
 
+    // Compatibility flag: aube already reads exclusively from the canonical lockfile.
+    /// List packages from the lockfile only, without checking node_modules.
+    #[arg(long)]
+    pub lockfile_only: bool,
+
     /// Show version and path for each entry.
     ///
     /// Default output is already name + version; `--long` adds the
@@ -162,6 +167,8 @@ pub async fn run(
     args: ListArgs,
     filter: aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<()> {
+    let _ = args.lockfile_only;
+
     if args.global {
         return run_global(&args);
     }
@@ -1006,6 +1013,7 @@ mod tests {
             format: ListFormat::Json,
             json: true,
             long: false,
+            lockfile_only: false,
             parseable: false,
         };
 

@@ -1345,6 +1345,39 @@ mod tests {
     }
 
     #[test]
+    fn minimum_package_age_defaults_to_thirty_days_and_honors_workspace() {
+        let ws = raw_yaml("minimumPackageAge: 86400\n");
+        let ctx = ResolveCtx {
+            managed_aube_config: &[],
+            project_aube_config: &[],
+            project_npmrc: &[],
+            user_aube_config: &[],
+            user_npmrc: &[],
+            workspace_yaml: &ws,
+            global_config_yaml: empty_yaml_map(),
+            env: &[],
+            cli: &[],
+            embedder_defaults: &[],
+        };
+        assert_eq!(resolved::minimum_package_age(&ctx), 86_400);
+
+        let empty = BTreeMap::new();
+        let ctx = ResolveCtx {
+            managed_aube_config: &[],
+            project_aube_config: &[],
+            project_npmrc: &[],
+            user_aube_config: &[],
+            user_npmrc: &[],
+            workspace_yaml: &empty,
+            global_config_yaml: empty_yaml_map(),
+            env: &[],
+            cli: &[],
+            embedder_defaults: &[],
+        };
+        assert_eq!(resolved::minimum_package_age(&ctx), 43_200);
+    }
+
+    #[test]
     fn managed_max_policy_enforces_larger_integer() {
         let local = entries(&[("minimumReleaseAge", "0")]);
         let managed = entries(&[("minimumReleaseAge", "1440")]);
@@ -2010,6 +2043,45 @@ mod tests {
             resolved::store_dir(&ctx),
             Some("/tmp/from-global-config".to_string()),
             "global config.yaml must win over user .npmrc"
+        );
+    }
+
+    #[test]
+    fn cache_dir_is_unset_until_configured() {
+        // `cacheDir` deliberately carries no baked-in default so the
+        // caller can tell "not configured" (fall back to the
+        // XDG_CACHE_HOME-aware platform path, which appends `/aube`)
+        // from "configured to a literal path". A default here would
+        // have every install read `~/.cache/aube` and ignore
+        // `XDG_CACHE_HOME`.
+        let npmrc: Vec<(String, String)> = Vec::new();
+        let ws: std::collections::BTreeMap<String, yaml_serde::Value> =
+            std::collections::BTreeMap::new();
+        let ctx = ResolveCtx::files_only(&npmrc, &ws);
+        assert_eq!(resolved::cache_dir(&ctx), None);
+    }
+
+    #[test]
+    fn cache_dir_reads_aube_env_alias() {
+        let npmrc: Vec<(String, String)> = Vec::new();
+        let ws: std::collections::BTreeMap<String, yaml_serde::Value> =
+            std::collections::BTreeMap::new();
+        let env = entries(&[("AUBE_CACHE_DIR", "/mnt/dev/cache/aube")]);
+        let ctx = ResolveCtx {
+            managed_aube_config: &[],
+            project_aube_config: &[],
+            project_npmrc: &npmrc,
+            user_aube_config: &[],
+            user_npmrc: &[],
+            workspace_yaml: &ws,
+            global_config_yaml: empty_yaml_map(),
+            env: &env,
+            cli: &[],
+            embedder_defaults: &[],
+        };
+        assert_eq!(
+            resolved::cache_dir(&ctx),
+            Some("/mnt/dev/cache/aube".to_string())
         );
     }
 

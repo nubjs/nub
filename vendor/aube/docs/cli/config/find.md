@@ -3,6 +3,7 @@
 
 - **Usage**: `aube config find <QUERY>…`
 - **Aliases**: `search`
+- **Effect**: read-only
 
 Search known settings by name, source key, or description
 

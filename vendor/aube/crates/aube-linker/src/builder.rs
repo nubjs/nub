@@ -23,6 +23,7 @@ impl Linker {
             virtual_store: store.virtual_store_dir(),
             store: store.clone(),
             use_global_virtual_store,
+            project_local_dep_paths: rustc_hash::FxHashSet::default(),
             strategy,
             patches: Patches::new(),
             hashes: None,
@@ -215,6 +216,19 @@ impl Linker {
     /// anything that lands outside its declared filesystem root.
     pub fn with_use_global_virtual_store(mut self, enabled: bool) -> Self {
         self.use_global_virtual_store = enabled;
+        self
+    }
+
+    /// Materialize selected dep paths into the project-local virtual
+    /// store while all other packages continue to use the GVS.
+    ///
+    /// Callers use this for package-specific compatibility transforms
+    /// that must never mutate a shared store entry.
+    pub fn with_project_local_dep_paths(
+        mut self,
+        dep_paths: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.project_local_dep_paths = dep_paths.into_iter().collect();
         self
     }
 

@@ -108,7 +108,7 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
         { code: 'workspaces', ok: true },
         { code: 'packageExtensions', ok: true },
         { code: 'dependenciesMeta.built', ok: true },
-        { code: 'nodeLinker', ok: true, partial: true, note: 'No PnP — warns and links node_modules instead.' },
+        { code: 'nodeLinker', ok: true, partial: true, note: "No PnP — Berry's default and an explicit pnp both abort." },
         { code: 'engines / os / cpu', ok: true },
       ],
     },
@@ -171,6 +171,22 @@ Under its own identity, Nub reads only neutral, cross-tool config — never anot
 <Callout title="You don't need to use Nub's package manager">
 The installer is optional. Keep running `npm`, `pnpm`, `yarn`, or `bun` exactly as you do today, and reach for Nub for everything else — running files, scripts, and binaries.
 </Callout>
+
+### Resolution versus layout
+
+What the tables above guarantee is **resolution**: which version a range resolves to, and which file a specifier resolves to. Nub mirrors the incumbent on both. It does not guarantee **layout** — how the resolved packages are arranged on disk. Layout is Nub's own axis, defaulting to [the virtual store](/docs/install/virtual-store) and set through the neutral `.npmrc` keys — or, where Nub owns the project, a [`nub.jsonc`](/docs/config#installlinker) block. No lockfile format records a layout, so the round-trip holds either way.
+
+Where an incumbent's layout config expresses a choice Nub can express too, Nub honors it — [per package manager](/docs/install/virtual-store#per-package-manager) has the flat-layout mapping. The rest are layout-only settings with no effect:
+
+| Incumbent | Setting | Under Nub |
+|---|---|---|
+| **npm** | `install-strategy` | Ignored — except `nested`, which aborts rather than install a tree that resolves differently |
+| **npm** | `global-style` | Ignored |
+| **npm** | `legacy-bundling` | Ignored |
+| **pnpm** | `symlink=false` | Ignored, with a warning — the isolated layout *is* its symlink graph |
+| **Yarn** | `nmHoistingLimits` | Ignored |
+| **Yarn** | `nmMode` | Ignored |
+| **Yarn** | `nodeLinker: pnp` | Refused — `ERR_NUB_PNP_UNSUPPORTED`, before any write |
 
 ### Nub identity
 

@@ -2,5 +2,6 @@
 # `aube store path`
 
 - **Usage**: `aube store path`
+- **Effect**: read-only
 
 Show the store path

@@ -42,6 +42,11 @@ aube exec tsc -- --noEmit
 `exec` runs a binary from the project context with `node_modules/.bin` on
 `PATH`.
 
+Non-shell `aube exec`, the `aube run` bin fallback, and non-shell `aube dlx`
+detect native package targets and launch them directly. Shell-routed commands,
+global bins, and direct `.bin` invocation continue through installed wrappers;
+on Unix, directly launched native targets must be executable.
+
 ## One-off binaries
 
 ```sh

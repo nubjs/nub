@@ -43,24 +43,29 @@ pub struct ScriptSettings {
     /// system one while project-local binaries still win. `None` when
     /// no runtime switching is active.
     pub node_bin_dir: Option<PathBuf>,
-    /// The resolved node executable, exported as `NODE` (and, unless
-    /// `node_execpath` overrides it, `npm_node_execpath`) for every script.
-    pub node_exe: Option<PathBuf>,
-    /// The *real* Node exported as `npm_node_execpath` when it differs from
-    /// the program driving `NODE` — a wrapping embedder points `NODE` at a
-    /// shim, but node-gyp reads `npm_node_execpath` for Node's install prefix
-    /// and must reach the real binary. `None` ⇒ falls back to `node_exe`,
-    /// where both name one binary. Mirrors `RuntimeContext::node_execpath`,
-    /// which feeds it.
+    /// The node exported as `NODE` (npm parity) — the program a
+    /// script's `$NODE` / bare `node` re-spawns. A wrapper's shim; the
+    /// real binary otherwise.
+    pub node_program: Option<PathBuf>,
+    /// The node exported as `npm_node_execpath` — the *real* binary
+    /// node-gyp reads to find Node's install prefix. Equals
+    /// [`Self::node_program`] unless a wrapper split them apart.
     pub node_execpath: Option<PathBuf>,
+    /// Extra environment an embedder contributes to every script,
+    /// applied last (after `env_clear`) so it survives the jail. Merge
+    /// semantics against aube's own values are resolved upstream; these
+    /// are plain overrides. (`NODE_OPTIONS` folding happens through
+    /// [`Self::node_options`].)
+    pub extra_env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     /// Embedder-supplied environment overlay applied verbatim to every
-    /// lifecycle spawn (`(key, value)` pairs, set last so they win over the
-    /// other `ScriptSettings`-derived keys). Generic by design — aube assigns
-    /// no meaning to the keys; an embedder fills it to route scripts through a
-    /// provisioned/augmented runtime (e.g. nub points `NODE` at its node shim,
-    /// pins `npm_node_execpath`, and injects its preload via `NODE_OPTIONS`)
-    /// without aube growing a runtime-specific field. Default-empty =
-    /// behavior-preserving: a stock aube spawns exactly as before.
+    /// lifecycle spawn (`(key, value)` pairs, set after [`Self::extra_env`]
+    /// so they win over it and over the other `ScriptSettings`-derived keys).
+    /// Generic by design — aube assigns no meaning to the keys; an embedder
+    /// fills it to route scripts through a provisioned/augmented runtime (e.g.
+    /// nub points `NODE` at its node shim, pins `npm_node_execpath`, and
+    /// injects its preload via `NODE_OPTIONS`) without aube growing a
+    /// runtime-specific field. Default-empty = behavior-preserving: a stock
+    /// aube spawns exactly as before.
     pub env_overlay: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     /// Embedder-supplied PATH entries prepended (in order, ahead of the
     /// existing PATH) to every lifecycle spawn. Counterpart to `env_overlay`
@@ -660,14 +665,21 @@ fn apply_script_settings_env(cmd: &mut tokio::process::Command, settings: &Scrip
     if let Some(exe) = aube_exe.as_deref() {
         cmd.env("npm_execpath", exe);
     }
-    // `npm_node_execpath` / `NODE`: the node binary scripts should use
-    // — the switched runtime's node, or the ambient `node` on PATH.
-    // Set here (not at spawn) so it survives the jail's `env_clear`.
-    // A wrapping embedder splits them: `NODE` a shim, `npm_node_execpath` the
-    // real Node node-gyp reads for the prefix. Unset ⇒ both name `node_exe`.
-    if let Some(node_exe) = settings.node_exe.as_deref() {
-        let execpath = settings.node_execpath.as_deref().unwrap_or(node_exe);
-        cmd.env("npm_node_execpath", execpath).env("NODE", node_exe);
+    // `npm_node_execpath` / `NODE`: the node binaries scripts should use
+    // — the switched runtime's node, or the ambient `node` on PATH. `NODE`
+    // is the program a script re-spawns (a wrapper's shim); the execpath
+    // is the *real* binary node-gyp reads for Node's install prefix. They
+    // coincide unless a wrapping embedder split them. Set here (not at
+    // spawn) so they survive the jail's `env_clear`.
+    let node_execpath = settings
+        .node_execpath
+        .as_deref()
+        .or(settings.node_program.as_deref());
+    if let Some(execpath) = node_execpath {
+        cmd.env("npm_node_execpath", execpath);
+    }
+    if let Some(node) = settings.node_program.as_deref().or(node_execpath) {
+        cmd.env("NODE", node);
     }
     // `npm_command`: the top-level PM command (run-script / install / …).
     if let Some(command) = settings.command.as_deref() {
@@ -727,9 +739,17 @@ fn apply_script_settings_env(cmd: &mut tokio::process::Command, settings: &Scrip
         }
         cmd.env("NODE_USE_ENV_PROXY", "1");
     }
-    // Embedder env overlay, applied LAST so it outranks the keys above (an
-    // embedder that, say, pins its own NODE_OPTIONS wins over the
-    // settings-derived one). Generic: aube assigns no meaning to the keys.
+    // Embedder-contributed env, applied last (after `env_clear`, so it
+    // survives the jail) and after every aube-set var, so a wrapping
+    // host has the final say. `NODE_OPTIONS` is not among these — it is
+    // folded into `settings.node_options` upstream to preserve the
+    // user's value.
+    for (key, value) in &settings.extra_env {
+        cmd.env(key, value);
+    }
+    // `env_overlay` is the embedder seam the host populates through
+    // `EngineContext`; it lands after `extra_env` so a host driving both
+    // seams gets one deterministic winner.
     for (key, value) in &settings.env_overlay {
         cmd.env(key, value);
     }
@@ -1641,7 +1661,7 @@ mod env_overlay_tests {
     fn node_execpath_overrides_only_npm_node_execpath() {
         let mut cmd = tokio::process::Command::new("node");
         let settings = ScriptSettings {
-            node_exe: Some(PathBuf::from("/wrapper/libexec/node-shim")),
+            node_program: Some(PathBuf::from("/wrapper/libexec/node-shim")),
             node_execpath: Some(PathBuf::from("/real/node/bin/node")),
             ..Default::default()
         };
@@ -1663,10 +1683,10 @@ mod env_overlay_tests {
     /// what every non-wrapping caller sends, so this is the behavior-preserving
     /// path — unchanged from before the split existed.
     #[test]
-    fn unset_node_execpath_falls_back_to_node_exe() {
+    fn unset_node_execpath_falls_back_to_node_program() {
         let mut cmd = tokio::process::Command::new("node");
         let settings = ScriptSettings {
-            node_exe: Some(PathBuf::from("/opt/node/bin/node")),
+            node_program: Some(PathBuf::from("/opt/node/bin/node")),
             ..Default::default()
         };
         apply_script_settings_env(&mut cmd, &settings);
@@ -1675,7 +1695,7 @@ mod env_overlay_tests {
             assert_eq!(
                 env_value(&cmd, key).map(|v| v.to_string_lossy().into_owned()),
                 Some("/opt/node/bin/node".to_string()),
-                "{key} must fall back to node_exe when no split is requested"
+                "{key} must fall back to node_program when no split is requested"
             );
         }
     }
@@ -1688,7 +1708,7 @@ mod env_overlay_tests {
     fn env_overlay_outranks_the_node_execpath_split() {
         let mut cmd = tokio::process::Command::new("node");
         let settings = ScriptSettings {
-            node_exe: Some(PathBuf::from("/settings/node")),
+            node_program: Some(PathBuf::from("/settings/node")),
             node_execpath: Some(PathBuf::from("/settings/execpath")),
             env_overlay: vec![(
                 OsString::from("npm_node_execpath"),
@@ -1903,6 +1923,39 @@ mod jail_tests {
         });
         assert_eq!(env("NO_PROXY"), None);
         assert_eq!(env("NODE_USE_ENV_PROXY"), None);
+    }
+
+    #[test]
+    fn wrapper_node_and_execpath_are_stamped_distinctly() {
+        // A wrapping embedder: `NODE` is the shim (so `$NODE` stays
+        // wrapped) while `npm_node_execpath` is the real binary node-gyp
+        // reads. Embedder `extra_env` lands last.
+        let env = proxy_env(ScriptSettings {
+            node_program: Some(PathBuf::from("/shim/node")),
+            node_execpath: Some(PathBuf::from("/real/node-24.4.1/bin/node")),
+            extra_env: vec![("MYTOOL_WRAPPED".into(), "1".into())],
+            ..Default::default()
+        });
+        assert_eq!(env("NODE").as_deref(), Some("/shim/node"));
+        assert_eq!(
+            env("npm_node_execpath").as_deref(),
+            Some("/real/node-24.4.1/bin/node")
+        );
+        assert_eq!(env("MYTOOL_WRAPPED").as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn node_execpath_falls_back_to_node_program() {
+        // A selector supplies only `node_program`; both vars point at it.
+        let env = proxy_env(ScriptSettings {
+            node_program: Some(PathBuf::from("/opt/node/bin/node")),
+            ..Default::default()
+        });
+        assert_eq!(env("NODE").as_deref(), Some("/opt/node/bin/node"));
+        assert_eq!(
+            env("npm_node_execpath").as_deref(),
+            Some("/opt/node/bin/node")
+        );
     }
 }
 

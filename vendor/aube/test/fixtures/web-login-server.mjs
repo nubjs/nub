@@ -53,7 +53,20 @@ const server = createServer((req, res) => {
 			res.end();
 			return;
 		}
-		const body = JSON.stringify({ token: TOKEN });
+		const token =
+			process.env.MOCK_WEB_LOGIN_OVERSIZED_TOKEN ||
+			process.env.MOCK_WEB_LOGIN_CHUNKED_TOKEN
+			? "x".repeat(64 * 1024)
+			: TOKEN;
+		const body = JSON.stringify({ token });
+		if (process.env.MOCK_WEB_LOGIN_CHUNKED_TOKEN) {
+			res.writeHead(200, { "content-type": "application/json" });
+			for (let offset = 0; offset < body.length; offset += 4096) {
+				res.write(body.slice(offset, offset + 4096));
+			}
+			res.end();
+			return;
+		}
 		res.writeHead(200, {
 			"content-type": "application/json",
 			"content-length": Buffer.byteLength(body),

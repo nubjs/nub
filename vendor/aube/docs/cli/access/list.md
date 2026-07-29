@@ -2,6 +2,7 @@
 # `aube access list`
 
 - **Usage**: `aube access list <SUBCOMMAND>`
+- **Effect**: read-only
 
 List packages visible to a user, organization, or team
 

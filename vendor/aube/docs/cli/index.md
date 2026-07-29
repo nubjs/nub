@@ -3,7 +3,7 @@
 
 **Usage**: `aube [FLAGS] <SUBCOMMAND>`
 
-**Version**: 1.32.0
+**Version**: 1.35.0
 
 - **Usage**: `aube [FLAGS] <SUBCOMMAND>`
 
@@ -13,7 +13,7 @@
 
 Change to directory before running (like `make -C` or `mise --cd`)
 
-### `-F --filter… <PATTERN>`
+### `-F --filter… <WORKSPACE>`
 
 Scope command execution to workspace packages matching PATTERN.
 
@@ -178,7 +178,7 @@ Run from the workspace root regardless of the current package
 - [`aube pack [FLAGS]`](/cli/pack.md)
 - [`aube patch [--edit-dir <DIR>] [--ignore-existing] <PACKAGE>`](/cli/patch.md)
 - [`aube patch-commit [--patches-dir <DIR>] <DIR>`](/cli/patch-commit.md)
-- [`aube patch-remove [PACKAGES]…`](/cli/patch-remove.md)
+- [`aube patch-remove [PATCH]…`](/cli/patch-remove.md)
 - [`aube peers <SUBCOMMAND>`](/cli/peers.md)
 - [`aube peers check [--json]`](/cli/peers/check.md)
 - [`aube prefix [-g --global]`](/cli/prefix.md)
@@ -206,6 +206,8 @@ Run from the workspace root regardless of the current package
 - [`aube store prune`](/cli/store/prune.md)
 - [`aube store status`](/cli/store/status.md)
 - [`aube test [FLAGS] [ARGS]…`](/cli/test.md)
+- [`aube trust <SUBCOMMAND>`](/cli/trust.md)
+- [`aube trust check [FLAGS] <PACKAGE@VERSION>`](/cli/trust/check.md)
 - [`aube undeprecate [FLAGS] <PACKAGE>`](/cli/undeprecate.md)
 - [`aube unlink [-g --global] [PACKAGE]`](/cli/unlink.md)
 - [`aube unpublish [FLAGS] [SPEC]`](/cli/unpublish.md)

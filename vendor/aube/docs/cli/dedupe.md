@@ -2,6 +2,7 @@
 # `aube dedupe`
 
 - **Usage**: `aube dedupe [FLAGS]`
+- **Effect**: modifies state
 
 Re-resolve the lockfile to collapse duplicate versions
 

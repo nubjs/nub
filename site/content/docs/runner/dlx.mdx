@@ -52,19 +52,6 @@ The global [`nub.jsonc`](/docs/config) carries a [`dlx`](/docs/config#dlx) block
 
 Setting it to `never` turns off [`nubx`](/docs/runner)'s implicit fallthrough fetch. An explicit `nub dlx` still runs, because typing it is the consent.
 
-Fetched tools can also read their own environment files:
-
-```jsonc title="~/.config/nub/nub.jsonc"
-{
-  // ...
-  "dlx": {
-    "envFile": "./tools.env"  // resolved next to the global file
-  }
-}
-```
-
-The `envFile` key takes the same `true`, `false`, path, and path-array forms as the top-level field.
-
 ## Related
 
 - [Runner](/docs/runner) — `nubx`, which fetches only on a local miss, and prompts first.

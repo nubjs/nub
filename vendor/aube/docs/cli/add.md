@@ -3,6 +3,7 @@
 
 - **Usage**: `aube add [FLAGS] [PACKAGES]…`
 - **Aliases**: `a`
+- **Effect**: modifies state
 
 Add a dependency
 
@@ -42,9 +43,9 @@ Conflicts with `--no-save`, which only snapshots `package.json` and the lockfile
 
 ### `--allow-low-downloads`
 
-Bypass the [`lowDownloadThreshold`] confirm prompt / refusal for this invocation.
+Bypass the similar-name, new-name, and [`lowDownloadThreshold`] confirm prompts / refusals for this invocation.
 
-`aube add` looks up each candidate's weekly download count and prompts (interactive) or fails (CI) when the count is below [`lowDownloadThreshold`]. The flag is intended for the cases where you've already verified the package out-of-band — adding a brand-new niche tool, a fresh fork, an internal scratch package — and don't want the prompt to interrupt scripted workflows. Does not affect the OSV malicious-package check, which remains a hard block.
+`aube add` looks up each candidate's weekly download count and prompts (interactive) or fails (CI) when the count is below [`lowDownloadThreshold`], resembles a top-100,000 npm package, or is newer than [`minimumPackageAge`]. The flag is intended for cases where you've already verified the package out-of-band. It does not affect the OSV malicious-package check, which remains a hard block.
 
 ### `--dangerously-allow-all-builds`
 

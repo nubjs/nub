@@ -1,6 +1,6 @@
 //! Supply-chain gates that run at the top of `aube add`.
 //!
-//! Two checks, layered by signal strength:
+//! Four checks, layered by signal strength:
 //!
 //! 1. **OSV `MAL-*` advisory check** — hard block via
 //!    `ERR_AUBE_MALICIOUS_PACKAGE`. Confirmed malicious advisories
@@ -12,15 +12,24 @@
 //!    gate so a name-only hit can't reject a patched popular package
 //!    (see `run_gates`).
 //!
-//! 2. **Weekly-downloads floor** — interactive confirm prompt below
+//! 2. **Popular-name similarity** — namespace-aware edit-distance
+//!    comparison against the top 100,000 npm packages catches names
+//!    designed to look like an established dependency.
+//!
+//! 3. **Weekly-downloads floor** — interactive confirm prompt below
 //!    the threshold, hard refusal in non-interactive contexts unless
 //!    `--allow-low-downloads` is passed. Catches typosquats and
 //!    impersonations that haven't been reported to OSV yet. The
 //!    `allowedUnpopularPackages` setting (glob patterns) bypasses
 //!    this gate for opted-in names, leaving the OSV check intact.
 //!
+//! 4. **Package-name age** — applies `minimumPackageAge` to the
+//!    registry's `time.created` timestamp. This closes the
+//!    slopsquatting window where an attacker registers a plausible
+//!    AI-hallucinated name immediately before a victim installs it.
+//!
 //! The gate fires only on the names the user typed for *registry*
-//! packages — git/local/workspace/jsr/aliased specs all skip both
+//! packages — git/local/workspace/jsr/aliased specs all skip these
 //! checks because the public-registry signal doesn't apply. Names
 //! whose resolved registry isn't `registry.npmjs.org` (per
 //! `NpmConfig::is_public_npmjs`) are filtered out upstream in
@@ -28,10 +37,12 @@
 
 use aube_codes::errors::{
     ERR_AUBE_ADVISORY_CHECK_FAILED, ERR_AUBE_LOW_DOWNLOAD_PACKAGE, ERR_AUBE_MALICIOUS_PACKAGE,
+    ERR_AUBE_NEW_PACKAGE_NAME, ERR_AUBE_PACKAGE_AGE_CHECK_FAILED, ERR_AUBE_SIMILAR_PACKAGE_NAME,
 };
 use aube_codes::warnings::{
-    WARN_AUBE_ADVISORY_CHECK_FAILED, WARN_AUBE_LOW_DOWNLOAD_PACKAGE,
+    WARN_AUBE_ADVISORY_CHECK_FAILED, WARN_AUBE_LOW_DOWNLOAD_PACKAGE, WARN_AUBE_NEW_PACKAGE_NAME,
     WARN_AUBE_OSV_BLOOM_REFRESH_FAILED, WARN_AUBE_OSV_MIRROR_REFRESH_FAILED,
+    WARN_AUBE_SIMILAR_PACKAGE_NAME,
 };
 use aube_registry::osv_bloom_client::OsvBloomClient;
 use aube_registry::osv_mirror::OsvMirror;
@@ -42,8 +53,24 @@ use aube_registry::supply_chain::{
 use aube_settings::resolved::{AdvisoryBloomCheck, AdvisoryCheck, AdvisoryCheckOnInstall};
 use miette::miette;
 use std::io::{BufRead, IsTerminal, Write};
+use std::path::Path;
 
-/// Run both supply-chain gates against the registry-bound specs the
+#[derive(Clone)]
+pub(crate) struct ReputationPolicy<'a> {
+    pub(crate) allow: bool,
+    pub(crate) prompt: LowDownloadPrompt,
+    pub(crate) minimum_package_age_minutes: u64,
+    pub(crate) registry_client: &'a aube_registry::client::RegistryClient,
+    pub(crate) full_packument_cache: &'a Path,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum LowDownloadPrompt {
+    Terminal,
+    Host(crate::commands::install::InstallControl),
+}
+
+/// Run the supply-chain gates against the registry-bound specs the
 /// user passed to `aube add`. Inputs should already be filtered to
 /// packages that resolve via the public npm registry — workspace, git,
 /// and local specs are not in scope.
@@ -62,78 +89,165 @@ use std::io::{BufRead, IsTerminal, Write};
 /// a malicious version) and a bare install whose resolved version is
 /// itself malicious.
 ///
-/// `allow_low_downloads` is the per-invocation `--allow-low-downloads`
-/// override; when `true` the download gate is skipped entirely (the
-/// advisory check still runs).
+/// `reputation_policy` controls the per-invocation
+/// `--allow-low-downloads` override and whether the caller permits a
+/// terminal prompt or delegates confirmation to an embedding host.
 ///
 /// `allowed_unpopular_globs` are the `allowedUnpopularPackages`
 /// setting entries: full-name globs that exempt matching names from
-/// the downloads gate only. The advisory check still runs against
-/// every package regardless — exempting confirmed-malicious advisories
-/// is not what this list is for.
-pub async fn run_gates(
+/// the similar-name, package-age, and downloads gates. The advisory
+/// check still runs against every package regardless — exempting
+/// confirmed-malicious advisories is not what this list is for.
+pub(crate) async fn run_gates(
     exact_advisory_pairs: &[(String, String)],
     download_names: &[String],
     advisory_check: AdvisoryCheck,
     low_download_threshold: u64,
-    allow_low_downloads: bool,
+    reputation_policy: ReputationPolicy<'_>,
     allowed_unpopular_globs: &[String],
 ) -> miette::Result<()> {
     if exact_advisory_pairs.is_empty() && download_names.is_empty() {
         return Ok(());
     }
-    // One client shared across both gates and every per-package
-    // probe so the OSV POST and the (potentially parallel) downloads
-    // GETs all reuse the same connection pool + TLS session.
+    let gated_reputation_names = if !reputation_policy.allow {
+        download_names_to_gate(download_names, allowed_unpopular_globs)
+    } else {
+        Vec::new()
+    };
+    // One lightweight client shared across OSV and downloads probes.
+    // Package age uses the standard RegistryClient supplied by the
+    // caller so it shares full-packument caching and retry policy with
+    // the resolver.
     //
     // Builder failure (TLS init, no root certs, etc.) routes through
-    // the same `advisoryCheck` policy `osv_gate` applies to HTTP
+    // the same `advisoryCheck` policy `osv_gate_versioned` applies to HTTP
     // failures: under `Required` it's a hard fail with
-    // `ERR_AUBE_ADVISORY_CHECK_FAILED`, otherwise it warns and skips
-    // both gates. `Off` short-circuits before even surfacing the
-    // warning — the user opted out of OSV entirely, so a probe-
-    // client init failure is no longer their concern.
-    let client = match aube_registry::supply_chain::build_probe_client() {
-        Ok(c) => c,
+    // `ERR_AUBE_ADVISORY_CHECK_FAILED`; otherwise OSV/download probes
+    // are skipped while the independent package-age gate still runs.
+    let probe_client = match aube_registry::supply_chain::build_probe_client() {
+        Ok(client) => Some(client),
         Err(e) => {
             if matches!(advisory_check, AdvisoryCheck::Off) {
                 tracing::debug!(
-                    "supply-chain probe client init failed; OSV is off, skipping all gates: {e}"
+                    "supply-chain probe client init failed; OSV is off, skipping downloads probe: {e}"
                 );
-                return Ok(());
+            } else {
+                tracing::warn!(
+                    code = WARN_AUBE_ADVISORY_CHECK_FAILED,
+                    "supply-chain probe client init failed: {e}"
+                );
+                if matches!(advisory_check, AdvisoryCheck::Required) {
+                    return Err(miette!(
+                        code = ERR_AUBE_ADVISORY_CHECK_FAILED,
+                        "supply-chain probe client could not be initialised and `advisoryCheck = required` is set: {e}"
+                    ));
+                }
             }
-            tracing::warn!(
-                code = WARN_AUBE_ADVISORY_CHECK_FAILED,
-                "supply-chain probe client init failed: {e}"
-            );
-            if matches!(advisory_check, AdvisoryCheck::Required) {
-                return Err(miette!(
-                    code = ERR_AUBE_ADVISORY_CHECK_FAILED,
-                    "supply-chain probe client could not be initialised and `advisoryCheck = required` is set: {e}"
-                ));
-            }
-            return Ok(());
+            None
         }
     };
-    osv_gate_versioned(
-        &client,
-        exact_advisory_pairs,
-        advisory_check,
-        "refusing to add malicious package(s):",
-    )
-    .await?;
-    if !allow_low_downloads && low_download_threshold > 0 {
-        let patterns = compile_allowed_unpopular(allowed_unpopular_globs);
-        let gated: Vec<String> = download_names
-            .iter()
-            .filter(|n| !patterns.iter().any(|p| p.matches(n)))
-            .cloned()
-            .collect();
-        if !gated.is_empty() {
-            downloads_gate(&client, &gated, low_download_threshold).await?;
+    if let Some(client) = &probe_client {
+        osv_gate_versioned(
+            client,
+            exact_advisory_pairs,
+            advisory_check,
+            "refusing to add malicious package(s):",
+        )
+        .await?;
+    }
+    if !gated_reputation_names.is_empty() {
+        similar_name_gate(&gated_reputation_names, &reputation_policy.prompt).await?;
+        if reputation_policy.minimum_package_age_minutes > 0 {
+            let cutoff = aube_resolver::MinimumReleaseAge {
+                minutes: reputation_policy.minimum_package_age_minutes,
+                ..Default::default()
+            }
+            .cutoff();
+            package_age_gate(
+                reputation_policy.registry_client,
+                reputation_policy.full_packument_cache,
+                &gated_reputation_names,
+                reputation_policy.minimum_package_age_minutes,
+                cutoff.as_deref(),
+                &reputation_policy.prompt,
+            )
+            .await?;
+        }
+        if low_download_threshold > 0
+            && let Some(client) = &probe_client
+        {
+            downloads_gate(
+                client,
+                &gated_reputation_names,
+                low_download_threshold,
+                &reputation_policy.prompt,
+            )
+            .await?;
         }
     }
     Ok(())
+}
+
+async fn package_age_gate(
+    client: &aube_registry::client::RegistryClient,
+    full_packument_cache: &Path,
+    names: &[String],
+    minimum_age_minutes: u64,
+    cutoff: Option<&str>,
+    prompt: &LowDownloadPrompt,
+) -> miette::Result<()> {
+    let Some(cutoff) = cutoff else {
+        return Ok(());
+    };
+    for name in names {
+        // Full npm packuments can be large. Fetch sequentially so a multi-package
+        // add never retains several response bodies at once. Use the registry
+        // client's existing full-packument path so URL encoding, retries, body
+        // limits, ETag revalidation, and the on-disk cache stay centralized.
+        let created = verified_package_created(
+            name,
+            client
+                .fetch_packument_with_time_cached(name, full_packument_cache)
+                .await,
+        )?;
+        if !is_new_package_name(&created, cutoff) {
+            continue;
+        }
+        tracing::warn!(
+            code = WARN_AUBE_NEW_PACKAGE_NAME,
+            "{name}: package name was first published at {created}"
+        );
+        if !confirm_new_package(prompt, name, &created, minimum_age_minutes).await? {
+            return Err(miette!(
+                code = ERR_AUBE_NEW_PACKAGE_NAME,
+                "user aborted `{} {name}`",
+                aube_util::cmd("add")
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verified_package_created(
+    name: &str,
+    result: Result<aube_registry::Packument, aube_registry::Error>,
+) -> miette::Result<String> {
+    match result {
+        Ok(packument) => packument.time.get("created").cloned().ok_or_else(|| {
+            miette!(
+                code = ERR_AUBE_PACKAGE_AGE_CHECK_FAILED,
+                "npm did not return a creation timestamp for {name}; refusing to bypass `minimumPackageAge`"
+            )
+        }),
+        Err(error) => Err(miette!(
+            code = ERR_AUBE_PACKAGE_AGE_CHECK_FAILED,
+            "could not verify the package-name age for {name}; refusing to bypass `minimumPackageAge`: {error}"
+        )),
+    }
+}
+
+fn is_new_package_name(created: &str, cutoff: &str) -> bool {
+    created > cutoff
 }
 
 /// Single entry point for the post-resolve OSV `MAL-*` routing
@@ -594,6 +708,15 @@ fn compile_allowed_unpopular(raw: &[String]) -> Vec<glob::Pattern> {
         .collect()
 }
 
+fn download_names_to_gate(names: &[String], allowed_unpopular_globs: &[String]) -> Vec<String> {
+    let patterns = compile_allowed_unpopular(allowed_unpopular_globs);
+    names
+        .iter()
+        .filter(|name| !patterns.iter().any(|pattern| pattern.matches(name)))
+        .cloned()
+        .collect()
+}
+
 async fn osv_gate_versioned(
     client: &reqwest::Client,
     pairs: &[(String, String)],
@@ -686,12 +809,196 @@ fn format_malicious_message(header: &str, hits: &[MaliciousAdvisory], footer: &s
     lines.join("\n")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PackageNameSuggestion {
+    name: String,
+    rank: usize,
+    distance: u8,
+}
+
+async fn similar_name_gate(names: &[String], prompt: &LowDownloadPrompt) -> miette::Result<()> {
+    let corpus = aube_resolver::popular_package_names();
+    for name in names {
+        let Some(suggestion) = find_similar_package_name(name, corpus) else {
+            continue;
+        };
+        tracing::warn!(
+            code = WARN_AUBE_SIMILAR_PACKAGE_NAME,
+            "{name} resembles {} (popularity rank #{}, edit distance {})",
+            suggestion.name,
+            suggestion.rank,
+            suggestion.distance
+        );
+        if !confirm_similar_package(prompt, name, &suggestion).await? {
+            return Err(miette!(
+                code = ERR_AUBE_SIMILAR_PACKAGE_NAME,
+                "user aborted `{} {name}`",
+                aube_util::cmd("add")
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn find_similar_package_name(name: &str, corpus: &str) -> Option<PackageNameSuggestion> {
+    let mut best: Option<PackageNameSuggestion> = None;
+    for (index, candidate) in corpus.lines().enumerate() {
+        if name == candidate {
+            continue;
+        }
+        let Some((requested_part, candidate_part)) = comparable_name_parts(name, candidate) else {
+            continue;
+        };
+        let threshold = if requested_part.len().max(candidate_part.len()) >= 5 {
+            2
+        } else {
+            1
+        };
+        let Some(distance) = bounded_damerau_levenshtein(requested_part, candidate_part, threshold)
+        else {
+            continue;
+        };
+        let suggestion = PackageNameSuggestion {
+            name: candidate.to_string(),
+            rank: index + 1,
+            distance,
+        };
+        if best
+            .as_ref()
+            .is_none_or(|current| (distance, index) < (current.distance, current.rank - 1))
+        {
+            best = Some(suggestion);
+        }
+    }
+    best
+}
+
+fn comparable_name_parts<'a>(requested: &'a str, candidate: &'a str) -> Option<(&'a str, &'a str)> {
+    let requested_scoped = requested
+        .strip_prefix('@')
+        .and_then(|name| name.split_once('/'));
+    let candidate_scoped = candidate
+        .strip_prefix('@')
+        .and_then(|name| name.split_once('/'));
+    match (requested_scoped, candidate_scoped) {
+        (None, None) => Some((requested, candidate)),
+        (Some((requested_scope, requested_name)), Some((candidate_scope, candidate_name)))
+            if requested_scope == candidate_scope =>
+        {
+            Some((requested_name, candidate_name))
+        }
+        (Some(_), Some(_)) => Some((requested, candidate)),
+        _ => None,
+    }
+}
+
+/// Optimal-string-alignment distance with an upper bound. npm package
+/// names are ASCII and capped at 214 characters, so fixed rows avoid
+/// allocating while scanning the embedded popularity corpus.
+fn bounded_damerau_levenshtein(left: &str, right: &str, limit: u8) -> Option<u8> {
+    const MAX_NAME_LEN: usize = 214;
+    if !left.is_ascii()
+        || !right.is_ascii()
+        || left.len() > MAX_NAME_LEN
+        || right.len() > MAX_NAME_LEN
+        || left.len().abs_diff(right.len()) > usize::from(limit)
+    {
+        return None;
+    }
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    let mut previous_previous = [0_u16; MAX_NAME_LEN + 1];
+    let mut previous = [0_u16; MAX_NAME_LEN + 1];
+    let mut current = [0_u16; MAX_NAME_LEN + 1];
+    for (j, cell) in previous.iter_mut().take(right.len() + 1).enumerate() {
+        *cell = j as u16;
+    }
+    for i in 1..=left.len() {
+        current[0] = i as u16;
+        let mut row_min = current[0];
+        for j in 1..=right.len() {
+            let substitution = previous[j - 1] + u16::from(left[i - 1] != right[j - 1]);
+            current[j] = (previous[j] + 1).min(current[j - 1] + 1).min(substitution);
+            if i > 1 && j > 1 && left[i - 1] == right[j - 2] && left[i - 2] == right[j - 1] {
+                current[j] = current[j].min(previous_previous[j - 2] + 1);
+            }
+            row_min = row_min.min(current[j]);
+        }
+        if row_min > u16::from(limit) {
+            return None;
+        }
+        previous_previous = previous;
+        previous = current;
+    }
+    let distance = previous[right.len()];
+    (distance <= u16::from(limit)).then_some(distance as u8)
+}
+
+async fn confirm_similar_package(
+    prompt: &LowDownloadPrompt,
+    name: &str,
+    suggestion: &PackageNameSuggestion,
+) -> miette::Result<bool> {
+    let refusal = || {
+        miette!(
+            code = ERR_AUBE_SIMILAR_PACKAGE_NAME,
+            "refusing to add {name}: did you mean {} (top-100,000 rank #{}, edit distance {})? Pass --allow-low-downloads after verifying the package name.",
+            suggestion.name,
+            suggestion.rank,
+            suggestion.distance
+        )
+    };
+    match prompt {
+        LowDownloadPrompt::Terminal
+            if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() =>
+        {
+            prompt_similar_package(name, suggestion)
+        }
+        LowDownloadPrompt::Terminal => Err(refusal()),
+        LowDownloadPrompt::Host(control) => control
+            .confirm(
+                crate::commands::install::InstallPrompt::SimilarPackageName {
+                    package: name.to_string(),
+                    suggested_package: suggestion.name.clone(),
+                    popularity_rank: suggestion.rank,
+                    edit_distance: suggestion.distance,
+                },
+            )
+            .await
+            .unwrap_or_else(|| Err(refusal())),
+    }
+}
+
+fn prompt_similar_package(name: &str, suggestion: &PackageNameSuggestion) -> miette::Result<bool> {
+    let mut stderr = std::io::stderr().lock();
+    writeln!(stderr, "  ⚠ {name} resembles a popular package:").ok();
+    writeln!(
+        stderr,
+        "    • did you mean {}? (top-100,000 rank #{}, edit distance {})",
+        suggestion.name, suggestion.rank, suggestion.distance
+    )
+    .ok();
+    write!(stderr, "  Continue adding {name}? [y/N] ").ok();
+    stderr.flush().ok();
+    drop(stderr);
+
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line).map_err(|e| {
+        miette!(
+            code = ERR_AUBE_SIMILAR_PACKAGE_NAME,
+            "failed to read confirmation: {e}"
+        )
+    })?;
+    let answer = line.trim().to_ascii_lowercase();
+    Ok(answer == "y" || answer == "yes")
+}
+
 async fn downloads_gate(
     client: &reqwest::Client,
     names: &[String],
     threshold: u64,
+    prompt: &LowDownloadPrompt,
 ) -> miette::Result<()> {
-    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
     let mut set: tokio::task::JoinSet<(String, Result<DownloadCount, _>)> =
         tokio::task::JoinSet::new();
     for name in names {
@@ -747,13 +1054,7 @@ async fn downloads_gate(
             code = WARN_AUBE_LOW_DOWNLOAD_PACKAGE,
             "{name}: {weekly} weekly downloads (threshold: {threshold})"
         );
-        if !interactive {
-            return Err(miette!(
-                code = ERR_AUBE_LOW_DOWNLOAD_PACKAGE,
-                "refusing to add {name}: only {weekly} weekly downloads (threshold: {threshold}). Pass --allow-low-downloads to bypass, or set `lowDownloadThreshold = 0`."
-            ));
-        }
-        if !prompt_continue(name, weekly, threshold)? {
+        if !confirm_low_download(prompt, name, weekly, threshold).await? {
             return Err(miette!(
                 code = ERR_AUBE_LOW_DOWNLOAD_PACKAGE,
                 "user aborted `{} {name}`",
@@ -762,6 +1063,38 @@ async fn downloads_gate(
         }
     }
     Ok(())
+}
+
+async fn confirm_low_download(
+    prompt: &LowDownloadPrompt,
+    name: &str,
+    weekly: u64,
+    threshold: u64,
+) -> miette::Result<bool> {
+    let refusal = || {
+        miette!(
+            code = ERR_AUBE_LOW_DOWNLOAD_PACKAGE,
+            "refusing to add {name}: only {weekly} weekly downloads (threshold: {threshold}). Pass --allow-low-downloads to bypass, or set `lowDownloadThreshold = 0`."
+        )
+    };
+    match prompt {
+        LowDownloadPrompt::Terminal
+            if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() =>
+        {
+            prompt_continue(name, weekly, threshold)
+        }
+        LowDownloadPrompt::Terminal => Err(refusal()),
+        LowDownloadPrompt::Host(control) => control
+            .confirm(
+                crate::commands::install::InstallPrompt::LowDownloadPackage {
+                    package: name.to_string(),
+                    weekly_downloads: weekly,
+                    threshold,
+                },
+            )
+            .await
+            .unwrap_or_else(|| Err(refusal())),
+    }
 }
 
 fn prompt_continue(name: &str, weekly: u64, threshold: u64) -> miette::Result<bool> {
@@ -787,9 +1120,75 @@ fn prompt_continue(name: &str, weekly: u64, threshold: u64) -> miette::Result<bo
     Ok(answer == "y" || answer == "yes")
 }
 
+async fn confirm_new_package(
+    prompt: &LowDownloadPrompt,
+    name: &str,
+    created: &str,
+    minimum_age_minutes: u64,
+) -> miette::Result<bool> {
+    let refusal = || {
+        miette!(
+            code = ERR_AUBE_NEW_PACKAGE_NAME,
+            "refusing to add {name}: the package name was first published at {created}, within the configured `minimumPackageAge` of {minimum_age_minutes} minutes. Pass --allow-low-downloads to approve this new name explicitly."
+        )
+    };
+    match prompt {
+        LowDownloadPrompt::Terminal
+            if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() =>
+        {
+            prompt_new_package(name, created, minimum_age_minutes)
+        }
+        LowDownloadPrompt::Terminal => Err(refusal()),
+        LowDownloadPrompt::Host(control) => control
+            .confirm(crate::commands::install::InstallPrompt::NewPackageName {
+                package: name.to_string(),
+                created_at: created.to_string(),
+                minimum_age_minutes,
+            })
+            .await
+            .unwrap_or_else(|| Err(refusal())),
+    }
+}
+
+fn prompt_new_package(name: &str, created: &str, minimum_age_minutes: u64) -> miette::Result<bool> {
+    let mut stderr = std::io::stderr().lock();
+    writeln!(stderr, "  ⚠ {name} is a newly registered package name:").ok();
+    writeln!(stderr, "    • first published {created}").ok();
+    writeln!(stderr, "    • minimum age: {minimum_age_minutes} minutes").ok();
+    write!(stderr, "  Continue adding {name}? [y/N] ").ok();
+    stderr.flush().ok();
+    drop(stderr);
+
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line).map_err(|e| {
+        miette!(
+            code = ERR_AUBE_NEW_PACKAGE_NAME,
+            "failed to read confirmation: {e}"
+        )
+    })?;
+    let answer = line.trim().to_ascii_lowercase();
+    Ok(answer == "y" || answer == "yes")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::install::{
+        InstallControl, InstallPrompt, InstallPromptFuture, InstallPromptHandler,
+    };
+    use std::sync::{Arc, Mutex};
+
+    struct RecordingPromptHandler {
+        answer: bool,
+        prompts: Mutex<Vec<InstallPrompt>>,
+    }
+
+    impl InstallPromptHandler for RecordingPromptHandler {
+        fn confirm(&self, prompt: InstallPrompt) -> InstallPromptFuture<'_> {
+            self.prompts.lock().unwrap().push(prompt);
+            Box::pin(async move { Ok(self.answer) })
+        }
+    }
 
     #[tokio::test]
     async fn osv_gate_versioned_off_skips_network() {
@@ -814,9 +1213,281 @@ mod tests {
         // registry-name list. The function must be a no-op in that
         // case (no network, no error) so those code paths stay free.
         assert!(
-            run_gates(&[], &[], AdvisoryCheck::Required, 1000, false, &[])
+            run_gates(
+                &[],
+                &[],
+                AdvisoryCheck::Required,
+                1000,
+                ReputationPolicy {
+                    allow: false,
+                    prompt: LowDownloadPrompt::Terminal,
+                    minimum_package_age_minutes: 43_200,
+                    registry_client: &crate::commands::make_client(std::path::Path::new(".")),
+                    full_packument_cache: std::path::Path::new("."),
+                },
+                &[],
+            )
+            .await
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn embedded_confirmation_is_routed_to_the_host() {
+        let handler = Arc::new(RecordingPromptHandler {
+            answer: true,
+            prompts: Mutex::new(Vec::new()),
+        });
+        let prompt =
+            LowDownloadPrompt::Host(InstallControl::silent().with_prompt_handler(handler.clone()));
+
+        assert!(
+            confirm_low_download(&prompt, "@scope/tiny", 12, 1000)
                 .await
-                .is_ok()
+                .unwrap()
+        );
+        assert_eq!(
+            *handler.prompts.lock().unwrap(),
+            vec![InstallPrompt::LowDownloadPackage {
+                package: "@scope/tiny".to_string(),
+                weekly_downloads: 12,
+                threshold: 1000,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn embedded_confirmation_without_a_handler_fails_closed() {
+        let prompt = LowDownloadPrompt::Host(InstallControl::silent());
+
+        let error = confirm_low_download(&prompt, "tiny", 12, 1000)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.code().map(|code| code.to_string()).as_deref(),
+            Some(ERR_AUBE_LOW_DOWNLOAD_PACKAGE)
+        );
+    }
+
+    #[tokio::test]
+    async fn embedded_new_package_confirmation_is_routed_to_the_host() {
+        let handler = Arc::new(RecordingPromptHandler {
+            answer: true,
+            prompts: Mutex::new(Vec::new()),
+        });
+        let prompt =
+            LowDownloadPrompt::Host(InstallControl::silent().with_prompt_handler(handler.clone()));
+
+        assert!(
+            confirm_new_package(
+                &prompt,
+                "plausible-ai-package",
+                "2026-07-28T10:00:00.000Z",
+                1440,
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            *handler.prompts.lock().unwrap(),
+            vec![InstallPrompt::NewPackageName {
+                package: "plausible-ai-package".to_string(),
+                created_at: "2026-07-28T10:00:00.000Z".to_string(),
+                minimum_age_minutes: 1440,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn new_package_refusal_names_the_governing_setting() {
+        let prompt = LowDownloadPrompt::Host(InstallControl::silent());
+        let error = confirm_new_package(
+            &prompt,
+            "plausible-ai-package",
+            "2026-07-28T10:00:00.000Z",
+            43_200,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("`minimumPackageAge`"));
+        assert_eq!(
+            error.code().map(|code| code.to_string()).as_deref(),
+            Some(ERR_AUBE_NEW_PACKAGE_NAME)
+        );
+    }
+
+    #[tokio::test]
+    async fn embedded_similar_name_confirmation_is_routed_to_the_host() {
+        let handler = Arc::new(RecordingPromptHandler {
+            answer: true,
+            prompts: Mutex::new(Vec::new()),
+        });
+        let prompt =
+            LowDownloadPrompt::Host(InstallControl::silent().with_prompt_handler(handler.clone()));
+        let suggestion = PackageNameSuggestion {
+            name: "lodash".to_string(),
+            rank: 12,
+            distance: 1,
+        };
+
+        assert!(
+            confirm_similar_package(&prompt, "lodahs", &suggestion)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            *handler.prompts.lock().unwrap(),
+            vec![InstallPrompt::SimilarPackageName {
+                package: "lodahs".to_string(),
+                suggested_package: "lodash".to_string(),
+                popularity_rank: 12,
+                edit_distance: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn similar_name_detects_adjacent_transposition() {
+        assert_eq!(
+            find_similar_package_name("lodahs", "react\nlodash\nexpress\n"),
+            Some(PackageNameSuggestion {
+                name: "lodash".to_string(),
+                rank: 2,
+                distance: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn bundled_corpus_detects_common_package_typo() {
+        let suggestion =
+            find_similar_package_name("lodahs", aube_resolver::popular_package_names())
+                .expect("lodash should be present in the popularity corpus");
+        assert_eq!(suggestion.name, "lodash");
+        assert_eq!(suggestion.distance, 1);
+    }
+
+    #[test]
+    fn similar_name_compares_basename_within_same_scope() {
+        assert_eq!(
+            find_similar_package_name("@babel/parserr", "@types/node\n@babel/parser\n"),
+            Some(PackageNameSuggestion {
+                name: "@babel/parser".to_string(),
+                rank: 2,
+                distance: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn similar_name_compares_full_name_across_scopes() {
+        assert_eq!(
+            find_similar_package_name("@type/node", "@types/node\n"),
+            Some(PackageNameSuggestion {
+                name: "@types/node".to_string(),
+                rank: 1,
+                distance: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn similar_name_does_not_compare_scoped_with_unscoped() {
+        assert_eq!(find_similar_package_name("@example/react", "react\n"), None);
+    }
+
+    #[test]
+    fn similar_name_skips_exact_and_distant_names() {
+        assert_eq!(
+            find_similar_package_name("lodash", "lodash\nexpress\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn similar_name_prefers_distance_then_popularity_rank() {
+        assert_eq!(
+            find_similar_package_name("foobarz", "foobars\nfoobaz\n"),
+            Some(PackageNameSuggestion {
+                name: "foobars".to_string(),
+                rank: 1,
+                distance: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn exact_allowed_names_skip_reputation_gates() {
+        let names = vec!["locked[tiny]".to_string(), "new-tiny".to_string()];
+        let allowed = vec![glob::Pattern::escape("locked[tiny]")];
+
+        assert_eq!(
+            download_names_to_gate(&names, &allowed),
+            vec!["new-tiny".to_string()]
+        );
+    }
+
+    #[test]
+    fn package_name_age_is_strictly_newer_than_cutoff() {
+        let cutoff = "2026-07-27T00:00:00.000Z";
+        assert!(is_new_package_name("2026-07-27T00:00:00.001Z", cutoff));
+        assert!(!is_new_package_name(cutoff, cutoff));
+        assert!(!is_new_package_name("2026-07-26T23:59:59.999Z", cutoff));
+    }
+
+    #[test]
+    fn package_age_probe_requires_a_creation_timestamp() {
+        let error = verified_package_created(
+            "missing-time",
+            Ok(aube_registry::Packument {
+                name: "missing-time".to_string(),
+                modified: None,
+                versions: Default::default(),
+                dist_tags: Default::default(),
+                time: Default::default(),
+            }),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.code().map(|code| code.to_string()).as_deref(),
+            Some(ERR_AUBE_PACKAGE_AGE_CHECK_FAILED)
+        );
+    }
+
+    #[test]
+    fn package_age_probe_reads_created_from_standard_packument() {
+        let created = "2026-07-28T10:00:00.000Z";
+        let value = verified_package_created(
+            "plausible-ai-package",
+            Ok(aube_registry::Packument {
+                name: "plausible-ai-package".to_string(),
+                modified: None,
+                versions: Default::default(),
+                dist_tags: Default::default(),
+                time: [("created".to_string(), created.to_string())]
+                    .into_iter()
+                    .collect(),
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(value, created);
+    }
+
+    #[test]
+    fn package_age_probe_fails_closed_on_registry_errors() {
+        let error = verified_package_created(
+            "unreachable",
+            Err(aube_registry::Error::NotFound("unreachable".to_string())),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.code().map(|code| code.to_string()).as_deref(),
+            Some(ERR_AUBE_PACKAGE_AGE_CHECK_FAILED)
         );
     }
 

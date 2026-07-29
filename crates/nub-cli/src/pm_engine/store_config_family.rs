@@ -128,6 +128,14 @@ pub(crate) fn run_verb(
 /// subcommand name is spliced into the argv so all three flow through one
 /// `ConfigArgs` parse (and usage errors render as `nub get …` / `nub set …`).
 fn run_config(canonical: &str, typed: &str, args: &[String]) -> Result<i32> {
+    // `path` is nub's OWN subcommand, absent from the engine's `ConfigCommand`,
+    // so it must be claimed ahead of the parse that would reject it — the same
+    // interception shape `try_nub_config` uses for nub-namespaced keys. Only the
+    // `config`/`c` spelling: under the hidden `get`/`set` shorthands `path` is a
+    // setting key, not a subcommand.
+    if canonical == "config" && args.first().is_some_and(|a| a == "path") {
+        return run_config_path(typed, &args[1..]);
+    }
     let (bin, argv): (String, Vec<String>) = match canonical {
         "config" => (format!("nub {typed}"), args.to_vec()),
         shorthand => (
@@ -142,6 +150,26 @@ fn run_config(canonical: &str, typed: &str, args: &[String]) -> Result<i32> {
         Parsed::Exit(code) => return Ok(code),
     };
     dispatch_config(parsed, explicit_global_scope(args))
+}
+
+/// Print the global settings file's path — `~/.config/nub/nub.jsonc` and its
+/// `XDG_CONFIG_HOME`/`%APPDATA%` variants, resolved by [`crate::config::config_path`]
+/// so the precedence lives in exactly one place. Prints whether or not the file
+/// exists and never creates it: the point is `$EDITOR "$(nub config path)"` on a
+/// machine that has no settings yet.
+fn run_config_path(typed: &str, rest: &[String]) -> Result<i32> {
+    if !rest.is_empty() {
+        eprintln!("nub {typed} path: takes no arguments\n\x20\x20usage: nub {typed} path");
+        return Ok(2);
+    }
+    let path = crate::config::config_path().ok_or_else(|| {
+        anyhow::anyhow!(
+            "nub {typed} path: no config directory resolves\n\
+             \x20\x20set XDG_CONFIG_HOME or HOME to a writable directory"
+        )
+    })?;
+    println!("{}", path.display());
+    Ok(0)
 }
 
 /// Whether the user EXPLICITLY asked for a global-scope write —

@@ -2,6 +2,7 @@
 # `aube root`
 
 - **Usage**: `aube root [-g --global]`
+- **Effect**: read-only
 
 Print the path to `node_modules`
 

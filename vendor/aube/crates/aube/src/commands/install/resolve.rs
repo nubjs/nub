@@ -226,7 +226,7 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
     if fresh {
         tracing::debug!("--lockfile-only: lockfile already up to date");
         if let Some(p) = prog_ref {
-            p.finish(true);
+            p.finish(true, crate::progress::TtyFinishBehavior::Preserve);
         }
         if !write_lockfile {
             super::control::output(
@@ -369,7 +369,7 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
     crate::commands::prepare_resolved_graph_for_lockfile_write(&mut graph);
     if !write_lockfile {
         if let Some(p) = prog_ref {
-            p.finish(true);
+            p.finish(true, crate::progress::TtyFinishBehavior::Preserve);
         }
         super::control::output(
             super::InstallOutputLevel::Info,
@@ -420,7 +420,7 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
     // primary output.
     maybe_cleanup_unused_catalogs(cwd, settings_ctx, workspace_catalogs, &graph.catalogs)?;
     if let Some(p) = prog_ref {
-        p.finish(true);
+        p.finish(true, crate::progress::TtyFinishBehavior::Preserve);
     }
     super::control::output(
         super::InstallOutputLevel::Info,

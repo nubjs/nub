@@ -78,13 +78,13 @@ pub fn resolve_node_version(override_: Option<&str>) -> Option<String> {
     if let Some(v) = override_ {
         return Some(v.trim().trim_start_matches('v').to_string());
     }
-    // Memoize the `node --version` probe. Spawning a process is cheap
-    // individually but this is called once per install and may end up
-    // called again by future callers in the same process (workspace
-    // installs, `aube add` chaining into `install`, tests). OnceLock
-    // gives us zero-cost lookups after the first probe.
-    static PROBED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    PROBED.get_or_init(probe_node_version).clone()
+    // Prefer the active runtime's real binary (`npm_node_execpath`) so a
+    // wrapper embedder that left `version` unset gets the underlying
+    // Node's version, not whatever bare `node` PATH resolves to. Falls
+    // back to bare `node` when no runtime is active.
+    let program =
+        crate::runtime::node_execpath().unwrap_or_else(|| std::path::PathBuf::from("node"));
+    probe_node_version(&program)
 }
 
 /// The Node the install's build artifacts are actually compiled by. This is
@@ -128,16 +128,40 @@ pub fn effective_node_version(override_: Option<&str>) -> Option<String> {
     build_node_version()
 }
 
-fn probe_node_version() -> Option<String> {
-    let output = std::process::Command::new("node")
-        .arg("--version")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+/// Probe `program --version`, memoized **per program path** — spawning is
+/// cheap individually but this is hit once per install and again by later
+/// callers in the same process (workspace installs, `aube add` chaining
+/// into `install`, tests). Keying the cache by path (rather than a single
+/// process-global slot) means a runtime that became active after an
+/// earlier bare-`node` probe still gets its own binary probed, instead of
+/// returning the stale first result.
+fn probe_node_version(program: &std::path::Path) -> Option<String> {
+    static PROBED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Option<String>>>,
+    > = std::sync::OnceLock::new();
+    let cache = PROBED.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    // Recover from a poisoned lock rather than panic: this runs in
+    // embedded/library contexts, and a stale cache entry from a panicked
+    // probe is harmless (worst case: one redundant `--version` spawn).
+    if let Some(cached) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(program) {
+        return cached.clone();
     }
-    let s = String::from_utf8(output.stdout).ok()?;
-    Some(s.trim().trim_start_matches('v').to_string())
+    let probed = (|| {
+        let output = std::process::Command::new(program)
+            .arg("--version")
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let s = String::from_utf8(output.stdout).ok()?;
+        Some(s.trim().trim_start_matches('v').to_string())
+    })();
+    cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(program.to_path_buf(), probed.clone());
+    probed
 }
 
 /// Test whether `version` satisfies `range`. A version or range we can't

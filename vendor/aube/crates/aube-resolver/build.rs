@@ -23,6 +23,8 @@ const RELEASE_TOP: usize = 2000;
 const DEFAULT_VERSION_CAP: usize = 100;
 const FAST_COMPRESSION_LEVEL: i32 = 10;
 const RELEASE_CI_COMPRESSION_LEVEL: i32 = 19;
+const POPULAR_NAMES_TOP: usize = 100_000;
+const POPULAR_NAMES_FORMAT: u32 = 1;
 // Bump when the on-disk rkyv schema (`src/primer_schema.rs`) changes
 // in a layout-breaking way. The on-disk `primer-topN-vM-sK.rkyv.zst`
 // artifact is gitignored, so older `sK` files orphan harmlessly and
@@ -41,12 +43,21 @@ fn main() {
                 "primer-top{top}-v{version_cap}-s{PRIMER_DATA_SCHEMA}.rkyv.zst"
             ))
         });
+    let popular_names_source = std::env::var_os("AUBE_POPULAR_NAMES_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            manifest_dir.join("data").join(format!(
+                "popular-top{POPULAR_NAMES_TOP}-v{POPULAR_NAMES_FORMAT}.json"
+            ))
+        });
 
     println!("cargo:rerun-if-env-changed=AUBE_PRIMER_PATH");
+    println!("cargo:rerun-if-env-changed=AUBE_POPULAR_NAMES_PATH");
     println!("cargo:rerun-if-env-changed=AUBE_PRIMER_TOP");
     println!("cargo:rerun-if-env-changed=AUBE_PRIMER_VERSION_CAP");
     println!("cargo:rerun-if-env-changed=AUBE_REQUIRE_PRIMER");
     println!("cargo:rerun-if-changed={}", source.display());
+    println!("cargo:rerun-if-changed={}", popular_names_source.display());
     let json = source.with_extension("json");
     println!("cargo:rerun-if-changed={}", json.display());
 
@@ -84,7 +95,8 @@ fn main() {
             //      tarball, but no `node`).
             // Ship an empty primer; runtime falls back to network packument
             // fetches.
-            write_package_blob(&out_dir, &[]);
+            let fallback_names = write_package_blob(&out_dir, &[]);
+            write_popular_names_blob(&out_dir, &popular_names_source, &fallback_names);
             return;
         }
     }
@@ -103,7 +115,8 @@ fn main() {
 
     let bytes = std::fs::read(&source)
         .unwrap_or_else(|e| panic!("failed to read primer {}: {e}", source.display()));
-    write_package_blob(&out_dir, &bytes);
+    let fallback_names = write_package_blob(&out_dir, &bytes);
+    write_popular_names_blob(&out_dir, &popular_names_source, &fallback_names);
 }
 
 fn primer_top() -> usize {
@@ -193,7 +206,7 @@ fn compress_json_primer(json: &Path, source: &Path) {
     std::fs::write(source, compressed).unwrap();
 }
 
-fn write_package_blob(out_dir: &Path, compressed: &[u8]) {
+fn write_package_blob(out_dir: &Path, compressed: &[u8]) -> Vec<String> {
     let mut blob = Vec::new();
     let mut index = Vec::new();
     if !compressed.is_empty() {
@@ -219,11 +232,60 @@ fn write_package_blob(out_dir: &Path, compressed: &[u8]) {
     let mut generated =
         "static PRIMER_BLOB: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/primer-packages.bin\"));\nstatic PRIMER_INDEX: &[(&str, usize, usize)] = &[\n"
             .to_string();
+    let fallback_names = index.iter().map(|(name, _, _)| name.clone()).collect();
     for (name, offset, len) in index {
         generated.push_str(&format!("    ({name:?}, {offset}, {len}),\n"));
     }
-    generated.push_str("];\n");
+    generated.push_str(
+        "];\nstatic POPULAR_NAMES_BLOB: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/popular-names.bin\"));\n",
+    );
     std::fs::write(out_dir.join("primer_index.rs"), generated).unwrap();
+    fallback_names
+}
+
+fn write_popular_names_blob(out_dir: &Path, source: &Path, fallback_names: &[String]) {
+    let names = if source.is_file() {
+        let input = std::fs::read(source).unwrap_or_else(|e| {
+            panic!(
+                "failed to read popular package names {}: {e}",
+                source.display()
+            )
+        });
+        serde_json::from_slice::<Vec<String>>(&input).unwrap_or_else(|e| {
+            panic!(
+                "failed to parse popular package names {}: {e}",
+                source.display()
+            )
+        })
+    } else {
+        if std::env::var_os("AUBE_POPULAR_NAMES_PATH").is_some() || primer_required() {
+            panic!(
+                "popular package names are required, but {} was missing",
+                source.display()
+            );
+        }
+        fallback_names.to_vec()
+    };
+    if primer_required() && names.len() != POPULAR_NAMES_TOP {
+        panic!(
+            "popular package names must contain exactly {POPULAR_NAMES_TOP} entries, found {}",
+            names.len()
+        );
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for name in &names {
+        if name.is_empty()
+            || name.bytes().any(|byte| byte.is_ascii_whitespace())
+            || !seen.insert(name)
+        {
+            panic!("popular package names contain an invalid or duplicate entry: {name:?}");
+        }
+    }
+    let joined = names.join("\n");
+    let compressed =
+        zstd::stream::encode_all(Cursor::new(joined.as_bytes()), primer_compression_level())
+            .unwrap();
+    std::fs::write(out_dir.join("popular-names.bin"), compressed).unwrap();
 }
 
 fn primer_required() -> bool {

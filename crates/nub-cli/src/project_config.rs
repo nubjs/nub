@@ -52,7 +52,7 @@ const INSTALL_KEYS: &[&str] = &[
     "minimumReleaseAge",
     "minimumReleaseAgeExclude",
 ];
-const DLX_KEYS: &[&str] = &["consent", "envFile"];
+const DLX_KEYS: &[&str] = &["consent"];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Error type — fail-loud, with a JSON path so a bad file self-describes.
@@ -201,7 +201,6 @@ impl ProjectConfig {
             verify_deps: Some(VerifyDeps::Warn),
             dlx: DlxConfig {
                 consent: Some(ImplicitDlx::Prompt),
-                ..DlxConfig::default()
             },
             ..Self::default()
         }
@@ -225,22 +224,24 @@ pub enum EnvFileSetting {
     Sources(Vec<String>),
 }
 
-/// `verifyDeps` — nub's own field name, carrying pnpm's value space.
-/// `Enabled(false)` is pnpm's `false`; the string arms are pnpm's
-/// `"install"|"warn"|"error"|"prompt"`. The name is deliberately NOT pnpm's
-/// `verifyDepsBeforeRun`: that spelling is reserved for adopting a pnpm field
-/// verbatim, and nub honours only three of the five values (`install` and
-/// `prompt` both resolve to `warn` — see [`crate::verify_deps`]), so the gate is
-/// also not "before run": it fires on `nub <file>`, `nub exec`, and `nubx` too.
-/// pnpm's own `verifyDepsBeforeRun` in `.npmrc` / `pnpm-workspace.yaml` is a
-/// separate, unrenamed compat surface read only under a pnpm incumbent.
+/// `verifyDeps` — nub's own field name, carrying a SUBSET of pnpm's value space.
+/// The name is deliberately NOT pnpm's `verifyDepsBeforeRun`: that spelling is
+/// reserved for adopting a pnpm field verbatim, and the gate is also not "before
+/// run" — it fires on `nub <file>`, `nub exec`, and `nubx` too.
+///
+/// pnpm's `install` and `prompt` are absent: nub implements neither, and until
+/// 2026-07-29 they parsed here and silently behaved as `warn`, which made the
+/// field mean something other than what it said. Every nub-owned surface now
+/// rejects them. The pnpm-mirroring surfaces still ACCEPT the strings — pnpm's
+/// `verifyDepsBeforeRun` in `.npmrc` / `pnpm-workspace.yaml`, read only under a
+/// pnpm incumbent — but they resolve straight to `Policy::Warn` in
+/// [`crate::verify_deps`] without passing through this enum, so mirroring the
+/// incumbent costs no variant here.
 #[derive(Debug, Clone, PartialEq)]
 pub enum VerifyDeps {
     Enabled(bool),
-    Install,
     Warn,
     Error,
-    Prompt,
 }
 
 /// The `install` block, consumed by the native PM through its aube settings
@@ -299,11 +300,10 @@ pub enum Hoist {
 pub type PublicHoist = Vec<String>;
 
 /// The `dlx` block — nubx's own security posture. `consent` reuses the global
-/// file's [`ImplicitDlx`] enum; `envFile` reuses the top-level tri-state.
+/// file's [`ImplicitDlx`] enum.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct DlxConfig {
     pub consent: Option<ImplicitDlx>,
-    pub env_file: Option<EnvFileSetting>,
 }
 
 /// Where a configuration value came from. File-backed sources retain both the
@@ -367,7 +367,6 @@ pub enum ConfigKey {
     InstallMinimumReleaseAge,
     InstallMinimumReleaseAgeExclude,
     DlxConsent,
-    DlxEnvFile,
 }
 
 /// Process-local overlays. Every field remains optional so an explicit false or
@@ -629,62 +628,6 @@ fn dlx_consent_for(config: &EffectiveConfig, legacy: ImplicitDlx) -> ImplicitDlx
         return legacy;
     }
     config.values.dlx.consent.unwrap_or(legacy)
-}
-
-/// Load the resolved dlx env-file layer. `None` means no dlx env setting won,
-/// preserving the pre-config behavior; `Some(empty)` is an explicit disable or
-/// empty exclusive source list.
-pub fn effective_dlx_env() -> Option<BTreeMap<String, String>> {
-    let config = effective_config()?;
-    dlx_env_for(config)
-}
-
-fn dlx_env_for(config: &EffectiveConfig) -> Option<BTreeMap<String, String>> {
-    let setting = config.values.dlx.env_file.as_ref()?;
-    let source = config.sources.get(&ConfigKey::DlxEnvFile)?;
-    let mut values = match setting {
-        EnvFileSetting::Disabled => BTreeMap::new(),
-        EnvFileSetting::Default => {
-            let root = nub_core::workspace::detect::detect_project(&config.cwd)
-                .map(|project| project.root)
-                .unwrap_or_else(|| config.cwd.clone());
-            nub_core::workspace::env::load_env_files(&root)
-                .into_iter()
-                .collect()
-        }
-        EnvFileSetting::Sources(paths) => {
-            let mut values = BTreeMap::new();
-            for raw in paths {
-                let mut expansion = std::collections::HashMap::from([(
-                    "__NUB_CONFIG_ENV_PATH".to_string(),
-                    raw.clone(),
-                )]);
-                nub_core::workspace::env::expand_env_map(&mut expansion);
-                let expanded = expansion
-                    .remove("__NUB_CONFIG_ENV_PATH")
-                    .expect("the path expansion entry remains present");
-                let path = Path::new(&expanded);
-                let path = if path.is_absolute() {
-                    path.to_path_buf()
-                } else {
-                    source.root.join(path)
-                };
-                let Some(contents) = nub_core::workspace::env::read_env_file(&path) else {
-                    continue;
-                };
-                for (key, value) in nub_core::workspace::env::parse_env(&contents) {
-                    values.insert(key, value);
-                }
-            }
-            let mut values: std::collections::HashMap<_, _> = values.into_iter().collect();
-            let denied = nub_core::workspace::env::strip_denied_env_file_keys(&mut values);
-            nub_core::workspace::env::warn_denied_env_file_keys(&denied);
-            nub_core::workspace::env::expand_env_map(&mut values);
-            values.into_iter().collect()
-        }
-    };
-    values.retain(|key, _| std::env::var_os(key).is_none());
-    Some(values)
 }
 
 pub(crate) fn runtime_config() -> Result<RuntimeConfig> {
@@ -977,14 +920,6 @@ fn merge_layer(
         consent,
         ConfigKey::DlxConsent
     );
-    merge_field!(
-        values.dlx,
-        sources,
-        layer.dlx,
-        source,
-        env_file,
-        ConfigKey::DlxEnvFile
-    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1167,7 +1102,7 @@ fn validate_root(
     Ok(cfg)
 }
 
-/// `envFile` / `dlx.envFile`: `true` | `false` | string | string[].
+/// `envFile`: `true` | `false` | string | string[].
 fn validate_env_file_setting(v: &Value, path: &str) -> Result<EnvFileSetting> {
     match v {
         Value::Bool(true) => Ok(EnvFileSetting::Default),
@@ -1182,23 +1117,25 @@ fn validate_env_file_setting(v: &Value, path: &str) -> Result<EnvFileSetting> {
 }
 
 fn validate_verify_deps(v: &Value, path: &str) -> Result<VerifyDeps> {
+    let unknown = |value: &str, note: &str| ConfigError::Value {
+        path: path.into(),
+        message: format!("{note}`{value}` (expected \"warn\", \"error\", or a boolean)"),
+    };
     match v {
         Value::Bool(b) => Ok(VerifyDeps::Enabled(*b)),
         Value::String(s) => match s.as_str() {
-            "install" => Ok(VerifyDeps::Install),
             "warn" => Ok(VerifyDeps::Warn),
             "error" => Ok(VerifyDeps::Error),
-            "prompt" => Ok(VerifyDeps::Prompt),
-            other => Err(ConfigError::Value {
-                path: path.into(),
-                message: format!(
-                    "unknown value `{other}` (expected \"install\", \"warn\", \"error\", or \"prompt\")"
-                ),
-            }),
+            // pnpm's two remaining values are refused rather than resolved to
+            // `warn`: nub has neither an auto-install nor an interactive confirm
+            // at this gate, so accepting them would promise a behavior nothing
+            // implements. See [`VerifyDeps`].
+            "install" | "prompt" => Err(unknown(s, "nub does not implement ")),
+            other => Err(unknown(other, "unknown value ")),
         },
         _ => Err(ConfigError::Type {
             path: path.into(),
-            expected: "a boolean or one of \"install\"/\"warn\"/\"error\"/\"prompt\"",
+            expected: "a boolean, \"warn\", or \"error\"",
         }),
     }
 }
@@ -1359,9 +1296,6 @@ fn validate_dlx(v: &Value, path: &str) -> Result<DlxConfig> {
             path: p,
             message: format!("unknown value `{s}` (expected \"prompt\" or \"never\")"),
         })?);
-    }
-    if let Some(v) = obj.get("envFile") {
-        dlx.env_file = Some(validate_env_file_setting(v, &child(path, "envFile"))?);
     }
     Ok(dlx)
 }
@@ -1645,18 +1579,45 @@ mod tests {
 
     #[test]
     fn verify_deps_covers_bool_and_string_arms() {
-        assert_eq!(
-            parse(r#"{ "verifyDeps": true }"#).verify_deps,
-            Some(VerifyDeps::Enabled(true))
-        );
-        assert_eq!(
-            parse(r#"{ "verifyDeps": "warn" }"#).verify_deps,
-            Some(VerifyDeps::Warn)
-        );
+        for (text, expected) in [
+            (r#"{ "verifyDeps": true }"#, VerifyDeps::Enabled(true)),
+            (r#"{ "verifyDeps": false }"#, VerifyDeps::Enabled(false)),
+            (r#"{ "verifyDeps": "warn" }"#, VerifyDeps::Warn),
+            (r#"{ "verifyDeps": "error" }"#, VerifyDeps::Error),
+        ] {
+            assert_eq!(parse(text).verify_deps, Some(expected), "{text}");
+        }
         assert!(matches!(
             parse_project_config(r#"{ "verifyDeps": "yes" }"#),
             Err(ConfigError::Value { .. })
         ));
+    }
+
+    /// pnpm's `install`/`prompt` parsed and silently behaved as `warn` until
+    /// 2026-07-29. Rejecting them is the whole point, so the message has to name
+    /// the field and say what it will take instead.
+    #[test]
+    fn verify_deps_rejects_the_values_nub_never_implemented() {
+        for value in ["install", "prompt"] {
+            let err = parse_project_config(&format!(r#"{{ "verifyDeps": "{value}" }}"#))
+                .expect_err(&format!("`{value}` must fail loud"));
+            match err.kind() {
+                ConfigError::Value { path, message } => {
+                    assert_eq!(path, "verifyDeps");
+                    assert!(
+                        message.contains(value)
+                            && message.contains("\"warn\"")
+                            && message.contains("\"error\""),
+                        "{value}: {message}"
+                    );
+                }
+                other => panic!("{value}: expected Value error, got {other:?}"),
+            }
+            assert!(
+                err.to_string().contains("verifyDeps"),
+                "the rendered error must name the field: {err}"
+            );
+        }
     }
 
     #[test]
@@ -1809,13 +1770,11 @@ mod tests {
         let cfg = parse_global(
             r#"{
               "dlx": {
-                "consent": "never",
-                "envFile": false
+                "consent": "never"
               }
             }"#,
         );
         assert_eq!(cfg.dlx.consent, Some(ImplicitDlx::Never));
-        assert_eq!(cfg.dlx.env_file, Some(EnvFileSetting::Disabled));
     }
 
     #[test]
@@ -1924,6 +1883,30 @@ mod tests {
             schema.get("$id").and_then(Value::as_str),
             Some("https://nubjs.com/schema/latest.json")
         );
+
+        // Key sets alone leave a hole: a field whose VALUE SET drifts keeps its
+        // key, so removing a value from the parser and forgetting the schema
+        // passes everything above while the editor still offers a value the
+        // parser now rejects. Pin the enumerated fields by value too.
+        fn enum_values(schema: &Value, pointer: &str) -> std::collections::BTreeSet<String> {
+            schema
+                .pointer(pointer)
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| panic!("schema enum missing at {pointer}"))
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        }
+        assert_eq!(
+            enum_values(&schema, "/properties/verifyDeps/oneOf/1/enum"),
+            expected(&["warn", "error"]),
+            "verifyDeps: nub rejects the values it never implemented, so the schema must not offer them"
+        );
+        assert_eq!(
+            enum_values(&schema, "/properties/dlx/properties/consent/enum"),
+            expected(&["prompt", "never"])
+        );
     }
 
     // ── discovery ──
@@ -2028,7 +2011,6 @@ mod tests {
             values: ProjectConfig {
                 dlx: DlxConfig {
                     consent: Some(ImplicitDlx::Prompt),
-                    ..DlxConfig::default()
                 },
                 ..ProjectConfig::default()
             },
@@ -2046,74 +2028,6 @@ mod tests {
             dlx_consent_for(&snapshot, ImplicitDlx::Never),
             ImplicitDlx::Prompt
         );
-    }
-
-    #[test]
-    fn dlx_env_file_sources_anchor_to_the_global_file_not_the_cwd() {
-        let dir = tempfile::tempdir().unwrap();
-        let global_root = dir.path().join("config/nub");
-        let cwd = dir.path().join("project/packages/app");
-        std::fs::create_dir_all(global_root.join("env")).unwrap();
-        std::fs::create_dir_all(&cwd).unwrap();
-        std::fs::write(
-            global_root.join(FILE_NAME),
-            r#"{ "dlx": { "envFile": ["./env/first.env", "./env/second.env"] } }"#,
-        )
-        .unwrap();
-        std::fs::write(
-            global_root.join("env/first.env"),
-            "DLX_VALUE=first\nCHAIN=$BASE\n",
-        )
-        .unwrap();
-        std::fs::write(
-            global_root.join("env/second.env"),
-            "DLX_VALUE=second\nBASE=expanded\n",
-        )
-        .unwrap();
-
-        let global = read_global_config_at(&global_root.join(FILE_NAME)).unwrap();
-        let snapshot =
-            resolve_effective_config(&cwd, Some(global), None, ConfigOverlays::default());
-        let values = dlx_env_for(&snapshot).expect("global dlx env is active");
-        assert_eq!(values.get("DLX_VALUE").map(String::as_str), Some("second"));
-        assert_eq!(values.get("CHAIN").map(String::as_str), Some("expanded"));
-        assert_eq!(
-            snapshot.sources.get(&ConfigKey::DlxEnvFile).unwrap().root,
-            global_root,
-            "a relative source resolves next to the file that set it, not the cwd"
-        );
-    }
-
-    #[test]
-    fn dlx_env_file_disabled_and_empty_source_lists_are_inert() {
-        for (env_file, expected) in [
-            (Some(EnvFileSetting::Disabled), Some(BTreeMap::new())),
-            (
-                Some(EnvFileSetting::Sources(Vec::new())),
-                Some(BTreeMap::new()),
-            ),
-            (None, None),
-        ] {
-            let snapshot = resolve_effective_config(
-                Path::new("/cwd"),
-                Some(LoadedConfig {
-                    source: ConfigSource::file(
-                        ConfigSourceKind::Global,
-                        Path::new("/global/nub.jsonc"),
-                    ),
-                    values: ProjectConfig {
-                        dlx: DlxConfig {
-                            env_file,
-                            ..DlxConfig::default()
-                        },
-                        ..ProjectConfig::default()
-                    },
-                }),
-                None,
-                ConfigOverlays::default(),
-            );
-            assert_eq!(dlx_env_for(&snapshot), expected);
-        }
     }
 
     #[test]
@@ -2315,7 +2229,7 @@ mod tests {
           "verifyDeps": false,
           "install": {
             "linker": { "strategy": "isolated", "hoist": false },
-            "publicHoist": false,
+            "publicHoist": [],
             "minimumReleaseAge": "1d",
             "minimumReleaseAgeExclude": []
           }
@@ -2333,13 +2247,12 @@ mod tests {
 
         let with_dlx = r#"{
           "nodeCompat": false,
-          "dlx": { "consent": "prompt", "envFile": false }
+          "dlx": { "consent": "prompt" }
         }"#;
         std::fs::write(&project_path, with_dlx).unwrap();
         std::fs::write(&global_path, with_dlx).unwrap();
         let global = read_global_config_at(&global_path).unwrap();
         assert_eq!(global.values.dlx.consent, Some(ImplicitDlx::Prompt));
-        assert_eq!(global.values.dlx.env_file, Some(EnvFileSetting::Disabled));
         let err = read_project_config_at(&project_path).unwrap_err();
         assert!(matches!(err.kind(), ConfigError::GlobalOnlyKey { .. }));
     }

@@ -27,8 +27,7 @@ fn golden_full_surface_config_parses() {
             "minimumReleaseAge": "3d"
           },
           "dlx": {
-            "consent": "never",
-            "envFile": false
+            "consent": "never"
           }
         }"#,
     )
@@ -45,7 +44,6 @@ fn golden_full_surface_config_parses() {
         Some(Duration::from_secs(3 * 86_400))
     );
     assert_eq!(cfg.dlx.consent, Some(ImplicitDlx::Never));
-    assert_eq!(cfg.dlx.env_file, Some(EnvFileSetting::Disabled));
 }
 
 #[test]
@@ -121,12 +119,6 @@ fn wrong_wrapper_types_report_the_nested_path() {
             r#"{ "install": { "publicHoist": true } }"#,
             "install.publicHoist",
             "an array of strings",
-        ),
-        (
-            GLOBAL,
-            r#"{ "dlx": { "envFile": 5 } }"#,
-            "dlx.envFile",
-            "a boolean, string, or array of strings",
         ),
     ] {
         let err = parse(text).expect_err(&format!("{text} must fail loud"));

@@ -2,6 +2,7 @@
 # `aube config`
 
 - **Usage**: `aube config [FLAGS] <SUBCOMMAND>`
+- **Effect**: read-only
 
 Read and write settings in `.npmrc`
 

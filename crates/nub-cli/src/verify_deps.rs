@@ -202,14 +202,15 @@ fn resolve_policy(project: &Project) -> Policy {
     Policy::Warn
 }
 
+/// `Install`/`Prompt` no longer reach here from a `nub.jsonc` — that parser
+/// rejects them — but they still arrive from the `NUB_VERIFY_DEPS` env layer,
+/// which mirrors pnpm's full value space.
 fn project_config_policy(value: &crate::project_config::VerifyDeps) -> Policy {
     use crate::project_config::VerifyDeps;
     match value {
         VerifyDeps::Enabled(false) => Policy::Off,
         VerifyDeps::Error => Policy::Error,
-        VerifyDeps::Enabled(true) | VerifyDeps::Install | VerifyDeps::Warn | VerifyDeps::Prompt => {
-            Policy::Warn
-        }
+        VerifyDeps::Enabled(true) | VerifyDeps::Warn => Policy::Warn,
     }
 }
 
@@ -660,12 +661,7 @@ mod tests {
             Policy::Off
         );
         assert_eq!(project_config_policy(&VerifyDeps::Error), Policy::Error);
-        for value in [
-            VerifyDeps::Enabled(true),
-            VerifyDeps::Install,
-            VerifyDeps::Warn,
-            VerifyDeps::Prompt,
-        ] {
+        for value in [VerifyDeps::Enabled(true), VerifyDeps::Warn] {
             assert_eq!(project_config_policy(&value), Policy::Warn);
         }
     }

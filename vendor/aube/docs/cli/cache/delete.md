@@ -2,6 +2,7 @@
 # `aube cache delete`
 
 - **Usage**: `aube cache delete <PATTERNS>…`
+- **Effect**: modifies state
 
 Delete metadata cache for the specified package(s).
 

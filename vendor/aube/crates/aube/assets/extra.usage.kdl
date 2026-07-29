@@ -1,0 +1,15 @@
+// `{run} <TAB>` offers the scripts from the package.json nearest the
+// shell's cwd.
+//
+// The command is fixed, so a `-C` on the line being completed is not
+// forwarded and `aube -C packages/api run <TAB>` still offers the outer
+// project's scripts. usage's only channel for the typed words is tera
+// interpolation into a `sh -c` string, with no shell-quoting filter, so
+// forwarding it would mean pasting user input into a shell command. The
+// helper itself honors `-C` for direct invocation, ready for a safer
+// channel upstream.
+complete "script" run="{run} --complete" descriptions=#true
+
+// Keep value completers in a shared fragment so `aube usage`, `aubr`, and
+// `aubx` are generated from the same candidate protocol.
+{completers}

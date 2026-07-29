@@ -161,6 +161,9 @@ pub(crate) fn version_clears_cutoff(
 /// still clear `exempt_cutoff` (the time-based resolution cutoff). Pass
 /// `None` to fully bypass the cutoff for exempt versions (no time-based
 /// wall in effect).
+///
+/// Deprecated versions stay eligible but never win over a
+/// non-deprecated one in the same range — see [`outranks`].
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pick_version<'a>(
@@ -281,16 +284,13 @@ pub(crate) fn pick_version<'a>(
         // `exempt_cutoff` are eligible (a no-op `None` when time-based
         // mode is off).
         if passes_effective_cutoff(ver_str, exempt_cutoff)
-            && fallback_lowest.as_ref().is_none_or(|(cur, _)| v < *cur)
+            && outranks(&v, meta, fallback_lowest.as_ref(), true)
         {
             fallback_lowest = Some((v.clone(), meta));
         }
 
         if passes_cutoff(ver_str, Some(&v)) {
-            let replace = best
-                .as_ref()
-                .is_none_or(|(cur, _)| if pick_lowest { v < *cur } else { v > *cur });
-            if replace {
+            if outranks(&v, meta, best.as_ref(), pick_lowest) {
                 best = Some((v, meta));
             }
         } else {
@@ -315,7 +315,8 @@ pub(crate) fn pick_version<'a>(
 
     // Lenient fallback: pnpm's `pickPackageFromMetaUsingTime` bypasses
     // the minimumReleaseAge gate and picks the *lowest* satisfying
-    // version — the candidate already cleared the time-based wall above.
+    // version (lowest non-deprecated, per `outranks`) — the candidate
+    // already cleared the time-based wall above.
     if let Some((_, meta)) = fallback_lowest {
         return PickResult::Found(meta);
     }
@@ -328,6 +329,41 @@ pub(crate) fn pick_version<'a>(
     } else {
         PickResult::NoMatch
     }
+}
+
+/// Does the candidate `(v, meta)` beat the incumbent pick?
+///
+/// A non-deprecated version outranks a deprecated one whatever their
+/// order; between two versions of equal deprecation status `lowest`
+/// decides the direction. This is pnpm's `pickVersionByVersionRange`
+/// rule — when the highest match carries a `deprecated` message it
+/// re-runs the range match over the non-deprecated versions and only
+/// keeps the deprecated pick when the range admits nothing else —
+/// expressed as a comparison so every scan in this crate gets it from
+/// one place. Real case: `codemirror@6.65.7` is an accidentally
+/// mis-tagged republish of `5.65.7`, so it sorts above every genuine
+/// 6.x and a plain highest-satisfying scan hands it to anyone whose
+/// range reaches past `dist-tags.latest`.
+///
+/// pnpm applies the rule on its highest-version path only; aube applies
+/// it in both directions on purpose. A deprecated floor is no safer
+/// than a non-deprecated one, so `resolution-mode=time-based` has
+/// nothing to gain from pinning a version the publisher withdrew.
+#[inline]
+pub(crate) fn outranks(
+    v: &node_semver::Version,
+    meta: &aube_registry::VersionMetadata,
+    incumbent: Option<&(node_semver::Version, &aube_registry::VersionMetadata)>,
+    lowest: bool,
+) -> bool {
+    let Some((cur_v, cur_meta)) = incumbent else {
+        return true;
+    };
+    let live = meta.deprecated.is_none();
+    if live != cur_meta.deprecated.is_none() {
+        return live;
+    }
+    if lowest { v < cur_v } else { v > cur_v }
 }
 
 /// True when `range_str` is a dist-tag reference (`latest`, `next`, a

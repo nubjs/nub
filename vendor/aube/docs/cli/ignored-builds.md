@@ -2,6 +2,7 @@
 # `aube ignored-builds`
 
 - **Usage**: `aube ignored-builds [-g --global]`
+- **Effect**: read-only
 
 Print packages whose install scripts were skipped by `pnpm.allowBuilds`
 

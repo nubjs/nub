@@ -801,6 +801,80 @@ fn test_pick_version_falls_through_when_latest_outside_range() {
     assert_eq!(result.version, "1.1.0");
 }
 
+/// Mark `version` deprecated in an already-built test packument.
+fn deprecate(packument: &mut Packument, version: &str, reason: &str) {
+    packument
+        .versions
+        .get_mut(version)
+        .expect("version present in test packument")
+        .deprecated = Some(reason.to_string());
+}
+
+#[test]
+fn test_pick_version_skips_deprecated_when_range_admits_another() {
+    // Real case: `codemirror@6.65.7` is an accidentally mis-tagged
+    // republish of `5.65.7`, so it sorts above every genuine 6.x.
+    // A plain highest-satisfying scan hands it to anyone whose range
+    // reaches past `dist-tags.latest`; pnpm re-picks among the
+    // non-deprecated versions instead.
+    let mut packument = make_packument("foo", &["1.0.0", "1.1.0", "1.99.0", "2.0.0"], "2.0.0");
+    deprecate(&mut packument, "1.99.0", "mis-tagged instance of 0.99.0");
+    let result = pick_version(
+        &packument,
+        "^1.0.0",
+        None,
+        false,
+        None,
+        None,
+        false,
+        |_, _| false,
+    )
+    .unwrap();
+    assert_eq!(result.version, "1.1.0");
+}
+
+#[test]
+fn test_pick_version_keeps_deprecated_when_nothing_else_matches() {
+    // The deprecation preference is a tiebreak, not a filter: a range
+    // that only reaches deprecated versions still resolves.
+    let mut packument = make_packument("foo", &["1.0.0", "1.1.0", "2.0.0"], "2.0.0");
+    deprecate(&mut packument, "1.0.0", "unsupported");
+    deprecate(&mut packument, "1.1.0", "unsupported");
+    let result = pick_version(
+        &packument,
+        "^1.0.0",
+        None,
+        false,
+        None,
+        None,
+        false,
+        |_, _| false,
+    )
+    .unwrap();
+    assert_eq!(result.version, "1.1.0");
+}
+
+#[test]
+fn test_pick_version_lowest_skips_deprecated_floor() {
+    // TimeBased mode picks the floor of the range, but a deprecated
+    // floor is no safer than a live one — take the lowest version the
+    // publisher hasn't withdrawn.
+    let mut packument = make_packument("foo", &["1.0.0", "1.1.0", "1.2.0"], "1.2.0");
+    deprecate(&mut packument, "1.0.0", "critical bug, upgrade");
+    let result = pick_version(
+        &packument,
+        "^1.0.0",
+        None,
+        true,
+        None,
+        None,
+        false,
+        |_, _| false,
+    )
+    .unwrap();
+    assert_eq!(result.version, "1.1.0");
+}
+
 #[test]
 fn test_pick_version_lowest_ignores_dist_tag_preference() {
     // TimeBased mode (`pick_lowest=true`) wants the floor of the

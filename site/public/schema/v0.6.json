@@ -65,10 +65,8 @@
         },
         {
           "enum": [
-            "install",
             "warn",
-            "error",
-            "prompt"
+            "error"
           ]
         }
       ],
@@ -237,10 +235,6 @@
             "never"
           ],
           "description": "Whether an implicit nubx registry fetch may be confirmed."
-        },
-        "envFile": {
-          "$ref": "#/$defs/envFileSetting",
-          "description": "Environment-file loading for nubx and nub dlx."
         }
       }
     }

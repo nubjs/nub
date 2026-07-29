@@ -2,6 +2,7 @@
 # `aube install`
 
 - **Usage**: `aube install [FLAGS]`
+- **Effect**: modifies state
 
 Install all dependencies
 

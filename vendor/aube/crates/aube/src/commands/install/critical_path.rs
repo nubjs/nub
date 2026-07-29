@@ -28,6 +28,7 @@ pub(super) fn is_likely_native_build(registry_name: &str) -> bool {
         "node-gyp",
         "prebuild-install",
         "node-gyp-build",
+        "opencode-ai",
     ];
     if EXACT.contains(&registry_name) {
         return true;
@@ -51,20 +52,6 @@ pub(super) fn is_likely_native_build(registry_name: &str) -> bool {
 #[cfg(test)]
 mod critical_path_tests {
     use super::is_likely_native_build;
-
-    #[test]
-    fn flags_exact_native_packages() {
-        for name in [
-            "sharp",
-            "esbuild",
-            "fsevents",
-            "node-gyp",
-            "better-sqlite3",
-            "sodium-native",
-        ] {
-            assert!(is_likely_native_build(name), "{name} should match");
-        }
-    }
 
     #[test]
     fn flags_scoped_native_prefixes() {

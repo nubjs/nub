@@ -37,14 +37,11 @@ fn string_map(tag: usize) -> BTreeMap<String, String> {
     BTreeMap::from([("KEY".to_string(), format!("value-{tag}"))])
 }
 
+/// Only the two values a `nub.jsonc` may carry — `Install`/`Prompt` exist for
+/// the pnpm-mirroring surfaces, not this one. Both differ from the explicit-
+/// empty form (`Enabled(false)`), which is what the falsy-precedence case needs.
 fn verify_deps(tag: usize) -> VerifyDeps {
-    [
-        VerifyDeps::Install,
-        VerifyDeps::Warn,
-        VerifyDeps::Error,
-        VerifyDeps::Prompt,
-    ][tag % 4]
-        .clone()
+    [VerifyDeps::Warn, VerifyDeps::Error][tag % 2].clone()
 }
 
 /// One variant per strategy, and the two that carry a knob carry a tagged one —
@@ -204,16 +201,6 @@ fn specs() -> Vec<KeySpec> {
             set_empty: Some(|c| c.dlx.consent = Some(ImplicitDlx::Never)),
             is_empty: Some(|c| c.dlx.consent == Some(ImplicitDlx::Never)),
         },
-        KeySpec {
-            key: ConfigKey::DlxEnvFile,
-            name: "dlx.envFile",
-            set: |c, t| c.dlx.env_file = Some(EnvFileSetting::Sources(strings(t))),
-            matches: |c, t| c.dlx.env_file == Some(EnvFileSetting::Sources(strings(t))),
-            // The explicit-empty source list (distinct from `false`, covered on
-            // the top-level `envFile`) must beat a lower non-empty list.
-            set_empty: Some(|c| c.dlx.env_file = Some(EnvFileSetting::Sources(Vec::new()))),
-            is_empty: Some(|c| c.dlx.env_file == Some(EnvFileSetting::Sources(Vec::new()))),
-        },
     ]
 }
 
@@ -235,7 +222,6 @@ fn ordinal(key: ConfigKey) -> usize {
         ConfigKey::InstallMinimumReleaseAge => 11,
         ConfigKey::InstallMinimumReleaseAgeExclude => 12,
         ConfigKey::DlxConsent => 13,
-        ConfigKey::DlxEnvFile => 14,
     }
 }
 
@@ -273,8 +259,8 @@ fn resolve(layers: [Option<ProjectConfig>; 5]) -> EffectiveConfig {
 #[test]
 fn spec_table_covers_every_config_key_exactly_once() {
     let specs = specs();
-    assert_eq!(specs.len(), 15, "one spec per ConfigKey variant");
-    let mut seen = [false; 15];
+    assert_eq!(specs.len(), 14, "one spec per ConfigKey variant");
+    let mut seen = [false; 14];
     for spec in &specs {
         let idx = ordinal(spec.key);
         assert!(!seen[idx], "duplicate spec for {}", spec.name);
