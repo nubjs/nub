@@ -621,6 +621,56 @@ console.log("lang:" + lang);
     );
 }
 
+/// A trailing `/` names a DIRECTORY, and probing must not answer it with a sibling
+/// file. Node's CJS resolver goes straight to LOAD_AS_DIRECTORY here, so
+/// `require("pkg/sub/")` is `sub/index.js` — never `sub.js`. Lexical normalization
+/// drops the empty component, which is exactly how this went wrong: silently, with
+/// no error, returning a different module than Node loads.
+#[test]
+fn a_trailing_slash_still_means_the_directory() {
+    let dir = fixture("trailing-slash");
+    write(
+        &dir.join("node_modules/ts/package.json"),
+        r#"{"name":"ts","main":"index.js"}"#,
+    );
+    write(
+        &dir.join("node_modules/ts/index.js"),
+        r#"module.exports="IDX";"#,
+    );
+    write(
+        &dir.join("node_modules/ts/sub.js"),
+        r#"module.exports="THE-FILE";"#,
+    );
+    write(
+        &dir.join("node_modules/ts/sub/index.js"),
+        r#"module.exports="THE-DIR-INDEX";"#,
+    );
+    // A sibling file with no directory at all: Node reports it missing, and so must nub.
+    write(
+        &dir.join("node_modules/ts/lone.js"),
+        r#"module.exports="LONE";"#,
+    );
+    write(
+        &dir.join("entry.cjs"),
+        r#"console.log("dir:" + require("ts/sub/"));
+try {
+  console.log("lone:" + require("ts/lone/"));
+} catch (e) {
+  console.log("lone:" + e.code);
+}
+"#,
+    );
+    let (stdout, stderr) = run(&dir, "entry.cjs");
+    assert!(
+        stdout.contains("dir:THE-DIR-INDEX"),
+        "a trailing-slash directory specifier resolved to a sibling file: {stdout} / {stderr}"
+    );
+    assert!(
+        stdout.contains("lone:MODULE_NOT_FOUND"),
+        "a trailing-slash specifier resolved a file Node reports missing: {stdout} / {stderr}"
+    );
+}
+
 /// THE ENCAPSULATION GUARD. A package that declares `exports` owns its subpath
 /// map; probing must never reach a path it withheld. Without this, #562's fix
 /// would be a sandbox escape out of every `exports` map on disk.

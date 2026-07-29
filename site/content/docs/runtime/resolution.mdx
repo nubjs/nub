@@ -113,6 +113,14 @@ JavaScript sorts first because a published package's `.ts` is unshipped source t
 
 Because the rule is about the dependency's shape rather than the importer's, it is not scoped to TypeScript-family parents — a `.js` file in a `checkJs` project resolves these the same way.
 
+A subpath naming a directory resolves that directory's `index` file, the way a `require` of the same subpath already does:
+
+```ts
+import { parse } from "qs/lib";   // resolves qs/lib/index.js
+```
+
+Only `index` is consulted. A directory's own `package.json` `main` is not read for a subpath — Node's `require` reads it, and deferring keeps both resolvers on the same answer. A trailing slash means what it says: `qs/lib/` is the directory, never a `qs/lib.js` beside it.
+
 <Callout>A dependency that declares `exports` is never probed. Its map decides what is reachable, exactly as on Node, so a subpath it withholds stays an error.</Callout>
 
 ## .js → .ts resolution

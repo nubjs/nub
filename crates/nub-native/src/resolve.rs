@@ -126,11 +126,23 @@ fn resolve_bare_subpath(
     };
     let subpath = segs.collect::<Vec<_>>().join("/");
     // A bare NAME (no subpath) resolves through `main`/`exports` — never ours.
-    // A traversing subpath would escape the package root: split on BOTH separators,
-    // because `path_join_resolve`'s lexical normalization goes through
-    // `Path::components`, which honors `\` on Windows — so a `/`-only guard would
-    // let `pkg/a\..\..\other` walk straight out of the package.
-    if subpath.is_empty() || subpath.split(['/', '\\']).any(|s| s == "..") {
+    //
+    // Beyond that, a subpath carrying a dot-segment or an empty segment belongs to
+    // Node, because lexical normalization erases the very thing that gives such a
+    // specifier its meaning:
+    //   - `..` would escape the package root. Split on BOTH separators, since
+    //     `path_join_resolve` goes through `Path::components`, which honors `\` on
+    //     Windows — a `/`-only guard would let `pkg/a\..\..\other` walk straight out.
+    //   - a trailing `/` or `/.` names a DIRECTORY. Node's CJS resolver goes straight
+    //     to LOAD_AS_DIRECTORY and its ESM resolver raises ERR_UNSUPPORTED_DIR_IMPORT,
+    //     but normalization drops that empty component — so probing would answer
+    //     `pkg/sub/` with a sibling `pkg/sub.js` (a DIFFERENT module than Node loads)
+    //     and would resolve `pkg/lone/` where Node reports it missing.
+    if subpath.is_empty()
+        || subpath
+            .split(['/', '\\'])
+            .any(|s| s.is_empty() || s == "." || s == "..")
+    {
         return None;
     }
 
@@ -157,7 +169,12 @@ fn resolve_bare_subpath(
     // transpile anything under a `node_modules/` path. A workspace package symlinked
     // into node_modules (the `main: ./index.ts` monorepo shape) is only loadable once
     // that hop is resolved away.
-    let candidate = try_resolve_file(&target, true, &NODE_MODULES_PROBE)?;
+    // `allow_dir_main: false`. Directory INDEX probing is deliberate — tsx resolves
+    // `pkg/dir` to `dir/index.js` and that is the parity target — but honoring a
+    // nested directory's own `package.json` `main` goes beyond both tsx and Node's
+    // ESM resolver, and CJS does not need it: declining here falls through to Node,
+    // whose LOAD_AS_DIRECTORY already reads that `main`.
+    let candidate = try_resolve_file(&target, false, &NODE_MODULES_PROBE)?;
     let resolved = real_path(&candidate);
 
     // A TS hit STILL under node_modules after the symlink hop is unshipped source the

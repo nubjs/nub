@@ -809,10 +809,16 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   // the two tiers in agreement. The check is on Node's ANSWER rather than a guess about
   // the request, so nothing is re-resolved unless our own keys actually changed the
   // outcome; the retry then reports whatever Node itself would, error included.
-  const TS_CLASSIC_EXTS = [".ts", ".cts", ".mts", ".tsx", ".jsx"];
-  const withoutTsExtensions = (fn) => {
+  // Every extension nub adds to `Module._extensions` that Node does not have of its
+  // own. `.cjs` belongs here with the TypeScript family: Node registers only `.js`,
+  // `.json` and `.node`, so nub's `.cjs` handler likewise widens LOAD_AS_FILE and
+  // lets `require("dep/x/sub")` find a dependency's `sub.cjs` that plain Node reports
+  // missing. An explicit `require("dep/x/sub.cjs")` is unaffected either way — an
+  // exact path is found by stat, without consulting the extension list at all.
+  const NUB_ADDED_EXTS = [".ts", ".cts", ".mts", ".tsx", ".jsx", ".cjs"];
+  const withoutNubAddedExtensions = (fn) => {
     const saved = [];
-    for (const ext of TS_CLASSIC_EXTS) {
+    for (const ext of NUB_ADDED_EXTS) {
       if (Object.hasOwn(module_._extensions, ext)) {
         saved.push([ext, module_._extensions[ext]]);
         delete module_._extensions[ext];
@@ -824,9 +830,9 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       for (const [ext, handler] of saved) module_._extensions[ext] = handler;
     }
   };
-  const isDepTsHit = (filename) =>
+  const isDepAddedExtHit = (filename) =>
     typeof filename === "string" &&
-    TS_CLASSIC_EXTS.includes(pathExtname(filename)) &&
+    NUB_ADDED_EXTS.includes(pathExtname(filename)) &&
     core.isDependency(pathToFileURL(filename).href);
 
   module_._resolveFilename = function (request, parent, isMain, options) {
@@ -836,6 +842,19 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       resolved = core.resolveCjsPath(request, parentPath);
     } catch { /* fall through to Node */ }
     if (resolved) {
+      // This pre-check stays at RESOLVE time even though `_resolveFilename` also
+      // answers `require.resolve()`, for which a path lookup is not a load. Below the
+      // Node #60380 fix, `require()` of a transpiled ES module dies inside the
+      // loader-worker translator with an opaque `cjsCache.get(...)` TypeError, and
+      // that happens before any load hook of ours can run — so a load-time refusal
+      // never gets its turn and Node's own crash is what the user sees.
+      //
+      // The cost is that `require.resolve()` of an ESM-syntax TS target throws here
+      // instead of returning the path. Telling the two callers apart is not reliable
+      // across the band this is live on: Node passes 3 arguments from `Module._load`
+      // and 4 from `require.resolve` up to 22.14, but 22.15 and 22.16 pass 4 for both
+      // while still lacking native TS — and the translator crash is present on
+      // exactly those versions. A clean error beats an opaque crash, so this stays.
       if (withClassicTranspile && core.requireTargetIsEsm(resolved, pathExtname(resolved))) {
         throw requireEsmError(resolved);
       }
@@ -863,7 +882,7 @@ function installCjsRequireHooks(core, withClassicTranspile) {
     }
     try {
       const byNode = origResolveFilename.call(this, request, parent, isMain, options);
-      if (withClassicTranspile && isDepTsHit(byNode)) {
+      if (withClassicTranspile && isDepAddedExtHit(byNode)) {
         // `_findPath` memoizes into `Module._pathCache` and returns that entry before
         // it ever consults the extension list, so the retry would be handed the same
         // TS hit and the removal below would look like a no-op. Drop the memo first.
@@ -872,7 +891,7 @@ function installCjsRequireHooks(core, withClassicTranspile) {
         for (const key of Object.keys(module_._pathCache)) {
           if (module_._pathCache[key] === byNode) delete module_._pathCache[key];
         }
-        return withoutTsExtensions(() =>
+        return withoutNubAddedExtensions(() =>
           origResolveFilename.call(this, request, parent, isMain, options),
         );
       }
