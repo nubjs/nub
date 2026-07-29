@@ -293,10 +293,21 @@ export function barePkg(specifier) {
 // nub is forbidden. The `node:`/`data:`/builtin guards, the nub-internal-graph
 // bypass, vendored packages, and the clobber map all stay in JS and run BEFORE the
 // native resolver (see resolveSpec / resolveCjsPath).
+// Node's `--preserve-symlinks` decides whether a resolved module is keyed by its
+// real path or the path it was reached through, and the native resolver has to hand
+// back whichever one Node itself would — otherwise a symlinked workspace package
+// reached two ways instantiates twice. The flag arrives by argv OR `NODE_OPTIONS`,
+// and only one of those shows up in `execArgv`, so both are checked. The word
+// boundary matters: `--preserve-symlinks-main` is a DIFFERENT flag that governs only
+// the entry point.
+const PRESERVE_SYMLINKS =
+  process.execArgv.includes("--preserve-symlinks") ||
+  /(^|\s)--preserve-symlinks(\s|$)/.test(process.env.NODE_OPTIONS || "");
+
 function resolveTs(specifier, parentPath) {
   if (!nubNative) return null;
   try {
-    return nubNative.resolveTs(specifier, parentPath || "");
+    return nubNative.resolveTs(specifier, parentPath || "", PRESERVE_SYMLINKS);
   } catch {
     return null;
   }

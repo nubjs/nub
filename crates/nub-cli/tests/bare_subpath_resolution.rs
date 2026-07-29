@@ -417,6 +417,89 @@ console.log("ESCAPED");
     );
 }
 
+/// The emit swaps reach `.mts` and `.cts` as well as `.ts`/`.tsx`, and a swap that
+/// lands on one inside a dependency is exactly as unloadable — so the discard has to
+/// cover the whole TypeScript family, not just what the probe order can hit.
+#[test]
+fn emit_swap_onto_dep_mts_and_cts_is_discarded() {
+    let dir = fixture("mts-cts-discard");
+    write(
+        &dir.join("node_modules/mp/package.json"),
+        r#"{"name":"mp","main":"index.js"}"#,
+    );
+    write(&dir.join("node_modules/mp/index.js"), "module.exports={};");
+    write(
+        &dir.join("node_modules/mp/deep.mts"),
+        r#"export const v: string = "unshipped-mts";"#,
+    );
+    write(
+        &dir.join("entry.ts"),
+        r#"import { v } from "mp/deep.mjs";
+console.log("LOADED:" + v);
+"#,
+    );
+    let (stdout, stderr) = run(&dir, "entry.ts");
+    assert!(!stdout.contains("LOADED"), "unexpectedly loaded: {stdout}");
+    assert!(
+        stderr.contains("ERR_MODULE_NOT_FOUND")
+            && !stderr.contains("ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING"),
+        "expected Node's own ERR_MODULE_NOT_FOUND, got: {stderr}"
+    );
+}
+
+/// Under `--preserve-symlinks` Node keys a symlinked workspace package by the path
+/// it was reached through, so the probe has to hand back that same path. Returning
+/// the real one instead keys the SAME file two ways and the module instantiates
+/// twice — silently, since both halves "work".
+#[cfg(unix)]
+#[test]
+fn preserve_symlinks_does_not_duplicate_a_workspace_module() {
+    let dir = fixture("dual-instance");
+    write(
+        &dir.join("packages/jslib/package.json"),
+        r#"{"name":"@repro/jslib","main":"./index.js"}"#,
+    );
+    write(
+        &dir.join("packages/jslib/index.js"),
+        r#"const s = require("./state");
+module.exports = { id: s.id };
+"#,
+    );
+    write(
+        &dir.join("packages/jslib/state.js"),
+        r#"module.exports = { id: {} };"#,
+    );
+    std::fs::create_dir_all(dir.join("node_modules/@repro")).unwrap();
+    std::os::unix::fs::symlink(
+        dir.join("packages/jslib"),
+        dir.join("node_modules/@repro/jslib"),
+    )
+    .unwrap();
+    write(
+        &dir.join("entry.cjs"),
+        r#"const viaBare = require("@repro/jslib").id;
+const viaSubpath = require("@repro/jslib/state").id;
+console.log("same:" + (viaBare === viaSubpath));
+"#,
+    );
+    let out = Command::new(nub_binary())
+        .arg(dir.join("entry.cjs").to_str().unwrap())
+        .current_dir(&dir)
+        .env("NODE_OPTIONS", "--preserve-symlinks")
+        .env(
+            "XDG_CACHE_HOME",
+            std::env::temp_dir().join(format!("nub-subpath-cache-{}", std::process::id())),
+        )
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("same:true"),
+        "the same module was instantiated twice under --preserve-symlinks: {stdout} / {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// THE ENCAPSULATION GUARD. A package that declares `exports` owns its subpath
 /// map; probing must never reach a path it withheld. Without this, #562's fix
 /// would be a sandbox escape out of every `exports` map on disk.

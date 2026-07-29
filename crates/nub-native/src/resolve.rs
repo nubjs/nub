@@ -28,8 +28,16 @@ const TS_PARENT_EXTS: [&str; 4] = [".ts", ".tsx", ".mts", ".cts"];
 /// The additive TS resolution. `Some(absolute path)` ⇒ nub short-circuits; `None`
 /// ⇒ fall through to Node (the compat boundary). `parent_path` is the importer's
 /// absolute filesystem path (empty for the entry).
+/// `preserve_symlinks` mirrors Node's flag of the same name. The caller passes it
+/// because the flag reaches a process two ways — argv and `NODE_OPTIONS` — and only
+/// the JS side sees both.
 #[napi]
-pub fn resolve_ts(specifier: String, parent_path: String) -> Option<String> {
+pub fn resolve_ts(
+    specifier: String,
+    parent_path: String,
+    preserve_symlinks: Option<bool>,
+) -> Option<String> {
+    let preserve_symlinks = preserve_symlinks.unwrap_or(false);
     let parent_ext = extname(&parent_path);
     let parent_dir = if parent_path.is_empty() {
         std::env::current_dir().ok()?.to_string_lossy().into_owned()
@@ -54,7 +62,7 @@ pub fn resolve_ts(specifier: String, parent_path: String) -> Option<String> {
         // No alias matched. A bare package NAME still belongs entirely to Node
         // (`main`/`exports`); only a SUBPATH into an `exports`-less dependency is
         // ours to probe.
-        return resolve_bare_subpath(&specifier, &parent_dir);
+        return resolve_bare_subpath(&specifier, &parent_dir, preserve_symlinks);
     }
 
     // Extensionless / emit-swap branch — only when the importer is itself a TS
@@ -86,7 +94,11 @@ pub fn resolve_ts(specifier: String, parent_path: String) -> Option<String> {
 /// Not gated on a TS importer: a `checkJs`/`allowJs` project's `.js` files sit in
 /// the same graph as its `.ts` files and import the same package subpaths, so
 /// gating would split resolution down the middle of one project.
-fn resolve_bare_subpath(specifier: &str, parent_dir: &str) -> Option<String> {
+fn resolve_bare_subpath(
+    specifier: &str,
+    parent_dir: &str,
+    preserve_symlinks: bool,
+) -> Option<String> {
     // `#foo` is an `imports` specifier — the package's own private map, Node's.
     if specifier.starts_with('#') {
         return None;
@@ -132,7 +144,8 @@ fn resolve_bare_subpath(specifier: &str, parent_dir: &str) -> Option<String> {
     // transpile anything under a `node_modules/` path. A workspace package symlinked
     // into node_modules (the `main: ./index.ts` monorepo shape) is only loadable once
     // that hop is resolved away.
-    let resolved = real_path(&try_resolve_file(&target, true, &NODE_MODULES_PROBE)?);
+    let candidate = try_resolve_file(&target, true, &NODE_MODULES_PROBE)?;
+    let resolved = real_path(&candidate);
 
     // A TS hit STILL under node_modules after the symlink hop is unshipped source the
     // load hooks refuse, so winning here is worse than not resolving at all: it turns
@@ -141,10 +154,24 @@ fn resolve_bare_subpath(specifier: &str, parent_dir: &str) -> Option<String> {
     // file before it ever considers a directory — `sub.ts` would outrank a sibling
     // `sub/index.js` that Node's CJS resolver loads today. Fall through instead, so
     // Node's own precedence and its own error both survive.
-    if is_node_modules(&resolved) && matches!(extname(&resolved).as_str(), ".ts" | ".tsx") {
+    //
+    // The whole TS family, not just what [`NODE_MODULES_PROBE`] can land on: the
+    // emit-convention swaps above reach `.mts` and `.cts` too (`pkg/sub.mjs` →
+    // `sub.mts`), and those are exactly as unloadable inside a dependency.
+    if is_node_modules(&resolved) && TS_PARENT_EXTS.contains(&extname(&resolved).as_str()) {
         return None;
     }
-    Some(resolved)
+
+    // Decide on `resolved` above, but hand back what NODE would hand back. Those
+    // differ only under `--preserve-symlinks`, and there the distinction is the whole
+    // ballgame: every other resolution in the process keys a symlinked workspace
+    // package by its un-realpathed path, so returning the real one here would key the
+    // SAME file two ways and instantiate its module twice.
+    Some(if preserve_symlinks {
+        candidate
+    } else {
+        resolved
+    })
 }
 
 /// Probe order for a bare package subpath — JS FIRST, and deliberately NOT
