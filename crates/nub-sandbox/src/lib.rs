@@ -92,6 +92,7 @@
 //! honestly in `LIMITATIONS.md` alongside the runtime [`Degradation`] signals; read it
 //! before relying on any single-axis guarantee.
 
+pub mod arm;
 pub mod backend;
 pub mod compiler;
 pub mod conformance;
