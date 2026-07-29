@@ -301,10 +301,17 @@ pub fn grant_build_jail_dependency_reads(
     if name != "build-jail" {
         return;
     }
-    let mut roots = vec![
-        ctx.homes.project.join("package.json"),
-        ctx.homes.project.join("node_modules"),
-    ];
+    // The two project roots are the ONLY grants the experimental arm can withhold, and
+    // withholding is all it can do — see `crate::arm` for why a drop-only boolean is what
+    // keeps the allowlist's nub-curated authorship invariant structural.
+    let mut roots = if crate::arm::project_grant_dropped() {
+        Vec::new()
+    } else {
+        vec![
+            ctx.homes.project.join("package.json"),
+            ctx.homes.project.join("node_modules"),
+        ]
+    };
     roots.extend(
         NUB_PM_CACHE_PATTERNS
             .iter()
@@ -497,9 +504,15 @@ pub fn compile_build_jail(
     // carried, so a POSIX child does not acquire a `USERPROFILE` the unconfined spawn
     // never had. `LOCALAPPDATA` is deliberately NOT redirected: the Windows LowBox launch
     // resolves its AppContainer profile dir from it (`defaults::OS_ESSENTIAL_ENV`), so
-    // pointing it elsewhere breaks process creation rather than a cache path — which also
-    // means Windows keeps most of this compat gap, since its tooling caches under
-    // `%LOCALAPPDATA%`.
+    // pointing it elsewhere breaks process creation rather than a cache path. That leaves
+    // Windows a compat gap of a DIFFERENT SHAPE, not a reachability one: measured on
+    // windows-latest, the OS itself redirects the known folder for a LowBox token, so the
+    // child's `%LOCALAPPDATA%` is the per-container `…\AppData\Local\Packages\<profile>\AC`
+    // and the real one is denied outright. `unique_profile_name` keys that profile on
+    // pid+nonce and `ProfileGuard::drop` deletes it, so the redirect target is fresh,
+    // empty and destroyed per LAUNCH — Windows tooling that caches there never hard-fails,
+    // it just gets zero reuse, ever. The `USERPROFILE` jail-home below IS persistent, so
+    // the two axes do not behave alike.
     if let Some(home) = &private_home {
         let value = home.to_string_lossy().into_owned();
         for key in ["HOME", "USERPROFILE"] {

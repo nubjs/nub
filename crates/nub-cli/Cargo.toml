@@ -30,6 +30,10 @@ embed-runtime = ["nub-core/embed-runtime"]
 # OFF by default, and compile-time on purpose so neither a user nor a dependency can
 # enable it at runtime. Rationale: pm_engine/build_prefetch.rs module doc.
 prefetch-github-hosts = []
+# TEST-ONLY, forwarded to nub-sandbox: lets a run drop the build jail's curated
+# project-file read grant for the corpus study's project-grant arm. OFF by default,
+# compile-time for the same reason as the feature above. Rationale: nub-sandbox/src/arm.rs.
+build-jail-project-grant-arm = ["nub-sandbox/build-jail-project-grant-arm"]
 
 [dependencies]
 nub-core = { path = "../nub-core" }
