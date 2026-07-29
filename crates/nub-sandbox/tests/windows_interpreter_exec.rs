@@ -55,13 +55,27 @@ mod win {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
-    /// Child modes. `exec` is the whole point: spawn `<exe> <args…>` the way nub's shim
-    /// spawns the real Node, and record what came back. The marker is written on BOTH
-    /// outcomes so a refusal is evidence rather than an absence — an absent marker would be
-    /// indistinguishable from a child that never started.
+    /// Classify a spawn failure into the probe's exit contract: 5 access-denied, 9 other.
+    fn spawn_err(marker: &Path, e: &std::io::Error) -> i32 {
+        let _ = std::fs::write(
+            marker,
+            format!("spawnerr {e:?} raw={:?}", e.raw_os_error()),
+        );
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            5
+        } else {
+            9
+        }
+    }
+
+    /// Child modes. `exec` and `execstatus` run the SAME spawn against the SAME image and
+    /// differ only in whether stdio is captured — which on Windows decides whether Rust
+    /// allocates an anonymous pipe. The marker is written on BOTH outcomes, so a refusal is
+    /// evidence rather than an absence.
     pub fn child_main(a: &[String]) -> i32 {
         match a.first().map(String::as_str) {
-            // exec <marker> <exe> [args…]
+            // exec <marker> <exe> [args…] — captured stdio (`Command::output`), the shape
+            // nub's own Node-version detection uses.
             Some("exec") => {
                 let marker = Path::new(&a[1]);
                 let exe = &a[2];
@@ -76,14 +90,54 @@ mod win {
                         let _ = std::fs::write(marker, format!("ranfail status={:?}", o.status));
                         9
                     }
-                    Err(e) => {
-                        let _ = std::fs::write(marker, format!("spawnerr {e:?} raw={:?}", e.raw_os_error()));
-                        if e.kind() == std::io::ErrorKind::PermissionDenied {
-                            5
-                        } else {
-                            9
-                        }
+                    Err(e) => spawn_err(marker, &e),
+                }
+            }
+            // execstatus <marker> <exe> [args…] — identical spawn with stdio pointed at NUL,
+            // so no pipe is created. The ONE variable between this and `exec`.
+            Some("execstatus") => {
+                let marker = Path::new(&a[1]);
+                let exe = &a[2];
+                let out = std::process::Command::new(exe)
+                    .args(&a[3..])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                match out {
+                    Ok(s) if s.success() => {
+                        let _ = std::fs::write(marker, "ok status0");
+                        0
                     }
+                    Ok(s) => {
+                        let _ = std::fs::write(marker, format!("ranfail status={s:?}"));
+                        9
+                    }
+                    Err(e) => spawn_err(marker, &e),
+                }
+            }
+            // namedpipe <marker> — the primitive under `Command::output`, with no process
+            // creation in the way at all. Rust's Windows anonymous pipe is a NAMED pipe
+            // (`\\.\pipe\__rust_anonymous_pipe1__.<pid>.<n>`, `sys::pal::windows::pipe`), so
+            // if an AppContainer refuses NPFS then every captured-stdio spawn fails for a
+            // reason that has nothing to do with the image being executed.
+            Some("namedpipe") => {
+                use windows_sys::Win32::System::Pipes::CreateNamedPipeW;
+                let name: Vec<u16> = format!(r"\\.\pipe\nub-interp-probe-{}", std::process::id())
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
+                // PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE, byte mode, one instance.
+                let h = unsafe { CreateNamedPipeW(name.as_ptr(), 0x0000_0001 | 0x0008_0000, 0, 1, 4096, 4096, 0, std::ptr::null()) };
+                let marker = Path::new(&a[1]);
+                if h.is_null() || h == (-1isize as *mut std::ffi::c_void) {
+                    let e = std::io::Error::last_os_error();
+                    let _ = std::fs::write(marker, format!("pipeerr {e:?} raw={:?}", e.raw_os_error()));
+                    5
+                } else {
+                    unsafe { windows_sys::Win32::Foundation::CloseHandle(h) };
+                    let _ = std::fs::write(marker, "ok pipe-created");
+                    0
                 }
             }
             // acl <marker> <path> — the DACL as it stands WHILE the grant is live. The ACEs
@@ -93,13 +147,24 @@ mod win {
                 let icacls = PathBuf::from(std::env::var("SystemRoot").unwrap_or_default())
                     .join("System32")
                     .join("icacls.exe");
-                match std::process::Command::new(icacls).arg(&a[2]).output() {
-                    Ok(o) => {
-                        let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
-                        text.push_str(&String::from_utf8_lossy(&o.stderr));
-                        let _ = std::fs::write(marker, text);
-                        0
+                // Redirected to a FILE, not a pipe: capturing stdio is the very thing under
+                // test here, so using it would make this diagnostic fail for the reason it
+                // exists to report on.
+                let sink = match std::fs::File::create(marker) {
+                    Ok(file) => file,
+                    Err(e) => {
+                        eprintln!("icacls sink: {e}");
+                        return 9;
                     }
+                };
+                match std::process::Command::new(icacls)
+                    .arg(&a[2])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::from(sink))
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                {
+                    Ok(_) => 0,
                     Err(e) => {
                         let _ = std::fs::write(marker, format!("icacls spawnerr {e:?}"));
                         9
@@ -298,9 +363,16 @@ mod win {
         println!("---- end icacls chain ({label}) ----");
     }
 
-    /// Run one exec arm and return `(exit_code, marker_text)`.
-    fn run_exec(f: &Fixture, policy: &SandboxPolicy, marker: &Path, argv: &[String]) -> (i32, String) {
-        let mut args = vec!["exec".to_string(), marker.to_string_lossy().into_owned()];
+    /// Run one child arm and return `(exit_code, marker_text)`. `mode` selects the child
+    /// entry point; `argv` is whatever that mode takes after the marker path.
+    fn run_child(
+        f: &Fixture,
+        policy: &SandboxPolicy,
+        mode: &str,
+        marker: &Path,
+        argv: &[String],
+    ) -> (i32, String) {
+        let mut args = vec![mode.to_string(), marker.to_string_lossy().into_owned()];
         args.extend(argv.iter().cloned());
         let outcome = apply(policy, spec(f, &args)).map(|p| p.status());
         let code = match outcome {
@@ -336,11 +408,11 @@ mod win {
         println!("interpreter: {}", node.display());
         dump_acl_chain("before any grant", &node);
 
-        interpreter_in_place(&mut fails, &node);
-        interpreter_ungranted_refused(&mut fails, &node);
-        interpreter_copied(&mut fails, &node);
-        acl_under_jail(&node);
+        named_pipe_refused(&mut fails);
         system_exec_baseline(&mut fails);
+        interpreter_in_place(&mut fails, node.as_path());
+        interpreter_ungranted_refused(&mut fails, node.as_path());
+        acl_under_jail(&node);
         production_grant_shape(&node);
 
         dump_acl_chain("after every launch dropped", &node);
@@ -354,42 +426,69 @@ mod win {
         }
     }
 
+    /// THE PRIMITIVE, with no process creation in the way. Rust's Windows "anonymous" pipe
+    /// is a NAMED pipe, so `Command::output()` opens NPFS before it ever reaches
+    /// `CreateProcessW`. Measuring the pipe alone is what separates "the image is denied"
+    /// from "the capture is denied" — the two produce an identical `os error 5` at the
+    /// `Command` API.
+    fn named_pipe_refused(fails: &mut u32) {
+        let f = Fixture::new("pipe");
+        let marker = f.work.join("pipe.txt");
+        let policy = jail_shaped(&f, Vec::new());
+        println!("  arm appcontainer-named-pipe:");
+        let (code, text) = run_child(&f, &policy, "namedpipe", &marker, &[]);
+        // Not a pass/fail of nub's: it records what the OS does. Reported as a property so
+        // the verdict step can require it to have been measured.
+        report(
+            fails,
+            "appcontainer-named-pipe-refused",
+            code == 5 && text.starts_with("pipeerr"),
+            &format!("exit={code} marker={text} (5/pipeerr ⇒ NPFS is denied to a LowBox child)"),
+        );
+    }
+
     /// TREATMENT. The real interpreter, at its own location, granted exactly as the build
-    /// jail grants it (the file and its bin dir — `grant_build_jail_interpreter`).
+    /// jail grants it (the file and its bin dir — `grant_build_jail_interpreter`), spawned
+    /// WITHOUT captured stdio so no pipe confounds the exec verdict.
     fn interpreter_in_place(fails: &mut u32, node: &Path) {
         let f = Fixture::new("inplace");
-        let marker = f.work.join("inplace.txt");
         let mut extra = vec![read_rule(node)];
         if let Some(dir) = node.parent() {
             extra.push(read_rule(dir));
         }
         let policy = jail_shaped(&f, extra);
-        println!("  arm interpreter-in-place-execs:");
-        let (code, text) = run_exec(
-            &f,
-            &policy,
-            &marker,
-            &[node.to_string_lossy().into_owned(), "--version".to_string()],
-        );
+        let argv = [node.to_string_lossy().into_owned(), "--version".to_string()];
+
+        println!("  arm interpreter-in-place-status-execs (no pipe):");
+        let status_marker = f.work.join("inplace-status.txt");
+        let (code, text) = run_child(&f, &policy, "execstatus", &status_marker, &argv);
         report(
             fails,
-            "interpreter-in-place-execs",
-            code == 0 && text.starts_with("ok v"),
+            "interpreter-in-place-status-execs",
+            code == 0 && text == "ok status0",
             &format!("exit={code} marker={text}"),
         );
+
+        // The production shape, for the record: same policy, same image, captured stdio.
+        // Not gated — it is the symptom, and gating on it would re-measure the pipe.
+        println!("  arm interpreter-in-place-output-execs (captured stdio):");
+        let out_marker = f.work.join("inplace-output.txt");
+        let (code, text) = run_child(&f, &policy, "exec", &out_marker, &argv);
+        println!("  diag:interpreter-in-place-output-execs exit={code} marker={text}");
     }
 
-    /// CONTROL — the both-directions half. Byte-identical to the treatment except that the
-    /// interpreter grant is absent, so nothing but the grant can explain a difference. A
-    /// probe that passed here as well would be measuring nothing.
+    /// CONTROL — the both-directions half, and the one that makes the treatment mean
+    /// something. Byte-identical to the treatment except that the interpreter grant is
+    /// absent, so nothing but the grant can explain a difference.
     fn interpreter_ungranted_refused(fails: &mut u32, node: &Path) {
         let f = Fixture::new("ungranted");
         let marker = f.work.join("ungranted.txt");
         let policy = jail_shaped(&f, Vec::new());
-        println!("  arm interpreter-ungranted-refused:");
-        let (code, text) = run_exec(
+        println!("  arm interpreter-ungranted-refused (no pipe):");
+        let (code, text) = run_child(
             &f,
             &policy,
+            "execstatus",
             &marker,
             &[node.to_string_lossy().into_owned(), "--version".to_string()],
         );
@@ -398,38 +497,6 @@ mod win {
             "interpreter-ungranted-refused",
             code == 5 && text.starts_with("spawnerr"),
             &format!("exit={code} (want 5) marker={text}"),
-        );
-    }
-
-    /// The LOCATION variable, isolated: the same image, granted the same way, inside the
-    /// fixture's own protected root instead of the toolcache. Passing here while the
-    /// in-place arm fails means the ancestor chain — not the mechanism — is the cause.
-    fn interpreter_copied(fails: &mut u32, node: &Path) {
-        let f = Fixture::new("copied");
-        let copy = f.work.join("node.exe");
-        if let Err(e) = std::fs::copy(node, &copy) {
-            report(
-                fails,
-                "interpreter-copied-execs",
-                false,
-                &format!("could not copy the interpreter into the fixture: {e}"),
-            );
-            return;
-        }
-        let marker = f.work.join("copied.txt");
-        let policy = jail_shaped(&f, vec![read_rule(&copy)]);
-        println!("  arm interpreter-copied-execs:");
-        let (code, text) = run_exec(
-            &f,
-            &policy,
-            &marker,
-            &[copy.to_string_lossy().into_owned(), "--version".to_string()],
-        );
-        report(
-            fails,
-            "interpreter-copied-execs",
-            code == 0 && text.starts_with("ok v"),
-            &format!("exit={code} marker={text}"),
         );
     }
 
@@ -459,34 +526,37 @@ mod win {
         println!("---- end live icacls ----");
     }
 
-    /// BASELINE. `C:\Windows\System32` grants `ALL APPLICATION PACKAGES` read+execute by
-    /// default, so a system image must run with no grant of ours at all. If THIS fails, the
-    /// child cannot execute anything and every verdict above is about process creation
-    /// rather than about the interpreter.
+    /// BASELINE, both stdio shapes. `C:\Windows\System32` grants `ALL APPLICATION PACKAGES`
+    /// read+execute by default, so a system image must run with no grant of ours at all. If
+    /// the no-pipe leg fails, the child cannot execute ANYTHING and every verdict above is
+    /// about process creation rather than about the interpreter; if only the captured leg
+    /// fails, the capture is the defect and the image never mattered.
     fn system_exec_baseline(fails: &mut u32) {
         let f = Fixture::new("sysexec");
-        let marker = f.work.join("sysexec.txt");
         let policy = jail_shaped(&f, Vec::new());
         let cmd = PathBuf::from(std::env::var("SystemRoot").unwrap_or_default())
             .join("System32")
             .join("cmd.exe");
-        println!("  arm system-exec-baseline:");
-        let (code, text) = run_exec(
-            &f,
-            &policy,
-            &marker,
-            &[
-                cmd.to_string_lossy().into_owned(),
-                "/c".to_string(),
-                "ver".to_string(),
-            ],
-        );
+        let argv = [
+            cmd.to_string_lossy().into_owned(),
+            "/c".to_string(),
+            "ver".to_string(),
+        ];
+
+        println!("  arm system-exec-baseline (no pipe):");
+        let status_marker = f.work.join("sysexec-status.txt");
+        let (code, text) = run_child(&f, &policy, "execstatus", &status_marker, &argv);
         report(
             fails,
             "system-exec-baseline",
             code == 0,
             &format!("exit={code} marker={text}"),
         );
+
+        println!("  arm system-exec-captured (captured stdio):");
+        let out_marker = f.work.join("sysexec-output.txt");
+        let (code, text) = run_child(&f, &policy, "exec", &out_marker, &argv);
+        println!("  diag:system-exec-captured exit={code} marker={text}");
     }
 
     /// DIAGNOSTIC. What the PRODUCTION compile actually derives for an interpreter on this

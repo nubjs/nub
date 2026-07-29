@@ -76,7 +76,7 @@ jobs:
           }
           [ -s probe.log ] || { echo "MISS the probe produced no output at all"; fail=1; }
           need "PROBE windows interpreter exec under AppContainer"
-          for p in interpreter-in-place-execs interpreter-ungranted-refused interpreter-copied-execs system-exec-baseline; do
+          for p in appcontainer-named-pipe-refused system-exec-baseline interpreter-in-place-status-execs interpreter-ungranted-refused; do
             grep -q "prop:$p=" probe.log || { echo "MISS property $p never reported"; fail=1; }
           done
           # The control and the baseline must hold in EVERY run, whatever the treatment did:
@@ -84,7 +84,7 @@ jobs:
           need "prop:interpreter-ungranted-refused=PASS"
           need "prop:system-exec-baseline=PASS"
           echo "---- recorded verdicts ----"
-          grep -E '^(PROBE |  prop:|interpreter: |WINDOWS )' probe.log || true
+          grep -E '^(PROBE |  prop:|  diag:|interpreter: |WINDOWS )' probe.log || true
           exit $fail
 
       - name: Upload probe log
