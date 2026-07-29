@@ -24,7 +24,7 @@ mod cache;
 mod ui;
 
 use std::fs;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
@@ -435,9 +435,12 @@ fn provision_smol_node(version: &NodeVersion, base: &Path, notice: &FirstRun) ->
 ///
 /// While the first-run box owns the terminal the downloader's own progress meter
 /// is silenced — two writers on one screen is torn output; the box's spinner is
-/// the only feedback. Without the box, the downloader's meter is left alone.
+/// the only feedback. It is silenced off a TTY too: nobody is watching a pipe or
+/// a log file, and a progress meter there is the one thing that breaks the
+/// otherwise byte-exact silence a non-interactive first run promises. An
+/// interactive run without the box still gets the meter.
 fn download_via_shell(url: &str, dest: &Path, notice: &FirstRun) -> Result<()> {
-    let muted = notice.owns_terminal();
+    let muted = notice.owns_terminal() || !std::io::stderr().is_terminal();
 
     if command_exists("curl") {
         let mut cmd = Command::new("curl");
