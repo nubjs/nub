@@ -238,8 +238,12 @@ fn link_bins_of_pkg_dir(
 /// `preferDirectCmds` — a direct dep's bin beats a hoisted transitive's —
 /// without a separate conflict table. Among colliding transitives,
 /// `HoistedPlacements::iter` yields dep_paths in `BTreeMap` order, so the
-/// greatest dep_path wins: deterministic across runs and platforms, and
-/// the same package pnpm's `localeCompare` tiebreak lands on.
+/// greatest dep_path wins — deterministic across runs and platforms.
+/// That matches only the MIDDLE tier of pnpm's `compareCommandsInConflict`
+/// (`pkgOwnsBin` first, then `pkgName.localeCompare`, then `semver`), so a
+/// collision where one package's bin is named after the package itself —
+/// the common CLI-tool shape — can still pick the other one. Closing that
+/// gap needs a real conflict table, not a write order.
 fn link_hoisted_placement_bins(
     aube_dir: &std::path::Path,
     graph: &aube_lockfile::LockfileGraph,
@@ -388,32 +392,15 @@ pub(crate) fn link_all_bins(input: LinkAllBinsInput<'_>) -> miette::Result<()> {
     let mut pkg_json_cache = PkgJsonCache::new();
     let mut ws_pkg_json_cache = WsPkgJsonCache::new();
     let ws_dirs_for_bins = has_workspace.then_some(ws_dirs);
-    // Lowest-precedence bin writers run first; every later pass overwrites
-    // a same-named shim (`create_bin_shim` unlinks before it writes), so
-    // the sequence below IS the conflict-resolution order:
-    //   dep-lifecycle bins < hoisted placements < direct deps < self-bin.
-    //
-    // The first two are hoisted-only in practice. Under isolated both write
-    // exclusively into `.aube/<dep_path>/node_modules/.bin`, which no other
-    // pass touches, so their position here is immaterial there.
-    //
-    // Gate matches the lifecycle phase's (`finalize.rs`) via the shared
-    // `dep_build_scripts_may_run` predicate, threaded through
-    // `maybe_link_dep_bins`: the `defaultTrust` floor can authorize a
-    // package's build scripts with no explicit allow rule, and those
-    // scripts call binaries declared in the package's own `dependencies`
-    // — which must be shimmed into the dep's `.bin` and put on PATH.
-    maybe_link_dep_bins(
-        ignore_scripts,
-        has_any_allow_rule,
-        floor_may_allow_any,
-        aube_dir,
-        graph_for_link,
-        virtual_store_dir_max_length,
-        placements,
-        shim_opts,
-        &mut pkg_json_cache,
-    )?;
+    // Writers into a SHARED `.bin` run lowest-precedence first, because
+    // every later pass overwrites a same-named shim (`create_bin_shim`
+    // unlinks before it writes). That makes the order below the whole
+    // conflict resolution for the hoisted layout:
+    //   hoisted placements < direct deps < self-bin.
+    // `maybe_link_dep_bins` is deliberately NOT part of this sequence — it
+    // is isolated-only, and its per-dep targets are disjoint from every
+    // `.bin` written here, so it stays at the end where standalone callers
+    // (`rebuild`) can reuse it without inheriting an ordering contract.
     if let Some(placements) = placements {
         link_hoisted_placement_bins(
             aube_dir,
@@ -520,6 +507,23 @@ pub(crate) fn link_all_bins(input: LinkAllBinsInput<'_>) -> miette::Result<()> {
             }
         }
     }
+    // Gate matches the lifecycle phase's (`finalize.rs`) via the shared
+    // `dep_build_scripts_may_run` predicate, threaded through
+    // `maybe_link_dep_bins`: the `defaultTrust` floor can authorize a
+    // package's build scripts with no explicit allow rule, and those
+    // scripts call binaries declared in the package's own `dependencies`
+    // — which must be shimmed into the dep's `.bin` and put on PATH.
+    maybe_link_dep_bins(
+        ignore_scripts,
+        has_any_allow_rule,
+        floor_may_allow_any,
+        aube_dir,
+        graph_for_link,
+        virtual_store_dir_max_length,
+        placements,
+        shim_opts,
+        &mut pkg_json_cache,
+    )?;
     Ok(())
 }
 
@@ -585,12 +589,16 @@ pub(super) fn link_bins_for_workspace_dep(
 /// dep-local `.bin` (via `dep_modules_dir_for`) before the
 /// project-level one so the dep's own transitive bins always win.
 ///
-/// Runs under both layouts. Under hoisted, `dep_modules_dir_for` resolves
-/// to whichever `node_modules/` the dep was hoisted into, so a nested
-/// child's bins land in the directory the parent's script actually gets on
-/// PATH — `run_dep_hook` prepends exactly one dep `.bin`, and for a nested
-/// child that is *not* the child's own sibling `.bin`. This pass is what
-/// closes that gap; `link_hoisted_placement_bins` handles the layout side.
+/// Isolated mode only. Under hoisted, `link_hoisted_placement_bins` already
+/// puts every placed package's bins in the `.bin` beside it, which is where
+/// Node resolves that copy from; a nested child's bins therefore sit in the
+/// requester's own `node_modules/.bin`, and `run_dep_hook` puts that
+/// directory on PATH ahead of the shared one. Running this pass under
+/// hoisted would instead write a nested child's bins into the *enclosing*
+/// (often root) `.bin` — a shared directory whose contents are decided by
+/// pass order inside `link_all_bins`, which standalone callers like
+/// `rebuild` do not reproduce. Skipping keeps that directory owned by the
+/// ordered passes alone.
 /// Gate + run the per-dep `.bin` linking pass.
 ///
 /// The link site in `run_link_phase` and the lifecycle site in
@@ -642,6 +650,10 @@ pub(crate) fn link_dep_bins(
     shim_opts: aube_linker::BinShimOptions,
     cache: &mut PkgJsonCache,
 ) -> miette::Result<()> {
+    if placements.is_some() {
+        // Hoisted — skip. See function doc.
+        return Ok(());
+    }
     for (dep_path, pkg) in &graph.packages {
         if pkg.dependencies.is_empty() {
             continue;
@@ -1615,6 +1627,12 @@ mod tests {
     /// `z-transitive` sorts last, so it wins inside the placements pass
     /// and only the later direct-dep pass can dislodge it. Reordering the
     /// two calls flips this assertion.
+    ///
+    /// Unix-only: it reads the winner back by canonicalizing the `.bin`
+    /// entry, which requires the symlink layout. On Windows
+    /// `create_bin_shim` writes `probe`/`probe.cmd`/`probe.ps1` as regular
+    /// files, so `canonicalize` would resolve to the shim itself.
+    #[cfg(unix)]
     #[test]
     fn hoisted_direct_dep_bin_beats_a_hoisted_transitive_of_the_same_name() {
         let dir = tempfile::tempdir().unwrap();

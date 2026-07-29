@@ -1479,8 +1479,18 @@ pub async fn run_dep_hook(
             _ => return Ok(false),
         },
     };
+    // Closest-ancestor-first, matching npm/pnpm's `.bin` chain. The
+    // hoisted layout nests a version conflict under the requester, so a
+    // package's own `node_modules/` can hold children that live nowhere
+    // else; their bins sit in THAT directory's `.bin` (see
+    // `link_hoisted_placement_bins`), which is exactly where Node resolves
+    // the nested copy from — so the script has to look there too, and
+    // first. Absent under the isolated layout and in the flat hoisted
+    // case, where it is simply an inert PATH entry.
+    let nested_bin_dir = package_dir.join("node_modules").join(".bin");
     let dep_bin_dir = dep_modules_dir.join(".bin");
-    let mut bin_dirs: Vec<&Path> = Vec::with_capacity(tool_bin_dirs.len() + 1);
+    let mut bin_dirs: Vec<&Path> = Vec::with_capacity(tool_bin_dirs.len() + 2);
+    bin_dirs.push(&nested_bin_dir);
     bin_dirs.push(&dep_bin_dir);
     bin_dirs.extend(tool_bin_dirs.iter().copied());
     run_script(
