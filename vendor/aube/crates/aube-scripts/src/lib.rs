@@ -1116,9 +1116,7 @@ async fn run_command_killing_descendants(
     // declaration order): the group kill has to land while the shell is still
     // unreaped, which is what pins the pgid against reuse.
     #[cfg(unix)]
-    let _group = child
-        .id()
-        .and_then(|pid| unix_group::ProcessGroupReaper::arm(pid, script_name));
+    let _group = unix_group::ProcessGroupReaper::arm(&child, script_name);
     #[cfg(windows)]
     let _job = match windows_job::JobObject::new() {
         Ok(job) => {

@@ -22,7 +22,8 @@
 //! is Linux-only and only re-parents orphans; it still leaves you enumerating
 //! them. `PR_SET_PDEATHSIG` reaches the shell but not its descendants.
 
-use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::Once;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 /// Live lifecycle process groups, readable from a signal handler.
 ///
@@ -33,11 +34,10 @@ use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 /// [`ProcessGroupReaper`] guard still reaps it on the ordinary paths.
 const REGISTRY_SLOTS: usize = 256;
 static REGISTRY: [AtomicI32; REGISTRY_SLOTS] = [const { AtomicI32::new(0) }; REGISTRY_SLOTS];
-static HANDLER_STATE: AtomicUsize = AtomicUsize::new(HANDLER_UNINIT);
-
-const HANDLER_UNINIT: usize = 0;
-const HANDLER_INSTALLING: usize = 1;
-const HANDLER_DONE: usize = 2;
+/// `Once` rather than a CAS flag: a second caller must BLOCK until the handler
+/// is actually installed, not return early on seeing "installation in progress"
+/// and publish a pgid the not-yet-installed handler cannot reap.
+static HANDLER: Once = Once::new();
 
 /// Signals whose default action terminates aube and that a user or supervisor
 /// actually sends: a terminal Ctrl-C, `docker stop` / CI cancellation, a
@@ -91,22 +91,28 @@ pub(crate) struct ProcessGroupReaper {
 
 impl ProcessGroupReaper {
     /// Arm the reaper for a just-spawned child, or return `None` if the child is
-    /// provably not its own group leader.
+    /// not its own group leader.
     ///
-    /// The `getpgid(pid) == pid` check is a HARD SAFETY GATE, not a diagnostic:
-    /// if the child is still in aube's own process group, `kill(-pid, …)` names
-    /// a group aube itself belongs to and would kill the installer — and every
-    /// other lifecycle script — instead of one script's descendants. Anything
-    /// short of a positive confirmation degrades to `kill_on_drop`-only, the
-    /// same fail-open posture the Windows job-object path takes when the OS
-    /// refuses it.
-    pub(crate) fn arm(pid: u32, script_name: &str) -> Option<Self> {
-        let pid = pid as libc::pid_t;
-        // SAFETY: `setpgid`/`getpgid` on a pid this process owns as a child.
-        // `setpgid` here is the parent half of the race-free pair in
-        // `group_on_spawn`; its failure is expected and ignored (`EACCES` once
-        // the child has exec'd, `ESRCH` if it already exited), because the
-        // `getpgid` below is what actually decides.
+    /// TAKES THE `Child`, NOT A PID, AND THAT IS LOAD-BEARING. `arm` completes
+    /// the race-free `setpgid` pair — so it MOVES its argument into a new group
+    /// before checking, and `Drop` then SIGKILLs that group. Pointed at anything
+    /// other than a child spawned through [`group_on_spawn`], it would relocate
+    /// an unrelated process and kill it. Owning a `&Child` is what makes that
+    /// unrepresentable; the pid is only read back out here.
+    ///
+    /// The `getpgid == pid` check that follows is then a genuine confirmation:
+    /// it is false exactly when BOTH `setpgid` calls failed, which leaves the
+    /// child in aube's own group, where `kill(-pid, …)` would name a group aube
+    /// belongs to and kill the installer along with every other running script.
+    /// That case degrades to `kill_on_drop`-only — the same fail-open posture
+    /// the Windows job-object path takes when the OS refuses it.
+    pub(crate) fn arm(child: &tokio::process::Child, script_name: &str) -> Option<Self> {
+        let pid = child.id()? as libc::pid_t;
+        // SAFETY: `setpgid`/`getpgid` on a live child of this process. The
+        // `setpgid` is the parent half of the pair in `group_on_spawn`; its
+        // failure is expected and ignored (`EACCES` once the child has exec'd
+        // and already done it itself, `ESRCH` if it exited), because the
+        // `getpgid` is what decides.
         let is_leader = unsafe {
             libc::setpgid(pid, pid);
             libc::getpgid(pid) == pid
@@ -169,41 +175,30 @@ fn register(pgid: libc::pid_t) -> Option<usize> {
 /// teardown; replacing it would silently break that. `SIG_IGN` is likewise left
 /// alone — it is a deliberate choice by whoever set it.
 fn install_signal_handler() {
-    if HANDLER_STATE.load(Ordering::SeqCst) != HANDLER_UNINIT
-        || HANDLER_STATE
-            .compare_exchange(
-                HANDLER_UNINIT,
-                HANDLER_INSTALLING,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            )
-            .is_err()
-    {
-        return;
-    }
-    for signo in REAPED_SIGNALS {
-        // SAFETY: `sigaction` with a zeroed `sigaction` struct read back into
-        // local storage, then a handler that is itself async-signal-safe.
-        unsafe {
-            let mut current: libc::sigaction = std::mem::zeroed();
-            if libc::sigaction(signo, std::ptr::null(), &mut current) != 0 {
-                continue;
+    HANDLER.call_once(|| {
+        for signo in REAPED_SIGNALS {
+            // SAFETY: `sigaction` with a zeroed `sigaction` struct read back into
+            // local storage, then a handler that is itself async-signal-safe.
+            unsafe {
+                let mut current: libc::sigaction = std::mem::zeroed();
+                if libc::sigaction(signo, std::ptr::null(), &mut current) != 0 {
+                    continue;
+                }
+                if current.sa_sigaction != libc::SIG_DFL {
+                    continue;
+                }
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = reap_and_resignal as *const () as usize;
+                // SA_RESETHAND restores SIG_DFL before the handler runs, so the
+                // `raise` below takes the default action once the handler returns
+                // and unblocks the signal — aube still dies with the exit status the
+                // user expects, having reaped first.
+                action.sa_flags = libc::SA_RESETHAND;
+                libc::sigemptyset(&mut action.sa_mask);
+                libc::sigaction(signo, &action, std::ptr::null_mut());
             }
-            if current.sa_sigaction != libc::SIG_DFL {
-                continue;
-            }
-            let mut action: libc::sigaction = std::mem::zeroed();
-            action.sa_sigaction = reap_and_resignal as *const () as usize;
-            // SA_RESETHAND restores SIG_DFL before the handler runs, so the
-            // `raise` below takes the default action once the handler returns
-            // and unblocks the signal — aube still dies with the exit status the
-            // user expects, having reaped first.
-            action.sa_flags = libc::SA_RESETHAND;
-            libc::sigemptyset(&mut action.sa_mask);
-            libc::sigaction(signo, &action, std::ptr::null_mut());
         }
-    }
-    HANDLER_STATE.store(HANDLER_DONE, Ordering::SeqCst);
+    });
 }
 
 /// Signal handler: `kill`, `raise` and relaxed atomic loads are the only things
@@ -221,26 +216,10 @@ extern "C" fn reap_and_resignal(signo: libc::c_int) {
     unsafe { libc::raise(signo) };
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `arm` must refuse a pid that is NOT its own group leader. The negative
-    /// case is the dangerous one: arming there would make `Drop` signal the
-    /// group aube itself is in.
-    #[test]
-    fn refuses_to_arm_when_the_child_is_not_its_own_group_leader() {
-        // SAFETY: reading this process's own pid/pgid.
-        let (pid, pgid) = unsafe { (libc::getpid(), libc::getpgrp()) };
-        if pid == pgid {
-            // The test binary happens to lead its own group (some CI runners);
-            // there is no non-leader pid to assert against.
-            return;
-        }
-        assert!(
-            ProcessGroupReaper::arm(pid as u32, "self").is_none(),
-            "armed on a pid that is not a group leader — Drop would have \
-             SIGKILLed the test process's own group"
-        );
-    }
-}
+// No unit test asserts the "refuses a non-leader pid" branch. Reaching it
+// requires handing `arm` a pid that is not a child spawned through
+// `group_on_spawn`, and `arm` starts by MOVING its argument into its own group —
+// so a test that passes any live pid manufactures the leader condition and then
+// SIGKILLs that process's group. Writing the test is the hazard, which is why
+// `arm` takes `&Child` instead of a bare pid. The reaping behaviour it guards is
+// covered end-to-end by `unix_process_group_tests` in `lib.rs`.
