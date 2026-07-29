@@ -2301,10 +2301,10 @@ fn test_format_iso8601_known_epoch() {
     assert_eq!(format_iso8601_utc(0), "1970-01-01T00:00:00.000Z");
 }
 
-/// The three missing-publish-time cases (#581). Together these pin the whole
-/// contract: an undeterminable age never silently clears the gate, but a
-/// packument whose `modified` predates the cutoff still resolves offline from
-/// abbreviated metadata — the property that keeps corgi registries usable.
+/// Missing publish time under STRICT mode (#581): an undeterminable age never
+/// silently clears the gate, but a packument whose `modified` predates the
+/// cutoff still resolves offline from abbreviated metadata — the property that
+/// keeps corgi registries usable. Lenient mode is pinned separately, below.
 #[test]
 fn pick_version_missing_time_fails_closed_unless_modified_proves_maturity() {
     const CUTOFF: &str = "2020-01-01T00:00:00.000Z";
@@ -2361,6 +2361,26 @@ fn pick_version_missing_time_fails_closed_unless_modified_proves_maturity() {
         "1.0.0",
         "an undated version in a dated map is excluded, not admitted"
     );
+}
+
+/// Lenient mode keeps upstream aube's default: an undeterminable publish age
+/// stays eligible rather than blocking. Only the embedder's strict posture
+/// (which nub pins on) turns it into a wall, so this change is default-
+/// preserving for standalone aube.
+#[test]
+fn pick_version_lenient_mode_keeps_undated_versions_eligible() {
+    let bare = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
+    let picked = pick_version(
+        &bare,
+        "^1.0.0",
+        None,
+        false,
+        Some("2020-01-01T00:00:00.000Z"),
+        None,
+        false,
+        |_, _| false,
+    );
+    assert_eq!(picked.unwrap().version, "1.1.0");
 }
 
 /// npm's full `time` map always carries `created`/`modified` bookkeeping keys

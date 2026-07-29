@@ -48,7 +48,7 @@ pub(super) fn prefer_non_vulnerable_pick<'a>(
         } else {
             cutoff
         };
-        crate::semver_util::version_clears_cutoff(packument, ver, effective)
+        crate::semver_util::version_clears_cutoff(packument, ver, effective, true)
     };
 
     // Two tiers, because this function is a PREFERENCE, not a gate: its only

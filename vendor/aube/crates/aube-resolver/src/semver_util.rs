@@ -81,27 +81,33 @@ pub fn pick_version_for_add<'a>(
 /// Does `ver` clear `effective`, the publish-age cutoff that applies to it?
 /// `None` means no wall is in effect, so everything clears.
 ///
-/// A missing publish time is NOT a silent bypass (#581): the gate is only as
-/// strong as the metadata feeding it, so an undeterminable age FAILS CLOSED.
-/// Three cases, matching pnpm's `pickPackageFromMeta` +
-/// `filterPkgMetadataByPublishDate`:
+/// A known publish time is always compared. When one is missing, the packument's
+/// `modified` timestamp is tried first as an UPPER BOUND on every version's
+/// publish time: `modified <= cutoff` proves the whole document predates the
+/// wall, so every version in it is mature. That is what keeps abbreviated
+/// (corgi) metadata usable without a full-packument fetch for the dormant
+/// majority of a dependency tree.
 ///
-/// - **time known** — compare it.
-/// - **times present, this one absent** — block. A hole in an otherwise
-///   populated map is anomalous, never a reason to admit a version.
-/// - **no per-version times at all** — fall back to the packument's `modified`,
-///   an UPPER BOUND on every version's publish time: `modified <= cutoff`
-///   proves the whole document predates the wall, so every version in it is
-///   mature. This is what keeps abbreviated (corgi) metadata usable without a
-///   full-packument fetch for the dormant majority of a dependency tree. When
-///   `modified` is absent or itself too new, nothing is provable — block.
+/// When even that cannot settle it, the age is UNDETERMINABLE and `strict`
+/// decides:
 ///
-/// Shared with the vulnerability re-pick (`resolve::vulnerable`), which applies
-/// the same wall and must not drift from it.
+/// - **`strict`** — block. A gate is only as strong as the metadata feeding it,
+///   and an unprovable age must not be a silent bypass (#581). nub pins
+///   `minimumReleaseAgeStrict` on, so this is nub's posture.
+/// - **lenient** — stay eligible, preserving upstream aube's default: lenient
+///   mode already means "fall back rather than fail", and gating it here would
+///   change standalone aube's out-of-box behavior rather than the embedder's.
+///
+/// A hole in an otherwise-populated `time` map is treated as undeterminable
+/// too — anomalous, and not evidence of maturity.
+///
+/// Shared with the vulnerability re-pick (`resolve::vulnerable`), which passes
+/// `strict` to mean "provably mature" for its first-choice tier.
 pub(crate) fn version_clears_cutoff(
     packument: &Packument,
     ver: &str,
     effective: Option<&str>,
+    strict: bool,
 ) -> bool {
     let Some(c) = effective else { return true };
     match packument.time.get(ver) {
@@ -115,7 +121,9 @@ pub(crate) fn version_clears_cutoff(
                 .time
                 .keys()
                 .any(|k| k != "created" && k != "modified");
-            !has_version_times && packument.modified.as_deref().is_some_and(|m| m <= c)
+            let modified_proves_maturity =
+                !has_version_times && packument.modified.as_deref().is_some_and(|m| m <= c);
+            modified_proves_maturity || !strict
         }
     }
 }
@@ -126,12 +134,11 @@ pub(crate) fn version_clears_cutoff(
 /// `resolution-mode=time-based` for direct deps. `cutoff` filters out
 /// versions whose registry publish time is later than the cutoff
 /// (lexicographic compare on ISO-8601 UTC strings, which sort
-/// correctly). When the packument carries no `time` entry for a version
-/// the cutoff FAILS CLOSED rather than waving the version through — an
-/// undeterminable publish age must not silently disable the gate
-/// (#581) — except where the packument's `modified` timestamp is itself
-/// at or before the cutoff, which proves every version in the document
-/// is old enough. See `passes_effective_cutoff` for the three cases.
+/// correctly). When the packument carries no `time` entry for a version,
+/// the packument's `modified` timestamp can still prove the whole
+/// document mature; failing that the age is undeterminable, and `strict`
+/// decides whether it blocks (#581) or stays eligible. See
+/// [`version_clears_cutoff`].
 ///
 /// `strict` controls fallback when the cutoff filters out every
 /// satisfying version: with `strict=true` we return `None` and the
@@ -208,8 +215,9 @@ pub(crate) fn pick_version<'a>(
         }
     };
 
-    let passes_effective_cutoff =
-        |ver: &str, effective: Option<&str>| version_clears_cutoff(packument, ver, effective);
+    let passes_effective_cutoff = |ver: &str, effective: Option<&str>| {
+        version_clears_cutoff(packument, ver, effective, strict)
+    };
 
     // A version's effective cutoff: exempt versions answer to the
     // time-based wall (`exempt_cutoff`) only; everyone else answers to
