@@ -160,6 +160,26 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             extra_reads.extend(python.reads);
         }
 
+        // `npm_config_node_gyp` names the REAL bootstrapped node-gyp here, replacing the
+        // engine's lazy shim. The shim resolves node-gyp two ways and the jail breaks both:
+        // its `AUBE_NODE_GYP_EXE` trampoline execs the PM binary (withheld — see
+        // `BUILD_JAIL_EXTRA_EXACT`), and its bare-`node-gyp`-on-PATH fallback loses whenever
+        // an `npm run` sits between the script and node-gyp, because npm's run-script
+        // prepends its OWN node-gyp stub ahead of the tool dir and that stub points right
+        // back at the shim. `prebuild-install || npm run build` is the standard idiom that
+        // hits it. Naming the real binary is also what npm and pnpm themselves export, so
+        // the shim's remaining reason to exist — lazy bootstrap — is already discharged:
+        // a confined install bootstraps unconditionally before the lifecycle fan-out.
+        // Absent tool tree ⇒ leave the ambient value alone.
+        if let Ok(Some(node_gyp_js)) =
+            aube::commands::install::node_gyp_bootstrap::cached_js_entry()
+        {
+            ambient.insert(
+                "npm_config_node_gyp".to_string(),
+                node_gyp_js.to_string_lossy().into_owned(),
+            );
+        }
+
         // PREFETCH — the same move `npm_config_nodedir` makes above, applied to the
         // package's own prebuilt binary: resolve the artifact out here, land it on the
         // path the installer checks before it opens a socket, and the confined script

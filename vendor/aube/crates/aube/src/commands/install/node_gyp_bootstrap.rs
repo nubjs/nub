@@ -211,6 +211,39 @@ pub fn lazy_js_shim_path() -> miette::Result<PathBuf> {
     Ok(shim_dir.join("node-gyp.js"))
 }
 
+/// The ALREADY-BOOTSTRAPPED node-gyp's own JS entry point, or `None` when no
+/// usable tool tree is on disk. Never bootstraps and never writes — a pure
+/// lookup, safe to call from a synchronous spawn path.
+///
+/// This is the value [`lazy_js_shim_path`] stands in for. An embedder that
+/// confines lifecycle scripts has already forced the bootstrap
+/// ([`ScriptReach::Confined`]), so it can hand the script the real node-gyp
+/// directly and skip the shim's two resolution channels — the
+/// `AUBE_NODE_GYP_EXE` trampoline (an exec of the PM binary, which a sandbox
+/// need not grant) and the bare-`node-gyp`-on-PATH fallback (which loses to
+/// whatever an intermediate `npm run` prepends). It must be the `.js` entry and
+/// never the `.bin` shim: consumers run `node $npm_config_node_gyp`, and npm's
+/// own `node-gyp-bin` stub is literally `node "$npm_config_node_gyp" "$@"`, so a
+/// shell shim there dies as a syntax error. Standalone aube never calls this.
+pub fn cached_js_entry() -> miette::Result<Option<PathBuf>> {
+    Ok(js_entry_in(&tool_root()?.join(BUCKET)))
+}
+
+/// Split from [`cached_js_entry`] so the layout contract is testable against a
+/// staged tree rather than the caller's real cache dir.
+fn js_entry_in(tool_dir: &Path) -> Option<PathBuf> {
+    let bin_dir = tool_dir.join("node_modules").join(".bin");
+    if !tool_tree_usable(tool_dir, &bin_dir) {
+        return None;
+    }
+    let entry = tool_dir
+        .join("node_modules")
+        .join(PKG)
+        .join("bin")
+        .join("node-gyp.js");
+    entry.exists().then_some(entry)
+}
+
 /// `pub` so an embedder driving the lazy node-gyp shim re-entry (its own
 /// `current_exe()` is what the shim execs) can print the bootstrapped binary
 /// path. Pairs with the `pub`-widened [`ensure_cached`]; standalone aube is
@@ -523,6 +556,33 @@ mod tests {
         assert!(
             !tool_tree_usable(&t.tool_dir, &t.bin_dir),
             "a purged store must force a re-bootstrap, not a success return"
+        );
+    }
+
+    /// A confining embedder stamps this path as `npm_config_node_gyp`, and npm's
+    /// own `node-gyp-bin` stub runs it as `node "$npm_config_node_gyp"` — so
+    /// naming the `.bin` shell shim instead would feed a `sh` script to Node.
+    /// The `None` half keeps the embedder on the lazy shim rather than a path
+    /// that dies at exec.
+    #[test]
+    fn the_cached_entry_is_the_js_file_node_can_run() {
+        let t = isolated_tree();
+        let pkg = t.store.join("node_modules/node-gyp");
+        std::fs::create_dir_all(pkg.join("bin")).expect("bin dir");
+        assert_eq!(js_entry_in(&t.tool_dir), None, "no bin/node-gyp.js yet");
+
+        std::fs::write(pkg.join("bin/node-gyp.js"), b"#!/usr/bin/env node\n").expect("entry");
+        assert_eq!(
+            js_entry_in(&t.tool_dir),
+            Some(t.tool_dir.join("node_modules/node-gyp/bin/node-gyp.js")),
+            "must resolve through the virtual store to the package's JS entry"
+        );
+
+        std::fs::remove_dir_all(&t.store).expect("purge store");
+        assert_eq!(
+            js_entry_in(&t.tool_dir),
+            None,
+            "a purged store must not hand out a path that no longer resolves"
         );
     }
 

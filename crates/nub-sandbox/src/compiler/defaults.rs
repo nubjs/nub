@@ -443,21 +443,23 @@ const BUILD_JAIL_EXTRA_PREFIXES: &[&str] = &["npm_package_", "npm_lifecycle_"];
 /// [`baseline_allows`]; of those, only PATH/HOME/TMPDIR were EMPIRICALLY load-bearing
 /// for a from-source node-gyp compile (HOME anchors the header cache on a clean host).
 ///
-/// `AUBE_NODE_GYP_EXE` is DELIBERATELY absent. The engine stamps it so its lazy
-/// `npm_config_node_gyp` shim can trampoline back through the PM binary
-/// (`<exe> __node-gyp-bootstrap <dir>`), but that trampoline is neither needed nor safe
-/// here: the engine bootstraps the real node-gyp OUTSIDE the jail and prepends its
-/// `$tooldirs`-readable bin dir to the lifecycle PATH, and the shim's own fallback then
-/// resolves `node-gyp` from that PATH — measured end-to-end, a from-source addon links
-/// under the jail through both the bare-`node-gyp` and the `npm_config_node_gyp` route.
-/// Admitting the var would REPLACE that working fallback with an exec of the PM binary,
-/// which no read grant covers, and the shim does not guard that call. Whether that is
-/// survivable is BACKEND-DEPENDENT, so it must not be assumed: under macOS Seatbelt the
-/// binary is unreadable yet still executable (the base profile allows `process-exec`
-/// outright), and the trampoline was measured to succeed; under a Linux bwrap namespace
-/// an ungranted path is simply not mounted, so the same exec is ENOENT and the compile
-/// hard-fails with no fallback left. Admitting the var therefore requires read-granting
-/// the binary in the same change — see `build_jail_withholds_the_node_gyp_trampoline_exe`.
+/// `AUBE_NODE_GYP_EXE` is DELIBERATELY absent, and the jail no longer needs it: the
+/// engine bootstraps the real node-gyp OUTSIDE the jail, `build_jail.rs` points
+/// `npm_config_node_gyp` straight at that binary's `bin/node-gyp.js`, and the
+/// `$tooldirs`-readable tool bin dir is on the lifecycle PATH for a bare `node-gyp`. So
+/// neither of the shim's resolution channels is exercised in here. That is a stronger
+/// footing than the earlier one, which rested on the shim's bare-PATH fallback and held
+/// only while nothing sat between the script and node-gyp: an intervening `npm run`
+/// prepends npm's OWN node-gyp stub ahead of the tool dir, and that stub points back at
+/// the shim, so the fallback resolved to a loop rather than to node-gyp.
+///
+/// Admitting the var would put an exec of the PM binary back on the path, which no read
+/// grant covers. Whether that is survivable is BACKEND-DEPENDENT, so it must not be
+/// assumed: under macOS Seatbelt the binary is unreadable yet still executable (the base
+/// profile allows `process-exec` outright), and the trampoline was measured to succeed;
+/// under a Linux bwrap namespace an ungranted path is simply not mounted, so the same
+/// exec is ENOENT. Admitting the var therefore requires read-granting the binary in the
+/// same change — see `build_jail_withholds_the_node_gyp_trampoline_exe`.
 const BUILD_JAIL_EXTRA_EXACT: &[&str] = &[
     "NODE",
     // The jail STAMPS this (`build_jail.rs`), so it must survive the scrub. A dependency's
