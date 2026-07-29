@@ -817,7 +817,8 @@ fn materialize_hoisted_node(
             }
         }
         for parent in &parents {
-            std::fs::create_dir_all(parent).map_err(|e| Error::Io(parent.clone(), e))?;
+            crate::sweep::with_transient_retry(|| std::fs::create_dir_all(parent))
+                .map_err(|e| Error::Io(parent.clone(), e))?;
         }
 
         for (rel_path, stored) in index {

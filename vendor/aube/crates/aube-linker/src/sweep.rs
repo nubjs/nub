@@ -160,16 +160,34 @@ pub(crate) fn remove_hidden_hoist_tree(path: &Path) {
 /// to place something else here and any residual entry that survives
 /// will surface as a downstream error.
 pub(crate) fn try_remove_entry(path: &Path) {
-    let _ = std::fs::remove_dir_all(path);
+    // Retried: on Windows a single handle held by a watcher, an editor, or
+    // Defender mid-scan makes `remove_dir_all` abort PARTWAY, leaving some of
+    // the old tree behind. Callers refill the slot afterwards, and a refill
+    // over a surviving old tree silently blends two package versions — files
+    // the old version had and the new one does not are never overwritten, so
+    // they persist and stay resolvable. Backing off clears the common case.
+    let _ = with_transient_retry(|| std::fs::remove_dir_all(path));
     let _ = std::fs::remove_file(path);
 }
 
-/// `xx::file::mkdirp` wrapped with the linker's `Error::Xx` conversion.
-/// Every materialize pass calls this before creating a symlink /
-/// junction, so the lossy `.to_string()` wrap lives in exactly one
-/// place.
+/// Recursive directory creation, retried through Windows' transient
+/// sharing errors. Every materialize pass calls this before creating a
+/// symlink / junction, so the retry and the path-carrying error
+/// conversion live in exactly one place.
 pub fn mkdirp(dir: &Path) -> Result<(), Error> {
-    xx::file::mkdirp(dir).map_err(|e| Error::Xx(e.to_string()))
+    // Calls `std::fs::create_dir_all` rather than `xx::file::mkdirp` so the
+    // raw OS error survives: `xx` wraps it in its own error type, and the
+    // retry predicate below matches on `raw_os_error()`, so a wrapped error
+    // would silently never be retriable. `xx::file::mkdirp` is an `exists()`
+    // check plus this same call, and `create_dir_all` is already a no-op on an
+    // existing directory, so dropping the check changes nothing.
+    //
+    // Retried because creating a directory whose slot is in Windows'
+    // pending-delete state returns ACCESS_DENIED — a state reachable precisely
+    // because a wipe just ran against a path something else holds open.
+    // Failure here is fatal to the install.
+    with_transient_retry(|| std::fs::create_dir_all(dir))
+        .map_err(|e| Error::Io(dir.to_path_buf(), e))
 }
 
 /// Classification of a `.aube/<dep_path>` symlink relative to the

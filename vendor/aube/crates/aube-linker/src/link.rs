@@ -1896,7 +1896,16 @@ fn reconcile_top_level_link(link_path: &Path, expected_target: &Path) -> Result<
         if link_path.symlink_metadata().is_err() {
             return Ok(false);
         }
-        match std::fs::remove_dir(link_path).or_else(|_| std::fs::remove_file(link_path)) {
+        // Retried: this is a top-level `node_modules/<name>` entry, the most
+        // likely thing in the tree to be held open by something the user is
+        // running — a dev server, a `--watch` task, an editor, Defender
+        // mid-scan. Failure here is FATAL to the install (the `Err` arm below),
+        // so an unretried sharing violation aborts a whole reinstall over a
+        // handle that would have cleared in milliseconds.
+        let removed = crate::sweep::with_transient_retry(|| {
+            std::fs::remove_dir(link_path).or_else(|_| std::fs::remove_file(link_path))
+        });
+        match removed {
             Ok(()) => Ok(false),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(Error::Io(link_path.to_path_buf(), e)),
