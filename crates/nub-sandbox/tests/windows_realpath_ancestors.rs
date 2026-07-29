@@ -1100,22 +1100,36 @@ put("done=ok");
         println!("interpreter: {}", node.display());
         println!("shim: {}", shim_import_arg());
 
+        // Each arm announces itself, flushed, BEFORE it runs. CI logs are unavailable until a
+        // job finishes, so a stalled arm is otherwise invisible — the job just sits there and
+        // a timeout discards the whole log. With these, the last line printed names the arm.
+        let step = |name: &str| {
+            use std::io::Write;
+            println!("STEP {name}");
+            let _ = std::io::stdout().flush();
+        };
+
+        step("writedac_ability");
         {
             let f = Fixture::new("dacl");
             writedac_ability(&mut fails, &f);
         }
+        step("ancestor_lstat_chain");
         {
             let f = Fixture::new("lstat");
             ancestor_lstat_chain(&mut fails, &f);
         }
+        step("node_matrix");
         {
             let f = Fixture::new("node");
             node_matrix(&mut fails, &f, node.as_path());
         }
+        step("production_lifecycle");
         {
             let f = Fixture::new("life");
             production_lifecycle(&mut fails, &f, node.as_path());
         }
+        step("done");
 
         if fails == 0 {
             println!("WINDOWS JAIL RESOLVES ABSOLUTE REQUIRES");

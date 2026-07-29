@@ -35,10 +35,15 @@ jobs:
     timeout-minutes: 60
     env:
       # crt-static matches sandbox-conformance's windows leg: it makes the self-reexec probe
-      # child self-contained, so it starts cleanly under the LowBox token. The stack bump is
-      # the inherited workaround three sibling branches already carry for the 0xC00000FD
-      # (stack overflow) exit on this workspace's deeper call paths.
-      RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=/STACK:8388608"
+      # child self-contained, so it starts cleanly under the LowBox token.
+      #
+      # BYTE-IDENTICAL to the sibling Windows probes ON PURPOSE. RUSTFLAGS is part of every
+      # cargo fingerprint, so adding even one flag here misses the shared `Swatinem/rust-cache`
+      # entry and forces a full cold rebuild of the whole dependency graph — measured: this job
+      # ran 35+ minutes with an extra `-C link-arg=/STACK:8388608` where the sibling probes
+      # finish in 2-3. That stack bump is an inherited workaround for `nub install`'s 0xC00000FD
+      # exit, and this probe never runs `nub install`, so it bought nothing and cost the cache.
+      RUSTFLAGS: "-C target-feature=+crt-static"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
