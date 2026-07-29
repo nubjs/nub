@@ -153,6 +153,19 @@ pub(super) const NUB_PROJECT_CONTEXT_EJECT: &[&str] = &[
 /// hold steady on a pure reorder; FNV-1a keeps it dependency-free and stable across
 /// platforms/releases (std's `DefaultHasher` is not guaranteed stable across Rust
 /// versions).
+/// Bumped on ANY change to the [`nested_optional_dep_pairs`] selection rules.
+///
+/// Load-bearing for warm trees, for the same reason as
+/// [`project_context_eject_token`]: the pairs are injected INSIDE the expand hook,
+/// past aube's settings fold, so without a moving token an already-installed
+/// project keeps its `settings_hash`, `try_install_fast_path` reports
+/// "Already up to date", and the link phase — where every nesting call site lives
+/// — never runs at all. Verified: stripping the nest from a warm store cell and
+/// re-installing left it stripped until this token moved. A graph-derived hash is
+/// not available here (the fingerprint is computed without the resolved graph), so
+/// a hand-bumped version is the form that composes.
+pub(crate) const NESTED_OPTIONAL_DEP_POLICY_VERSION: u32 = 1;
+
 pub(crate) fn project_context_eject_token() -> String {
     eject_list_token(NUB_PROJECT_CONTEXT_EJECT)
 }
@@ -191,11 +204,151 @@ fn nub_internal_seed(resolved_seed: &[String]) -> Vec<String> {
 /// closure/seed policy — is unit-tested with injected flags and never touches
 /// the host store. The resolved seed is filtered through [`nub_internal_seed`].
 fn expand(graph: &LockfileGraph, seed_names: &[String]) -> DiskMaterializePlan {
-    plan_from_flags(
+    let mut plan = plan_from_flags(
         graph,
         &nub_internal_seed(seed_names),
         &dynamic_phantom_flags(graph),
-    )
+    );
+    // Store handle built ONCE and captured, matching `dynamic_phantom_flags`
+    // above. No store (a `storeDir` override the sidecar helpers do not know
+    // about) reports no scripts, which leaves every package on the unchanged
+    // sibling-symlink path.
+    let store = crate::dynamic_phantom::store_v1_dir()
+        .map(|store_v1| aube_store::Store::at(store_v1.join("files")));
+    plan.nested_optional_deps = nested_optional_dep_pairs(graph, &|pkg: &LockedPackage| {
+        store
+            .as_ref()
+            .is_some_and(|store| declares_install_script(store, pkg))
+    });
+    plan
+}
+
+/// `(importer, optional-dep)` pairs whose dependency is additionally materialized
+/// INSIDE the importer's own package directory. THE CANONICAL STATEMENT of this
+/// policy — the linker side carries only the mechanism.
+///
+/// THE DEFECT THIS CLOSES. The ecosystem idiom for shipping a platform binary is
+/// an optionalDependency plus a postinstall that `require.resolve`s it and
+/// `rename()`s the file into the importer's own `bin/`. Under the isolated linker
+/// that resolve returns a realpath in a SEPARATE virtual-store cell, and `rename`
+/// needs write on the SOURCE's parent to unlink the dirent — so the move lands on
+/// a cell shared by every project on the machine. Both outcomes are wrong and they
+/// are one bug: under the build jail the store is read-only and the script fails
+/// outright (`bun`: "Your package manager doesn't seem to support bun"); without
+/// the jail the script SUCCEEDS and empties the peer package's canonical cell, so
+/// every other project depending on it installs a binary-less directory while
+/// `nub install` reports success. Both reproduced. Nesting a copy inside the
+/// importer makes the resolved realpath a path the importer may write, so the
+/// move consumes that copy instead of the peer's canonical one.
+///
+/// Each conjunct is a SAFETY guard, and each is load-bearing:
+/// - the importer runs an install script — otherwise nothing moves anything, and
+///   the extra copy would buy a second realpath for free;
+/// - the dep is a graph LEAF — the nested copy carries no dependency edges, so a
+///   dep with its own deps would resolve them out of the nest into the importer's
+///   sibling set, a different closure than it would see un-nested;
+/// - no second DECLARED consumer, by importer count or top-level presence — two
+///   resolution paths for one package is a double load, which for the native
+///   `.node` addons this class ships is a double registration. Deliberately about
+///   DECLARED consumers only: the hidden hoist tree aliases every graph package,
+///   so an undeclared walk-up can still reach the peer cell. That is unchanged by
+///   this policy — the importer, the only declared consumer, resolves the nearer
+///   nested copy.
+fn nested_optional_dep_pairs(
+    graph: &LockfileGraph,
+    runs_install_script: &dyn Fn(&LockedPackage) -> bool,
+) -> Vec<(String, String)> {
+    use aube_lockfile::resolve_dep_edge;
+
+    // Count BOTH maps: the npm/pnpm/bun readers mirror an active optional edge into
+    // `dependencies`, but the yarn-berry reader keeps the two disjoint. Counting
+    // only `dependencies` would score a berry optional dep at zero importers, and
+    // the sole-importer guard below would silently skip every yarn project.
+    let mut importers_of: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for pkg in graph.packages.values() {
+        let mut counted: HashSet<String> = HashSet::new();
+        for (child_name, child_tail) in pkg
+            .dependencies
+            .iter()
+            .chain(pkg.optional_dependencies.iter())
+        {
+            if let Some(child_key) =
+                resolve_dep_edge(child_name, child_tail, |k| graph.packages.contains_key(k))
+                && counted.insert(child_key.clone())
+            {
+                *importers_of.entry(child_key).or_default() += 1;
+            }
+        }
+    }
+    let top_level: HashSet<&str> = graph
+        .importers
+        .values()
+        .flat_map(|deps| deps.iter().map(|d| d.name.as_str()))
+        .collect();
+
+    let mut pairs = Vec::new();
+    for pkg in graph.packages.values() {
+        if pkg.optional_dependencies.is_empty() {
+            continue;
+        }
+        // `runs_install_script` reads the manifest out of the CAS, so it runs LAST —
+        // after the free graph guards have already rejected most candidates.
+        let mut script_checked = None;
+        for (dep_name, dep_tail) in &pkg.optional_dependencies {
+            if top_level.contains(dep_name.as_str()) {
+                continue;
+            }
+            let Some(dep_key) =
+                resolve_dep_edge(dep_name, dep_tail, |k| graph.packages.contains_key(k))
+            else {
+                continue;
+            };
+            if importers_of.get(&dep_key).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            let Some(dep_pkg) = graph.packages.get(&dep_key) else {
+                continue;
+            };
+            if !dep_pkg.dependencies.is_empty() || !dep_pkg.optional_dependencies.is_empty() {
+                continue;
+            }
+            if !*script_checked.get_or_insert_with(|| runs_install_script(pkg)) {
+                break;
+            }
+            pairs.push((pkg.name.clone(), dep_name.clone()));
+        }
+    }
+    pairs
+}
+
+/// Whether `pkg`'s published manifest declares a lifecycle script that runs at
+/// install time. Read from the CAS copy of its `package.json` rather than
+/// `LockedPackage::has_install_script`, which only npm's lockfile format
+/// populates — under an aube/pnpm/bun lockfile that field is uniformly false.
+///
+/// Best-effort: an unreadable or unparseable manifest reports NO script, which
+/// leaves the package on the unchanged sibling-symlink path.
+fn declares_install_script(store: &aube_store::Store, pkg: &LockedPackage) -> bool {
+    let Some(index) = store.load_index(pkg.registry_name(), &pkg.version, pkg.integrity.as_deref())
+    else {
+        return false;
+    };
+    let Some(manifest) = index.get("package.json") else {
+        return false;
+    };
+    let Ok(bytes) = std::fs::read(&manifest.store_path) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    let Some(scripts) = json.get("scripts").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    ["preinstall", "install", "postinstall"]
+        .iter()
+        .any(|k| scripts.contains_key(*k))
 }
 
 /// One dynamically-flagged importer the planner may seed. Two INDEPENDENT reasons
@@ -362,6 +515,7 @@ fn plan_from_flags(
     // eject set (rung 1) — it records no per-importer target hoist.
     DiskMaterializePlan {
         names: names.into_iter().collect(),
+        ..DiskMaterializePlan::default()
     }
 }
 
@@ -1038,5 +1192,124 @@ mod tests {
         );
         assert_eq!(types_package_name("@babel/core"), "@types/babel__core");
         assert_eq!(types_package_name("react"), "@types/react");
+    }
+}
+
+#[cfg(test)]
+mod nested_optional_dep_tests {
+    use super::*;
+    use aube_lockfile::{DirectDep, LockedPackage, LockfileGraph};
+
+    /// Build a graph where `importer` has `dep` as an ACTIVE optional edge —
+    /// mirrored into `dependencies`, which is how the resolver records one.
+    fn graph_with_optional(importer: &str, dep: &str, dep_is_leaf: bool) -> LockfileGraph {
+        let mut g = LockfileGraph::default();
+        let mut parent = LockedPackage {
+            name: importer.to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: format!("{importer}@1.0.0"),
+            ..Default::default()
+        };
+        parent
+            .dependencies
+            .insert(dep.to_string(), "1.0.0".to_string());
+        parent
+            .optional_dependencies
+            .insert(dep.to_string(), "1.0.0".to_string());
+        g.packages.insert(format!("{importer}@1.0.0"), parent);
+
+        let mut child = LockedPackage {
+            name: dep.to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: format!("{dep}@1.0.0"),
+            ..Default::default()
+        };
+        if !dep_is_leaf {
+            child
+                .dependencies
+                .insert("grandchild".to_string(), "1.0.0".to_string());
+            g.packages.insert(
+                "grandchild@1.0.0".to_string(),
+                LockedPackage {
+                    name: "grandchild".to_string(),
+                    version: "1.0.0".to_string(),
+                    dep_path: "grandchild@1.0.0".to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        g.packages.insert(format!("{dep}@1.0.0"), child);
+
+        g.importers.insert(
+            ".".to_string(),
+            vec![DirectDep {
+                name: importer.to_string(),
+                dep_path: format!("{importer}@1.0.0"),
+                dep_type: aube_lockfile::DepType::Production,
+                specifier: None,
+            }],
+        );
+        g
+    }
+
+    fn pairs(g: &LockfileGraph, has_script: bool) -> Vec<(String, String)> {
+        nested_optional_dep_pairs(g, &move |_: &LockedPackage| has_script)
+    }
+
+    #[test]
+    fn a_script_running_importer_nests_its_leaf_optional_dep() {
+        let g = graph_with_optional("bun", "@oven/bun-darwin-aarch64", true);
+        assert_eq!(
+            pairs(&g, true),
+            vec![("bun".to_string(), "@oven/bun-darwin-aarch64".to_string())]
+        );
+    }
+
+    #[test]
+    fn no_install_script_means_no_nesting() {
+        // Nothing moves the resolved file, so the second realpath a nested copy
+        // creates would be pure cost.
+        let g = graph_with_optional("rollup", "@rollup/rollup-darwin-arm64", true);
+        assert!(pairs(&g, false).is_empty());
+    }
+
+    #[test]
+    fn a_non_leaf_optional_dep_is_never_nested() {
+        // The nested copy carries no dependency edges, so a dep with its own
+        // deps would resolve them out of the nest into the importer's sibling
+        // set — a different closure than it would see un-nested.
+        let g = graph_with_optional("importer", "has-own-deps", false);
+        assert!(pairs(&g, true).is_empty());
+    }
+
+    #[test]
+    fn a_second_route_to_the_dep_blocks_nesting() {
+        // Two realpaths for one package is a double load, which for the native
+        // addons this class ships means a double registration.
+        let mut g = graph_with_optional("bun", "@oven/bun-darwin-aarch64", true);
+        let mut other = LockedPackage {
+            name: "other".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: "other@1.0.0".to_string(),
+            ..Default::default()
+        };
+        other
+            .dependencies
+            .insert("@oven/bun-darwin-aarch64".to_string(), "1.0.0".to_string());
+        g.packages.insert("other@1.0.0".to_string(), other);
+        assert!(pairs(&g, true).is_empty());
+    }
+
+    #[test]
+    fn a_top_level_dep_is_never_nested() {
+        // The project's own `node_modules/<dep>` symlink is the other route.
+        let mut g = graph_with_optional("bun", "@oven/bun-darwin-aarch64", true);
+        g.importers.get_mut(".").unwrap().push(DirectDep {
+            name: "@oven/bun-darwin-aarch64".to_string(),
+            dep_path: "@oven/bun-darwin-aarch64@1.0.0".to_string(),
+            dep_type: aube_lockfile::DepType::Production,
+            specifier: None,
+        });
+        assert!(pairs(&g, true).is_empty());
     }
 }

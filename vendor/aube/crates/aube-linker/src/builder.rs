@@ -44,7 +44,31 @@ impl Linker {
             no_integrity_read_keys: std::collections::BTreeMap::new(),
             link_progress: None,
             disk_materialize: Vec::new(),
+            nested_optional_deps: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// Nest each `(importer, optional-dep)` pair's dependency as a real directory
+    /// inside the importer's own package dir, alongside the usual sibling symlink
+    /// (see the field docs on [`Linker`]). Empty for standalone aube and every
+    /// test → the materialize pass is byte-for-byte unchanged.
+    pub fn with_nested_optional_deps(mut self, pairs: &[(String, String)]) -> Self {
+        for (importer, dep) in pairs {
+            self.nested_optional_deps
+                .entry(importer.clone())
+                .or_default()
+                .insert(dep.clone());
+        }
+        self
+    }
+
+    /// The optional-dep names to nest inside `importer_name`'s own package dir,
+    /// or `None` when the feature is unused (the standalone default).
+    pub(crate) fn nested_optional_deps_of(
+        &self,
+        importer_name: &str,
+    ) -> Option<&std::collections::BTreeSet<String>> {
+        self.nested_optional_deps.get(importer_name)
     }
 
     /// Force a set of packages to materialize as real project-local directories

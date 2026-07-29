@@ -2226,3 +2226,157 @@ fn clonedir_materialize_matches_per_file_byte_for_byte() {
     // Stats parity: the clone counts every index entry as linked.
     assert_eq!(stats.files_linked, index.len());
 }
+
+/// The importer's `optionalDependencies` edge is present in BOTH maps, mirroring
+/// how the resolver records an ACTIVE optional edge.
+fn make_optional_dep_graph() -> LockfileGraph {
+    let mut graph = make_graph();
+    let foo = graph.packages.get_mut("foo@1.0.0").unwrap();
+    foo.optional_dependencies
+        .insert("bar".to_string(), "2.0.0".to_string());
+    graph
+}
+
+/// Persist the dep indices to the store. The nested-copy pass resolves a dep's
+/// index through the STORE rather than the caller's map — it runs on the warm
+/// cache-hit paths, where the install driver deliberately omits indices — so a
+/// test that only hands `link_all` an in-memory map would exercise the
+/// best-effort miss branch and silently assert nothing.
+fn persist_indices(store: &Store, indices: &BTreeMap<String, aube_store::PackageIndex>) {
+    for (dep_path, index) in indices {
+        let (name, version) = dep_path.rsplit_once('@').unwrap();
+        store.save_index(name, version, None, index).unwrap();
+    }
+}
+
+#[test]
+fn nested_optional_dep_puts_the_resolved_realpath_inside_the_importer() {
+    // The isolated layout makes `bar` a SIBLING of `foo`, so `foo`'s
+    // `require.resolve('bar/...')` realpath lands in bar's own cell — read-only
+    // under the build jail, and shared by every project on the machine.
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let (store, indices) = setup_store_with_files(dir.path());
+    persist_indices(&store, &indices);
+    let graph = make_optional_dep_graph();
+
+    // CONTROL — same store, same graph, feature OFF. Establishes that the
+    // assertions below discriminate: the nested path is absent and the sibling
+    // symlink is the only route to bar.
+    let control_dir = dir.path().join("control");
+    std::fs::create_dir_all(&control_dir).unwrap();
+    Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .link_all(&control_dir, &graph, &indices)
+        .unwrap();
+    let control_foo = control_dir.join("node_modules/.aube/foo@1.0.0/node_modules/foo");
+    assert!(
+        control_foo.join("index.js").exists(),
+        "control must actually have linked foo"
+    );
+    assert!(
+        !control_foo.join("node_modules/bar").exists(),
+        "without the option there must be no nested copy — otherwise the \
+         positive assertions below prove nothing"
+    );
+    assert!(
+        control_dir
+            .join("node_modules/.aube/foo@1.0.0/node_modules/bar")
+            .exists(),
+        "control's only route to bar is the sibling symlink"
+    );
+
+    Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .with_nested_optional_deps(&[("foo".to_string(), "bar".to_string())])
+        .link_all(&project_dir, &graph, &indices)
+        .unwrap();
+
+    let foo_dir = project_dir.join("node_modules/.aube/foo@1.0.0/node_modules/foo");
+    let nested = foo_dir.join("node_modules/bar/index.js");
+    assert!(
+        nested.exists(),
+        "bar must be materialized inside foo's own package dir"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&nested).unwrap(),
+        "module.exports = 'bar';"
+    );
+    // The point of the whole change: the resolved file's realpath is under the
+    // importer's directory, which is the subtree the build jail grants rw.
+    assert!(
+        nested
+            .canonicalize()
+            .unwrap()
+            .starts_with(foo_dir.canonicalize().unwrap()),
+        "nested copy's realpath must live inside the importer's package dir"
+    );
+    // Nesting is ADDITIVE — the sibling symlink stays for any consumer that
+    // path-joins to it rather than resolving.
+    assert!(
+        project_dir
+            .join("node_modules/.aube/foo@1.0.0/node_modules/bar")
+            .exists(),
+        "the sibling symlink must survive alongside the nested copy"
+    );
+}
+
+#[test]
+fn nested_optional_dep_is_topped_up_on_a_warm_store_and_never_resurrected() {
+    // Two properties in tension, both load-bearing: a warm cell (which the bug
+    // does not prevent being written) must still GAIN the nested copy, yet a
+    // relink must not RESTORE a file the importer's script already consumed.
+    let dir = tempfile::tempdir().unwrap();
+    let (store, indices) = setup_store_with_files(dir.path());
+    persist_indices(&store, &indices);
+    let graph = make_optional_dep_graph();
+
+    // Warm the store WITHOUT the feature, so the cell exists un-nested.
+    let first = dir.path().join("first");
+    std::fs::create_dir_all(&first).unwrap();
+    Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .link_all(&first, &graph, &indices)
+        .unwrap();
+    let warm_foo = first.join("node_modules/.aube/foo@1.0.0/node_modules/foo");
+    assert!(
+        !warm_foo.join("node_modules/bar").exists(),
+        "precondition: the warm cell has no nested copy"
+    );
+
+    let second = dir.path().join("second");
+    std::fs::create_dir_all(&second).unwrap();
+    let nesting = Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .with_nested_optional_deps(&[("foo".to_string(), "bar".to_string())]);
+    nesting.link_all(&second, &graph, &indices).unwrap();
+    let foo_dir = second.join("node_modules/.aube/foo@1.0.0/node_modules/foo");
+    assert!(
+        foo_dir.join("node_modules/bar/index.js").exists(),
+        "the warm cell must be topped up with the nested copy"
+    );
+
+    // RE-LINK THE SAME PROJECT. The runs above always saw a MISSING local `.aube`
+    // entry, which routes through `ensure_in_virtual_store_with_subdir`; only a
+    // second link into an existing project tree classifies `EntryState::Fresh` and
+    // exercises the short-circuit in `link_all` itself. Strip the nest first so a
+    // no-op would be visible.
+    std::fs::remove_dir_all(foo_dir.join("node_modules")).unwrap();
+    nesting.link_all(&second, &graph, &indices).unwrap();
+    assert!(
+        foo_dir.join("node_modules/bar/index.js").exists(),
+        "the EntryState::Fresh short-circuit must also top up the nested copy"
+    );
+
+    // Simulate the postinstall moving the resolved file out of the nested copy.
+    std::fs::remove_file(foo_dir.join("node_modules/bar/index.js")).unwrap();
+    let third = dir.path().join("third");
+    std::fs::create_dir_all(&third).unwrap();
+    nesting.link_all(&third, &graph, &indices).unwrap();
+    assert!(
+        !foo_dir.join("node_modules/bar/index.js").exists(),
+        "a relink must not resurrect a file the importer's script consumed"
+    );
+}

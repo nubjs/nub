@@ -56,6 +56,10 @@ pub struct DiskMaterializePlan {
     /// project-local hidden hoist tree over this set (see
     /// [`Linker::link_hidden_hoist`](crate::Linker)), not a per-importer hoist.
     pub names: Vec<String>,
+    /// `(importer name, optional-dependency name)` pairs fed to
+    /// [`Linker::with_nested_optional_deps`](crate::Linker::with_nested_optional_deps).
+    /// Empty for standalone aube; see that field's docs for the mechanism.
+    pub nested_optional_deps: Vec<(String, String)>,
 }
 
 /// A hook that expands a disk-materialize seed into a graph-aware plan. `Send +
@@ -84,6 +88,7 @@ pub fn expand_disk_materialize(graph: &LockfileGraph, seed: &[String]) -> DiskMa
         Some(hook) => hook(graph, seed),
         None => DiskMaterializePlan {
             names: seed.to_vec(),
+            ..DiskMaterializePlan::default()
         },
     }
 }

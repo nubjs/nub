@@ -246,6 +246,7 @@ impl Linker {
 
         if pkg_nm_dir.exists() {
             trace!("virtual store hit: {dep_path}");
+            self.ensure_nested_optional_deps(&pkg_nm_dir, pkg, graph, stats)?;
             stats.packages_cached += 1;
             return Ok(());
         }
@@ -785,8 +786,170 @@ impl Linker {
                 .map_err(|e| Error::Io(symlink_path.clone(), e))?;
         }
 
+        self.ensure_nested_optional_deps(&pkg_nm_dir, pkg, graph, stats)?;
+
         stats.packages_linked += 1;
         trace!("materialized {dep_path} ({} files)", index.len());
+        Ok(())
+    }
+
+    /// Place every configured nested optional dep inside `pkg_nm_dir`.
+    ///
+    /// Called from the fresh-materialize path AND from every warm short-circuit
+    /// that skips it. That is not belt-and-suspenders: a virtual-store cell is
+    /// reused whenever it already exists, and the failure this nesting fixes does
+    /// not prevent the cell from being written — a machine that has hit the bug
+    /// once holds a fully-materialized cell and would never re-enter
+    /// `materialize_into` to gain the nested copy. Skipping the warm path would
+    /// make the fix apply only to stores that never saw the bug.
+    ///
+    /// `None` (the standalone default) short-circuits before any filesystem work.
+    pub(crate) fn ensure_nested_optional_deps(
+        &self,
+        pkg_nm_dir: &Path,
+        pkg: &LockedPackage,
+        graph: &LockfileGraph,
+        stats: &mut LinkStats,
+    ) -> Result<(), Error> {
+        let Some(dep_names) = self.nested_optional_deps_of(&pkg.name) else {
+            return Ok(());
+        };
+        // `EntryState::Fresh` proves the CELL exists, never the package dir inside
+        // it. Without this the `create_dir_all` below would mint an empty shell at
+        // a path the virtual-store hit then reports as populated forever.
+        if !pkg_nm_dir.exists() {
+            return Ok(());
+        }
+        for dep_name in dep_names {
+            // The npm/pnpm/bun readers mirror an active optional edge into
+            // `dependencies`; the yarn-berry reader keeps the two maps disjoint, so
+            // both are consulted. A pruned optional (platform mismatch) is absent
+            // from the graph and drops out at `resolve_dep_edge`.
+            let Some(dep_tail) = pkg
+                .dependencies
+                .get(dep_name)
+                .or_else(|| pkg.optional_dependencies.get(dep_name))
+            else {
+                continue;
+            };
+            let Some(dep_key) =
+                resolve_dep_edge(dep_name, dep_tail, |k| graph.packages.contains_key(k))
+            else {
+                continue;
+            };
+            let Some(dep_pkg) = graph.packages.get(&dep_key) else {
+                continue;
+            };
+            // Best-effort by contract (see `materialize_nested_dep`): an IO failure
+            // here would otherwise fail an install that the untouched sibling
+            // symlink still serves. Four of the five call sites are warm
+            // short-circuits that previously could not fail at all.
+            if let Err(e) = self.materialize_nested_dep(pkg_nm_dir, dep_name, dep_pkg, stats) {
+                warn!("could not nest optional dep {dep_name} inside {}: {e}", pkg.name);
+            }
+        }
+        Ok(())
+    }
+
+    /// Fill `<importer_dir>/node_modules/<dep_name>` with `dep_pkg`'s files.
+    ///
+    /// A flat file-fill, deliberately WITHOUT the sibling-symlink pass
+    /// [`materialize_into`] does: the nested copy carries no dependency edges of
+    /// its own, so the embedder must only nest packages that are graph leaves.
+    /// Anything else would resolve its own deps by walking up out of the nest into
+    /// the importer's sibling set, which is not the same closure.
+    ///
+    /// Best-effort by contract: a nested copy is an ADDITION on top of a sibling
+    /// symlink that already resolves, so a missing index or a failed write must not
+    /// fail the install — it degrades to the pre-existing layout.
+    ///
+    /// Staged into a `.tmp-` sibling and renamed, for the same reason
+    /// `ensure_in_virtual_store_with_subdir` does: under the global virtual store
+    /// this writes into a cell two concurrent installs share, and a bare
+    /// `create_dir_all` would publish the destination before a single file landed —
+    /// the racing process would see it, take the idempotence skip, and proceed with
+    /// a half-filled copy. `LostRace` keeps the winner's copy.
+    fn materialize_nested_dep(
+        &self,
+        importer_dir: &Path,
+        dep_name: &str,
+        dep_pkg: &LockedPackage,
+        stats: &mut LinkStats,
+    ) -> Result<(), Error> {
+        validate_package_link_name(dep_name)?;
+        let nested_root = importer_dir.join("node_modules");
+        let dest = nested_root.join(dep_name);
+        // Idempotent, and — load-bearing — a relink must NOT resurrect a copy the
+        // importer's own lifecycle script legitimately consumed.
+        if dest.exists() {
+            return Ok(());
+        }
+        let Some(index) = self.store.load_index(
+            dep_pkg.registry_name(),
+            &dep_pkg.version,
+            self.index_read_key(dep_pkg),
+        ) else {
+            debug!(
+                "nested optional dep {dep_name} has no store index; leaving the sibling symlink as \
+                 the only placement"
+            );
+            return Ok(());
+        };
+        let tmp_root = nested_root.join(materialize_tmp_name());
+        let staged = tmp_root.join(dep_name);
+        let result = self.fill_nested_dep(&staged, &index, stats);
+        if result.is_err() {
+            let _ = std::fs::remove_dir_all(&tmp_root);
+            return result;
+        }
+        // A scoped dep publishes at `node_modules/@scope/name`, so the rename needs
+        // its `@scope` parent to exist on the destination side too.
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| Error::Io(parent.to_path_buf(), e))?;
+        }
+        match place_materialized_entry(&staged, &dest) {
+            Ok(MaterializePlacement::Placed) => {}
+            Ok(MaterializePlacement::LostRace) => {
+                stats.files_linked = stats.files_linked.saturating_sub(index.len());
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&tmp_root);
+                return Err(Error::Io(dest, e));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&tmp_root);
+        Ok(())
+    }
+
+    /// Link every file of `index` into `staged`, creating parents in one pass.
+    fn fill_nested_dep(
+        &self,
+        staged: &Path,
+        index: &PackageIndex,
+        stats: &mut LinkStats,
+    ) -> Result<(), Error> {
+        let mut parents: Vec<PathBuf> = vec![staged.to_path_buf()];
+        for rel_path in index.keys() {
+            validate_index_key(rel_path)?;
+            if let Some(parent) = staged.join(rel_path).parent() {
+                parents.push(parent.to_path_buf());
+            }
+        }
+        parents.sort_unstable();
+        parents.dedup();
+        for parent in &parents {
+            std::fs::create_dir_all(parent).map_err(|e| Error::Io(parent.clone(), e))?;
+        }
+        for (rel_path, stored) in index {
+            let target = staged.join(rel_path);
+            self.link_file_fresh(stored, rel_path, &target)?;
+            stats.files_linked += 1;
+            self.note_files_linked(1);
+            if stored.executable {
+                #[cfg(unix)]
+                xx::file::make_executable(&target).map_err(|e| Error::Xx(e.to_string()))?;
+            }
+        }
         Ok(())
     }
 

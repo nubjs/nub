@@ -1,11 +1,10 @@
 use aube_lockfile::graph_hash::GraphHashes;
 use aube_store::Store;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 #[cfg(test)]
 use aube_store::PackageIndex;
-#[cfg(test)]
-use std::collections::BTreeMap;
 #[cfg(test)]
 use std::path::Path;
 
@@ -278,6 +277,20 @@ pub struct Linker {
     /// `.aube/node_modules/`, a blanket alias for every graph package. That
     /// replaced the former per-importer phantom-target hoist.
     disk_materialize: Vec<String>,
+    /// Importer name → optional-dependency names additionally materialized as REAL
+    /// directories nested at `<importer>/node_modules/<dep>`.
+    ///
+    /// MECHANISM ONLY — the embedder owns the policy and states the defect in full
+    /// (nub's `pm_engine::phantom_closure::nested_optional_dep_pairs`). The invariant
+    /// aube guarantees: the isolated layout places a dep as a SIBLING of its
+    /// importer, so `require.resolve` from inside the importer returns a realpath in
+    /// a different virtual-store cell; a nested copy moves that realpath under the
+    /// importer's own directory, which is the subtree a lifecycle script may write.
+    ///
+    /// Keyed by NAME, so two graph copies of one importer nest alike — an extra
+    /// reflink, never a wrong resolution. Empty for standalone aube and every
+    /// existing test, where the materialize pass is byte-for-byte unchanged.
+    nested_optional_deps: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// Strategy for linking files from the store to node_modules.

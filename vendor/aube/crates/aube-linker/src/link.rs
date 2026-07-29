@@ -43,6 +43,7 @@ impl Linker {
             no_integrity_read_keys: self.no_integrity_read_keys.clone(),
             link_progress: self.link_progress.clone(),
             disk_materialize: self.disk_materialize.clone(),
+            nested_optional_deps: self.nested_optional_deps.clone(),
         }
     }
 
@@ -383,6 +384,12 @@ impl Linker {
                                 );
                                 if store_pkg_dir.exists() && local_is_real_dir {
                                     // Both placements already correct.
+                                    self.ensure_nested_optional_deps(
+                                        &local_aube_entry.join("node_modules").join(&pkg.name),
+                                        pkg,
+                                        graph,
+                                        &mut local_stats,
+                                    )?;
                                     local_stats.packages_cached += 1;
                                     return Ok(local_stats);
                                 }
@@ -423,7 +430,16 @@ impl Linker {
                                 )?;
                                 if local_is_real_dir {
                                     // Project-local dir was already correct; only the
-                                    // store copy needed (re)placing, done above.
+                                    // store copy needed (re)placing, done above. The
+                                    // project-local copy is the one an ejected
+                                    // package's realpath resolves to, so it needs the
+                                    // top-up as much as the store copy just did.
+                                    self.ensure_nested_optional_deps(
+                                        &local_aube_entry.join("node_modules").join(&pkg.name),
+                                        pkg,
+                                        graph,
+                                        &mut local_stats,
+                                    )?;
                                     local_stats.packages_cached += 1;
                                     return Ok(local_stats);
                                 }
@@ -466,6 +482,16 @@ impl Linker {
                             let state = classify_entry_state(&local_aube_entry, &global_entry);
 
                             if matches!(state, EntryState::Fresh) {
+                                // Warm shared-store cell. Top up any missing nested
+                                // optional dep before short-circuiting — see
+                                // `ensure_nested_optional_deps` for why the warm
+                                // path is the one this fix has to reach.
+                                self.ensure_nested_optional_deps(
+                                    &global_entry.join("node_modules").join(&pkg.name),
+                                    pkg,
+                                    graph,
+                                    &mut local_stats,
+                                )?;
                                 local_stats.packages_cached += 1;
                                 return Ok(local_stats);
                             }
@@ -565,6 +591,12 @@ impl Linker {
                                 // deliberately omits this dep_path from
                                 // `package_indices` on the fast path, so
                                 // do the existence check first.
+                                self.ensure_nested_optional_deps(
+                                    &aube_entry.join("node_modules").join(&pkg.name),
+                                    pkg,
+                                    graph,
+                                    &mut local_stats,
+                                )?;
                                 local_stats.packages_cached += 1;
                                 return Ok(local_stats);
                             }
@@ -1062,6 +1094,16 @@ impl Linker {
                             let state = classify_entry_state(&local_aube_entry, &global_entry);
 
                             if matches!(state, EntryState::Fresh) {
+                                // Warm shared-store cell. Top up any missing nested
+                                // optional dep before short-circuiting — see
+                                // `ensure_nested_optional_deps` for why the warm
+                                // path is the one this fix has to reach.
+                                self.ensure_nested_optional_deps(
+                                    &global_entry.join("node_modules").join(&pkg.name),
+                                    pkg,
+                                    graph,
+                                    &mut local_stats,
+                                )?;
                                 local_stats.packages_cached += 1;
                                 return Ok(local_stats);
                             }
@@ -1135,6 +1177,12 @@ impl Linker {
                             let mut local_stats = LinkStats::default();
                             let aube_entry = aube_dir.join(self.aube_dir_entry_name(dep_path));
                             if aube_entry.exists() {
+                                self.ensure_nested_optional_deps(
+                                    &aube_entry.join("node_modules").join(&pkg.name),
+                                    pkg,
+                                    graph,
+                                    &mut local_stats,
+                                )?;
                                 local_stats.packages_cached += 1;
                                 return Ok(local_stats);
                             }

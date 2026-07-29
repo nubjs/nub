@@ -206,7 +206,8 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
             cwd,
             graph_for_link.packages.values(),
         ))
-        .with_disk_materialize(&dm_plan.names);
+        .with_disk_materialize(&dm_plan.names)
+        .with_nested_optional_deps(&dm_plan.nested_optional_deps);
     if let Some(enabled) = use_global_virtual_store_override {
         linker = linker.with_use_global_virtual_store(enabled);
     }

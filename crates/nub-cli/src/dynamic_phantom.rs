@@ -107,8 +107,9 @@ pub(crate) fn settings_fingerprint() -> String {
 fn settings_token(enabled: bool) -> String {
     if enabled {
         format!(
-            "phantom_scanner={PHANTOM_SCANNER_VERSION};project_context={}",
-            crate::pm_engine::phantom_closure::project_context_eject_token()
+            "phantom_scanner={PHANTOM_SCANNER_VERSION};project_context={};nested_optional={}",
+            crate::pm_engine::phantom_closure::project_context_eject_token(),
+            crate::pm_engine::phantom_closure::NESTED_OPTIONAL_DEP_POLICY_VERSION,
         )
     } else {
         "phantom_eject=disabled".to_string()
@@ -341,19 +342,23 @@ mod tests {
         );
     }
 
-    /// The user (enabled) token folds the scanner version AND the curated-eject list
-    /// token, so a scanner bump or a #457 list edit invalidates a warm tree and forces
-    /// a re-scan/relink; the dead on/off toggle is gone. The disabled token (reachable
-    /// only via the internal A/B seam) is version-free and distinct, so flipping the
-    /// seam still re-links to the pure-symlink shape. Pins both against a future
-    /// refactor.
+    /// The user (enabled) token folds the scanner version, the curated-eject list
+    /// token, AND the nested-optional-dep policy version, so a bump to any of the
+    /// three invalidates a warm tree and forces the re-scan/relink that carries the
+    /// new behavior. Each segment earns its place by gating a decision made INSIDE
+    /// the expand hook, past aube's own settings fold — without it the fast path
+    /// reports "Already up to date" and the change never reaches an existing
+    /// install. The disabled token (reachable only via the internal A/B seam) is
+    /// version-free and distinct, so flipping the seam still re-links to the
+    /// pure-symlink shape. Pins both against a future refactor.
     #[test]
     fn enabled_token_folds_version_disabled_seam_token_is_distinct() {
         assert_eq!(
             settings_token(true),
             format!(
-                "phantom_scanner={PHANTOM_SCANNER_VERSION};project_context={}",
-                crate::pm_engine::phantom_closure::project_context_eject_token()
+                "phantom_scanner={PHANTOM_SCANNER_VERSION};project_context={};nested_optional={}",
+                crate::pm_engine::phantom_closure::project_context_eject_token(),
+                crate::pm_engine::phantom_closure::NESTED_OPTIONAL_DEP_POLICY_VERSION,
             )
         );
         assert_eq!(settings_token(false), "phantom_eject=disabled");
