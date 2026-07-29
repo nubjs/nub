@@ -436,7 +436,7 @@ pub fn discover_project_config(start: &Path) -> Option<PathBuf> {
 /// FAIL-LOUD: an unknown key or malformed value is a [`ConfigError`], NOT a
 /// silent degrade (unlike the best-effort global reader).
 pub fn read_project_config_at(path: &Path) -> Result<LoadedConfig> {
-    let text = std::fs::read_to_string(path).map_err(ConfigError::Io)?;
+    let text = crate::jsonc::read_guarded(path).map_err(ConfigError::Io)?;
     let source_path = std::path::absolute(path).map_err(ConfigError::Io)?;
     Ok(LoadedConfig {
         source: ConfigSource::file(ConfigSourceKind::Project, &source_path),
@@ -445,7 +445,7 @@ pub fn read_project_config_at(path: &Path) -> Result<LoadedConfig> {
 }
 
 pub(crate) fn read_global_config_at(path: &Path) -> Result<LoadedConfig> {
-    let text = std::fs::read_to_string(path).map_err(ConfigError::Io)?;
+    let text = crate::jsonc::read_guarded(path).map_err(ConfigError::Io)?;
     let source_path = std::path::absolute(path).map_err(ConfigError::Io)?;
     Ok(LoadedConfig {
         source: ConfigSource::file(ConfigSourceKind::Global, &source_path),
@@ -726,9 +726,11 @@ impl EffectiveConfig {
             .map(|path| path.to_string_lossy().into_owned());
 
         if let Some(path) = tsconfig.as_deref() {
-            let text = std::fs::read_to_string(path).map_err(|error| ConfigError::Value {
-                path: "tsconfig".into(),
-                message: format!("cannot read `{path}`: {error}"),
+            let text = crate::jsonc::read_guarded(Path::new(path)).map_err(|error| {
+                ConfigError::Value {
+                    path: "tsconfig".into(),
+                    message: format!("cannot read `{path}`: {error}"),
+                }
             })?;
             let parsed =
                 crate::jsonc::parse_to_value(&text).map_err(|error| ConfigError::Value {
@@ -1522,6 +1524,39 @@ mod tests {
                     .as_ref()
             )
         );
+    }
+
+    /// `/dev/zero` is the case that matters: an unbounded read of it never
+    /// returns, so reaching an assertion at all is half the contract. The other
+    /// half is that it still fails as a `tsconfig` problem — the author gets
+    /// pointed at the key they wrote, not at a bare I/O error.
+    #[cfg(unix)]
+    #[test]
+    fn a_tsconfig_naming_a_device_fails_as_a_tsconfig_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = LoadedConfig {
+            source: ConfigSource::file(ConfigSourceKind::Project, &dir.path().join(FILE_NAME)),
+            values: ProjectConfig {
+                tsconfig: Some("/dev/zero".into()),
+                ..ProjectConfig::default()
+            },
+        };
+        let err = resolve_effective_config(
+            dir.path(),
+            None,
+            Some(project),
+            ConfigOverlays {
+                defaults: ProjectConfig::builtin_defaults(),
+                ..ConfigOverlays::default()
+            },
+        )
+        .runtime_config()
+        .unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Value { path, .. } if path == "tsconfig"),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("not a regular file"), "{err}");
     }
 
     #[test]

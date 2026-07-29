@@ -10,6 +10,13 @@
 //! Depth is therefore capped on the RAW TEXT, before the parser is handed it —
 //! the only point at which the recursion can still be bounded, since the parser
 //! exposes no depth option.
+//!
+//! [`read_guarded`] is the other half of the same job: these files arrive by a
+//! path the user chose, so obtaining the bytes is itself unbounded work unless
+//! the read is bounded too.
+
+use std::io::Read;
+use std::path::Path;
 
 use jsonc_parser::ParseOptions;
 use serde_json::Value;
@@ -26,6 +33,50 @@ pub(crate) const MAX_NESTING_DEPTH: usize = 64;
 pub(crate) fn parse_to_value(text: &str) -> Result<Option<Value>, String> {
     check_nesting_depth(text)?;
     jsonc_parser::parse_to_serde_value(text, &ParseOptions::default()).map_err(|e| e.to_string())
+}
+
+/// Largest externally-authored file read into memory. A fully-populated
+/// `nub.jsonc` is a couple of kilobytes and the tsconfig one points at is a
+/// hand-written sibling, so a megabyte is three orders of magnitude of headroom
+/// — matching [`crate::phantom_scan`]'s bound on a hand-written source file.
+const MAX_FILE_BYTES: u64 = 1024 * 1024;
+
+/// Read an externally-authored file under both a type and a size bound.
+///
+/// The type check comes first, and is what turns a character device or a
+/// writer-less FIFO into an error instead of a hang: `stat` answers where
+/// `open` would block forever, and it follows symlinks, so a link to
+/// `/dev/zero` is judged by its target.
+///
+/// The size bound is then enforced by [`Read::take`] rather than by
+/// `metadata.len()`, because a regular file may under-report its length
+/// (`/proc` entries declare 0) — the declared length is a hint, the bounded
+/// read is the ceiling.
+pub(crate) fn read_guarded(path: &Path) -> std::io::Result<String> {
+    if !std::fs::metadata(path)?.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+
+    // Read bytes, not a String: `take` can cut a multi-byte character in half,
+    // which would report an over-cap file as invalid UTF-8.
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!(
+                "larger than the {} MiB limit",
+                MAX_FILE_BYTES / (1024 * 1024)
+            ),
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.utf8_error()))
 }
 
 /// Byte-scan for the deepest `{`/`[` nesting, ignoring delimiters inside strings
@@ -174,6 +225,22 @@ mod tests {
             "these call jsonc_parser directly and so skip MAX_NESTING_DEPTH; \
              route them through jsonc::parse_to_value: {offenders:#?}"
         );
+    }
+
+    #[test]
+    fn reads_stop_at_the_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let at_limit = dir.path().join("at-limit");
+        let over_limit = dir.path().join("over-limit");
+        std::fs::write(&at_limit, vec![b'/'; MAX_FILE_BYTES as usize]).unwrap();
+        std::fs::write(&over_limit, vec![b'/'; MAX_FILE_BYTES as usize + 1]).unwrap();
+
+        assert_eq!(
+            read_guarded(&at_limit).unwrap().len() as u64,
+            MAX_FILE_BYTES
+        );
+        let over = read_guarded(&over_limit).unwrap_err();
+        assert!(over.to_string().contains("1 MiB limit"), "{over}");
     }
 
     #[test]

@@ -86,7 +86,7 @@ pub fn implicit_dlx() -> ImplicitDlx {
     let Some(path) = config_path() else {
         return ImplicitDlx::Prompt;
     };
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Ok(text) = crate::jsonc::read_guarded(&path) else {
         return ImplicitDlx::Prompt;
     };
     let Ok(Some(value)) = crate::jsonc::parse_to_value(&text) else {
@@ -127,7 +127,7 @@ pub fn set_implicit_dlx(value: ImplicitDlx) -> std::io::Result<()> {
         )
     })?;
 
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let text = crate::jsonc::read_guarded(&path).unwrap_or_default();
     let (root, obj) = root_object(&text);
 
     // Get-or-create the `exec` object, then set-or-append the key inside it.
@@ -160,7 +160,7 @@ pub fn unset_implicit_dlx() -> std::io::Result<()> {
     let Some(path) = config_path() else {
         return Ok(());
     };
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Ok(text) = crate::jsonc::read_guarded(&path) else {
         return Ok(());
     };
     let Ok(root) = CstRootNode::parse(&text, &ParseOptions::default()) else {
