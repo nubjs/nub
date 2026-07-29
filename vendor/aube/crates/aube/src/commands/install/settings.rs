@@ -207,10 +207,16 @@ pub(super) fn detect_aube_dir_gvs_mode(aube_dir: &std::path::Path) -> Option<boo
         // `InvalidInput` directly made `saw_real_dir` unreachable on
         // Windows, so a per-project tree returned `None` and the caller's
         // mode-change wipe never fired.
+        //
+        // `is_real_dir` additionally requires the entry BE a directory, so a
+        // stray regular file directly under `.aube/` no longer counts as
+        // evidence of a per-project tree (it did on Unix, where `read_link` on
+        // a file is also EINVAL). A loose file is not a package entry, so it
+        // should not decide the mode either way.
         if std::fs::read_link(entry.path()).is_ok() {
             return Some(true);
         }
-        if aube_linker::is_real_dir(&entry.path()) {
+        if !saw_real_dir && aube_linker::is_real_dir(&entry.path()) {
             saw_real_dir = true;
         }
     }

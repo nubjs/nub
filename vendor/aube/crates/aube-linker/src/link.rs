@@ -425,6 +425,11 @@ impl Linker {
                                 // Drop a stale shared-store symlink/junction left by
                                 // a prior GVS install or the fetch prewarm before
                                 // materializing the real project-local dir.
+                                // The narrow `remove_dir`/`remove_file` pair is
+                                // correct HERE, unlike the `Stale` sites below:
+                                // the `read_link` guard proves the entry is a
+                                // link, so there is no populated directory for
+                                // it to fail to evict.
                                 if std::fs::read_link(&local_aube_entry).is_ok() {
                                     let _ = std::fs::remove_dir(&local_aube_entry)
                                         .or_else(|_| std::fs::remove_file(&local_aube_entry));
@@ -1869,14 +1874,23 @@ fn reconcile_top_level_link(link_path: &Path, expected_target: &Path) -> Result<
             return Ok(false);
         }
         // Widening order: `remove_dir` unlinks a junction or an empty dir
-        // without a recursive walk, `remove_dir_all` handles a POPULATED real
-        // directory (an incumbent npm/yarn tree being taken over — `remove_dir`
-        // returns `ERROR_DIR_NOT_EMPTY` there and the old `remove_file`
-        // fallback then returned `ERROR_ACCESS_DENIED`, aborting the install
-        // with a bare `os error 5` on the first hoisted dep), and `remove_file`
-        // covers a plain file. Matches what the Unix branch below already does.
+        // without a recursive walk; a POPULATED REAL directory (an incumbent
+        // npm/yarn tree being taken over) needs the recursive delete, because
+        // `remove_dir` returns `ERROR_DIR_NOT_EMPTY` there and the old
+        // `remove_file` fallback then returned `ERROR_ACCESS_DENIED`, aborting
+        // the install with a bare `os error 5` on the first hoisted dep; a
+        // plain file falls through to `remove_file`. The recursive delete is
+        // gated on `is_real_dir` rather than tried unconditionally so it can
+        // only ever reach the one shape it was added for — the Unix branch
+        // below is likewise recursive only in its not-a-link arm.
         match std::fs::remove_dir(link_path)
-            .or_else(|_| std::fs::remove_dir_all(link_path))
+            .or_else(|e| {
+                if crate::is_real_dir(link_path) {
+                    std::fs::remove_dir_all(link_path)
+                } else {
+                    Err(e)
+                }
+            })
             .or_else(|_| std::fs::remove_file(link_path))
         {
             Ok(()) => Ok(false),

@@ -780,13 +780,21 @@ jobs:
       # linker included. That gap is why the Windows-only `read_link` /
       # `junction::create` divergences behind #576 and #566 went unnoticed: the
       # semantics they depend on differ per-OS and nothing exercised them off Unix.
-      # Run the linker's platform-semantics suite from inside the aube workspace on
-      # every OS leg. Scoped to `-p aube-linker --lib` deliberately: a light
-      # dependency subtree, no network or registry fixture, and it covers the
-      # link-creation and entry-classification primitives every install rides on.
+      # Run the engine's platform-semantics suites from inside the aube workspace.
+      # Both crates are needed: the link-creation and entry-classification
+      # primitives live in `aube-linker`, but `detect_aube_dir_gvs_mode`'s tests
+      # live in `aube` — and those are the ones that were `#[cfg(all(test, unix))]`.
+      # `--lib` keeps it to unit tests: no network, no registry fixture.
+      #
+      # Linux is excluded on purpose. These are Node-independent Rust unit tests,
+      # so the five Linux Node-tier legs would run them five identical times, and
+      # aube-parity.yml already runs the whole aube workspace on ubuntu. Windows
+      # (and macOS on the full matrix) is where the divergent path semantics that
+      # motivated these tests actually differ.
       - name: Vendored engine — linker platform semantics
+        if: runner.os != 'Linux'
         working-directory: vendor/aube
-        run: cargo test -p aube-linker --lib
+        run: cargo test -p aube-linker -p aube --lib
       # Brand-boundary sweep for the embedded PM engine: a real `nub install`
       # in a sandboxed fixture (HOME/XDG_* inside a temp dir) must never leak
       # the engine's upstream identity — no ERR_AUBE_/WARN_AUBE_/aube.jdx.dev

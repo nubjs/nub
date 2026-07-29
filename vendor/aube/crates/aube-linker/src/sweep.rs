@@ -324,9 +324,12 @@ pub(crate) fn classify_entry_state(link_path: &Path, expected: &Path) -> EntrySt
         }
         Ok(_) => EntryState::Stale,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => EntryState::Missing,
-        // Some other error (permission, etc.): treat as Stale and
-        // let the removal/recreate path try its best-effort cleanup
-        // + surface the real error on symlink creation if unlucky.
+        // Not a link. Dominated by "it is a real directory" — a per-project
+        // entry where a shared-store one is wanted, which on Windows arrives as
+        // the raw `ERROR_NOT_A_REPARSE_POINT` rather than any mapped kind (see
+        // `is_not_a_link_error`) — plus genuine IO errors like permission.
+        // `Stale` is the right action for both: the caller clears the entry and
+        // recreates it, and a real failure resurfaces at that point.
         Err(_) => EntryState::Stale,
     }
 }
@@ -364,6 +367,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let target = tmp.path().join("target");
         std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), b"keep").unwrap();
 
         let populated = tmp.path().join("populated");
         std::fs::create_dir_all(populated.join("nested")).unwrap();
@@ -381,8 +385,10 @@ mod tests {
                 path.display()
             );
         }
-        // Clearing a link must unlink the entry, not recurse through it.
-        assert!(target.is_dir());
+        // Clearing a link must unlink the entry, not recurse through it. An
+        // empty `target` could not tell the two apart — a follow-through would
+        // delete the contents and still leave the directory standing.
+        assert_eq!(std::fs::read(target.join("keep.txt")).unwrap(), b"keep");
     }
 
     #[test]

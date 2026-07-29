@@ -155,6 +155,18 @@ fn create_junction_with_retry(target: &Path, link: &Path) -> io::Result<()> {
                 crate::try_remove_entry(link);
             }
             Err(e) if is_retriable_link_error(&e) && attempt < 9 => {
+                // `junction::create` is not atomic: it `fs::create_dir`s the
+                // link path and only then opens it to write the reparse point
+                // (junction-2.0.0 internals.rs:37-38), with no cleanup if that
+                // second step fails. A 5/32 here therefore LEAKS an empty
+                // directory, and the next attempt collides with our own debris.
+                // Release the latch so that self-inflicted collision does not
+                // spend the one reconcile the loop allows — otherwise transient
+                // AV/indexer contention exhausts the backoff after two attempts
+                // and reports 183 for what was really a sharing violation.
+                // Termination still holds: `attempt` is the bound, and it only
+                // ever increases.
+                reconciled = false;
                 std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                 delay_ms = (delay_ms * 2).min(2000);
                 attempt += 1;
@@ -1237,14 +1249,13 @@ mod tests {
         occupy(&link);
         create_dir_link(&target, &link).unwrap();
 
+        // Reading the marker THROUGH the link proves both that the link
+        // resolves to `target` and that `target`'s contents survived.
         assert_eq!(
             std::fs::read(link.join("marker.txt")).unwrap(),
             b"hi",
             "link does not resolve to the requested target after reconcile"
         );
-        // The target's own contents must survive the reconcile — clearing the
-        // slot must unlink the entry, never recurse through it.
-        assert!(target.join("marker.txt").exists());
     }
 
     #[test]
@@ -1265,13 +1276,31 @@ mod tests {
         assert_converges(|link| std::fs::write(link, b"stale").unwrap());
     }
 
+    /// Repointing a link must unlink the OLD entry, never recurse through it
+    /// into the directory it referenced. Written out longhand rather than via
+    /// `assert_converges` because the assertion that matters here is about the
+    /// abandoned target, which the helper has no handle on.
     #[test]
-    fn create_dir_link_converges_over_link_to_other_target() {
-        assert_converges(|link| {
-            let other = link.parent().unwrap().join("other-target");
-            std::fs::create_dir_all(&other).unwrap();
-            create_dir_link(&other, link).unwrap();
-        });
+    fn create_dir_link_repoint_does_not_follow_the_old_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("marker.txt"), b"hi").unwrap();
+
+        let other = dir.path().join("other-target");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("keep.txt"), b"keep").unwrap();
+
+        let link = dir.path().join("link");
+        create_dir_link(&other, &link).unwrap();
+        create_dir_link(&target, &link).unwrap();
+
+        assert_eq!(std::fs::read(link.join("marker.txt")).unwrap(), b"hi");
+        assert_eq!(
+            std::fs::read(other.join("keep.txt")).unwrap(),
+            b"keep",
+            "clearing the slot recursed through the old link and destroyed its target"
+        );
     }
 
     /// The hot case, and literally the shape #576 reports: a warm re-link
