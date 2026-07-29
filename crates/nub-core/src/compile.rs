@@ -57,9 +57,10 @@ pub struct Manifest {
     /// version. Smol: the acceptance FLOOR the launcher enforces (`discovered >=
     /// node_version`) and the version it provisions when nothing is found.
     ///
-    /// The floor is the WHOLE acceptance rule for smol — a compiled range's upper
-    /// bound is deliberately not carried (gap 8: any discovered Node >= target
-    /// qualifies, whatever the major), so there is no second version field here.
+    /// The floor is the WHOLE acceptance rule for smol: any discovered Node at or
+    /// above it qualifies, whatever the major. A compiled range's upper bound is
+    /// deliberately not carried into the artifact, so there is no second version
+    /// field here.
     pub node_version: String,
     /// The target triple this binary was compiled for (e.g. `darwin-arm64`).
     pub triple: String,

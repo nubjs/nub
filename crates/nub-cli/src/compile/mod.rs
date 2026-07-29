@@ -106,8 +106,8 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     let (node_version, node_blob, node_sha) = if opts.smol {
         // Smol bakes the acceptance FLOOR the launcher enforces (`discovered >=
         // floor`) — and ONLY that. A range's upper bound is deliberately not
-        // carried into the artifact (gap 8), so the raw spec is echoed here for
-        // the compiling user and goes no further.
+        // carried into the artifact, so the raw spec is echoed here for the
+        // compiling user and goes no further.
         let floor = version_management::pin_floor(&pin, &cache_root)?;
         eprintln!(
             "Using Node.js {} (resolved from {source}; satisfied at runtime)",

@@ -35,6 +35,11 @@ libsui = "0.16"
 zstd = { version = "0.13", default-features = false }
 anyhow = "1"
 libc = "0.2"
+# Home resolution for the --smol version-manager scan. Not `$HOME` directly: a
+# compiled binary is routinely launched from a service manager or cron with HOME
+# unset, which is exactly when the scan matters, and this falls back to getpwuid_r.
+# nub-core already links it, so it costs the launcher nothing.
+dirs-next = "2"
 # SHA-256 verification of a `--smol` shell-out-provisioned Node against
 # SHASUMS256.txt before it is committed into the shared store (fat-LTO drops it
 # from the embed-shape path, which never provisions).
