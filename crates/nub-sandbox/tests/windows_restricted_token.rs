@@ -58,8 +58,9 @@ mod win {
         AccessCheck, CreateRestrictedToken, DACL_SECURITY_INFORMATION, DISABLE_MAX_PRIVILEGE,
         DuplicateTokenEx, GENERIC_MAPPING, GROUP_SECURITY_INFORMATION, GetLengthSid,
         OWNER_SECURITY_INFORMATION, PRIVILEGE_SET, PSECURITY_DESCRIPTOR, PSID, SID_AND_ATTRIBUTES,
-        SecurityImpersonation, SetTokenInformation, TOKEN_ALL_ACCESS, TOKEN_DUPLICATE,
-        TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenImpersonation, TokenIntegrityLevel,
+        SecurityImpersonation, SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_ALL_ACCESS,
+        TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+        TokenImpersonation, TokenIntegrityLevel,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -104,13 +105,21 @@ mod win {
         Ok(SidGuard(sid))
     }
 
+    /// The rights the derived tokens need, and the reason the first revision of this probe
+    /// measured nothing: `CreateRestrictedToken` gives the new token THE SAME access rights as the
+    /// handle it was derived from, and `SetTokenInformation(TokenIntegrityLevel)` requires
+    /// `TOKEN_ADJUST_DEFAULT`. Opening with only `TOKEN_DUPLICATE | TOKEN_QUERY` therefore built a
+    /// restricted token that could not be relabelled, and both treatment arms failed with
+    /// ACCESS_DENIED before a single access check ran — which reads exactly like the mechanism
+    /// being unavailable rather than the harness being wrong.
+    const TOKEN_RIGHTS: u32 =
+        TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ASSIGN_PRIMARY;
+
     /// An impersonation-level duplicate of our own token, unmodified. The baseline arm.
     fn own_token() -> std::io::Result<TokenGuard> {
         let mut me: HANDLE = std::ptr::null_mut();
         // SAFETY: opens our own process token with exactly the rights used below.
-        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &mut me) }
-            == 0
-        {
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_RIGHTS, &mut me) } == 0 {
             return Err(std::io::Error::last_os_error());
         }
         let _me = TokenGuard(me);
@@ -126,9 +135,7 @@ mod win {
     fn restricted_token(level: &str) -> std::io::Result<TokenGuard> {
         let mut me: HANDLE = std::ptr::null_mut();
         // SAFETY: as above.
-        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &mut me) }
-            == 0
-        {
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_RIGHTS, &mut me) } == 0 {
             return Err(std::io::Error::last_os_error());
         }
         let _me = TokenGuard(me);
@@ -154,11 +161,18 @@ mod win {
             )
         };
         if ok == 0 {
-            return Err(std::io::Error::last_os_error());
+            return Err(std::io::Error::other(format!(
+                "CreateRestrictedToken: {}",
+                std::io::Error::last_os_error()
+            )));
         }
         let restricted = TokenGuard(restricted);
-        set_integrity(restricted.0, level)?;
+        // Named per step: "Access is denied" alone cannot be told from the mechanism being
+        // unavailable, which is how the first revision's failure was nearly read as a finding.
+        set_integrity(restricted.0, level)
+            .map_err(|e| std::io::Error::other(format!("SetTokenInformation(integrity): {e}")))?;
         duplicate_for_check(restricted.0)
+            .map_err(|e| std::io::Error::other(format!("DuplicateTokenEx: {e}")))
     }
 
     fn set_integrity(token: HANDLE, level: &str) -> std::io::Result<()> {
