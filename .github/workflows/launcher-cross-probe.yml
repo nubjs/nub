@@ -1,0 +1,88 @@
+# Branch-scoped probe (see .claude/skills/ci-adhoc-test) — NO PR needed.
+# Pushing to the launcher-cross-probe branch runs this on a real ubuntu runner.
+#
+# Verifies that `crates/nub-launcher` — its OWN cargo workspace, excluded from
+# the repo root workspace, depending on crates/nub-core by path — actually
+# cross-compiles inside `cross`'s container for every `cross: true` target in
+# release.yml's build matrix (x86_64-unknown-linux-musl,
+# aarch64-unknown-linux-gnu, aarch64-unknown-linux-musl). `cross` mounts only
+# the launcher's own workspace + path deps, so nub-core's manifest must parse
+# with no repo-root workspace present — the #132 failure the self-contained
+# nub-core Cargo.toml (inlined workspace.package/dependencies/lints fields)
+# was written to fix. This probe confirms that fix holds in a REAL cross
+# container, not just the mount-set MODEL it was verified against locally.
+name: launcher-cross-probe
+on:
+  push:
+    branches: [launcher-cross-probe]
+    paths:
+      - 'crates/nub-launcher/**'
+      - 'crates/nub-core/**'
+      - '.github/workflows/launcher-cross-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: cross build nub-launcher (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-gnu
+          - aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: launcher-cross-probe-${{ matrix.target }}
+          workspaces: crates/nub-launcher -> target
+
+      - name: Install cross
+        # Pinned to match release.yml's exact version (a from-source rebuild
+        # would test a different cross than the one release.yml actually uses).
+        run: cargo install cross --version 0.2.5 --locked
+
+      # Visible-in-the-log check that isolates a workspace-root failure from an
+      # ordinary compile error: cargo metadata inside the launcher workspace,
+      # run from the SAME container cross uses, must exit 0 whether or not
+      # crates/nub-core carries any `workspace = true` inheritance. If this
+      # step ever fails with "failed to find a workspace root" while the build
+      # step below fails too, that is the #132 regression, not a new bug.
+      - name: cargo metadata (workspace-root check, native)
+        run: |
+          set +e
+          cd crates/nub-launcher
+          cargo metadata --no-deps > /dev/null
+          RC=$?
+          echo "cargo metadata --no-deps exit status: $RC"
+          exit "$RC"
+
+      - name: cross build nub-launcher
+        env:
+          MATRIX_TARGET: ${{ matrix.target }}
+        run: |
+          set +e
+          cd crates/nub-launcher
+          cross build --release --target "$MATRIX_TARGET"
+          RC=$?
+          echo "cross build exit status: $RC"
+          exit "$RC"
+
+      - name: Verify the built binary exists
+        env:
+          MATRIX_TARGET: ${{ matrix.target }}
+        run: |
+          ls -la "crates/nub-launcher/target/$MATRIX_TARGET/release/nub-launcher"
+          file "crates/nub-launcher/target/$MATRIX_TARGET/release/nub-launcher"
