@@ -106,24 +106,50 @@ export function groupByOwner(delta) {
   return { byOwner, unattributed };
 }
 
-/// A regular file that looks like a shipped executable payload rather than
-/// bookkeeping. Shared by the `binary-downloader` predicate and by the
-/// outside-the-cell diagnostic, so the two always agree on what "a binary" means.
+/// A created entry substantial enough to be the payload a downloader exists to
+/// fetch, as opposed to bookkeeping from a script that bailed. Shared by the
+/// `binary-downloader` predicate and the outside-the-cell diagnostic so both agree.
 ///
-/// THE EXEC BIT ALONE IS NOT ENOUGH and the size floor alone is not either:
-///   * a symlink is mode 0777 on Linux, so `type` must be pinned to a regular file;
-///   * a 200-byte shell shim is executable, and a partially-written download or an
-///     HTTP error page saved to disk is a small regular file — both are excluded by
-///     the floor, and both are precisely the "it wrote something then died" shape;
-///   * a downloaded `.node` / `.so` / `.dll` is often mode 0644, so extension is a
-///     second admissible route rather than a redundant one.
-export const BINARY_MIN_BYTES = 1024 * 1024;
-const BINARY_EXT = /\.(node|so|so\.\d+|dylib|dll|wasm|a|exe|jar)$/i;
-export function isBinaryPayload(e) {
+/// THE TEST IS SIZE ON A REGULAR FILE, and the exec bit is deliberately NOT part of
+/// it — that is a correction to this function's first version, made after it was
+/// measured against a real run.
+///
+/// The first version required `>= 1 MiB AND (mode-executable OR native extension)`.
+/// The size floor is the clause that does the discriminating work: the two
+/// distributions are orders of magnitude apart, with bookkeeping (a JSON receipt, a
+/// log, a saved HTTP error body) in the tens of KiB and real payloads in the
+/// megabytes-to-hundreds-of-megabytes. The exec/extension clause was meant to add
+/// specificity on top, and instead produced a FALSE NEGATIVE on a genuine download:
+/// `azure-functions-core-tools@4.12.1` fetched
+/// `azure-functions-core-tools/bin/Azure.Functions.Cli.…` — 579,911,350 bytes, mode
+/// 0664 — and was scored INVALID-FIXTURE because 580 MB of downloaded payload
+/// happened not to carry the exec bit or a name this list recognised. A predicate
+/// that calls a successful half-gigabyte download "unmeasurable" is wrong in the
+/// direction that hides breakage, so the clause is now a RECORDED CORROBORATOR
+/// (`payloadFacts`) rather than a gate.
+///
+/// Why size alone is still sound here: a >= 1 MiB regular file appearing inside a
+/// cell that ALREADY EXISTED before the window cannot come from materialisation
+/// (that is the `kind` discriminator's job), and cannot come from the PM's own
+/// hardlink-breaking either — rewriting a file with identical content yields an
+/// equal digest and an equal size, so it lands in TOUCHED, which is excluded from
+/// ACTED by construction.
+///
+/// `ty === 'file'` still matters: a symlink is mode 0777 on Linux and would sail
+/// through any mode test, and dirs report size 0.
+export const PAYLOAD_MIN_BYTES = 1024 * 1024;
+const NATIVE_EXT = /\.(node|so|so\.\d+|dylib|dll|wasm|a|exe|jar)$/i;
+export function isSubstantialPayload(e, min = PAYLOAD_MIN_BYTES) {
   if (!e || e.ty !== 'file') return false;
-  if (!(e.sz >= BINARY_MIN_BYTES)) return false;
-  const executable = e.mode != null && (e.mode & 0o111) !== 0;
-  return executable || BINARY_EXT.test(e.p ?? e.path ?? '');
+  return e.sz >= min;
+}
+/// The corroborators, recorded next to every payload so a reader can see whether it
+/// was executable or native-named without that judgement having gated the verdict.
+export function payloadFacts(e) {
+  return {
+    executable: e?.mode != null && (e.mode & 0o111) !== 0,
+    native_ext: NATIVE_EXT.test(e?.p ?? e?.path ?? ''),
+  };
 }
 
 // Distinguish SCRIPT OUTPUT from PM MATERIALISATION inside the same window.

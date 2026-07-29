@@ -31,6 +31,26 @@ const PM_NOISE = [
   /^proj:node_modules\/\.(modules|nub|package-lock)/,
   /\.aube-side-effects-cache/,               // aube's side-effect replay cache
   /^tmp:fslock\//,                           // PM file locks
+  // ⭐ BIN-SHIM MATERIALISATION — the single largest source of fake work-signal.
+  // A cell's `node_modules/.bin/` holds shims the PM generates for that package's
+  // DEPENDENCIES; they are nub's writes, not the lifecycle script's. They land
+  // inside the cell, so attribution correctly assigns them to the package, and
+  // that is exactly what made them so misleading.
+  //
+  // MEASURED on one A0 shard: 135 of 140 owners with any delta had .bin entries,
+  // 216 of 699 created entries (31%) were .bin shims. And it is what produced the
+  // study's headline defect — @cloudflare/wrangler@1.21.0 scored
+  // DID-WORK-AND-SUCCEEDED on `changed=2`, and those two entries were:
+  //     .bin          0 b   dir
+  //     .bin/rimraf 280 b   a shim for its rimraf dependency
+  // Wrangler's postinstall produced NOTHING; the package manager wrote both. So
+  // the original predicate was not merely weak — for this package it was reading
+  // the PM's own bookkeeping as the package's work.
+  //
+  // Nothing legitimate is lost: bin links are the PM's job by construction, and no
+  // class's work-signal is a sibling `.bin` entry (the hook-installer class, the
+  // one that writes outside its own cell, is scored on project paths).
+  /node_modules\/\.bin(\/|$)/,
 ];
 const isNoise = (k) => PM_NOISE.some((re) => re.test(k));
 

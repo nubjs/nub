@@ -13,7 +13,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { isBinaryPayload, BINARY_MIN_BYTES } from './attribute.mjs';
+import { isSubstantialPayload, payloadFacts, PAYLOAD_MIN_BYTES } from './attribute.mjs';
 
 const [deltaF, manifestF, logF, outF] = process.argv.slice(2);
 const delta = JSON.parse(fs.readFileSync(deltaF, 'utf8'));
@@ -89,14 +89,14 @@ for (const m of manifest) {
       // The artifact, not its existence. `evidence` names the file that satisfied the
       // predicate (or the largest created file that failed to), so a reader can judge
       // the 1 MiB floor against what was actually on disk instead of taking it on faith.
-      const min = P.created_binary.min_bytes ?? BINARY_MIN_BYTES;
-      const hit = created.find((e) => isBinaryPayload(e) && e.sz >= min);
+      const min = P.created_binary.min_bytes ?? PAYLOAD_MIN_BYTES;
+      const hit = created.find((e) => isSubstantialPayload(e, min));
       const biggest = created.reduce((a, e) => ((e.sz ?? 0) > (a?.sz ?? -1) ? e : a), null);
       binaryEvidence = hit ?? biggest ?? null;
       reasons.push(
         hit
-          ? `created_binary: HIT ${hit.p} ${hit.sz}b mode=${(hit.mode ?? 0).toString(8)}`
-          : `created_binary: MISS (>=${min}b regular file, executable or native ext) — largest created: ${
+          ? `created_binary: HIT ${hit.p} ${hit.sz}b mode=${(hit.mode ?? 0).toString(8)} ${JSON.stringify(payloadFacts(hit))}`
+          : `created_binary: MISS (no created regular file >=${min}b) — largest created: ${
               biggest ? `${biggest.p} ${biggest.sz}b mode=${(biggest.mode ?? 0).toString(8)}` : 'none'
             }`,
       );
@@ -157,14 +157,14 @@ for (const m of manifest) {
   const artifacts = [...created]
     .sort((a, b) => (b.sz ?? 0) - (a.sz ?? 0))
     .slice(0, 5)
-    .map((e) => ({ p: e.p, sz: e.sz, mode: (e.mode ?? 0).toString(8), ty: e.ty, binary: isBinaryPayload(e) }));
+    .map((e) => ({ p: e.p, sz: e.sz, mode: (e.mode ?? 0).toString(8), ty: e.ty, payload: isSubstantialPayload(e), ...payloadFacts(e) }));
 
   results.push({
     pkg: m.pkg, version: m.version, class: m.cls, kind, acted,
     changed: changed.length, effect, verdict, reasons,
     artifacts,
     binary_evidence: binaryEvidence
-      ? { p: binaryEvidence.p, sz: binaryEvidence.sz, mode: (binaryEvidence.mode ?? 0).toString(8), binary: isBinaryPayload(binaryEvidence) }
+      ? { p: binaryEvidence.p, sz: binaryEvidence.sz, mode: (binaryEvidence.mode ?? 0).toString(8), payload: isSubstantialPayload(binaryEvidence), ...payloadFacts(binaryEvidence) }
       : null,
   });
 }
@@ -177,7 +177,7 @@ for (const m of manifest) {
 const binaryWritesOutsideCells = [];
 for (const [kind, entries] of Object.entries(delta.unattributed_sample || {})) {
   for (const e of entries) {
-    if (isBinaryPayload({ ...e, p: e.path })) binaryWritesOutsideCells.push({ kind, ...e });
+    if (isSubstantialPayload({ ...e, p: e.path })) binaryWritesOutsideCells.push({ kind, ...e, ...payloadFacts({ ...e, p: e.path }) });
   }
 }
 

@@ -59,10 +59,20 @@ const CASES = [
     why: 'A downloaded .node is routinely mode 0644, so extension must be a second route.',
   },
   {
-    name: 'tarball-only', cls: 'binary-downloader',
-    created: [{ p: 'dl/pkg.tar.gz', sz: 9 * MiB, mode: 0o644, ty: 'file' }],
-    want: 'DID-WORK-AND-FAILED',
-    why: 'Large but neither executable nor a native artifact: the payload never landed.',
+    name: 'non-executable-payload', cls: 'binary-downloader',
+    created: [{ p: 'bin/Azure.Functions.Cli.dat', sz: 553 * MiB, mode: 0o664, ty: 'file' }],
+    want: 'DID-WORK-AND-SUCCEEDED',
+    why: 'THE SECOND REGRESSION: azure-functions-core-tools@4.12.1 downloads 579,911,350 bytes '
+      + 'at mode 0664. Requiring the exec bit scored that as unmeasurable — a false negative in '
+      + 'the direction that hides breakage.',
+  },
+  {
+    name: 'bin-shim-noise', cls: 'binary-downloader',
+    created: [],  // delta.mjs drops node_modules/.bin, so nothing reaches the predicate
+    want: 'NEVER-RAN-ITS-REAL-PATH',
+    why: 'THE ROOT CAUSE: wrangler\'s changed=2 was a 0-byte .bin dir and a 280-byte PM shim for '
+      + 'its rimraf dependency. With .bin excluded as PM noise the honest verdict is that its '
+      + 'postinstall did nothing observable.',
   },
   {
     name: 'just-under', cls: 'binary-downloader',
