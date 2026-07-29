@@ -24,11 +24,17 @@
 //! the host has no linked token, and NAMES which route it used.
 //!
 //! THE ANTI-HOLLOW CONTRACT: an arm that never ran must never read as a pass. So the arm
-//! writes its OWN token elevation state to a marker file as its first act, and the parent
-//! fails unless (a) both markers exist, (b) the de-elevated arm's marker reports
-//! `elevated=0`, and (c) every property reported a verdict in BOTH arms. The
-//! `acl-grant-allow` property is the CONTROL — it must pass in both arms, which is what
-//! distinguishes it from a second copy of the treatment.
+//! reports its OWN token state to a marker file as its first act, and the parent fails
+//! unless (a) both markers exist, (b) the de-elevated arm could NOT pass an access check
+//! only an administrator passes while the elevated arm COULD, and (c) every property
+//! reported a verdict in BOTH arms. The `acl-grant-allow` property is the CONTROL — it must
+//! pass in both arms, which is what distinguishes it from a second copy of the treatment.
+//!
+//! The gate is an access check, not `TokenIsElevated`, because that flag is not a sound
+//! oracle here: `CreateRestrictedToken` COPIES it rather than recomputing it, so the
+//! fallback route produces a token with no administrative authority that still reports
+//! `TokenIsElevated=1` (measured, run 30423750288). Both values are reported; only the
+//! access-checked one gates. See [`admin_authority`].
 
 #[cfg(not(target_os = "windows"))]
 fn main() {
@@ -190,21 +196,62 @@ mod win {
         }
     }
 
-    fn token_elevated(tok: windows_sys::Win32::Foundation::HANDLE) -> bool {
-        use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TokenElevation};
-        let mut elev = TOKEN_ELEVATION { TokenIsElevated: 0 };
-        let mut ret = 0u32;
-        // SAFETY: `tok` carries TOKEN_QUERY; the buffer is exactly a TOKEN_ELEVATION.
-        let ok = unsafe {
-            GetTokenInformation(
+    /// `TokenElevationType`: 1 Default (no split token on this host/logon), 2 Full
+    /// (the elevated half of a split), 3 Limited (the standard-user half). Reported because
+    /// it is what says whether a LINKED token should exist at all.
+    fn elevation_type() -> u32 {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TokenElevationType};
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        // SAFETY: query-only handle on our own token; the buffer is the DWORD this class
+        // returns.
+        unsafe {
+            let mut tok = std::ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) == 0 {
+                return 0;
+            }
+            let mut ty: u32 = 0;
+            let mut ret = 0u32;
+            let ok = GetTokenInformation(
                 tok,
-                TokenElevation,
-                std::ptr::from_mut(&mut elev).cast(),
-                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                TokenElevationType,
+                std::ptr::from_mut(&mut ty).cast(),
+                4,
                 &mut ret,
-            )
+            );
+            CloseHandle(tok);
+            if ok != 0 { ty } else { 0 }
+        }
+    }
+
+    /// Whether this process actually WIELDS administrative authority, decided by an access
+    /// check rather than by a token flag.
+    ///
+    /// This is the load-bearing oracle, and `TokenIsElevated` is NOT a substitute for it:
+    /// `CreateRestrictedToken` COPIES the elevation flag from its parent instead of
+    /// recomputing it, so a token whose `BUILTIN\Administrators` SID has been reduced to
+    /// deny-only and whose privileges are all stripped still reports `TokenIsElevated=1`
+    /// while being unable to do anything an administrator can (measured on windows-latest,
+    /// run 30423750288). `SC_MANAGER_CREATE_SERVICE` is the canonical probe — the SCM grants
+    /// it to Administrators only, a deny-only SID does not match, and the call mutates
+    /// nothing.
+    fn admin_authority() -> bool {
+        use windows_sys::Win32::System::Services::{
+            CloseServiceHandle, OpenSCManagerW, SC_MANAGER_CREATE_SERVICE,
         };
-        ok != 0 && elev.TokenIsElevated != 0
+        // SAFETY: opens the local SCM for a right we never exercise; NULL machine/database.
+        unsafe {
+            let h = OpenSCManagerW(
+                std::ptr::null(),
+                std::ptr::null(),
+                SC_MANAGER_CREATE_SERVICE,
+            );
+            if h.is_null() {
+                return false;
+            }
+            CloseServiceHandle(h);
+            true
+        }
     }
 
     /// A PRIMARY token for the SAME user with administrative authority removed, usable as
@@ -213,11 +260,19 @@ mod win {
     ///
     /// The linked token is preferred: on a UAC-filtered admin it IS the standard-user token
     /// Windows already minted for this logon, so the arm runs as a genuine standard user.
-    /// The restricted-token fallback covers a host with LUA filtering off (no linked token
-    /// exists there); it is STRICTLY MORE confined than a standard user — the Administrators
-    /// SID becomes deny-only rather than merely absent — so a jail that holds under it holds
-    /// for a standard user, while a failure under it needs the deny-only SID ruled out
-    /// before being read as an elevation requirement.
+    /// Every step is logged, because a silent fall-through to route 2 would leave the report
+    /// unable to say WHY the ideal token was unavailable.
+    ///
+    /// The restricted-token fallback is STRICTLY MORE confined than a standard user — the
+    /// Administrators SID becomes deny-only rather than merely absent — so a jail that holds
+    /// under it holds for a standard user, while a failure under it needs the deny-only SID
+    /// ruled out before being read as an elevation requirement. `DISABLE_MAX_PRIVILEGE`
+    /// keeps only `SeChangeNotifyPrivilege`, which is exactly the traverse-bypass the
+    /// backend's leaf-only grants already depend on.
+    ///
+    /// Neither route is accepted on the `TokenIsElevated` flag — see [`admin_authority`] for
+    /// why that flag lies under route 2. The caller gates on the arm's own access-checked
+    /// verdict instead.
     fn deelevated_primary_token()
     -> std::io::Result<(windows_sys::Win32::Foundation::HANDLE, &'static str)> {
         use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
@@ -259,31 +314,50 @@ mod win {
                 &mut ret,
             )
         };
-        if got != 0 && !linked.LinkedToken.is_null() {
+        if got == 0 {
+            println!(
+                "    [linked-token] GetTokenInformation(TokenLinkedToken) failed: {}",
+                std::io::Error::last_os_error()
+            );
+        } else if linked.LinkedToken.is_null() {
+            println!("    [linked-token] no linked token on this logon");
+        } else {
             let mut primary: HANDLE = std::ptr::null_mut();
             // `TokenLinkedToken` hands back an IMPERSONATION token; CreateProcessAsUserW
-            // needs a PRIMARY one.
-            // SAFETY: duplicating a token we own into a primary token.
-            let dup = unsafe {
-                DuplicateTokenEx(
-                    linked.LinkedToken,
-                    TOKEN_ALL_ACCESS,
-                    std::ptr::null(),
-                    SecurityImpersonation,
-                    TokenPrimary,
-                    &mut primary,
-                )
-            };
-            unsafe { CloseHandle(linked.LinkedToken) };
-            if dup != 0 {
-                // A "linked" token that still reports elevated is not a de-elevation; drop
-                // it rather than measure under it.
-                if !token_elevated(primary) {
+            // needs a PRIMARY one. Without `SeTcbPrivilege` the handle can come back at
+            // IDENTIFICATION level with less than TOKEN_ALL_ACCESS, so the wide request is
+            // retried at the minimum CreateProcessAsUserW actually needs before giving up.
+            let wanted = [
+                ("TOKEN_ALL_ACCESS", TOKEN_ALL_ACCESS),
+                (
+                    "assign-primary|duplicate|query",
+                    TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY,
+                ),
+            ];
+            for (label, access) in wanted {
+                // SAFETY: duplicating a token handle we own into a primary token.
+                let dup = unsafe {
+                    DuplicateTokenEx(
+                        linked.LinkedToken,
+                        access,
+                        std::ptr::null(),
+                        SecurityImpersonation,
+                        TokenPrimary,
+                        &mut primary,
+                    )
+                };
+                if dup != 0 {
+                    unsafe { CloseHandle(linked.LinkedToken) };
                     unsafe { CloseHandle(me) };
+                    println!("    [linked-token] duplicated as primary ({label})");
                     return Ok((primary, "linked-token"));
                 }
-                unsafe { CloseHandle(primary) };
+                println!(
+                    "    [linked-token] DuplicateTokenEx({label}) failed: {}",
+                    std::io::Error::last_os_error()
+                );
             }
+            unsafe { CloseHandle(linked.LinkedToken) };
         }
 
         // Route 2 — a restricted token with BUILTIN\Administrators deny-only and every
@@ -323,12 +397,6 @@ mod win {
         }
         if ok == 0 {
             return Err(err);
-        }
-        if token_elevated(restricted) {
-            unsafe { CloseHandle(restricted) };
-            return Err(std::io::Error::other(
-                "restricted token still reports TokenIsElevated=1",
-            ));
         }
         Ok((restricted, "restricted-token"))
     }
@@ -455,9 +523,24 @@ mod win {
             let project = root.join("proj");
             let package = project.join("node_modules/pkg");
             let home = root.join("home");
-            for d in [&bin, &work, &vault, &package, &home.join("cache")] {
+            let cache = home.join("cache");
+            // The Windows backend turns EVERY read grant into an inheritable ACE and fails
+            // the launch when the target does not exist — `FsOrigin` is not carried into the
+            // launch plan, so the build jail's SPECULATIVE roots (the project manifest, the
+            // PM store/tools cache) must be materialized here or `compile_build_jail`'s
+            // policy cannot launch at all. See the report: this is a Windows-only divergence
+            // from Linux, where `compile_mount_plan` skips a missing speculative source.
+            for d in [
+                &bin,
+                &work,
+                &vault,
+                &package,
+                &cache.join("nub/pm/store"),
+                &cache.join("nub/pm/tools"),
+            ] {
                 std::fs::create_dir_all(d).unwrap();
             }
+            std::fs::write(project.join("package.json"), b"{}").unwrap();
             let child = bin.join("child.exe");
             std::fs::copy(std::env::current_exe().unwrap(), &child).unwrap();
             let allowed = work.join("allowed.txt");
@@ -670,8 +753,10 @@ mod win {
     /// it was created with differs.
     pub fn arm_main(marker_path: &str) -> i32 {
         let elevated = is_elevated();
+        let admin = admin_authority();
         // FIRST ACT, before anything can fail: the marker's existence proves the arm ran,
-        // and `elevated=` proves WHICH arm it was. The parent gates on both.
+        // and the two token lines prove WHICH arm it was. `admin=` is the gate the parent
+        // actually trusts — `elevated=` is the token flag, which route 2 leaves stale.
         let mut marker = match std::fs::File::create(marker_path) {
             Ok(f) => f,
             Err(e) => {
@@ -680,10 +765,13 @@ mod win {
             }
         };
         let _ = writeln!(marker, "elevated={}", u8::from(elevated));
+        let _ = writeln!(marker, "admin={}", u8::from(admin));
         let _ = marker.flush();
         println!(
-            "ARM elevated={} pid={}",
+            "ARM elevated={} admin={} elevation-type={} pid={}",
             u8::from(elevated),
+            u8::from(admin),
+            elevation_type(),
             std::process::id()
         );
 
@@ -930,21 +1018,35 @@ mod win {
 
     // ── the differential driver ───────────────────────────────────────────────────
 
-    /// Parse an arm's marker into `(elevated, property→verdict)`. `None` ⇒ the arm never
-    /// wrote a marker, which is the "it did not run" case the parent must never pass.
-    fn read_marker(path: &Path) -> Option<(bool, Vec<(String, bool)>)> {
+    struct Arm {
+        /// The `TokenIsElevated` flag. Informative only — `CreateRestrictedToken` copies it.
+        elevated: bool,
+        /// Access-checked administrative authority. THE gate.
+        admin: bool,
+        props: Vec<(String, bool)>,
+    }
+
+    /// Parse an arm's marker. `None` ⇒ the arm never wrote one, which is the "it did not
+    /// run" case that must never read as a pass.
+    fn read_marker(path: &Path) -> Option<Arm> {
         let raw = std::fs::read_to_string(path).ok()?;
-        let mut elevated = None;
+        let (mut elevated, mut admin) = (None, None);
         let mut props = Vec::new();
         for line in raw.lines() {
             if let Some(v) = line.strip_prefix("elevated=") {
                 elevated = Some(v.trim() == "1");
+            } else if let Some(v) = line.strip_prefix("admin=") {
+                admin = Some(v.trim() == "1");
             } else if let Some(rest) = line.strip_prefix("prop:") {
                 let (name, tail) = rest.split_once('=')?;
                 props.push((name.to_string(), tail.starts_with("PASS")));
             }
         }
-        Some((elevated?, props))
+        Some(Arm {
+            elevated: elevated?,
+            admin: admin?,
+            props,
+        })
     }
 
     pub fn differential_main() -> i32 {
@@ -1026,41 +1128,57 @@ mod win {
 
         // ── the anti-hollow gate ────────────────────────────────────────────────
         let mut fails: Vec<String> = Vec::new();
-        let deelev = read_marker(&deelev_marker);
-        let Some((deelev_elevated, deelev_props)) = deelev else {
+        let Some(deelev) = read_marker(&deelev_marker) else {
             eprintln!("FATAL: the de-elevated arm wrote NO marker — it did not run");
             return 2;
         };
-        if deelev_elevated {
+        // THE gate: the arm must have failed an access check only an administrator passes.
+        // A token flag is not enough — route 2 leaves `TokenIsElevated` stale, so trusting
+        // it would either reject a genuinely de-elevated arm or, worse on some other host,
+        // accept an elevated one.
+        if deelev.admin {
             eprintln!(
-                "FATAL: the de-elevated arm reported IsElevated=1 via route {route} — \
-                 de-elevation did not happen, so nothing was measured"
+                "FATAL: the de-elevated arm still holds administrative authority via route \
+                 {route} (opened the SCM for CREATE_SERVICE) — de-elevation did not happen, \
+                 so nothing was measured"
             );
+            return 2;
+        }
+        // Where the flag IS meaningful (the linked token is a real standard-user token), it
+        // must agree.
+        if route == "linked-token" && deelev.elevated {
+            eprintln!("FATAL: the linked token reports IsElevated=1");
+            return 2;
+        }
+        if deelev.props.is_empty() {
+            eprintln!("FATAL: the de-elevated arm recorded zero properties");
             return 2;
         }
         if deelev_rc != 0 {
             fails.push(format!("de-elevated arm exited {deelev_rc}"));
-        }
-        if deelev_props.is_empty() {
-            eprintln!("FATAL: the de-elevated arm recorded zero properties");
-            return 2;
         }
 
         let elev = elev_rc.map(|rc| (rc, read_marker(&elev_marker)));
         if let Some((rc, marker)) = &elev {
             match marker {
                 None => fails.push("the elevated arm wrote no marker".to_string()),
-                Some((el, props)) => {
-                    if !el {
-                        fails.push("the elevated arm reported IsElevated=0".to_string());
+                Some(arm) => {
+                    // The differential is only a differential if arm A really did hold the
+                    // authority arm B lacks.
+                    if !arm.admin {
+                        fails.push(
+                            "the elevated arm did NOT hold administrative authority — the \
+                             two arms did not differ"
+                                .to_string(),
+                        );
                     }
                     if *rc != 0 {
                         fails.push(format!("elevated arm exited {rc}"));
                     }
                     // A property present in one arm and absent in the other is a silently
                     // skipped measurement, which must not read as agreement.
-                    let a: Vec<&String> = props.iter().map(|(n, _)| n).collect();
-                    let b: Vec<&String> = deelev_props.iter().map(|(n, _)| n).collect();
+                    let a: Vec<&String> = arm.props.iter().map(|(n, _)| n).collect();
+                    let b: Vec<&String> = deelev.props.iter().map(|(n, _)| n).collect();
                     if a != b {
                         fails.push(format!(
                             "arms measured different properties: {a:?} vs {b:?}"
@@ -1070,24 +1188,32 @@ mod win {
             }
         }
 
+        let elev_arm = elev.as_ref().and_then(|(_, m)| m.as_ref());
         println!("\n── DIFFERENTIAL ────────────────────────────────────────────");
+        println!("de-elevation route: {route}");
         println!(
-            "route={route}  elevated-arm={:?}  de-elevated-arm=rc {deelev_rc}",
-            elev_rc
+            "{:<28} {:>10} {:>14}",
+            "token state", "elevated", "de-elevated"
         );
-        let elev_props = elev
-            .as_ref()
-            .and_then(|(_, m)| m.as_ref())
-            .map(|(_, p)| p.clone())
-            .unwrap_or_default();
+        println!(
+            "{:<28} {:>10} {:>14}",
+            "admin authority (SCM)",
+            elev_arm.map_or("n/a", |a| if a.admin { "YES" } else { "NO" }),
+            if deelev.admin { "YES" } else { "NO" }
+        );
+        println!(
+            "{:<28} {:>10} {:>14}",
+            "TokenIsElevated flag",
+            elev_arm.map_or("n/a", |a| if a.elevated { "1" } else { "0" }),
+            if deelev.elevated { "1" } else { "0" }
+        );
         println!(
             "{:<28} {:>10} {:>14}",
             "property", "elevated", "de-elevated"
         );
-        for (name, ok) in &deelev_props {
-            let e = elev_props
-                .iter()
-                .find(|(n, _)| n == name)
+        for (name, ok) in &deelev.props {
+            let e = elev_arm
+                .and_then(|a| a.props.iter().find(|(n, _)| n == name))
                 .map(|(_, v)| if *v { "PASS" } else { "FAIL" })
                 .unwrap_or("n/a");
             println!(

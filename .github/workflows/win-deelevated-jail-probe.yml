@@ -46,8 +46,10 @@ jobs:
         shell: bash
         run: |
           fail=0
-          grep -q 'ARM elevated=1'  probe.log || { echo "MISSING: the elevated arm never reported"; fail=1; }
-          grep -q 'ARM elevated=0'  probe.log || { echo "MISSING: the DE-ELEVATED arm never reported — nothing was measured"; fail=1; }
+          # `admin=` is the access-checked verdict, not the TokenIsElevated flag: the
+          # fallback de-elevation route leaves that flag stale, so it cannot be the gate.
+          grep -q 'ARM .*admin=1' probe.log || { echo "MISSING: no arm held administrative authority — the arms did not differ"; fail=1; }
+          grep -q 'ARM .*admin=0' probe.log || { echo "MISSING: the DE-ELEVATED arm never reported — nothing was measured"; fail=1; }
           grep -q '^DEELEV route='  probe.log || { echo "MISSING: no de-elevation route was recorded"; fail=1; }
           grep -q 'WINDOWS BUILD JAIL HOLDS WITH NO ELEVATION' probe.log || { echo "MISSING: the differential did not conclude"; fail=1; }
           # Every property must carry a verdict in the de-elevated arm; a silently dropped
