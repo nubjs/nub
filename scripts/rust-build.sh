@@ -12,17 +12,14 @@
 # the ~3 workspace crates, instead of paying a ~3-min cold build. Sharing one live
 # path is what lets concurrent worktrees keep converging on one warm cache.
 #
-# WHAT DOES *NOT* DEFEAT REUSE: RELOCATION. This script used to claim that "rustc
-# bakes the target path into its fingerprints, so a private or CoW-cloned dir gets
-# a 0% hit." That is FALSE, and it was expensive — it is why isolation was treated
-# as synonymous with a cold build. Measured on this workspace with controls in both
-# directions: clone a warm target dir to a NEW path and build there → 0 crates
-# rebuilt; a genuinely empty dir → all 13; touch one source in the clone → exactly 1.
-# Cargo revalidates a relocated target dir in place. The true statement is about
-# SCCACHE, which keys on the rustc command line — that embeds absolute --out-dir /
-# -L dependency= paths, so a different target dir is a guaranteed miss there. The
-# two mechanisms were conflated. Consequence: an isolated worktree can be SEEDED
-# from the shared cache and skip the cold build entirely (see SEEDING below).
+# RELOCATION DOES NOT DEFEAT REUSE. This script used to claim a private or
+# CoW-cloned dir gets "a 0% hit" because rustc bakes the target path into its
+# fingerprints. That is FALSE, and it cost real time — it is why isolation was
+# treated as synonymous with a cold build. Measured with controls both ways: a
+# warm dir cloned to a new path rebuilt 0 crates, an empty dir rebuilt all 13,
+# touching one source rebuilt 1. Cargo revalidates a relocated dir in place. The
+# claim is true of SCCACHE, which keys on the rustc command line (absolute
+# --out-dir / -L paths); the two mechanisms were conflated.
 #
 # THE HAZARD THAT SHARING CREATES. Cargo names a crate's output by package id
 # (name + version), NOT by source content. Two worktrees whose source for the SAME
@@ -102,43 +99,20 @@ key=$(git -C "$root" ls-files -s -- vendor/aube crates $leaves 2>/dev/null \
   | shasum 2>/dev/null | cut -c1-12 || true)
 bucket="$shared${key:+-$key}"
 
-# CoW-clone $1 into $2, PUBLISHING BY RENAME so the destination is never visible
-# in a partial state. This is the whole point: the caller assigns $target and
-# `exec cargo` runs against it regardless of what this returns, so a destination
-# that exists-but-is-half-copied would hand cargo a target dir with fingerprints
-# whose artifacts are missing — precisely the confusing artifact-level failure
-# this script exists to prevent. A claim-then-fill scheme (mkdir, then copy)
-# cannot give that guarantee: it serializes the copiers but not the consumers,
-# and an interrupted copy leaves a permanently half-populated dir that looks
-# claimed forever. Agent builds here are killed routinely, so that is a real
-# case, not a theoretical one.
-#
-# Copy into a claim dir beside the destination, then rename into place only once
-# the copy has returned 0. The exposure window shrinks from minutes of
-# tree-walking to a single rename, and a killed copy leaves only an unreferenced
-# claim, retired in-place by the function itself on a later run — the sweeps at
-# the bottom of this file only scan beside the shared dir, so they cover the
-# bucket call site but never the private one in a worktree root. Clone-only:
-# `cp -c` (APFS) and `--reflink=always` (btrfs/XFS) FAIL rather than silently
-# falling back to a real multi-GB copy, which would trade minutes of CPU for
-# gigabytes of disk.
+# CoW-clone $1 into $2. The caller runs cargo against $2 no matter what this
+# returns, so $2 must never be visible half-copied — cargo would find fingerprints
+# whose artifacts are missing, the exact failure this script exists to prevent.
+# Staging under a fixed-name claim dir and renaming on success gives that: the
+# claim is also the mutual-exclusion token, so one racer clones instead of all of
+# them. Clone-only — `cp -c` (APFS) and `--reflink=always` (btrfs/XFS) fail rather
+# than silently falling back to a real multi-GB copy.
 seed_from() {
   [ -d "$1" ] || return 1
-  # A FIXED-name claim dir is both the mutual-exclusion token and the staging
-  # area. Fixed rather than per-pid so exactly one racer clones: a per-pid temp
-  # would have every worktree in the first post-merge wave clone the same source
-  # and then discard it, and a bare test-then-`mv` is still a race — `mv a b`
-  # with `b` an existing dir yields `b/a`, nesting a full clone inside the
-  # winner's bucket where the GC's -maxdepth 1 never reaches it.
   _claim="$2.seeding"
-  # Retire an abandoned claim (a clone killed mid-flight — routine here). This
-  # runs BEFORE the destination-exists return below, deliberately: once the
-  # destination is published, that return fires on every later invocation, so a
-  # retire placed after it would never execute and an orphaned claim at the
-  # isolated call site would be permanent — it sits in the worktree root, which
-  # neither sweep scans, and would show up untracked in `git status` forever. A
-  # claim older than the window is abandoned by definition, so retiring it when
-  # the destination already exists is harmless.
+  # Retire an abandoned claim (killed clone — routine here) BEFORE the
+  # destination-exists return: that return fires on every run once $2 is
+  # published, so a retire below it would be dead code and a claim in a worktree
+  # root — which neither sweep scans — would leak untracked forever.
   if [ -d "$_claim" ] && [ -z "$(find "$_claim" -maxdepth 0 -mmin -120 2>/dev/null)" ]; then
     rm -rf "$_claim" 2>/dev/null
   fi
@@ -164,23 +138,13 @@ newest_bucket() {
 if [ -n "$diverged" ] || [ -n "$untracked" ]; then
   target="$root/target"   # private, worktree-local; removed with the worktree
   why="isolated — this worktree diverges a depended-on crate from origin/main"
-  # Seed from the shared cache on FIRST creation only. A relocated target dir
-  # keeps its dependency artifacts (see the header), so this turns a ~3-min cold
-  # build into a rebuild of just the diverged crates.
-  #
-  # ANY bucket will do, and the fallback is what makes seeding work at all for
-  # the common case. $bucket is keyed by THIS worktree's index, but we are on
-  # this branch precisely because the content diverges, and buckets are only ever
-  # created by non-diverged worktrees — so whenever the divergence is COMMITTED
-  # or staged (i.e. any ordinary feature branch) no bucket carries this key and
-  # an exact-match seed silently never fires. It only worked for unstaged edits,
-  # where the index still matches the base.
-  #
-  # Seeding from a base-content bucket is sound here in a way it would NOT be on
-  # the shared branch: this destination is PRIVATE to one worktree, so a stale
-  # workspace-crate artifact can't clobber a sibling — cargo just fingerprints it
-  # as changed and rebuilds it. What we are actually after is the ~700 crates.io
-  # rlibs, which are identical across every bucket.
+  # ANY bucket will do, and the fallback is what makes seeding fire at all for
+  # the ordinary case: $bucket is keyed by this worktree's INDEX, but buckets are
+  # only created by non-diverged worktrees, so a committed or staged divergence
+  # (i.e. any feature branch) matches no bucket name. Seeding from base content is
+  # sound here only because $target is PRIVATE — a stale workspace artifact can't
+  # clobber a sibling, cargo just rebuilds it, and the crates.io rlibs we're
+  # after are identical across buckets.
   _seed="$bucket"
   [ -d "$_seed" ] || _seed=$(newest_bucket)
   [ -n "$_seed" ] && [ -d "$_seed" ] || _seed="$shared"
@@ -201,26 +165,17 @@ else
 fi
 
 mkdir -p "$target"
-# `touch` is what makes the GC's mtime rule a real liveness signal, and it is NOT
-# redundant with the mkdir above. Verified: `mkdir -p` on an existing dir does not
-# update its mtime, and neither does a nested write — a cargo target dir's top
-# level goes quiescent after the first build, so a bucket in continuous use would
-# otherwise age past the window and be collected mid-build. That is a FAILED
-# build, not a cold one.
+# NOT redundant with the mkdir: verified that `mkdir -p` on an existing dir does
+# not update its mtime, and neither does a nested write. A target dir's top level
+# goes quiescent after the first build, so without this an in-use bucket ages past
+# the GC window and is collected mid-build — a failed build, not a cold one.
 touch "$target" 2>/dev/null || true
 
-# Buckets are content-addressed caches, so a stale-mtime sweep is enough — no
-# liveness check beyond the `touch` above, which every invocation applies to the
-# dir it is about to use. Cheap, silent, and bounded to this script's own dirs.
-#
-# Matched by EXACT names, not a prefix glob: the keyed buckets plus the bare
-# legacy dir (which is what makes the migration genuinely self-retiring — a `-*`
-# glob alone never matches the legacy name, and a `*` glob would also swallow an
-# unrelated prefix-sharing sibling such as a hand-made `shared-target.bak`).
-#
-# The SECOND pass, on its own much shorter window, retires abandoned `.seeding`
-# claims left beside the shared dir by a killed clone. It covers the bucket call
-# site only; a claim in a worktree root is retired by `seed_from` itself.
+# Stale-mtime sweep; the `touch` above is the liveness signal. Exact names rather
+# than a prefix glob so an unrelated sibling (a hand-made `shared-target.bak`)
+# can't be caught, while the bare legacy dir still is — which is what lets the
+# migration retire itself. Second pass: abandoned claims from a killed clone,
+# bucket-side only; a claim in a worktree root is retired by `seed_from`.
 _base=$(basename "$shared")
 find "$(dirname "$shared")" -maxdepth 1 -type d \
   \( -name "$_base" -o -name "$_base-*" \) -mtime +14 \
