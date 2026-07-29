@@ -112,6 +112,9 @@ pub use backend::{
     PreparedSignalCallback, exercise_monitor_state_6, exercise_monitor_state_7,
     exercise_monitor_state_8, exercise_monitor_states_1_to_5,
 };
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub use backend::{windows_ancestor_capability_sids, windows_capability_fallbacks};
 
 /// The Linux enforcement suites' skip gate, resolving Bubblewrap candidates the way
 /// production does. Test support, not an embedder API.

@@ -120,6 +120,9 @@ pub fn earliest_bootstrap() -> std::io::Result<RuntimeCapability> {
 // without a Windows machine (the FFI launcher itself stays `#[cfg(windows)]`).
 #[cfg(any(target_os = "windows", test))]
 mod windows;
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub use windows::{windows_ancestor_capability_sids, windows_capability_fallbacks};
 
 // The Windows dedicated-account + WFP backend (agent-sandbox). Same cfg as `windows` so its
 // OS-agnostic plan derivation and mode-selection are unit-tested on the macOS dev host.
