@@ -26,17 +26,21 @@ Every field, with its full value set. Each has its own section below.
   // passed on the command line, so the full V8 set
   "v8Flags": ["--expose-gc"],
 
-  "nodeCompat": false,             // true = plain Node, pinning kept
+  // true = disable every Nub augmentation, keeping the version pin
+  "nodeCompat": false,
 
-  // true = the default .env cascade | false = load nothing
-  // a path, or an array of paths where later files win
-  // paths expand ${VAR} and $VAR against the environment
+  // true = the default .env cascade
+  // false = load nothing
+  // A path or an array of paths to load
+  // "envFile": ".env.${APP_ENV}",
   "envFile": [".env", ".env.local"],
 
   // text | jsonc | json5 | toml | yaml | ts | tsx | jsx
   "loader": { ".graphql": "text" },
 
   "conditions": ["development"],   // matched ahead of "default"
+
+  // read for JSX, decorators, and path mapping — not type checking
   "tsconfig": "./tsconfig.runtime.json",
 
   // warn | error | false
