@@ -5,6 +5,7 @@
     "runtime",
     "watch",
     "runner",
+    "compile",
     "init",
     "install",
     "node",

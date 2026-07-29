@@ -13,7 +13,7 @@ nub compile app.ts       # → ./app, a standalone executable
 Everything the entry imports is transpiled and bundled at compile time on your machine. The output carries no `node_modules` and needs no toolchain on the target — TypeScript, JSX, and non-erasable syntax are already down-leveled and packaged.
 
 <Callout title="Cross-compiling is in progress">
-Building one platform's executable from another needs that platform's prebuilt launcher, and Nub does not distribute those yet. Passing `--platform` for a foreign target names the launcher it could not find.
+Building one platform's executable from another needs that platform's prebuilt launcher, and a Nub install ships only its own. Passing `--platform` for a foreign target names the launcher it could not find.
 </Callout>
 
 ## Two shapes

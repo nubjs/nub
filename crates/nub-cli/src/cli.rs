@@ -6357,7 +6357,8 @@ fn perform_selfowned_upgrade(
 /// entirely. So: move the live `nub.exe` aside to `nub.exe.old` (succeeds even
 /// mid-run; rustup and uv ride the same fact), rename the staged binary into
 /// place, then refresh the `nubx.exe` COPY from it (install.ps1 ships nubx as a
-/// copy — symlinks need admin/Developer Mode).
+/// copy — symlinks need admin/Developer Mode), then overwrite the remaining bin/
+/// sidecars so they cannot go stale against the new binary.
 ///
 /// All-or-nothing (the upgrade.md#atomicity contract, per-file form): if the
 /// first rename fails the install is untouched; if the second fails the old
@@ -6410,6 +6411,40 @@ fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
              `nub` is upgraded and usable. Re-run the installer to restore nubx.",
             nubx.display()
         );
+    }
+
+    // Everything ELSE the archive ships in bin/ — busybox.exe (the Windows script
+    // shell) and the `nub compile` launcher template — must travel with the binary,
+    // or an upgraded install silently keeps the PREVIOUS release's copies. The POSIX
+    // path gets that free by swapping the whole directory; here only nub.exe and
+    // nubx.exe need the per-file rename dance (they can be running), so every other
+    // staged entry is refreshed here. `nub.exe` was renamed OUT of the staging dir
+    // above, and nubx is refreshed from it, so both are skipped. Best-effort per the
+    // resilience contract: nub is already swapped and authoritative.
+    //
+    // Staged as temp-then-rename rather than remove-then-copy: a remove that
+    // succeeds followed by a copy that fails (AV lock, full disk) would leave the
+    // install with NO busybox.exe, breaking `nub run` script execution outright —
+    // strictly worse than the stale-but-working file the failure started from.
+    if let Ok(entries) = std::fs::read_dir(staged_bin) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name == "nubx.exe" || !entry.file_type().is_ok_and(|t| t.is_file()) {
+                continue;
+            }
+            let dest = bin_dir.join(&name);
+            let tmp = bin_dir.join(format!("{}.new", name.to_string_lossy()));
+            let staged =
+                std::fs::copy(entry.path(), &tmp).and_then(|_| std::fs::rename(&tmp, &dest));
+            if let Err(e) = staged {
+                let _ = std::fs::remove_file(&tmp);
+                eprintln!(
+                    "nub upgrade: warning: could not refresh {} ({e}); the previous \
+                     copy is left in place and `nub` is upgraded and usable.",
+                    dest.display()
+                );
+            }
+        }
     }
     Ok(())
 }

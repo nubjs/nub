@@ -506,6 +506,14 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2 # zizmor: ignore[cache-poisoning] tag runs restore only caches saved by main/tag runs (PR caches are branch-isolated), so seeding requires push access
         with:
           key: ${{ matrix.platform }}
+          # nub-launcher is its own workspace with its own target dir, so the default
+          # `. -> target` alone would leave its build (nub-core's whole dep graph under
+          # fat LTO) uncached. Kept as a SEPARATE target dir, not merged into the root
+          # one: the two workspaces set different `release` profile settings, so
+          # sharing a dir makes each build invalidate the other's fingerprints.
+          workspaces: |
+            . -> target
+            crates/nub-launcher -> target
 
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320  # v5
         with:
@@ -615,16 +623,38 @@ jobs:
           rm -f package.json package-lock.json
           cd "$GITHUB_WORKSPACE"
 
+      # `compile` rides along with `embed-runtime`: the two feature lists are
+      # disjoint (embed-runtime forwards to nub-core; compile adds Rolldown +
+      # libsui + zstd + the oxc parser subset), and without it the shipped binary
+      # has no `nub compile` verb at all. It is a COMPILE-TIME-only dep set — it
+      # costs release build minutes, not runtime behavior.
       - name: Build binary (embeds the staged runtime)
         env:
           MATRIX_CROSS: ${{ matrix.cross }}
           MATRIX_TARGET: ${{ matrix.target }}
         run: |
           if [ "$MATRIX_CROSS" = "true" ]; then
-            cross build --release -p nub-cli --features embed-runtime --target "$MATRIX_TARGET"
+            cross build --release -p nub-cli --features embed-runtime,compile --target "$MATRIX_TARGET"
           else
-            cargo build --release -p nub-cli --features embed-runtime --target "$MATRIX_TARGET"
+            cargo build --release -p nub-cli --features embed-runtime,compile --target "$MATRIX_TARGET"
           fi
+        shell: bash
+
+      # The runtime half of `nub compile`: the per-triple template the compile-time
+      # pipeline copies and injects a payload into. Built from inside the crate (its
+      # OWN workspace, excluded at the root Cargo.toml, so `-p nub-launcher` cannot
+      # see it) — the same `cd`-first shape as the nub-native addon above, and it
+      # inherits that shape's hazard: `cross` mounts only this workspace and its path
+      # deps, so crates/nub-core's manifest must parse WITHOUT the repo-root
+      # manifest. That is why nub-core is self-contained; see the note atop
+      # crates/nub-core/Cargo.toml before reintroducing any `.workspace = true` there.
+      - name: Build nub-launcher template
+        env:
+          MATRIX_CROSS: ${{ matrix.cross }}
+          MATRIX_TARGET: ${{ matrix.target }}
+        run: |
+          CMD="cargo"; [ "$MATRIX_CROSS" = "true" ] && CMD="cross"
+          (cd crates/nub-launcher && $CMD build --release --target "$MATRIX_TARGET")
         shell: bash
 
       # CI GATE: the built binary must embed a NON-EMPTY metadata primer.
@@ -671,6 +701,7 @@ jobs:
           # platform package ships ONLY bin/ — no runtime/ sidecar. Both verbs are
           # real binary copies (nub picks its verb from the argv[0] basename).
           PKG="npm/nub-$MATRIX_PLATFORM"
+          EXE=""; [[ "$MATRIX_PLATFORM" == win32-* ]] && EXE=".exe"
           mkdir -p "$PKG/bin"
           if [[ "$MATRIX_PLATFORM" == win32-* ]]; then
             cp "target/$MATRIX_TARGET/release/nub.exe" "$PKG/bin/nub.exe"
@@ -692,6 +723,17 @@ jobs:
             cp "target/$MATRIX_TARGET/release/nub" "$PKG/bin/nubx"
             chmod +x "$PKG/bin/nub" "$PKG/bin/nubx"
           fi
+          # The template ships NEXT TO nub under the exact name
+          # compile::locate_launcher_template looks for — that sibling relationship is
+          # the distribution contract, and it carries the template through every
+          # channel for free: the npm platform package ships all of bin/
+          # (`files: ["bin"]`), and github-release tars this same bin/ for install.sh
+          # / install.ps1 / `nub upgrade`. No +x: it is data to be injected into, not
+          # a command.
+          LAUNCHER="crates/nub-launcher/target/$MATRIX_TARGET/release/nub-launcher$EXE"
+          test -f "$LAUNCHER" \
+            || { echo "::error::missing nub-launcher template for $MATRIX_PLATFORM at $LAUNCHER — 'nub compile' would ship unable to find its launcher on this platform."; exit 1; }
+          cp "$LAUNCHER" "$PKG/bin/nub-launcher-$MATRIX_PLATFORM$EXE"
 
       - name: Upload platform package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4

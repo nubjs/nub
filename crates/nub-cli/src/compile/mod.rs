@@ -478,16 +478,27 @@ fn node_runs(node: &Path) -> bool {
 ///
 /// Lookup order: the `NUB_LAUNCHER_TEMPLATE` override, then a `nub-launcher-<triple>`
 /// sibling of the running `nub`, then a plain `nub-launcher` sibling for the host
-/// target. Per-release distribution of the eight templates is a separate effort;
-/// until it lands the error below names exactly what is missing.
+/// target.
+///
+/// SIBLING-OF-`nub` IS THE DISTRIBUTION CONTRACT. Every release channel puts the
+/// host's template in the same directory as the binary it shipped with — the npm
+/// platform package's `bin/`, the release archive's `bin/` (so `~/.nub/bin` and the
+/// Windows install dir), and the Homebrew keg's `bin`. `--platform` for a FOREIGN
+/// triple still needs `NUB_LAUNCHER_TEMPLATE`: a package carries one platform's
+/// launcher, not all eight.
+///
+/// The exe path is canonicalized first so a channel that exposes `nub` through a
+/// symlink (winget's portable command alias) still anchors the sibling lookup to
+/// the real install dir. `current_exe` resolves symlinks on Linux
+/// (`/proc/self/exe`) but NOT on macOS, where it returns the path used to exec.
 fn locate_launcher_template(target: &TargetPlatform) -> Result<PathBuf> {
+    let exe = std::env::current_exe()
+        .ok()
+        .map(|p| fs::canonicalize(&p).unwrap_or(p));
     locate_launcher_template_in(
         target,
         std::env::var_os("NUB_LAUNCHER_TEMPLATE").map(PathBuf::from),
-        std::env::current_exe()
-            .ok()
-            .as_deref()
-            .and_then(Path::parent),
+        exe.as_deref().and_then(Path::parent),
     )
 }
 
@@ -805,8 +816,8 @@ mod tests {
         assert_eq!(at("darwin-arm64"), dir.join("bin").join("node"));
     }
 
-    /// The template error is the whole cross-compile UX until per-release template
-    /// distribution lands, so it must name the triple and the exact filenames.
+    /// A release ships only the HOST's template, so this error is still the whole
+    /// cross-compile UX — it must name the triple and the exact filenames.
     #[test]
     fn a_missing_foreign_template_names_what_is_missing() {
         let dir = fresh_dir("no-template");
@@ -821,6 +832,27 @@ mod tests {
         assert!(
             msg.contains("NUB_LAUNCHER_TEMPLATE"),
             "should name the override: {msg}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Pins the Rust half of the release↔lookup contract: the name
+    /// `.github/workflows/release.yml` must copy the template to. Renaming it here
+    /// fails this test; renaming it in the workflow does not, so the two have to be
+    /// changed together.
+    #[test]
+    fn the_release_shipped_filename_is_what_the_host_lookup_accepts() {
+        let dir = fresh_dir("shipped");
+        let host = TargetPlatform::host().unwrap();
+        let shipped = dir.join(format!(
+            "nub-launcher-{}{}",
+            host.triple(),
+            host.exe_suffix()
+        ));
+        fs::write(&shipped, b"template").unwrap();
+        assert_eq!(
+            locate_launcher_template_in(&host, None, Some(&dir)).unwrap(),
+            shipped
         );
         let _ = fs::remove_dir_all(&dir);
     }

@@ -88,6 +88,12 @@ class Nub < Formula
     # bin/ path explicitly — install them straight onto PATH, no libexec, no symlink
     # dance, and ignore runtime/.
     bin.install "bin/nub", "bin/nubx"
+    # The nub compile launcher template resolves as a SIBLING of the running nub
+    # (compile::locate_launcher_template), so it has to land wherever the binaries
+    # did — libexec would put it out of reach. Accepted cost: brew links the keg's
+    # bin into the prefix, so the template becomes a (harmless, namespaced) entry
+    # on PATH. Globbed, so this still installs from a pre-template archive.
+    bin.install Dir["bin/nub-launcher-*"]
   end
 
   test do
