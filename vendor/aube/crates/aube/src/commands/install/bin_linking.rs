@@ -545,21 +545,16 @@ pub(crate) fn link_dep_bins(
             // a dep that was never materialized.
             continue;
         }
-        // Both endpoints stay in PROJECT coordinates (`.aube/<dep_path>/…`),
-        // never the shared store's `<dep_path>-<graph-hash>` spelling, even
-        // though under the GVS the symlink puts the shim FILE in that store.
-        // The two link kinds sharing this directory resolve differently and so
-        // need different coordinates: a SYMLINK is walked by the kernel from
-        // its physical parent (store), while a SHIM's `basedir=$(dirname "$0")`
-        // is lexical over the INVOCATION path — and the only consumer,
-        // `run_dep_lifecycle_scripts`, puts `<dep_modules_dir>/.bin` on PATH
-        // un-canonicalized. A store-spelled shim target therefore names a
-        // hash-suffixed directory the project namespace never has.
-        // Project spelling stays correct for every OTHER project sharing the
-        // entry: the store key hashes the whole dep-graph SUBTREE, so any two
-        // projects reaching this entry resolve identical child `dep_path`s
-        // (`aube_lockfile::graph_hash`) — the same invariant the entry's own
-        // sibling symlinks already rely on.
+        // Under the GVS, `.aube/<dep_path>` is a symlink into the shared store,
+        // so this `.bin/` has TWO legitimate spellings — the project's
+        // `<dep_path>` and the store's `<dep_path>-<graph-hash>` — and a shim's
+        // `basedir=$(dirname "$0")` is lexical over whichever one its invoker
+        // used. Both occur in production: the lifecycle runner puts the project
+        // spelling on PATH, and nub's macOS build jail canonicalizes the child's
+        // PATH (Seatbelt matches resolved paths, and an ungranted symlinked entry
+        // fails `posix_spawnp` with a FATAL EPERM that masks every later entry),
+        // handing the same shim a store-spelled `$0`. So the emitted target must
+        // not depend on which spelling reached it — see the child loop below.
         let dep_modules_dir = dep_modules_dir_for(&pkg_dir, &pkg.name);
         let bin_dir = dep_modules_dir.join(".bin");
         // Don't `create_dir_all(&bin_dir)` here — most deps have
@@ -586,16 +581,21 @@ pub(crate) fn link_dep_bins(
             if child_dep_path == *dep_path && child_name == &pkg.name {
                 continue;
             }
+            // Reach the child through the SIBLING SYMLINK the linker wrote next
+            // to this `.bin/`, not through a path re-derived from `aube_dir`.
+            // That keeps the emitted relative target inside the dep's own
+            // `node_modules/` (`../<child_name>/…`), so it never names the
+            // virtual-store entry whose leaf differs between the two spellings
+            // above — the symlink itself absorbs the difference, because the
+            // kernel walks it from its physical parent. A re-derived path
+            // escapes to the store root and is correct in one spelling only.
+            // It also tracks the linker exactly: the sibling is written under
+            // the EDGE name, so an aliased dep (`"x": "npm:y@1"`) resolves here
+            // the same way `require('x')` does from inside the package.
             // The sibling may have been filtered (optional on another
             // platform); `link_bins_for_dep_at` already returns Ok when
             // the target pkg_json is absent, so just call through.
-            let child_pkg_dir = materialized_pkg_dir(
-                aube_dir,
-                &child_dep_path,
-                child_name,
-                virtual_store_dir_max_length,
-                placements,
-            );
+            let child_pkg_dir = dep_modules_dir.join(child_name);
             link_bins_for_dep_at(
                 cache,
                 &bin_dir,
@@ -922,6 +922,7 @@ mod tests {
     ) -> (LockfileGraph, std::path::PathBuf) {
         let parent_dep_path = "lmdb@3.0.0";
         let child_dep_path = "node-gyp-build-optional-packages@5.2.0";
+        let child_name = "node-gyp-build-optional-packages";
 
         // Parent on disk (must exist or `link_dep_bins` skips it).
         let parent_dir = materialized_pkg_dir(aube_dir, parent_dep_path, "lmdb", 120, None);
@@ -956,6 +957,25 @@ mod tests {
             "#!/usr/bin/env node\nconsole.log('ngb-ok')\n",
         )
         .unwrap();
+
+        // The sibling symlink `materialize_into` writes next to the parent's
+        // own directory. Not decoration: it is what `require('<child>')`
+        // resolves through from inside the parent, and now what the per-dep
+        // `.bin` shim's target is expressed against — a fixture without it
+        // would let a target that can only resolve via `aube_dir` pass.
+        let sibling = dep_modules_dir_for(&parent_dir, "lmdb").join(child_name);
+        // Relative on POSIX (survives the store relocation the GVS test
+        // performs), absolute on Windows where `create_dir_link` writes a
+        // junction — the same split `materialize_into` makes.
+        #[cfg(not(windows))]
+        let sibling_target = std::path::PathBuf::from("..")
+            .join("..")
+            .join(dep_path_to_filename(child_dep_path, 120))
+            .join("node_modules")
+            .join(child_name);
+        #[cfg(windows)]
+        let sibling_target = child_dir.clone();
+        aube_linker::create_dir_link(&sibling_target, &sibling).unwrap();
 
         let mut parent = locked("lmdb", "3.0.0", BTreeMap::new());
         parent.dependencies.insert(
@@ -995,34 +1015,33 @@ mod tests {
     /// entries carry a graph-hash suffix, so a per-dep `.bin/` derived from
     /// the project side lands PHYSICALLY in that store. The shim is a
     /// `/bin/sh` script whose `basedir=$(dirname "$0")` is purely LEXICAL, so
-    /// what it resolves against is the path its INVOKER used — and the only
-    /// invoker, the lifecycle runner, puts the project-side
-    /// `.aube/<dep_path>/node_modules/.bin` on PATH. A target spelled in the
-    /// store's `<dep_path>-<hash>` coordinates therefore names a directory
-    /// that exists in neither namespace, and every transitive CLI a build
-    /// script shells out to (`node-gyp-build`, `prebuild-install`,
-    /// node-pre-gyp — the whole native-addon family) dies with
-    /// `Cannot find module`.
+    /// what it resolves against is the path its INVOKER used — and the entry
+    /// has two spellings that differ in exactly the leaf a re-derived target
+    /// names. Whichever one such a target picks, the other invocation lands on
+    /// a directory that does not exist, and every transitive CLI a build script
+    /// shells out to (`node-gyp-build`, `prebuild-install`, node-pre-gyp — the
+    /// whole native-addon family) dies with `Cannot find module`.
     ///
-    /// The test RUNS the shim through the project-side path rather than
-    /// inspecting the target's spelling, so it pins the whole agreement — the
-    /// emitted target, the `$basedir` the shim derives, and node's lexical
-    /// collapse of the two — instead of one side of it. That makes it fail in
-    /// BOTH directions: for a target respelled into store coordinates (the
-    /// regression), and for any future `$basedir` that is resolved physically
-    /// (`cd -P`), which would leave the project-spelled target naming a
-    /// directory under the store root. Asserting resolution from the shim's
-    /// PHYSICAL store directory instead is the inverted premise that let the
-    /// store-spelled target ship green — and a store-side invocation is not a
-    /// geometry production has: every shim the jailed lifecycle runner invokes
-    /// carries a project-side `$0`, even though the jail canonicalizes the
-    /// child's CWD into the store.
+    /// BOTH spellings are production geometries, which is why the test RUNS the
+    /// shim from each rather than inspecting the target's text. The lifecycle
+    /// runner puts the project spelling on PATH; nub's macOS build jail then
+    /// canonicalizes that PATH before spawning (Seatbelt matches resolved paths,
+    /// and one ungranted symlinked entry fails `posix_spawnp` with a FATAL
+    /// EPERM that masks every later entry), so the same shim is reached through
+    /// the store spelling with a store-rooted `$0`. Measured: 0 store-rooted
+    /// invocations on Linux, where that backend canonicalizes only the child's
+    /// cwd — the divergence is the backend, not the corpus.
     ///
-    /// Node is load-bearing as the interpreter, not incidental. It collapses
-    /// the target's `..` with `path.resolve` BEFORE opening it, which keeps the
-    /// walk in project coordinates; a non-node interpreter is handed the
-    /// `..`-bearing path and the kernel walks it through the `.aube` symlink
-    /// into the store, where the un-hashed name does not exist.
+    /// Each half is the other's control, so neither can pass hollowly: a target
+    /// re-derived from the project's `.aube` fails the store-side run (the
+    /// reported `Cannot find module`), and one re-derived from the store fails
+    /// the project-side run. Only a target that stays inside the dep's own
+    /// `node_modules/` — reached through the sibling symlink, which the kernel
+    /// walks from its physical parent either way — satisfies both.
+    ///
+    /// Node is load-bearing as the interpreter, not incidental: it collapses the
+    /// target's `..` with `path.resolve` before opening it, so the walk stays in
+    /// whichever coordinate system `$0` supplied.
     #[test]
     #[cfg(unix)]
     fn dep_bin_shims_resolve_when_the_entry_is_a_symlink_into_a_hashed_store() {
@@ -1047,6 +1066,21 @@ mod tests {
             std::fs::rename(staging.join(&entry), &hashed).unwrap();
             std::os::unix::fs::symlink(&hashed, aube_dir.join(&entry)).unwrap();
         }
+        // `materialize_into` spells a cell's sibling symlinks with the HASHED
+        // sibling name when it materializes into the store (`apply_hashes`), so
+        // they resolve from the cell's physical parent. The staging fixture
+        // wrote the project spelling; the relocation above left it dangling.
+        let sibling = store
+            .join("lmdb@3.0.0-0123456789abcdef")
+            .join("node_modules")
+            .join("node-gyp-build-optional-packages");
+        std::fs::remove_file(&sibling).unwrap();
+        std::os::unix::fs::symlink(
+            "../../node-gyp-build-optional-packages@5.2.0-fedcba9876543210/node_modules/\
+             node-gyp-build-optional-packages",
+            &sibling,
+        )
+        .unwrap();
 
         let hidden = aube_dir.join("node_modules");
         link_dep_bins(
@@ -1065,36 +1099,38 @@ mod tests {
         )
         .unwrap();
 
-        // RUN the shim through the PROJECT-side path the lifecycle runner puts
-        // on PATH. Executing rather than stat-ing the resolved target is what
-        // makes this non-tautological: `$basedir` is `dirname "$0"`, so only a
-        // real invocation expands it in the coordinate system a consumer uses.
-        let shim = aube_dir
+        // RUN the shim, once per spelling. Executing rather than stat-ing the
+        // resolved target is what makes this non-tautological: `$basedir` is
+        // `dirname "$0"`, so only a real invocation expands it in the coordinate
+        // system a consumer supplied.
+        let project_shim = aube_dir
             .join("lmdb@3.0.0")
             .join("node_modules/.bin/node-gyp-build-optional-packages");
-        let body = std::fs::read_to_string(&shim)
-            .unwrap_or_else(|e| panic!("no shim at {}: {e}", shim.display()));
-        // The two namespaces have to genuinely diverge or the run below proves
+        let body = std::fs::read_to_string(&project_shim)
+            .unwrap_or_else(|e| panic!("no shim at {}: {e}", project_shim.display()));
+        // The two namespaces have to genuinely diverge or the runs below prove
         // nothing: the shim FILE is physically in the hashed store, reachable
-        // from the path invoked above only through the `.aube` symlink.
-        let physical = std::fs::canonicalize(shim.parent().unwrap()).unwrap();
+        // from the project path only through the `.aube` symlink.
+        let store_shim = std::fs::canonicalize(&project_shim).unwrap();
         assert!(
-            physical.starts_with(std::fs::canonicalize(&store).unwrap()),
+            store_shim.starts_with(std::fs::canonicalize(&store).unwrap()),
             "fixture must leave the shim physically in the hashed store, else \
-             the invocation below cannot tell the two namespaces apart; got {}",
-            physical.display()
+             the invocations below cannot tell the two namespaces apart; got {}",
+            store_shim.display()
         );
-        let out = std::process::Command::new(&shim)
-            .output()
-            .unwrap_or_else(|e| panic!("could not spawn {}: {e}", shim.display()));
-        assert!(
-            out.status.success() && String::from_utf8_lossy(&out.stdout).contains("ngb-ok"),
-            "shim must run when invoked through the project-side `.bin` the \
-             lifecycle runner puts on PATH; status {:?}\nstdout: {}\nstderr: {}\nshim:\n{body}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-        );
+        for (spelling, shim) in [("project", &project_shim), ("store", &store_shim)] {
+            let out = std::process::Command::new(shim)
+                .output()
+                .unwrap_or_else(|e| panic!("could not spawn {}: {e}", shim.display()));
+            assert!(
+                out.status.success() && String::from_utf8_lossy(&out.stdout).contains("ngb-ok"),
+                "shim must run when invoked through its {spelling} spelling; \
+                 status {:?}\nstdout: {}\nstderr: {}\nshim:\n{body}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
         let target =
             aube_linker::parse_posix_shim_target(&body).expect("shim must carry its target marker");
 
@@ -1105,6 +1141,14 @@ mod tests {
         assert!(
             !target.starts_with('/'),
             "shim target must be relative to be shareable, got {target}"
+        );
+        // The invariant the two runs above demonstrate, stated directly: a
+        // target confined to the dep's own `node_modules/` (one `..`, out of
+        // `.bin/`) never names a virtual-store entry, so it cannot depend on
+        // which spelling of that entry `$0` carried.
+        assert_eq!(
+            target, "../node-gyp-build-optional-packages/bin/build.js",
+            "shim target must stay inside the dep's own node_modules"
         );
         assert!(
             body.contains(r#"export NODE_PATH="$basedir/..:$basedir/../../../node_modules""#),
