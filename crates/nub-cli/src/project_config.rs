@@ -289,12 +289,14 @@ pub enum Hoist {
 /// than through a dependency's own walk-up (tsc finding `@types/*`, a linter
 /// loading plugins). It sits OUTSIDE [`LinkerConfig`] because it means the same
 /// thing under every strategy: the root `node_modules` exists wherever the store
-/// lives. `All(true)` ≡ pnpm `shamefully-hoist`.
-#[derive(Debug, Clone, PartialEq)]
-pub enum PublicHoist {
-    All(bool),
-    Patterns(Vec<String>),
-}
+/// lives.
+///
+/// Patterns only, deliberately — no blanket boolean. pnpm's `shamefully-hoist`
+/// is itself sugar for `publicHoistPattern: ['*']` (`getConfig.ts`), so `["*"]`
+/// already spells "everything" without a second, differently-shaped way to say
+/// it. A boolean also reads as if it overrides `linker`, which it does not: it
+/// surrenders the isolation guarantee while leaving the layout alone.
+pub type PublicHoist = Vec<String>;
 
 /// The `dlx` block — nubx's own security posture. `consent` reuses the global
 /// file's [`ImplicitDlx`] enum; `envFile` reuses the top-level tri-state.
@@ -1328,16 +1330,7 @@ fn validate_install(v: &Value, path: &str) -> Result<InstallConfig> {
     }
     if let Some(v) = obj.get("publicHoist") {
         let p = child(path, "publicHoist");
-        install.public_hoist = Some(match v {
-            Value::Bool(b) => PublicHoist::All(*b),
-            Value::Array(_) => PublicHoist::Patterns(as_string_array(v, &p)?),
-            _ => {
-                return Err(ConfigError::Type {
-                    path: p,
-                    expected: "a boolean or array of strings",
-                });
-            }
-        });
+        install.public_hoist = Some(as_string_array(v, &p)?);
     }
     if let Some(v) = obj.get("minimumReleaseAge") {
         install.minimum_release_age = Some(parse_duration(
@@ -1684,10 +1677,7 @@ mod tests {
                 hoist: Some(Hoist::Patterns(vec!["*types*".into()]))
             })
         );
-        assert_eq!(
-            cfg.install.public_hoist,
-            Some(PublicHoist::Patterns(vec!["@types/*".into()]))
-        );
+        assert_eq!(cfg.install.public_hoist, Some(vec!["@types/*".to_string()]));
         assert_eq!(
             cfg.install.minimum_release_age,
             Some(Duration::from_secs(3 * 86_400))

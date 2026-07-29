@@ -207,15 +207,8 @@
           "description": "The node_modules layout. Each strategy accepts only its own options."
         },
         "publicHoist": {
-          "oneOf": [
-            {
-              "type": "boolean"
-            },
-            {
-              "$ref": "#/$defs/stringArray"
-            }
-          ],
-          "description": "Packages forced into the root node_modules for tools that resolve from the project root. true hoists every package."
+          "$ref": "#/$defs/stringArray",
+          "description": "Name patterns forced into the root node_modules, for tools that resolve from the project root such as tsc finding @types/*. Use [\"*\"] for every package and [] for none."
         },
         "minimumReleaseAge": {
           "type": "string",

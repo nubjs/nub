@@ -110,7 +110,17 @@ fn wrong_wrapper_types_report_the_nested_path() {
             PROJECT,
             r#"{ "install": { "publicHoist": 5 } }"#,
             "install.publicHoist",
-            "a boolean or array of strings",
+            "an array of strings",
+        ),
+        // `publicHoist` is patterns only. The blanket boolean pnpm spells
+        // `shamefully-hoist` is `["*"]` here — pnpm's own internal
+        // representation of it — so a bare `true` is a type error, not a
+        // second way to say the same thing.
+        (
+            PROJECT,
+            r#"{ "install": { "publicHoist": true } }"#,
+            "install.publicHoist",
+            "an array of strings",
         ),
         (
             GLOBAL,

@@ -66,7 +66,7 @@ Every field, with its full value set. Each has its own section below. Paths are 
     //   isolated → "hoist": boolean | string[]
     "linker": { "strategy": "global-virtual-store", "eject": ["electron"] },
 
-    "publicHoist": ["@types/*"],     // boolean | string[]; any layout
+    "publicHoist": ["@types/*"],     // name patterns; ["*"] for all; any layout
 
     // <integer><s|m|h|d|w>; a bare number is rejected
     "minimumReleaseAge": "3d",
@@ -426,13 +426,13 @@ Put packages in the project's top-level `node_modules` without declaring them. U
 }
 ```
 
-Setting `true` lifts everything, matching pnpm's `shamefully-hoist`.
+A single `*` lifts everything, matching pnpm's `shamefully-hoist`. Every package reaching the project root also means every package can resolve every other one, so the isolation the layout gives you is gone — reach for it when a tool needs it, not by default.
 
 ```jsonc title="nub.jsonc"
 {
   // ...
   "install": {
-    "publicHoist": true
+    "publicHoist": ["*"]
   }
 }
 ```

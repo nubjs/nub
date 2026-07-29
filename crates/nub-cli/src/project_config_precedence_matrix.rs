@@ -168,11 +168,11 @@ fn specs() -> Vec<KeySpec> {
         KeySpec {
             key: ConfigKey::InstallPublicHoist,
             name: "install.publicHoist",
-            set: |c, t| c.install.public_hoist = Some(PublicHoist::Patterns(strings(t))),
-            matches: |c, t| c.install.public_hoist == Some(PublicHoist::Patterns(strings(t))),
-            // `publicHoist: false` — the explicit opt-out — must beat a lower list.
-            set_empty: Some(|c| c.install.public_hoist = Some(PublicHoist::All(false))),
-            is_empty: Some(|c| c.install.public_hoist == Some(PublicHoist::All(false))),
+            set: |c, t| c.install.public_hoist = Some(strings(t)),
+            matches: |c, t| c.install.public_hoist.as_deref() == Some(strings(t).as_slice()),
+            // `publicHoist: []` — the explicit opt-out — must beat a lower list.
+            set_empty: Some(|c| c.install.public_hoist = Some(Vec::new())),
+            is_empty: Some(|c| c.install.public_hoist.as_deref() == Some(&[][..])),
         },
         KeySpec {
             key: ConfigKey::InstallMinimumReleaseAge,

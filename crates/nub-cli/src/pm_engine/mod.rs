@@ -921,7 +921,7 @@ fn lower_native_install_settings(
     install: &crate::project_config::InstallConfig,
     embedder_defaults: &[(String, String)],
 ) -> Result<NativeInstallSettings> {
-    use crate::project_config::{Hoist, LinkerConfig, PublicHoist};
+    use crate::project_config::{Hoist, LinkerConfig};
 
     // Only `pnp` still bails here. The pairings the old flat trio rejected at
     // install time — hoist under a shared store, eject under a project-local one
@@ -978,21 +978,14 @@ fn lower_native_install_settings(
         }
     }
 
-    // One nub knob, two aube settings — so BOTH arms write BOTH. Writing only
-    // the one an arm names leaves the other at whatever a lower tier resolved,
-    // which inverts the request: `.npmrc` `shamefully-hoist=true` under a
-    // `publicHoist` pattern list would hoist everything, the opposite of
-    // naming patterns.
-    match install.public_hoist.as_ref() {
-        Some(PublicHoist::All(enabled)) => {
-            settings.push(("shamefullyHoist".to_string(), enabled.to_string()));
-            settings.push(("publicHoistPattern".to_string(), String::new()));
-        }
-        Some(PublicHoist::Patterns(patterns)) => {
-            settings.push(("shamefullyHoist".to_string(), "false".to_string()));
-            settings.push(("publicHoistPattern".to_string(), patterns.join(",")));
-        }
-        None => {}
+    // One nub knob, two aube settings — so write BOTH. Writing only the pattern
+    // leaves `shamefullyHoist` at whatever a lower tier resolved, which inverts
+    // the request: `.npmrc` `shamefully-hoist=true` under a `publicHoist`
+    // pattern list would hoist everything, the opposite of naming patterns.
+    // Naming patterns is always a narrowing, so the blanket flag goes off.
+    if let Some(patterns) = install.public_hoist.as_ref() {
+        settings.push(("shamefullyHoist".to_string(), "false".to_string()));
+        settings.push(("publicHoistPattern".to_string(), patterns.join(",")));
     }
 
     // ADDITIVE, deliberately: the merge seeds from the embedder's own ejects —
@@ -3042,7 +3035,7 @@ pub(crate) fn with_fd_captured<T>(_fd: i32, f: impl FnOnce() -> T) -> (T, String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project_config::{Hoist, InstallConfig, LinkerConfig, PublicHoist};
+    use crate::project_config::{Hoist, InstallConfig, LinkerConfig};
 
     fn get<'a>(defaults: &'a [(String, String)], key: &str) -> Option<&'a str> {
         defaults
@@ -3184,13 +3177,15 @@ mod tests {
 
     #[test]
     fn public_hoist_lowers_independently_of_the_linker_strategy() {
-        // Every arm writes BOTH aube keys. Writing only the one it names would
-        // leave the other at a lower tier's value, which inverts the request.
+        // Writes BOTH aube keys. Writing only `publicHoistPattern` would leave
+        // `shamefullyHoist` at a lower tier's value, which inverts the request.
+        // `["*"]` is the everything-spelling — pnpm's own representation of
+        // `shamefully-hoist` — so it still travels as a pattern, not the flag.
         for (public_hoist, shamefully, patterns) in [
-            (PublicHoist::All(true), "true", ""),
-            (PublicHoist::All(false), "false", ""),
+            (vec!["*".to_string()], "false", "*"),
+            (Vec::new(), "false", ""),
             (
-                PublicHoist::Patterns(vec!["@types/*".into(), "eslint-*".into()]),
+                vec!["@types/*".to_string(), "eslint-*".to_string()],
                 "false",
                 "@types/*,eslint-*",
             ),
