@@ -82,6 +82,13 @@ fn gen_hosts(catalog: &serde_json::Value) -> String {
         let host = string(entry, "host", &at);
         string(entry, "reason", &at);
         string(entry, "detail", &at);
+        // Held to the SAME provenance bar as an admitted host. A refusal is the input to a
+        // later promotion decision, and an unevidenced one is worse than no entry: it reads
+        // as a settled verdict while carrying nothing a reviewer could re-check.
+        // `observedUrl` is the field a path-scoped grant would have to be written against.
+        require_provenance(entry, &at);
+        string(entry, "requester", &at);
+        string(entry, "observedUrl", &at);
         if seen.contains(&host) {
             fail(&format!(
                 "{at}: `{host}` is in networkHosts AND recorded as refused — one of the two \

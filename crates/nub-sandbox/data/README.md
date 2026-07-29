@@ -166,17 +166,31 @@ and only for the packages in this table.
 
 Documentation only. Nothing in this object is compiled into any allowlist.
 
-It records hosts that a real install was measured to need and that were refused anyway, so
+It records hosts that a real install was measured to need and that were **not** admitted, so
 you can see the bar before opening a PR. A build-time check keeps it disjoint from
 `networkHosts`, so an entry cannot be quietly promoted while its rejection rationale stays
 behind.
 
-The three recorded refusals cover the three recurring shapes: a **write-capable** host
-(`github.com` — the demand is real, 46 corpus packages, but host-level DNS gating cannot
-restrict it to release-download paths), a **multi-tenant** object store
-(`storage.googleapis.com`), and a **non-blocking** soft fetch (`package.cli.amplify.aws` —
-the install still succeeds without it). The first two need pre-download brokering rather
-than an allowlist entry.
+Entries carry the same `evidence` / `observed` / `platform` provenance as `networkHosts`,
+plus `requester` (the package that fetched it) and `observedUrl` (the URL actually seen).
+They are held to that bar deliberately: a refusal is the *input to a later promotion
+decision*, and an unevidenced one is worse than no entry at all, because it reads as a
+settled verdict while carrying nothing a reviewer can re-check. `observedUrl` is also the
+field a path-scoped grant would have to be written against.
+
+The recorded entries cover four shapes, and only three are disqualifications:
+
+| host | reason | why |
+| --- | --- | --- |
+| `github.com` | `write-capable` | Carries an authenticated write on the same hostname. The one a path-scoped grant would fix — see below. |
+| `storage.googleapis.com` | `multi-tenant` | An attacker can rent a bucket under the same hostname and read back what a confined script sends there. |
+| `package.cli.amplify.aws` | `not-blocking` | The fetch fails and the install still exits 0. A soft fetch that degrades does not earn an entry. |
+| `workers.cloudflare.com` | `undecided` | No disqualification established — a single-tenant vendor binary path. Recorded as an evidenced candidate; admitting it is a maintainer call. |
+
+`undecided` is a real and useful value, not a placeholder. A measured host with no
+established disqualification should be recorded as a candidate rather than silently dropped
+or quietly admitted, and the difference between "we refused this" and "nobody has ruled yet"
+is exactly what the next reviewer needs.
 
 ## Opening a PR
 
@@ -211,11 +225,32 @@ needed it yet; adding a field ahead of a real case would be guessing at its shap
   `@prisma/client` 7.0.0 dropped its postinstall entirely, so its grant is dead weight on 7
   — harmless, since an unused grant confers nothing on a script that never runs, but not
   expressible.
-- **Path-scoped hosts.** The corpus recorded a narrowest URL prefix per host
-  (`github.com` needs only `/*/*/releases/download/`). DNS-level gating cannot enforce a
-  path, so the schema records no prefix. This is the field that would unblock the largest
-  group of currently-refused hosts, and it depends on proxy work rather than on a catalog
-  change.
+- **Path-scoped hosts — the highest-value gap, and the one with a concrete argument behind
+  it.** The schema records no URL prefix, because DNS-level gating cannot enforce a path.
+  Adding one depends on proxy work rather than on a catalog change, and it is worth doing
+  rather than a nice-to-have. The reason is `github.com`.
+
+  `github.com` is not refused because downloading a release tarball from it is dangerous.
+  It is refused because the **same hostname** serves `git-receive-pack` — an authenticated
+  **write** — and CI environments routinely hand lifecycle scripts a token with push
+  rights. A host-level grant cannot tell the two apart, so admitting `github.com` today
+  would open a push path, not just a fetch path. That is a categorically different exposure
+  from serving bytes into the jail, and it is why the host-level answer has to be "no".
+
+  A path-scoped grant limited to `/*/*/releases/download/` **separates them**: the release
+  asset path is a plain GET surface, and `git-receive-pack` lives at a different path
+  entirely. The same mechanism applies to `storage.googleapis.com`, whose observed prefixes
+  (`/tensorflow/`, `/chrome-for-testing-public/`) are stable and single-tenant even though
+  the hostname is not.
+
+  So path scoping is not a refinement of the existing allowlist — it converts a
+  permanently-refused host into an admissible one, and by count `github.com` and the object
+  stores are the largest group of currently-refused hosts. Both requirements it implies are
+  real: the proxy must gate on the request path, not only the CONNECT authority and SNI,
+  which for HTTPS means terminating TLS for those hosts; and redirects must be re-checked
+  against the prefix, since a release download 302s to a different host
+  (`release-assets.githubusercontent.com`) whose asset paths are opaque signed GUIDs. That
+  second half is unsolved and is the reason this is proxy work rather than a schema edit.
 
 ## Remote updates: designed, not built
 

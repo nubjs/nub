@@ -67,22 +67,47 @@
     }
   ],
   "notGranted": {
-    "comment": "Documentation only. Nothing in this object is compiled into any allowlist; it records hosts that a real install was measured to need and that were nonetheless refused, so a contributor can see the bar before opening a PR. A test asserts this list and networkHosts stay disjoint.",
+    "comment": "Documentation only. Nothing in this object is compiled into any allowlist; it records hosts that a real install was measured to need and that were not admitted, so a contributor can see the bar before opening a PR. A build-time check keeps this list and networkHosts disjoint. Entries carry the same provenance fields as networkHosts, because an evidenced candidate is what makes a later promotion reviewable — `observedUrl` in particular is what a path-scoped grant would have to be written against.",
     "hosts": [
       {
         "host": "github.com",
         "reason": "write-capable",
-        "detail": "46 corpus packages fetch release tarballs here (14 blocking), so the demand is real and measured. Refused anyway: an unauthenticated write probe returns path-varying statuses, meaning routes that accept a write exist under the same hostname. Host-level DNS gating cannot restrict this to /releases/download/. Needs pre-download brokering, not an allowlist entry."
+        "requester": "cube-js native installer (`Cube.js Native Installer`); 46 corpus packages total, 14 of them blocking",
+        "observedUrl": "https://github.com/cube-js/cube/releases/download/v1.4.4/native-linux-x64-glibc-fallback.tar.gz",
+        "detail": "The demand is real and measured, and the refusal is NOT about the download. github.com carries `git-receive-pack` — an authenticated write on the same hostname — and CI routinely hands lifecycle scripts a token with push rights, so a host-level grant opens a push path rather than only a fetch path. Host-level DNS gating cannot separate the two. A path-scoped grant limited to /*/*/releases/download/ would, which is the argument for building proxy path support rather than treating this host as permanently refused.",
+        "evidence": "measured",
+        "observed": "FetchError: request to <url> failed, reason: getaddrinfo EAI_AGAIN github.com — the denied arm of the Linux corpus run.",
+        "platform": "linux-x64"
       },
       {
         "host": "storage.googleapis.com",
         "reason": "multi-tenant",
-        "detail": "Needed by puppeteer, taiko, chromedriver and @tensorflow/tfjs-node for Chrome and libtensorflow artifacts. Refused because an attacker can rent a bucket under the same hostname and read back whatever a confined script writes there — the exfiltration criterion, not an integrity one."
+        "requester": "@tensorflow/tfjs-node, chromedriver (also puppeteer and taiko on the earlier macOS pass)",
+        "observedUrl": "https://storage.googleapis.com/tensorflow/libtensorflow/libtensorflow-cpu-linux-x86_64-2.9.1.tar.gz; https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.53/linux64/chromedriver-linux64.zip",
+        "detail": "Refused because an attacker can rent a bucket under the same hostname and read back whatever a confined script writes there — the exfiltration criterion, not an integrity one. The two observed prefixes (/tensorflow/ and /chrome-for-testing-public/) are stable and single-tenant, so this is a second candidate for a path-scoped grant.",
+        "evidence": "measured",
+        "observed": "Both artifacts requested in the denied arm of the Linux corpus run; libtensorflow logged as `* Downloading libtensorflow` immediately before the URL.",
+        "platform": "linux-x64"
       },
       {
         "host": "package.cli.amplify.aws",
         "reason": "not-blocking",
-        "detail": "@aws-amplify/cli fetches its binary here and reports `failed to install amplify binary` when egress is denied, but the install itself still succeeds (rc 0). A soft fetch that degrades rather than failing does not earn an entry."
+        "requester": "@aws-amplify/cli",
+        "observedUrl": "https://package.cli.amplify.aws/14.5.1/amplify-pkg-linux-x64.tgz",
+        "detail": "A soft fetch that degrades rather than failing does not earn an entry: the CLI reports `failed to install amplify binary` with egress denied, but the install itself still exits 0.",
+        "evidence": "measured",
+        "observed": "Error fetching release: getaddrinfo EAI_AGAIN package.cli.amplify.aws, followed by `failed to install amplify binary`, in the denied arm of the Linux corpus run.",
+        "platform": "linux-x64"
+      },
+      {
+        "host": "workers.cloudflare.com",
+        "reason": "undecided",
+        "requester": "@cloudflare/wrangler@1.21.0",
+        "observedUrl": "https://workers.cloudflare.com/get-npm-wrangler-binary/1.21.0/x86_64-unknown-linux-musl",
+        "detail": "Recorded as an evidenced candidate, not as a disqualification: no write-capable route or multi-tenant namespace has been established for it, and the fetch is a dedicated single-tenant vendor binary path. Whether it is admitted is a maintainer call, and it is deliberately left out of networkHosts until then. Note the requester is wrangler 1.x, which prints its own deprecation notice directing users to the `wrangler` package — so the demand may not survive the version it was measured on.",
+        "evidence": "measured",
+        "observed": "Downloading release from <url>, then Error fetching release: getaddrinfo EAI_AGAIN workers.cloudflare.com, in the denied arm of the Linux corpus run.",
+        "platform": "linux-x64 (musl artifact)"
       }
     ]
   }
