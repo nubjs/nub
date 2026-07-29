@@ -16,7 +16,7 @@
 // (it imported them as ESM), so this module never require()s the core there.
 
 const module_ = require("node:module");
-const { readdirSync, existsSync } = require("node:fs");
+const { readdirSync, existsSync, realpathSync } = require("node:fs");
 const { fileURLToPath, pathToFileURL } = require("node:url");
 const { join, dirname, extname: pathExtname } = require("node:path");
 
@@ -824,10 +824,24 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       for (const [ext, handler] of saved) module_._extensions[ext] = handler;
     }
   };
-  const isDepTsHit = (filename) =>
-    typeof filename === "string" &&
-    TS_CLASSIC_EXTS.includes(pathExtname(filename)) &&
-    core.isNodeModules(pathToFileURL(filename).href);
+  const isDepTsHit = (filename) => {
+    if (typeof filename !== "string") return false;
+    if (!TS_CLASSIC_EXTS.includes(pathExtname(filename))) return false;
+    // Decide on where the file REALLY lives, not on the path Node happened to hand
+    // back. Under `--preserve-symlinks` Node's `tryFile` skips `toRealPath`, so a
+    // workspace package symlinked into node_modules still carries a `/node_modules/`
+    // segment and would read as a dependency — costing it the TS source that IS its
+    // build output. Resolving first makes the test independent of Node's symlink
+    // policy rather than coincidentally agreeing with the default. Only TS-extension
+    // hits get here, so the extra stat is off the hot path.
+    let real = filename;
+    try {
+      real = realpathSync(filename);
+    } catch {
+      /* unreadable: fall back to the literal path */
+    }
+    return core.isNodeModules(pathToFileURL(real).href);
+  };
 
   module_._resolveFilename = function (request, parent, isMain, options) {
     let resolved = null;

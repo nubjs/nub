@@ -65,6 +65,23 @@ fn fixture(name: &str) -> PathBuf {
     dir
 }
 
+/// `(major, minor)` of the `node` first on PATH. 22.15 is the fast-tier floor; the
+/// classic `require.extensions` behavior one test below pins exists only under it.
+fn path_node_version() -> Option<(u32, u32)> {
+    let out = Command::new("node").arg("--version").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v = String::from_utf8_lossy(&out.stdout);
+    let v = v.trim().trim_start_matches('v');
+    let mut parts = v.split('.');
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+fn on_compat_tier() -> bool {
+    matches!(path_node_version(), Some((m, n)) if (m, n) < (22, 15))
+}
+
 fn run(dir: &Path, entry: &str) -> (String, String) {
     let out = Command::new(nub_binary())
         .arg(dir.join(entry).to_str().unwrap())
@@ -235,6 +252,62 @@ module.exports = { who: v };
     assert!(
         stdout.contains("threw:MODULE_NOT_FOUND"),
         "expected Node's own MODULE_NOT_FOUND, got: {stdout} / {stderr}"
+    );
+}
+
+/// The dependency test has to decide on where a file REALLY lives. Under
+/// `--preserve-symlinks` Node hands back the un-realpathed path, so a workspace
+/// package symlinked into node_modules still carries a `/node_modules/` segment —
+/// and treating it as a dependency would cost it the TypeScript source that is its
+/// actual build output.
+///
+/// COMPAT TIER ONLY, because that is the only band where the behavior exists at
+/// all: resolving an extensionless `main` onto TS source depends on the classic
+/// `require.extensions` keys, which the fast tier never registers — Node 26 reports
+/// the same package missing both before and after this branch. The entry is plain
+/// `.cjs` on purpose; a `.cts` entry trips a SEPARATE pre-existing issue, where the
+/// load-side node_modules gate refuses the symlinked package's TS under this flag,
+/// which nub v0.5.0 exhibits identically and which is not what this pins.
+#[cfg(unix)]
+#[test]
+fn preserve_symlinks_keeps_a_workspace_package_loadable() {
+    if !on_compat_tier() {
+        return;
+    }
+    let dir = fixture("preserve-symlinks");
+    write(
+        &dir.join("packages/ws/package.json"),
+        r#"{"name":"@repro/ws","main":"./index"}"#,
+    );
+    write(
+        &dir.join("packages/ws/index.ts"),
+        r#"const v: string = "ws-source";
+module.exports = { who: v };
+"#,
+    );
+    std::fs::create_dir_all(dir.join("node_modules/@repro")).unwrap();
+    std::os::unix::fs::symlink(dir.join("packages/ws"), dir.join("node_modules/@repro/ws"))
+        .unwrap();
+    write(
+        &dir.join("entry.cjs"),
+        r#"console.log("who:" + require("@repro/ws").who);
+"#,
+    );
+    let out = Command::new(nub_binary())
+        .arg(dir.join("entry.cjs").to_str().unwrap())
+        .current_dir(&dir)
+        .env("NODE_OPTIONS", "--preserve-symlinks")
+        .env(
+            "XDG_CACHE_HOME",
+            std::env::temp_dir().join(format!("nub-subpath-cache-{}", std::process::id())),
+        )
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("who:ws-source"),
+        "workspace package was treated as a dependency under --preserve-symlinks: {stdout} / {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
