@@ -298,7 +298,16 @@ mod win {
                 default_effect: Effect::Deny,
                 ..Default::default()
             },
-            env: EnvPolicy::resolved(env),
+            // `enforce` MUST be set, not merely `resolved`: the Windows backend hands the
+            // child the constructed map only when the env axis enforces, and otherwise lets it
+            // inherit the parent's environment. With `EnvPolicy::resolved` alone the
+            // NODE_OPTIONS arm silently measured the PARENT's env and died at resolveMainPath.
+            env: EnvPolicy {
+                resolved: true,
+                enforce: true,
+                constructed: env,
+                ..Default::default()
+            },
             pid: PidPolicy::default(),
             build_jail: true,
         }
@@ -1108,9 +1117,12 @@ put("done=ok");
             .lines()
             .find(|l| l.starts_with("cwd="))
             .unwrap_or("<absent>");
+        // Compared by TAIL, not by full path: `%TEMP%` reaches the probe as an 8.3 short name
+        // (`RUNNER~1`) while the child reports the long form (`runneradmin`), so a whole-path
+        // match fails on two spellings of the same directory.
         let cwd_ok = cwd_line
             .to_ascii_lowercase()
-            .contains(&pkg.to_string_lossy().to_ascii_lowercase());
+            .ends_with("\\project\\node_modules\\demo-pkg");
         report(
             fails,
             "lifecycle-cwd-is-package-dir",
