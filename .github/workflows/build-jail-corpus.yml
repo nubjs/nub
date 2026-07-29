@@ -67,7 +67,7 @@ jobs:
         env:
           NUB_BIN: ${{ steps.prov.outputs.bin }}
           NUB_EXPECT_GIT_SHA: ${{ github.sha }}
-          STUDY_PATH: /usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin
+          STUDY_PATH: /usr/bin:/bin:/usr/sbin:/sbin
           OUTROOT: ${{ runner.temp }}/build-jail-corpus
         run: |
           chmod +x run-shard.sh
@@ -80,7 +80,7 @@ jobs:
         env:
           NUB_BIN: ${{ steps.prov.outputs.bin }}
           NUB_EXPECT_GIT_SHA: ${{ github.sha }}
-          STUDY_PATH: /usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin
+          STUDY_PATH: /usr/bin:/bin:/usr/sbin:/sbin
           OUTROOT: ${{ runner.temp }}/build-jail-corpus
         run: |
           START=$(date +%s)

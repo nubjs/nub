@@ -158,6 +158,28 @@ FORCE=""
 # rather than "the harness is broken". Resolve a real one or run without it.
 TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
 [ -n "$TIMEOUT_BIN" ] || echo "note: no timeout(1) available; running unbounded" >> "$LOG"
+
+# THE NODE ON STUDY_PATH MUST ACTUALLY WORK, and it is not necessarily the Node
+# the surrounding environment provisioned. `env -i` discards the ambient PATH, so
+# a hardcoded STUDY_PATH silently substitutes whatever `node` happens to sit in
+# those directories. On a CI runner that resolved a Homebrew Node which aborts on
+# `--version` (SIGABRT), so the engine download for the codegen fixture died and
+# the codegen denominator failed for a reason that looked like a package problem.
+# Prefer the caller's own `node`, and refuse to start on a broken one rather than
+# letting it surface later as an unexplained lifecycle-script failure.
+NODE_DIR="$(cd "$(dirname "$(command -v node)")" && pwd)"
+case ":$STUDY_PATH:" in
+  *":$NODE_DIR:"*) ;;
+  *) STUDY_PATH="$NODE_DIR:$STUDY_PATH" ;;
+esac
+JAILED_NODE="$(env -i PATH="$STUDY_PATH" bash -c 'command -v node' || true)"
+JAILED_NODE_V="$(env -i PATH="$STUDY_PATH" bash -c 'node --version' 2>&1 || true)"
+echo "study_path_node=$JAILED_NODE ($JAILED_NODE_V)" >> "$LOG"
+case "$JAILED_NODE_V" in
+  v*) ;;
+  *) echo "FATAL: node on STUDY_PATH is unusable: '$JAILED_NODE' -> '$JAILED_NODE_V'" | tee -a "$LOG" >&2
+     exit 7 ;;
+esac
 runnub() {
   ( cd "$PROJ" && env -i \
       PATH="$STUDY_PATH" HOME="$H" TMPDIR="$TMPD" \
