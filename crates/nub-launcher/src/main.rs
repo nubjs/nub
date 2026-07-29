@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 use anyhow::{Context, Result, anyhow, bail};
-use nub_core::compile::{self, Manifest, PayloadView, Shape};
+use nub_core::compile::{self, Manifest, PayloadView, Shape, is_safe_relative_name};
 use nub_core::node::{discovery, flags, spawn, version::NodeVersion};
 use ui::FirstRun;
 
@@ -554,8 +554,9 @@ fn ensure_app(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
     for (name, data) in &view.app_files {
         // Refuse a payload file name that could escape the extraction dir — a
         // corrupted/hostile section must not write outside `tmp` via `..`, an
-        // absolute path, or a leading separator (defense in depth; nub compile
-        // only ever emits flat bundle names).
+        // absolute path, or a leading separator. Names are nested and partly
+        // user-derived since `--include` landed, so `nub compile` checks the
+        // same predicate at build time; this stays as the last line of defense.
         if !is_safe_relative_name(name) {
             bail!("compiled payload has an unsafe file name: {name:?}");
         }
@@ -582,18 +583,6 @@ fn ensure_app(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
 }
 
 // ---- helpers ------------------------------------------------------------------
-
-/// A payload file name is safe to join under the extraction dir iff every path
-/// component is a plain name — no absolute root/prefix, no `..`, no leading
-/// separator, no `.`. Nested `a/b.js` is allowed (all-Normal); an escaping name
-/// is rejected. Guards against a corrupted section writing outside the cache.
-fn is_safe_relative_name(name: &str) -> bool {
-    use std::path::{Component, Path};
-    !name.is_empty()
-        && Path::new(name)
-            .components()
-            .all(|c| matches!(c, Component::Normal(_)))
-}
 
 /// A short, filesystem-safe key from a hex content hash.
 fn short_key(hex: &str) -> String {

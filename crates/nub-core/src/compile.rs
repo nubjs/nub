@@ -8,7 +8,7 @@
 //! PE `RT_RCDATA` resource — see [`ContainerFormat`]), but the blob itself is
 //! byte-identical across formats. It carries: a small JSON manifest (shape,
 //! entry name, Node version/triple, the embedded Node's content hash), the
-//! bundled app files (entry + Rolldown chunks), and — for the default `embed`
+//! app files (entry + Rolldown chunks + verbatim `--include`d assets), and — for the default `embed`
 //! shape — the zstd-compressed Node binary. `smol` shape carries no Node blob.
 //!
 //! Design points:
@@ -51,7 +51,9 @@ pub enum Shape {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     pub shape: Shape,
-    /// The entry file's name within the extracted app dir (e.g. `main.js`).
+    /// The entry file's path within the extracted app dir, `/`-separated. Flat
+    /// (`main.js`) unless `--include` anchored the app dir above the entry's own
+    /// directory, which nests it (`src/main.js`).
     pub entry: String,
     /// The concrete Node version this binary targets. Embed: the EXACT embedded
     /// version. Smol: the acceptance FLOOR the launcher enforces (`discovered >=
@@ -94,6 +96,24 @@ pub struct PayloadView<'a> {
     pub app_files: Vec<(String, &'a [u8])>,
     /// The zstd-compressed Node binary (`embed` shape), or empty (`smol`).
     pub node_blob: &'a [u8],
+}
+
+/// Whether a payload file name is safe to join under the extraction dir: every
+/// component a plain name — no root/prefix, no `..`, no leading separator, no `.`.
+/// Nested `a/b.js` is allowed; anything that could escape is not.
+///
+/// Lives here because BOTH sides of the container must agree. The launcher
+/// enforces it while extracting (a corrupted or hostile section must not write
+/// outside the cache), and `nub compile` checks it while building — since
+/// `--include` derives payload names from user-supplied paths, a name the
+/// launcher would reject has to fail the BUILD rather than ship an executable
+/// that aborts on the user's machine.
+pub fn is_safe_relative_name(name: &str) -> bool {
+    use std::path::{Component, Path};
+    !name.is_empty()
+        && Path::new(name)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
 }
 
 /// Encode a payload into the container blob written to the Mach-O section.

@@ -98,32 +98,51 @@ pub fn plan(
     // `app_sha256` hashes — so the same inputs always produce the same cache key.
     let mut collected: BTreeMap<String, PathBuf> = BTreeMap::new();
     for m in &roots {
+        let found = m.walk()?;
         let mut hits = 0usize;
-        for file in m.walk()? {
-            if excludes.iter().any(|e| e.matches(&file)) {
+        for file in &found {
+            if excludes.iter().any(|e| e.matches(file)) {
                 continue;
             }
-            let rel = relative_slash(&anchor, &file)?;
-            collected.insert(rel, file);
+            let rel = relative_slash(&anchor, file)?;
+            collected.insert(rel, file.clone());
             hits += 1;
         }
         // An include that ships nothing is a typo or a stale path, and staying
         // silent means discovering it when the binary fails on a user's machine.
         // (`--exclude` is deliberately the opposite — see `Matcher::matches`.)
+        // The three causes need three different fixes, so name the one that applied.
         if hits == 0 {
-            bail!(
-                "--include {:?} matched no files{}",
-                m.token,
-                if m.pattern.is_some() {
-                    ""
-                } else {
-                    " (the path does not exist)"
-                }
-            );
+            let hint = if !found.is_empty() {
+                " (every file it matched was excluded)"
+            } else if m.root.exists() {
+                ""
+            } else {
+                " (the path does not exist)"
+            };
+            bail!("--include {:?} matched no files{hint}", m.token);
         }
     }
 
     let entry_prefix = relative_slash(&anchor, entry_dir).unwrap_or_default();
+
+    // The launcher refuses any payload name that could escape its extraction dir.
+    // Since `--include` derives names from user paths, check the SAME predicate
+    // here: a rejected name must fail this build, not produce an executable that
+    // aborts on someone else's machine. (`entry_prefix` is empty when the entry
+    // sits at the anchor, which is not a payload name and is always fine.)
+    for name in std::iter::once(&entry_prefix)
+        .filter(|p| !p.is_empty())
+        .chain(collected.keys())
+    {
+        if !nub_core::compile::is_safe_relative_name(name) {
+            bail!(
+                "--include produced a path that cannot be embedded: {name:?}. \
+                 Included paths must sit inside the tree that holds the entry."
+            );
+        }
+    }
+
     Ok(Layout {
         entry_prefix,
         assets: collected
@@ -138,9 +157,12 @@ pub fn plan(
 struct Matcher {
     token: String,
     /// The deepest directory the pattern is rooted at — the literal leading
-    /// components, absolute and normalized.
+    /// components, resolved into the entry's namespace.
     root: PathBuf,
-    /// The absolute `/`-separated glob, when the token had any wildcards.
+    /// The glob tail RELATIVE to `root`, when the token had any wildcards.
+    /// Relative, not absolute, so the build machine's own directory names can
+    /// never be read as glob syntax — a project living in `~/proj[1]` would
+    /// otherwise have its every glob silently match nothing.
     pattern: Option<String>,
     /// Whether `root` is a plain file (no glob, and it exists as a file).
     is_file: bool,
@@ -148,6 +170,9 @@ struct Matcher {
 
 impl Matcher {
     fn parse(cwd: &Path, token: &str) -> Result<Self> {
+        if token.trim().is_empty() {
+            bail!("an empty --include/--exclude path selects the entire working tree; pass a path");
+        }
         let raw = Path::new(token);
         let abs = if raw.is_absolute() {
             raw.to_path_buf()
@@ -155,27 +180,51 @@ impl Matcher {
             cwd.join(raw)
         };
 
+        // A path that exists under exactly this name is that path, even though
+        // `[`/`{` are glob syntax AND legal filename characters everywhere —
+        // otherwise a Next.js/Astro route directory (`app/[id]/data.json`) or a
+        // browser-numbered download (`report[1].pdf`) could not be named at all.
+        if abs.exists() {
+            let root = resolve(&abs);
+            let is_file = root.is_file();
+            return Ok(Self {
+                token: token.to_string(),
+                root,
+                pattern: None,
+                is_file,
+            });
+        }
+
         // Split at the first component carrying a wildcard: everything before it
-        // is a real directory we can walk; the whole pattern filters what we find.
-        let mut root = PathBuf::new();
+        // is a real directory we can walk; the rest filters what we find. Scan
+        // only what the USER TYPED — the cwd this gets joined onto is a machine
+        // path, not pattern text, and scanning it would let a directory named
+        // `my[work]` truncate the literal root and break every glob under it.
+        let mut lit = PathBuf::new();
+        let mut tail = PathBuf::new();
         let mut sawglob = false;
-        for c in abs.components() {
+        for c in raw.components() {
             let literal = match c {
                 Component::Normal(s) => !has_wildcard(&s.to_string_lossy()),
                 _ => true,
             };
-            if !literal {
+            if sawglob || !literal {
                 sawglob = true;
-                break;
+                tail.push(c);
+            } else {
+                lit.push(c);
             }
-            root.push(c);
         }
 
-        let root = normalize(&root);
+        let root = resolve(&if lit.is_absolute() {
+            lit
+        } else {
+            cwd.join(lit)
+        });
         if sawglob {
             return Ok(Self {
                 token: token.to_string(),
-                pattern: Some(to_slash(&normalize(&abs))),
+                pattern: Some(to_slash(&tail)),
                 root,
                 is_file: false,
             });
@@ -209,10 +258,20 @@ impl Matcher {
         if self.root.is_dir() {
             walk_dir(&self.root, &mut out)?;
         }
-        if let Some(pattern) = &self.pattern {
-            out.retain(|p| glob_match::glob_match(pattern, &to_slash(p)));
+        if self.pattern.is_some() {
+            out.retain(|p| self.glob_hits(p));
         }
         Ok(out)
+    }
+
+    /// Whether this matcher's glob selects `path`, compared on the portion below
+    /// `root` so only the user's own pattern text is ever glob syntax.
+    fn glob_hits(&self, path: &Path) -> bool {
+        let Some(pattern) = &self.pattern else {
+            return false;
+        };
+        path.strip_prefix(&self.root)
+            .is_ok_and(|rel| glob_match::glob_match(pattern, &to_slash(rel)))
     }
 
     /// Whether this token prunes `path`. A literal directory prunes its whole
@@ -222,15 +281,47 @@ impl Matcher {
     /// matching Deno) — the residual risk being a typo'd `--exclude ./secrets`
     /// that then ships the secrets.
     fn matches(&self, path: &Path) -> bool {
-        match &self.pattern {
-            Some(p) => glob_match::glob_match(p, &to_slash(path)),
-            None => path == self.root || path.starts_with(&self.root),
+        match self.pattern {
+            Some(_) => self.glob_hits(path),
+            None => path.starts_with(&self.root),
         }
     }
 }
 
 fn has_wildcard(s: &str) -> bool {
     s.contains(['*', '?', '[', '{'])
+}
+
+/// Put `path` in the same namespace as the canonicalized entry by resolving its
+/// deepest EXISTING ancestor and re-appending the rest.
+///
+/// Neither half alone is enough. Plain `canonicalize` fails outright on a glob's
+/// non-existent tail; plain lexical normalization leaves a symlinked spelling
+/// (`/tmp` where the entry canonicalized to `/private/tmp`) that then silently
+/// fails to prefix-match a walked path — which disarms an `--exclude` without a
+/// word, so `--include . --exclude "$PWD/.env"` ships the secret. `$PWD` is the
+/// logical path while `current_dir()` is the physical one, so that spelling is
+/// the ordinary one in a build script, not an exotic input.
+fn resolve(path: &Path) -> PathBuf {
+    let normalized = normalize(path);
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut probe = normalized.as_path();
+    loop {
+        if let Ok(real) = probe.canonicalize() {
+            let mut out = real;
+            out.extend(tail.iter().rev());
+            return out;
+        }
+        match (probe.parent(), probe.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name.to_os_string());
+                probe = parent;
+            }
+            // A path with no existing ancestor at all (or a bare root): the
+            // lexical form is the best available answer.
+            _ => return normalized,
+        }
+    }
 }
 
 fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -432,6 +523,87 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn an_exclude_spelled_through_a_symlink_still_prunes() {
+        // The entry arrives canonicalized, so a token left in its symlinked
+        // spelling used to prefix-match nothing — and an unmatched --exclude is
+        // silent, so `--include . --exclude "$PWD/.env"` shipped the secret
+        // ($PWD is logical, current_dir() is physical).
+        let d = fixture("symlink");
+        let link = d.parent().unwrap().join(format!(
+            "nub-assets-link-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(&d, &link).unwrap();
+
+        let plan = plan(
+            &d.join("src"),
+            &d,
+            &["assets".into()],
+            // Spelled through the link; names the same physical file.
+            &[link.join("assets/img").to_string_lossy().into_owned()],
+        )
+        .unwrap();
+        assert_eq!(
+            plan.assets.iter().map(|a| &a.rel).collect::<Vec<_>>(),
+            ["assets/data.json"],
+            "an exclude spelled through a symlink must prune the same files as one spelled directly"
+        );
+        let _ = fs::remove_file(&link);
+    }
+
+    #[test]
+    fn a_glob_metacharacter_in_the_project_path_is_not_glob_syntax() {
+        // The user's pattern is matched BELOW the include root, so a build
+        // machine directory literally named `my[work]` — part of the path, not
+        // of what they typed — can never be read as a character class.
+        let d = fixture("brackets");
+        let odd = d.join("my[work]");
+        fs::create_dir_all(odd.join("assets/img")).unwrap();
+        fs::create_dir_all(odd.join("src")).unwrap();
+        fs::write(odd.join("assets/img/a.png"), "png").unwrap();
+        let plan = plan(&odd.join("src"), &odd, &["assets/**/*.png".into()], &[]).unwrap();
+        assert_eq!(
+            plan.assets.iter().map(|a| &a.rel).collect::<Vec<_>>(),
+            ["assets/img/a.png"]
+        );
+    }
+
+    #[test]
+    fn a_path_that_exists_verbatim_wins_over_reading_it_as_a_glob() {
+        // `[id]` route directories and `report[1].pdf` downloads are ordinary
+        // names that happen to contain glob syntax.
+        let d = fixture("literal-brackets");
+        fs::create_dir_all(d.join("app/[id]")).unwrap();
+        fs::write(d.join("app/[id]/data.json"), "{}").unwrap();
+        fs::write(d.join("report[1].pdf"), "pdf").unwrap();
+        let plan = plan(
+            &d.join("src"),
+            &d,
+            &["app/[id]".into(), "report[1].pdf".into()],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            plan.assets.iter().map(|a| &a.rel).collect::<Vec<_>>(),
+            ["app/[id]/data.json", "report[1].pdf"]
+        );
+    }
+
+    #[test]
+    fn an_empty_include_token_is_rejected_rather_than_taking_the_whole_tree() {
+        let d = fixture("empty");
+        // `--include "$ASSET_DIR"` with the variable unset would otherwise embed
+        // the entire working tree, node_modules and dotfiles included.
+        for token in ["", "   "] {
+            let err = plan(&d.join("src"), &d, &[token.to_string()], &[]).unwrap_err();
+            assert!(format!("{err:#}").contains("empty"), "{err:#}");
+        }
+    }
+
+    #[test]
     fn overlapping_includes_ship_each_file_once() {
         let d = fixture("overlap");
         let plan = plan(
@@ -454,6 +626,11 @@ mod tests {
             &["assets/img".into()],
         )
         .unwrap_err();
-        assert!(format!("{err:#}").contains("matched no files"), "{err:#}");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("matched no files"), "{msg}");
+        // The three ways an include can come up empty need three different
+        // fixes, so a path emptied by --exclude must not be reported as missing.
+        assert!(msg.contains("every file it matched was excluded"), "{msg}");
+        assert!(!msg.contains("does not exist"), "{msg}");
     }
 }

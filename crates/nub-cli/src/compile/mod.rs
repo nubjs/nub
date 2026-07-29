@@ -58,8 +58,9 @@ pub struct CompileOptions {
     pub bundle: BundleOptions,
 }
 
-/// The bundled app files to embed: `(name, bytes)` per file (entry + chunks +
-/// any shipped source map + the synthesized `package.json`).
+/// The app files to embed: `(name, bytes)` per file — entry + chunks, any
+/// shipped source map, every `--include`d asset, and the synthesized
+/// `package.json`. Names are `/`-separated and relative to the extracted app dir.
 type AppFiles = Vec<(String, Vec<u8>)>;
 
 pub fn run(mut opts: CompileOptions) -> Result<i32> {
@@ -281,8 +282,6 @@ fn target_defines(target: &TargetPlatform) -> Vec<(String, String)> {
     ]
 }
 
-/// The app file set: every emitted file verbatim, plus a `package.json
-/// {"type":"module"}` so Node runs the ESM `.js` entry as ESM.
 /// Bundle output + embedded assets, in the payload's write order.
 ///
 /// The synthesized `package.json` sits BESIDE the entry rather than at the app
@@ -320,11 +319,9 @@ fn assemble_app(bundled: &bundle::BundleResult, layout: &assets::Layout) -> Resu
         // rather than a "Cannot use import statement outside a module" on a
         // user's machine.
         Some((_, bytes)) => {
-            let declares_esm = serde_json::from_slice::<serde_json::Value>(bytes)
-                .ok()
-                .and_then(|v| v.get("type")?.as_str().map(str::to_owned))
-                .is_some_and(|t| t == "module");
-            if !declares_esm {
+            let parsed: serde_json::Value = serde_json::from_slice(bytes)
+                .with_context(|| format!("parsing the embedded {pkg}"))?;
+            if parsed.get("type").and_then(|t| t.as_str()) != Some("module") {
                 bail!(
                     "the embedded {pkg} must declare \"type\": \"module\" — it sits beside the \
                      compiled entry, which is an ES module. Add the field, or drop the file \
