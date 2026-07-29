@@ -121,17 +121,6 @@ fn create_junction_with_retry(target: &Path, link: &Path) -> io::Result<()> {
     loop {
         match junction::create(target, link) {
             Ok(()) => return Ok(()),
-            // `ERROR_ALREADY_EXISTS` when the junction ALREADY points where we
-            // were going to point it is a no-op, not a conflict. Callers reach
-            // here after their own stale-entry reconciliation, so a surviving
-            // correct entry means a concurrent writer (the fetch-phase prewarm,
-            // a parallel install) got there first — the outcome we wanted.
-            // Treating it as fatal is what surfaced as `os error 183` on a
-            // sibling entry during an incremental `add` (#576). A junction
-            // pointing SOMEWHERE ELSE is still a real error and still fails.
-            Err(e) if e.raw_os_error() == Some(183) && junction_points_at(link, target) => {
-                return Ok(());
-            }
             Err(e) if is_retriable_link_error(&e) && attempt < 9 => {
                 std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                 delay_ms = (delay_ms * 2).min(2000);
@@ -139,21 +128,6 @@ fn create_junction_with_retry(target: &Path, link: &Path) -> io::Result<()> {
             }
             Err(e) => return Err(e),
         }
-    }
-}
-
-/// Whether `link` is already a reparse point resolving to `target`.
-///
-/// Compared through `canonicalize` on both sides so an `8.3` short name, a
-/// case difference, or a `\\?\` verbatim prefix on one side alone does not
-/// read as a mismatch and turn a benign collision back into a hard failure.
-#[cfg(windows)]
-fn junction_points_at(link: &Path, target: &Path) -> bool {
-    match (std::fs::canonicalize(link), std::fs::canonicalize(target)) {
-        (Ok(l), Ok(t)) => l == t,
-        // Cannot prove they match — treat as a mismatch so the caller still
-        // sees the error rather than silently accepting a wrong entry.
-        _ => false,
     }
 }
 
@@ -1166,40 +1140,6 @@ mod tests {
     fn normalize_collapses_parent_and_cur_dir() {
         let p = Path::new(r"C:\a\b\.\..\c\d\..\e");
         assert_eq!(normalize_path(p), PathBuf::from(r"C:\a\c\e"));
-    }
-
-    // nubjs/nub#576: `ERROR_ALREADY_EXISTS` on a junction that already points
-    // where we wanted it is the concurrent-writer outcome we asked for, not a
-    // conflict. Runs only on the windows-latest CI leg — junctions have no
-    // POSIX equivalent to exercise.
-    #[cfg(windows)]
-    #[test]
-    fn recreating_a_junction_at_its_existing_target_succeeds() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("target");
-        let link = dir.path().join("link");
-        std::fs::create_dir_all(&target).unwrap();
-
-        create_dir_link(&target, &link).expect("first junction must be created");
-        create_dir_link(&target, &link)
-            .expect("recreating at the SAME target must be a no-op, not os 183");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn recreating_a_junction_at_a_different_target_still_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = dir.path().join("first");
-        let second = dir.path().join("second");
-        let link = dir.path().join("link");
-        std::fs::create_dir_all(&first).unwrap();
-        std::fs::create_dir_all(&second).unwrap();
-
-        create_dir_link(&first, &link).expect("first junction must be created");
-        // A junction pointing somewhere else is a genuine conflict — silently
-        // accepting it would leave the package resolving to the wrong tree.
-        create_dir_link(&second, &link)
-            .expect_err("a junction at a DIFFERENT target must still be an error");
     }
 
     #[cfg(windows)]
