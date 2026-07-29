@@ -63,11 +63,20 @@ use std::path::{Component, Path, PathBuf};
 ///   absolute against `link`'s parent first).
 ///
 /// **Convergent**: an occupied `link` that already points at `target` is a
-/// no-op success, and any other occupant is cleared and replaced. Callers
-/// re-link into live `node_modules` trees on every `add` / `remove`, so a
-/// create that hard-failed on collision aborted whole installs over entries
-/// that survived the previous run (nubjs/nub#576, #566). The clean-create
-/// fast path is unchanged — the reconcile costs nothing until a collision.
+/// no-op success, and a stale LINK or empty directory is cleared and replaced.
+/// Callers re-link into live `node_modules` trees on every `add` / `remove`, so
+/// a create that hard-failed on collision aborted whole installs over entries
+/// that survived the previous run (nubjs/nub#576, #566). The clean-create fast
+/// path is unchanged — the reconcile costs nothing until a collision.
+///
+/// A POPULATED REAL DIRECTORY is deliberately NOT cleared: this primitive never
+/// recurses. Every caller that legitimately replaces real content clears the
+/// slot itself first (`try_remove_entry` / `remove_existing` /
+/// `reconcile_top_level_link`), so real content still occupying a link path
+/// means the linker is about to write over something it does not own — most
+/// sharply, a package's own just-materialized files when a dependency name
+/// collides with the package's under case folding. That stays a loud error, on
+/// every platform, rather than a silent recursive delete.
 pub fn create_dir_link(target: &Path, link: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -80,7 +89,7 @@ pub fn create_dir_link(target: &Path, link: &Path) -> io::Result<()> {
                 if matches!(std::fs::read_link(link), Ok(existing) if existing == target) {
                     return Ok(());
                 }
-                crate::try_remove_entry(link);
+                clear_link_slot(link)?;
                 match std::os::unix::fs::symlink(target, link) {
                     // A concurrent linker thread refilled the slot between the
                     // clear and the retry. It writes the same target we do, so
@@ -144,7 +153,7 @@ fn create_junction_with_retry(target: &Path, link: &Path) -> io::Result<()> {
             // DIFFERENT target means something outside the linker owns the
             // path, and clearing again would be an unbounded delete/recreate
             // fight with whoever that is.
-            Err(e) if is_already_exists(&e) => {
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 if junction_points_at(link, target) {
                     return Ok(());
                 }
@@ -152,7 +161,12 @@ fn create_junction_with_retry(target: &Path, link: &Path) -> io::Result<()> {
                     return Err(e);
                 }
                 reconciled = true;
-                crate::try_remove_entry(link);
+                // Surface the CLEAR's own error rather than looping back to a
+                // second 183. When a dev server / watcher / AV scanner holds a
+                // handle on the occupant the removal is what actually failed,
+                // and reporting "already exists" for a sharing violation sends
+                // the reader looking in the wrong place.
+                clear_link_slot(link)?;
             }
             Err(e) if is_retriable_link_error(&e) && attempt < 9 => {
                 // `junction::create` is not atomic: it `fs::create_dir`s the
@@ -195,9 +209,18 @@ fn junction_points_at(link: &Path, target: &Path) -> bool {
     )
 }
 
-#[cfg(windows)]
-fn is_already_exists(error: &io::Error) -> bool {
-    error.kind() == io::ErrorKind::AlreadyExists || error.raw_os_error() == Some(183)
+/// Clear a stale LINK or empty directory out of a link path. Deliberately
+/// non-recursive: `remove_dir` unlinks a junction or an empty directory,
+/// `remove_file` unlinks a POSIX symlink or a plain file, and a populated real
+/// directory matches neither, so its error propagates and the caller's create
+/// stays loud. See `create_dir_link` for why that shape must not be recursed
+/// into. `NotFound` is success — something else already cleared the slot.
+fn clear_link_slot(link: &Path) -> io::Result<()> {
+    match std::fs::remove_dir(link).or_else(|_| std::fs::remove_file(link)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(windows)]
@@ -1263,12 +1286,31 @@ mod tests {
         assert_converges(|link| std::fs::create_dir_all(link).unwrap());
     }
 
+    /// The one occupant shape convergence must NOT swallow. Real content at a
+    /// link path means the linker is about to overwrite something it does not
+    /// own — the case-folding self-collision in `materialize_into`'s sibling
+    /// pass reaches this with the package's OWN freshly-materialized files, so
+    /// a recursive clear here would destroy them silently. Stays a loud error,
+    /// and the contents must be intact afterwards.
     #[test]
-    fn create_dir_link_converges_over_populated_dir() {
-        assert_converges(|link| {
-            std::fs::create_dir_all(link.join("nested")).unwrap();
-            std::fs::write(link.join("stale.txt"), b"stale").unwrap();
-        });
+    fn create_dir_link_refuses_to_clobber_a_populated_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+
+        let link = dir.path().join("link");
+        std::fs::create_dir_all(link.join("nested")).unwrap();
+        std::fs::write(link.join("precious.txt"), b"precious").unwrap();
+
+        assert!(
+            create_dir_link(&target, &link).is_err(),
+            "populated real directory was silently replaced"
+        );
+        assert_eq!(
+            std::fs::read(link.join("precious.txt")).unwrap(),
+            b"precious"
+        );
+        assert!(link.join("nested").is_dir());
     }
 
     #[test]

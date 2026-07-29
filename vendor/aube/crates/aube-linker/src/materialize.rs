@@ -12,12 +12,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
-/// Whether path lookup folds case on this platform. Windows always does, and
-/// the default macOS volume does; Linux does not. Governs the self-reference
-/// skip in the transitive-sibling pass, where two package names differing only
-/// by case would otherwise resolve to one directory.
-const CASE_INSENSITIVE_PATHS: bool = cfg!(any(windows, target_os = "macos"));
-
 enum MaterializePlacement {
     Placed,
     LostRace,
@@ -707,17 +701,16 @@ impl Linker {
             // package resolves to its own files, matching what npm /
             // pnpm / yarn end up with after their hoisting passes.
             //
-            // The comparison has to tolerate case wherever the filesystem
-            // does. On Windows and a default macOS volume `Foo` and `foo`
-            // name the SAME directory, so an exact-match skip lets a `foo`
-            // edge on a package named `Foo` compute a `symlink_path` that
-            // IS `pkg_nm_dir`. `create_dir_link` converges by clearing
-            // whatever occupies the slot, so that would recursively delete
-            // the package's own just-materialized files — where it used to
-            // surface as the loud EEXIST this comment describes.
-            if dep_name == &pkg.name
-                || (CASE_INSENSITIVE_PATHS && dep_name.eq_ignore_ascii_case(&pkg.name))
-            {
+            // Case folding makes this an exact-match skip over a path
+            // comparison that is not exact: where the filesystem folds case
+            // (Windows, a default macOS volume, a casefold ext4 directory, a
+            // Docker-on-macOS bind mount) a `foo` edge on a package named
+            // `Foo` computes a `symlink_path` that IS `pkg_nm_dir`. That is
+            // not detectable from the name alone — the property belongs to the
+            // mount, not the platform — so the backstop lives in
+            // `create_dir_link`, which refuses to clear a populated real
+            // directory and keeps the collision a loud error everywhere.
+            if dep_name == &pkg.name {
                 continue;
             }
             let symlink_path = pkg_nm_parent.join(dep_name);
