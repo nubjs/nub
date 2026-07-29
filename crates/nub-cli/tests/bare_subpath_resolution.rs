@@ -65,23 +65,6 @@ fn fixture(name: &str) -> PathBuf {
     dir
 }
 
-/// `(major, minor)` of the `node` first on PATH. 22.15 is the fast-tier floor,
-/// and one test below is a fast-tier-only contract.
-fn path_node_version() -> Option<(u32, u32)> {
-    let out = Command::new("node").arg("--version").output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let v = String::from_utf8_lossy(&out.stdout);
-    let v = v.trim().trim_start_matches('v');
-    let mut parts = v.split('.');
-    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
-}
-
-fn on_fast_tier() -> bool {
-    matches!(path_node_version(), Some((m, n)) if (m, n) >= (22, 15))
-}
-
 fn run(dir: &Path, entry: &str) -> (String, String) {
     let out = Command::new(nub_binary())
         .arg(dir.join(entry).to_str().unwrap())
@@ -183,21 +166,14 @@ console.log("from:" + s.from);
 /// the load hooks refuse. Node's CJS resolver loads `sub/index.js` here, and so
 /// must nub.
 ///
-/// FAST TIER ONLY, and the reason is a separate pre-existing bug rather than
-/// anything this probe does. Below 22.15 nub registers a classic
-/// `require.extensions` handler for the TS family, so Node's OWN CJS resolver
-/// finds `sub.ts` during LOAD_AS_FILE and never reaches LOAD_AS_DIRECTORY — the
-/// additive resolver has already declined the file by then. That handler carries
-/// no `node_modules` bail, unlike its `.js`/`.cjs` sibling, so the outcome is not
-/// merely a different error: the dependency's unshipped source is transpiled and
-/// returned, and `require("pkg/sub")` hands back `sub.ts`'s exports where plain
-/// Node hands back `sub/index.js`'s. Verified against nub v0.5.0, which predates
-/// this branch and is identical on 20.11 and 18.19.
+/// Runs on EVERY tier. Below 22.15 the classic `require.extensions` handlers put
+/// the TS family into `Module._extensions`, which Node's `_findPath` walks during
+/// LOAD_AS_FILE before it ever tries LOAD_AS_DIRECTORY — so this used to hand back
+/// a dependency's unshipped `sub.ts` instead. The require-side resolver now
+/// re-resolves without those keys whenever Node's answer is a TS file under
+/// node_modules, which is what keeps the two tiers agreeing here.
 #[test]
 fn directory_index_outranks_an_unloadable_ts_sibling() {
-    if !on_fast_tier() {
-        return;
-    }
     let dir = fixture("dir-vs-ts");
     write(
         &dir.join("node_modules/pkg/package.json"),
@@ -217,6 +193,49 @@ console.log("who:" + m.who);
     );
     let (stdout, stderr) = run(&dir, "entry.cts");
     assert_eq!(stdout, "who:dir-index", "stderr: {stderr}");
+}
+
+/// A dependency's own relative require must not reach its unshipped TS source
+/// either. Plain Node reports `./util` missing when only `util.ts` exists, and so
+/// must nub — deps are never transpiled, on any tier. Below 22.15 the classic
+/// `require.extensions` keys made this resolve and load, silently.
+#[test]
+fn dep_internal_relative_require_does_not_reach_ts_source() {
+    let dir = fixture("dep-internal-ts");
+    write(
+        &dir.join("node_modules/depts/package.json"),
+        r#"{"name":"depts","main":"index.js"}"#,
+    );
+    write(
+        &dir.join("node_modules/depts/index.js"),
+        r#"const u = require("./util");
+module.exports = { who: u.who };
+"#,
+    );
+    write(
+        &dir.join("node_modules/depts/util.ts"),
+        r#"const v: string = "unshipped";
+module.exports = { who: v };
+"#,
+    );
+    write(
+        &dir.join("entry.cts"),
+        r#"try {
+  console.log("who:" + require("depts").who);
+} catch (e) {
+  console.log("threw:" + (e as { code?: string }).code);
+}
+"#,
+    );
+    let (stdout, stderr) = run(&dir, "entry.cts");
+    assert!(
+        !stdout.contains("who:unshipped"),
+        "a dep's relative require reached its unshipped TS source: {stdout} / {stderr}"
+    );
+    assert!(
+        stdout.contains("threw:MODULE_NOT_FOUND"),
+        "expected Node's own MODULE_NOT_FOUND, got: {stdout} / {stderr}"
+    );
 }
 
 /// A published package shipping ONLY TypeScript source must surface Node's own

@@ -795,6 +795,40 @@ function requireEsmError(filename) {
 // already cover resolution + transpile.
 function installCjsRequireHooks(core, withClassicTranspile) {
   const origResolveFilename = module_._resolveFilename;
+
+  // The classic transpile handlers registered below put `.ts`/`.cts`/`.mts`/`.tsx`/
+  // `.jsx` into `Module._extensions`, and Node's `_findPath` runs `tryExtensions` over
+  // EVERY key of that object during LOAD_AS_FILE — before it ever tries
+  // LOAD_AS_DIRECTORY. Registering them therefore reorders Node's own resolution
+  // INSIDE dependencies: `require("pkg/sub")` picks a dep's unshipped `sub.ts` over the
+  // `sub/index.js` Node loads, and a dep's internal `require("./util")` picks `util.ts`
+  // where Node reports it missing. Both hand back a silently different module.
+  //
+  // Deps are NEVER transpiled — the same invariant the `.js`/`.cjs` handler below
+  // states — and the fast tier already resolves both shapes Node's way, so this keeps
+  // the two tiers in agreement. The check is on Node's ANSWER rather than a guess about
+  // the request, so nothing is re-resolved unless our own keys actually changed the
+  // outcome; the retry then reports whatever Node itself would, error included.
+  const TS_CLASSIC_EXTS = [".ts", ".cts", ".mts", ".tsx", ".jsx"];
+  const withoutTsExtensions = (fn) => {
+    const saved = [];
+    for (const ext of TS_CLASSIC_EXTS) {
+      if (Object.hasOwn(module_._extensions, ext)) {
+        saved.push([ext, module_._extensions[ext]]);
+        delete module_._extensions[ext];
+      }
+    }
+    try {
+      return fn();
+    } finally {
+      for (const [ext, handler] of saved) module_._extensions[ext] = handler;
+    }
+  };
+  const isDepTsHit = (filename) =>
+    typeof filename === "string" &&
+    TS_CLASSIC_EXTS.includes(pathExtname(filename)) &&
+    core.isNodeModules(pathToFileURL(filename).href);
+
   module_._resolveFilename = function (request, parent, isMain, options) {
     let resolved = null;
     try {
@@ -828,7 +862,21 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       delete options.conditions;
     }
     try {
-      return origResolveFilename.call(this, request, parent, isMain, options);
+      const byNode = origResolveFilename.call(this, request, parent, isMain, options);
+      if (withClassicTranspile && isDepTsHit(byNode)) {
+        // `_findPath` memoizes into `Module._pathCache` and returns that entry before
+        // it ever consults the extension list, so the retry would be handed the same
+        // TS hit and the removal below would look like a no-op. Drop the memo first.
+        // Purging by VALUE rather than rebuilding the cache key keeps this off Node's
+        // internal key format, which differs across the supported range.
+        for (const key of Object.keys(module_._pathCache)) {
+          if (module_._pathCache[key] === byNode) delete module_._pathCache[key];
+        }
+        return withoutTsExtensions(() =>
+          origResolveFilename.call(this, request, parent, isMain, options),
+        );
+      }
+      return byNode;
     } catch (e) {
       // Under PnP, an in-tree issuer requiring a dep NOT in its manifest makes PnP
       // throw. That is nub's OWN transpile helpers (e.g. `@oxc-project/runtime`),
