@@ -484,10 +484,11 @@ pub(super) async fn update_manifest_for_add(
                     code = aube_codes::errors::ERR_AUBE_RELEASE_AGE_MISSING_TIME,
                     help = format!(
                         "the minimumReleaseAge window is checked against the registry's `time` \
-                         metadata, which this packument does not carry — no window would admit \
-                         these versions\nto proceed: point the registry in .npmrc at one that \
-                         serves publish times, add `{}` to `minimumReleaseAgeExclude`, or set \
-                         `minimumReleaseAge=0` to turn the window off for this project",
+                         metadata, which omits these versions — no window would admit them\n\
+                         to proceed: unset `registry-supports-time-field` if it is on (it \
+                         suppresses the full-packument fetch that carries `time`), check the \
+                         registry config in .npmrc, add `{}` to `minimumReleaseAgeExclude`, or \
+                         set `minimumReleaseAge=0` to turn the window off for this project",
                         spec.name
                     ),
                     "cannot check the publish age of {}@{effective_range} — the registry served no publish time for any matching version",

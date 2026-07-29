@@ -413,9 +413,12 @@ fn format_undated_help(d: &UndatedDetails) -> String {
     }
     s.push_str(
         "the minimumReleaseAge window is checked against the registry's `time` metadata, which \
-         this packument does not carry — no window would admit these versions\n",
+         omits these versions — no window would admit them\n",
     );
-    s.push_str("to proceed: point the registry in .npmrc at one that serves publish times, add `");
+    s.push_str(
+        "to proceed: unset `registry-supports-time-field` if it is on (it suppresses the \
+         full-packument fetch that carries `time`), check the registry config in .npmrc, add `",
+    );
     s.push_str(&d.name);
     s.push_str(
         "` to `minimumReleaseAgeExclude`, or set `minimumReleaseAge=0` to turn the window off \
