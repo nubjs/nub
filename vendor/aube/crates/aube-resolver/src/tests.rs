@@ -6147,3 +6147,66 @@ async fn optional_dep_with_both_fetches_in_flight() {
 
     server.abort();
 }
+
+/// A registry that carries the package but not the requested version —
+/// a mirror holding only the platform bindings its own users have pulled
+/// — must not fail the install when the dep is optional. Reported as
+/// nubjs/nub#580: `rolldown` lists all 15 `@rolldown/binding-*` as
+/// optional, and the version pick runs before the `os`/`cpu` filter, so a
+/// binding that couldn't resolve aborted the whole install even though
+/// the platform filter was about to drop it.
+#[tokio::test]
+async fn optional_dep_with_no_matching_version_is_skipped() {
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:1/",
+    ));
+    let mut resolver = Resolver::new(client);
+    resolver.cache.insert(
+        "p-map".to_string(),
+        make_packument("p-map", &["7.0.4"], "7.0.4"),
+    );
+    resolver.cache.insert(
+        "native-binding".to_string(),
+        make_packument("native-binding", &["1.1.0", "1.2.0"], "1.2.0"),
+    );
+
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert("p-map".to_string(), "7.0.4".to_string());
+    manifest
+        .optional_dependencies
+        .insert("native-binding".to_string(), "1.0.3".to_string());
+
+    let graph = resolver
+        .resolve(&manifest, None)
+        .await
+        .expect("an optional dep with no matching version must not fail the resolve");
+    assert!(graph_has_package(&graph, "p-map", "7.0.4"));
+    assert!(!graph_has_package(&graph, "native-binding", "1.0.3"));
+}
+
+/// The skip above is scoped to optional deps — a required dep whose range
+/// matches nothing is still a hard failure.
+#[tokio::test]
+async fn required_dep_with_no_matching_version_still_fails() {
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:1/",
+    ));
+    let mut resolver = Resolver::new(client);
+    resolver.cache.insert(
+        "native-binding".to_string(),
+        make_packument("native-binding", &["1.1.0", "1.2.0"], "1.2.0"),
+    );
+
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert("native-binding".to_string(), "1.0.3".to_string());
+
+    let err = resolver
+        .resolve(&manifest, None)
+        .await
+        .expect_err("a required dep with no matching version must fail the resolve");
+    assert!(matches!(err, Error::NoMatch(_)), "got {err:?}");
+}
