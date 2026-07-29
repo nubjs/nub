@@ -370,8 +370,10 @@ mod win {
             project: f.root.join("no-project"),
         };
         let interpreter = vec![f.child.clone()];
-        // Shaped like the embedder's `node_toolchain_grant` output — POSIX-layout subtrees
-        // that do not exist under a Windows Node install.
+        // Shaped like the embedder's `node_layout` subtrees — and deliberately the POSIX
+        // spelling, which does not exist under a Windows Node install. Absent grants must
+        // be skipped rather than refused whatever produced them, so this stays a valid
+        // fixture now that the embedder derives the Windows shape correctly.
         let extra_reads = vec![
             f.root.join("no-node-root/include/node"),
             f.root.join("no-node-root/lib/node_modules"),
