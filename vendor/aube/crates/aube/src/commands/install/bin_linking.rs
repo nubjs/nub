@@ -1641,9 +1641,7 @@ mod tests {
             std::fs::create_dir_all(&pkg_dir).unwrap();
             std::fs::write(
                 pkg_dir.join("package.json"),
-                format!(
-                    r#"{{"name":"{name}","version":"1.0.0","bin":{{"probe":"cli.js"}}}}"#
-                ),
+                format!(r#"{{"name":"{name}","version":"1.0.0","bin":{{"probe":"cli.js"}}}}"#),
             )
             .unwrap();
             std::fs::write(pkg_dir.join("cli.js"), "#!/usr/bin/env node\n").unwrap();

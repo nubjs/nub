@@ -1428,33 +1428,6 @@ fn unshare_one_file(path: &Path, mode: u32) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Run a lifecycle hook against an installed dependency's package
-/// directory. Mirrors [`run_root_hook`] but spawns inside `package_dir`
-/// (the actual linked package directory, e.g.
-/// `node_modules/.aube/<dep_path>/node_modules/<name>`). The manifest
-/// is the dependency's own `package.json`, *not* the project root's.
-///
-/// Every `<modules_dir>/.bin` from the package's own out to the project
-/// root is prepended to `PATH`, closest first, so the dep's postinstall
-/// can spawn tools declared in its own `dependencies` (the transitive-bin
-/// case — `prebuild-install`, `node-gyp`, `napi-postinstall`). The install
-/// driver writes those shims via `link_dep_bins` (isolated) and
-/// `link_hoisted_placement_bins` (hoisted).
-///
-/// For the `install` hook specifically, if the manifest leaves both
-/// `install` and `preinstall` empty but the package has a top-level
-/// `binding.gyp`, this falls back to running `node-gyp rebuild` — the
-/// node-gyp default that npm and pnpm both honor so native modules
-/// without a prebuilt binary still compile on install.
-///
-/// `tool_bin_dirs` are prepended to `PATH` *after* the dep's own
-/// `.bin` so that aube-bootstrapped tools (e.g. node-gyp) fill the
-/// gap for deps that shell out to them without declaring them as
-/// their own `dependencies`. The dep's local bin still wins if it
-/// shipped its own copy.
-///
-/// The caller is responsible for gating on `BuildPolicy` and
-/// `--ignore-scripts`. Returns `Ok(false)` if the hook wasn't defined.
 /// The `.bin` chain Node's own resolution implies for a package's
 /// lifecycle script: the package's own `<modules_dir>/.bin`, then every
 /// enclosing `<modules_dir>/.bin` out to `project_root`. Closest first, so
@@ -1488,6 +1461,33 @@ fn dep_bin_chain(package_dir: &Path, project_root: &Path, modules_dir_name: &str
     chain
 }
 
+/// Run a lifecycle hook against an installed dependency's package
+/// directory. Mirrors [`run_root_hook`] but spawns inside `package_dir`
+/// (the actual linked package directory, e.g.
+/// `node_modules/.aube/<dep_path>/node_modules/<name>`). The manifest
+/// is the dependency's own `package.json`, *not* the project root's.
+///
+/// Every `<modules_dir>/.bin` from the package's own out to the project
+/// root is prepended to `PATH`, closest first, so the dep's postinstall
+/// can spawn tools declared in its own `dependencies` (the transitive-bin
+/// case — `prebuild-install`, `node-gyp`, `napi-postinstall`). The install
+/// driver writes those shims via `link_dep_bins` (isolated) and
+/// `link_hoisted_placement_bins` (hoisted).
+///
+/// For the `install` hook specifically, if the manifest leaves both
+/// `install` and `preinstall` empty but the package has a top-level
+/// `binding.gyp`, this falls back to running `node-gyp rebuild` — the
+/// node-gyp default that npm and pnpm both honor so native modules
+/// without a prebuilt binary still compile on install.
+///
+/// `tool_bin_dirs` are prepended to `PATH` *after* the dep's own
+/// `.bin` so that aube-bootstrapped tools (e.g. node-gyp) fill the
+/// gap for deps that shell out to them without declaring them as
+/// their own `dependencies`. The dep's local bin still wins if it
+/// shipped its own copy.
+///
+/// The caller is responsible for gating on `BuildPolicy` and
+/// `--ignore-scripts`. Returns `Ok(false)` if the hook wasn't defined.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_dep_hook(
     package_dir: &Path,
@@ -2204,7 +2204,6 @@ mod break_cas_hardlinks_tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
-
 }
 
 #[cfg(test)]
@@ -2252,7 +2251,9 @@ mod dep_bin_chain_tests {
         assert_eq!(
             chain,
             vec![
-                PathBuf::from("/p/node_modules/.aube/lmdb@3.0.0/node_modules/lmdb/node_modules/.bin"),
+                PathBuf::from(
+                    "/p/node_modules/.aube/lmdb@3.0.0/node_modules/lmdb/node_modules/.bin"
+                ),
                 PathBuf::from("/p/node_modules/.aube/lmdb@3.0.0/node_modules/.bin"),
                 PathBuf::from("/p/node_modules/.bin"),
             ]
@@ -2264,11 +2265,7 @@ mod dep_bin_chain_tests {
     /// the modules dir, so it must not contribute an entry.
     #[test]
     fn dep_bin_chain_honors_a_custom_modules_dir_and_skips_the_scope_hop() {
-        let chain = dep_bin_chain(
-            Path::new("/p/mods/@scope/name"),
-            Path::new("/p"),
-            "mods",
-        );
+        let chain = dep_bin_chain(Path::new("/p/mods/@scope/name"), Path::new("/p"), "mods");
         assert_eq!(
             chain,
             vec![
