@@ -8,12 +8,13 @@ use base64::Engine as _;
 use sha2::{Digest, Sha512};
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::time::Duration;
 
 fn nub_binary() -> PathBuf {
     let mut path = std::env::current_exe().unwrap();
@@ -177,29 +178,13 @@ impl RegistryFixture {
         let server = thread::spawn(move || {
             while !server_stop.load(Ordering::Relaxed) {
                 match listener.accept() {
-                    Ok((mut stream, _)) => {
+                    Ok((stream, _)) => {
                         let responses = responses.clone();
                         thread::spawn(move || {
-                            let mut request = [0_u8; 4096];
-                            let size = stream.read(&mut request).unwrap_or(0);
-                            let first_line = String::from_utf8_lossy(&request[..size])
-                                .lines()
-                                .next()
-                                .unwrap_or_default()
-                                .to_ascii_lowercase();
-                            let path = first_line.split_whitespace().nth(1).unwrap_or("/");
-                            let (status, content_type, body) =
-                                if let Some((content_type, body)) = responses.get(path) {
-                                    ("200 OK", content_type.as_str(), body.as_slice())
-                                } else {
-                                    ("404 Not Found", "text/plain", b"not found".as_slice())
-                                };
-                            let headers = format!(
-                                "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                                body.len()
-                            );
-                            stream.write_all(headers.as_bytes()).unwrap();
-                            stream.write_all(body).unwrap();
+                            // A dead client mid-exchange is not a fixture bug,
+                            // and a panic on this detached thread would not fail
+                            // the test anyway — the assertions live in the test.
+                            let _ = serve_one(stream, &responses);
                         });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -216,6 +201,62 @@ impl RegistryFixture {
             thread: Some(server),
         }
     }
+}
+
+/// Serve one request, then close the connection *gracefully*.
+///
+/// The graceful close is load-bearing on Windows, where `closesocket` on a
+/// socket that still holds unread bytes in its receive buffer is an ABORTIVE
+/// close: it sends RST and discards whatever is still queued in the send
+/// buffer, so the client sees a transport-level error instead of the response
+/// it was mid-read of. The tarball is the largest body here and so the most
+/// exposed, and the age-floor test pins `fetch-retries=0`, leaving no retry
+/// cushion. Hence: read the request to its end, then half-close (FIN) and drain
+/// to EOF so the final close has nothing left to abort over.
+///
+/// `set_nonblocking(false)` is belt-and-braces for the same platform — an
+/// accepted socket can inherit the listener's non-blocking mode, which would
+/// turn the request read into an instant `WouldBlock` and serve a 404.
+fn serve_one(
+    mut stream: TcpStream,
+    responses: &HashMap<String, (String, Vec<u8>)>,
+) -> std::io::Result<()> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+
+    let mut buf = [0_u8; 4096];
+    let mut request = Vec::new();
+    // These are all bodyless GETs, so end-of-headers is end-of-request.
+    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+        match stream.read(&mut buf)? {
+            0 => break,
+            size => request.extend_from_slice(&buf[..size]),
+        }
+    }
+
+    let first_line = String::from_utf8_lossy(&request)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let path = first_line.split_whitespace().nth(1).unwrap_or("/");
+    let (status, content_type, body) = if let Some((content_type, body)) = responses.get(path) {
+        ("200 OK", content_type.as_str(), body.as_slice())
+    } else {
+        ("404 Not Found", "text/plain", b"not found".as_slice())
+    };
+    let headers = format!(
+        "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(headers.as_bytes())?;
+    stream.write_all(body)?;
+    stream.flush()?;
+
+    stream.shutdown(Shutdown::Write)?;
+    while stream.read(&mut buf)? > 0 {}
+    Ok(())
 }
 
 impl Drop for RegistryFixture {
