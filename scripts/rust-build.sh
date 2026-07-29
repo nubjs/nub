@@ -113,15 +113,17 @@ bucket="$shared${key:+-$key}"
 # claimed forever. Agent builds here are killed routinely, so that is a real
 # case, not a theoretical one.
 #
-# Copy into a temp sibling, then rename into place only once the copy has
-# returned 0. The exposure window shrinks from minutes of tree-walking to a
-# single rename, and a killed copy leaves only an unreferenced temp (swept by
-# the GC below). Clone-only: `cp -c` (APFS) and `--reflink=always` (btrfs/XFS)
-# FAIL rather than silently falling back to a real multi-GB copy, which would
-# trade minutes of CPU for gigabytes of disk.
+# Copy into a claim dir beside the destination, then rename into place only once
+# the copy has returned 0. The exposure window shrinks from minutes of
+# tree-walking to a single rename, and a killed copy leaves only an unreferenced
+# claim, retired in-place by the function itself on a later run — the sweeps at
+# the bottom of this file only scan beside the shared dir, so they cover the
+# bucket call site but never the private one in a worktree root. Clone-only:
+# `cp -c` (APFS) and `--reflink=always` (btrfs/XFS) FAIL rather than silently
+# falling back to a real multi-GB copy, which would trade minutes of CPU for
+# gigabytes of disk.
 seed_from() {
   [ -d "$1" ] || return 1
-  [ -e "$2" ] && return 1
   # A FIXED-name claim dir is both the mutual-exclusion token and the staging
   # area. Fixed rather than per-pid so exactly one racer clones: a per-pid temp
   # would have every worktree in the first post-merge wave clone the same source
@@ -129,12 +131,18 @@ seed_from() {
   # with `b` an existing dir yields `b/a`, nesting a full clone inside the
   # winner's bucket where the GC's -maxdepth 1 never reaches it.
   _claim="$2.seeding"
-  # Retire an abandoned claim (a clone killed mid-flight — routine here). Guards
-  # both call sites, including the private target dir, which the sweep below
-  # cannot see because it lives in the worktree, not beside the shared dir.
+  # Retire an abandoned claim (a clone killed mid-flight — routine here). This
+  # runs BEFORE the destination-exists return below, deliberately: once the
+  # destination is published, that return fires on every later invocation, so a
+  # retire placed after it would never execute and an orphaned claim at the
+  # isolated call site would be permanent — it sits in the worktree root, which
+  # neither sweep scans, and would show up untracked in `git status` forever. A
+  # claim older than the window is abandoned by definition, so retiring it when
+  # the destination already exists is harmless.
   if [ -d "$_claim" ] && [ -z "$(find "$_claim" -maxdepth 0 -mmin -120 2>/dev/null)" ]; then
     rm -rf "$_claim" 2>/dev/null
   fi
+  [ -e "$2" ] && return 1
   mkdir "$_claim" 2>/dev/null || return 1
   if cp -c -a "$1/." "$_claim/" 2>/dev/null \
     || cp -a --reflink=always "$1/." "$_claim/" 2>/dev/null; then
@@ -209,8 +217,10 @@ touch "$target" 2>/dev/null || true
 # legacy dir (which is what makes the migration genuinely self-retiring — a `-*`
 # glob alone never matches the legacy name, and a `*` glob would also swallow an
 # unrelated prefix-sharing sibling such as a hand-made `shared-target.bak`).
-# Half-written `.seeding.<pid>` temps from a killed clone are swept on the same
-# pass; they are never referenced by anything.
+#
+# The SECOND pass, on its own much shorter window, retires abandoned `.seeding`
+# claims left beside the shared dir by a killed clone. It covers the bucket call
+# site only; a claim in a worktree root is retired by `seed_from` itself.
 _base=$(basename "$shared")
 find "$(dirname "$shared")" -maxdepth 1 -type d \
   \( -name "$_base" -o -name "$_base-*" \) -mtime +14 \

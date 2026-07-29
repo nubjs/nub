@@ -69,6 +69,10 @@ __pycache__/
 
 # === Build / IDE artifacts ===
 /target/
+# Staging dir for scripts/rust-build.sh's target-dir seeding, renamed into place
+# once the clone completes. A killed clone leaves one behind until the script
+# retires it; it must never be stageable in the meantime.
+/target.seeding/
 # nub-native is its own Cargo workspace; its build output is routed into the root
 # /target/ above (via crates/nub-native/.cargo/config.toml), but guard against a
 # stray local target/ if it's ever built without that routing.
