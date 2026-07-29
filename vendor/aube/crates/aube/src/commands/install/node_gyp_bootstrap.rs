@@ -555,9 +555,19 @@ mod tests {
         std::fs::create_dir_all(&bin_dir).expect("bin dir");
         let tally = tmp.join("tally");
         let path_gyp = bin_dir.join("node-gyp");
+        // The stub enforces its OWN ceiling before running `body`. Without it, a
+        // regression that removes the shim's guard would make this test fork-bomb
+        // the CI runner instead of failing; with it, the cycle stops at 25 hops and
+        // the assertions below report a clean failure.
         std::fs::write(
             &path_gyp,
-            format!("#!/bin/sh\necho x >> '{}'\n{body}\n", tally.display()),
+            format!(
+                "#!/bin/sh\necho x >> '{t}'\n\
+                 if [ \"$(wc -l < '{t}')\" -ge 25 ]; then\n\
+                 \x20 echo 'stub: re-entry ceiling hit — the shim did not stop' >&2; exit 90\n\
+                 fi\n{body}\n",
+                t = tally.display()
+            ),
         )
         .expect("write path node-gyp");
         std::fs::set_permissions(&path_gyp, std::fs::Permissions::from_mode(0o755)).expect("chmod");
