@@ -473,11 +473,21 @@ OPENABLE under an ORDINARY `%TEMP%`/profile tree with no `C:\`-owned store (VM-v
   ACE governs the directory object alone, so an ancestor never becomes a subtree read, and
   there is no DACL propagation to pay for per spawn. Both halves are best-effort — a refused
   ACE write is skipped, never fatal.
-- **What the capability half costs.** A capability is a machine-wide key: holding one also
-  opens every other object whose DACL grants it. The set is bounded to what already sits on
-  this launch's own ancestor chain, and it is the coarse half of a deliberately best-effort
-  jail — one that blocks the bulk of supply-chain attack shapes, not one that claims a
-  watertight boundary.
+- **What the capability half costs, and that it is INERT on Windows 11 26100.** A capability is
+  a machine-wide key: holding one also opens every other object whose DACL grants it, bounded
+  here to what already sits on this launch's own ancestor chain. In practice it buys nothing
+  yet — `CreateProcessW` returns `ERROR_INVALID_PARAMETER` for the `S-1-15-3-65536-…` form that
+  `C:\` and `C:\Users` actually carry, so the launch drops the capabilities and retries (counted
+  by `windows_capability_fallbacks`). Measured, every ancestor was still reachable, but only
+  because the runner was ELEVATED and could write the DACLs on `C:\` and `C:\Users` directly.
+  A standard non-elevated user can write neither, so the reachability of those two roots off an
+  elevated machine remains an open question.
+- **The ancestor ACE write is not yet affordable (OPEN).** Any DACL write on a large shared
+  ancestor propagates inheritance across its subtree, and `%TEMP%` is on the chain. Measured on
+  windows-latest the write stalls for minutes with a duration that varies run to run, which is
+  what keeps the piped-stdio measurements from running at all. `SetKernelObjectSecurity` is the
+  non-propagating primitive this wants; until then the repair works and costs too much per
+  lifecycle spawn to turn on.
 
 - **The precondition is INHERITABILITY, not a protected ancestor.** Where an
   `ALL APPLICATION PACKAGES` allow-ACE can reach a work dir, an ungranted secret UNDER it is

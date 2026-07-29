@@ -1156,6 +1156,18 @@ pub(super) mod launch {
     /// scope a non-inherited traverse grant wants.
     ///
     /// `FILE_FLAG_BACKUP_SEMANTICS` is what lets `CreateFileW` open a DIRECTORY at all.
+    ///
+    /// STILL NOT ENOUGH, measured — do not read the paragraph above as settled. Run
+    /// 30493913027's watchdog pinned the remaining stall to the FIRST launch that writes these
+    /// aces, and the only WRITE in that window is this function (`verify_clean_root` and
+    /// `harvest_capability_sids` merely read DACLs). For file objects `SetSecurityInfo` still
+    /// propagates inheritance to existing children, so trading the named writer for the
+    /// handle-based one narrowed nothing: the chain includes `%TEMP%`, which on a CI runner is
+    /// enormous, and the walk takes minutes and varies from run to run. The genuinely
+    /// non-propagating primitive is `SetKernelObjectSecurity`, which wants a hand-built
+    /// descriptor (`InitializeSecurityDescriptor` + `SetSecurityDescriptorDacl`) instead of
+    /// `SetEntriesInAclW`'s convenience — that is the next move, and nothing else about the
+    /// repair changes with it.
     fn set_ace_on_object(path: &Path, sid: PSID, access: u32, mode: i32) -> io::Result<()> {
         use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SetSecurityInfo};
         use windows_sys::Win32::Storage::FileSystem::{
