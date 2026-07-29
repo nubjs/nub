@@ -100,6 +100,48 @@ JSON
 	assert_file_not_exists aube-builds-marker.txt
 }
 
+@test "aube add DOES rerun unchanged dep build scripts under node-linker=hoisted" {
+	# The inverse of the test above, and deliberately so. Skipping the rerun is
+	# correct only for a layout that leaves an unchanged package directory
+	# alone. Hoisted wipes and refills every placed package on each relink, and
+	# the refill restores published tarball contents — never build output — so
+	# skipping there deletes a package's build artifacts and never puts them
+	# back. The marker is absent after the add on the unfixed code.
+	#
+	# `disable_delta_build_caches` also turns the side-effects cache off, which
+	# is what makes this observable: with the cache on the fix restores the
+	# artifact instead of rerunning, and no marker would be written.
+	disable_delta_build_caches
+	cat >package.json <<'JSON'
+{
+  "name": "allow-builds-hoisted-delta-test",
+  "version": "1.0.0",
+  "dependencies": {
+    "aube-test-builds-marker": "^1.0.0"
+  },
+  "pnpm": {
+    "allowBuilds": {
+      "aube-test-builds-marker": true
+    }
+  }
+}
+JSON
+	run aube install --node-linker=hoisted
+	assert_success
+	assert_file_exists aube-builds-marker.txt
+
+	# Only clear the marker — do NOT poison the installed copy the way the
+	# isolated test does. Hoisted refills the package dir from the store, so a
+	# poisoned manifest would be replaced before the script ever ran.
+	rm -f aube-builds-marker.txt
+
+	run aube add abbrev@4.0.0 --node-linker=hoisted
+	assert_success
+	assert_file_exists aube-builds-marker.txt
+	run cat aube-builds-marker.txt
+	assert_output "ran:aube-test-builds-marker@1.0.0"
+}
+
 @test "aube remove does not rerun unchanged allowlisted dep build scripts" {
 	disable_delta_build_caches
 	cat >package.json <<'JSON'
