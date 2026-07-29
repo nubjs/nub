@@ -168,8 +168,22 @@ cargo check --workspace --all-targets --message-format short   # iterate until e
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 REAL_HOME="$HOME"; mkdir -p /tmp/clean-aube-home
 env HOME=/tmp/clean-aube-home RUSTUP_HOME="$REAL_HOME/.rustup" CARGO_HOME="$REAL_HOME/.cargo" \
-  cargo test --workspace --lib          # registry/config tests read ~/.npmrc
+  cargo test --workspace                # registry/config tests read ~/.npmrc
 ```
+
+**`--workspace` with NO `--lib` — that is what CI runs** (`aube-parity.yml`, `working-directory:
+vendor/aube`, `run: cargo test --workspace`). `--lib` runs only the in-crate unit tests and SKIPS
+`crates/*/tests/**` entirely, so the fork-discipline integration tests — the ones that pin
+default-preservation, exactly what a bump is most likely to break — never execute. The v1.35 bump
+shipped a green `--lib` run and CI still failed on
+`aube-settings/tests/gvs_disable_list_embedder_default.rs`, whose pinned copy of aube's built-in GVS
+list had gone stale against the new upstream baseline.
+
+**Run aube's suite from inside `vendor/aube` (or the venue), never via `--manifest-path` from the nub
+root.** Cargo reads `.cargo/config.toml` from the INVOCATION directory, and aube's own config sets
+`RUST_TEST_THREADS = "1"` because `aube-util`'s `concurrency` and `http::ticket_cache` tests mutate
+process env and are not thread-safe. Invoking from the nub root silently drops that and those tests
+flake — which reads exactly like a regression your merge caused.
 
 For each error ask: **is this symbol nub delta or upstream?** Then apply the doctrine. Never paper
 over with `.unwrap()`/`.expect()` or by deleting a capability.
