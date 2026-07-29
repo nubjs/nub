@@ -25,12 +25,16 @@
 // The inner loop is deliberately NOT a job type here. This tool is for the heavy,
 // cold-anyway gates that are what actually saturate the Mac.
 //
-// THE DARWIN CROSS-BUILD. `cargo-zigbuild` + zig, no Apple SDK: zig ships its own
-// libSystem.tbd, so nothing Apple-licensed is ever installed on the builder. ZIG_VERSION
-// is PINNED and that pin is load-bearing — zig 0.14.1 and 0.15.2 SIGSEGV in the Mach-O
-// linker, presenting as `error: linking ... exit status: 1` with an EMPTY `= note:` and a
-// zero-byte output, i.e. no diagnostic at all. cargo-zigbuild's README claims "0.15+",
-// which is not enough.
+// LINUX-NATIVE ONLY, DELIBERATELY. An earlier version of this tool also cross-compiled
+// `aarch64-apple-darwin` here via cargo-zigbuild plus hand-written Apple framework stub
+// TBDs. That worked, but the stubs froze 371 symbols against a real export surface of
+// ~8,700 (4.3%), and their upkeep was REACTIVE — the only way to learn a symbol was
+// missing was a link failure after a full compile. A live example was already latent:
+// the stubs carried `_SecTrustGetCertificateAtIndex` but not the replacement Apple's own
+// headers point at, so a routine `security-framework` bump would have broken the build.
+// macOS artifacts now come from `.github/workflows/mac-build.yml` + `scripts/mac-build.ts`,
+// which build natively on a real macOS runner: no stubs, no pinned zig, complete SDK, and
+// a correct deployment target (minos 11.0, where the cross-build forced 13.0).
 //
 // ORPHAN-PROOFING IS THE POINT, NOT A NICETY. Stray builders that outlive their launcher
 // are the exact failure this repo keeps paying for. Three independent layers, because a
@@ -90,24 +94,24 @@ const MAX_RUN = "45m";
 // EVERY instance this tool creates; there is no exception to maintain.
 const BAKE_MAX_RUN = "90m";
 
-const HELP = `remote-build — run a nub build/gate on an ephemeral GCE spot VM
+const HELP = `remote-build — run a nub CI gate on an ephemeral GCE spot VM
 
 Usage:
-  nub scripts/remote-build.ts [--job build|clippy|test] [options]
+  nub scripts/remote-build.ts [--job clippy|test] [options]
   nub scripts/remote-build.ts --fanout <n>        # n concurrent builders + local-load sampling
   nub scripts/remote-build.ts --build-image       # bake the golden image (once, ~10 min)
   nub scripts/remote-build.ts --reap              # delete stray builder VMs
 
 Jobs:
-  build    cross-compile aarch64-apple-darwin, pull the signed binary back (default)
-  clippy   cargo clippy --all-targets --all-features -- -D warnings (native Linux)
-  test     cargo test -p nub-cli (native Linux)
+  clippy   the full CI clippy gate (default)
+  test     the whole-workspace test suite
+
+For a macOS BINARY use scripts/mac-build.ts, which builds natively on a real macOS
+runner. This tool is Linux-native gates only.
 
 Options:
-  --job <j>          Job to run (default: build).
-  --profile <p>      Cargo profile for --job build: fast | release (default: fast).
+  --job <j>          Job to run (default: clippy).
   --fanout <n>       Run n builders concurrently; samples local CPU/load throughout.
-  --out <dir>        Where to place pulled artifacts (default: <repo>/target/remote).
   --source <dir>     Worktree to build (default: the git root of the cwd).
   --machine <type>   GCE machine type (default: ${MACHINE_TYPE}).
   --on-demand        Use on-demand rather than spot provisioning.
@@ -122,7 +126,7 @@ Cost: spot c3-standard-8 is a few cents per build. A stray cannot outlive ${MAX_
 
 export function parseArgs(argv: string[]) {
   const a = {
-    job: "build",
+    job: "clippy",
     profile: "fast",
     fanout: 1,
     out: "",
@@ -155,8 +159,8 @@ export function parseArgs(argv: string[]) {
       process.exit(2);
     }
   }
-  if (!["build", "clippy", "test"].includes(a.job)) {
-    process.stderr.write(`remote-build: --job must be build|clippy|test\n`);
+  if (!["clippy", "test"].includes(a.job)) {
+    process.stderr.write(`remote-build: --job must be clippy|test\n`);
     process.exit(2);
   }
   // Whitelisted for the same reason --job is: `profile` is interpolated into a script piped
@@ -397,13 +401,6 @@ command -v node >/dev/null || { echo "remote-build: node missing on builder (wou
 mkdir -p runtime/addons
 [ -s runtime/addons/nub-native.node ] || printf 'placeholder' > runtime/addons/nub-native.node
 [ -d node_modules ] || npm install --no-audit --no-fund --loglevel=error
-# zig supplies a macOS libc, but nub's darwin tree also links Apple FRAMEWORKS and two system
-# dylibs (-lcompression -framework Security -framework SystemConfiguration -framework
-# CoreFoundation -liconv, via rustls-native-certs -> reqwest and lzma-sys). zig ships none of
-# them, so the cross-build fails at LINK time — compiling was never the problem. These are
-# symbol-only stub TBDs carrying no Apple code, which is what keeps the route licence-clean.
-mkdir -p "$HOME/.darwin-stubs"
-cp -R scripts/darwin-stubs/. "$HOME/.darwin-stubs/"
 `;
 
 export function jobScript(job: string, profile: string) {
@@ -423,17 +420,6 @@ tests/brand-lint/check-env-reads.sh`;
 cp "$CARGO_TARGET_DIR/debug/libnub_native.so" runtime/addons/nub-native.node
 cargo test`;
   }
-  // The CLI alone is not a usable dev binary. nub's TypeScript path goes through the
-  // nub-native N-API addon, and PREPARE only stages an 11-byte PLACEHOLDER (enough to satisfy
-  // the build.rs integrity hash, not to load). Without the real cdylib the binary runs and
-  // installs packages fine but dies on the first .ts file with `nubNative.transformCached is
-  // not a function` — a partial artifact that looks complete. Build both, always.
-  // nub-native is its own workspace with its own profiles, so it takes --release rather than
-  // the CLI's profile name.
-  return `${PREPARE}export RUSTFLAGS="-C link-arg=-L$HOME/.darwin-stubs -C link-arg=-F$HOME/.darwin-stubs"
-cargo zigbuild --target aarch64-apple-darwin -p nub-cli --profile ${profile}
-(cd crates/nub-native && cargo zigbuild --target aarch64-apple-darwin --release)
-ls -la "$CARGO_TARGET_DIR/aarch64-apple-darwin/${profile}/nub" "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/libnub_native.dylib"`;
 }
 
 // `bash -s` reads the script FROM STDIN, incrementally, as it executes. Any command inside
@@ -471,26 +457,6 @@ async function runJob(ip: string, script: string, onLine: (s: string) => void) {
   });
 }
 
-// arm64 macOS SIGKILLs any binary without at least an ad-hoc signature, so an unsigned
-// artifact looks exactly like a build failure when it is nothing of the sort. zig emits a
-// valid ad-hoc signature itself; this verifies rather than assumes, because a silently
-// unsigned artifact is the single most confusing way for this pipeline to fail.
-function verifyArtifact(path: string) {
-  const fileOut = sh("file", [path]).trim();
-  if (!/Mach-O 64-bit executable arm64/.test(fileOut)) {
-    throw new Error(`remote-build: pulled artifact is not an arm64 Mach-O executable:\n  ${fileOut}`);
-  }
-  let signed = true;
-  let signErr = "";
-  try {
-    sh("codesign", ["--verify", path], { stdio: "pipe" });
-  } catch (e: any) {
-    // Keep stderr: "not signed at all" and "malformed signature" need different fixes.
-    signed = false;
-    signErr = String(e?.stderr || e?.message || e).trim().split("\n")[0];
-  }
-  return { fileOut, signed, signErr };
-}
 
 async function oneBuild(
   idx: number,
@@ -528,39 +494,13 @@ async function oneBuild(
 
     await runJob(ip, jobScript(a.job, a.profile), (l) => log(l));
 
-    let artifact = "";
-    let verified: { fileOut: string; signed: boolean } | null = null;
-    if (a.job === "build") {
-      mkdirSync(outDir, { recursive: true });
-      artifact = join(outDir, a.fanout > 1 ? `nub-${idx}` : "nub");
-      const addon = join(outDir, a.fanout > 1 ? `nub-native-${idx}.node` : "nub-native.node");
-      const ssh = `ssh -i ${SSH_KEY} ${SSH_OPTS.join(" ")}`;
-      sh("rsync", ["-az", "-e", ssh, `${SSH_USER}@${ip}:~/.cargo-shared-target/aarch64-apple-darwin/${a.profile}/nub`, artifact]);
-      sh("rsync", ["-az", "-e", ssh, `${SSH_USER}@${ip}:~/.cargo-shared-target/aarch64-apple-darwin/release/libnub_native.dylib`, addon]);
-      // Stage the addon where the binary actually looks for it. runtime/addons is gitignored
-      // and is exactly what `make addon-fast` populates locally, so this is the same contract
-      // — without it the pulled binary is inert on any TypeScript input.
-      if (a.fanout === 1) {
-        const staged = join(source, "runtime", "addons");
-        mkdirSync(staged, { recursive: true });
-        sh("cp", [addon, join(staged, "nub-native.node")]);
-        log(`staged addon -> ${join(staged, "nub-native.node")}`);
-      }
-      verified = verifyArtifact(artifact);
-      log(`pulled ${artifact} — ${verified.fileOut.replace(/^.*?: /, "")}, signature ${verified.signed ? "valid" : "MISSING"}`);
-      // arm64 macOS SIGKILLs an unsigned binary, so handing one back as a success is the
-      // worst outcome available: it fails later, at exec, looking like a build bug.
-      if (!verified.signed) {
-        throw new Error(`artifact is unsigned and will be SIGKILLed on exec: ${artifact} (${verified.signErr})`);
-      }
-    }
     const secs = (Date.now() - t0) / 1000;
     log(`done in ${secs.toFixed(0)}s`);
-    return { idx, ok: true, secs, artifact, signed: verified?.signed ?? null, error: "" };
+    return { idx, ok: true, secs, error: "" };
   } catch (e: any) {
     const secs = (Date.now() - t0) / 1000;
     log(`FAILED after ${secs.toFixed(0)}s: ${e?.message || e}`);
-    return { idx, ok: false, secs, artifact: "", signed: null, error: String(e?.message || e) };
+    return { idx, ok: false, secs, error: String(e?.message || e) };
   } finally {
     if (created && !a.keep) await deleteInstance(name, zone);
     live.delete(`${name}|${zone}`);
@@ -643,7 +583,7 @@ async function reap(all: boolean) {
 }
 
 // The golden image is what makes this a go-to tool rather than a ceremony: a bare Ubuntu
-// needs rustup + the darwin target + zig + cargo-zigbuild + Node before it can do anything,
+// needs rustup + clippy + Node before it can do anything,
 // and cargo-zigbuild itself is a multi-minute source build. Baking that once turns per-build
 // setup into boot time. The registry warm-up additionally pre-fetches every crate so a cold
 // builder does not re-download the index on every run.
@@ -672,15 +612,7 @@ curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | sudo -E bash -
 sudo apt-get install -y -qq nodejs
 curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
 . "$HOME/.cargo/env"
-rustup target add aarch64-apple-darwin
 rustup component add clippy
-# PIN zig 0.16.0. 0.14.1 and 0.15.2 SIGSEGV in the Mach-O linker with an EMPTY error note
-# and a zero-byte output — the least debuggable failure in this pipeline.
-curl -fsSL https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz -o /tmp/zig.tar.xz
-sudo mkdir -p /opt/zig && sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
-sudo ln -sf /opt/zig/zig /usr/local/bin/zig
-zig version
-cargo install cargo-zigbuild --locked
 echo '. "$HOME/.cargo/env"' >> ~/.bashrc
 `;
     await runJob(ip, provision, (l) => process.stdout.write(`  ${l}\n`));
@@ -700,7 +632,6 @@ npm install --no-audit --no-fund --loglevel=error
 cargo fetch
 mkdir -p "$HOME/.darwin-stubs"
 cp -R scripts/darwin-stubs/. "$HOME/.darwin-stubs/"
-export RUSTFLAGS="-C link-arg=-L$HOME/.darwin-stubs -C link-arg=-F$HOME/.darwin-stubs"
 # Best-effort: a warm-up failure still leaves a usable image (toolchain + registry), so it
 # must not abort the bake — but it must not be SILENT either, or a cold-building image is
 # indistinguishable from a warm one. Warn loudly rather than `|| true`.
@@ -708,14 +639,12 @@ export RUSTFLAGS="-C link-arg=-L$HOME/.darwin-stubs -C link-arg=-F$HOME/.darwin-
 # cmake and the C-compiling target deps. Masking it would publish an image whose every build
 # dies with the zero-byte, empty-\`= note:\` linker failure this file's header calls the least
 # debuggable failure in the pipeline. Let it fail the bake — no image gets created.
-cargo zigbuild --target aarch64-apple-darwin -p nub-cli --profile fast
 cargo build -p nub-cli --profile fast || echo "WARM-WARN: linux warm-up failed; builders will cold-compile"
 (cd crates/nub-native && cargo build) || echo "WARM-WARN: addon warm-up failed"
 rm -rf ~/src
 # Fail the bake if the warm compile produced nothing. Without this a truncated or skipped
 # warm step publishes a cold image that looks identical to a warm one until every builder
 # is mysteriously slow.
-test -d "$CARGO_TARGET_DIR/aarch64-apple-darwin" || { echo "BAKE-FAIL: no darwin artifacts in $CARGO_TARGET_DIR" >&2; exit 4; }
 echo "warm target dir: $(du -sh "$CARGO_TARGET_DIR" | cut -f1)"
 `;
     await runJob(ip, warm, (l) => process.stdout.write(`  ${l}\n`));
@@ -810,7 +739,6 @@ async function main() {
   for (const r of results) {
     process.stdout.write(
       `  [${r.idx}] ${r.ok ? "ok" : "FAIL"} ${r.secs.toFixed(0)}s` +
-        (r.artifact ? ` -> ${r.artifact}${r.signed === false ? " (UNSIGNED)" : ""}` : "") +
         (r.error ? ` — ${r.error.split("\n")[0]}` : "") + "\n",
     );
   }

@@ -1,7 +1,0 @@
---- !tapi-tbd
-tbd-version:     4
-targets:         [ arm64-macos, arm64e-macos, x86_64-macos ]
-install-name:    '/usr/lib/libiconv.2.dylib'
-current-version: 1.0.0
-compatibility-version: 1.0.0
-...

@@ -19,14 +19,14 @@ metadata:
 
 # Remote builds — get the heavy Rust jobs off the Mac
 
-`scripts/remote-build.ts` dispatches a build/gate to a throwaway GCE spot VM and, for a
-darwin build, brings back a runnable arm64 macOS binary. Full measurements and the
+`scripts/remote-build.ts` dispatches a build/gate to a throwaway GCE spot VM and reports the result.
+**For a macOS binary use the `mac-build` skill instead** — it builds natively on a real
+macOS runner, with no stub TBDs, no pinned zig, and a correct deployment target. Full measurements and the
 decision record: [`wiki/research/remote-build-offload.md`](../../../wiki/research/remote-build-offload.md).
 
 ```sh
 nub scripts/remote-build.ts --job clippy                 # the CI gate, off-box
 nub scripts/remote-build.ts --job test                   # cargo test -p nub-cli
-nub scripts/remote-build.ts --job build --profile release # darwin binary -> target/remote/nub
 nub scripts/remote-build.ts --fanout 10 --job clippy     # 10 builders at once
 nub scripts/remote-build.ts --reap                       # delete stray builder VMs
 nub scripts/remote-build.ts --build-image                # re-bake the golden image (rare)
@@ -39,10 +39,8 @@ Measured, `n2-standard-16` vs the Mac:
 | Job | Remote | Mac | Verdict |
 |---|---|---|---|
 | warm incremental | 8.1s | ~5s | **stays local — remote loses** |
-| cold `release` | 7m 00s | ~15m | remote, 2× |
 | `clippy --all-targets --all-features` | 35.3s | — | remote |
 | `cargo test` (whole workspace) | 39.4s warm | — | remote (718 passed / 0 failed on Linux) |
-| cold `fast` | 3m 55s | ~3m | a wash |
 
 **The inner loop is deliberately not a job type.** Do not try to route `cargo build --profile
 fast` through this while iterating; you will make your loop slower. This tool exists for the
@@ -58,15 +56,6 @@ own disk**, which is where the relief comes from. Adding local cores would not h
 
 ## The gotchas, each of which cost real time
 
-- **zig is PINNED at 0.16.0 and that pin is load-bearing.** 0.14.1 and 0.15.2 SIGSEGV in the
-  Mach-O linker, presenting as `error: linking … exit status: 1` with an **empty** `= note:` and
-  a zero-byte output — no diagnostic at all. cargo-zigbuild's README claims "0.15+"; not enough.
-- **No Apple SDK is involved.** zig ships its own `libSystem.tbd`, so nothing Apple-licensed is
-  installed on the builder. This is why the SDK licence clause (which restricts running the SDK
-  on non-Apple hardware) never applies to this route.
-- **arm64 macOS SIGKILLs any unsigned binary.** zig emits a valid ad-hoc signature itself; the
-  tool verifies `file` + `codesign` on every pulled artifact and says `UNSIGNED` loudly rather
-  than handing you something that dies on exec and looks like a build failure.
 - **macOS ships openrsync ("2.6.9 compatible"), not rsync 3.x.** Any 3.x-only flag fails the
   whole sync. Sync uses a `--files-from` **allowlist** built from `git ls-files`; an `--exclude`
   blocklist makes rsync walk ~99 GB of gitignored tree and time out at 120s.
@@ -78,20 +67,6 @@ own disk**, which is where the relief comes from. Adding local cores would not h
 - **Under `--all-features`, `crates/nub-core/build.rs` panics** unless `runtime/addons/nub-native.node`
   is staged. The job script stages a placeholder, the same trick CI uses for its addon-less job.
 - **`cmake` is mandatory** on the builder — `libz-ng-sys` fails ~35s in without it.
-- **zig gives you a macOS libc, NOT Apple's frameworks.** nub's darwin tree links
-  `-lcompression -framework Security -framework SystemConfiguration -framework CoreFoundation
-  -liconv` through `rustls-native-certs` → `reqwest` and `lzma-sys`. Neither `security-framework`
-  nor `core-foundation` is a DIRECT dependency in any `Cargo.toml`, so a manifest grep says
-  "no framework linkage" and is wrong — check the resolved target tree. Without the symbol-only
-  stub TBDs in `scripts/darwin-stubs/` the build dies at LINK time, after a full compile.
-- **`--job build` produces the CLI *and* the N-API addon.** The CLI alone is a partial artifact
-  that looks complete: it reports a version and installs packages, then dies on the first `.ts`
-  file with `nubNative.transformCached is not a function`. The 11-byte placeholder satisfies
-  `build.rs`'s integrity hash and cannot be loaded. Both are pulled; the addon is staged into
-  `runtime/addons/` (gitignored, same place `make addon-fast` puts it).
-- **Deployment target comes out macOS 13.0, not 11.0.** cargo-zigbuild forces
-  `-platform_version macos 13.0.0` and `MACOSX_DEPLOYMENT_TARGET` does not override it. Fine for
-  a dev binary; **this must be solved before cross-compiled artifacts go anywhere near a release.**
 
 ## Orphaned builders cannot outlive their TTL (three layers)
 

@@ -41,26 +41,24 @@ test("rsync push uses no rsync-3.x-only flags (macOS ships openrsync 2.6.9)", ()
   assert.ok(!args.some((a) => a.startsWith("--exclude")), "a blocklist makes rsync walk ~99 GB of gitignored tree and time out");
 });
 
-test("parseArgs defaults to a spot darwin fast build with fanout 1", () => {
+test("parseArgs defaults to a spot clippy run with fanout 1", () => {
   const a = parseArgs([]);
-  assert.equal(a.job, "build");
-  assert.equal(a.profile, "fast");
+  assert.equal(a.job, "clippy");
   assert.equal(a.fanout, 1);
   assert.equal(a.onDemand, false);
   assert.equal(a.keep, false);
 });
 
-test("parseArgs reads job, profile and fanout", () => {
-  const a = parseArgs(["--job", "clippy", "--profile", "release", "--fanout", "10"]);
-  assert.equal(a.job, "clippy");
-  assert.equal(a.profile, "release");
+test("parseArgs reads job and fanout", () => {
+  const a = parseArgs(["--job", "test", "--fanout", "10"]);
+  assert.equal(a.job, "test");
   assert.equal(a.fanout, 10);
 });
 
 // Every job runs on a fresh clone, so every job needs the prerequisites. A regression
 // that drops the node guard from ONE job type would produce a silently degraded binary
 // from that path only — which is exactly the kind of bug that survives a smoke test.
-for (const job of ["build", "clippy", "test"]) {
+for (const job of ["clippy", "test"]) {
   test(`jobScript(${job}) guards the prerequisites a fresh clone lacks`, () => {
     const s = jobScript(job, "fast");
     assert.match(s, /command -v node/, "must fail loudly without node (else the primer silently empties)");
@@ -68,33 +66,6 @@ for (const job of ["build", "clippy", "test"]) {
     assert.match(s, /npm install/, "must install node_modules");
   });
 }
-
-test("jobScript(build) cross-compiles the darwin target at the requested profile", () => {
-  const s = jobScript("build", "release");
-  assert.match(s, /cargo zigbuild --target aarch64-apple-darwin/);
-  assert.match(s, /--profile release/);
-});
-
-// zig supplies a macOS libc but NOT Apple's frameworks. nub's darwin tree links Security,
-// SystemConfiguration, CoreFoundation, libcompression and libiconv (rustls-native-certs ->
-// reqwest, and lzma-sys), so without the stub TBDs on the linker's search path the build
-// dies at LINK time with `library not found for -lcompression` — after a full compile.
-// A CLI without the N-API addon is a PARTIAL artifact that looks complete: it runs, reports a
-// version, and installs packages, then dies on the first .ts file with
-// `nubNative.transformCached is not a function`. PREPARE's 11-byte placeholder satisfies the
-// build.rs integrity hash but cannot be loaded.
-test("the darwin build produces the N-API addon, not just the CLI", () => {
-  const s = jobScript("build", "fast");
-  assert.match(s, /cd crates\/nub-native && cargo zigbuild --target aarch64-apple-darwin --release/);
-  assert.match(s, /libnub_native\.dylib/, "must surface the addon so a missing one fails loudly");
-});
-
-test("the darwin build points the linker at the stub TBDs", () => {
-  const s = jobScript("build", "fast");
-  assert.match(s, /cp -R scripts\/darwin-stubs\/\. "\$HOME\/\.darwin-stubs\/"/, "stubs must be installed");
-  assert.match(s, /-C link-arg=-L\$HOME\/\.darwin-stubs/, "library search path");
-  assert.match(s, /-C link-arg=-F\$HOME\/\.darwin-stubs/, "framework search path");
-});
 
 // Verified against .github/workflows/ci.yml: the Clippy job runs THREE things. nub-native
 // is its own workspace (panic=unwind cdylib) `exclude`d from the root, so a root-only
@@ -122,7 +93,7 @@ test("jobScript(test) matches CI: whole workspace, real addon staged over the pl
 // would be destroyed with it, so every builder would pay a full cold compile while the
 // image claimed to carry warm artifacts. Both sides must agree on the path.
 test("every job uses a target dir that survives the bake's cleanup of ~/src", () => {
-  for (const job of ["build", "clippy", "test"]) {
+  for (const job of ["clippy", "test"]) {
     const s = jobScript(job, "fast");
     assert.match(s, /export CARGO_TARGET_DIR="\$HOME\/\.cargo-shared-target"/, `${job} must reuse the baked artifacts`);
     assert.ok(!/CARGO_TARGET_DIR="?\$HOME\/src/.test(s), `${job} must not target a dir the bake deletes`);
@@ -132,7 +103,7 @@ test("every job uses a target dir that survives the bake's cleanup of ~/src", ()
 // sshd runs `bash -s` non-interactively; Ubuntu's .bashrc returns before any appended
 // PATH line, so rustup's env is never applied and cargo dies with 127.
 test("every job sources cargo's env, since a non-interactive ssh shell never does", () => {
-  for (const job of ["build", "clippy", "test"]) {
+  for (const job of ["clippy", "test"]) {
     assert.match(jobScript(job, "fast"), /\. "\$HOME\/\.cargo\/env"/, `${job} would die with cargo: command not found`);
   }
 });
