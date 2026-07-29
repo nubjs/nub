@@ -117,11 +117,14 @@ Because the rule is about the dependency's shape rather than the importer's, it 
 
 ## .js → .ts resolution
 
-With `moduleResolution: "nodenext"`, `tsc` wants a `.js` extension on relative imports even though the file on disk is `.ts`. Nub reverses that at runtime, so the same source runs before and after a build.
+With `moduleResolution: "nodenext"`, `tsc` wants a `.js` extension even though the file on disk is `.ts`. Nub reverses that at runtime, so the same source runs before and after a build.
 
 ```ts
 // resolves ./handler.ts when no ./handler.js exists
 import { handler } from "./handler.js";
+
+// and across a package subpath, into a workspace package built from TS source
+import { createPrompt } from "@repo/lib/prompt.js";
 ```
 
 The literal extension always wins first: a real on-disk `./handler.js` is used as-is, and the swap only fires when the written extension points at a file that doesn't exist. The same rewrite covers `.jsx → .tsx`, `.mjs → .mts`, and `.cjs → .cts` — and likewise, a real `.cjs` beats a sibling `.cts`. This is the `tsc`/`tsx` emit convention, not a guess at the file's type.

@@ -222,6 +222,30 @@ console.log("LOADED");
     );
 }
 
+/// A traversing subpath must never resolve outside the package root. The guard
+/// splits on both separators, since lexical normalization honors `\` on Windows;
+/// this pins the separator-independent half on every platform.
+#[test]
+fn traversing_subpath_never_escapes_the_package_root() {
+    let dir = fixture("traversal");
+    write(&dir.join("outside-secret.js"), r#"module.exports={};"#);
+    write(
+        &dir.join("entry.ts"),
+        r#"import "thirdparty/../../outside-secret";
+console.log("ESCAPED");
+"#,
+    );
+    let (stdout, stderr) = run(&dir, "entry.ts");
+    assert!(
+        !stdout.contains("ESCAPED"),
+        "a traversing subpath escaped the package root: {stdout}"
+    );
+    assert!(
+        stderr.contains("ERR_"),
+        "expected the traversal to stay unresolved, got: {stderr}"
+    );
+}
+
 /// THE ENCAPSULATION GUARD. A package that declares `exports` owns its subpath
 /// map; probing must never reach a path it withheld. Without this, #562's fix
 /// would be a sandbox escape out of every `exports` map on disk.

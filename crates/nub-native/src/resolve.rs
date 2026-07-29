@@ -101,8 +101,11 @@ fn resolve_bare_subpath(specifier: &str, parent_dir: &str) -> Option<String> {
     };
     let subpath = segs.collect::<Vec<_>>().join("/");
     // A bare NAME (no subpath) resolves through `main`/`exports` — never ours.
-    // A traversing subpath would escape the package root.
-    if subpath.is_empty() || subpath.split('/').any(|s| s == "..") {
+    // A traversing subpath would escape the package root: split on BOTH separators,
+    // because `path_join_resolve`'s lexical normalization goes through
+    // `Path::components`, which honors `\` on Windows — so a `/`-only guard would
+    // let `pkg/a\..\..\other` walk straight out of the package.
+    if subpath.is_empty() || subpath.split(['/', '\\']).any(|s| s == "..") {
         return None;
     }
 
