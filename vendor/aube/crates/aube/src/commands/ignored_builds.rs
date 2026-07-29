@@ -16,7 +16,7 @@
 
 use clap::Args;
 use miette::{Context, IntoDiagnostic};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const AFTER_LONG_HELP: &str = "\
 Examples:
@@ -132,6 +132,14 @@ pub(super) struct IgnoredEntry {
     pub version: String,
     pub approval_key: String,
     pub suspicions: Vec<aube_scripts::Suspicion>,
+    /// The graph `LockedPackage.name`s behind this build — the spelling
+    /// `rebuild` matches on, which is the ALIAS for an `npm:`-aliased dep
+    /// and so diverges from `name`/`approval_key`. Plural because one
+    /// build can back several graph nodes (two aliases of one package, or
+    /// an alias alongside the real dep), which the dedup collapses.
+    /// Declared last so the derived `Ord`'s `(name, version)` primary
+    /// ordering documented above is unchanged.
+    pub graph_names: Vec<String>,
 }
 
 impl IgnoredEntry {
@@ -200,7 +208,12 @@ pub(super) fn collect_ignored(project_dir: &std::path::Path) -> miette::Result<V
             .into_iter()
             .collect();
 
-    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    // `(registry_name, version)` → the `out` index that reported it, or
+    // `None` when that pair was examined and deliberately skipped. Both
+    // states must be remembered: a later package sharing the pair has
+    // already been decided for, and a collapsed one still contributes its
+    // own graph node to `graph_names`.
+    let mut seen: BTreeMap<(String, String), Option<usize>> = BTreeMap::new();
     let mut out: Vec<IgnoredEntry> = Vec::new();
 
     for pkg in graph.packages.values() {
@@ -210,7 +223,27 @@ pub(super) fn collect_ignored(project_dir: &std::path::Path) -> miette::Result<V
         if super::install::package_build_is_allowed(&policy, pkg) {
             continue;
         }
-        if !seen.insert((pkg.name.clone(), pkg.version.clone())) {
+        // Identify the entry by `registry_name()` throughout, not `pkg.name`.
+        // The policy above, the store index, and the `allowBuilds` allowlist
+        // all key on the real package name, so an `npm:` alias reported under
+        // its alias would display a spec that can never authorize the build.
+        // `name` and `approval_key` must move together: `is_source_backed()`
+        // reads their inequality as "source-backed", so changing only the key
+        // would misclassify every aliased registry package. Deduping here also
+        // collapses an alias and the real package into the one build they are.
+        let report_name = pkg.registry_name();
+        let key = (report_name.to_string(), pkg.version.clone());
+        if let Some(slot) = seen.get(&key) {
+            // Already decided. If it produced an entry, this package is a
+            // second graph node behind the same build (two aliases of one
+            // package, or an alias plus the real dep) and the follow-up
+            // rebuild has to name it too.
+            if let Some(idx) = *slot {
+                let names = &mut out[idx].graph_names;
+                if !names.contains(&pkg.name) {
+                    names.push(pkg.name.clone());
+                }
+            }
             continue;
         }
         // A source-backed dep is authorized by its source key, not its bare
@@ -224,7 +257,10 @@ pub(super) fn collect_ignored(project_dir: &std::path::Path) -> miette::Result<V
             Some(source_key) if recorded_source_builds.contains(&source_key) => {
                 (source_key, Vec::new())
             }
-            Some(_) => continue,
+            Some(_) => {
+                seen.insert(key, None);
+                continue;
+            }
             None => {
                 let read_key = pkg.integrity.as_deref().or_else(|| {
                     no_integrity_index
@@ -232,18 +268,21 @@ pub(super) fn collect_ignored(project_dir: &std::path::Path) -> miette::Result<V
                         .map(String::as_str)
                 });
                 let Some(suspicions) =
-                    lifecycle_scripts_with_suspicions(&store, &pkg.name, &pkg.version, read_key)
+                    lifecycle_scripts_with_suspicions(&store, report_name, &pkg.version, read_key)
                 else {
+                    seen.insert(key, None);
                     continue;
                 };
-                (pkg.name.clone(), suspicions)
+                (report_name.to_string(), suspicions)
             }
         };
+        seen.insert(key, Some(out.len()));
         out.push(IgnoredEntry {
-            name: pkg.name.clone(),
+            name: report_name.to_string(),
             version: pkg.version.clone(),
             approval_key,
             suspicions,
+            graph_names: vec![pkg.name.clone()],
         });
     }
 

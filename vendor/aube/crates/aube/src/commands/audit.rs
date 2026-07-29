@@ -173,9 +173,17 @@ pub async fn run(args: AuditArgs) -> miette::Result<Option<i32>> {
 
     // Build the bulk request body: { name: [version, ...] } with versions
     // deduped so the registry doesn't do extra work on a diamond dep.
+    // Key the query on `registry_name()`, not `pkg.name`: an `npm:` alias
+    // carries the alias as `name`, which the advisory endpoint has never
+    // heard of, so the package came back clean no matter how many
+    // advisories it had — and `resolved_versions_by_name` below already
+    // reads the response back by `registry_name()`, so the alias spelling
+    // could never have matched anyway.
     let mut pkg_versions: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for pkg in closure.values() {
-        let entry = pkg_versions.entry(pkg.name.clone()).or_default();
+        let entry = pkg_versions
+            .entry(pkg.registry_name().to_string())
+            .or_default();
         if !entry.contains(&pkg.version) {
             entry.push(pkg.version.clone());
         }

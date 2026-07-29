@@ -12,10 +12,17 @@ BIN_DIR ?= /usr/local/bin
 RUST_BUILD = $(CURDIR)/scripts/rust-build.sh
 TARGET   = target/$(PROFILE)/nub
 
+# PROFILE names a cargo profile AND the target/<dir> the copy steps read from, so
+# the two must agree. `debug` is the odd one out: cargo's profile is named `dev`
+# but its output dir is `target/debug`, and it is the default, so it takes no
+# flag. Any other named profile (`fast`) needs an explicit --profile or cargo
+# would build into target/debug while the copy steps looked in target/<profile>.
 ifeq ($(PROFILE),release)
   CARGO_FLAGS = --release
-else
+else ifeq ($(PROFILE),debug)
   CARGO_FLAGS =
+else
+  CARGO_FLAGS = --profile $(PROFILE)
 endif
 
 .PHONY: build addon addon-fast install-dev uninstall-dev qos-global test verify test-node-matrix bench clean npm-build npm-publish npm-publish-dry
@@ -51,12 +58,19 @@ addon:
 # The fast profile rebuilds it in a fraction of that. addon-fast builds the
 # native addon under the same profile so a single `cargo build --profile fast`
 # pass serves both.
+# Builds through scripts/rust-build.sh and symlinks to the target dir IT picked.
+# Hardcoding $(CURDIR)/target left nub-dev pointing at a stale binary: every
+# documented rebuild path (the post-merge refresh, the dev-loop) goes through the
+# wrapper, which normally writes to the SHARED dir, so nothing updated
+# ./target/fast/nub and `nub-dev` silently served whatever was built last time
+# make ran. `--print-target` re-resolves the same shared/isolated decision.
 install-dev: addon-fast qos-global
-	$(CARGO) build --profile fast
-	ln -sf $(CURDIR)/target/fast/nub $(BIN_DIR)/nub-dev
-	ln -sf $(CURDIR)/target/fast/nub $(BIN_DIR)/nubx-dev
-	@echo "Installed: $(BIN_DIR)/nub-dev -> target/fast/nub"
-	@echo "Installed: $(BIN_DIR)/nubx-dev -> target/fast/nub"
+	scripts/rust-build.sh build --profile fast
+	@t=$$(scripts/rust-build.sh --print-target); \
+	  ln -sf $$t/fast/nub $(BIN_DIR)/nub-dev; \
+	  ln -sf $$t/fast/nub $(BIN_DIR)/nubx-dev; \
+	  echo "Installed: $(BIN_DIR)/nub-dev -> $$t/fast/nub"; \
+	  echo "Installed: $(BIN_DIR)/nubx-dev -> $$t/fast/nub"
 	@echo ""
 	@nub-dev --version
 
@@ -94,10 +108,17 @@ verify:
 	}
 	NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" fmt --check
 	(cd crates/nub-native && NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" fmt --check)
-	$(MAKE) --no-print-directory PROFILE=debug CARGO="env NUB_SHARED_TARGET='$(CURDIR)/target' '$(RUST_BUILD)'" addon
+	@# PROFILE=fast, matching both the dev loop and CI's check/clippy jobs, so the
+	@# gates reuse the artifacts iteration already built instead of driving a
+	@# second full dependency compile under `dev` (~26 GB of duplicated
+	@# target/debug + target/fast, and one cold dependency build the first time a
+	@# developer crossed from the dev loop into the gates). `fast` inherits `dev`,
+	@# so debug-assertions, overflow checks and opt-level are identical — only
+	@# debuginfo differs, and no lint reads it.
+	$(MAKE) --no-print-directory PROFILE=fast CARGO="env NUB_SHARED_TARGET='$(CURDIR)/target' '$(RUST_BUILD)'" addon
 	@test -s runtime/addons/nub-native.node
-	NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-targets --all-features -- -D warnings
-	(cd crates/nub-native && NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-features -- -D warnings)
+	NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-targets --all-features --profile fast -- -D warnings
+	(cd crates/nub-native && NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-features --profile fast -- -D warnings)
 	tests/brand-lint/check-env-reads.sh
 	tests/brand-lint/check-path-literals.sh
 	NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" test

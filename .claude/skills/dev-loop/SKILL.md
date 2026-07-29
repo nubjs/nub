@@ -104,10 +104,12 @@ The `nub-cli` integration suite lives in `crates/nub-cli/tests/*.rs` — e.g. `p
 Match `.github/workflows/ci.yml` exactly — a scoped `-p` without `--all-targets` misses test-code lints:
 
 ```bash
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-targets --all-features --profile fast -- -D warnings
 cargo fmt --check
-cargo test -p <crate>        # scoped to what you changed
+cargo test -p <crate>        # scoped to what you changed; DEFAULT profile, as CI runs it
 ```
+
+Keep `--profile fast` on clippy. It is what CI's check and clippy jobs run, and it puts the gates in the same artifact universe as the `--profile fast` dev loop above — without it, gating drives a second full dependency build under `dev` and your first pre-push after a day of iterating pays a cold build for nothing. `cargo test` deliberately stays on the default profile, matching CI's test jobs, which reuse the debug addon and binary by path.
 
 Then run the full [pre-push local verification loop in AGENTS.md](../../../AGENTS.md) (incremental build → exact CI gates → e2e tmp-fixture run → Docker for global-cache/config behavior → promote durable checks into the suite). For the e2e probe loop specifically, use the `ad-hoc-test` skill. Get it green locally and push ONCE — fix-after-fix pushes saturate the shared CI runner pool.
 
@@ -152,6 +154,6 @@ cargo test -p nub-cli --test <file_stem>        # one file
 cargo test -p nub-cli <substring>               # one test by name
 
 # CI cheap gates
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-targets --all-features --profile fast -- -D warnings
 cargo fmt --check
 ```

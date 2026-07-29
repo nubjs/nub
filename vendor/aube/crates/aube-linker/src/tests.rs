@@ -2444,6 +2444,72 @@ fn is_real_dir_distinguishes_a_plain_dir_from_a_dir_shaped_link() {
     assert!(!aube_util::fs::is_real_dir(&tmp.path().join("missing")));
 }
 
+// `node_modules/<name>` written by an incumbent npm or yarn is a POPULATED
+// REAL directory, and reclaiming that slot is the linker's job — unlike the
+// generic-helper case below, this caller OWNS the entry. On Windows
+// `remove_dir` cannot evict one and the `remove_file` fallback answers os 5,
+// which the retry ladder reads as transient, so `nub install` over an npm
+// tree burned ~10s and then aborted with a bare `Access is denied`.
+// Reproduced on 0.6.0 and canary.
+//
+// NOTE: on Unix this exercises the `cfg(not(windows))` branch, which has
+// always recursed — so it passes with or without the fix here. Its value is
+// the windows-latest leg of `aube-parity`; do not read a local green as
+// evidence the fix works.
+#[test]
+fn reconcile_top_level_link_reclaims_an_incumbent_package_manager_tree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_pkg = tmp.path().join("store/express");
+    std::fs::create_dir_all(&store_pkg).unwrap();
+    std::fs::write(store_pkg.join("index.js"), b"//ours").unwrap();
+
+    // What `npm install` leaves behind: a real directory holding real files.
+    let link_path = tmp.path().join("node_modules/express");
+    std::fs::create_dir_all(link_path.join("lib")).unwrap();
+    std::fs::write(link_path.join("package.json"), b"{}").unwrap();
+
+    assert!(
+        !crate::link::reconcile_top_level_link(&link_path, &store_pkg).unwrap(),
+        "an incumbent tree must be reclaimed, not reported as already correct"
+    );
+    assert!(
+        link_path.symlink_metadata().is_err(),
+        "incumbent tree survived, so the create_dir_link that follows would collide"
+    );
+
+    // The slot is free and the real link lands in it.
+    sys::create_dir_link(&store_pkg, &link_path).unwrap();
+    assert_eq!(
+        std::fs::read(link_path.join("index.js")).unwrap(),
+        b"//ours"
+    );
+}
+
+// A junction is the other shape reaching that removal, and its TARGET must
+// survive being unlinked — the recursion is gated on `is_real_dir` precisely
+// so it cannot follow one.
+#[test]
+fn reconcile_top_level_link_unlinks_a_stale_link_without_touching_its_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let old_target = tmp.path().join("store/old");
+    std::fs::create_dir_all(&old_target).unwrap();
+    std::fs::write(old_target.join("keep.js"), b"keep").unwrap();
+    let new_target = tmp.path().join("store/new");
+    std::fs::create_dir_all(&new_target).unwrap();
+
+    let link_path = tmp.path().join("node_modules/pkg");
+    std::fs::create_dir_all(link_path.parent().unwrap()).unwrap();
+    sys::create_dir_link(&old_target, &link_path).unwrap();
+
+    assert!(!crate::link::reconcile_top_level_link(&link_path, &new_target).unwrap());
+    assert!(link_path.symlink_metadata().is_err(), "link not reclaimed");
+    assert_eq!(
+        std::fs::read(old_target.join("keep.js")).unwrap(),
+        b"keep",
+        "reclaiming the link recursed through it and destroyed the old target"
+    );
+}
+
 // `create_dir_link` is the last writer before the install aborts, so it
 // carries its own clear-and-retry for a leftover link in the slot. The
 // restraint is deliberate and load-bearing: a POPULATED directory is a

@@ -35,7 +35,7 @@
     "remotes:check": "node scripts/soak/remotes.mts --check",
     "remotes:fix": "node scripts/soak/remotes.mts --fix",
     "dockerignore:update": "untracked --write .dockerignore",
-    "test:scripts": "node --test scripts/soak/*.test.mts"
+    "test:scripts": "node --test 'scripts/**/*.test.m[jt]s'"
   },
   "untracked": {
     "whitelist": [

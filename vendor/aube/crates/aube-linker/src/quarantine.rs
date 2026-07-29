@@ -25,12 +25,27 @@
 //! `qtn_proc_apply_to_self` with them cleared reports success and
 //! changes nothing, and the path-exclusion SPI returns `EPERM`.
 //!
-//! Dropping the attribute is safe here for the same reason Homebrew
-//! drops it after checksum verification: the tarball was verified
-//! against the lockfile's integrity hash before any of its files reached
-//! the CAS, so Gatekeeper's unverified-download provenance adds nothing
-//! on top. Only `com.apple.quarantine` is touched; every other xattr on
-//! the file is left alone.
+//! Dropping the attribute is sound because it is not a judgement anyone
+//! made about the package. It lands only when the installing process
+//! inherited quarantine flags, so the same package, from the same
+//! registry, with the same verified integrity hash, comes out
+//! quarantined when installed from a GUI Git client's terminal and clean
+//! when installed from Terminal.app. Restoring the clean state is what
+//! makes the install reproducible, and the bytes are pinned
+//! independently: the tarball was verified against the lockfile's
+//! integrity hash before any of its files reached the CAS.
+//!
+//! Homebrew is sometimes cited as precedent for stripping after
+//! verification — including by pnpm, which shipped this same fix. That
+//! citation does not hold up: brew *applies* quarantine to casks on
+//! purpose and warns that `--no-quarantine` reduces system security. The
+//! comparable artifact is a brew BOTTLE, the package manager's own
+//! verified download, and brew's formula/bottle path never touches the
+//! attribute at all. An unquarantined store is that state, not a
+//! departure from it.
+//!
+//! Only `com.apple.quarantine` is touched; every other xattr on the file
+//! is left alone.
 //!
 //! ## Why the warm path strips too
 //!

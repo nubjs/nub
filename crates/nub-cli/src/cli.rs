@@ -6361,8 +6361,9 @@ fn ensure_bin_executable(path: &Path) -> Result<()> {
 /// from a terminal that inherited quarantine flags (one embedded in a
 /// Gatekeeper-enabled app), everything they write is stamped: the upgrade
 /// would install a nub that cannot start, and the self-shim would exec one.
-/// Both archives are checksum-verified before use, so clearing the attribute
-/// afterwards is the trade Homebrew makes for a verified download.
+/// Both archives are checksum-verified before use, and the attribute is not
+/// a judgement about them — it reflects only which terminal the upgrade was
+/// run from. See `nub_core::quarantine` for the full rationale.
 ///
 /// Best-effort by the resilience contract in `perform_selfowned_upgrade`:
 /// the binary is already swapped and executable, so a failure warns with the
