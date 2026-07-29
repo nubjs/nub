@@ -116,6 +116,101 @@ mod win {
                     Err(e) => spawn_err(marker, &e),
                 }
             }
+            // execinherit <marker> <exe> [args…] — plain `status()`, stdio INHERITED. Creates
+            // no new kernel object before `CreateProcessW`, so it is the spawn on its own:
+            // `execstatus` still opens `NUL` three times, which is itself a securable object.
+            Some("execinherit") => {
+                let marker = Path::new(&a[1]);
+                let exe = &a[2];
+                match std::process::Command::new(exe).args(&a[3..]).status() {
+                    Ok(s) if s.success() => {
+                        let _ = std::fs::write(marker, "ok status0");
+                        0
+                    }
+                    Ok(s) => {
+                        let _ = std::fs::write(marker, format!("ranfail status={s:?}"));
+                        9
+                    }
+                    Err(e) => spawn_err(marker, &e),
+                }
+            }
+            // rawspawn <marker> <command-line> — `CreateProcessW` with a zeroed STARTUPINFOW
+            // and no handle inheritance, so Rust's spawn machinery is out of the picture
+            // entirely and the recorded error is the OS's own.
+            Some("rawspawn") => {
+                use windows_sys::Win32::System::Threading::{
+                    CreateProcessW, GetExitCodeProcess, PROCESS_INFORMATION, STARTUPINFOW,
+                    WaitForSingleObject,
+                };
+                let marker = Path::new(&a[1]);
+                let mut cmdline: Vec<u16> =
+                    a[2].encode_utf16().chain(std::iter::once(0)).collect();
+                let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
+                si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+                let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+                let ok = unsafe {
+                    CreateProcessW(
+                        std::ptr::null(),
+                        cmdline.as_mut_ptr(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        0,
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        &si,
+                        &mut pi,
+                    )
+                };
+                if ok == 0 {
+                    let e = std::io::Error::last_os_error();
+                    let _ = std::fs::write(
+                        marker,
+                        format!("rawspawnerr {e:?} raw={:?}", e.raw_os_error()),
+                    );
+                    return 5;
+                }
+                let mut code: u32 = 0;
+                unsafe {
+                    WaitForSingleObject(pi.hProcess, 0xFFFF_FFFF);
+                    GetExitCodeProcess(pi.hProcess, &mut code);
+                    windows_sys::Win32::Foundation::CloseHandle(pi.hThread);
+                    windows_sys::Win32::Foundation::CloseHandle(pi.hProcess);
+                }
+                let _ = std::fs::write(marker, format!("ok rawspawn code={code}"));
+                0
+            }
+            // readfile <marker> <path> — can the child READ the image at all? Separates "the
+            // token never gets the rights the DACL grants" from "the rights are there and
+            // process creation is refused for another reason".
+            Some("readfile") => {
+                let marker = Path::new(&a[1]);
+                match std::fs::File::open(&a[2]) {
+                    Ok(mut file) => {
+                        use std::io::Read;
+                        let mut buf = [0u8; 2];
+                        match file.read(&mut buf) {
+                            Ok(n) => {
+                                let _ = std::fs::write(marker, format!("ok read {n} {buf:?}"));
+                                0
+                            }
+                            Err(e) => {
+                                let _ = std::fs::write(marker, format!("readerr {e:?}"));
+                                9
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ =
+                            std::fs::write(marker, format!("openerr {e:?} raw={:?}", e.raw_os_error()));
+                        if e.kind() == std::io::ErrorKind::PermissionDenied {
+                            5
+                        } else {
+                            9
+                        }
+                    }
+                }
+            }
             // namedpipe <marker> — the primitive under `Command::output`, with no process
             // creation in the way at all. Rust's Windows anonymous pipe is a NAMED pipe
             // (`\\.\pipe\__rust_anonymous_pipe1__.<pid>.<n>`, `sys::pal::windows::pipe`), so
@@ -426,6 +521,8 @@ mod win {
         dump_acl_chain("before any grant", &node);
 
         named_pipe_refused(&mut fails);
+        read_before_exec(&mut fails, node.as_path());
+        spawn_shapes(&mut fails);
         spawn_cwd_differential(&mut fails);
         system_exec_baseline(&mut fails);
         interpreter_in_place(&mut fails, node.as_path());
@@ -442,6 +539,104 @@ mod win {
             eprintln!("{fails} propert(y/ies) failed");
             1
         }
+    }
+
+    /// READ before EXEC. Every spawn arm has come back `ERROR_ACCESS_DENIED`, which says
+    /// nothing about WHICH object was refused. Reading the two images directly answers the
+    /// prior question: whether the LowBox token receives the rights the DACL grants it at
+    /// all — the System32 image through `ALL APPLICATION PACKAGES`, the interpreter through
+    /// nub's own ACE. If both reads succeed, the rights are there and process creation is
+    /// being refused for a reason that is not the image.
+    fn read_before_exec(fails: &mut u32, node: &Path) {
+        let f = Fixture::new("read");
+        let mut extra = vec![read_rule(node)];
+        if let Some(dir) = node.parent() {
+            extra.push(read_rule(dir));
+        }
+        let policy = jail_shaped(&f, extra);
+        let cmd = PathBuf::from(std::env::var("SystemRoot").unwrap_or_default())
+            .join("System32")
+            .join("cmd.exe");
+
+        println!("  arm reads-the-aap-granted-system-image:");
+        let m = f.work.join("read-sys.txt");
+        let (code, text) = run_child(
+            &f,
+            &policy,
+            "readfile",
+            &m,
+            &[cmd.to_string_lossy().into_owned()],
+        );
+        report(
+            fails,
+            "reads-the-aap-granted-system-image",
+            code == 0,
+            &format!("exit={code} marker={text}"),
+        );
+
+        println!("  arm reads-the-nub-granted-interpreter:");
+        let m = f.work.join("read-node.txt");
+        let (code, text) = run_child(
+            &f,
+            &policy,
+            "readfile",
+            &m,
+            &[node.to_string_lossy().into_owned()],
+        );
+        report(
+            fails,
+            "reads-the-nub-granted-interpreter",
+            code == 0,
+            &format!("exit={code} marker={text}"),
+        );
+    }
+
+    /// THE SPAWN SHAPE, isolated. Same image, same policy, same cwd; only how the spawn is
+    /// issued changes. `execinherit` adds no kernel object before `CreateProcessW`;
+    /// `rawspawn` removes Rust's spawn machinery altogether. If all three shapes are
+    /// refused, `CreateProcessW` itself is what an AppContainer child cannot do here.
+    fn spawn_shapes(fails: &mut u32) {
+        let f = Fixture::new("shapes");
+        let policy = jail_shaped(&f, Vec::new());
+        let cmd = PathBuf::from(std::env::var("SystemRoot").unwrap_or_default())
+            .join("System32")
+            .join("cmd.exe");
+
+        println!("  arm spawn-inherited-stdio:");
+        let m = f.work.join("shape-inherit.txt");
+        let (code, text) = run_child(
+            &f,
+            &policy,
+            "execinherit",
+            &m,
+            &[
+                cmd.to_string_lossy().into_owned(),
+                "/c".to_string(),
+                "ver".to_string(),
+            ],
+        );
+        report(
+            fails,
+            "spawn-inherited-stdio",
+            code == 0,
+            &format!("exit={code} marker={text}"),
+        );
+
+        println!("  arm spawn-raw-createprocess:");
+        let m = f.work.join("shape-raw.txt");
+        let (code, text) = run_child(
+            &f,
+            &policy,
+            "rawspawn",
+            &m,
+            &[format!("\"{}\" /c ver", cmd.display())],
+        );
+        report(
+            fails,
+            "spawn-raw-createprocess",
+            code == 0,
+            &format!("exit={code} marker={text}"),
+        );
     }
 
     /// THE WORKING-DIRECTORY VARIABLE, isolated. `CreateProcessW` duplicates a handle to the

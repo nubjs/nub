@@ -76,7 +76,7 @@ jobs:
           }
           [ -s probe.log ] || { echo "MISS the probe produced no output at all"; fail=1; }
           need "PROBE windows interpreter exec under AppContainer"
-          for p in appcontainer-named-pipe-refused spawn-from-granted-cwd spawn-from-ungranted-cwd-refused system-exec-baseline interpreter-in-place-status-execs interpreter-ungranted-refused; do
+          for p in appcontainer-named-pipe-refused reads-the-aap-granted-system-image reads-the-nub-granted-interpreter spawn-inherited-stdio spawn-raw-createprocess spawn-from-granted-cwd system-exec-baseline interpreter-in-place-status-execs interpreter-ungranted-refused; do
             grep -q "prop:$p=" probe.log || { echo "MISS property $p never reported"; fail=1; }
           done
           # The control and the baseline must hold in EVERY run, whatever the treatment did:
