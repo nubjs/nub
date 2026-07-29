@@ -9,6 +9,13 @@ use sha2::Digest;
 fn side_effects_cache_marker() -> String {
     format!(".{}-side-effects-cache", aube_util::prog())
 }
+
+/// True for this cache's marker under ANY brand — `.<tool>-side-effects-cache`.
+/// Used by the directory hash so a marker left by a differently-branded build
+/// is excluded from the digest rather than changing it.
+fn is_side_effects_marker_name(name: &str) -> bool {
+    name.starts_with('.') && name.ends_with("-side-effects-cache")
+}
 const SIDE_EFFECTS_CACHE_TMP_PREFIX: &str = ".tmp-side-effects-";
 const SIDE_EFFECTS_CACHE_TMP_STALE_AFTER: std::time::Duration =
     std::time::Duration::from_secs(60 * 60);
@@ -321,7 +328,15 @@ fn hash_dir_inner(
 
     for entry in entries {
         let path = entry.path();
-        if path.file_name().and_then(|n| n.to_str()) == Some(side_effects_cache_marker().as_str()) {
+        // Skip ANY brand's marker, not just the active one. A tree installed by
+        // an earlier build carries the previous spelling, and folding that file
+        // into the hash would invalidate every cached entry exactly once, for a
+        // file this cache wrote itself.
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(is_side_effects_marker_name)
+        {
             continue;
         }
         let rel = path

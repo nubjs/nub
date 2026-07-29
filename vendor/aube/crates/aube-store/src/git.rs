@@ -289,7 +289,7 @@ pub fn git_shallow_clone(
     // identical output either way.
     // Keep git scratch out of world-writable /tmp. Predictable names
     // under $TMPDIR are the classic symlink pre-plant vector. Attacker
-    // creates /tmp/aube-git-<k>-<c> as a symlink into $HOME/.ssh, then
+    // creates /tmp/<tool>-git-<k>-<c> as a symlink into $HOME/.ssh, then
     // the remove_dir_all below walks right through it and nukes the
     // victim's keys. 0700 on the cache root blocks the same race on a
     // shared user dir.
@@ -542,8 +542,9 @@ fn canonicalize_clone_dir(
 /// before this is called. The returned `head_sha` is `commit`
 /// lowercased.
 ///
-/// Cache layout uses a separate `aube-codeload-` prefix from the
-/// `aube-git-` prefix `git_shallow_clone` writes, so a per-dep
+/// Cache layout uses a separate `<tool>-codeload-` prefix from the
+/// `<tool>-git-` prefix `git_shallow_clone` writes (both brand-scoped
+/// via `codeload_entry_prefix` / `git_entry_prefix`), so a per-dep
 /// fallback from one path to the other doesn't trip on the other
 /// caller's marker files.
 pub fn extract_codeload_tarball(

@@ -4,7 +4,7 @@ use super::{FrozenMode, InstallOptions, run};
 
 /// Unique-per-call scratch directory that `rm -rf`s itself on drop.
 /// Used to run a git dep's `prepare` script without mutating the
-/// shared `git_shallow_clone` cache under `/tmp/aube-git-*`.
+/// shared `git_shallow_clone` cache under `<cache>/git/<tool>-git-*`.
 pub(super) struct ScratchDir(std::path::PathBuf);
 
 impl ScratchDir {
@@ -54,7 +54,7 @@ pub(super) fn prepare_scratch_copy(
     // the Drop impl immediately means a failure to spawn `cp`, a
     // non-zero cp exit, or any panic between here and the `Ok`
     // return still removes the partially-populated temp dir
-    // instead of leaking it under `/tmp/aube-git-prep-*`.
+    // instead of leaking it under `<tmp>/<tool>-git-prep-*`.
     let scratch = ScratchDir(dst);
 
     // `cp -a src/. dst/` — the trailing `/.` copies src's contents

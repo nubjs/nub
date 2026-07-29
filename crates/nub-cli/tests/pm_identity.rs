@@ -646,7 +646,7 @@ fn nub_profile_reads_no_branded_user_or_project_config_file() {
 #[test]
 fn nub_never_writes_an_aube_branded_path() {
     let dir = project(
-        "aube-path-brand",
+        "brand-path",
         r#"{"name":"app","version":"1.0.0","scripts":{"probe":"node -e \"console.log(process.env.npm_config_node_gyp)\""}}"#,
     );
     let home = dir.join("home");
@@ -675,8 +675,12 @@ fn nub_never_writes_an_aube_branded_path() {
         .lines()
         .find(|l| l.contains("node-gyp"))
         .unwrap_or_else(|| panic!("script did not print npm_config_node_gyp: {stdout}"));
+    // Separator-normalized: `cache_namespace` is the literal "nub/pm", so on
+    // Windows `Path::join` yields `…\\xdg-cache\\nub/pm\\tools\\…` — a raw
+    // `contains("/nub/")` fails there while the leak it guards is unchanged.
+    let normalized = node_gyp.replace('\\', "/");
     assert!(
-        node_gyp.contains("/nub/") && !node_gyp.contains("/aube/"),
+        normalized.contains("/nub/") && !normalized.contains("/aube/"),
         "npm_config_node_gyp must live under nub's cache namespace: {node_gyp}"
     );
 
