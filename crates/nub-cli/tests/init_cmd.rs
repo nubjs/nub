@@ -205,18 +205,21 @@ impl RegistryFixture {
 
 /// Serve one request, then close the connection *gracefully*.
 ///
-/// The graceful close is load-bearing on Windows, where `closesocket` on a
-/// socket that still holds unread bytes in its receive buffer is an ABORTIVE
-/// close: it sends RST and discards whatever is still queued in the send
-/// buffer, so the client sees a transport-level error instead of the response
-/// it was mid-read of. The tarball is the largest body here and so the most
-/// exposed, and the age-floor test pins `fetch-retries=0`, leaving no retry
-/// cushion. Hence: read the request to its end, then half-close (FIN) and drain
-/// to EOF so the final close has nothing left to abort over.
+/// Closing a socket that still holds unread bytes in its receive buffer is an
+/// ABORTIVE close: it discards whatever is still queued in the send buffer, so
+/// the client sees a transport-level error instead of the response it was
+/// mid-read of. Not Windows-specific — a CI probe measured 0/15 successes with
+/// the abortive close against 15/15 with this one on windows, ubuntu AND macos;
+/// Windows surfaces it as `ConnectionReset` 10054, macOS stalls to timeout. The
+/// age-floor test pins `fetch-retries=0`, so there is no cushion. Hence: read
+/// the request to its end, then half-close (FIN) and drain to EOF so the final
+/// close has nothing left to abort over.
 ///
-/// `set_nonblocking(false)` is belt-and-braces for the same platform — an
-/// accepted socket can inherit the listener's non-blocking mode, which would
-/// turn the request read into an instant `WouldBlock` and serve a 404.
+/// `set_nonblocking(false)` is REQUIRED, not belt-and-braces, and for macOS
+/// rather than Windows: BSD `accept` inherits the listener's non-blocking flag
+/// onto the accepted socket (Linux explicitly does not). Without it the request
+/// read returns `WouldBlock` before the bytes land, the path parses as `/`, and
+/// the fixture serves a 404 for a package it holds — a second, independent bug.
 fn serve_one(
     mut stream: TcpStream,
     responses: &HashMap<String, (String, Vec<u8>)>,
