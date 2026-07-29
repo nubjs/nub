@@ -268,10 +268,19 @@ module.exports = { who: v };
 /// `.cjs` on purpose; a `.cts` entry trips a SEPARATE pre-existing issue, where the
 /// load-side node_modules gate refuses the symlinked package's TS under this flag,
 /// which nub v0.5.0 exhibits identically and which is not what this pins.
+///
+/// COUPLING, for whoever adds the load-side gate: the classic TS-family
+/// `require.extensions` handler transpiles unconditionally today, and this package
+/// loads through it on a path that still reads `/node_modules/` under this flag.
+/// Gating that handler on the LITERAL filename would break this test and quietly
+/// undo the resolution-side fix. Resolve the path there the way `isDepTsHit` does —
+/// better, factor the one "is this really a dependency?" predicate both layers call,
+/// so the two definitions cannot drift apart.
 #[cfg(unix)]
 #[test]
 fn preserve_symlinks_keeps_a_workspace_package_loadable() {
     if !on_compat_tier() {
+        eprintln!("skipping: needs the compat tier (PATH node below 22.15)");
         return;
     }
     let dir = fixture("preserve-symlinks");
