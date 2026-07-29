@@ -85,6 +85,23 @@ const CASES = [
     want: 'DID-WORK-AND-SUCCEEDED', why: 'Floor boundary, inclusive.',
   },
   {
+    name: 'gyp-stamps-only', cls: 'native-build-prebuilt',
+    created: [
+      { p: 'better-sqlite3/build/Release/obj.target', sz: 0, mode: 0o775, ty: 'dir' },
+      { p: 'better-sqlite3/build/Release/obj.target/better_sqlite3.stamp', sz: 0, mode: 0o664, ty: 'file' },
+      { p: 'better-sqlite3/build/Makefile', sz: 14418, mode: 0o664, ty: 'file' },
+    ],
+    want: 'DID-WORK-AND-FAILED',
+    why: 'THE THIRD REGRESSION: better-sqlite3@13.0.1 scored SUCCEEDED on empty build/Release '
+      + 'directories and 0-byte .stamp files. node-gyp configured and compiled nothing.',
+  },
+  {
+    name: 'real-prebuilt', cls: 'native-build-prebuilt',
+    created: [{ p: 'cld/build/Release/cld.node', sz: 6680280, mode: 0o775, ty: 'file' }],
+    want: 'DID-WORK-AND-SUCCEEDED',
+    why: 'A real native addon landed; the type+extension test must still admit it.',
+  },
+  {
     name: 'selfconf', cls: 'self-configuring',
     created: [{ p: 'cfg.json', sz: 120, mode: 0o644, ty: 'file' }],
     want: 'UNSIGNALLED',

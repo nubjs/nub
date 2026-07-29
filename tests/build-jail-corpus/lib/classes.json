@@ -7,15 +7,16 @@
     "  created_all_of  : every regex must match >=1 entry in CREATED (root:rel form)",
     "  created_any_of  : >=1 regex must match >=1 CREATED entry",
     "  changed_any_of  : as created_any_of but over CREATED + MODIFIED",
-    "  min_created     : CREATED count over all roots must be >= n. WEAK BY CONSTRUCTION — it is",
+    "  min_created     : CREATED count over all roots must be >= n. WEAK BY CONSTRUCTION \u2014 it is",
     "                    satisfied by 'the script wrote any file at all', including a bookkeeping",
     "                    write from a script that then died. It must never be a class's ONLY",
     "                    operator; see THE 2026-07-28 CORRECTION below.",
-    "  created_binary  : >=1 CREATED entry is a REGULAR FILE of at least `min_bytes`. This asks",
-    "                    whether the script produced the substantial payload its class exists to",
-    "                    produce, not whether it produced anything. Executability and native-artifact",
-    "                    extension are RECORDED alongside each payload but do NOT gate the verdict —",
-    "                    see the class note. Implemented by isSubstantialPayload() in attribute.mjs.",
+    "  created_file    : >=1 CREATED entry is a REGULAR FILE, optionally name-matched via `any_of`",
+    "                    and optionally at least `min_bytes`. This asks whether the script produced",
+    "                    the artifact its class exists to produce. The regular-file check is",
+    "                    load-bearing: the path-matching operators this replaces were satisfied by",
+    "                    empty DIRECTORIES and 0-byte stamp files. Executability is recorded next to",
+    "                    each artifact but never gates a verdict. See both classes' notes below.",
     "  content_nonce   : a CREATED/MODIFIED file matching `where` must CONTAIN the run nonce.",
     "                    This is the ONLY operator a warm cache cannot satisfy, because the",
     "                    nonce is generated per run and cannot pre-exist. Prefer it wherever",
@@ -25,11 +26,11 @@
     "STRENGTH is recorded per class and is not decoration: a verdict built on a weak signal",
     "must be labelled weak in the corpus output, or the corpus overstates its own confidence.",
     "",
-    "── THE 2026-07-28 CORRECTION — read this before weakening any predicate ──────────────",
+    "\u2500\u2500 THE 2026-07-28 CORRECTION \u2014 read this before weakening any predicate \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
     "The first full two-platform run reported 117 surviving verdicts on Linux and 96 on macOS.",
     "115 and 94 of them respectively rested on a predicate satisfiable by 'the script created any",
-    "file at all': binary-downloader was created_any_of ['^(pkg|home|store):.*'] + min_created 1 —",
-    "a regex that reduces to `.*` after the harness strips its root prefix — and self-configuring",
+    "file at all': binary-downloader was created_any_of ['^(pkg|home|store):.*'] + min_created 1 \u2014",
+    "a regex that reduces to `.*` after the harness strips its root prefix \u2014 and self-configuring",
     "was min_created 1 alone. The class breakdown of the 117 was self-configuring 74,",
     "binary-downloader 41, native-build-prebuilt 2, so the two STRONG predicates in this file (the",
     ".o requirement for gyp builds, the content nonce for codegen) gated ZERO survivals. The whole",
@@ -45,19 +46,27 @@
     "",
     "Wrangler's postinstall produced NOTHING. The predicate was reading the package manager's own",
     "bin-shim bookkeeping as the package's work. Measured across one A0 shard, 135 of 140 owners",
-    "with any delta had .bin entries and 31% of all created entries were shims — so this was a",
+    "with any delta had .bin entries and 31% of all created entries were shims \u2014 so this was a",
     "systematic inflator, not a wrangler quirk. delta.mjs now excludes node_modules/.bin from the",
     "delta as PM noise, which is the deeper half of the fix; the predicate below is the other half.",
     "",
-    "So: binary-downloader now requires a binary-shaped artifact (created_binary), and",
+    "So: binary-downloader now requires a substantial created FILE (created_file), and",
     "self-configuring is demoted to strength NONE / UNSIGNALLED. 74 honest 'we cannot tell' is",
     "worth more than 74 survivals resting on min_created 1. Denial evidence is still harvested for",
-    "UNSIGNALLED classes — errsig.mjs scans every package's failures regardless of class — so",
+    "UNSIGNALLED classes \u2014 errsig.mjs scans every package's failures regardless of class \u2014 so",
     "demoting a class costs the survival number but NOT the carve-out list, which is the study's",
     "actual deliverable. Do not restore a work-signal for a heterogeneous class without a",
-    "per-package predicate written by hand and grounded in that package's own source."
+    "per-package predicate written by hand and grounded in that package's own source.",
+    "",
+    "\u2500\u2500 THE 2026-07-29 FOLLOW-UP \u2014 the same fault was in a THIRD class \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+    "Running the tightened predicates and then PRINTING the artifacts rather than counting them",
+    "found two more instances of the identical mistake, both recorded in the class notes:",
+    "native-build-prebuilt was satisfied by empty build/Release/ DIRECTORIES (better-sqlite3),",
+    "and native-build-gyp's `^pkg:` regexes anchored at the string start while cell-relative",
+    "paths begin with the package directory, so that class could only ever report MISS.",
+    "The lesson generalises: an artifact predicate must name a FILE and assert its TYPE, and",
+    "every predicate must be checked against real recorded artifacts, not reasoned about."
   ],
-
   "native-build-gyp": {
     "fixture": [
       "No project files needed. The hazard is the opposite of a missing input: node-gyp",
@@ -79,7 +88,6 @@
       "predicate would score a skipped compile as a successful one."
     ]
   },
-
   "native-build-prebuilt": {
     "fixture": [
       "Cold download cache, and that cache directory MUST be inside a snapshot root (usually",
@@ -87,17 +95,34 @@
       "Set npm_config_build_from_source=false so the download path is the one under test."
     ],
     "predicate": {
-      "created_any_of": ["\\.node$", "^pkg:(prebuilds|build/Release)/"],
-      "min_created": 1
+      "created_file": {
+        "any_of": [
+          "\\.(node|so|dylib|dll)$"
+        ],
+        "min_bytes": 1024
+      }
     },
     "strength": "medium",
     "why": [
       "No nonce is possible: the artifact is an upstream-fixed binary, so its content cannot",
-      "carry a per-run marker. The signal therefore rests entirely on CREATED-in-window plus a",
-      "verified-cold cache. State that dependency wherever the number is cited."
+      "carry a per-run marker. The signal rests on CREATED-in-window plus a verified-cold cache.",
+      "State that dependency wherever the number is cited.",
+      "",
+      "CORRECTED 2026-07-29, and it was the same fault as the downloader class one file over.",
+      "The predicate was created_any_of ['\\\\.node$', '^pkg:(prebuilds|build/Release)/'] plus",
+      "min_created 1, evaluated against PATHS. The second alternative was unanchored, so it was",
+      "satisfied by anything under a build/Release/ prefix \u2014 including a DIRECTORY.",
+      "better-sqlite3@13.0.1 scored DID-WORK-AND-SUCCEEDED on six empty directories and two",
+      "0-byte .stamp files, with no .node and no .o anywhere in its delta: node-gyp had written",
+      "its configure output and compiled nothing. It was one of only three survivals in the run",
+      "that found it, so a third of the numerator was this.",
+      "",
+      "The class deliverable is a prebuilt native addon, so the predicate now names one: a",
+      "created REGULAR FILE ending .node/.so/.dylib/.dll, at least 1 KiB. The type check is what",
+      "excludes the directories; the small floor excludes 0-byte stamps without risking a false",
+      "negative, since a real addon is tens of KiB at minimum."
     ]
   },
-
   "binary-downloader": {
     "fixture": [
       "Cold per-package download cache, inside a snapshot root. Many of these consult a",
@@ -105,24 +130,26 @@
       "an inherited skip flag is a silent bail-out that scores as a pass."
     ],
     "predicate": {
-      "created_binary": { "min_bytes": 1048576 }
+      "created_file": {
+        "min_bytes": 1048576
+      }
     },
     "strength": "medium",
     "why": [
       "A downloader's job is to land a USABLE BINARY, so the predicate names one. The prior",
       "version said the corroborating signal 'is that the CREATED entry is a large executable'",
       "and that the harness recorded size so it was 'checkable post hoc rather than baked into",
-      "the predicate' — the check was never performed, and 41 of 117 Linux survivals rested on",
+      "the predicate' \u2014 the check was never performed, and 41 of 117 Linux survivals rested on",
       "the unbaked version. It is baked in now.",
       "",
       "Why the test is size on a regular file, and why the exec bit is NOT part of it:",
-      "  * REGULAR FILE — a symlink is mode 0777 on Linux and dirs report size 0, so the type",
+      "  * REGULAR FILE \u2014 a symlink is mode 0777 on Linux and dirs report size 0, so the type",
       "    must be pinned or every link the PM materialises would qualify.",
-      "  * >= 1 MiB — the two distributions this separates are orders of magnitude apart and the",
+      "  * >= 1 MiB \u2014 the two distributions this separates are orders of magnitude apart and the",
       "    floor sits in the gap. Bookkeeping a bailing script writes (a JSON receipt, a log, a",
       "    saved HTTP error body) is tens of KiB at most; the real payloads are megabytes to",
       "    hundreds of megabytes (chromedriver, geckodriver, the Prisma engines, swc, dprint,",
-      "    ffmpeg, pdfnet). The floor is not tuned to the observed pass rate — every package's",
+      "    ffmpeg, pdfnet). The floor is not tuned to the observed pass rate \u2014 every package's",
       "    created-artifact list, with sizes and modes, is emitted into the report so the margin",
       "    is auditable and the choice refutable post hoc.",
       "  * NOT executability, and NOT a native-artifact extension. The first version of this",
@@ -136,7 +163,7 @@
       "",
       "Why size alone is still sound: a >= 1 MiB regular file appearing in a cell that already",
       "existed before the window cannot be materialisation (the `kind` discriminator separates",
-      "that), and cannot be the PM's hardlink-breaking either — rewriting a file with identical",
+      "that), and cannot be the PM's hardlink-breaking either \u2014 rewriting a file with identical",
       "content leaves digest and size equal, so it lands in TOUCHED, which is excluded from ACTED.",
       "",
       "STILL NO NONCE, so the no-nonce caveat from the prebuilt class survives unchanged: the",
@@ -146,21 +173,23 @@
       "KNOWN LOSS OF SENSITIVITY, stated rather than hidden: a downloader that lands its payload",
       "OUTSIDE its own store cell (into $HOME/.cache/<tool>/) is unattributable by path, so its A0",
       "arm now fails the predicate and the row goes INADMISSIBLE instead of counted. That is the",
-      "safe direction — it reports 'cannot measure' rather than 'survives' — but it does hide a",
+      "safe direction \u2014 it reports 'cannot measure' rather than 'survives' \u2014 but it does hide a",
       "real break behind an inadmissible row. Those writes are surfaced separately as",
       "binary_writes_outside_cells in the report so the gap is visible."
     ]
   },
-
   "codegen": {
     "fixture": [
-      "The generator's INPUT must exist in the project — for Prisma a schema.prisma with a",
+      "The generator's INPUT must exist in the project \u2014 for Prisma a schema.prisma with a",
       "generator block and a datasource block. Without it the postinstall exits 0 having done",
       "nothing, which is the archetypal false pass this whole method exists to catch.",
       "The schema MUST embed the run nonce (e.g. a model named NubProbe<RUNID>)."
     ],
     "predicate": {
-      "content_nonce": { "where": "^(pkg|nm|proj):.*", "must_appear": true }
+      "content_nonce": {
+        "where": "^(pkg|nm|proj):.*",
+        "must_appear": true
+      }
     },
     "strength": "strongest",
     "why": [
@@ -170,16 +199,20 @@
       "construction rather than by hygiene."
     ]
   },
-
   "hook-installer": {
     "fixture": [
-      "A REAL .git directory — `git init` plus at least one commit, since some installers",
+      "A REAL .git directory \u2014 `git init` plus at least one commit, since some installers",
       "check for a valid repository rather than the directory's mere existence. Also ensure",
       "the fixture does not set core.hooksPath already, and that HUSKY / lefthook skip vars",
       "are absent from the environment."
     ],
     "predicate": {
-      "changed_any_of": ["^proj:\\.git/hooks/", "^proj:\\.husky/", "^proj:\\.git/config$", "^proj:lefthook"]
+      "changed_any_of": [
+        "^proj:\\.git/hooks/",
+        "^proj:\\.husky/",
+        "^proj:\\.git/config$",
+        "^proj:lefthook"
+      ]
     },
     "strength": "strong",
     "why": [
@@ -188,10 +221,13 @@
       "pass would mean the grant is wider than believed."
     ]
   },
-
   "telemetry-nag": {
-    "fixture": ["Nothing. The class has no input requirement, which is itself the problem."],
-    "predicate": { "log_match": null },
+    "fixture": [
+      "Nothing. The class has no input requirement, which is itself the problem."
+    ],
+    "predicate": {
+      "log_match": null
+    },
     "strength": "NONE",
     "why": [
       "HONEST GAP. This class produces no filesystem effect by design, so the tree delta is",
@@ -202,7 +238,6 @@
       "given a predicate that would manufacture false confidence."
     ]
   },
-
   "self-configuring": {
     "fixture": [
       "Cold cache; and check for an 'already configured' short-circuit, which is the bail-out",
@@ -212,14 +247,14 @@
     "strength": "NONE",
     "why": [
       "HONEST GAP, demoted from `weak` on 2026-07-28. The class is heterogeneous and has no",
-      "common artifact, and its predicate was `min_created: 1` — 'the script wrote any file at",
+      "common artifact, and its predicate was `min_created: 1` \u2014 'the script wrote any file at",
       "all'. That supplied 74 of the 117 Linux survivals and 62 of the 96 macOS survivals, which",
       "is to say the headline compatibility number was mostly this one line.",
       "",
       "The prior text already contained its own refutation: it said the class 'must never be",
       "counted in a succeeded figure without a per-package predicate written by hand'. No such",
       "predicate was written, and it was counted anyway. Rather than invent one to keep the",
-      "number up, the class is now reported UNSIGNALLED — the same treatment telemetry-nag",
+      "number up, the class is now reported UNSIGNALLED \u2014 the same treatment telemetry-nag",
       "already gets, and for the same reason.",
       "",
       "This costs survival counts, not findings. errsig.mjs classifies failures for EVERY package",

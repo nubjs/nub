@@ -78,26 +78,39 @@ for (const m of manifest) {
   } else {
     effect = true;
     if (P.created_all_of) for (const re of P.created_all_of) {
-      const hit = created.some((e) => new RegExp(re.replace(/^\^pkg:/, '')).test(e.p));
+      // `^pkg:` becomes a path-SEGMENT anchor, not a string anchor. Cell-relative
+      // paths carry the package directory (`cld/build/Release/cld.node`), so the
+      // literal `^build/...` this used to produce could never match and every
+      // native-build-gyp predicate would have silently reported MISS.
+      const hit = created.some((e) => new RegExp(re.replace(/^\^pkg:/, '(?:^|/)')).test(e.p));
       reasons.push(`all_of ${re}: ${hit ? 'HIT' : 'MISS'}`); if (!hit) effect = false;
     }
     if (P.created_any_of) {
       const hit = P.created_any_of.some((re) => created.some((e) => new RegExp(re.replace(/^\^[a-z|()]*pkg[a-z|()]*:/, '')).test(e.p)));
       reasons.push(`any_of: ${hit ? 'HIT' : 'MISS'}`); if (!hit) effect = false;
     }
-    if (P.created_binary) {
-      // The artifact, not its existence. `evidence` names the file that satisfied the
-      // predicate (or the largest created file that failed to), so a reader can judge
-      // the 1 MiB floor against what was actually on disk instead of taking it on faith.
-      const min = P.created_binary.min_bytes ?? PAYLOAD_MIN_BYTES;
-      const hit = created.find((e) => isSubstantialPayload(e, min));
+    if (P.created_file) {
+      // A REGULAR FILE, optionally name-matched, optionally size-floored. The `ty`
+      // check is the load-bearing part and the reason this replaced `created_any_of`
+      // for the artifact classes: that operator matched PATHS, so a 0-byte
+      // `build/Release/x.stamp` and even an empty `build/Release/` DIRECTORY
+      // satisfied it. better-sqlite3@13.0.1 scored DID-WORK-AND-SUCCEEDED on exactly
+      // that — six empty dirs and two 0-byte .stamp files, no .node and no .o — which
+      // is the same "any path appeared" failure as the downloader predicate, one
+      // class over.
+      const min = P.created_file.min_bytes ?? 0;
+      const pats = (P.created_file.any_of || []).map((r) => new RegExp(r.replace(/^\^pkg:/, '(?:^|/)')));
+      const hit = created.find(
+        (e) => e.ty === 'file' && e.sz >= min && (!pats.length || pats.some((re) => re.test(e.p))),
+      );
       const biggest = created.reduce((a, e) => ((e.sz ?? 0) > (a?.sz ?? -1) ? e : a), null);
       binaryEvidence = hit ?? biggest ?? null;
+      const want = `regular file${min ? ` >=${min}b` : ''}${pats.length ? ` matching ${P.created_file.any_of.join('|')}` : ''}`;
       reasons.push(
         hit
-          ? `created_binary: HIT ${hit.p} ${hit.sz}b mode=${(hit.mode ?? 0).toString(8)} ${JSON.stringify(payloadFacts(hit))}`
-          : `created_binary: MISS (no created regular file >=${min}b) — largest created: ${
-              biggest ? `${biggest.p} ${biggest.sz}b mode=${(biggest.mode ?? 0).toString(8)}` : 'none'
+          ? `created_file: HIT ${hit.p} ${hit.sz}b mode=${(hit.mode ?? 0).toString(8)} ${JSON.stringify(payloadFacts(hit))}`
+          : `created_file: MISS (wanted a ${want}) — largest created: ${
+              biggest ? `${biggest.p} ${biggest.sz}b ty=${biggest.ty} mode=${(biggest.mode ?? 0).toString(8)}` : 'none'
             }`,
       );
       if (!hit) effect = false;
