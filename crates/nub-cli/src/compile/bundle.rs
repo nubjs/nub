@@ -14,7 +14,10 @@
 //! build time is a guaranteed `ERR_MODULE_NOT_FOUND` on the deploy machine —
 //! with no stack-trace clue and nothing the operator can install to fix it. The
 //! only fix is to make the specifier statically analyzable, so an escape hatch
-//! would just defer the same crash to the user's machine.
+//! would just defer the same crash to the user's machine. `--external` is the
+//! one sanctioned way past it, and it works by REMOVING the package from the
+//! graph — an external is matched on its raw specifier before resolution, so
+//! its source is never loaded and its unanalyzable sites are never scanned.
 //!
 //! The same reasoning drives the two gates that bracket the bundle. BEFORE it,
 //! [`jsx_override`] refuses to let a tsconfig `jsx: "preserve"` through, because
@@ -26,8 +29,10 @@
 //! successfully" mean the output is at least loadable.
 
 use std::borrow::Cow;
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail};
 use rolldown::plugin::__inner::SharedPluginable;
@@ -37,8 +42,8 @@ use rolldown::plugin::{
 use rolldown::{BundlerBuilder, BundlerOptions, InputItem};
 use rolldown_common::bundler_options::{BundlerTransformOptions, Either, JsxOptions};
 use rolldown_common::{
-    InnerOptions, Output, OutputFormat, Platform, RawMinifyOptions, ResolveOptions, SourceMapType,
-    StrOrBytes, TreeshakeOptions, TsConfig,
+    InnerOptions, IsExternal, Output, OutputFormat, Platform, RawMinifyOptions, ResolveOptions,
+    SourceMapType, StrOrBytes, TreeshakeOptions, TsConfig,
 };
 use rolldown_error::{BuildDiagnostic, DiagnosticOptions, EventKind};
 use rolldown_utils::indexmap::FxIndexMap;
@@ -85,6 +90,11 @@ pub struct BundleOptions {
     /// Extra `exports` conditions, ADDED to the platform defaults (Rolldown
     /// unions them; a condition set is matched, not ranked).
     pub conditions: Vec<String>,
+    /// Packages to leave OUT of the bundle, resolved from disk at run time.
+    /// Package-scoped, not specifier-exact: `--external prettier` also covers
+    /// `prettier/plugins/babel`, which is what makes the flag usable on a
+    /// package whose subpaths are imported separately.
+    pub external: Vec<String>,
     /// Explicit tsconfig; `None` keeps Rolldown's auto-discovery.
     pub tsconfig: Option<PathBuf>,
 }
@@ -137,6 +147,7 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
         define: Some(defines(opts)?),
         sourcemap: sourcemap_type(opts.sourcemap),
         sourcemap_exclude_sources: (!opts.sources_content).then_some(true),
+        external: external_matcher(&opts.external)?,
         resolve: Some(ResolveOptions {
             alias: alias_entries(&opts.alias)?,
             condition_names: (!opts.conditions.is_empty()).then(|| opts.conditions.clone()),
@@ -354,6 +365,61 @@ fn alias_entries(raw: &[String]) -> Result<Option<AliasEntries>> {
         out.push((from, vec![Some(to)]));
     }
     Ok(Some(out))
+}
+
+/// Build the `--external` predicate.
+///
+/// Rolldown's string form (`IsExternal::StringOrRegex`) compares the specifier
+/// for EQUALITY, so `prettier` there would bundle `prettier/plugins/babel`
+/// anyway — a silent half-externalization. Rolldown's own predicate variant
+/// expresses the package-scoped rule the flag's `<PKG>` value promises, so this
+/// stays inside Rolldown's API rather than inventing a matcher on top of it.
+///
+/// INVARIANT: [`is_package_specifier`] is mirrored by the runtime resolve hook
+/// (`compile::external`). If the two rules diverge, a specifier can be left out
+/// of the bundle and then not redirected at run time — an `ERR_MODULE_NOT_FOUND`
+/// with no diagnosis.
+fn external_matcher(packages: &[String]) -> Result<Option<IsExternal>> {
+    if packages.is_empty() {
+        return Ok(None);
+    }
+    // Only a BARE specifier can be honored. A path-shaped value bakes the build
+    // host's own path into the chunk as an import specifier (Rolldown's
+    // resolved-id external call matches it) or normalizes to something the
+    // runtime hook cannot re-base — either way a broken artifact with nothing
+    // failing at build time.
+    for pkg in packages {
+        let bad = pkg.trim().is_empty()
+            || pkg.starts_with(['.', '/', '\\'])
+            || pkg.contains(':')
+            || pkg != pkg.trim();
+        if bad {
+            bail!(
+                "--external expects a bare package name, got {pkg:?}\n\
+                 \x20\x20A path, a URL, or a `node:` specifier cannot be resolved on the\n\
+                 \x20\x20machine the binary runs on. Name the package: --external prettier"
+            );
+        }
+    }
+    let packages = packages.to_vec();
+    // The return type is spelled out because `IsExternal::Fn` holds a `dyn Fn`
+    // whose return is itself a boxed trait object: without it, inference gives
+    // the closure a concrete future type and the unsizing coercion fails.
+    type Answer = Pin<Box<dyn Future<Output = Result<bool>> + Send + 'static>>;
+    Ok(Some(IsExternal::Fn(Some(Arc::new(
+        move |specifier: &str, _importer: Option<&str>, _is_resolved: bool| -> Answer {
+            let matched = packages
+                .iter()
+                .any(|pkg| is_package_specifier(specifier, pkg));
+            Box::pin(async move { Ok(matched) })
+        },
+    )))))
+}
+
+/// Does `specifier` name `pkg` or one of its subpaths?
+fn is_package_specifier(specifier: &str, pkg: &str) -> bool {
+    specifier == pkg
+        || (specifier.starts_with(pkg) && specifier.as_bytes().get(pkg.len()) == Some(&b'/'))
 }
 
 /// Split at the FIRST `=`: a define value (`K='a=b'`) and an alias target may
@@ -735,6 +801,7 @@ mod tests {
             ignore_annotations: false,
             alias: Vec::new(),
             conditions: Vec::new(),
+            external: Vec::new(),
             tsconfig: None,
         }
     }
@@ -782,6 +849,91 @@ mod tests {
         assert!(alias_entries(&["a=".to_string()]).is_err());
         assert!(alias_entries(&["=b".to_string()]).is_err());
         assert!(alias_entries(&["ab".to_string()]).is_err());
+    }
+
+    // The whole point of taking a PACKAGE rather than a specifier: a package
+    // whose subpaths are imported separately (prettier's plugins, a scoped
+    // package's `/dist/x`) must externalize as a unit, and a package that merely
+    // shares a name PREFIX must not be dragged along with it.
+    #[test]
+    fn external_matches_the_package_and_its_subpaths_only() {
+        assert!(is_package_specifier("prettier", "prettier"));
+        assert!(is_package_specifier("prettier/plugins/babel", "prettier"));
+        assert!(is_package_specifier("@scope/pkg/sub", "@scope/pkg"));
+        assert!(!is_package_specifier("prettier-plugin-x", "prettier"));
+        assert!(!is_package_specifier("pretti", "prettier"));
+        assert!(!is_package_specifier("./local/prettier", "prettier"));
+    }
+
+    // A path-shaped value would externalize to something no runtime resolve can
+    // fix — the build host's own absolute path baked in as a specifier — and
+    // nothing downstream would fail the build, so it has to be refused here.
+    #[test]
+    fn external_takes_a_bare_package_name_and_refuses_anything_else() {
+        assert!(external_matcher(&[]).expect("valid").is_none());
+        for ok in ["prettier", "@scope/pkg"] {
+            assert!(
+                external_matcher(&[ok.to_string()])
+                    .expect("valid")
+                    .is_some(),
+                "{ok} is a bare package name"
+            );
+        }
+        for bad in [
+            "",
+            "  ",
+            "./local",
+            "/abs/path",
+            "node:fs",
+            "C:\\pkg",
+            " pad",
+        ] {
+            assert!(
+                external_matcher(&[bad.to_string()]).is_err(),
+                "{bad:?} is not a bare package name and must be refused"
+            );
+        }
+    }
+
+    // An externalized package's source is never loaded, so the sites the
+    // unresolvable-import scan would otherwise reject never reach it. This is
+    // the mechanism the flag exists for, and it is Rolldown's behavior rather
+    // than ours — assert it against a real bundle, not by reading rolldown.
+    #[test]
+    fn externalizing_a_package_takes_its_unanalyzable_imports_out_of_the_build() {
+        let dir = std::env::temp_dir().join(format!("nub-ext-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let pkg = dir.join("node_modules").join("plugins-host");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            br#"{"name":"plugins-host","version":"1.0.0","main":"index.js","type":"module"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("index.js"),
+            b"export const load = (n) => import(n);\nexport const NAME = 'host';\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("entry.ts"),
+            b"import { NAME } from 'plugins-host';\nglobalThis.OUT = NAME;\n",
+        )
+        .unwrap();
+
+        let mut o = opts();
+        let Err(err) = bundle(&dir.join("entry.ts"), &o) else {
+            panic!("control: the dependency's import(n) must fail the build when bundled");
+        };
+        assert!(
+            format!("{err:#}").contains("could not be resolved"),
+            "got: {err:#}"
+        );
+
+        o.external = vec!["plugins-host".to_string()];
+        bundle(&dir.join("entry.ts"), &o)
+            .expect("externalizing the package removes its unanalyzable site from the graph");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

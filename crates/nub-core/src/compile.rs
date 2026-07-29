@@ -92,7 +92,9 @@ pub struct Manifest {
 /// slices into the caller's section bytes, so no large copy happens on decode.
 pub struct PayloadView<'a> {
     pub manifest: Manifest,
-    /// `(name, bytes)` for every bundled app file, in write order (entry first).
+    /// `(name, bytes)` for every bundled app file, in write order. The entry is
+    /// located by NAME (`Manifest::entry`), never by position — `--external`
+    /// appends a generated wrapper that becomes the entry, so it is written last.
     pub app_files: Vec<(String, &'a [u8])>,
     /// The zstd-compressed Node binary (`embed` shape), or empty (`smol`).
     pub node_blob: &'a [u8],
