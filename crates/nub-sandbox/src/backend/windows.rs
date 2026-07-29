@@ -49,7 +49,7 @@
 //! `Prepared::status()` calls [`WindowsLaunch::run`], which owns setup → spawn → wait
 //! → RAII teardown.
 
-use crate::policy::{Effect, FsAccess, FsPolicy, FsRule, NetPolicy};
+use crate::policy::{Effect, FsAccess, FsOrigin, FsPolicy, FsRule, NetPolicy};
 // Referenced only by the Windows-gated `apply`; the host build (module-under-test)
 // never names it.
 #[cfg(target_os = "windows")]
@@ -161,6 +161,10 @@ pub(super) struct FsDegrade {
 /// The deny-shadowing check runs against these policy-derived subtree grants before the
 /// program-file grant is added; an unrepresentable nested deny is rejected, not degraded.
 ///
+/// Consults the real filesystem, unlike the pure carve above: whether a grant whose source
+/// is MISSING survives depends on its [`FsOrigin`], the same split the Linux bind plan makes
+/// (see the arm inside).
+///
 /// `pub(super)` so the dedicated-account backend can reuse the same derivation for its
 /// own grant/deny plan rather than restating it.
 pub(super) fn derive_grants(fs: &FsPolicy) -> (Vec<PathBuf>, Vec<PathBuf>, FsDegrade) {
@@ -179,6 +183,21 @@ pub(super) fn derive_grants(fs: &FsPolicy) -> (Vec<PathBuf>, Vec<PathBuf>, FsDeg
         }
         match literal_subtree(rule.matcher.as_str()) {
             Some(dir) => {
+                // An ACE can only be installed on a path that exists, and `set_ace` fails
+                // the launch when it is not there. What that failure MEANS depends on who
+                // named the path, exactly as it does for the Linux bind plan
+                // (`linux_grants::compile_mount_plan`): an AUTHORED path is a specific
+                // location someone named, so its absence is an authoring mistake worth
+                // refusing, while a SPECULATIVE one is a guess across ecosystems and
+                // layouts that is absent on most machines by construction. Windows was
+                // dropping `FsOrigin` on the floor here and refusing both, which made the
+                // build jail — whose project and PM-cache roots are speculated — unable to
+                // launch at all whenever one of them had yet to be created. Skipping opens
+                // no hole: a path that does not exist grants nothing, and an authored rule
+                // naming the same path still pushes it and still fails hard.
+                if rule.origin == FsOrigin::Speculative && !dir.exists() {
+                    continue;
+                }
                 if !read.contains(&dir) {
                     read.push(dir.clone());
                 }
@@ -1814,6 +1833,72 @@ mod tests {
         assert_eq!(read, vec![PathBuf::from("C:/proj/pkg")]);
         assert_eq!(write, vec![PathBuf::from("C:/proj/pkg")]);
         assert_eq!(deg, FsDegrade::default());
+    }
+
+    /// Both directions of the origin-aware existence check, on one fixture so the ONLY
+    /// difference between the two arms is `FsOrigin`. The speculative arm is what lets the
+    /// build jail launch before its guessed roots exist; the authored arm is the control
+    /// that keeps a named-but-missing grant a hard launch failure (the promise
+    /// `windows_enforcement`'s `missing-grant` probe pins end-to-end).
+    #[test]
+    fn a_missing_source_is_skipped_only_when_speculative() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let present = dir.path().join("present");
+        std::fs::create_dir(&present).expect("create present");
+        let missing = dir.path().join("missing");
+        let canon = |p: &Path| p.to_string_lossy().replace('\\', "/");
+
+        let with_origin = |origin: FsOrigin| FsRule {
+            matcher: CanonGlob(canon(&missing)),
+            effect: Effect::Allow,
+            access: FsAccess::Read,
+            origin,
+        };
+
+        let (read, _, _) = derive_grants(&fs(
+            Effect::Deny,
+            vec![
+                rule(&canon(&present), Effect::Allow, FsAccess::Read),
+                with_origin(FsOrigin::Speculative),
+            ],
+        ));
+        assert_eq!(
+            read,
+            vec![present.clone()],
+            "an absent speculative grant must not reach the ACE plan"
+        );
+
+        let (read, _, _) = derive_grants(&fs(
+            Effect::Deny,
+            vec![
+                rule(&canon(&present), Effect::Allow, FsAccess::Read),
+                with_origin(FsOrigin::Authored),
+            ],
+        ));
+        assert_eq!(
+            read,
+            vec![present, missing],
+            "an absent AUTHORED grant must still be planned, so set_ace fails the launch"
+        );
+    }
+
+    /// A speculative grant is skipped for being ABSENT, never for being speculative — the
+    /// failure mode that would silently hollow out the build jail's whole read set.
+    #[test]
+    fn a_present_speculative_source_is_still_granted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canon = dir.path().to_string_lossy().replace('\\', "/");
+        let (read, write, _) = derive_grants(&fs(
+            Effect::Deny,
+            vec![FsRule {
+                matcher: CanonGlob(format!("{canon}/**")),
+                effect: Effect::Allow,
+                access: FsAccess::ReadWrite,
+                origin: FsOrigin::Speculative,
+            }],
+        ));
+        assert_eq!(read, vec![dir.path().to_path_buf()]);
+        assert_eq!(write, vec![dir.path().to_path_buf()]);
     }
 
     #[test]

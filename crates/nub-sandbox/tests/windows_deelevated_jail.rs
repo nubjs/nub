@@ -649,12 +649,12 @@ mod win {
             let package = project.join("node_modules/pkg");
             let home = root.join("home");
             let cache = home.join("cache");
-            // The Windows backend turns EVERY read grant into an inheritable ACE and fails
-            // the launch when the target does not exist — `FsOrigin` is not carried into the
-            // launch plan, so the build jail's SPECULATIVE roots (the project manifest, the
-            // PM store/tools cache) must be materialized here or `compile_build_jail`'s
-            // policy cannot launch at all. See the report: this is a Windows-only divergence
-            // from Linux, where `compile_mount_plan` skips a missing speculative source.
+            // The build jail's SPECULATIVE roots (the project manifest, the PM store/tools
+            // cache) are materialized here so this differential measures ELEVATION and
+            // nothing else. `derive_grants` now skips a missing speculative source, so their
+            // absence would no longer fail the launch — but it would silently shrink the
+            // read set both arms are compared on. `windows_speculative_grants` owns the
+            // absent case.
             for d in [
                 &bin,
                 &work,
