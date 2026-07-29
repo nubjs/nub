@@ -60,8 +60,8 @@ jobs:
           for f in image-caption image-build image-producttype runner-elevated; do
             grep -q "fact:$f=" survey.log || { echo "MISS label $f"; fail=1; }
           done
-          echo "---- the two rows that decide it ----"
-          grep -E 'prop:lowbox-lstat\[C:\\\]|prop:lowbox-lstat\[C:\\Users\]' survey.log || echo "(neither reported)"
+          echo "---- the rows that decide it ----"
+          grep -E 'prop:(lstat|traverse)-without-a-grant|prop:standard-user-can-write-dacl' survey.log || echo "(none reported)"
           echo "---- full survey ----"
           grep -E '^  (fact|prop):' survey.log || true
           exit $fail

@@ -28,6 +28,8 @@ $ARAP = 'S-1-15-2-2'
 $TRAVERSE       = 0x20
 $READ_ATTRS     = 0x80
 $LIST_DIRECTORY = 0x1
+# WRITE_DAC — whether a standard user could author the repair on this path at all.
+$WRITE_DAC = 0x40000
 
 function Write-Label {
   $os = Get-CimInstance Win32_OperatingSystem
@@ -59,6 +61,10 @@ function Survey-Path([string]$path) {
   $selfTraverse = $false
   $selfReadAttrs = $false
   $descendantTraverse = $false
+  # Tracked apart from the capability-inclusive counters above: only AAP/ARAP grants an
+  # AppContainer child access nub does not have to obtain.
+  $aapTraverse = $false
+  $aapReadAttrs = $false
   foreach ($ace in $acl.Access) {
     $sid = $null
     try {
@@ -84,14 +90,42 @@ function Survey-Path([string]$path) {
       if ($mask -band $READ_ATTRS) { $selfReadAttrs = $true }
     }
     if ($inheritable -and ($mask -band $TRAVERSE)) { $descendantTraverse = $true }
+    if ((-not $inheritOnly) -and (($sid -eq $AAP) -or ($sid -eq $ARAP))) {
+      if ($mask -band $TRAVERSE)   { $aapTraverse = $true }
+      if ($mask -band $READ_ATTRS) { $aapReadAttrs = $true }
+    }
   }
 
-  # `lstat` of the path itself needs read-attributes ON the object. Reported separately from
-  # traverse because Node's realpath walk needs the former on every prefix, and a chain that is
-  # traversable but not stat-able still fails exactly the way the defect does.
-  Write-Output "  prop:lowbox-lstat[$path]=$(if ($selfReadAttrs) { 'YES' } else { 'NO' })"
-  Write-Output "  prop:lowbox-traverse-self[$path]=$(if ($selfTraverse) { 'YES' } else { 'NO' })"
-  Write-Output "  prop:lowbox-traverse-descendants[$path]=$(if ($descendantTraverse) { 'YES' } else { 'NO' })"
+  # THE VERDICT THAT MATTERS is the UNGRANTED one. A capability ace only helps a child that
+  # HOLDS that capability, and nub cannot obtain these: `CreateProcessW` refuses the
+  # `S-1-15-3-65536-...` form outright (ERROR_INVALID_PARAMETER), and Chromium's AppContainer
+  # never requests a harvested ace's sid either. So AAP/ARAP is the only trustee that grants an
+  # AppContainer child anything for free, and the two verdicts are reported separately —
+  # collapsing them reads a `C:\` that only carries a capability ace as already reachable.
+  #
+  # `lstat` needs read-attributes ON the object; walking THROUGH to a descendant needs traverse.
+  # Both are reported because a chain that is traversable but not stat-able fails exactly the way
+  # the defect does.
+  Write-Output "  prop:lstat-without-a-grant[$path]=$(if ($aapReadAttrs) { 'YES' } else { 'NO' })"
+  Write-Output "  prop:traverse-without-a-grant[$path]=$(if ($aapTraverse) { 'YES' } else { 'NO' })"
+  Write-Output "  fact:lstat-if-capability-were-holdable[$path]=$(if ($selfReadAttrs) { 'YES' } else { 'NO' })"
+  Write-Output "  fact:traverse-descendants-any-lowbox-trustee[$path]=$(if ($descendantTraverse) { 'YES' } else { 'NO' })"
+
+  # IS THE REPAIR EVEN AVAILABLE HERE? Writing an ace needs WRITE_DAC, so a standard user can
+  # only repair a chain member whose DACL grants it (or that it owns). This is the read-only
+  # answer to that, alongside the owner — together with the rows above it decides whether the
+  # ancestor repair is a candidate at all on this image.
+  $standard = @('S-1-5-32-545', 'S-1-5-11', 'S-1-1-0')
+  $userWriteDac = $false
+  foreach ($ace in $acl.Access) {
+    if ($ace.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+    $sid = $null
+    try { $sid = $ace.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } catch { $sid = $ace.IdentityReference.Value }
+    if ($standard -notcontains $sid) { continue }
+    if (([int]$ace.FileSystemRights) -band $WRITE_DAC) { $userWriteDac = $true }
+  }
+  Write-Output "  fact:owner[$path]=$($acl.Owner)"
+  Write-Output "  prop:standard-user-can-write-dacl[$path]=$(if ($userWriteDac) { 'YES' } else { 'NO' })"
 }
 
 Write-Output 'SURVEY windows default ancestor DACLs (read-only)'
