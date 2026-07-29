@@ -49,13 +49,12 @@
 //!
 //! - Reach is "every package this run links", not "every package on
 //!   disk". Besides the frozen fast path, which short-circuits before
-//!   the linker entirely, several per-package warm checks return earlier
-//!   still — `EntryState::Fresh` in `link.rs` and
-//!   `ensure_shared_local_in_global_store`, and the `aube_entry.exists()`
-//!   checks the install fast path relies on. Those deliberately never
-//!   load the package index, so stripping there would cost a
-//!   `load_index` per package on the warm path — far more than the strip
-//!   it enables. The practical consequence: a repeat install with
+//!   the linker entirely, the per-package warm checks in `link.rs`
+//!   (`EntryState::Fresh` and the `aube_entry.exists()` checks the
+//!   install fast path relies on) return before the index is loaded —
+//!   they lazy-load it only after the guard, so stripping there would
+//!   cost a `load_index` per package on the warm path, far more than the
+//!   strip it enables. The practical consequence: a repeat install with
 //!   `node_modules` intact strips nothing new, and healing a poisoned
 //!   store goes through the remove-and-reinstall path above.
 //! - The index is the tarball's file list, so files written into a
@@ -302,11 +301,97 @@ mod imp {
             assert!(attrs.iter().any(|a| a == "user.keepme"), "got {attrs:?}");
         }
 
-        /// Pins the `<entry>/node_modules/<name>` composition against
-        /// `materialize_into`'s layout. Nothing else couples the two,
-        /// and because the strip is best-effort a path that drifted
-        /// would degrade to a silent no-op — on the warm seam, which is
-        /// the half that heals an already-poisoned store.
+        /// The warm seam end to end: materialize a package with a native
+        /// addon for real, poison the materialized file, then re-enter
+        /// `ensure_in_aube_dir` so it takes the `final_entry.exists()`
+        /// branch, and assert the addon came back clean.
+        ///
+        /// This is what actually couples `strip_cached_entry`'s
+        /// `<entry>/node_modules/<name>` reconstruction to the layout
+        /// `materialize_into` writes. The unit test below builds that
+        /// path itself, so it would stay green if the materializer
+        /// moved — leaving the warm strip a silent no-op, since the
+        /// strip is best-effort and a missing path is not an error.
+        #[test]
+        fn cached_entry_hit_strips_a_materialized_native_addon() {
+            use crate::{LinkStats, LinkStrategy, Linker};
+            use aube_lockfile::{LockedPackage, LockfileGraph};
+            use aube_store::Store;
+            use std::collections::BTreeMap;
+
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::at(dir.path().join("store/files"));
+            let addon = store
+                .import_bytes(b"\xcf\xfa\xed\xfe not really\n", false)
+                .unwrap();
+            let manifest = store
+                .import_bytes(br#"{"name":"pkg","version":"1.2.3"}"#, false)
+                .unwrap();
+            let mut index = PackageIndex::default();
+            index.insert("build/Release/native.node".to_string(), addon);
+            index.insert("package.json".to_string(), manifest);
+
+            let pkg = LockedPackage {
+                name: "pkg".to_string(),
+                version: "1.2.3".to_string(),
+                integrity: None,
+                dependencies: BTreeMap::new(),
+                dep_path: "pkg@1.2.3".to_string(),
+                ..Default::default()
+            };
+            let aube_dir = dir.path().join("project/node_modules/.aube");
+            std::fs::create_dir_all(&aube_dir).unwrap();
+            let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, false);
+
+            let mut cold = LinkStats::default();
+            linker
+                .ensure_in_aube_dir(
+                    &aube_dir,
+                    "pkg@1.2.3",
+                    &LockfileGraph::default(),
+                    &pkg,
+                    &index,
+                    &mut cold,
+                    None,
+                )
+                .expect("cold materialize");
+
+            let addon_path = aube_dir
+                .join(linker.aube_dir_entry_name("pkg@1.2.3"))
+                .join("node_modules")
+                .join("pkg")
+                .join("build/Release/native.node");
+            assert!(
+                addon_path.is_file(),
+                "materialize did not put the addon where the warm strip looks for it"
+            );
+            set_quarantine(&addon_path);
+
+            let mut warm = LinkStats::default();
+            linker
+                .ensure_in_aube_dir(
+                    &aube_dir,
+                    "pkg@1.2.3",
+                    &LockfileGraph::default(),
+                    &pkg,
+                    &index,
+                    &mut warm,
+                    None,
+                )
+                .expect("warm re-entry");
+            assert_eq!(
+                warm.packages_cached, 1,
+                "expected the cache-hit branch, not a re-materialize"
+            );
+            assert!(
+                !is_quarantined(&addon_path),
+                "the cache-hit seam left the addon quarantined"
+            );
+        }
+
+        /// Scoped names nest a level deeper than plain ones; this covers
+        /// that composition directly. The end-to-end test above is what
+        /// guards against `materialize_into` drifting.
         #[test]
         fn strip_cached_entry_resolves_the_virtual_store_entry_layout() {
             let dir = tempfile::tempdir().unwrap();

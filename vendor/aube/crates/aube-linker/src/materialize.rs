@@ -250,9 +250,8 @@ impl Linker {
             // A cache hit skips materialization, so the cold-path strip
             // never runs — and the global virtual store outlives
             // `rm -rf node_modules`, so an entry written by a pre-fix
-            // build would stay quarantined forever. Stripping here too
-            // makes the invariant hold for every package the linker
-            // touches, cold or warm.
+            // build would stay quarantined forever. Stripping here is
+            // what makes that removal-and-reinstall recovery heal.
             crate::quarantine::strip_from_native_binaries(&pkg_nm_dir, index);
             return Ok(());
         }
@@ -370,6 +369,12 @@ impl Linker {
         let state = classify_entry_state(&local_aube_entry, &global_entry);
         if matches!(state, EntryState::Fresh) {
             stats.packages_cached += 1;
+            // The local entry already points at a fresh global one, so
+            // nothing is materialized — but the index is a parameter
+            // here, unlike the `link.rs` short-circuits, so the strip is
+            // free. The package lives in the global entry the symlink
+            // resolves to.
+            crate::quarantine::strip_cached_entry(&global_entry, &pkg.name, index);
             return Ok(());
         }
         self.ensure_in_virtual_store(dep_path, graph, pkg, index, stats, nested_link_targets)?;
