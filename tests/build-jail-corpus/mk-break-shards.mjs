@@ -25,12 +25,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const [tableF, outDir, ...manifests] = process.argv.slice(2);
-if (!tableF || !outDir) {
-  console.error('usage: mk-break-shards.mjs <verdict-table.json> <outdir> [shard-*.tsv ...]');
+// COMMA-SEPARATED TABLES, because the break set is not stable across passes. Roughly
+// 4% of verdicts move between identical runs, and at this corpus's admissible size
+// (order ten) that is most of the set: three Linux passes produced 1 stable break and
+// 31 rows that varied. Taking the UNION over passes is what makes the attribution
+// pass cover everything worth attributing; the per-pass modal verdict is still what
+// the headline is computed from.
+const [tableArg, outDir, ...manifests] = process.argv.slice(2);
+if (!tableArg || !outDir) {
+  console.error('usage: mk-break-shards.mjs <verdict-table.json[,more.json]> <outdir> [shard-*.tsv ...]');
   process.exit(2);
 }
-const table = JSON.parse(fs.readFileSync(tableF, 'utf8'));
+const tables = tableArg.split(',').map((f) => JSON.parse(fs.readFileSync(f, 'utf8')));
+const table = { rows: tables.flatMap((t) => t.rows) };
 
 // The capability + version + class rows, from whichever shard manifests were passed.
 const src = new Map();
