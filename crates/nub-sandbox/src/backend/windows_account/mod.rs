@@ -110,7 +110,7 @@ pub(crate) enum AccountNet {
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) struct AccountLaunch {
     pub(crate) program: OsString,
-    pub(crate) args: Vec<OsString>,
+    pub(crate) args: crate::backend::CommandArgs,
     pub(crate) cwd: Option<PathBuf>,
     /// Subtrees granted read+execute to the sandbox SID, inheritable.
     pub(crate) read_grants: Vec<PathBuf>,

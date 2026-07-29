@@ -104,7 +104,8 @@ pub fn apply(
     let profile = build_profile(policy, &spec, proxy_port, ca_bundle, tmp_dir);
     let mut wrapped = Command::new(SANDBOX_EXEC_PATH);
     wrapped.arg("-p").arg(&profile).arg("--");
-    wrapped.arg(&spec.program).args(&spec.args);
+    wrapped.arg(&spec.program);
+    spec.args.apply_to(&mut wrapped);
     if let Some(cwd) = &spec.cwd {
         wrapped.current_dir(cwd);
     }
@@ -331,7 +332,7 @@ fn install_process_group(command: &mut Command) {
 /// path. The env axis is enforced by construction here exactly as in the skeleton.
 fn base_command(spec: &CommandSpec, policy: &SandboxPolicy) -> Command {
     let mut command = Command::new(&spec.program);
-    command.args(&spec.args);
+    spec.args.apply_to(&mut command);
     if let Some(cwd) = &spec.cwd {
         command.current_dir(cwd);
     }

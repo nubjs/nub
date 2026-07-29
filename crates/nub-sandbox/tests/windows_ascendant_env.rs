@@ -417,6 +417,8 @@ mod win {
             net: NetPolicy::default(),
             env: EnvPolicy::resolved(base_env()),
             pid: PidPolicy::default(),
+            // These probes drive the `nub sandbox` scope, not the dependency build jail.
+            build_jail: false,
         }
     }
 

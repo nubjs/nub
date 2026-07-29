@@ -1,0 +1,167 @@
+# Branch-scoped ad-hoc probe: can a native addon actually COMPILE inside the build jail?
+#
+# Two arms, one probe. The FIXED arm runs the branch as-is. The POISONED arm reverts the
+# fix (tests/win-jail-native-build/poison.patch), rebuilds, and runs the identical probe.
+#
+# WHAT EACH PLATFORM PROVES. On WINDOWS the differential is the finding: fixed must produce
+# a real `.node`, poisoned must not. On LINUX the fix is a deliberate NO-OP — a POSIX
+# distribution ships its own headers and the old grandparent derivation was already
+# correct there — so BOTH arms must produce the artifact. That is not a weaker assertion;
+# it is the control that the diff changed nothing on POSIX, and it independently proves
+# the probe harness itself works on a platform where the bug never existed.
+#
+# Two further controls hold in EVERY arm on EVERY platform: the confined script ran, and it
+# ran CONFINED. Without them a red Windows verdict could just be a broken probe.
+#
+# Every step is `if: always()`, because a red step early in the job must never hide the
+# end-to-end verdicts — which is the only thing this job exists to produce.
+name: win-jail-native-build-probe
+
+on:
+  push:
+    branches: [sandbox/win-nodedir-headers]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    env:
+      # A HARNESS ACCOMMODATION FOR A SEPARATE DEFECT, deliberately not a product change.
+      # Windows gives the main thread a 1MB stack against Linux's 8MB, and the unoptimized
+      # `fast` profile overflows it inside `nub install` before any lifecycle script runs —
+      # measured on this branch's first two runs as rc 3221225725 (0xC00000FD,
+      # STATUS_STACK_OVERFLOW) with "thread 'main' has overflowed its stack", identically in
+      # the FIXED and POISONED arms and for both fixture shapes. Identical in both arms is
+      # what makes it pre-existing rather than anything this branch introduced. Linking the
+      # probe binary with a Linux-sized stack lets the probe measure the jail instead of a
+      # debug-build frame-size artifact; the overflow itself is reported separately.
+      RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-C link-arg=/STACK:8388608' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Toolchain baseline
+        if: always()
+        shell: bash
+        run: |
+          node -p "process.versions.node + ' ' + process.platform + '/' + process.arch"
+          node -p "require('path').dirname(process.execPath)"
+          python3 --version || python --version || true
+
+      # ARM 1 — the branch as written.
+      - name: Build nub (fixed)
+        run: cargo build -p nub-cli --profile fast
+
+      - name: Probe (fixed)
+        if: always()
+        shell: bash
+        run: |
+          rc=0
+          node tests/win-jail-native-build/probe.mjs "$(bash tests/win-jail-native-build/nubpath.sh)" > fixed.log 2>&1 || rc=$?
+          echo "probe exit=$rc"
+          cat fixed.log
+
+      # ARM 2 — the identical probe against a build with the fix reverted. Reverting in the
+      # WORKFLOW rather than behind a runtime flag keeps the shipped binary free of a probe
+      # seam, and makes the differential a property of the SOURCE rather than of a toggle.
+      - name: Poison the fix
+        if: always()
+        shell: bash
+        run: |
+          git apply --verbose tests/win-jail-native-build/poison.patch
+          git --no-pager diff --stat
+
+      - name: Build nub (poisoned)
+        if: always()
+        run: cargo build -p nub-cli --profile fast
+
+      - name: Probe (poisoned)
+        if: always()
+        shell: bash
+        run: |
+          rc=0
+          node tests/win-jail-native-build/probe.mjs "$(bash tests/win-jail-native-build/nubpath.sh)" > poisoned.log 2>&1 || rc=$?
+          echo "probe exit=$rc"
+          cat poisoned.log
+
+      # THE VERDICT, read off the two logs rather than off any step's exit status. An
+      # assertion whose `prop:` line is ABSENT fails here — a probe that never ran must not
+      # be indistinguishable from one that passed.
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          fail=0
+          need() { # need <file> <literal-line> <label>
+            if grep -qF "$2" "$1" 2>/dev/null; then
+              echo "OK   [$3] $2"
+            else
+              echo "MISS [$3] $2"
+              fail=1
+            fi
+          }
+          for f in fixed.log poisoned.log; do
+            if [ ! -s "$f" ]; then
+              echo "MISS [$f] the probe produced no output at all"
+              fail=1
+            fi
+          done
+
+          # The verdict rides the TARBALL shape. The `file:` DIRECTORY shape crashes
+          # `nub install` on Windows (`thread 'main' has overflowed its stack`, rc
+          # 0xC00000FD) in BOTH arms, which makes it a pre-existing defect elsewhere rather
+          # than anything this branch touches — it is still run and logged, so it stays
+          # visible, but gating on it would only re-measure someone else's bug.
+          S=tarball
+
+          # Controls — identical in both arms, so neither arm can go green (or red) merely
+          # by being permissive, and a launch regression is told apart from a header one.
+          for f in fixed.log poisoned.log; do
+            need "$f" "prop:$S/jailed-child-ran=PASS" "control/$f"
+            need "$f" "prop:$S/jail-enforced=PASS" "control/$f"
+          done
+
+          # The fixed arm must build and load a real addon on every platform.
+          need fixed.log "prop:$S/addon-artifact=PASS" "fixed"
+          need fixed.log "prop:$S/addon-loads=PASS" "fixed"
+
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            # The differential. Without the fix, node-gyp is pointed one level above the
+            # distribution root, finds no headers, and cannot fetch any (net deny-all).
+            need poisoned.log "prop:$S/addon-artifact=FAIL" "poisoned/windows"
+          else
+            # POSIX behavior must be preserved exactly: the old derivation was already
+            # correct for `<root>/bin/node`, so reverting the fix must change nothing.
+            need poisoned.log "prop:$S/addon-artifact=PASS" "poisoned/posix"
+            need poisoned.log "prop:$S/addon-loads=PASS" "poisoned/posix"
+          fi
+
+          echo "---- diagnostic: the file:-directory shape, not gated ----"
+          grep -hE "prop:dir/|dir/install rc=" fixed.log poisoned.log || echo "(no dir-shape lines)"
+
+          echo "----"
+          if [ "$fail" = 0 ]; then
+            echo "VERDICT: PASS on ${{ matrix.os }}"
+          else
+            echo "VERDICT: FAILED on ${{ matrix.os }} — see the MISS lines above."
+          fi
+          exit $fail
+
+      - name: Upload probe logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-jail-native-build-${{ matrix.os }}
+          path: |
+            fixed.log
+            poisoned.log
+          if-no-files-found: warn

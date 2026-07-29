@@ -1,0 +1,42 @@
+diff --git a/crates/nub-cli/src/pm_engine/build_jail.rs b/crates/nub-cli/src/pm_engine/build_jail.rs
+index a1946fb7b5..8703d31463 100644
+--- a/crates/nub-cli/src/pm_engine/build_jail.rs
++++ b/crates/nub-cli/src/pm_engine/build_jail.rs
+@@ -614,17 +614,11 @@ struct NodeLayout {
+ }
+ 
+ fn node_layout(exec: &Path) -> Option<NodeLayout> {
++    // POISONED: the pre-fix derivation — the grandparent unconditionally, which walks one
++    // level above a flat Windows distribution.
+     let dir = exec.parent()?;
+-    let flat = exec
+-        .file_name()
+-        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("node.exe"));
+-    let (root, global_modules) = if flat {
+-        (dir.to_path_buf(), dir.join("node_modules"))
+-    } else {
+-        let root = dir.parent()?.to_path_buf();
+-        let global_modules = root.join("lib").join("node_modules");
+-        (root, global_modules)
+-    };
++    let root = dir.parent()?.to_path_buf();
++    let global_modules = root.join("lib").join("node_modules");
+     Some(NodeLayout {
+         headers: root.join("include").join("node"),
+         root,
+diff --git a/crates/nub-cli/src/pm_engine/build_prefetch.rs b/crates/nub-cli/src/pm_engine/build_prefetch.rs
+index ba56b187f4..a584414913 100644
+--- a/crates/nub-cli/src/pm_engine/build_prefetch.rs
++++ b/crates/nub-cli/src/pm_engine/build_prefetch.rs
+@@ -352,6 +352,11 @@ pub(super) fn node_headers(
+     // A user who named their own dist URL is building against a Node that is not
+     // nodejs.org's, so upstream headers would answer a question they did not ask. Decline
+     // and leave them the behavior they had.
++    // POISONED: the header prefetch is disabled, so nodedir can only ever name the
++    // distribution root.
++    if true {
++        return None;
++    }
+     if ["npm_config_disturl", "npm_config_dist_url"]
+         .iter()
+         .any(|key| ambient.get(*key).is_some_and(|v| !v.is_empty()))

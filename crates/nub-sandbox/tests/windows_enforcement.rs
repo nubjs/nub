@@ -82,6 +82,7 @@ mod win {
             Some("token") => token_check(),
             Some("checkhandle") => check_handle(&a[1]),
             Some("spawnchild") => spawn_grandchild(&a[1]),
+            Some("forkuntil") => fork_until(&a[1], &a[2]),
             Some("sleep") => {
                 std::thread::sleep(Duration::from_secs(90));
                 0
@@ -150,6 +151,39 @@ mod win {
             }
             Err(_) => 9,
         }
+    }
+
+    /// Spawn up to `want` live grandchildren, stopping at the first spawn failure, and
+    /// record `<spawned> <last-raw-os-error>` to `marker`. Holds every handle so nothing
+    /// exits and decrements the Job's active-process count mid-run — the count under test
+    /// must be the PEAK, not a race against reaping. The grandchildren are reaped by the
+    /// Job when the launch's handle closes.
+    fn fork_until(want: &str, marker: &str) -> i32 {
+        let Ok(want) = want.parse::<usize>() else {
+            return 9;
+        };
+        let Ok(exe) = std::env::current_exe() else {
+            return 9;
+        };
+        let mut live = Vec::new();
+        let mut err = 0i32;
+        for _ in 0..want {
+            match std::process::Command::new(&exe)
+                .args(["__sbxchild__", "sleep"])
+                .spawn()
+            {
+                Ok(c) => live.push(c),
+                Err(e) => {
+                    err = e.raw_os_error().unwrap_or(-1);
+                    // The text a real build's toolchain would relay, verbatim — the
+                    // record of what a capped user actually sees.
+                    println!("  [over-cap spawn error] {e}");
+                    break;
+                }
+            }
+        }
+        let _ = std::fs::write(marker, format!("{} {err}", live.len()));
+        0
     }
 
     /// Prove the child is genuinely in a LowBox AppContainer (`TokenIsAppContainer==1`)
@@ -333,6 +367,8 @@ mod win {
             net: NetPolicy::default(),
             env: EnvPolicy::resolved(base_env(&[])),
             pid: PidPolicy::default(),
+            // These probes drive the `nub sandbox` scope, not the dependency build jail.
+            build_jail: false,
         }
     }
 
@@ -1084,6 +1120,9 @@ mod win {
         // ── process-reap (Job Object KILL_ON_JOB_CLOSE) ──────────────────────────
         job_reap(&mut fails, &f);
 
+        // ── process-count (Job Object ACTIVE_PROCESS), both directions ───────────
+        active_process_cap(&mut fails, &f);
+
         if fails == 0 { Ok(()) } else { Err(fails) }
     }
 
@@ -1200,6 +1239,100 @@ mod win {
                 }
             }
         }
+    }
+
+    /// The Job's `ACTIVE_PROCESS` ceiling, BOTH directions. The cap arm proves an
+    /// unbounded fork from confined code is bounded at the cap and that the failure is an
+    /// observable `ERROR_NOT_ENOUGH_QUOTA` spawn error (not a kill); the LEGITIMATE-BUILD
+    /// control proves the same cap still admits a full parallel native build's structural
+    /// ceiling (`2 * cores + 5`, the measured worst case) with every spawn succeeding.
+    /// A cap arm that passed because nothing spawned would be hollow, so both arms assert
+    /// a non-zero spawned count and the cap arm asserts it landed AT the ceiling.
+    fn active_process_cap(fails: &mut u32, f: &Fixture) {
+        let cores = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1);
+        // Restated independently of the backend (which does not export it) so a silent
+        // change to the production formula fails this test rather than tracking it.
+        let cap = (cores * 8).max(64);
+        let wc = read_confine(&[&f.work], &[&f.work]);
+
+        // Cap arm: ask for more than the ceiling. The direct child occupies one slot, so
+        // the grandchildren admitted are `cap - 1`.
+        let marker = f.work.join("forkcap.txt");
+        let rc = code(
+            &wc,
+            &f.child,
+            &[
+                "__sbxchild__",
+                "forkuntil",
+                &(cap + 8).to_string(),
+                &canon_native(&marker),
+            ],
+        );
+        match fork_result(rc, &marker) {
+            None => {
+                *fails += 1;
+                eprintln!("FAIL proc-cap: the fork experiment did not run (exit {rc})");
+            }
+            Some((spawned, err)) => {
+                // ERROR_NOT_ENOUGH_QUOTA — the spawn-error failure shape, not a tree kill.
+                if spawned == cap - 1 && err == 1816 {
+                    println!("PASS proc-cap: bounded at {spawned} grandchildren, spawn err 1816");
+                } else {
+                    *fails += 1;
+                    eprintln!(
+                        "FAIL proc-cap: spawned {spawned} err {err}, expected {} and 1816",
+                        cap - 1
+                    );
+                }
+            }
+        }
+
+        // Legitimate-build control: the structural ceiling of a real parallel native
+        // build must still fit under the cap, every spawn succeeding.
+        let build_ceiling = 2 * cores + 5;
+        let marker2 = f.work.join("forkbuild.txt");
+        let rc2 = code(
+            &wc,
+            &f.child,
+            &[
+                "__sbxchild__",
+                "forkuntil",
+                &build_ceiling.to_string(),
+                &canon_native(&marker2),
+            ],
+        );
+        match fork_result(rc2, &marker2) {
+            None => {
+                *fails += 1;
+                eprintln!("FAIL proc-cap control: the build experiment did not run (exit {rc2})");
+            }
+            Some((spawned, err)) if spawned == build_ceiling && err == 0 => {
+                println!("PASS proc-cap control: a {spawned}-process build runs uncapped");
+            }
+            Some((spawned, err)) => {
+                *fails += 1;
+                eprintln!(
+                    "FAIL proc-cap control: a legitimate {build_ceiling}-process build was \
+                     capped at {spawned} (err {err})"
+                );
+            }
+        }
+    }
+
+    /// `(spawned, last-error)` from a `forkuntil` marker — `None` when the child did not
+    /// exit cleanly or wrote nothing, so "the experiment never ran" can never read as a
+    /// pass.
+    fn fork_result(rc: i32, marker: &Path) -> Option<(usize, i32)> {
+        if rc != 0 {
+            return None;
+        }
+        let raw = std::fs::read_to_string(marker).ok()?;
+        let mut parts = raw.split_whitespace();
+        let spawned: usize = parts.next()?.parse().ok()?;
+        let err: i32 = parts.next()?.parse().ok()?;
+        Some((spawned, err))
     }
 
     /// The sandboxed run reaps the grandchild when `status()` closes the Job handle; the

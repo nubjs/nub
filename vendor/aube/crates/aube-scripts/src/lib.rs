@@ -321,6 +321,24 @@ pub fn spawn_shell(script_cmd: &str) -> tokio::process::Command {
     spawn_shell_with_settings(script_cmd, &settings)
 }
 
+/// The exact `cmd.exe` command-line tail for `script_cmd` — `/d` skips AutoRun, `/s`
+/// flips the quote-stripping rule so only the *outer* `"..."` pair is removed, `/c`
+/// runs the command and exits.
+///
+/// THE ONE SOURCE OF TRUTH for those bytes. It is both handed to `raw_arg` and reported
+/// to an embedder-owned sandbox through [`LifecycleSpawnArgs::WindowsVerbatim`], which
+/// re-launches the spawn through its own `CreateProcessW`: two encoders producing the
+/// tail independently would drift, and any drift is a mangled script.
+///
+/// The interior spaces are not cosmetic. `raw_arg` appends with a single space between
+/// tokens, so the three-call form this replaces emitted `/d /s /c " <script> "`;
+/// reproducing that spacing keeps the line std builds byte-identical to before. `/s`
+/// strips the outer quote pair and `cmd.exe` ignores the surrounding whitespace.
+#[cfg(windows)]
+fn cmd_exe_command_tail(script_cmd: &str) -> std::ffi::OsString {
+    format!("/d /s /c \" {script_cmd} \"").into()
+}
+
 fn spawn_shell_with_settings(
     script_cmd: &str,
     settings: &ScriptSettings,
@@ -347,11 +365,7 @@ fn spawn_shell_with_settings(
         if settings.script_shell.is_some() {
             cmd.arg("-c").arg(script_cmd);
         } else {
-            // `/d` skips AutoRun, `/s` flips the quote-stripping rule
-            // so only the *outer* `"..."` pair is removed, `/c` runs
-            // the command and exits. Build the raw argv tail manually
-            // so cmd.exe sees the original script bytes.
-            cmd.raw_arg("/d /s /c \"").raw_arg(script_cmd).raw_arg("\"");
+            cmd.raw_arg(cmd_exe_command_tail(script_cmd));
         }
         cmd
     };
@@ -1300,7 +1314,12 @@ pub async fn run_script(
         .filter(|(scope, hook)| hook.confines(scope.package_name, scope.project_root))
     {
         Some((scope, hook)) => {
-            let spawn = lifecycle_sandbox_spawn(&cmd, script_dir, &scope);
+            let spawn = lifecycle_sandbox_spawn(
+                &cmd,
+                script_dir,
+                &scope,
+                verbatim_tail(script_cmd, &settings, jail.is_some()),
+            );
             // The host sandbox owns a synchronous spawn+wait (nub-sandbox drives an
             // outer bwrap / Seatbelt child), so run it off the async runtime.
             tokio::task::spawn_blocking(move || hook.run(spawn))
@@ -1325,21 +1344,52 @@ pub async fn run_script(
     Ok(())
 }
 
+/// The pre-encoded command line this spawn was built with, for the embedder to
+/// reproduce byte-for-byte. `None` whenever the tail is ordinary argv the embedder can
+/// re-encode itself: every Unix spawn, and on Windows a user-configured `script-shell`
+/// (which takes `-c <script>`) or the jailed builder.
+fn verbatim_tail(
+    script_cmd: &str,
+    settings: &ScriptSettings,
+    jailed: bool,
+) -> Option<std::ffi::OsString> {
+    #[cfg(windows)]
+    {
+        (!jailed && settings.script_shell.is_none()).then(|| cmd_exe_command_tail(script_cmd))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (script_cmd, settings, jailed);
+        None
+    }
+}
+
 /// Package a fully-configured lifecycle command for the embedder's confinement hook.
 /// Reads the program/args/env back off the built command so the embedder confines the
 /// SAME spawn aube would have run; the env is handed over as the command's explicit
 /// operations (the unconfined spawn inherits the aube-process env and layers these).
 /// Takes the whole [`SandboxScope`] rather than its parts so the identity the hook was
 /// ASKED about in `confines` is the identity it is HANDED in `run` — they cannot drift.
+///
+/// `verbatim` is threaded in rather than read off `cmd` because `Command::get_args`
+/// erases the `Arg::Raw` marker `raw_arg` sets: the pieces come back looking like
+/// ordinary argv, and an embedder that re-encoded them would hand `cmd.exe` a line it
+/// cannot parse (see [`cmd_exe_command_tail`]).
 fn lifecycle_sandbox_spawn(
     cmd: &tokio::process::Command,
     script_dir: &Path,
     scope: &SandboxScope<'_>,
+    verbatim: Option<std::ffi::OsString>,
 ) -> aube_util::LifecycleSandboxSpawn {
     let std_cmd = cmd.as_std();
     aube_util::LifecycleSandboxSpawn {
         program: std_cmd.get_program().to_os_string(),
-        args: std_cmd.get_args().map(|a| a.to_os_string()).collect(),
+        args: match verbatim {
+            Some(line) => aube_util::LifecycleSpawnArgs::WindowsVerbatim(line),
+            None => aube_util::LifecycleSpawnArgs::Argv(
+                std_cmd.get_args().map(|a| a.to_os_string()).collect(),
+            ),
+        },
         cwd: script_dir.to_path_buf(),
         project_root: scope.project_root.to_path_buf(),
         package_dir: scope.package_dir.to_path_buf(),

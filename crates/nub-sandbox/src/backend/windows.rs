@@ -27,6 +27,9 @@
 //!     exemption exposes every loopback listener, including local forwarders.
 //!   - process-reap: a Job Object with `KILL_ON_JOB_CLOSE`; the whole tree dies when
 //!     the job handle closes (after the child exits, or if nub does).
+//!   - process-count: the same Job carries `ACTIVE_PROCESS` (see
+//!     [`active_process_cap`]) so a fork bomb from confined code is bounded — a
+//!     zero-privilege limit the LowBox token cannot break away from.
 //!
 //! ASCENDANT-ENV READ IS OS-CLOSED (design.md §2.4): a LowBox child CANNOT
 //! `OpenProcess(PROCESS_VM_READ)` the parent to read nub's environ — the AppContainer
@@ -46,7 +49,7 @@
 //! `Prepared::status()` calls [`WindowsLaunch::run`], which owns setup → spawn → wait
 //! → RAII teardown.
 
-use crate::policy::{Effect, FsAccess, FsPolicy, FsRule, NetPolicy};
+use crate::policy::{Effect, FsAccess, FsOrigin, FsPolicy, FsRule, NetPolicy};
 // Referenced only by the Windows-gated `apply`; the host build (module-under-test)
 // never names it.
 #[cfg(target_os = "windows")]
@@ -75,7 +78,7 @@ fn dedupe_windows_env_pairs<'a>(
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) struct AppContainerLaunch {
     program: OsString,
-    args: Vec<OsString>,
+    args: super::CommandArgs,
     cwd: Option<PathBuf>,
     /// Subtrees the AppContainer SID is granted inheritable read-execute.
     read_grants: Vec<PathBuf>,
@@ -114,6 +117,29 @@ impl WindowsLaunch {
     }
 }
 
+/// Active-process ceiling applied to every confined launch's Job Object
+/// (`JOB_OBJECT_LIMIT_ACTIVE_PROCESS`), bounding a fork bomb from confined code without
+/// any privilege. Sized from what a LEGITIMATE build actually needs: node-gyp emits no
+/// `-j`, so `make` runs serial, and the measured structural ceiling of a parallel native
+/// build is `2 * cores + 5` (23 at 8 cores, 69 at 32). `8 * cores` is ~4x that headroom;
+/// the 64 floor keeps a low-core runner from getting a cap tighter than a JS-only
+/// script tree ever needs. The scope is deliberately PER LAUNCH (one Job per confined
+/// spawn = one script tree), not per install — a per-install cap would have to be summed
+/// across concurrent scripts and would land ABOVE the ~1,440-process incident it exists
+/// to bound, protecting nothing.
+///
+/// Over-cap failure is an observable spawn error in the child (`ERROR_NOT_ENOUGH_QUOTA`,
+/// 1816), NOT a kill of the tree — a legitimate build that brushes the ceiling reports a
+/// spawn failure through its own toolchain rather than dying silently.
+pub(super) fn active_process_cap() -> u32 {
+    let cores = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    u32::try_from(cores.saturating_mul(8))
+        .unwrap_or(u32::MAX)
+        .max(64)
+}
+
 /// What the allowlist model could NOT express for a policy, so the caller can be told.
 #[derive(Debug, Default, PartialEq)]
 pub(super) struct FsDegrade {
@@ -135,6 +161,10 @@ pub(super) struct FsDegrade {
 /// The deny-shadowing check runs against these policy-derived subtree grants before the
 /// program-file grant is added; an unrepresentable nested deny is rejected, not degraded.
 ///
+/// Consults the real filesystem, unlike the pure carve above: whether a grant whose source
+/// is MISSING survives depends on its [`FsOrigin`], the same split the Linux bind plan makes
+/// (see the arm inside).
+///
 /// `pub(super)` so the dedicated-account backend can reuse the same derivation for its
 /// own grant/deny plan rather than restating it.
 pub(super) fn derive_grants(fs: &FsPolicy) -> (Vec<PathBuf>, Vec<PathBuf>, FsDegrade) {
@@ -153,6 +183,21 @@ pub(super) fn derive_grants(fs: &FsPolicy) -> (Vec<PathBuf>, Vec<PathBuf>, FsDeg
         }
         match literal_subtree(rule.matcher.as_str()) {
             Some(dir) => {
+                // An ACE can only be installed on a path that exists, and `set_ace` fails
+                // the launch when it is not there. What that failure MEANS depends on who
+                // named the path, exactly as it does for the Linux bind plan
+                // (`linux_grants::compile_mount_plan`): an AUTHORED path is a specific
+                // location someone named, so its absence is an authoring mistake worth
+                // refusing, while a SPECULATIVE one is a guess across ecosystems and
+                // layouts that is absent on most machines by construction. Windows was
+                // dropping `FsOrigin` on the floor here and refusing both, which made the
+                // build jail — whose project and PM-cache roots are speculated — unable to
+                // launch at all whenever one of them had yet to be created. Skipping opens
+                // no hole: a path that does not exist grants nothing, and an authored rule
+                // naming the same path still pushes it and still fails hard.
+                if rule.origin == FsOrigin::Speculative && !dir.exists() {
+                    continue;
+                }
                 if !read.contains(&dir) {
                     read.push(dir.clone());
                 }
@@ -331,6 +376,20 @@ enum WinNetPlan {
     FailUnelevated,
 }
 
+/// Drop the `\\?\` prefix `std::fs::canonicalize` puts on a Windows path, when the result
+/// is still a plain drive path a normal API accepts.
+///
+/// `\\?\UNC\server\share` is left ALONE: its non-verbatim spelling is `\\server\share`,
+/// a genuine network path, and rewriting it would change which host is addressed. A real
+/// network working directory is not something cmd.exe supports anyway, so stripping there
+/// would trade one failure for a less obvious one.
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
+        Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
+        _ => path,
+    }
+}
+
 /// Decide the net posture. Per-host is signalled by any Allow rule (matches
 /// `backend::start_proxy_if_needed`, which is what actually starts the proxy). A pure
 /// deny-all is coarse (no proxy, no elevation). `elevated` is consulted only on the
@@ -430,7 +489,13 @@ pub(crate) fn apply(
                 )),
             });
         }
-        spec.cwd = Some(effective_cwd);
+        // The DACL checks above want the canonical form; the CHILD must not receive it.
+        // `canonicalize` returns an extended-length `\\?\C:\…` path, and cmd.exe rejects
+        // one as a working directory — it prints "UNC paths are not supported" and silently
+        // runs in the Windows directory instead. Every dependency lifecycle script on
+        // Windows is a cmd.exe invocation, so handing the verbatim form through meant each
+        // one started in the wrong directory and could not find its own package's files.
+        spec.cwd = Some(strip_verbatim_prefix(effective_cwd));
     }
 
     // ── agent-sandbox route (dedicated account + WFP) ────────────────────────────
@@ -501,7 +566,7 @@ pub(crate) fn apply(
     // command path — identical contract to the mac/linux relaxed case.
     if !sandboxing && tmp_lost.is_none() {
         let mut command = std::process::Command::new(&spec.program);
-        command.args(&spec.args);
+        spec.args.apply_to(&mut command);
         if let Some(cwd) = &spec.cwd {
             command.current_dir(cwd);
         }
@@ -806,9 +871,9 @@ pub(super) mod launch {
         TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
     };
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-        SetInformationJobObject,
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
     };
     use windows_sys::Win32::System::Memory::{GetProcessHeap, HeapFree};
     use windows_sys::Win32::System::Threading::{
@@ -1232,7 +1297,7 @@ pub(super) mod launch {
 
             // 4. Job with KILL_ON_JOB_CLOSE; `_job` closes the handle on drop (declared
             //    LAST ⇒ dropped FIRST ⇒ reaps any lingering tree before ACE revoke).
-            let job = create_kill_on_close_job()?;
+            let job = create_confinement_job()?;
             let _job = HandleGuard(job);
 
             // 5. Proc-thread attribute list: SECURITY_CAPABILITIES, plus a HANDLE_LIST
@@ -1524,13 +1589,20 @@ pub(super) mod launch {
         Ok(buf)
     }
 
-    fn create_kill_on_close_job() -> io::Result<HANDLE> {
+    /// The confinement Job: whole-tree reap on handle close, plus the active-process
+    /// ceiling (see [`super::active_process_cap`]).
+    fn create_confinement_job() -> io::Result<HANDLE> {
         let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if job.is_null() {
             return Err(io::Error::last_os_error());
         }
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // ACTIVE_PROCESS is transitive to grandchildren and refuses CREATE_BREAKAWAY_FROM_JOB,
+        // so confined code cannot escape it; it needs no privilege, which is why it is the
+        // containment lever the zero-privilege jail can actually use.
+        info.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        info.BasicLimitInformation.ActiveProcessLimit = super::active_process_cap();
         let ok = unsafe {
             SetInformationJobObject(
                 job,
@@ -1647,18 +1719,35 @@ pub(super) mod launch {
         to_wide(&s)
     }
 
-    /// Build a mutable UTF-16 command line from program + args, quoting each token per
-    /// the CommandLineToArgvW rules std uses. lpApplicationName is NULL, so the child
-    /// gets a conventional argv.
+    /// Build a mutable UTF-16 command line from program + args, quoting each argv token
+    /// per the CommandLineToArgvW rules std uses. lpApplicationName is NULL, so the
+    /// child gets a conventional argv.
+    ///
+    /// THE INVARIANT A VERBATIM TAIL PROTECTS: `cmd.exe` does not parse its line by
+    /// those rules, so re-encoding a line already built for it (aube's `raw_arg` tail —
+    /// see `spawn_shell_with_settings` in `aube-scripts`) escapes `"` as `\"` and hands
+    /// `cmd.exe` a first token of `\""`. Every dependency lifecycle script under the
+    /// build jail passes through here, so that re-encoding broke all of them on Windows.
+    /// A [`CommandArgs::Verbatim`](crate::backend::CommandArgs) tail is therefore copied
+    /// through untouched; the gate that keeps this from being a general quoting bypass
+    /// lives in `validate_apply_inputs`, not here.
     pub(in crate::backend) fn build_command_line(
         program: &std::ffi::OsStr,
-        args: &[std::ffi::OsString],
+        args: &crate::backend::CommandArgs,
     ) -> Vec<u16> {
         let mut line: Vec<u16> = Vec::new();
         append_quoted(&mut line, program);
-        for a in args {
-            line.push(u16::from(b' '));
-            append_quoted(&mut line, a);
+        match args {
+            crate::backend::CommandArgs::Argv(v) => {
+                for a in v {
+                    line.push(u16::from(b' '));
+                    append_quoted(&mut line, a);
+                }
+            }
+            crate::backend::CommandArgs::Verbatim(tail) => {
+                line.push(u16::from(b' '));
+                line.extend(tail.encode_wide());
+            }
         }
         line.push(0);
         line
@@ -1733,6 +1822,55 @@ mod tests {
     use super::*;
     use crate::policy::{CanonGlob, FsOrigin, FsRule, FsRuleSet, TmpMode};
 
+    /// A dependency lifecycle script on Windows is a cmd.exe invocation, and cmd.exe
+    /// REFUSES an extended-length working directory — it prints "UNC paths are not
+    /// supported" and runs in the Windows directory instead, so the script cannot find its
+    /// own package's files. `canonicalize` produces exactly that spelling, so the child's
+    /// cwd has to be handed over in its ordinary form.
+    #[test]
+    fn the_child_cwd_sheds_the_verbatim_prefix_canonicalize_adds() {
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\C:\Users\r\pkg")),
+            PathBuf::from(r"C:\Users\r\pkg")
+        );
+        // Already ordinary, and POSIX-shaped paths (the test host): unchanged.
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"C:\Users\r\pkg")),
+            PathBuf::from(r"C:\Users\r\pkg")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from("/tmp/pkg")),
+            PathBuf::from("/tmp/pkg")
+        );
+    }
+
+    /// A verbatim UNC path must survive INTACT. Stripping `\\?\` from `\\?\UNC\srv\share`
+    /// yields `UNC\srv\share`, a relative path naming a different location entirely — a
+    /// silently wrong working directory rather than a loud failure.
+    #[test]
+    fn a_verbatim_unc_cwd_is_left_alone() {
+        let unc = PathBuf::from(r"\\?\UNC\server\share\pkg");
+        assert_eq!(strip_verbatim_prefix(unc.clone()), unc);
+    }
+
+    /// The cap must clear the measured structural ceiling of a legitimate parallel
+    /// native build (`2 * cores + 5`) on this host with real headroom, and never fall
+    /// below the 64 floor — the two properties that make it defence-in-depth rather
+    /// than a build-breaking limit.
+    #[test]
+    fn active_process_cap_clears_a_legitimate_build_ceiling() {
+        let cores = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1);
+        let cap = active_process_cap();
+        assert!(cap >= 64, "cap {cap} fell below the floor");
+        let build_ceiling = u32::try_from(2 * cores + 5).unwrap();
+        assert!(
+            cap >= build_ceiling * 3,
+            "cap {cap} leaves under 3x headroom over the {build_ceiling}-process build ceiling"
+        );
+    }
+
     fn fs(default_effect: Effect, entries: Vec<FsRule>) -> FsPolicy {
         FsPolicy {
             rules: FsRuleSet {
@@ -1763,6 +1901,72 @@ mod tests {
         assert_eq!(read, vec![PathBuf::from("C:/proj/pkg")]);
         assert_eq!(write, vec![PathBuf::from("C:/proj/pkg")]);
         assert_eq!(deg, FsDegrade::default());
+    }
+
+    /// Both directions of the origin-aware existence check, on one fixture so the ONLY
+    /// difference between the two arms is `FsOrigin`. The speculative arm is what lets the
+    /// build jail launch before its guessed roots exist; the authored arm is the control
+    /// that keeps a named-but-missing grant a hard launch failure (the promise
+    /// `windows_enforcement`'s `missing-grant` probe pins end-to-end).
+    #[test]
+    fn a_missing_source_is_skipped_only_when_speculative() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let present = dir.path().join("present");
+        std::fs::create_dir(&present).expect("create present");
+        let missing = dir.path().join("missing");
+        let canon = |p: &Path| p.to_string_lossy().replace('\\', "/");
+
+        let with_origin = |origin: FsOrigin| FsRule {
+            matcher: CanonGlob(canon(&missing)),
+            effect: Effect::Allow,
+            access: FsAccess::Read,
+            origin,
+        };
+
+        let (read, _, _) = derive_grants(&fs(
+            Effect::Deny,
+            vec![
+                rule(&canon(&present), Effect::Allow, FsAccess::Read),
+                with_origin(FsOrigin::Speculative),
+            ],
+        ));
+        assert_eq!(
+            read,
+            vec![present.clone()],
+            "an absent speculative grant must not reach the ACE plan"
+        );
+
+        let (read, _, _) = derive_grants(&fs(
+            Effect::Deny,
+            vec![
+                rule(&canon(&present), Effect::Allow, FsAccess::Read),
+                with_origin(FsOrigin::Authored),
+            ],
+        ));
+        assert_eq!(
+            read,
+            vec![present, missing],
+            "an absent AUTHORED grant must still be planned, so set_ace fails the launch"
+        );
+    }
+
+    /// A speculative grant is skipped for being ABSENT, never for being speculative — the
+    /// failure mode that would silently hollow out the build jail's whole read set.
+    #[test]
+    fn a_present_speculative_source_is_still_granted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canon = dir.path().to_string_lossy().replace('\\', "/");
+        let (read, write, _) = derive_grants(&fs(
+            Effect::Deny,
+            vec![FsRule {
+                matcher: CanonGlob(format!("{canon}/**")),
+                effect: Effect::Allow,
+                access: FsAccess::ReadWrite,
+                origin: FsOrigin::Speculative,
+            }],
+        ));
+        assert_eq!(read, vec![dir.path().to_path_buf()]);
+        assert_eq!(write, vec![dir.path().to_path_buf()]);
     }
 
     #[test]

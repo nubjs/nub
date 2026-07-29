@@ -129,7 +129,11 @@ base64 = "0.22"
 # the lib target's feature set, which unification would otherwise supply invisibly.
 [target.'cfg(target_os = "windows")'.dev-dependencies.windows-sys]
 version = "0.61"
-features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_System_Threading", "Win32_System_Diagnostics_Debug", "Win32_System_Pipes", "Win32_Storage_FileSystem"]
+features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_System_Threading", "Win32_System_Diagnostics_Debug", "Win32_System_Pipes", "Win32_Storage_FileSystem",
+  # The de-elevation probe's administrative-authority oracle: OpenSCManagerW for
+  # SC_MANAGER_CREATE_SERVICE succeeds only for an administrator and mutates nothing, which
+  # is what lets the paired arms be gated on an access check rather than a token flag.
+  "Win32_System_Services"]
 
 # The Windows enforcement probe self-reexecs as the AppContainer child, so it owns
 # `main` (dispatch on argv) rather than the libtest harness. windows-latest CI only; a
@@ -169,6 +173,28 @@ harness = false
 
 [[test]]
 name = "windows_clean_root"
+harness = false
+
+# Owns a real `main` for the same reason as `windows_enforcement`: it self-reexecs both as
+# the jailed probe child AND as the arm the parent launches under a second primary token.
+[[test]]
+name = "windows_deelevated_jail"
+harness = false
+
+# Self-reexecs as the jailed probe child, like the harnesses above.
+[[test]]
+name = "windows_speculative_grants"
+harness = false
+
+# Self-reexecs as the jailed probe child, which in turn spawns the interpreter.
+[[test]]
+name = "windows_interpreter_exec"
+harness = false
+
+# Self-reexecs as the jailed probe child, which spawns the interpreter on a script; the
+# parent side also impersonates a de-elevated token to ask what DACLs a standard user owns.
+[[test]]
+name = "windows_realpath_ancestors"
 harness = false
 
 # OPT-IN ONLY. This probe is not a unit test: on an unprovisioned machine it exits non-zero

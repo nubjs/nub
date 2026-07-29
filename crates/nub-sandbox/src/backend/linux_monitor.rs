@@ -755,7 +755,19 @@ impl BootstrapSpec {
             build_marker: image.build_marker,
             runtime_objects,
             program,
-            args: spec.args.clone(),
+            // A verbatim command line has no meaning on this path: the monitor
+            // `execve`s the target directly rather than handing a line to a shell that
+            // parses it. Validation already refuses one off Windows, so this is the
+            // belt — fail rather than exec with an empty argv.
+            args: spec
+                .args
+                .argv()
+                .ok_or_else(|| {
+                    io::Error::other(
+                        "a verbatim command line cannot be launched through the sandbox monitor",
+                    )
+                })?
+                .to_vec(),
             cwd,
             env,
             network_filter: policy.net.enforce,

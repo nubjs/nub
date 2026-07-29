@@ -164,11 +164,94 @@ impl Degradation {
     }
 }
 
+/// How the child's argument tail is spelled on the wire.
+///
+/// Windows has no argv: `CreateProcessW` takes ONE command-line string, and every
+/// program decides for itself how to split it. Rust's encoder targets the
+/// `CommandLineToArgvW` rules, which `cmd.exe` does NOT implement — it treats `\"` as
+/// two literal characters, so a script carrying interior quotes
+/// (`node -e "require('is-odd')(3)"`) arrives mangled. aube therefore encodes the
+/// `cmd.exe` line itself with `CommandExt::raw_arg` (see `spawn_shell_with_settings` in
+/// `aube-scripts`); [`Verbatim`](Self::Verbatim) is how that already-encoded line
+/// survives the trip through this crate to `CreateProcessW` instead of being
+/// re-encoded into a line `cmd.exe` cannot parse.
+///
+/// NOT a general "skip the quoting" escape hatch: [`validate_apply_inputs`] refuses a
+/// `Verbatim` tail off Windows, and refuses one whose program is not the Windows
+/// command interpreter — the only program nub launches that parses its own line. Every
+/// other spawn stays [`Argv`](Self::Argv) with byte-identical quoting to before.
+#[derive(Debug, Clone)]
+pub enum CommandArgs {
+    /// Ordinary argv: each element is ONE argument, quoted by the launcher.
+    Argv(Vec<std::ffi::OsString>),
+    /// A pre-encoded Windows command-line TAIL, appended after the program name and
+    /// handed to `CreateProcessW` byte-for-byte. Windows-only; see the type doc.
+    Verbatim(std::ffi::OsString),
+}
+
+impl Default for CommandArgs {
+    fn default() -> Self {
+        Self::Argv(Vec::new())
+    }
+}
+
+impl CommandArgs {
+    /// The argv elements, or the whole verbatim line as a single item — the shape the
+    /// NUL scan wants, where "which token" only matters for the error text.
+    fn tokens(&self) -> impl Iterator<Item = &std::ffi::OsStr> {
+        match self {
+            Self::Argv(v) => Box::new(v.iter().map(std::ffi::OsString::as_os_str))
+                as Box<dyn Iterator<Item = &std::ffi::OsStr>>,
+            Self::Verbatim(line) => Box::new(std::iter::once(line.as_os_str())),
+        }
+    }
+
+    /// The argv elements, or `None` for a verbatim line.
+    ///
+    /// For a launcher that `execve`s the target directly — the Linux PID-1 monitor,
+    /// which serializes argv across its handshake — rather than building a command line.
+    /// A verbatim tail has no representation there at all, so the caller must FAIL on
+    /// `None` rather than substitute an empty argv, which would silently launch the
+    /// shell with no script.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn argv(&self) -> Option<&[std::ffi::OsString]> {
+        match self {
+            Self::Argv(v) => Some(v),
+            Self::Verbatim(_) => None,
+        }
+    }
+
+    /// Apply to a plain `std::process::Command` (the paths that spawn without a custom
+    /// `CreateProcessW`).
+    pub(crate) fn apply_to(&self, command: &mut Command) {
+        match self {
+            Self::Argv(v) => {
+                command.args(v);
+            }
+            Self::Verbatim(line) => {
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    command.raw_arg(line);
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = line;
+                    debug_assert!(
+                        false,
+                        "a verbatim command line is rejected off Windows by validate_apply_inputs"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// The command to launch under a policy. Host-provided (Boundary B).
 #[derive(Debug, Clone)]
 pub struct CommandSpec {
     pub program: std::ffi::OsString,
-    pub args: Vec<std::ffi::OsString>,
+    pub args: CommandArgs,
     /// Working directory for the child, if the caller pins one.
     pub cwd: Option<std::path::PathBuf>,
     /// Directories whose existing immediate children may be materialized for
@@ -215,7 +298,7 @@ impl CommandSpec {
     pub fn new(program: impl Into<std::ffi::OsString>) -> Self {
         Self {
             program: program.into(),
-            args: Vec::new(),
+            args: CommandArgs::default(),
             cwd: None,
             deny_search_roots: Vec::new(),
             require_nesting: false,
@@ -225,7 +308,7 @@ impl CommandSpec {
         }
     }
     pub fn arg(mut self, a: impl Into<std::ffi::OsString>) -> Self {
-        self.args.push(a.into());
+        self.argv_mut().push(a.into());
         self
     }
     pub fn args<I, S>(mut self, args: I) -> Self
@@ -233,8 +316,29 @@ impl CommandSpec {
         I: IntoIterator<Item = S>,
         S: Into<std::ffi::OsString>,
     {
-        self.args.extend(args.into_iter().map(Into::into));
+        self.argv_mut().extend(args.into_iter().map(Into::into));
         self
+    }
+    /// Hand the launcher a command line the caller has ALREADY encoded for the
+    /// program's own parser, bypassing argv quoting. Replaces the whole tail — the two
+    /// shapes are alternatives, never mixed. Accepted only for a Windows `cmd.exe`
+    /// launch; see [`CommandArgs`] for why, and [`validate_apply_inputs`] for the gate.
+    pub fn verbatim_command_line(mut self, line: impl Into<std::ffi::OsString>) -> Self {
+        self.args = CommandArgs::Verbatim(line.into());
+        self
+    }
+    fn argv_mut(&mut self) -> &mut Vec<std::ffi::OsString> {
+        if let CommandArgs::Verbatim(_) = self.args {
+            debug_assert!(
+                false,
+                "arg()/args() after verbatim_command_line() discards the encoded line"
+            );
+            self.args = CommandArgs::Argv(Vec::new());
+        }
+        match &mut self.args {
+            CommandArgs::Argv(v) => v,
+            CommandArgs::Verbatim(_) => unreachable!("converted to argv above"),
+        }
     }
     pub fn cwd(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.cwd = Some(dir.into());
@@ -1156,6 +1260,18 @@ fn apply_inner(
     Ok(prepared)
 }
 
+/// Whether `program` names `cmd.exe` — the sole program whose command line nub hands
+/// over verbatim. Matched on the file name so it holds for the bare name aube passes
+/// and for an absolute `System32` path alike; case-insensitive because Windows paths
+/// are. Deliberately NOT extended to `powershell`/`pwsh`: neither is on the lifecycle
+/// spawn path, and each would need its own audited encoder before it could opt in.
+fn program_is_windows_command_interpreter(program: &std::ffi::OsStr) -> bool {
+    std::path::Path::new(program)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("cmd.exe") || n.eq_ignore_ascii_case("cmd"))
+}
+
 fn validate_apply_inputs(policy: &SandboxPolicy, spec: &CommandSpec) -> Result<(), Degradation> {
     let has_allow = policy
         .net
@@ -1255,8 +1371,31 @@ fn validate_apply_inputs(policy: &SandboxPolicy, spec: &CommandSpec) -> Result<(
         }
     };
     reject_nul("entry program", &spec.program)?;
-    for (index, argument) in spec.args.iter().enumerate() {
+    for (index, argument) in spec.args.tokens().enumerate() {
         reject_nul(&format!("argument {index}"), argument)?;
+    }
+    if let CommandArgs::Verbatim(_) = spec.args {
+        // The ONLY sanctioned verbatim caller is aube's `cmd.exe` script line, so the
+        // opt-in is confined to exactly that shape rather than left open as a
+        // skip-the-quoting hatch any future caller could reach for. Fail closed: a
+        // verbatim tail anywhere else is a programming error, not a degradation to
+        // absorb, and silently re-encoding it would reintroduce the original bug.
+        if !cfg!(windows) {
+            return Err(Degradation {
+                lost: vec!["process-input".to_string()],
+                reason: Some("a verbatim command line is a Windows-only encoding".to_string()),
+            });
+        }
+        if !program_is_windows_command_interpreter(&spec.program) {
+            return Err(Degradation {
+                lost: vec!["process-input".to_string()],
+                reason: Some(format!(
+                    "a verbatim command line is only accepted for the Windows command \
+                     interpreter, not {}",
+                    std::path::Path::new(&spec.program).display()
+                )),
+            });
+        }
     }
     if let Some(cwd) = &spec.cwd {
         reject_nul("working directory", cwd.as_os_str())?;
@@ -1372,7 +1511,7 @@ fn generic_apply(
         });
     }
     let mut command = Command::new(&spec.program);
-    command.args(&spec.args);
+    spec.args.apply_to(&mut command);
     if let Some(cwd) = &spec.cwd {
         command.current_dir(cwd);
     }
@@ -1540,6 +1679,55 @@ mod tests {
         policy.net.brokers[0].env = vec!["HTTPS_PROXY".to_string()];
         let err = validate_apply_inputs(&policy, &CommandSpec::new("/usr/bin/true")).unwrap_err();
         assert_eq!(err.lost, vec!["credential-broker"]);
+    }
+
+    /// The verbatim command line exists for ONE caller — aube's already-encoded `cmd.exe`
+    /// script tail — and must never become a general "skip argv quoting" hatch, which
+    /// would let a future caller hand an arbitrary program an unquoted, attacker-shaped
+    /// line. Both halves of the gate are asserted here rather than left to review.
+    #[test]
+    fn a_verbatim_command_line_is_confined_to_the_windows_command_interpreter() {
+        let policy = SandboxPolicy::default();
+
+        let spec = CommandSpec::new("node.exe").verbatim_command_line("-e \"boom\"");
+        let err = validate_apply_inputs(&policy, &spec).unwrap_err();
+        assert_eq!(err.lost, vec!["process-input"]);
+        assert!(
+            err.reason.as_deref().is_some_and(|r| r
+                .contains("only accepted for the Windows command interpreter")
+                || r.contains("Windows-only encoding")),
+            "an off-interpreter verbatim line must be refused by name, got {:?}",
+            err.reason
+        );
+
+        // The sanctioned shape: `cmd.exe` by bare name (what aube passes) and by absolute
+        // path (what a resolved program would be), each accepted only on Windows.
+        for program in ["cmd.exe", "CMD.EXE", r"C:\Windows\System32\cmd.exe"] {
+            let spec = CommandSpec::new(program).verbatim_command_line("/d /s /c \" echo hi \"");
+            let verdict = validate_apply_inputs(&policy, &spec);
+            assert_eq!(
+                verdict.is_ok(),
+                cfg!(windows),
+                "{program} verbatim acceptance must track the platform, got {verdict:?}"
+            );
+        }
+
+        // Ordinary argv is untouched by the gate on every platform.
+        let spec = CommandSpec::new("node.exe").args(["-e", "boom"]);
+        assert!(validate_apply_inputs(&policy, &spec).is_ok());
+    }
+
+    /// The two shapes are alternatives, never a mix — a spec cannot carry an encoded line
+    /// AND argv, because a launcher would have to guess which one the caller meant.
+    #[test]
+    fn setting_one_argument_shape_replaces_the_other() {
+        let spec = CommandSpec::new("cmd.exe")
+            .args(["-c", "ignored"])
+            .verbatim_command_line("/d /s /c \" echo hi \"");
+        match &spec.args {
+            CommandArgs::Verbatim(line) => assert_eq!(line, "/d /s /c \" echo hi \""),
+            other => panic!("expected the verbatim line to win, got {other:?}"),
+        }
     }
 
     /// A bypass key the child inherited must not survive, or the whole per-host policy is

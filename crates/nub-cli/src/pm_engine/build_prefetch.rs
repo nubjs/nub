@@ -111,7 +111,7 @@ pub(super) fn prefetch(
     ambient: &mut BTreeMap<String, String>,
     probe: &ProbeScope,
 ) -> Vec<PathBuf> {
-    let Some(family) = detect_family(&spawn.args) else {
+    let Some(family) = detect_family(&spawn.args.command_line()) else {
         return Vec::new();
     };
     // ANCHOR: `bin.js:7` does `require(path.resolve('package.json'))` BEFORE the
@@ -144,12 +144,7 @@ pub(super) fn prefetch(
 /// || node-gyp rebuild` is the canonical shape: the fallback never runs when the prefetched
 /// artifact satisfies the first command, so keying on position (not on a fixed precedence)
 /// is what makes a chain resolve to the command that actually decides the outcome.
-fn detect_family(args: &[std::ffi::OsString]) -> Option<Family> {
-    let script = args
-        .iter()
-        .map(|a| a.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(" ");
+fn detect_family(script: &str) -> Option<Family> {
     let prebuild = script.find("prebuild-install");
     // `node-pre-gyp` also appears in `… node-pre-gyp rebuild`, which has no download step
     // to short-circuit; require the install verb before claiming the family.
@@ -322,6 +317,174 @@ fn node_pre_gyp_libc(platform: &str, ambient: &BTreeMap<String, String>) -> Stri
         .to_string()
 }
 
+// ── the Node headers node-gyp compiles against ─────────────────────────────────
+
+/// Land the Node headers (and, for a Windows target, the `node.lib` import library) on
+/// local disk out of jail, and return the directory to name in `npm_config_nodedir`.
+/// `None` on any refusal — the caller then leaves `nodedir` alone, exactly as before.
+///
+/// WHY A FETCH IS NEEDED AT ALL. Every POSIX distribution ships `include/node` inside the
+/// Node root, so `nodedir` names that root, node-gyp reads the headers off the filesystem
+/// and never opens a socket. The WINDOWS distribution ships neither: `node-v22.20.0-win
+/// -x64.zip` contains zero `include/`, `.h` or `.lib` entries — it is `node.exe`,
+/// `node_modules/` and a handful of shims. And node-gyp does not degrade gracefully from
+/// that. With `nodedir` set it SKIPS its header download outright (`configure.js`,
+/// `getNodeDir`), so the compile fails on a missing `node.h`; with `nodedir` unset it
+/// downloads into its devdir — which the Windows jail's net deny-all refuses. Either way
+/// no native addon could build on Windows under the jail.
+///
+/// So this is the [module doc's](self) prefetch move applied to the toolchain itself: nub
+/// performs the GET, unconfined, against a host `$downloads` already carries, and the
+/// confined build finds a local tree. The Windows jail STAYS deny-all — nothing here
+/// widens a net axis.
+///
+/// The result is cached under nub's cache dir keyed on the Node version, so an install of
+/// N native packages fetches once and later installs fetch not at all.
+pub(super) fn node_headers(
+    ambient: &BTreeMap<String, String>,
+    probe: &ProbeScope,
+) -> Option<PathBuf> {
+    // A user who named their own dist URL is building against a Node that is not
+    // nodejs.org's, so upstream headers would answer a question they did not ask. Decline
+    // and leave them the behavior they had.
+    if ["npm_config_disturl", "npm_config_dist_url"]
+        .iter()
+        .any(|key| ambient.get(*key).is_some_and(|v| !v.is_empty()))
+    {
+        return None;
+    }
+    let facts = node_facts(ambient, probe)?;
+    // The TARGET's platform, read off the interpreter that will load the addon — not
+    // `cfg!(windows)`. The import library is a property of the Node being compiled
+    // against, and that is what `node_facts` reports.
+    let want_lib = facts.platform == "win32";
+    let dir = cache_root()?.join("node-headers").join(&facts.version);
+    if headers_ready(&dir, want_lib) {
+        return Some(dir);
+    }
+    materialize_headers(&dir, facts, want_lib)
+}
+
+/// The two files whose presence means a later install can skip the fetch. Existence-only,
+/// like every other hit test here — which is why [`materialize_headers`] publishes by
+/// renaming a fully-populated staging dir rather than filling `dir` in place.
+fn headers_ready(dir: &Path, want_lib: bool) -> bool {
+    dir.join("include").join("node").join("node.h").is_file()
+        && (!want_lib || dir.join("Release").join("node.lib").is_file())
+}
+
+fn materialize_headers(dir: &Path, facts: &NodeFacts, want_lib: bool) -> Option<PathBuf> {
+    let version = &facts.version;
+    let parent = dir.parent()?;
+    std::fs::create_dir_all(parent).ok()?;
+    let staging = tempfile::TempDir::new_in(parent).ok()?;
+
+    let tarball = staging.path().join("headers.tar.gz");
+    let url = format!("https://nodejs.org/dist/v{version}/node-v{version}-headers.tar.gz");
+    if !host_allowed(&url) {
+        return None;
+    }
+    fetch(&url, &tarball)?;
+    extract_headers(&tarball, staging.path(), version)?;
+    std::fs::remove_file(&tarball).ok();
+
+    if want_lib {
+        let url = format!(
+            "https://nodejs.org/dist/v{version}/win-{}/node.lib",
+            win_lib_arch(&facts.arch)?
+        );
+        if !host_allowed(&url) {
+            return None;
+        }
+        // node-gyp resolves the import library as `<nodedir>/$(Configuration)/node.lib`
+        // whenever nodedir is set (`configure.js`: the `!gyp.opts.nodedir` ternary picks
+        // `<(target_arch)` only when it is NOT). `$(Configuration)` is an MSBuild macro
+        // resolved long after nub is gone, and `create-config-gypi.js` can emit exactly
+        // `Release` or `Debug`, so both names must hold the file.
+        let release = staging.path().join("Release").join("node.lib");
+        std::fs::create_dir_all(release.parent()?).ok()?;
+        fetch(&url, &release)?;
+        let debug = staging.path().join("Debug").join("node.lib");
+        std::fs::create_dir_all(debug.parent()?).ok()?;
+        std::fs::copy(&release, &debug).ok()?;
+    }
+
+    let staged = staging.keep();
+    match std::fs::rename(&staged, dir) {
+        Ok(()) => Some(dir.to_path_buf()),
+        // A concurrent install published first — its tree is equivalent, so adopt it
+        // rather than failing. Anything else (a real error) leaves nodedir unset.
+        Err(_) => {
+            std::fs::remove_dir_all(&staged).ok();
+            headers_ready(dir, want_lib).then(|| dir.to_path_buf())
+        }
+    }
+}
+
+/// `process.arch` in the spelling nodejs.org publishes the import library under.
+fn win_lib_arch(arch: &str) -> Option<&'static str> {
+    match arch {
+        "x64" => Some("x64"),
+        "arm64" => Some("arm64"),
+        "ia32" => Some("x86"),
+        _ => None,
+    }
+}
+
+/// Unpack the tarball's `node-v<version>/include/` subtree into `<dest>/include/`.
+///
+/// PATH SAFETY IS THE POINT, not a precaution. This runs UNCONFINED, as the user, over a
+/// body that arrived from the network, so an entry naming `../` or an absolute path would
+/// be an arbitrary file write — the same defect class this module's own review already
+/// found twice. Every entry must sit under the expected prefix AND consist only of
+/// ordinary components, checked on the DECODED path rather than the raw string.
+///
+/// The byte and entry budgets bound the other half: [`fetch`]'s cap bounds the compressed
+/// body, which says nothing about what it expands to.
+fn extract_headers(tarball: &Path, dest: &Path, version: &str) -> Option<()> {
+    const MAX_UNPACKED: u64 = 256 * 1024 * 1024;
+    const MAX_ENTRIES: usize = 50_000;
+    let file = std::fs::File::open(tarball).ok()?;
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let want = PathBuf::from(format!("node-v{version}")).join("include");
+    let mut budget = MAX_UNPACKED;
+    let mut entries = 0usize;
+    let mut wrote_a_header = false;
+    for entry in archive.entries().ok()? {
+        let mut entry = entry.ok()?;
+        entries += 1;
+        if entries > MAX_ENTRIES {
+            return None;
+        }
+        let path = entry.path().ok()?.into_owned();
+        let Ok(relative) = path.strip_prefix(&want) else {
+            continue;
+        };
+        if relative
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return None;
+        }
+        let out = dest.join("include").join(relative);
+        let kind = entry.header().entry_type();
+        if kind.is_dir() {
+            std::fs::create_dir_all(&out).ok()?;
+            continue;
+        }
+        // Regular files only. A symlink or hardlink entry is the other way a tar reaches
+        // outside its root, and the headers tarball contains none.
+        if !kind.is_file() {
+            continue;
+        }
+        budget = budget.checked_sub(entry.size())?;
+        std::fs::create_dir_all(out.parent()?).ok()?;
+        std::io::copy(&mut entry, &mut std::fs::File::create(&out).ok()?).ok()?;
+        wrote_a_header = true;
+    }
+    wrote_a_header.then_some(())
+}
+
 // ── prebuild-install ───────────────────────────────────────────────────────────
 
 /// Derive the artifact URL, fetch it, and drop it at `<pkgdir>/prebuilds/<basename(url)>`.
@@ -336,7 +499,7 @@ fn prebuild_install(
     manifest: &Value,
     node: &NodeFacts,
 ) -> Option<()> {
-    let flags = prebuild_flags(&spawn.args);
+    let flags = prebuild_flags(&spawn.args.command_line());
     // Three flags make a placed file unreadable by construction, so writing one would be
     // pure waste: `--nolocal` returns straight to `download()` ahead of the local probe
     // (`download.js:18`), `--build-from-source` skips the download path outright, and
@@ -386,12 +549,7 @@ fn prebuild_install(
 /// rebuild` is the canonical shape, and letting the fallback's flags leak in would
 /// attribute node-gyp's `--arch` to prebuild-install. Cutting at the first shell operator
 /// errs toward attributing too FEW flags, which is the fail-soft direction.
-fn prebuild_flags(args: &[std::ffi::OsString]) -> BTreeMap<String, String> {
-    let line = args
-        .iter()
-        .map(|a| a.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(" ");
+fn prebuild_flags(line: &str) -> BTreeMap<String, String> {
     let Some(idx) = line.find("prebuild-install") else {
         return BTreeMap::new();
     };
@@ -1286,10 +1444,11 @@ fn best_napi_version(manifest: &Value, interpreter_napi: u32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
 
-    fn args(script: &str) -> Vec<OsString> {
-        vec![OsString::from("-c"), OsString::from(script)]
+    /// The joined script line for a `sh -c <script>` spawn — what the seam's
+    /// `command_line()` hands the family/flag heuristics.
+    fn args(script: &str) -> String {
+        format!("-c {script}")
     }
 
     fn node26() -> NodeFacts {
@@ -1662,7 +1821,11 @@ mod tests {
     /// by the package (its own artifact name plus nub's pid, readable as `$PPID`) and it
     /// lands in a directory the confined `preinstall` may write. `fs::copy` would have
     /// opened it O_CREAT|O_TRUNC and followed the link, writing through it as the USER.
+    // Gated like the directory-guard test above: the fixture plants a symlink through
+    // `std::os::unix`, which does not exist on Windows — without this the whole `nub-cli`
+    // test binary fails to compile there.
     #[test]
+    #[cfg(unix)]
     fn a_symlinked_staged_temp_is_refused_not_followed() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("package");

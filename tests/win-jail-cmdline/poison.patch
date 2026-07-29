@@ -1,0 +1,31 @@
+diff --git a/vendor/aube/crates/aube-scripts/src/lib.rs b/vendor/aube/crates/aube-scripts/src/lib.rs
+index d5911319c7..4e49d71a22 100644
+--- a/vendor/aube/crates/aube-scripts/src/lib.rs
++++ b/vendor/aube/crates/aube-scripts/src/lib.rs
+@@ -358,7 +358,7 @@ fn spawn_shell_with_settings(
+         if settings.script_shell.is_some() {
+             cmd.arg("-c").arg(script_cmd);
+         } else {
+-            cmd.raw_arg(cmd_exe_command_tail(script_cmd));
++            cmd.raw_arg("/d /s /c \"").raw_arg(script_cmd).raw_arg("\"");
+         }
+         cmd
+     };
+@@ -1330,15 +1330,8 @@ fn verbatim_tail(
+     settings: &ScriptSettings,
+     jailed: bool,
+ ) -> Option<std::ffi::OsString> {
+-    #[cfg(windows)]
+-    {
+-        (!jailed && settings.script_shell.is_none()).then(|| cmd_exe_command_tail(script_cmd))
+-    }
+-    #[cfg(not(windows))]
+-    {
+-        let _ = (script_cmd, settings, jailed);
+-        None
+-    }
++    let _ = (script_cmd, settings, jailed);
++    None
+ }
+ 
+ /// Package a fully-configured lifecycle command for the embedder's confinement hook.

@@ -525,6 +525,12 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
     }
     #[cfg(windows)]
     {
+        // `NODE_OPTIONS` is deliberately NOT admitted. It was, briefly, to carry a Windows
+        // realpath repair nub stamped — safe only because that stamp OVERWROTE any ambient
+        // value first. The stamp is gone (see `windows_realpath_node_options`), so admitting
+        // the key would now let an AMBIENT `NODE_OPTIONS` through, and it carries `--import`:
+        // an arbitrary-code channel into every dependency's lifecycle script. If a future
+        // repair reinstates the stamp, this entry comes back WITH it, never before.
         BUILD_JAIL_EXTRA_EXACT
             .iter()
             .any(|e| e.eq_ignore_ascii_case(key))
@@ -538,6 +544,90 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
         BUILD_JAIL_EXTRA_EXACT.contains(&key)
             || BUILD_JAIL_EXTRA_PREFIXES.iter().any(|p| key.starts_with(p))
     }
+}
+
+/// The `NODE_OPTIONS` the Windows build jail stamps, repairing Node's module resolution
+/// under the AppContainer without loosening a single grant.
+///
+/// THE DEFECT. Node's JS `realpathSync` walks a path component by component and, on Windows,
+/// `lstat`s the VOLUME ROOT first. The jail grants leaf-only and leans on traverse-bypass
+/// (`SeChangeNotifyPrivilege` + `FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL`), which exempts
+/// INTERMEDIATE components of a single open — it does not make an ancestor openable as a
+/// TARGET. So every `require()` of an absolute path dies on `EPERM: lstat 'C:\'`.
+///
+/// WHY NOT AN ANCESTOR ACE. Writing one needs `WRITE_DAC`, and `C:\` and `C:\Users` are
+/// Administrators-owned; a standard user cannot. A jail that needs elevation cannot be
+/// default-on, so that repair is disqualified rather than merely awkward.
+///
+/// WHY NOT REDIRECT REALPATH AT ITS NATIVE TWIN. That was the first candidate, and it is
+/// REFUTED by measurement: `fs.realpathSync.native` is refused under this jail too, with
+/// `EPERM ... realpath` on a file the jail GRANTED and Node can `readFileSync` in the same
+/// breath (run 30460192608). Its single `GetFinalPathNameByHandleW` needs more than the leaf
+/// handle the jail allows, so pointing the JS realpath at it buys nothing. Both realpath
+/// implementations are unavailable, which leaves only NOT CALLING one.
+///
+/// WHAT IT WOULD DO. `--preserve-symlinks-main` clears the realpath in `resolveMainPath`
+/// (`internal/modules/run_main.js`) and `--preserve-symlinks` clears the ones in `_findPath`
+/// and the ESM `finalizeResolution`, so module resolution never walks a path to the volume
+/// root. Measured on Windows CI (run 30463527647), that is sufficient: the entry point runs,
+/// dependency `require`s resolve, and a lifecycle script body completes under the real
+/// build-jail policy.
+///
+/// WHY IT IS NOT STAMPED ANYWAY — the disqualifying measurement. nub's DEFAULT node-linker is
+/// `Isolated` (`aube-linker/src/lib.rs`), which materialises each package in its own store
+/// cell and wires dependencies as symlinks. `--preserve-symlinks` makes a dependency resolve
+/// under its LINK path, so the parent-directory walk from `node_modules/<pkg>` skips the store
+/// cell that holds that package's private dependencies and lands on the project's top-level
+/// `node_modules` instead. Against a fixture mirroring the real
+/// `.aube/<dep_path>/node_modules/<name>` layout, a package whose private dependency is
+/// `bar@2.0.0` resolved `bar@1.0.0` — the unrelated top-level copy — and threw NOTHING:
+///
+/// ```text
+/// without the flag:  foo sees bar@2.0.0
+/// with the flag:     foo sees bar@1.0.0
+/// ```
+///
+/// A lifecycle script that builds against the wrong dependency version and exits 0 is worse
+/// than one that cannot start. The jail's current loud failure is the better of the two, so
+/// this stays unwired. (`preserve_symlinks_isolated_layout` is the standing regression test.)
+///
+/// WHAT SURVIVES, for whoever takes this next:
+///  - Scope the flag to HOISTED installs only, detected at policy-compile time. Safe, but it
+///    leaves the default layout with no working jail, so it does not deliver default-on.
+///  - A `module.registerHooks()` resolve hook that resolves symlinks itself with `readlink`
+///    on granted leaves, never walking to the volume root. Unproven and real work, but it is
+///    the mechanism nub is architecturally built on, and preload delivery already works
+///    (`node-shim-executed=PASS` proves a `data:` `--import` evaluates inside the jail).
+///  - The dedicated-account backend, which has no LowBox check at all — at the cost of a
+///    one-time elevated setup, forfeiting default-on for Windows.
+///
+/// Note that blocker 2 constrains this independently: a piped `child_process` spawn under the
+/// jail HANGS, and every `node-gyp` configure pipes, so native builds stay blocked on Windows
+/// regardless of which route above is taken.
+#[cfg(windows)]
+pub fn windows_realpath_node_options() -> String {
+    "--preserve-symlinks-main --preserve-symlinks".to_string()
+}
+
+/// Retained for the probe's differential arm: the refuted native-realpath shim, kept so
+/// `windows_realpath_ancestors` measures the SAME string that was rejected rather than a
+/// restatement of it, and so a future Node that grants `GetFinalPathNameByHandleW` under an
+/// AppContainer can be re-tested against it directly.
+///
+/// `data:` is load-bearing: `defaultResolve` short-circuits on that protocol before any
+/// filesystem access, which is the only way a preload can be delivered into a jail whose
+/// realpath is broken. `--import` preloads run AFTER `resolveMainPath`, which is why the
+/// entry point still needs `--preserve-symlinks-main` alongside.
+#[cfg(windows)]
+#[doc(hidden)]
+pub fn windows_native_realpath_shim_node_options() -> String {
+    // Percent-encoded because NODE_OPTIONS is whitespace-separated; only space and quote
+    // need it here.
+    let shim = "import fs from \"node:fs\";\
+                const n=fs.realpathSync.native;n.native=n;fs.realpathSync=n;"
+        .replace(' ', "%20")
+        .replace('"', "%22");
+    format!("--preserve-symlinks-main --import data:text/javascript,{shim}")
 }
 
 /// The build-jail ENV posture (D1): a DEFAULT-DENY allowlist over the effective child

@@ -102,8 +102,9 @@ pub mod preflight;
 pub mod proxy;
 
 pub use backend::{
-    CommandSpec, Degradation, Prepared, PreparedChild, PreparedSignalTarget, RuntimeCapability,
-    StatusReport, apply, apply_with_runtime, earliest_bootstrap, validate_adjacent_resource_bundle,
+    CommandArgs, CommandSpec, Degradation, Prepared, PreparedChild, PreparedSignalTarget,
+    RuntimeCapability, StatusReport, apply, apply_with_runtime, earliest_bootstrap,
+    validate_adjacent_resource_bundle,
 };
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
@@ -138,6 +139,8 @@ pub use compiler::{
     CommandRunner, CompileCtx, CompileError, CompileWarning, DOWNLOAD_HOSTS, ScopeCapabilities,
     compile, compile_build_jail, compile_with_warnings,
 };
+#[cfg(windows)]
+pub use compiler::{windows_native_realpath_shim_node_options, windows_realpath_node_options};
 pub use matcher::Homes;
 
 /// One-time privileged host setup for the Linux agent-sandbox — the implementation behind

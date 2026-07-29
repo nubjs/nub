@@ -1,0 +1,63 @@
+# Branch-scoped ad-hoc probe: does the Windows backend honour FsOrigin::Speculative?
+# No PR required (see .claude/skills/ci-adhoc-test/SKILL.md). CI is the only venue —
+# AppContainer cannot be launched over SSH (OpenSSH lands in session 0 with no window
+# station, so every launch returns 0xC0000142 STATUS_DLL_INIT_FAILED), which also rules out
+# the standing nub-win VM. Delete once this joins sandbox-conformance's windows leg on main.
+name: win-speculative-grants-probe
+
+on:
+  push:
+    branches: [sandbox/win-speculative-fs-grants]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      # Matches sandbox-conformance's windows leg: crt-static makes the self-reexec probe
+      # child self-contained, so it starts cleanly under the LowBox token.
+      RUSTFLAGS: "-C target-feature=+crt-static"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      # Host-testable derivation, on the real target. Cheap, and it fails loudly if the
+      # origin check is compiled out of `derive_grants` on Windows specifically.
+      - name: Unit — origin-aware grant derivation
+        shell: bash
+        run: cargo test -p nub-sandbox --lib backend::windows::tests 2>&1 | tee unit.log
+
+      # `always()` on both remaining steps so a red unit gate cannot hide the end-to-end
+      # verdicts. Proving this probe is non-hollow means running it against a build with
+      # the fix REVERTED — where the unit test above fails first, and its short-circuit
+      # would otherwise leave the real launch unmeasured in exactly the run that needs it.
+      - name: Probe — speculative vs authored missing grants under a real LowBox launch
+        if: always()
+        shell: bash
+        run: cargo test -p nub-sandbox --test windows_speculative_grants 2>&1 | tee probe.log
+
+      # A job that exits 0 having measured nothing is worse than a red one. The harness
+      # gates on these itself; asserting them again here means a future change that softens
+      # an in-binary check still cannot go quietly green.
+      - name: Assert every property actually reported a verdict
+        if: always()
+        shell: bash
+        run: |
+          fail=0
+          grep -q '^PROBE windows speculative fs grants' probe.log || { echo "MISSING: the probe never started"; fail=1; }
+          for p in speculative-absent-launches authored-absent-refuses speculative-present-enforced speculative-present-confines production-jail-absent-roots; do
+            grep -q "prop:$p=" probe.log || { echo "MISSING: property $p never reported"; fail=1; }
+          done
+          # The two controls are what stop a permissive fix from passing. Name them
+          # explicitly so a run in which they silently vanished cannot go green.
+          grep -q 'prop:authored-absent-refuses=PASS' probe.log || { echo "CONTROL LOST: a missing AUTHORED grant no longer fails the launch"; fail=1; }
+          grep -q 'prop:speculative-present-confines=PASS' probe.log || { echo "CONTROL LOST: confinement around a kept speculative grant is not enforced"; fail=1; }
+          grep -q 'WINDOWS HONOURS FsOrigin::Speculative' probe.log || { echo "MISSING: the probe did not conclude"; fail=1; }
+          grep -q 'a_missing_source_is_skipped_only_when_speculative ... ok' unit.log || { echo "MISSING: the unit differential did not run on the Windows target"; fail=1; }
+          echo "── recorded verdicts ──"
+          grep -E '^(PROBE |  prop:|WINDOWS )' probe.log
+          exit $fail

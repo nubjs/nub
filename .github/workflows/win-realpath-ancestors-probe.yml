@@ -1,0 +1,144 @@
+# Branch-scoped ad-hoc probe: why does `require()` of an absolute path die inside the build
+# jail, and which repair survives the zero-privilege constraint? No pull request required
+# (.claude/skills/ci-adhoc-test/SKILL.md). CI is the only venue — an AppContainer cannot be
+# launched over SSH (session 0 has no window station, so every launch returns 0xC0000142),
+# which also rules out the standing nub-win VM.
+#
+# THE QUESTION. Node's JS `realpathSync` lstats the VOLUME ROOT before anything else, and the
+# jail grants leaf-only. The obvious repair is an ACE on each granted path's ancestor chain —
+# which is only shippable if a STANDARD, NON-ELEVATED user can write those DACLs, because a
+# jail that needs admin cannot be default-on. That question is measured de-elevated here, and
+# it decides whether the repair is even a candidate.
+#
+# THE CONTROLS. `deelevated-can-write-own-dacl` must pass in BOTH the ambient and de-elevated
+# arms, so a refusal on `C:\` is evidence about `C:\` rather than about a broken impersonation;
+# `deelevated-context-is-nonadmin` evaluates real group state (`CheckTokenMembership`, which
+# reports a deny-only SID as not a member), never the `TokenIsElevated` flag that
+# `CreateRestrictedToken` copies rather than recomputes — and never an RPC issued while
+# impersonating a restricted token, which is how an earlier revision hung.
+# `node-plain-fails` is the both-directions control on the treatment arms: the defect must
+# still reproduce in the same run, or a green treatment arm is measuring nothing.
+#
+# Every step is `if: always()`, because a red step early in the job must never hide the
+# verdicts this job exists to produce.
+name: win-realpath-ancestors-probe
+
+on:
+  push:
+    branches: [sandbox/win-jail-blockers]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      # crt-static matches sandbox-conformance's windows leg: it makes the self-reexec probe
+      # child self-contained, so it starts cleanly under the LowBox token.
+      #
+      # Kept BYTE-IDENTICAL to the sibling Windows probes: RUSTFLAGS is part of every cargo
+      # fingerprint, so a flag that differs here can only cost cache hits. An earlier revision
+      # carried `-C link-arg=/STACK:8388608` — an inherited workaround for `nub install`'s
+      # 0xC00000FD exit that this probe, which never runs `nub install`, had no use for.
+      # (The first runs' 35+ minute builds were NOT mainly that flag: `Swatinem/rust-cache`
+      # keys on the workflow/job, so a NEW workflow starts cold whatever its RUSTFLAGS. Once
+      # this workflow has completed once, its own cache entry makes later runs fast.)
+      RUSTFLAGS: "-C target-feature=+crt-static"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Interpreter baseline
+        if: always()
+        shell: bash
+        run: |
+          which node
+          node -p "process.execPath"
+          node -p "process.versions.node"
+
+      # The ambient half of the DACL question, from the shell, so the probe's own answer can be
+      # cross-read against a tool nobody has to trust the probe's FFI for.
+      - name: Ancestor DACLs as the runner sees them
+        if: always()
+        shell: cmd
+        run: |
+          icacls C:\
+          icacls C:\Users
+          icacls "C:\Program Files"
+          whoami /groups | findstr /i "Mandatory Administrators"
+
+      # BUILD AND RUN ARE SEPARATE STEPS so the RUN can carry a timeout that the build's
+      # (unbounded, and on a cold cache genuinely long) duration would otherwise swallow. With
+      # them fused, a probe that HANGS is indistinguishable from one still compiling, and the
+      # job timeout then cancels the job and discards `probe.log` entirely — which is exactly
+      # how the first two runs of this workflow ended with no evidence at all.
+      - name: Build the probe
+        if: always()
+        shell: bash
+        run: cargo test -p nub-sandbox --test windows_realpath_ancestors --no-run
+
+      - name: Probe — realpath ancestors under AppContainer
+        if: always()
+        shell: bash
+        run: |
+          rc=0
+          timeout -k 30 600 cargo test -p nub-sandbox --test windows_realpath_ancestors \
+            > probe.log 2>&1 || rc=$?
+          echo "probe exit=$rc (124 ⇒ the probe itself hung; the last STEP line below names the arm)"
+          cat probe.log
+
+      # The verdict is read off the log, never off a step's exit status: a property whose
+      # `prop:` line is ABSENT must fail here, so a probe that never ran cannot be mistaken for
+      # one that passed.
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          fail=0
+          need() {
+            if grep -qF "$1" probe.log 2>/dev/null; then
+              echo "OK   $1"
+            else
+              echo "MISS $1"
+              fail=1
+            fi
+          }
+          [ -s probe.log ] || { echo "MISS the probe produced no output at all"; fail=1; }
+          need "PROBE windows realpath ancestors under AppContainer"
+          for p in deelevated-token-available deelevated-context-is-nonadmin \
+                   deelevated-can-write-own-dacl deelevated-cannot-write-dacl-c-root \
+                   deelevated-cannot-write-dacl-c-users jail-lstat-c-root-refused \
+                   jail-lstat-granted-work-permitted jail-lstat-ungranted-refused \
+                   node-plain-fails node-preserve-main-lets-entry-run \
+                   node-preserve-main-alone-leaves-dep-broken node-preserve-symlinks-resolves-dep \
+                   node-preserve-symlinks-completes node-shim-executed \
+                   realpath-native-refused-in-jail \
+                   psymlinks-ungranted-read-refused psymlinks-granted-read-permitted \
+                   node-shim-via-node-options lifecycle-policy-compiles \
+                   lifecycle-script-body-completed lifecycle-cwd-is-package-dir; do
+            grep -q "prop:$p=" probe.log || { echo "MISS property $p never reported"; fail=1; }
+          done
+          # The controls must hold in EVERY run, whatever the treatment arms did: without them
+          # a red treatment cannot be told from a broken harness.
+          need "prop:deelevated-context-is-nonadmin=PASS"
+          need "prop:deelevated-can-write-own-dacl=PASS"
+          need "prop:node-plain-fails=PASS"
+          need "prop:psymlinks-ungranted-read-refused=PASS"
+          echo "---- recorded verdicts ----"
+          grep -E '^(PROBE |  prop:|    |interpreter: |shim: |WINDOWS )' probe.log || true
+          exit $fail
+
+      - name: Upload probe log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-realpath-ancestors-probe
+          path: probe.log
+          if-no-files-found: warn
