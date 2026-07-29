@@ -99,23 +99,32 @@ untracked=$(git -C "$root" ls-files --others --exclude-standard -- \
 # OIDs, so this is a pure content hash of the depended-on crates. ~0.2s.
 # shellcheck disable=SC2086
 key=$(git -C "$root" ls-files -s -- vendor/aube crates $leaves 2>/dev/null \
-  | shasum 2>/dev/null | cut -c1-12)
+  | shasum 2>/dev/null | cut -c1-12 || true)
 bucket="$shared${key:+-$key}"
+
+# CoW-clone $1 into $2, claiming the destination ATOMICALLY. `mkdir` is the claim:
+# it fails if the dir already exists, so two worktrees racing to seed the same
+# bucket can't both copy — the loser would otherwise `cp` INTO the winner's dir
+# and nest a second full copy inside it. Clone-only: `cp -c` (APFS) and
+# `--reflink=always` (btrfs/XFS) FAIL rather than silently falling back to a real
+# multi-GB copy, which would trade minutes of CPU for gigabytes of disk. Any
+# failure is non-fatal — the caller just gets a cold build.
+seed_from() {
+  [ -d "$1" ] || return 1
+  mkdir "$2" 2>/dev/null || return 1
+  cp -c -a "$1/." "$2/" 2>/dev/null \
+    || cp -a --reflink=always "$1/." "$2/" 2>/dev/null \
+    || return 1
+}
 
 if [ -n "$diverged" ] || [ -n "$untracked" ]; then
   target="$root/target"   # private, worktree-local; removed with the worktree
   why="isolated — this worktree diverges a depended-on crate from origin/main"
   # Seed from the shared cache on FIRST creation only. A relocated target dir
   # keeps its dependency artifacts (see the header), so this turns a ~3-min cold
-  # build into a rebuild of just the diverged crates. CoW only: `cp -c` (APFS)
-  # and `--reflink=always` (btrfs/XFS) both FAIL rather than silently falling
-  # back to a real multi-GB copy, which would trade minutes of CPU for gigabytes
-  # of disk — not a deal worth making. Any failure is non-fatal: cold build.
-  if [ ! -d "$target" ] && [ -d "$bucket" ]; then
-    cp -c -a "$bucket" "$target" 2>/dev/null \
-      || cp -a --reflink=always "$bucket" "$target" 2>/dev/null \
-      || true
-    [ -d "$target" ] && why="$why (seeded from $(basename "$bucket"))"
+  # build into a rebuild of just the diverged crates.
+  if seed_from "$bucket" "$target"; then
+    why="$why (seeded from $(basename "$bucket"))"
   fi
 else
   target="$bucket"        # shared fast path, content-keyed
@@ -123,13 +132,10 @@ else
   # MIGRATION: content-keying renames the bucket, so on the first run after this
   # change lands the warm legacy dir would be orphaned and every worktree would
   # eat one cold build. Seed the new bucket from it (same CoW clone, ~0 cost).
-  # Self-retiring: once every live worktree has moved to a keyed bucket, the
-  # legacy dir just ages out of the GC window below.
-  if [ ! -d "$target" ] && [ -d "$shared" ] && [ "$target" != "$shared" ]; then
-    cp -c -a "$shared" "$target" 2>/dev/null \
-      || cp -a --reflink=always "$shared" "$target" 2>/dev/null \
-      || true
-    [ -d "$target" ] && why="$why (migrated from the legacy shared dir)"
+  # Self-retiring: the legacy dir is covered by the GC below, so once every live
+  # worktree has moved to a keyed bucket it ages out on its own.
+  if [ "$target" != "$shared" ] && seed_from "$shared" "$target"; then
+    why="$why (migrated from the legacy shared dir)"
   fi
 fi
 
@@ -137,8 +143,15 @@ mkdir -p "$target"
 
 # Buckets are pure content-addressed caches, so mtime GC needs no liveness check
 # (unlike a per-worktree dir, which can belong to a live build). Cheap, silent,
-# and bounded: only ever touches this script's own keyed buckets.
-find "$(dirname "$shared")" -maxdepth 1 -name "$(basename "$shared")-*" \
+# and bounded to this script's own dirs.
+#
+# The glob covers the legacy unkeyed dir as well as the keyed buckets, which is
+# what makes the migration above genuinely self-retiring — a `-*` glob would
+# never match the bare legacy name and it would sit there forever. mtime is a
+# sound liveness proxy for it too: anything still building there keeps it fresh,
+# and `mkdir -p "$target"` above just touched the dir this invocation uses. A
+# collected dir costs one cold build, never correctness.
+find "$(dirname "$shared")" -maxdepth 1 -name "$(basename "$shared")*" \
   -type d -mtime +14 -exec rm -rf {} + 2>/dev/null || true
 
 # CONTENTION CONTROL. Many agent worktrees build concurrently, and every cargo
