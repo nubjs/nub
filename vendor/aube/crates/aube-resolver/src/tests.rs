@@ -199,6 +199,7 @@ fn age_gate_help_lists_gated_versions_and_bypass() {
         importer: "packages/app".into(),
         ancestors: vec![("parent".into(), "1.0.0".into())],
         gated: vec!["4.17.21".into(), "4.17.20".into()],
+        publish_times_missing: false,
     }));
     let help = err.help().expect("help set").to_string();
     assert!(help.contains("importer: packages/app"));
@@ -206,6 +207,66 @@ fn age_gate_help_lists_gated_versions_and_bypass() {
     assert!(help.contains("blocked by age gate: 4.17.21, 4.17.20"));
     assert!(help.contains("minimumReleaseAgeStrict=false"));
     assert!(help.contains("minimumReleaseAgeExclude"));
+}
+
+/// A registry that publishes no `time` data blocks the whole range, but for a
+/// reason the ordinary age-gate wording actively misleads on: it would list a
+/// years-old version as "blocked by age gate" and offer a wider window as the
+/// remedy, when no window would ever have helped.
+#[test]
+fn age_gate_names_missing_publish_times_as_the_cause() {
+    let err = Error::AgeGate(Box::new(AgeGateDetails {
+        name: "lodash".into(),
+        range: "^4".into(),
+        minutes: 1440,
+        importer: ".".into(),
+        ancestors: vec![],
+        gated: vec!["4.17.21".into(), "4.17.20".into()],
+        publish_times_missing: true,
+    }));
+    assert!(
+        err.to_string().contains("served no publish times"),
+        "headline must name the real cause, got: {err}"
+    );
+    let help = err.help().expect("help set").to_string();
+    assert!(
+        !help.contains("blocked by age gate"),
+        "must not imply the versions were too new: {help}"
+    );
+    assert!(
+        !help.contains("loosen `minimumReleaseAge`"),
+        "widening the window is not a remedy here: {help}"
+    );
+    assert!(help.contains("minimumReleaseAgeExclude"));
+    assert!(help.contains("minimumReleaseAge=0"));
+}
+
+/// The mixed case stays an ordinary age gate: a populated `time` map with a
+/// hole for one version dates the rest fine, so the missing-times wording
+/// would be wrong.
+#[test]
+fn age_gate_with_a_partially_dated_packument_is_not_the_missing_times_case() {
+    let mut packument = make_packument("lodash", &["4.17.20", "4.17.21"], "4.17.21");
+    packument
+        .time
+        .insert("4.17.20".to_string(), "2026-07-01T00:00:00.000Z".to_string());
+    let task = ResolveTask {
+        name: "lodash".into(),
+        range: "^4".into(),
+        dep_type: DepType::Production,
+        is_root: true,
+        parent: None,
+        importer: ".".into(),
+        original_specifier: None,
+        real_name: None,
+        ancestors: Arc::from([]),
+        range_from_override: false,
+    };
+    let d = build_age_gate(&task, &packument, 1440);
+    assert!(
+        !d.publish_times_missing,
+        "one dated version is enough to make this an ordinary age gate"
+    );
 }
 
 #[test]

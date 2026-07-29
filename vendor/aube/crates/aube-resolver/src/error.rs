@@ -8,10 +8,7 @@ use aube_registry::Packument;
 pub enum Error {
     #[error("no version of {} matches range `{}`", .0.name, .0.range)]
     NoMatch(Box<NoMatchDetails>),
-    #[error(
-        "no version of {} matching {} is older than {} minute(s) (minimumReleaseAgeStrict=true)",
-        .0.name, .0.range, .0.minutes
-    )]
+    #[error("{}", .0.headline())]
     AgeGate(Box<AgeGateDetails>),
     #[error("registry error for {0}: {1}")]
     Registry(String, String),
@@ -86,6 +83,33 @@ pub struct AgeGateDetails {
     /// the age gate, sorted newest-first. Empty when the cutoff was
     /// tighter than every published version.
     pub gated: Vec<String>,
+    /// The packument carried no publish time for ANY satisfying version,
+    /// so nothing was blocked for being too new — every candidate was
+    /// blocked for having an undeterminable age (#581). That is a
+    /// different operator problem with different remedies, and reporting
+    /// it as an ordinary age gate sends people to widen a window that was
+    /// never the cause.
+    pub publish_times_missing: bool,
+}
+
+impl AgeGateDetails {
+    /// The headline. Splitting on `publish_times_missing` keeps one error
+    /// variant and one code while still telling the truth: "nothing is old
+    /// enough" and "nothing's age can be established" are the same refusal
+    /// for opposite reasons.
+    pub(crate) fn headline(&self) -> String {
+        if self.publish_times_missing {
+            format!(
+                "cannot establish the publish age of any version of {} matching `{}` — the registry served no publish times",
+                self.name, self.range
+            )
+        } else {
+            format!(
+                "no version of {} matching {} is older than {} minute(s) (minimumReleaseAgeStrict=true)",
+                self.name, self.range, self.minutes
+            )
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -256,6 +280,14 @@ pub(crate) fn build_age_gate(
         }
     }
     gated.sort_by(|a, b| b.0.cmp(&a.0));
+    // No satisfying version carries a publish time => nothing was blocked for
+    // being too new; the whole range was blocked for being undateable. A
+    // populated map with a hole in it is NOT this case — there the rest of the
+    // document dates fine and the hole is the anomaly worth reporting as one.
+    let publish_times_missing = !gated.is_empty()
+        && !gated
+            .iter()
+            .any(|(_, ver)| packument.time.contains_key(ver));
     AgeGateDetails {
         name: task.name.clone(),
         range: task.range.clone(),
@@ -263,6 +295,7 @@ pub(crate) fn build_age_gate(
         importer: task.importer.clone(),
         ancestors: task.ancestors.to_vec(),
         gated: gated.into_iter().map(|(_, s)| s).collect(),
+        publish_times_missing,
     }
 }
 
@@ -304,6 +337,20 @@ fn format_age_gate_help(d: &AgeGateDetails) -> String {
     let mut s = String::new();
     push_importer(&mut s, &d.importer);
     push_chain(&mut s, &d.ancestors, &d.name);
+    if d.publish_times_missing {
+        s.push_str(
+            "the registry served no `time` data for this package, so no version's age can be \
+             checked against the cutoff\n",
+        );
+        s.push_str("to proceed: add `");
+        s.push_str(&d.name);
+        s.push_str(
+            "` to `minimumReleaseAgeExclude`, set `minimumReleaseAgeStrict=false` to fall back \
+             to the lowest satisfying version, or set `minimumReleaseAge=0` to turn the window \
+             off for this project",
+        );
+        return s;
+    }
     if !d.gated.is_empty() {
         s.push_str(&format!(
             "blocked by age gate: {}\n",
