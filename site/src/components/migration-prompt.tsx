@@ -4,9 +4,8 @@ import { useState } from 'react';
 
 /* Minimal fallback used only if the `prompt` prop is missing, so the button
    still copies something actionable rather than an empty string. The real
-   payload is the short START_PROMPT constant, passed in via the `prompt` prop
-   (see the home page) — it points the agent at the full adoption guide
-   (start.md) and command reference (llms-full.txt) to read. */
+   payload is the START_PROMPT constant, passed in via the `prompt` prop (see
+   the home page) — a two-sentence pointer at the adoption guide (start.md). */
 const FALLBACK_PROMPT =
   'Adopt Nub (https://nubjs.com) in this Node.js project: read https://nubjs.com/start.md and follow the steps there. The full docs are at https://nubjs.com/llms.txt.';
 

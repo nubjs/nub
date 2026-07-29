@@ -18,17 +18,27 @@ switch ($Arch) {
 
 # --- Version ---
 $Version = if ($args.Count -gt 0) { $args[0] } else { "latest" }
-if ($Version -eq "latest") {
-    # Authenticate the GitHub API call when a token is available: CI runners share
-    # an IP and hit the 60/hr unauthenticated rate limit (403). Real users without
-    # GITHUB_TOKEN use the anonymous path unchanged.
-    $apiHeaders = @{}
-    if ($env:GITHUB_TOKEN) { $apiHeaders["Authorization"] = "token $env:GITHUB_TOKEN" }
-    $Release = Invoke-RestMethod "https://api.github.com/repos/nubjs/nub/releases/latest" -Headers $apiHeaders
-    $Version = $Release.tag_name -replace "^v", ""
+if ($Version -eq "canary") {
+    # The rolling canary prerelease — rebuilt from every commit to main and
+    # published under the un-versioned `canary` tag, so there is no version to
+    # resolve. May be broken; `nub upgrade --stable` returns to a release.
+    $ReleaseTag = "canary"
+    $DisplayVersion = "canary"
+} else {
+    if ($Version -eq "latest") {
+        # Authenticate the GitHub API call when a token is available: CI runners share
+        # an IP and hit the 60/hr unauthenticated rate limit (403). Real users without
+        # GITHUB_TOKEN use the anonymous path unchanged.
+        $apiHeaders = @{}
+        if ($env:GITHUB_TOKEN) { $apiHeaders["Authorization"] = "token $env:GITHUB_TOKEN" }
+        $Release = Invoke-RestMethod "https://api.github.com/repos/nubjs/nub/releases/latest" -Headers $apiHeaders
+        $Version = $Release.tag_name -replace "^v", ""
+    }
+    $ReleaseTag = "v$Version"
+    $DisplayVersion = "v$Version"
 }
 
-Write-Host "Installing nub v$Version for $Target..." -ForegroundColor Cyan
+Write-Host "Installing nub $DisplayVersion for $Target..." -ForegroundColor Cyan
 
 # --- Install ---
 # The install location is overridable via NUB_INSTALL_DIR (default %USERPROFILE%\.nub).
@@ -47,7 +57,7 @@ $Exe = "$BinDir\nub.exe"
 # The archive ships bin\ plus a vestigial empty runtime\ (kept only to satisfy the
 # sidecar-era `nub upgrade`; the binary ignores it — see release.yml).
 $ArchiveName = "nub-$Target.zip"
-$Url = "https://github.com/nubjs/nub/releases/download/v$Version/$ArchiveName"
+$Url = "https://github.com/nubjs/nub/releases/download/$ReleaseTag/$ArchiveName"
 $ChecksumUrl = "$Url.sha256"
 Write-Host "Downloading from $Url..."
 

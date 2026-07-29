@@ -111,3 +111,28 @@ enableGlobalVirtualStore=false
 ```
 
 The `enableGlobalVirtualStore=false` form keeps isolation and its phantom-dependency protection; it only relocates the store from the shared per-machine location to `node_modules/.store/` inside the project. That makes the tree self-contained — it survives a Docker `COPY --from` into a fresh image, where the shared store would not exist. Nub already does this automatically in CI and under `nub ci`, so you rarely set it by hand. See [store and disk layout](/docs/install#store-and-disk-layout) for the shared-versus-project-local store in full.
+
+## GYP-based native builds
+
+Some packages that compile native code with node-gyp fail to build under the isolated layout. The trigger is a `binding.gyp` that names another package as a GYP build-file dependency:
+
+```json
+// binding.gyp — the idiom that breaks
+{
+  "targets": [
+    {
+      "dependencies": ["<!(node -p \"require('node-addon-api').gyp\")"]
+    }
+  ]
+}
+```
+
+Every node-gyp run generates with `--depth=.` and writes into `build/`, and GYP joins its output paths against that depth. A dependency reference pointing outside the package directory — which any non-flat `node_modules` produces — then resolves one level short of its target. The build either dies with a Python `FileNotFoundError` naming a `.target.mk` path, or writes a duplicate tree next to the intended one.
+
+Install that project flat:
+
+```bash
+nub install --node-linker hoisted
+```
+
+The limitation is GYP's, not the linker's: GYP assumes a single source tree rooted at `--depth`, and the same builds fail the same way under pnpm's virtual store. A package that reaches a dependency's headers through `include_dirs` instead is unaffected — that path is a compiler flag and never reaches the computation.

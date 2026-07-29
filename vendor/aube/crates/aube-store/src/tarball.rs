@@ -343,6 +343,7 @@ impl Store {
         for entry in archive.entries().map_err(|e| Error::Tar(e.to_string()))? {
             entries_seen += 1;
             if entries_seen > MAX_TARBALL_ENTRIES {
+                core::hint::cold_path();
                 return Err(Error::Tar(format!(
                     "tarball exceeds entry cap of {MAX_TARBALL_ENTRIES}"
                 )));
@@ -381,6 +382,7 @@ impl Store {
                 entry_type,
                 tar::EntryType::Regular | tar::EntryType::Continuous
             ) {
+                core::hint::cold_path();
                 return Err(Error::Tar(format!(
                     "tarball entry type {entry_type:?} is not allowed"
                 )));
@@ -395,6 +397,7 @@ impl Store {
                 .size()
                 .map_err(|e| Error::Tar(e.to_string()))?;
             if declared > MAX_TARBALL_ENTRY_BYTES {
+                core::hint::cold_path();
                 return Err(Error::Tar(format!(
                     "tarball entry exceeds per-entry cap: {declared} bytes > {MAX_TARBALL_ENTRY_BYTES}"
                 )));
@@ -425,6 +428,7 @@ impl Store {
             // non-empty stream. Synthetic-entry injection: header
             // claims empty file, real bytes go to disk.
             if declared == 0 && !content.is_empty() {
+                core::hint::cold_path();
                 return Err(Error::Tar(format!(
                     "tarball entry declared 0 bytes but yielded {} bytes",
                     content.len()

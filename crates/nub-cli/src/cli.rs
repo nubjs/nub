@@ -277,28 +277,31 @@ fn merge_child_env(
 /// injecting a var Node already delivers identically would FREEZE it at the `nub
 /// watch` startup value (Node's `--env-file` never overrides an already-present
 /// env var). Inject a key iff nub's `${VAR}` expansion changed it from the raw
-/// value Node's `--env-file` delivers (`raw_env` is the unexpanded `.env*` merge);
-/// every plain var is left to Node's `--env-file` and live-reloads on restart. A
-/// key absent from `raw_env` is injected — including a CLI-only `--env-file`
-/// value. A CLI value that overrides a config source also differs from `raw_env`
-/// and is injected, keeping CLI strongest. Below Node's `--env-file` floor nothing
-/// is forwarded, so `raw_env` is empty and every var is injected. Pure over its
-/// inputs so the selection can be unit-tested without spawning Node.
+/// value Node actually delivers — `forwarded_raw` is the unexpanded merge of the
+/// files that really reach Node as `--env-file` args; every plain var is left to
+/// Node's `--env-file` and live-reloads on restart. A key absent from
+/// `forwarded_raw` is injected, because injection is then its only delivery
+/// channel: that covers a CLI-only `--env-file` value (auto-discovery is
+/// suppressed) and every source below Node's 20.6.0 `--env-file` floor, where
+/// nothing is forwarded at all. A CLI value that overrides a config `env` source
+/// also differs from `forwarded_raw` and is injected, keeping CLI strongest. Pure
+/// over its inputs so the selection can be unit-tested without spawning Node.
 fn watch_inject_vars<'a>(
     env_vars: &'a HashMap<String, String>,
-    raw_env: &HashMap<String, String>,
+    forwarded_raw: &HashMap<String, String>,
 ) -> Vec<(&'a String, &'a String)> {
     env_vars
         .iter()
-        .filter(|(k, v)| raw_env.get(*k) != Some(*v))
+        .filter(|(k, v)| forwarded_raw.get(*k) != Some(*v))
         .collect()
 }
 
 /// Node's `--env-file` floor (landed 20.6.0). Below it Node aborts on the unknown
-/// option before executing anything, so a watch child handed the flag dies with no
-/// output — every env-file source falls back to whole-map injection instead. Gates
-/// both the auto/config cascade and the explicit flags; nub supports Node from
-/// 18.19, so this range is live, not dead code.
+/// option *before executing anything*, so a watch child handed the flag dies
+/// instantly with no output — every env-file source must fall back to whole-map
+/// injection instead. Gates the auto-discovered `.env*` cascade and the project
+/// config's `env` sources as well as the explicit flags; nub supports Node from
+/// 18.19, so this range is live, not theoretical.
 fn node_accepts_env_file(version: &nub_core::node::version::NodeVersion) -> bool {
     *version >= nub_core::node::version::NodeVersion::new(20, 6, 0)
 }
@@ -441,13 +444,41 @@ fn strip_windows_verbatim_prefix(path: &str) -> String {
     }
 }
 
-/// Exact ambient spellings for the env-file runtime-control denylist. A Unix
-/// process may carry both canonical and mixed-case spellings; Windows collapses
-/// them through its case-insensitive environment.
-fn ambient_denied_env_file_keys() -> Vec<String> {
+/// The keys the watch guard strips from a forwarded env file's values.
+///
+/// The runtime-control denylist is unconditional. `NODE_ENV` joins it only when
+/// the auto `.env*` cascade is the live source, which is what keeps `nub watch`
+/// byte-identical to `nub <file>`: `load_env_files` drops a file-set `NODE_ENV`
+/// (#263 — a `.env` pinning it broke `next build`, whose prerender forks
+/// inherited the wrong mode), while the explicit `--env-file` map deliberately
+/// does not. Forwarding the raw files to Node bypasses that load-time drop
+/// entirely, so the watch path has to re-apply it at the process boundary.
+///
+/// The guard is one process-wide placeholder set, so it cannot key per file —
+/// `auto_cascade` picks whichever family's direct-runner policy to reproduce. An
+/// explicit flag suppresses auto-discovery, so those two never co-occur and the
+/// choice is exact. A project-config `env` SOURCES list is the one family that
+/// composes with an explicit flag; its own loader drops `NODE_ENV` too, so alone
+/// it wants the guard on, but alongside `--env-file` the explicit family's
+/// keep-`NODE_ENV` policy wins and a config source's `NODE_ENV` reaches the
+/// child. That combination is the residual gap — deliberately resolved toward
+/// the CLI flag, which is the more specific instruction.
+fn watch_guarded_env_file_keys(auto_cascade: bool) -> Vec<&'static str> {
+    let mut keys = nub_core::workspace::env::denied_env_file_keys().to_vec();
+    if auto_cascade {
+        keys.push("NODE_ENV");
+    }
+    keys
+}
+
+/// Exact ambient spellings of the guarded keys. A Unix process may carry both
+/// canonical and mixed-case spellings; Windows collapses them through its
+/// case-insensitive environment. An ambient value is the user's own and must
+/// survive untouched — only file-derived values are stripped.
+fn ambient_guarded_env_file_keys(guarded: &[&'static str]) -> Vec<String> {
     env::vars_os()
         .filter_map(|(key, _)| key.into_string().ok())
-        .filter(|key| nub_core::workspace::env::is_denied_env_file_key(key))
+        .filter(|key| guarded.iter().any(|g| key.eq_ignore_ascii_case(g)))
         .collect()
 }
 
@@ -455,8 +486,12 @@ fn ambient_denied_env_file_keys() -> Vec<String> {
 /// startup consumers cannot read a value from a raw env file. Unix startup
 /// lookup is exact-case, so a mixed-case ambient key does not cover the canonical
 /// spelling; Windows lookup is case-insensitive.
-fn watch_env_guard_placeholders(ambient_keys: &[String], windows: bool) -> Vec<&'static str> {
-    nub_core::workspace::env::denied_env_file_keys()
+fn watch_env_guard_placeholders(
+    guarded: &[&'static str],
+    ambient_keys: &[String],
+    windows: bool,
+) -> Vec<&'static str> {
+    guarded
         .iter()
         .copied()
         .filter(|denied| {
@@ -965,8 +1000,17 @@ pub enum Command {
     /// Upgrade Nub to the latest version.
     Upgrade {
         /// Target version (default: latest).
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["canary", "stable"])]
         version: Option<String>,
+
+        /// Upgrade to the latest canary build (rebuilt from every commit).
+        #[arg(long, conflicts_with = "stable")]
+        canary: bool,
+
+        /// Upgrade to the latest stable release — the default on stable
+        /// builds; on a canary build this opts back out of the canary channel.
+        #[arg(long)]
+        stable: bool,
 
         /// Show what would happen without performing the upgrade.
         #[arg(long)]
@@ -2581,9 +2625,11 @@ fn dispatch_subcommand(
         }),
         Some(Command::Upgrade {
             version,
+            canary,
+            stable,
             dry_run,
             yes,
-        }) => run_upgrade(version.as_deref(), dry_run, yes),
+        }) => run_upgrade(version.as_deref(), canary, stable, dry_run, yes),
         Some(Command::Help { command }) => {
             // `nub help <cmd>` routes to that command's help; `nub help` alone →
             // the curated top-level page. Same router as `nub <cmd> -h`.
@@ -4603,6 +4649,50 @@ enum StreamMode {
     Prefixed,
 }
 
+/// Resolve the bundled busybox-w32 POSIX-`sh` sidecar that backs `nub run` script
+/// bodies on Windows. The win32 package lays `busybox.exe` beside `nub.exe` in the
+/// package's `bin/` dir, so it resolves relative to the running executable
+/// (canonicalized, matching `current_nub_binary`). `__NUB_BUSYBOX_EXE` overrides
+/// the location — an internal test/CI seam that lets the Rust suite and the
+/// branch-scoped Windows probe supply a busybox without the release-packaging step;
+/// it is NOT a documented user knob (`--script-shell` is the user-facing override).
+/// A missing sidecar is a clean error, never a panic and never a silent cmd.exe
+/// fallback — that would resurrect the non-POSIX script semantics busybox replaces.
+/// Only reached on Windows (the `cfg!(windows)` default arm); cross-platform std so
+/// it compiles everywhere.
+fn resolve_bundled_busybox() -> Result<String> {
+    let to_utf8 = |p: PathBuf| -> Result<String> {
+        p.to_str()
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("busybox path is not valid UTF-8: {}", p.display()))
+    };
+    if let Some(over) = std::env::var_os("__NUB_BUSYBOX_EXE") {
+        let p = PathBuf::from(over);
+        if !p.is_file() {
+            bail!(
+                "__NUB_BUSYBOX_EXE points at a missing file: {}",
+                p.display()
+            );
+        }
+        return to_utf8(p);
+    }
+    let exe = std::env::current_exe().context("could not determine path to nub binary")?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let dir = exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("nub binary has no parent directory"))?;
+    let busybox = dir.join("busybox.exe");
+    if !busybox.is_file() {
+        bail!(
+            "nub's bundled POSIX shell (busybox.exe) was not found next to the nub \
+             executable at {}. Reinstall nub, or set `script-shell` in .npmrc to a \
+             POSIX shell on PATH.",
+            busybox.display()
+        );
+    }
+    to_utf8(busybox)
+}
+
 /// Build the shell `Command` for a package script with Nub's augmentation
 /// applied exactly once: `NODE_OPTIONS` (injected flags + preload + webstorage),
 /// the PATH shim prepended to the `node_modules/.bin` walk-up chain, `.env`
@@ -4685,27 +4775,22 @@ fn build_script_command(
         &ua_product,
     );
 
-    // Shell precedence: the explicit `--script-shell <path>` flag wins, then a
-    // `.npmrc` `script-shell=` setting, then the platform default. A custom
-    // POSIX shell uses `-c`; only the implicit Windows `cmd` default uses `/d /s /c`.
+    // Shell precedence: an explicit `--script-shell <path>` flag wins, then a
+    // `.npmrc` `script-shell=` setting, then the platform default. The default is
+    // the system `/bin/sh` on Unix and, on Windows, a bundled busybox-w32 POSIX
+    // `sh` resolved next to nub.exe — a real spawnable child process, so one POSIX
+    // script body runs identically on macOS/Linux/Windows and a future OS sandbox
+    // can confine it (an in-process interpreter could do neither). This replaces
+    // the former implicit `cmd.exe` default. busybox is a multi-call binary, so
+    // its `sh` applet name precedes `-c`; every other shell here takes plain `-c`.
     let custom_shell = script_shell_override
         .map(str::to_string)
         .or_else(|| nub_core::workspace::scripts::script_shell(&project.root));
-    let (shell, shell_flag) = if let Some(ref s) = custom_shell {
-        (s.as_str(), "-c")
-    } else if cfg!(windows) {
-        // npm's exact flags: `/d` (skip AutoRun), `/s` (strip outer quotes), `/c`.
-        ("cmd", "/d /s /c")
-    } else {
-        ("sh", "-c")
+    let (shell, shell_args): (String, Vec<&str>) = match custom_shell {
+        Some(ref s) => (s.clone(), vec!["-c"]),
+        None if cfg!(windows) => (resolve_bundled_busybox()?, vec!["sh", "-c"]),
+        None => ("sh".to_string(), vec!["-c"]),
     };
-    // The implicit Windows `cmd` default must spawn with verbatim arguments — the
-    // script body is passed to cmd.exe exactly as written (npm's
-    // `windowsVerbatimArguments: true`), so Rust's MSVCRT re-quoting never mangles
-    // a `node -e "…"` body or undoes the per-arg cmd escaping below. A custom POSIX
-    // shell (e.g. Git-Bash `sh.exe` via `--script-shell`) does its own parsing,
-    // so it takes the normal escaped-`arg` path.
-    let cmd_verbatim = custom_shell.is_none() && cfg!(windows);
 
     // Append the user's extra args the way npm does (@npmcli/promise-spawn):
     // each arg is escaped for the target shell and spliced onto the UNescaped
@@ -4715,7 +4800,7 @@ fn build_script_command(
     // not security — the args are the user's own argv (A42). The returned
     // `full_cmd` is also what the `$ <cmd>` preamble echoes, so the displayed
     // command matches the effective one (issue #146).
-    let full_cmd = nub_core::workspace::shell_escape::splice_args(cmd, args, shell);
+    let full_cmd = nub_core::workspace::shell_escape::splice_args(cmd, args, &shell);
 
     // Augmentation: NODE_OPTIONS + PATH shim so child `node` processes inside
     // the script inherit transpilation, polyfills, flag injection, and
@@ -4740,31 +4825,14 @@ fn build_script_command(
         &runtime_node_options,
     );
 
-    let mut command = StdCommand::new(shell);
-    // Windows cmd: split the multi-token flag (`/d /s /c`) and pass the body
-    // verbatim via `raw_arg`, the Rust equivalent of Node's
-    // `windowsVerbatimArguments: true`, so MSVCRT re-quoting never mangles a
-    // `node -e "…"` body or undoes the per-arg cmd escaping. A custom POSIX shell
-    // (e.g. Git-Bash `sh.exe`) does its own parsing → the escaped-`arg` path.
-    #[cfg(windows)]
-    let spawned = if cmd_verbatim {
-        use std::os::windows::process::CommandExt;
-        for flag in shell_flag.split(' ') {
-            command.arg(flag);
-        }
-        command.raw_arg(&full_cmd);
-        true
-    } else {
-        false
-    };
-    #[cfg(not(windows))]
-    let spawned = {
-        let _ = cmd_verbatim;
-        false
-    };
-    if !spawned {
-        command.arg(shell_flag).arg(&full_cmd);
-    }
+    // Every shell here parses `-c <body>` with the body as a single word (system
+    // `sh`, busybox `sh <-c>`, or a custom POSIX `--script-shell`), so the args
+    // are escaped + spliced onto the body above and passed as one string. The
+    // former implicit Windows `cmd` default — the sole `windowsVerbatimArguments`
+    // consumer — is gone; an explicit `script-shell=cmd` still takes this path
+    // with cmd-escaped args (unchanged), it was never the verbatim default.
+    let mut command = StdCommand::new(&shell);
+    command.args(&shell_args).arg(&full_cmd);
     command.current_dir(&project.root);
 
     // PATH: shim dir (when augmenting) → `.bin` walk-up chain → system PATH.
@@ -4784,6 +4852,37 @@ fn build_script_command(
         None => std::ffi::OsString::from(bin_path.clone()),
     };
     command.env("PATH", path);
+
+    // busybox-w32 script-shell integration (Windows default only; `bin_path` on
+    // the PATH above already lets it resolve `node_modules/.bin/*.cmd` shims).
+    // Two POSIX temp conventions the native-Win32 busybox does not provide:
+    //   * `${TMPDIR}` shell expansion — ash reads it from the process env, and on
+    //     Windows it is normally unset (the OS uses %TMP%/%TEMP%), so a script's
+    //     `${TMPDIR}` would be empty. Point it at the real OS temp dir, leaving a
+    //     user-set value untouched. (busybox's own C `getenv` already falls back
+    //     to %TMP%/%TEMP%, so `mktemp` worked; ash variable expansion does not.)
+    //   * literal `/tmp` — busybox resolves an absolute POSIX path against the
+    //     current drive root, so `/tmp` is `<project-drive>:\tmp` with no remap.
+    //     Materialize it ONLY when the body actually references `/tmp` — most
+    //     scripts never do, so the ordinary run creates nothing and no stray
+    //     drive-root `\tmp` appears. When a body does write `> /tmp/x`, best-effort
+    //     create it; ignoring the error keeps a locked-down drive root a
+    //     no-regression (the old cmd.exe default had no `/tmp` at all), while
+    //     `$TMPDIR`/`mktemp` still resolve via the env above. Skipped under an
+    //     explicit `--script-shell` (that shell owns its own environment model).
+    #[cfg(windows)]
+    if custom_shell.is_none() {
+        if std::env::var_os("TMPDIR").is_none()
+            && let Some(tmp) = std::env::temp_dir().to_str()
+        {
+            command.env("TMPDIR", tmp);
+        }
+        if full_cmd.contains("/tmp")
+            && let Some(drive_root) = project.root.ancestors().last()
+        {
+            let _ = std::fs::create_dir_all(drive_root.join("tmp"));
+        }
+    }
 
     // Default-on compile cache for script children (same decision as spawn_node,
     // 2026-06-10): a script's node subtree inherits this env, so heavyweight
@@ -5650,20 +5749,44 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // `discover_env_files`' highest-priority-first list in reverse for nub's
     // first-writer-wins precedence to line up.
     //
-    // CLI `--env-file` suppresses only the automatic `.env*` cascade. Explicit
-    // config `env` sources still compose first, and CLI values overlay them.
-    // Forward the auto/config cascade only when the pinned Node has `--env-file`
-    // at all, and the explicit files only when it also accepts every requested
-    // flag flavor (#479); below either floor, inject the whole parsed map.
+    // Auto-discovery suppression (the maintainer, 2026-06-15): when the user passed
+    // `--env-file`, the eager `.env*` discovery is suppressed on the watch path too
+    // — neither the `discover_env_files` `--env-file` Node args nor the pre-expanded
+    // `load_env_files` map are populated, so only the user's explicit file(s) reach
+    // the child. This keeps `nub --watch --env-file …` consistent with the direct
+    // file runner. `--no-env-file` suppresses BOTH the auto args and the explicit
+    // `--env-file` overlay — the watched Node receives no `--env-file` args at all.
+    // A project-config `env` SOURCES list is not suppressed by the CLI flag: it
+    // still composes first and CLI values overlay it.
+    // Load the cascade ONCE: `base_raw_env` is the unexpanded merge, `auto_env` is
+    // the same map expanded. A single read (rather than `load_env_files` + a second
+    // raw load) avoids re-parsing every file twice and closes the TOCTOU window
+    // where a file changing between two reads could spuriously inject a plain var.
+    // Forward the explicit `--env-file` files only when the pinned Node accepts
+    // every flag flavor present (#479). All-or-nothing: mixing forwarded and
+    // injected explicit files would corrupt last-writer-wins precedence (an
+    // injected earlier file, arriving via the inherited env, would beat a
+    // forwarded later one — Node's `--env-file` never overrides an already-set
+    // var). Below the gate, fall back to whole-map injection: values freeze at
+    // their startup snapshot (the pre-#479 behavior — degraded, never broken).
+    // The auto/config cascade needs the SAME floor. It never had one: `--env-file`
+    // args for its files were pushed unconditionally, so on Node 18.19–20.5 every
+    // `nub watch` in a project with a `.env` (or a config `env` source) died on
+    // `bad option: --env-file=…` before running a line. Gate it exactly like the
+    // explicit flags (the cascade always uses the plain `--env-file` spelling, so
+    // only the 20.6.0 floor applies to it).
     let forward_auto = node_accepts_env_file(&node.version);
     let forward_explicit = should_forward_explicit_env_files(&node.version, explicit_env_files);
+    // The auto `.env*` cascade or the config `env` sources, unexpanded. Loaded
+    // whenever that family is live, INDEPENDENT of forwarding: `auto_env` below
+    // needs it as the injection base even when the files never reach Node.
     let base_raw_env = if no_env_file {
         HashMap::new()
     } else {
         match &runtime.env {
             crate::project_config::RuntimeEnv::Default if !env_file_present => project
                 .as_ref()
-                .map(|p| nub_core::workspace::env::load_env_files_raw(&p.root, forward_auto))
+                .map(|p| nub_core::workspace::env::load_env_files_raw_warning(&p.root))
                 .unwrap_or_default(),
             crate::project_config::RuntimeEnv::Default => HashMap::new(),
             crate::project_config::RuntimeEnv::Sources(paths) => {
@@ -5678,15 +5801,20 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     nub_core::workspace::env::expand_env_map(&mut auto_env);
     let mut env_vars = auto_env;
     overlay_env_file_vars(&mut env_vars);
-    // Raw values that the watched Node receives through forwarded files. Values
-    // absent here must be injected, while values that differ after expansion
-    // are injected with their expanded form.
+    // The raw values the watched Node receives through forwarded `--env-file`
+    // args — precisely the set the inject loop must SKIP, since injecting a var
+    // Node already delivers freezes it at the startup value (#207). A family that
+    // is not forwarded contributes nothing here, which makes injection its only
+    // delivery channel and restores the pre-#207 freeze-at-startup behavior:
+    // degraded live-reload, never a dead watcher.
     let mut forwarded_raw_env = if forward_auto {
         base_raw_env
     } else {
         HashMap::new()
     };
     if forward_explicit {
+        // The explicit files reach Node as `--env-file` args below, so the inject
+        // loop must skip everything Node delivers identically.
         if let Some(explicit) = ENV_FILE_VARS_RAW.get() {
             forwarded_raw_env.extend(explicit.clone());
         }
@@ -5727,9 +5855,11 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
 
     if forward_auto {
         // Reverse so the highest-priority `.env*` file lands last (Node's
-        // last-writer-wins ⇒ nub's first-writer-wins precedence). The inversion is
-        // only needed because Node parses these; the injected fallback below the
-        // floor gets its precedence from `base_raw_env` directly.
+        // last-writer-wins ⇒ nub's first-writer-wins precedence). A config `env`
+        // sources array is already authored last-wins, so it passes through as
+        // written. The inversion is only needed because Node parses these; the
+        // injected fallback below the floor gets its precedence from
+        // `base_raw_env` directly.
         let env_paths: Box<dyn Iterator<Item = &PathBuf>> = if config_env_sources {
             Box::new(env_file_paths.iter())
         } else {
@@ -5814,12 +5944,16 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         }
         .node_options_token();
 
-        let ambient_keys = ambient_denied_env_file_keys();
-        for key in watch_env_guard_placeholders(&ambient_keys, cfg!(windows)) {
+        // The `.env*`/config cascade is the live family exactly when no explicit
+        // flag suppressed it; that decides whether `NODE_ENV` is guarded here (see
+        // `watch_guarded_env_file_keys`).
+        let guarded_keys = watch_guarded_env_file_keys(!env_file_present && !no_env_file);
+        let ambient_keys = ambient_guarded_env_file_keys(&guarded_keys);
+        for key in watch_env_guard_placeholders(&guarded_keys, &ambient_keys, cfg!(windows)) {
             cmd.env(key, "");
         }
         let state = serde_json::json!({
-            "denylist": nub_core::workspace::env::denied_env_file_keys(),
+            "denylist": guarded_keys,
             "ambientKeys": ambient_keys,
             "nodeOptions": &sanitized_node_options,
         });
@@ -6313,6 +6447,19 @@ const RELEASE_DOWNLOAD_BASE_ENV: &str = "NUB_RELEASE_BASE_URL";
 /// testable against a `file://` fixture.
 const RELEASE_LATEST_API_ENV: &str = "NUB_RELEASE_LATEST_URL";
 
+/// The rolling release tag the canary channel publishes under — release.yml's
+/// canary-release job recreates it at every built main commit, so the archive
+/// lives at `<base>/canary/nub-<target>.<ext>` with no `v` prefix (bun's exact
+/// layout). npm carries the same builds under the `canary` dist-tag; Homebrew
+/// and winget carry only stable releases.
+const CANARY_TAG: &str = "canary";
+
+/// Internal, test-only override for the canary release-by-tag endpoint
+/// (default: GitHub's `…/releases/tags/canary`). Serves the JSON whose `name`
+/// is `Canary <X.Y.Z>-canary.<date>.<run>` (release.yml's canary-release job
+/// titles it so). Same contract as [`RELEASE_LATEST_API_ENV`].
+const RELEASE_CANARY_API_ENV: &str = "NUB_RELEASE_CANARY_URL";
+
 /// The releases-download base URL — the test seam's override if set, else the
 /// canonical github.com path. Centralized so the override is read in exactly one
 /// place and the default is the single source of truth.
@@ -6326,6 +6473,59 @@ fn release_download_base() -> String {
 fn release_latest_api() -> String {
     std::env::var(RELEASE_LATEST_API_ENV)
         .unwrap_or_else(|_| format!("https://api.github.com/repos/{RELEASE_REPO}/releases/latest"))
+}
+
+/// The canary release-by-tag API URL — the test seam's override if set, else
+/// GitHub's `releases/tags/canary` endpoint.
+fn release_canary_api() -> String {
+    std::env::var(RELEASE_CANARY_API_ENV).unwrap_or_else(|_| {
+        format!("https://api.github.com/repos/{RELEASE_REPO}/releases/tags/{CANARY_TAG}")
+    })
+}
+
+/// True when THIS binary is a canary build — the canary pipeline stamps the
+/// compiled version as `<X.Y.Z>-canary.<date>.<run>` (release.yml's
+/// set-version.mjs step), so the marker rides CARGO_PKG_VERSION. bun-mirror: a
+/// canary build's bare `nub upgrade` stays on the canary channel (see
+/// [`choose_release_channel`]).
+fn is_canary_build() -> bool {
+    env!("CARGO_PKG_VERSION").contains("-canary.")
+}
+
+/// Which release channel an upgrade pulls from — orthogonal to
+/// [`UpgradeChannel`] (HOW the binary got installed): stable is the versioned
+/// `v*` tags, canary the rolling [`CANARY_TAG`] prerelease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReleaseChannel {
+    Stable,
+    Canary,
+}
+
+/// The bun-mirrored channel decision, pure for testability: `--canary` opts
+/// in; a canary build defaults back to canary so bare `nub upgrade` tracks the
+/// channel you're on; `--stable` or an explicit `--version` opts out.
+fn choose_release_channel(
+    flag_canary: bool,
+    flag_stable: bool,
+    explicit_version: bool,
+    running_is_canary: bool,
+) -> ReleaseChannel {
+    if flag_canary || (running_is_canary && !flag_stable && !explicit_version) {
+        ReleaseChannel::Canary
+    } else {
+        ReleaseChannel::Stable
+    }
+}
+
+/// Where to send a user whose install channel cannot serve the canary (npm and
+/// Homebrew only carry stable releases): the standalone installer, whose
+/// `canary` argument installs the rolling build into the self-owned `~/.nub`.
+fn canary_install_hint() -> &'static str {
+    if cfg!(windows) {
+        r#"iex "& { $(irm https://nubjs.com/install.ps1) } canary""#
+    } else {
+        "curl -fsSL https://nubjs.com/install.sh | bash -s canary"
+    }
 }
 
 /// The npm package users `npm install -g`. The bare `nub` name is an unrelated
@@ -6348,12 +6548,25 @@ enum UpgradeChannel {
     Npm,
     /// Homebrew install (path under a Homebrew prefix).
     Homebrew,
+    /// winget portable install (path under WinGet's package store). ADVISE,
+    /// never execute: spawning `winget upgrade` from inside a running nub would
+    /// try to replace the in-use nub.exe, which fails AND corrupts winget's
+    /// version bookkeeping (winget-cli #5235 records the upgrade as done);
+    /// self-swapping the file instead would leave winget's tracked version
+    /// stale forever (portable packages have no version hook, winget-cli
+    /// discussion #3304) and the next real `winget upgrade` would silently
+    /// clobber it. So this channel only prints the command to run.
+    Winget,
     /// The curl/`~/.nub` self-owned install — Nub owns the binary and swaps it
     /// in place. `install_dir` is the `…/.nub` root (parent of `bin/`).
     SelfOwned { install_dir: PathBuf },
     /// Couldn't tell — print the manual-instruction message and exit non-zero.
     Unknown,
 }
+
+/// The exact command a winget-installed user upgrades with. Advisory only —
+/// see [`UpgradeChannel::Winget`] for why nub never spawns it.
+const WINGET_UPGRADE_DISPLAY: &str = "winget upgrade --id Nubjs.Nub";
 
 /// Classify the install channel from the canonicalized binary path. Pure (no
 /// I/O) so the routing matrix is unit-testable; the actual `current_nub_binary`
@@ -6367,6 +6580,12 @@ fn detect_channel(bin_path: &Path) -> UpgradeChannel {
     }
     if s.contains("/homebrew/") || s.contains("/Cellar/") || s.contains("/linuxbrew/") {
         return UpgradeChannel::Homebrew;
+    }
+    // winget's portable-package store (%LOCALAPPDATA%\Microsoft\WinGet\Packages\…).
+    // The Links\ stub is a symlink into it, and `current_nub_binary` canonicalizes,
+    // so the real store path is what arrives here.
+    if s.contains("\\Microsoft\\WinGet\\Packages\\") || s.contains("/Microsoft/WinGet/Packages/") {
+        return UpgradeChannel::Winget;
     }
     // Self-owned: the binary sits at `<install_dir>/bin/nub`. Derive install_dir
     // by walking up from the binary, then accept it as self-owned when EITHER the
@@ -6476,67 +6695,129 @@ fn archive_ext(target: &str) -> &'static str {
     }
 }
 
-/// GitHub release archive URL for a resolved version + platform target. Mirrors
-/// install.sh's `url=` line (install.ps1's on Windows) so the self-owned channel
-/// pulls the same artifact the installer did. The base is
+/// GitHub release archive URL for a release TAG (`v<X.Y.Z>` for stable,
+/// [`CANARY_TAG`] for the rolling canary) + platform target. Mirrors
+/// install.sh's `url=` line (install.ps1's on Windows) so the self-owned
+/// channel pulls the same artifact the installer did. The base is
 /// [`release_download_base`] so the test seam can redirect it to a local
 /// fixture; unset → the canonical github.com URL.
-fn archive_url(version: &str, target: &str) -> String {
+fn archive_url_for_tag(tag: &str, target: &str) -> String {
     format!(
-        "{}/v{version}/nub-{target}.{}",
+        "{}/{tag}/nub-{target}.{}",
         release_download_base(),
         archive_ext(target)
     )
 }
 
-/// SHA-256 checksum sidecar URL for the archive. release.yml publishes a
-/// `<archive>.sha256` next to each archive; the self-owned channel fetches it
-/// and verifies the download before extracting.
-fn checksum_url(version: &str, target: &str) -> String {
-    format!("{}.sha256", archive_url(version, target))
+/// [`archive_url_for_tag`] for a resolved stable version (`v<version>` tag).
+fn archive_url(version: &str, target: &str) -> String {
+    archive_url_for_tag(&format!("v{version}"), target)
 }
 
-fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> {
+/// SHA-256 checksum sidecar URL for the archive. release.yml publishes a
+/// `<archive>.sha256` next to each archive (stable and canary alike); the
+/// self-owned channel fetches it
+/// and verifies the download before extracting.
+fn checksum_url_for_tag(tag: &str, target: &str) -> String {
+    format!("{}.sha256", archive_url_for_tag(tag, target))
+}
+
+/// [`checksum_url_for_tag`] for a resolved stable version (`v<version>` tag).
+fn checksum_url(version: &str, target: &str) -> String {
+    checksum_url_for_tag(&format!("v{version}"), target)
+}
+
+fn run_upgrade(
+    version: Option<&str>,
+    canary: bool,
+    stable: bool,
+    dry_run: bool,
+    _yes: bool,
+) -> Result<i32> {
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let bin_str = nub_binary.to_string_lossy().into_owned();
     let channel = detect_channel(&nub_binary);
+    let release_channel =
+        choose_release_channel(canary, stable, version.is_some(), is_canary_build());
     let target = version.unwrap_or("latest");
 
     if dry_run {
         match &channel {
             UpgradeChannel::Npm => {
-                println!("would upgrade to {target} via npm");
-                println!("  command: {}", npm_upgrade_command(target));
+                // npm serves the canary channel as the `canary` dist-tag
+                // (release.yml publishes every canary build under it), so the
+                // npm path is the same command with a different spec.
+                let npm_target = match release_channel {
+                    ReleaseChannel::Canary => CANARY_TAG,
+                    ReleaseChannel::Stable => target,
+                };
+                println!("would upgrade to {npm_target} via npm");
+                println!("  command: {}", npm_upgrade_command(npm_target));
             }
             UpgradeChannel::Homebrew => {
-                println!("would upgrade to {target} via homebrew");
-                println!("  command: {HOMEBREW_UPGRADE_DISPLAY}");
+                if release_channel == ReleaseChannel::Canary {
+                    println!(
+                        "would upgrade to canary, but canary builds are not published to Homebrew"
+                    );
+                    println!("  install instead: {}", canary_install_hint());
+                } else {
+                    println!("would upgrade to {target} via homebrew");
+                    println!("  command: {HOMEBREW_UPGRADE_DISPLAY}");
+                }
+            }
+            UpgradeChannel::Winget => {
+                if release_channel == ReleaseChannel::Canary {
+                    println!(
+                        "would upgrade to canary, but canary builds are not published to winget"
+                    );
+                    println!("  install instead: {}", canary_install_hint());
+                } else {
+                    println!("would upgrade to {target} via winget (run it yourself)");
+                    println!("  command: {WINGET_UPGRADE_DISPLAY}");
+                }
             }
             UpgradeChannel::SelfOwned { install_dir } => {
                 // Show the resolved dir, not a hardcoded ~/.nub — a receipt-marked
                 // NUB_INSTALL_DIR relocates it.
+                let channel_word = match release_channel {
+                    ReleaseChannel::Canary => "canary",
+                    ReleaseChannel::Stable => target,
+                };
                 println!(
-                    "would upgrade to {target} via self-owned ({})",
+                    "would upgrade to {channel_word} via self-owned ({})",
                     install_dir.display()
                 );
                 match platform_target() {
                     Some(plat) => {
-                        // Resolve `latest` to a concrete tag so the printed URL is
-                        // the real artifact, not a bogus `vlatest`. A dry-run is an
-                        // explicit user action where one GitHub API call is fine;
-                        // if it fails (offline), fall back to the literal spec and
-                        // say so rather than fabricate a version.
-                        let resolved = resolve_version(target);
-                        let ver = match &resolved {
-                            Ok(v) => v.as_str(),
-                            Err(_) => target,
+                        let tag = match release_channel {
+                            ReleaseChannel::Canary => {
+                                // The rolling tag needs no resolution; surface the
+                                // advertised canary version when the API answers.
+                                if let Some(v) = resolve_canary_version() {
+                                    println!("  canary:   v{v}");
+                                }
+                                CANARY_TAG.to_string()
+                            }
+                            ReleaseChannel::Stable => {
+                                // Resolve `latest` to a concrete tag so the printed URL is
+                                // the real artifact, not a bogus `vlatest`. A dry-run is an
+                                // explicit user action where one GitHub API call is fine;
+                                // if it fails (offline), fall back to the literal spec and
+                                // say so rather than fabricate a version.
+                                let resolved = resolve_version(target);
+                                let ver = match &resolved {
+                                    Ok(v) => v.as_str(),
+                                    Err(_) => target,
+                                };
+                                if resolved.is_err() && target == "latest" {
+                                    println!("  (could not resolve `latest`; showing literal)");
+                                }
+                                format!("v{ver}")
+                            }
                         };
-                        if resolved.is_err() && target == "latest" {
-                            println!("  (could not resolve `latest`; showing literal)");
-                        }
                         println!("  platform: {plat}");
-                        println!("  archive:  {}", archive_url(ver, plat));
-                        println!("  sha256:   {}", checksum_url(ver, plat));
+                        println!("  archive:  {}", archive_url_for_tag(&tag, plat));
+                        println!("  sha256:   {}", checksum_url_for_tag(&tag, plat));
                         println!("  install:  {}", install_dir.display());
                     }
                     None => println!(
@@ -6547,19 +6828,58 @@ fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> 
                 }
             }
             UpgradeChannel::Unknown => {
-                println!("would upgrade to {target}, but the install channel is unknown");
+                // Mirror the real-run Unknown arm: a canary ask gets the
+                // installer hint, not the stable npm command.
+                let channel_word = match release_channel {
+                    ReleaseChannel::Canary => "canary",
+                    ReleaseChannel::Stable => target,
+                };
+                println!("would upgrade to {channel_word}, but the install channel is unknown");
                 println!("  binary: {bin_str}");
-                println!("  manual: {}", npm_upgrade_command(target));
+                match release_channel {
+                    ReleaseChannel::Canary => {
+                        println!("  manual: {}", canary_install_hint())
+                    }
+                    ReleaseChannel::Stable => {
+                        println!("  manual: {}", npm_upgrade_command(target))
+                    }
+                }
             }
         }
         return Ok(0);
     }
 
+    // Homebrew and winget only carry stable releases — a canary ask on those
+    // channels has nothing to install, so route the user to the standalone
+    // installer rather than silently handing them a stable build. (npm DOES
+    // carry canary, as the `canary` dist-tag — handled in the npm arm below.)
+    if release_channel == ReleaseChannel::Canary
+        && matches!(channel, UpgradeChannel::Homebrew | UpgradeChannel::Winget)
+    {
+        bail!(
+            "nub upgrade: canary builds are not published to {}.\n\
+             Install the canary via the standalone installer instead:\n  {}",
+            if channel == UpgradeChannel::Homebrew {
+                "Homebrew"
+            } else {
+                "winget"
+            },
+            canary_install_hint()
+        );
+    }
+
     match channel {
         UpgradeChannel::Npm => {
-            let cmd = npm_upgrade_command(target);
+            // The canary channel rides npm's `canary` dist-tag (release.yml
+            // publishes every canary build under it), so a canary ask is the
+            // same install with a different spec.
+            let npm_target = match release_channel {
+                ReleaseChannel::Canary => CANARY_TAG,
+                ReleaseChannel::Stable => target,
+            };
+            let cmd = npm_upgrade_command(npm_target);
             println!("running `{cmd}`");
-            let status = npm_upgrade_command_invocation(target).status()?;
+            let status = npm_upgrade_command_invocation(npm_target).status()?;
             let code = nub_core::node::spawn::exit_code_from_status(&status);
             // npm wrote a NEW inode; existing shim hardlinks still carry the
             // old bytes until `nub pm shim` re-links them.
@@ -6599,8 +6919,25 @@ fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> 
             }
             Ok(code)
         }
+        UpgradeChannel::Winget => {
+            // Advisory only — see the enum doc: spawning winget here would try
+            // to replace this running nub.exe (fails + corrupts winget's version
+            // tracking), and self-swapping would strand winget's bookkeeping.
+            bail!(
+                "nub upgrade: this nub was installed by winget, which must perform the upgrade \
+                 itself.\nRun: {WINGET_UPGRADE_DISPLAY}"
+            );
+        }
         UpgradeChannel::SelfOwned { install_dir } => {
-            perform_selfowned_upgrade(&install_dir, target)?;
+            if is_canary_build() && release_channel == ReleaseChannel::Stable {
+                // Explicit --stable (or --version) from a canary build: make the
+                // channel switch visible (bun's "Downgrading … to stable" moment).
+                println!(
+                    "leaving the canary channel (v{}) for a stable release",
+                    env!("CARGO_PKG_VERSION")
+                );
+            }
+            perform_selfowned_upgrade(&install_dir, release_channel, target)?;
             // nub owns the swapped-in binary's path — re-link the shims to the
             // new inode in place (the post-upgrade re-link story).
             relink_shims_after_selfowned(&install_dir);
@@ -6611,10 +6948,43 @@ fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> 
                 "nub upgrade: could not detect install channel.\n\
                  Binary at: {bin_str}\n\
                  Upgrade manually: {}",
-                npm_upgrade_command(target)
+                if release_channel == ReleaseChannel::Canary {
+                    canary_install_hint().to_string()
+                } else {
+                    npm_upgrade_command(target)
+                }
             );
         }
     }
+}
+
+/// Best-effort resolve of the canary release's advertised version: release.yml
+/// titles the rolling release `Canary <X.Y.Z>-canary.<date>.<run>`, so the
+/// release-by-tag API's `name` field carries the version after the word
+/// (tolerating a bare or `v`-prefixed name too). `None` on ANY failure — the
+/// rolling-tag download needs no version resolution, so a flaky API must never
+/// block a canary upgrade; it only costs the version label and the
+/// already-up-to-date short-circuit.
+fn resolve_canary_version() -> Option<String> {
+    let api = release_canary_api();
+    let out = std::process::Command::new("curl")
+        .args(["--fail", "--silent", "--location", &api])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let body: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let name = body.get("name")?.as_str()?.trim();
+    let version = name
+        .strip_prefix("Canary ")
+        .unwrap_or(name)
+        .trim()
+        .trim_start_matches('v');
+    if version.is_empty() {
+        return None;
+    }
+    Some(version.to_string())
 }
 
 /// Resolve a `latest`/explicit version spec to a concrete `X.Y.Z` string via the
@@ -6666,7 +7036,11 @@ fn resolve_version(spec: &str) -> Result<String> {
 /// `detect_channel`, `archive_url`, `checksum_url`, `platform_target`,
 /// `sha256_hex`, and sidecar parsing — are individually exercised; the glue here
 /// is kept deliberately linear and small so its correctness is reviewable by eye.
-fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<()> {
+fn perform_selfowned_upgrade(
+    install_dir: &Path,
+    release_channel: ReleaseChannel,
+    version_spec: &str,
+) -> Result<()> {
     let target = platform_target().ok_or_else(|| {
         anyhow::anyhow!(
             "nub upgrade: no published archive for this platform ({}/{}). \
@@ -6675,11 +7049,32 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
             std::env::consts::ARCH
         )
     })?;
-    let version = resolve_version(version_spec)?;
-    let url = archive_url(&version, target);
-    let sha_url = checksum_url(&version, target);
+    let (tag, label, expected_version) = match release_channel {
+        ReleaseChannel::Stable => {
+            let version = resolve_version(version_spec)?;
+            (format!("v{version}"), format!("v{version}"), Some(version))
+        }
+        ReleaseChannel::Canary => match resolve_canary_version() {
+            Some(v) => {
+                if v == env!("CARGO_PKG_VERSION") {
+                    // bun-mirror: a no-op canary upgrade says so instead of
+                    // re-downloading identical bytes.
+                    println!("already on the latest canary build (v{v})");
+                    println!("to return to the latest stable release: nub upgrade --stable");
+                    return Ok(());
+                }
+                (CANARY_TAG.to_string(), format!("canary v{v}"), Some(v))
+            }
+            // The rolling tag downloads without resolution; a flaky API costs the
+            // label, the up-to-date short-circuit, and the staged binary's version
+            // assertion (its bundle validation still runs).
+            None => (CANARY_TAG.to_string(), "canary".to_string(), None),
+        },
+    };
+    let url = archive_url_for_tag(&tag, target);
+    let sha_url = checksum_url_for_tag(&tag, target);
 
-    println!("upgrading to v{version} ({target})");
+    println!("upgrading to {label} ({target})");
 
     // Stage downloads + extraction in a sibling temp dir on the same filesystem
     // as the install so the final swap is a same-filesystem rename (atomic).
@@ -6721,7 +7116,7 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
     // copy). Windows has no mode bit and no `ensure_bin_executable`.
     #[cfg(not(windows))]
     ensure_bin_executable(&new_bin.join(NUB_EXE))?;
-    verify_provisioned_version(&new_bin.join(NUB_EXE), &version)
+    verify_provisioned_version(&new_bin.join(NUB_EXE), expected_version.as_deref())
         .context("nub upgrade: staged release bundle failed validation")?;
 
     // The staged binary validates any platform resources it requires before the
@@ -6774,7 +7169,7 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
         }
     }
 
-    println!("installed v{version} to {}", install_dir.display());
+    println!("installed {label} to {}", install_dir.display());
     Ok(())
 }
 
@@ -7076,7 +7471,7 @@ fn provision_self(version: &str) -> Result<PathBuf> {
     // HERE instead of exec-looping. The tarball was already checksum-verified and
     // the store path is version-addressed, so this is belt-and-suspenders — but it
     // is the last gate before a default-on exec, so it stays.
-    verify_provisioned_version(&staged_bin, version)?;
+    verify_provisioned_version(&staged_bin, Some(version))?;
 
     // Atomic place. A concurrent provisioner may have won the race — keep theirs.
     if !bin.is_file() {
@@ -7099,20 +7494,31 @@ fn provision_self(version: &str) -> Result<PathBuf> {
 /// expected version — the loop-safety gate before a default-on exec. `nub
 /// --version` prints a bare `v<X.Y.Z>` on its first stdout line. The probe carries
 /// the re-entry guard so it can never itself delegate (`--version` short-circuits
-/// before the dispatcher anyway, but the guard is cheap insurance).
-fn verify_provisioned_version(bin: &Path, expected: &str) -> Result<()> {
+/// before the dispatcher anyway, but the guard is cheap insurance), and
+/// `__NUB_VALIDATE_RESOURCE_BUNDLE` so the artifact proves the platform resources
+/// it needs (the packaged Bubblewrap fallback) actually shipped with it.
+///
+/// `expected` is `None` only for the rolling canary tag with the releases API
+/// unreachable, where there is no resolved version to compare against. The probe
+/// itself still runs — the bundle validation is the half that matters most for a
+/// staged artifact, and it is exactly the half that does not need the version.
+fn verify_provisioned_version(bin: &Path, expected: Option<&str>) -> Result<()> {
+    let guard = expected.unwrap_or(CANARY_TAG);
     let out = std::process::Command::new(bin)
         .arg("--version")
-        .env(crate::self_shim::SELF_DISPATCHED_ENV, expected)
+        .env(crate::self_shim::SELF_DISPATCHED_ENV, guard)
         .env("__NUB_VALIDATE_RESOURCE_BUNDLE", "1")
         .output()
         .with_context(|| format!("probing {} --version", bin.display()))?;
     if !out.status.success() {
         bail!(
-            "{ERR_NUB_SELF_SHIM}: the provisioned nub@{expected} failed its --version probe. \
+            "{ERR_NUB_SELF_SHIM}: the provisioned nub@{guard} failed its --version probe. \
              Set NUB_SELF_SHIM=0 to run with your installed nub."
         );
     }
+    let Some(expected) = expected else {
+        return Ok(());
+    };
     let stdout = String::from_utf8_lossy(&out.stdout);
     let reported = stdout
         .lines()
@@ -9573,10 +9979,15 @@ mod tests {
         assert!(arg.ends_with("missing.env"), "{arg}");
     }
 
+    /// The floor the auto-discovered `.env*` cascade and the project-config `env`
+    /// sources share with the explicit flags. Empirically pinned against installed
+    /// Nodes: 19.3.0 rejects `--env-file`, 20.10.0 accepts it — bracketing the
+    /// documented 20.6.0 landing.
     #[test]
-    fn auto_and_config_env_file_forwarding_gates_on_node_version() {
+    fn auto_env_file_forwarding_gates_on_node_version() {
         use nub_core::node::version::NodeVersion;
         assert!(!node_accepts_env_file(&NodeVersion::new(18, 19, 0)));
+        assert!(!node_accepts_env_file(&NodeVersion::new(19, 3, 0)));
         assert!(!node_accepts_env_file(&NodeVersion::new(20, 5, 0)));
         assert!(node_accepts_env_file(&NodeVersion::new(20, 6, 0)));
         assert!(node_accepts_env_file(&NodeVersion::new(26, 0, 0)));
@@ -9723,22 +10134,41 @@ mod tests {
 
     #[test]
     fn watch_env_guard_placeholders_follow_os_key_semantics() {
+        let guarded = watch_guarded_env_file_keys(false);
         let ambient = vec![
             "NODE_OPTIONS".to_string(),
             "node_extra_ca_certs".to_string(),
         ];
 
-        let unix = watch_env_guard_placeholders(&ambient, false);
+        let unix = watch_env_guard_placeholders(&guarded, &ambient, false);
         assert!(!unix.contains(&"NODE_OPTIONS"));
         assert!(unix.contains(&"NODE_EXTRA_CA_CERTS"));
         assert!(unix.contains(&"NODE_TLS_REJECT_UNAUTHORIZED"));
         assert!(unix.contains(&"NODE_REPL_EXTERNAL_MODULE"));
 
-        let windows = watch_env_guard_placeholders(&ambient, true);
+        let windows = watch_env_guard_placeholders(&guarded, &ambient, true);
         assert!(!windows.contains(&"NODE_OPTIONS"));
         assert!(!windows.contains(&"NODE_EXTRA_CA_CERTS"));
         assert!(windows.contains(&"NODE_TLS_REJECT_UNAUTHORIZED"));
         assert!(windows.contains(&"NODE_REPL_EXTERNAL_MODULE"));
+    }
+
+    /// `NODE_ENV` is guarded only for the auto `.env*` cascade, matching what the
+    /// direct runner does for each family (#263 drops a file-set `NODE_ENV` from
+    /// the cascade; the explicit `--env-file` map keeps it). An ambient value is
+    /// the user's own and never gets a placeholder.
+    #[test]
+    fn node_env_is_guarded_only_for_the_auto_cascade() {
+        assert!(watch_guarded_env_file_keys(true).contains(&"NODE_ENV"));
+        assert!(!watch_guarded_env_file_keys(false).contains(&"NODE_ENV"));
+
+        let guarded = watch_guarded_env_file_keys(true);
+        assert!(watch_env_guard_placeholders(&guarded, &[], false).contains(&"NODE_ENV"));
+        assert!(
+            !watch_env_guard_placeholders(&guarded, &["NODE_ENV".to_string()], false)
+                .contains(&"NODE_ENV"),
+            "an ambient NODE_ENV must pass through untouched"
+        );
     }
 
     #[test]
@@ -10243,6 +10673,17 @@ mod tests {
         }
     }
 
+    // The channel flags are mutually exclusive, and an explicit version pins a
+    // stable release so it can't combine with either channel flag.
+    #[test]
+    fn subcommand_upgrade_channel_flags_conflict() {
+        assert!(parse(&["nub", "upgrade", "--canary"]).is_ok());
+        assert!(parse(&["nub", "upgrade", "--stable"]).is_ok());
+        assert!(parse(&["nub", "upgrade", "--canary", "--stable"]).is_err());
+        assert!(parse(&["nub", "upgrade", "--version", "1.2.3", "--canary"]).is_err());
+        assert!(parse(&["nub", "upgrade", "--version", "1.2.3", "--stable"]).is_err());
+    }
+
     // P0 regression guard: a self-owned upgrade must leave bin/nub EXECUTABLE.
     // The release tarball ships the binary at 0644 (CI's artifact round-trip
     // strips +x), so after the staging-extract + swap_dir the freshly-installed
@@ -10360,6 +10801,14 @@ mod tests {
             detect_channel(Path::new("/opt/homebrew/Cellar/nub/0.0.6/bin/nub")),
             UpgradeChannel::Homebrew
         );
+        // winget's portable-package store, in the canonicalized (post-Links-
+        // symlink) form the router actually sees.
+        assert_eq!(
+            detect_channel(Path::new(
+                "C:\\Users\\u\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Nubjs.Nub_Microsoft.Winget.Source_8wekyb3d8bbwe\\nub.exe"
+            )),
+            UpgradeChannel::Winget
+        );
         match detect_channel(Path::new("/home/u/.nub/bin/nub")) {
             UpgradeChannel::SelfOwned { install_dir } => {
                 assert_eq!(install_dir, Path::new("/home/u/.nub"));
@@ -10454,7 +10903,8 @@ mod tests {
     }
 
     /// Serializes the tests that read or mutate the release-URL env seams
-    /// (`NUB_RELEASE_BASE_URL` / `NUB_RELEASE_LATEST_URL`). Those vars are
+    /// (`NUB_RELEASE_BASE_URL` / `NUB_RELEASE_LATEST_URL` /
+    /// `NUB_RELEASE_CANARY_URL`). Those vars are
     /// process-global, so a test that sets them mustn't run concurrently with one
     /// that asserts the unset-default URL shape.
     static RELEASE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -10490,6 +10940,53 @@ mod tests {
             sha256_hex(b""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+
+    // The rolling canary tag's URLs: un-versioned `download/canary/` path, the
+    // same `.sha256` pairing + per-platform extension rules as stable, and the
+    // release-by-tag resolve endpoint. Default (env-seam unset) shapes, so it
+    // holds the release-env lock like the stable URL test above.
+    #[test]
+    fn canary_urls_use_the_rolling_tag_path() {
+        let _g = RELEASE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            archive_url_for_tag(CANARY_TAG, "linux-x64"),
+            "https://github.com/nubjs/nub/releases/download/canary/nub-linux-x64.tar.gz"
+        );
+        assert_eq!(
+            checksum_url_for_tag(CANARY_TAG, "win32-x64"),
+            "https://github.com/nubjs/nub/releases/download/canary/nub-win32-x64.zip.sha256"
+        );
+        assert_eq!(
+            release_canary_api(),
+            "https://api.github.com/repos/nubjs/nub/releases/tags/canary"
+        );
+    }
+
+    // The bun-mirrored channel decision table: `--canary` opts in, a canary
+    // build's bare `nub upgrade` stays on canary, and `--stable` or an explicit
+    // `--version` opts back to the stable channel.
+    #[test]
+    fn release_channel_decision_mirrors_bun() {
+        use ReleaseChannel::*;
+        // (flag_canary, flag_stable, explicit_version, running_is_canary) → chosen
+        let cases = [
+            ((false, false, false, false), Stable),
+            ((true, false, false, false), Canary),
+            ((false, true, false, false), Stable),
+            ((false, false, true, false), Stable),
+            ((false, false, false, true), Canary),
+            ((false, true, false, true), Stable),
+            ((false, false, true, true), Stable),
+            ((true, false, false, true), Canary),
+        ];
+        for ((c, s, v, r), want) in cases {
+            assert_eq!(
+                choose_release_channel(c, s, v, r),
+                want,
+                "choose_release_channel({c}, {s}, {v}, {r})"
+            );
+        }
     }
 
     // END-TO-END upgrade test against a LOCAL fake release — closes the "upgrade
@@ -10594,7 +11091,7 @@ mod tests {
         );
 
         // The full download→verify→extract→swap→chmod→symlink path.
-        let result = perform_selfowned_upgrade(&install, "latest");
+        let result = perform_selfowned_upgrade(&install, ReleaseChannel::Stable, "latest");
 
         // Wrong-checksum sub-case: corrupt the archive after digesting it and prove
         // the verify step REFUSES it (run before asserting the happy path so a
@@ -10608,7 +11105,7 @@ mod tests {
             format!("{}  nub-{target}.tar.gz\n", "0".repeat(64)),
         )
         .unwrap();
-        let bad = perform_selfowned_upgrade(&bad_install, "latest");
+        let bad = perform_selfowned_upgrade(&bad_install, ReleaseChannel::Stable, "latest");
 
         // Restore env BEFORE asserting so a failed assertion can't leak the seam.
         unsafe {
@@ -10736,7 +11233,7 @@ mod tests {
         unsafe {
             std::env::set_var(RELEASE_DOWNLOAD_BASE_ENV, &base_url);
         }
-        let result = perform_selfowned_upgrade(&install, FAKE_VERSION);
+        let result = perform_selfowned_upgrade(&install, ReleaseChannel::Stable, FAKE_VERSION);
         unsafe {
             std::env::remove_var(RELEASE_DOWNLOAD_BASE_ENV);
         }
@@ -10750,6 +11247,117 @@ mod tests {
         assert!(
             !install.join("runtime").exists(),
             "the new upgrader removes ~/.nub/runtime; the archive's runtime/ is ignored"
+        );
+    }
+
+    // CANARY CHANNEL e2e: drives `ReleaseChannel::Canary` through the same
+    // file:// seams. (a) With the release-by-tag API advertising a version other
+    // than this build's, the full download→verify→swap runs from the
+    // UN-VERSIONED rolling-tag asset path (`releases/download/canary/…` — no
+    // `v` prefix, the exact layout the canary pipeline publishes). (b) With the API
+    // advertising THIS build's own version, the upgrade short-circuits as
+    // already-up-to-date and leaves the install untouched.
+    #[cfg(unix)]
+    #[test]
+    fn canary_upgrade_pulls_the_rolling_tag_and_short_circuits_when_current() {
+        let Some(target) = platform_target() else {
+            eprintln!("skipping: no published tarball target for this platform");
+            return;
+        };
+        let _g = RELEASE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // The staged binary is version-probed before the swap, so the fixture has
+        // to answer `--version` with the version the API advertises below — which
+        // also makes this the canary-side coverage of that gate.
+        const NEW_NUB_BYTES: &[u8] = b"#!/bin/sh\nif [ \"${1:-}\" = --version ]; then echo v9.9.10-canary.20990101.7; else echo fake-canary-nub; fi\n";
+        let fixture = tempfile::tempdir().expect("fixture root");
+
+        let build = fixture.path().join("build");
+        std::fs::create_dir_all(build.join("bin")).unwrap();
+        std::fs::write(build.join("bin").join("nub"), NEW_NUB_BYTES).unwrap();
+
+        let asset_dir = fixture
+            .path()
+            .join("releases")
+            .join("download")
+            .join(CANARY_TAG);
+        std::fs::create_dir_all(&asset_dir).unwrap();
+        let archive = asset_dir.join(format!("nub-{target}.tar.gz"));
+        assert!(
+            std::process::Command::new("tar")
+                .arg("-czf")
+                .arg(&archive)
+                .arg("-C")
+                .arg(&build)
+                .args(["bin"])
+                .status()
+                .expect("tar the fixture archive")
+                .success(),
+            "fixture archive must tar cleanly"
+        );
+        let digest = sha256_hex(&std::fs::read(&archive).unwrap());
+        std::fs::write(
+            asset_dir.join(format!("nub-{target}.tar.gz.sha256")),
+            format!("{digest}  nub-{target}.tar.gz\n"),
+        )
+        .unwrap();
+
+        // The release-by-tag response: `name` is release.yml's `Canary <ver>`
+        // title form; the advertised version here ≠ this build's version.
+        let canary_json = fixture.path().join("canary.json");
+        std::fs::write(
+            &canary_json,
+            r#"{"tag_name":"canary","name":"Canary 9.9.10-canary.20990101.7"}"#,
+        )
+        .unwrap();
+
+        let install = fixture.path().join(".nub");
+        std::fs::create_dir_all(install.join("bin")).unwrap();
+        std::fs::write(install.join("bin").join("nub"), b"OLD\n").unwrap();
+
+        let base_url = format!("file://{}/releases/download", fixture.path().display());
+        unsafe {
+            std::env::set_var(RELEASE_DOWNLOAD_BASE_ENV, &base_url);
+            std::env::set_var(
+                RELEASE_CANARY_API_ENV,
+                format!("file://{}", canary_json.display()),
+            );
+        }
+
+        // (a) advertised ≠ running → the rolling-tag download+swap runs.
+        let upgraded = perform_selfowned_upgrade(&install, ReleaseChannel::Canary, "latest");
+
+        // (b) advertised == running → short-circuit, nothing touched.
+        let current_install = fixture.path().join(".nub-current");
+        std::fs::create_dir_all(current_install.join("bin")).unwrap();
+        std::fs::write(current_install.join("bin").join("nub"), b"OLD\n").unwrap();
+        std::fs::write(
+            &canary_json,
+            format!(
+                r#"{{"tag_name":"canary","name":"Canary {}"}}"#,
+                env!("CARGO_PKG_VERSION")
+            ),
+        )
+        .unwrap();
+        let current = perform_selfowned_upgrade(&current_install, ReleaseChannel::Canary, "latest");
+
+        unsafe {
+            std::env::remove_var(RELEASE_DOWNLOAD_BASE_ENV);
+            std::env::remove_var(RELEASE_CANARY_API_ENV);
+        }
+
+        upgraded.expect("canary upgrade against the local fake rolling release must succeed");
+        assert_eq!(
+            std::fs::read(install.join("bin").join("nub")).unwrap(),
+            NEW_NUB_BYTES,
+            "canary upgrade must swap in the rolling-tag archive's bytes"
+        );
+
+        current.expect("an already-current canary upgrade must succeed as a no-op");
+        assert_eq!(
+            std::fs::read(current_install.join("bin").join("nub")).unwrap(),
+            b"OLD\n",
+            "an already-current canary must short-circuit without touching the install"
         );
     }
 

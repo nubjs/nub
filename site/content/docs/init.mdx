@@ -8,19 +8,20 @@ Running `nub init` scaffolds a minimal TypeScript project that runs and typechec
 ```console
 $ nub init -y
 created my-app
-  package.json
-  tsconfig.json
-  index.ts
-  .gitignore
-  README.md
-  .git/ initialized
+├── package.json
+├── tsconfig.json
+├── index.ts
+├── .gitignore
+├── README.md
+└── .git/
 
 devDependencies:
 + @nubjs/types@0.4.13
 + @types/node@26.1.1
 + typescript@7.0.2
 
-next: nub index.ts
+Your project is ready!
+Try running `nub index.ts`
 ```
 
 The scaffold has zero runtime dependencies — the entry file runs right away:
@@ -39,22 +40,25 @@ The manifest makes this a Nub-native project — the same `packageManager` pin a
   "name": "my-app",
   "version": "0.0.1",
   "type": "module",
-  "packageManager": "nub@0.4.13",
+  "packageManager": "nub@0.5.0",
   "devEngines": {
-    "packageManager": { "name": "nub", "version": "^0.4.13", "onFail": "warn" }
+    "packageManager": { "name": "nub", "version": "^0.5.0", "onFail": "warn" }
   },
   "scripts": {
     "start": "nub index.ts"
   },
   "devDependencies": {
-    "@nubjs/types": "^0.4.13",
+    "@nubjs/types": ">=0.4.13 <=0.5.0",
     "@types/node": "^26",
     "typescript": "^7"
   }
 }
 ```
 
-The install step resolves those and writes Nub's neutral lockfile, `nub.lock`.
+The `@nubjs/types` range is capped at the running Nub version, but allows an
+older release so the default 24-hour cooling window can select the newest
+mature declarations. The install step resolves the dependencies and writes
+Nub's neutral lockfile, `nub.lock`.
 
 The tsconfig targets Node's own TypeScript semantics — `nodenext` resolution, `verbatimModuleSyntax`, strict mode, `noEmit` (Nub transpiles; the installed `typescript` is for the editor and typechecking) — and wires the installed type packages:
 

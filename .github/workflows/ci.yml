@@ -150,6 +150,10 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
+      # nub-phantom is an excluded, aube-free workspace and keeps the lower 1.93
+      # floor, so it verifies on 1.93.0 first. The root workspace (nub-cli) depends
+      # on the vendored aube, which uses core::hint::cold_path() (stable in 1.95),
+      # so root + nub-native verify on 1.95.0.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # 1.93.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
         with:
           toolchain: 1.93.0
@@ -162,11 +166,11 @@ jobs:
         with:
           shared-key: ci-check
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo check --all-targets
       - run: cargo check --manifest-path crates/nub-phantom/Cargo.toml --all-targets
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # 1.95.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
         with:
           toolchain: 1.95.0
+      - run: cargo check --all-targets
       - run: cd crates/nub-native && cargo check --locked --all-targets --all-features
       # Real Windows compile + test coverage is the windows-latest leg of the
       # `test` job. The previous fast `x86_64-pc-windows-gnu` cross-check needed
@@ -835,6 +839,16 @@ jobs:
           else
             cp target/debug/libnub_native.so runtime/addons/nub-native.node
           fi
+      # nub's Windows script shell is a bundled busybox-w32 sidecar that
+      # release.yml stages next to nub.exe — absent from cargo's target dir, so the
+      # many `nub run` integration tests would have no shell here. Point the
+      # internal resolver override (crates/nub-cli/src/cli.rs resolve_bundled_busybox)
+      # at the vendored binary (windows-latest is x64) so those tests exercise the
+      # real busybox script path. Unix uses the system /bin/sh and ignores this var.
+      - name: Point nub run at the vendored busybox (Windows script shell)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "__NUB_BUSYBOX_EXE=$GITHUB_WORKSPACE/vendor/busybox-w32/busybox64.exe" >> "$GITHUB_ENV"
       # --no-fail-fast: a plain `cargo test` stops at the FIRST failing test target,
       # so one unrelated failure would abort the run before it ever reached the
       # sandbox-enforcement suites this job exists to gate. Run every target to
@@ -919,6 +933,11 @@ jobs:
           mkdir -p runtime/addons
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             cp target/debug/nub_native.dll runtime/addons/nub-native.node
+            # The PnP matrix's `run`/`ws-run` scenarios execute package scripts, so
+            # the built nub needs its Windows script shell. Stage busybox next to
+            # nub.exe exactly as the win32 package does, exercising the REAL
+            # current_exe() sidecar resolution (no test-only env override here).
+            cp vendor/busybox-w32/busybox64.exe target/debug/busybox.exe
           elif [[ "$RUNNER_OS" == "macOS" ]]; then
             cp target/debug/libnub_native.dylib runtime/addons/nub-native.node
           else

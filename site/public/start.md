@@ -94,16 +94,23 @@ The same pages online (agent-readable index: https://nubjs.com/llms.txt; `nub <c
 
 ## 3. Investigate the project
 
-Do a read-only pass over the project — dependencies, `package.json` scripts, the TypeScript runner, env loading, watch tooling, and the Node-version / package-manager setup. Make no edits. What you're looking for is the set of tools Nub makes redundant here:
+Do a read-only pass over the project — dependencies, `package.json` scripts, the TypeScript runner, env loading, watch tooling, CI workflows, and the Node-version / package-manager setup. Make no edits. What you're looking for is the classes of tooling Nub makes redundant. Match by class — the named packages are representatives, not an exhaustive list:
 
-| Likely redundant | Subsumed by |
-| --- | --- |
-| `tsx`, `ts-node` | Nub runs TypeScript directly (`nub <file>`) |
-| `dotenv` (loading `.env`) | Nub loads `.env` / `.env.${NODE_ENV}` automatically |
-| `nodemon` | Nub's watch mode (`nub watch <file>`) |
-| `tsconfig-paths` | Nub applies `tsconfig.json#paths` at runtime |
-| `cross-env` | Nub's env loading + script runner |
-| `nvm`, `fnm`, `corepack` | Nub provisions the pinned Node automatically |
+| Toolchain class | Look for | Subsumed by |
+| --- | --- | --- |
+| TypeScript runners | `tsx`, `ts-node`, `ts-node-dev`, `esbuild-register`, `@swc-node/register` | `nub <file>` runs TypeScript directly |
+| Build-to-run scripts | script bodies shaped like `tsc && node dist/…` | `nub <file>` — no build step to run |
+| Env-file loading | `dotenv`, `dotenv-cli`, `dotenv-expand`, `env-cmd`; `import "dotenv/config"`, `-r dotenv/config` | `.env` / `.env.${NODE_ENV}` load automatically, with `${VAR}` expansion |
+| Cross-platform env vars | `cross-env` in script bodies | Nub's script runner + env loading |
+| Watch-and-restart | `nodemon`, `tsx watch`, `ts-node-dev` | `nub watch <file>` |
+| Script orchestration | `npm-run-all` / `npm-run-all2` (`run-p`, `run-s`) | `nub run "/^build:/"` runs matching scripts concurrently; serial with `--workspace-concurrency 1` |
+| Path aliases | `tsconfig-paths`, `-r tsconfig-paths/register` | `tsconfig.json#paths` applied at runtime |
+| Bin runners | `npx`, `pnpm dlx` / `pnpm exec`, `yarn dlx`, `bunx` | `nubx <tool>` |
+| Package-manager wrappers | `ni` / `@antfu/ni` | Nub drives the incumbent PM's lockfile directly |
+| Package patching | `patch-package` + its `postinstall` hook | `nub patch` / `nub patch-commit` — but patches then apply only on `nub install`, so teammates and CI must install through Nub |
+| Node version managers | `nvm`, `fnm`, `n`, `volta`; "install Node / nvm use" steps in the README | the pin (`.node-version` / `engines.node`) alone provisions the right Node |
+| Package-manager provisioning | corepack, `corepack enable` in setup or CI | `nub pm` |
+| CI Node setup | `actions/setup-node` (+ its cache config) | `nubjs/setup-nub` installs Nub, warms the pinned Node, and caches the store |
 
 Some of these may still be referenced in code (e.g. an explicit `import "dotenv/config"`) — a dependency is only safe to remove once nothing references it, so note the references your plan would have to update.
 
@@ -116,11 +123,14 @@ Present what you found as a set of **independent, opt-in steps**, each with a on
 The menu is project-specific, but it typically draws from:
 
 - **Install the Nub agent skill** (see step 6) so future sessions automatically reach for Nub.
-- **Remove the TypeScript runner** — drop `tsx` / `ts-node` from devDependencies and change scripts to run files with Nub.
+- **Remove the TypeScript runner** — drop `tsx` / `ts-node` (or their register-hook siblings) from devDependencies, and collapse any `tsc && node dist/…` scripts that exist only to run code.
 - **Remove dotenv** — delete the dependency and its `import "dotenv/config"` references; `.env` loads automatically.
 - **Remove nodemon** — replace with Nub's watch mode.
 - **Remove `cross-env` / `tsconfig-paths`** — subsumed by the runtime.
+- **Remove `npm-run-all`** — replace `run-p` / `run-s` invocations with Nub's regex script selector.
+- **Migrate `patch-package`** — re-author patches with `nub patch`, then drop the dependency and its `postinstall` hook. Flag the constraint: patches apply on `nub install` only, so this step commits the team and CI to installing through Nub.
 - **Retire the Node version manager** — ensure a pin exists (`.node-version` / `engines.node`), then drop `nvm` / `fnm` / corepack setup from docs and CI.
+- **Swap CI Node setup** — replace `actions/setup-node` with `nubjs/setup-nub` in GitHub workflows.
 - **Update `package.json` scripts** — route script bodies through Nub where it simplifies them.
 
 Anything the user doesn't select simply stays as it is — every step is optional, and using Nub for day-to-day commands works fine with zero of them applied.

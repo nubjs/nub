@@ -106,16 +106,26 @@ fi
 # --- Version ---
 
 version=${1:-latest}
-if [[ "$version" == latest ]]; then
-    # Authenticate the GitHub API call when a token is available: CI runners share
-    # an IP and hit the 60/hr unauthenticated rate limit (403). Real users without
-    # GITHUB_TOKEN use the anonymous path unchanged.
-    api_auth=()
-    [[ -n "${GITHUB_TOKEN:-}" ]] && api_auth=(-H "Authorization: token ${GITHUB_TOKEN}")
-    version=$(curl -fsSL ${api_auth[@]+"${api_auth[@]}"} "https://api.github.com/repos/nubjs/nub/releases/latest" | grep '"tag_name"' | sed -E 's/.*"v(.*)".*/\1/')
-    if [[ -z "$version" ]]; then
-        error "Failed to determine latest version"
+if [[ "$version" == canary ]]; then
+    # The rolling canary prerelease — rebuilt from every commit to main and
+    # published under the un-versioned `canary` tag, so there is no version to
+    # resolve. May be broken; `nub upgrade --stable` returns to a release.
+    release_tag=canary
+    display_version=canary
+else
+    if [[ "$version" == latest ]]; then
+        # Authenticate the GitHub API call when a token is available: CI runners share
+        # an IP and hit the 60/hr unauthenticated rate limit (403). Real users without
+        # GITHUB_TOKEN use the anonymous path unchanged.
+        api_auth=()
+        [[ -n "${GITHUB_TOKEN:-}" ]] && api_auth=(-H "Authorization: token ${GITHUB_TOKEN}")
+        version=$(curl -fsSL ${api_auth[@]+"${api_auth[@]}"} "https://api.github.com/repos/nubjs/nub/releases/latest" | grep '"tag_name"' | sed -E 's/.*"v(.*)".*/\1/')
+        if [[ -z "$version" ]]; then
+            error "Failed to determine latest version"
+        fi
     fi
+    release_tag="v${version}"
+    display_version="v${version}"
 fi
 
 # --- Install ---
@@ -135,7 +145,7 @@ fi
 bin_dir="$install_dir/bin"
 exe="$bin_dir/nub"
 
-info "Installing nub v${version} for ${target}..."
+info "Installing nub ${display_version} for ${target}..."
 
 mkdir -p "$bin_dir" || error "Failed to create install directory: $bin_dir"
 
@@ -146,7 +156,7 @@ mkdir -p "$bin_dir" || error "Failed to create install directory: $bin_dir"
 # `nub upgrade`; current binaries use only resources adjacent to bin/nub.
 # (Windows is handled by install.ps1 above, so $target is always darwin/linux.)
 archive_name="nub-${target}.tar.gz"
-url="https://github.com/nubjs/nub/releases/download/v${version}/${archive_name}"
+url="https://github.com/nubjs/nub/releases/download/${release_tag}/${archive_name}"
 checksum_url="${url}.sha256"
 
 tmp_archive=$(mktemp) || error "Failed to create temp file"
@@ -249,7 +259,7 @@ cat > "$install_dir/.nub-receipt" <<'RECEIPT' || error "Failed to write install 
 # in-place self-update for a non-default install location).
 RECEIPT
 
-success "Installed nub v${version} (with nubx) to $exe"
+success "Installed nub ${display_version} (with nubx) to $exe"
 
 # --- PATH setup ---
 

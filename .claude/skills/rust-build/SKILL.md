@@ -60,6 +60,16 @@ Baseline all sharers agree on is **origin/main**. So:
 
 Depended-on crates = every workspace/vendored crate **except the leaf binary** `crates/nub-cli`: `crates/nub-core`, `crates/nub-cache-key`, `crates/nub-native`, and all of `vendor/aube`. The wrapper computes divergence with `git diff` against the merge-base with origin/main (committed branch work *and* uncommitted edits), so it adapts as you edit — start shared, and the first time you touch aube it flips to isolated on the next build.
 
+## Orchestrating a serial multi-phase epic — reuse ONE dedicated target, never fresh-cold-build per worktree
+
+The isolation rule above hands each diverging worktree a **fresh private `target/` = one cold build (~40 min on a contended host)**. Correct for a lone worktree — but an agentic **serial chain** of diverging worktrees (a multi-phase epic where each phase edits `crates/nub-sandbox` or another depended-on crate in its own worktree, one after another, each reviewed + merge-verified) pays that cold build *per phase and per review* — pure waste, since the crates.io deps are identical across the phases and only the ~10 workspace crates change. (Burned 2026-07-25: ran a sandbox epic giving every phase/review a fresh private `CARGO_TARGET_DIR` — a 47-min cold review build for nothing, repeatedly, until the maintainer flagged the loop times.)
+
+Fix — point the whole serial chain at **ONE dedicated private target** (not a fresh per-worktree one, and NOT the default shared one): `export CARGO_TARGET_DIR=~/.cache/nub/<epic>-target`, reused across every phase worktree + its review + its merge-verify. Deps compile cold **once**; each later build recompiles only the workspace crates (a few minutes). Two safety rules:
+- **Serial only.** Cargo's target-dir lock serializes builds into one dir, so run them one at a time (a serial epic already does); never point two *concurrently-building* worktrees at it.
+- **Dedicated, NOT `shared-target`.** `~/.cache/nub/shared-target` is **multi-tenant** — many concurrent Claude/dev sessions build against it — so a worktree diverging a depended-on crate would clobber *their* builds. Use a private-but-reused epic target instead.
+
+Corollary: **a review/verify sub-agent must reuse the implementer's already-warm target, never a fresh one** — dispatching a reviewer into a new `CARGO_TARGET_DIR` re-pays the whole cold build for nothing.
+
 ## Trade-offs and edges
 
 - **A worktree that edits aube pays a cold build even with no sibling diverging aube concurrently.** The invariant is "match origin/main," which doesn't depend on observing volatile sibling state — that's what makes it robust. Isolating-only-when-a-sibling-also-diverges would save a cold build for a lone aube editor but is racy; the simple rule wins.

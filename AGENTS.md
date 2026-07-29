@@ -4,6 +4,18 @@ This file is the entry point for AI coding agents working in this repository. It
 
 When the active agent is OpenAI Codex, read [`CODEX.md`](CODEX.md) after this file. It is Codex-only maintainer guidance and does not apply to Claude or other agents.
 
+## Skills work for EVERY agent, not just Claude (Codex included)
+
+This repo's task-specific playbooks — "skills" — live as plain-markdown `SKILL.md` files under `.claude/skills/<name>/SKILL.md`. Each carries a frontmatter `description` naming exactly when to use it. **Claude Code auto-discovers and auto-triggers these; Codex and other agents do NOT** — they have no equivalent auto-load, so they must reach them deliberately. If you are Codex (or any non-Claude agent): when a task looks like it has an established playbook, run `ls .claude/skills/` and read the matching `SKILL.md` before improvising — they are agent-neutral markdown, nothing about them is Claude-specific. A skill's steps are authoritative over your default approach for that task. The highest-value ones to know exist:
+
+- **`gcloud-vm`** — provision/start/reach Google Cloud VMs (real Linux-kernel enforcement, real Windows/MSVC/AppContainer, a clean build box); you can CREATE a VM on demand, not just start the standing `nub-linux`/`nub-win`.
+- **`dev-loop`** / **`rust-build`** / **`worktree`** — build & test nub in a worktree (the fast-profile loop, the shared-target-dir contamination hazard, the one-command worktree setup).
+- **`ci-adhoc-test`** — run a macOS/Windows/Linux-arch probe on real CI with NO PR (branch-scoped workflow); **`ci-watch`** — block on CI correctly.
+- **`release`** — cut a patch release end-to-end; **`address-issue`** — the full issue playbook; **`audit-thread`** / **`sandbox-pentest`** — parity-audit and adversarial-red-team methodology.
+- **`prose-writing`** — REQUIRED before writing any GitHub comment, doc, or release note; **`benchmarking`**, **`pm-perf-tracing`**, **`impact-analysis`**, **`aube-bump`**, **`git-archaeology`**, **`md-toc`**, **`soak`** — each a durable method for its named task.
+
+(This is the repo's OWN agent tooling, so a `.claude/skills/*` home is correct — the "agent-agnostic, never overfit to Claude" rule governs copy that ships to USERS' arbitrary agents, not this repo's internal playbooks. The rule this section satisfies is that those playbooks be *reachable* by whichever agent is running here.)
+
 When present, `AGENTS.local.md` (gitignored, not part of a clean checkout) carries maintainer-local orientation — a personal orchestration workflow, sub-agent dispatch policy, and pointers into local-only directories that a fresh clone does not contain. It is an optional overlay; nothing in this file depends on it, and a contributor working without it has everything needed here.
 
 ## Non-negotiables — read first if you're opening a PR or editing this repo

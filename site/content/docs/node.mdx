@@ -57,6 +57,8 @@ Hello world!
 
 Within a single directory, `.node-version` wins over `.nvmrc` (it's the tool-agnostic standard). Discovery walks **up** the directory tree to the nearest pin and **skips** pin files that live inside an installed dependency (under `node_modules`) — a dependency's own CI pin never drives your project. The `package.json` fields (`devEngines.runtime`, `engines.node`) are read from the **workspace root** manifest when one exists above you, else the nearest `package.json` — a monorepo pins its Node once at the root.
 
+Dependency build scripts follow the same root anchor during an install, so every member of a monorepo builds native dependencies under one Node rather than switching per member. Running a script with `nub run` inside a member still uses that member's own pin.
+
 ### Where the binary comes from
 
 Once a version is pinned, Nub finds a binary for it in order:

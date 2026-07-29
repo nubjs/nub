@@ -2,7 +2,9 @@
 name = "nub-cli"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# 1.95 (above the 1.93 workspace floor) for core::hint::cold_path() in the
+# vendored aube engine, a path dep of nub-cli. See vendor/aube/Cargo.toml.
+rust-version = "1.95"
 license.workspace = true
 repository.workspace = true
 

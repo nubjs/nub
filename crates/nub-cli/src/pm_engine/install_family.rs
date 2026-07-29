@@ -368,6 +368,7 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
     )?;
     super::min_release_age::persist(&session.cwd, code == 0, &globals.output);
     stamp_if_virgin(&session, code);
+    crate::install_engine::record(&session.cwd, code);
     // `nub add vite` (or adding any dep to a vite project) changes the graph;
     // refresh `.modules.yaml` + the < 8.1 patch. Note: a FIRST `nub add vite`
     // can't have disk-materialized vite yet (the manifest didn't declare it at
@@ -393,6 +394,7 @@ fn run_remove(typed: &str, args: &[String]) -> Result<i32> {
         aube::commands::remove::run(verb, globals.effective_filter()),
     )?;
     stamp_if_virgin(&session, code);
+    crate::install_engine::record(&session.cwd, code);
     Ok(code)
 }
 
@@ -424,6 +426,7 @@ fn run_update(typed: &str, args: &[String]) -> Result<i32> {
     )?;
     super::min_release_age::persist(&session.cwd, code == 0, &globals.output);
     stamp_if_virgin(&session, code);
+    crate::install_engine::record(&session.cwd, code);
     // `nub update` re-resolves; a vite bump can cross the 8.1 boundary, so
     // refresh `.modules.yaml` + the < 8.1 patch to match the new graph.
     apply_vite_compat(&session, code);
@@ -1150,6 +1153,7 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     // declaration). Any incumbent signal ⇒ `false` ⇒ no write — nub never imposes
     // its brand on another PM's project (the symmetric brand boundary).
     stamp_if_virgin(&session, code);
+    crate::install_engine::record(&session.cwd, code);
     Ok(code)
 }
 
@@ -1360,7 +1364,9 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
             ));
         }
     }
-    run_engine(&session, opts, yarn, &flags.output)
+    let code = run_engine(&session, opts, yarn, &flags.output)?;
+    crate::install_engine::record(&session.cwd, code);
+    Ok(code)
 }
 
 /// Yarn-kind drift pre-flight, at the nub layer.

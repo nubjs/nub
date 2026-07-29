@@ -920,25 +920,6 @@ fn native_pm_mode(detected: Option<&DetectedLockfile>, truly_fresh: bool, cwd: &
     ) == Some(config_scope::Role::Nub)
 }
 
-/// Whether Nub's native-only hard release-age default applies. Lenient engine
-/// sessions collapse identity contradictions to `None`, so `truly_fresh` alone
-/// is insufficient there: independently prove that strict identity resolution
-/// also sees no incumbent signal before treating an undetected project as new.
-fn native_release_age_default_enabled(
-    detected: Option<&DetectedLockfile>,
-    truly_fresh: bool,
-    cwd: &Path,
-) -> bool {
-    if detected.is_some() {
-        return native_pm_mode(detected, truly_fresh, cwd);
-    }
-    truly_fresh
-        && matches!(
-            resolve_identity_walk_up(cwd, IdentityStrictness::Strict),
-            Ok(None)
-        )
-}
-
 fn lower_native_install_settings(
     install: &crate::project_config::InstallConfig,
     embedder_defaults: &[(String, String)],
@@ -1579,6 +1560,23 @@ fn augmentation_to_lifecycle_overlay(
     (overlay, prepends)
 }
 
+/// The directory lifecycle Node discovery is anchored at: the workspace root
+/// when `cwd` sits in a member, else the project root, else `cwd` itself.
+///
+/// aube keys its install state and virtual store at the workspace root
+/// (`dirs::workspace_or_project_root`), and an install from a member
+/// materializes the ONE shared tree for the whole workspace — so the Node its
+/// build scripts compile against, which is also the engine that keys the ABI
+/// caches, must be the root's pin rather than whichever member the shell sits
+/// in. Anchoring at the raw cwd instead lets a member's own `.nvmrc` flip the
+/// engine key against a root-anchored state file, thrashing the warm path.
+/// `detect_project` walks up by the same rule aube's root does.
+fn lifecycle_node_anchor(cwd: &Path) -> PathBuf {
+    nub_core::workspace::detect::detect_project(cwd)
+        .map(|p| p.workspace_root.unwrap_or(p.root))
+        .unwrap_or_else(|| cwd.to_path_buf())
+}
+
 /// Install nub's runtime augmentation onto the engine's lifecycle-script spawn
 /// env (via aube's generic [`aube::set_script_settings`] overlay), so dependency
 /// build scripts run under the project's provisioned + augmented Node — the same
@@ -1587,17 +1585,7 @@ fn augmentation_to_lifecycle_overlay(
 /// re-entrant / broken install); the resolved Node *version* is published to the
 /// engine either way. Called once per command from [`engine_session`].
 fn apply_lifecycle_augmentation(cwd: &Path, configured_node_options: Option<&str>) {
-    // Anchor Node discovery at the workspace root — the directory aube keys its
-    // install state and virtual store at (`dirs::workspace_or_project_root`). An
-    // install from a member materializes the ONE shared tree for the whole
-    // workspace, so the Node its build scripts compile against — and the engine
-    // that keys the ABI caches — must be the root's pin, not whichever member the
-    // shell sits in. Discovering from the raw cwd instead lets a member's own
-    // `.nvmrc` flip the engine key against a root-anchored state file, thrashing
-    // the warm path. `detect_project` walks up by the same rule aube's root does.
-    let anchor = nub_core::workspace::detect::detect_project(cwd)
-        .map(|p| p.workspace_root.unwrap_or(p.root))
-        .unwrap_or_else(|| cwd.to_path_buf());
+    let anchor = lifecycle_node_anchor(cwd);
     // The project's Node — pin-aware (`.nvmrc`/`.node-version`/`engines`), NOT
     // the ambient PATH node. This resolved version drives flag injection and its
     // path pins npm_node_execpath. Mirrors build_script_command's discovery.
@@ -2456,6 +2444,23 @@ fn nub_setting_defaults(
             fresh_format.to_string(),
         ),
         ("defaultTrust".to_string(), "true".to_string()),
+        // Nub advertises a real 24-hour trust floor, not an advisory one. Pin
+        // both halves at Nub's embedder tier rather than inheriting the engine's
+        // current built-in values: 1440 minutes, and fail closed when no mature
+        // version satisfies the range. Explicit user config still wins.
+        //
+        // BOTH halves are unconditional, incumbent projects included. A parallel
+        // lane (68fb21e99d) scoped only the `Strict` half to Nub-native projects,
+        // on the premise that an incumbent npm/pnpm/yarn/bun project "retains its
+        // own prior default behavior unchanged" — a premise the `minimumReleaseAge`
+        // line above already breaks, since the floor itself applies everywhere.
+        // Scoping only the strictness would leave an incoherent half-policy: Nub's
+        // floor imposed on an incumbent, but silently degrading to advisory exactly
+        // when the registry cannot prove a publish time. Whether the floor should
+        // apply to incumbents AT ALL is the real question, and it is one decision,
+        // not two.
+        ("minimumReleaseAge".to_string(), "1440".to_string()),
+        ("minimumReleaseAgeStrict".to_string(), "true".to_string()),
         ("virtualStoreDir".to_string(), store_dir.clone()),
         ("stateDir".to_string(), store_dir),
         (
@@ -2491,16 +2496,6 @@ fn nub_setting_defaults(
         ),
         ("diskMaterializePackages".to_string(), disk_materialize),
     ];
-    // Nub-native projects make the default 24-hour release-age gate hard: if
-    // registry metadata cannot establish a publish time, resolution fails
-    // closed. Incumbent npm/pnpm/yarn/bun projects retain their own prior
-    // setting/default behavior unchanged, as does standalone aube.
-    if native_release_age_default_enabled(detected, truly_fresh, cwd) {
-        defaults.insert(
-            2,
-            ("minimumReleaseAgeStrict".to_string(), "true".to_string()),
-        );
-    }
     if let Some(data) = nub_data_dir() {
         defaults.push((
             "storeDir".to_string(),
@@ -3656,6 +3651,16 @@ mod tests {
             );
             assert_eq!(get(&defaults, "defaultLockfileFormat"), Some("pnpm"));
             assert_eq!(
+                get(&defaults, "minimumReleaseAge"),
+                Some("1440"),
+                "Nub's release-age floor must default to 24 hours"
+            );
+            assert_eq!(
+                get(&defaults, "minimumReleaseAgeStrict"),
+                Some("true"),
+                "Nub's 24-hour release-age floor must fail closed by default"
+            );
+            assert_eq!(
                 get(&defaults, "virtualStoreDir"),
                 Some("node_modules/.store")
             );
@@ -3725,56 +3730,17 @@ mod tests {
         }
     }
 
+    /// A lenient engine session collapses an identity CONTRADICTION (a
+    /// `packageManager` naming one PM beside another PM's lockfile) to a plain
+    /// "no incumbent", which is indistinguishable from a genuinely fresh project.
+    /// Any default that keys off "this project is Nub-native" must therefore
+    /// consult STRICT resolution rather than trusting a lenient `None` — the
+    /// release-age scoping in 68fb21e99d read the lenient answer and treated an
+    /// ambiguous incumbent as Nub's own. That scoping is gone (the floor now
+    /// applies unconditionally), so this pins the underlying strictness contract
+    /// on its own, for the next default that needs it.
     #[test]
-    fn minimum_release_age_strict_default_is_native_only() {
-        let dir = tempfile::tempdir().unwrap();
-        let detected = |kind| DetectedLockfile {
-            kind,
-            dir: dir.path().to_path_buf(),
-            fresh: false,
-        };
-
-        for kind in [
-            LockfileKind::Npm,
-            LockfileKind::NpmShrinkwrap,
-            LockfileKind::Pnpm,
-            LockfileKind::Yarn,
-            LockfileKind::YarnBerry,
-            LockfileKind::Bun,
-        ] {
-            let incumbent = detected(kind);
-            let defaults = nub_setting_defaults(
-                Some(&incumbent),
-                false,
-                dir.path(),
-                VirtualStoreLocality::Default,
-            );
-            assert_eq!(
-                get(&defaults, "minimumReleaseAgeStrict"),
-                None,
-                "{kind:?} incumbent must retain the engine's prior default"
-            );
-        }
-
-        let fresh = nub_setting_defaults(None, true, dir.path(), VirtualStoreLocality::Default);
-        assert_eq!(
-            get(&fresh, "minimumReleaseAgeStrict"),
-            Some("true"),
-            "a truly fresh Nub-native project must fail closed"
-        );
-
-        let nub = detected(LockfileKind::Aube);
-        let nub_defaults =
-            nub_setting_defaults(Some(&nub), false, dir.path(), VirtualStoreLocality::Default);
-        assert_eq!(
-            get(&nub_defaults, "minimumReleaseAgeStrict"),
-            Some("true"),
-            "an existing Nub-native project must fail closed"
-        );
-    }
-
-    #[test]
-    fn minimum_release_age_strict_default_rejects_lenient_identity_ambiguity() {
+    fn lenient_identity_resolution_hides_an_incumbent_contradiction() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("package.json"),
@@ -3792,15 +3758,6 @@ mod tests {
         assert!(
             resolve_identity_walk_up(dir.path(), IdentityStrictness::Strict).is_err(),
             "strict identity resolution must retain the contradiction"
-        );
-
-        // Lenient callers previously passed this lossy `None` together with a
-        // derived fresh=true, which incorrectly enabled Nub's native default.
-        let defaults = nub_setting_defaults(None, true, dir.path(), VirtualStoreLocality::Default);
-        assert_eq!(
-            get(&defaults, "minimumReleaseAgeStrict"),
-            None,
-            "an ambiguous incumbent project must not be treated as Nub-native"
         );
     }
 
@@ -4620,5 +4577,42 @@ mod tests {
         let m = root_manifest(d.path());
         assert!(first_catalog_specifier(&m, d.path()).is_some());
         assert!(role_honors_catalog(Role::Yarn, Some(4), Some(10)));
+    }
+
+    #[test]
+    fn a_member_install_resolves_the_workspace_roots_node_pin() {
+        // aube anchors install state and the virtual store at the workspace root,
+        // and a member install materializes that ONE shared tree. So the engine
+        // published for it has to name the root's Node: keyed off the member's own
+        // pin, the ABI caches describe a Node the root-anchored state file never
+        // saw, and alternating root/member installs each rebuild the other's tree.
+        let d = workspace(&[
+            (
+                "package.json",
+                r#"{"name":"ws","workspaces":["packages/*"]}"#,
+            ),
+            (".nvmrc", "22.15.0\n"),
+            ("packages/member/package.json", r#"{"name":"member"}"#),
+            ("packages/member/.nvmrc", "20.19.0\n"),
+        ]);
+        let member = d.path().join("packages/member");
+        let pin_at = |dir: &Path| {
+            nub_core::node::discovery::resolve_pin_chain(dir)
+                .expect("pin chain resolves")
+                .pin
+                .expect("a pin file is in scope")
+                .0
+        };
+
+        // Control: from the raw cwd the member's own pin wins — the key the engine
+        // carried before discovery was anchored.
+        assert_eq!(pin_at(&member), "20.19.0");
+        assert_eq!(
+            pin_at(&lifecycle_node_anchor(&member)),
+            "22.15.0",
+            "a member install builds the workspace's one shared tree, so anchoring \
+             Node discovery anywhere but the root keys the ABI caches to a Node the \
+             install state never saw"
+        );
     }
 }

@@ -34,3 +34,13 @@ symlink wiki
 # isolation:worktree worktrees do NOT run new-worktree.ts — those rely on the
 # dispatch-prompt step-0 `ln -s <abs-shared-root>/.fray .fray`.
 symlink .fray
+
+# The prebuilt N-API addon. `--all-features` turns on `embed-runtime`, whose
+# build script hashes every runtime entrypoint and PANICS when this file is
+# absent — so `cargo clippy --all-targets --all-features`, the pre-push gate
+# AGENTS.md prescribes, cannot run at all in a fresh worktree without it.
+# COPIED, never symlinked: `make addon-fast` writes this exact path, and a
+# symlink would send a worktree's addon build through into the shared tree,
+# clobbering it for every sibling. A missing source is skipped, so a tree that
+# has never built the addon still creates worktrees fine.
+copy runtime/addons/nub-native.node

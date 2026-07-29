@@ -6,17 +6,23 @@
 //! fields `nub pm pin` writes, via the same writer.
 
 use std::io::IsTerminal;
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use console::{Key, Term};
 use serde_json::{Map, Value, json};
 
 /// `@types/node` range written into the scaffold. Tracks the docs' latest-major
 /// rule (AGENTS.md: examples always use the newest Node major) — bump on a new
-/// `@types/node` major at release time. `@nubjs/types` needs no constant: it is
-/// version-locked to nub itself (`make version` bumps npm/nub-types with the
-/// binary), so its range derives from CARGO_PKG_VERSION.
+/// `@types/node` major at release time.
 const TYPES_NODE_RANGE: &str = "^26";
+
+/// Oldest declarations that cover the scaffold's `Worker`-era ambient surface.
+/// The upper bound is filled from the running Nub version: init may install an
+/// older mature release under the 24-hour age gate, but never declarations for
+/// runtime behavior newer than the binary being used.
+const NUB_TYPES_FLOOR: &str = "0.4.13";
 
 /// `typescript` range written into the scaffold. Nub transpiles TS itself, so
 /// the compiler package exists for the editor's typechecking (`tsc --noEmit`,
@@ -45,7 +51,7 @@ pub(crate) fn run_init(opts: InitOptions) -> Result<i32> {
 
     let cwd = std::env::current_dir().context("resolving the current directory")?;
     let interactive =
-        !opts.yes && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+        !opts.yes && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
 
     // A basename that sanitizes to nothing (non-Latin script, all-symbol) must
     // not become `"name": ""` — an invalid manifest that fails silently later.
@@ -68,33 +74,16 @@ pub(crate) fn run_init(opts: InitOptions) -> Result<i32> {
             }
             s
         }
-        (None, true) => {
-            let input = demand::Input::new("Project name")
-                .placeholder(&default_name)
-                .validation(|s| {
-                    if s.is_empty() || !sanitize_name(s).is_empty() {
-                        Ok(())
-                    } else {
-                        Err("not a valid package name")
-                    }
-                })
-                .run();
-            match prompt_result(input)? {
-                None => return Ok(130),
-                Some(s) if s.trim().is_empty() => default_name,
-                Some(s) => sanitize_name(&s),
-            }
-        }
+        (None, true) => match prompt_name(&default_name)? {
+            None => return Ok(130),
+            Some(s) => s,
+        },
         (None, false) => default_name,
     };
     let typescript = if opts.js {
         false
     } else if interactive {
-        let pick = demand::Select::new("Language")
-            .option(demand::DemandOption::new(true).label("TypeScript"))
-            .option(demand::DemandOption::new(false).label("JavaScript"))
-            .run();
-        match prompt_result(pick)? {
+        match prompt_choice("Language", &[("TypeScript", true), ("JavaScript", false)])? {
             None => return Ok(130),
             Some(ts) => ts,
         }
@@ -106,7 +95,10 @@ pub(crate) fn run_init(opts: InitOptions) -> Result<i32> {
     let git = if opts.no_git || in_repo {
         false
     } else if interactive {
-        match prompt_result(demand::Confirm::new("Initialize a git repository?").run())? {
+        match prompt_choice(
+            "Initialize a Git repository?",
+            &[("Yes", true), ("No", false)],
+        )? {
             None => return Ok(130),
             Some(yes) => yes,
         }
@@ -151,13 +143,7 @@ pub(crate) fn run_init(opts: InitOptions) -> Result<i32> {
 
     let git_ran = git && git_init(&cwd);
 
-    println!("created {name}");
-    for (file, _) in &files {
-        println!("  {file}");
-    }
-    if git_ran {
-        println!("  .git/ initialized");
-    }
+    print_created_tree(&name, &files, git_ran);
 
     // The engine's install output already ends with a blank line; only the
     // no-install path needs its own separator before the next-step line.
@@ -170,16 +156,19 @@ pub(crate) fn run_init(opts: InitOptions) -> Result<i32> {
     } else {
         println!();
     }
-    println!("next: nub {entry}");
+    use clx::style;
+    println!("Your project is ready!");
+    println!("Try running `{}`", style::ecyan(format!("nub {entry}")));
     Ok(0)
 }
 
 /// The scaffolded manifest, in display order. Identity fields come from the
 /// same writer `nub pm pin` uses so the two surfaces can't drift; both the pin
-/// and the `@nubjs/types` range derive from the running version (nub-types is
-/// release-locked to the binary).
+/// and the `@nubjs/types` ceiling derive from the running version (nub-types is
+/// released in lockstep with the binary).
 fn manifest_json(name: &str, entry: &str, typescript: bool) -> String {
     let ver = env!("CARGO_PKG_VERSION");
+    let nub_types_range = format!(">={NUB_TYPES_FLOOR} <={ver}");
     let mut root = Map::new();
     root.insert("name".into(), Value::String(name.into()));
     root.insert("version".into(), Value::String("0.0.1".into()));
@@ -190,7 +179,7 @@ fn manifest_json(name: &str, entry: &str, typescript: bool) -> String {
         root.insert(
             "devDependencies".into(),
             json!({
-                "@nubjs/types": format!("^{ver}"),
+                "@nubjs/types": nub_types_range,
                 "@types/node": TYPES_NODE_RANGE,
                 "typescript": TYPESCRIPT_RANGE,
             }),
@@ -228,13 +217,144 @@ const TSCONFIG: &str = r#"{
 }
 "#;
 
-/// Ctrl-C / Esc on a prompt is a deliberate cancel: `None` (caller exits 130,
-/// the conventional SIGINT code), never an error report.
-fn prompt_result<T>(r: std::io::Result<T>) -> Result<Option<T>> {
-    match r {
-        Ok(v) => Ok(Some(v)),
-        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Ok(None),
-        Err(e) => Err(e).context("reading prompt input"),
+/// Keep demand's text editor, but use its inline mode so editing and submitted
+/// states occupy the same row. Demand under-counts an inline input's height as
+/// zero, so its editing row survives submission alongside its success row;
+/// clear both before writing Nub's dim-label `:` form.
+fn prompt_name(default_name: &str) -> Result<Option<String>> {
+    let mut theme = demand::Theme::new();
+    theme.title.set_dimmed(true);
+    theme.input_prompt.set_dimmed(true);
+    let input = demand::Input::new("Project name")
+        .inline(true)
+        .prompt("> ")
+        .placeholder(default_name)
+        .theme(&theme)
+        .validation(|s| {
+            if s.is_empty() || !sanitize_name(s).is_empty() {
+                Ok(())
+            } else {
+                Err("not a valid package name")
+            }
+        })
+        .run();
+    let term = Term::stderr();
+    match input {
+        Ok(raw) => {
+            let name = if raw.trim().is_empty() {
+                default_name.to_string()
+            } else {
+                sanitize_name(&raw)
+            };
+            term.clear_last_lines(2)
+                .context("clearing project-name prompt")?;
+            write_prompt_answer(&term, "Project name", &name)?;
+            Ok(Some(name))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+            term.clear_last_lines(1)
+                .context("clearing cancelled project-name prompt")?;
+            Ok(None)
+        }
+        Err(e) => Err(e).context("reading project-name prompt"),
+    }
+}
+
+struct CursorGuard<'a>(&'a Term);
+
+impl Drop for CursorGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.show_cursor();
+    }
+}
+
+/// Nub's compact multiple-choice prompt: the same filled/hollow square cells
+/// and cyan focus cursor as `update -i`, without demand's button backgrounds.
+fn prompt_choice<T: Copy>(title: &str, options: &[(&str, T)]) -> Result<Option<T>> {
+    debug_assert!(!options.is_empty());
+    let term = Term::stderr();
+    let _guard = CursorGuard(&term);
+    term.hide_cursor().context("hiding prompt cursor")?;
+    let mut selected = 0usize;
+    let lines = options.len() + 2;
+
+    loop {
+        let frame = render_choice_frame(title, options, selected);
+        write!(&term, "{frame}").context("rendering choice prompt")?;
+        term.flush().context("flushing choice prompt")?;
+        // Raw here means Ctrl-C is returned as a key instead of re-raised as a
+        // process signal, so the cursor guard and frame cleanup still run.
+        let key = match term.read_key_raw() {
+            Ok(key) => key,
+            Err(error) => {
+                let _ = term.clear_last_lines(lines);
+                return Err(error).context("reading choice prompt");
+            }
+        };
+        term.clear_last_lines(lines)
+            .context("clearing choice prompt")?;
+        match key {
+            Key::ArrowDown | Key::Char('j') => selected = (selected + 1) % options.len(),
+            Key::ArrowUp | Key::Char('k') => {
+                selected = (selected + options.len() - 1) % options.len()
+            }
+            Key::Enter => {
+                write_prompt_answer(&term, title, options[selected].0)?;
+                return Ok(Some(options[selected].1));
+            }
+            Key::Escape | Key::CtrlC => return Ok(None),
+            _ => {}
+        }
+    }
+}
+
+fn render_choice_frame<T>(title: &str, options: &[(&str, T)], selected: usize) -> String {
+    use clx::style;
+    let mut out = format!("{}\n", style::estyle(title).dim());
+    for (index, (label, _)) in options.iter().enumerate() {
+        if index == selected {
+            out.push_str(&format!("{} ■ {label}\n", style::ecyan("❯")));
+        } else {
+            out.push_str(&format!("  {} {label}\n", style::estyle("□").dim()));
+        }
+    }
+    out.push_str(
+        &style::estyle("↑/↓ move · enter confirm · esc cancel")
+            .dim()
+            .to_string(),
+    );
+    out.push('\n');
+    out
+}
+
+fn write_prompt_answer(term: &Term, title: &str, answer: &str) -> Result<()> {
+    use clx::style;
+    let label = prompt_answer_label(title);
+    term.write_line(&format!("{} {answer}", style::estyle(label).dim()))
+        .with_context(|| format!("writing {title} answer"))
+}
+
+fn prompt_answer_label(title: &str) -> String {
+    if title.ends_with('?') {
+        title.to_string()
+    } else {
+        format!("{title}:")
+    }
+}
+
+fn print_created_tree(name: &str, files: &[(&str, String)], git_ran: bool) {
+    println!("created {name}");
+    let entries = files.len() + usize::from(git_ran);
+    for (index, (file, _)) in files.iter().enumerate() {
+        let branch = if index + 1 == entries {
+            "└──"
+        } else {
+            "├──"
+        };
+        println!("{branch} {file}");
+    }
+    if git_ran {
+        println!("└── .git/");
     }
 }
 
@@ -351,12 +471,36 @@ mod tests {
     }
 
     #[test]
-    fn manifest_carries_identity_pin_and_lockstep_types_range() {
+    fn manifest_carries_identity_pin_and_age_gate_compatible_types_range() {
         let v: Value = serde_json::from_str(&manifest_json("demo", "index.ts", true)).unwrap();
         let ver = env!("CARGO_PKG_VERSION");
         assert_eq!(v["packageManager"], format!("nub@{ver}"));
         assert_eq!(v["devEngines"]["packageManager"]["name"], "nub");
-        assert_eq!(v["devDependencies"]["@nubjs/types"], format!("^{ver}"));
+        assert_eq!(
+            v["devDependencies"]["@nubjs/types"],
+            format!(">={NUB_TYPES_FLOOR} <={ver}")
+        );
+        let types_range =
+            node_semver::Range::parse(v["devDependencies"]["@nubjs/types"].as_str().unwrap())
+                .unwrap();
+        assert!(
+            node_semver::Version::parse(NUB_TYPES_FLOOR)
+                .unwrap()
+                .satisfies(&types_range),
+            "the oldest mature declaration release must remain selectable"
+        );
+        assert!(
+            node_semver::Version::parse(ver)
+                .unwrap()
+                .satisfies(&types_range),
+            "the running Nub release must remain selectable after it matures"
+        );
+        assert!(
+            !node_semver::Version::parse("99.0.0")
+                .unwrap()
+                .satisfies(&types_range),
+            "declarations newer than the running Nub runtime must not be selected"
+        );
         assert_eq!(v["devDependencies"]["typescript"], TYPESCRIPT_RANGE);
         assert_eq!(v["scripts"]["start"], "nub index.ts");
     }
@@ -366,5 +510,32 @@ mod tests {
         let v: Value = serde_json::from_str(&manifest_json("demo", "index.js", false)).unwrap();
         assert!(v.get("devDependencies").is_none());
         assert_eq!(v["scripts"]["start"], "nub index.js");
+    }
+
+    #[test]
+    fn choice_frame_uses_square_cells_without_background_colors() {
+        let frame = render_choice_frame(
+            "Language",
+            &[("TypeScript", true), ("JavaScript", false)],
+            0,
+        );
+        let plain = console::strip_ansi_codes(&frame);
+        assert!(plain.contains("❯ ■ TypeScript"));
+        assert!(plain.contains("  □ JavaScript"));
+        assert!(plain.contains("↑/↓ move · enter confirm · esc cancel"));
+        assert!(
+            !frame.contains("48;"),
+            "choice prompt must never set an ANSI background: {frame:?}"
+        );
+    }
+
+    #[test]
+    fn submitted_prompt_labels_use_colons_without_double_punctuating_questions() {
+        assert_eq!(prompt_answer_label("Project name"), "Project name:");
+        assert_eq!(prompt_answer_label("Language"), "Language:");
+        assert_eq!(
+            prompt_answer_label("Initialize a Git repository?"),
+            "Initialize a Git repository?"
+        );
     }
 }

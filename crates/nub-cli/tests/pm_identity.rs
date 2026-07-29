@@ -60,6 +60,33 @@ fn run(dir: &Path, args: &[&str]) -> (String, String, i32) {
 
 const EMPTY_PNPM: &str = r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@9.1.0"}"#;
 
+#[test]
+fn nub_defaults_to_a_strict_24_hour_release_age_floor() {
+    let dir = project("release-age-default", r#"{"name":"app","version":"1.0.0"}"#);
+    let (age, stderr, code) = run(&dir, &["config", "get", "minimumReleaseAge"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(age.trim(), "1440");
+    let (strict, stderr, code) = run(&dir, &["config", "get", "minimumReleaseAgeStrict"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(strict.trim(), "true");
+
+    std::fs::write(
+        dir.join(".npmrc"),
+        "registry=http://127.0.0.1:1/\nminimumReleaseAge=0\nminimumReleaseAgeStrict=false\n",
+    )
+    .unwrap();
+    let (age, stderr, code) = run(&dir, &["config", "get", "minimumReleaseAge"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(age.trim(), "0", "explicit project config must still win");
+    let (strict, stderr, code) = run(&dir, &["config", "get", "minimumReleaseAgeStrict"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        strict.trim(),
+        "false",
+        "explicit project config must still win"
+    );
+}
+
 /// Rows "none|none → nub identity" (truly-fresh) and "declared X|none → X's
 /// format" (the fresh-with-pin row): an empty-deps install writes the
 /// identity's lockfile without any network.
