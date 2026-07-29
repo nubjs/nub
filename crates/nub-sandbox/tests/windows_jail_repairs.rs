@@ -396,6 +396,41 @@ mod win {
         let _ = std::io::stdout().flush();
     }
 
+    /// Where the probe currently is, for the watchdog to name if it stops moving.
+    static BREADCRUMB: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+    /// A stall inside `apply` cannot be bounded from outside the call — it is synchronous Rust
+    /// in this process, so the job timeout kills the run and discards the log, which is how two
+    /// runs reported a stall with no location. This names the location instead: every launch
+    /// leaves a breadcrumb, and a watchdog thread prints the last one and exits if the probe
+    /// stops moving. Exit 97 rather than a panic so the harness reports the code rather than
+    /// unwinding through FFI teardown.
+    fn arm_watchdog() {
+        const STALL: std::time::Duration = std::time::Duration::from_secs(120);
+        std::thread::spawn(|| {
+            let mut last = None;
+            loop {
+                std::thread::sleep(STALL);
+                let now = BREADCRUMB.lock().ok().and_then(|b| b.clone());
+                if now.is_some() && now == last {
+                    println!(
+                        "  fact:watchdog-stalled-at={}",
+                        now.unwrap_or_else(|| "<none>".to_string())
+                    );
+                    flush();
+                    std::process::exit(97);
+                }
+                last = now;
+            }
+        });
+    }
+
+    fn breadcrumb(where_: &str) {
+        if let Ok(mut slot) = BREADCRUMB.lock() {
+            *slot = Some(where_.to_string());
+        }
+    }
+
     /// The total character count of the environment block a policy would hand `CreateProcessW`,
     /// counted the way the OS does: `KEY=VALUE\0` per entry, plus the block's own terminator.
     /// The documented ceiling is 32767.
@@ -431,6 +466,8 @@ mod win {
         let mut args = vec![mode.to_string(), marker.to_string_lossy().into_owned()];
         args.extend(argv.iter().cloned());
         let _ = std::fs::remove_file(marker);
+        breadcrumb(&format!("run_jailed mode={mode} cwd={}", cwd.display()));
+        flush();
         let outcome = apply(policy, spec(f, cwd, &args)).map(|p| p.status());
         let code = match outcome {
             Ok(Ok(status)) => status.code().unwrap_or(-1),
@@ -1139,6 +1176,7 @@ try {{
     pub fn probe_main() -> i32 {
         let mut fails = 0u32;
         println!("PROBE windows jail repairs under AppContainer");
+        arm_watchdog();
 
         let Some(node) = path_node() else {
             eprintln!("no node.exe on PATH — the probe cannot run");
