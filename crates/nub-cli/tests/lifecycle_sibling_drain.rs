@@ -21,6 +21,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// The one package dir the store materialized for `name`.
+fn store_package_dir(root: &Path, name: &str) -> Option<PathBuf> {
+    root.join("node_modules/.store")
+        .read_dir()
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|e| e.path().join("node_modules").join(name))
+        .find(|p| p.exists())
+}
+
 fn nub_binary() -> PathBuf {
     let mut path = std::env::current_exe().unwrap();
     path.pop(); // deps/
@@ -83,14 +93,7 @@ fn a_failing_dep_build_does_not_abort_its_siblings() {
     assert_eq!(run(&dir, &["install"]), 0, "install should link both deps");
     let approve = run(&dir, &["approve-builds", "--all"]);
 
-    let marker = dir
-        .join("node_modules/.store")
-        .read_dir()
-        .expect("store dir exists")
-        .filter_map(Result::ok)
-        .map(|e| e.path().join("node_modules/dep-slow/RAN-MARKER"))
-        .find(|p| p.exists());
-    let found = marker.is_some();
+    let found = store_package_dir(&dir, "dep-slow").is_some_and(|d| d.join("RAN-MARKER").exists());
     let _ = std::fs::remove_dir_all(&dir);
 
     // Parity half: the install still FAILS. Draining is not tolerating.
@@ -102,5 +105,62 @@ fn a_failing_dep_build_does_not_abort_its_siblings() {
         found,
         "dep-slow never reached the end of its postinstall — a sibling package's \
          unrelated failure aborted it mid-build, leaving a half-written package dir"
+    );
+}
+
+/// Defect A at the install level: once the command has returned, nothing a
+/// lifecycle script spawned may still be writing into the package directory.
+///
+/// The script SUCCEEDS here — this is not the failure path. It backgrounds a
+/// writer the way `node-gyp` backgrounds `make`, and exits. Before the runner
+/// reaped process groups, that writer reparented to init and kept appending to a
+/// package dir the installer had already reported on; the corpus study saw up to
+/// 11,407 lines arrive after the command returned.
+#[test]
+fn nothing_keeps_writing_after_the_install_command_returns() {
+    let dir = std::env::temp_dir().join(format!("nub-orphan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let dep = dir.join("deps/dep-orphan");
+    std::fs::create_dir_all(&dep).unwrap();
+
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"orphan-root","version":"1.0.0",
+            "dependencies":{"dep-orphan":"file:./deps/dep-orphan"},
+            "dependenciesMeta":{"dep-orphan":{"sandbox":false}}}"#,
+    )
+    .unwrap();
+    // `&` detaches the writer from the script's shell exactly as node-gyp
+    // detaches make: killing the shell alone leaves it running. It appends at
+    // ~20 Hz so any survival shows up as file growth.
+    std::fs::write(
+        dep.join("package.json"),
+        r#"{"name":"dep-orphan","version":"1.0.0","scripts":{"postinstall":"sh -c 'while :; do echo x >> ./ORPHAN-LOG; sleep 0.05; done' & sleep 0.6"}}"#,
+    )
+    .unwrap();
+
+    assert_eq!(run(&dir, &["install"]), 0, "install should link the dep");
+    assert_eq!(
+        run(&dir, &["approve-builds", "--all"]),
+        0,
+        "the fixture script exits 0; this test is about the success path"
+    );
+
+    let log = store_package_dir(&dir, "dep-orphan")
+        .expect("store materialized the package")
+        .join("ORPHAN-LOG");
+    let at_return = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    let after = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        at_return > 0,
+        "the fixture never wrote anything — the test would pass vacuously"
+    );
+    assert_eq!(
+        after, at_return,
+        "a process the postinstall spawned was still writing into the package \
+         dir after the command returned ({at_return} -> {after} bytes)"
     );
 }
