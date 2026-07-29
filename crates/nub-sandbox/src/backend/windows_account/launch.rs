@@ -39,9 +39,9 @@ use windows_sys::Win32::Foundation::{
     WAIT_OBJECT_0,
 };
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-    SetInformationJobObject,
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectExtendedLimitInformation, SetInformationJobObject,
 };
 use windows_sys::Win32::System::StationsAndDesktops::{
     DESKTOP_CREATEMENU, DESKTOP_CREATEWINDOW, DESKTOP_ENUMERATE, DESKTOP_HOOKCONTROL,
@@ -247,7 +247,7 @@ impl AccountLaunch {
         // Best-effort containment. seclogon has already placed the child in its own job and
         // current Windows refuses cross-session nesting, so this commonly returns
         // ERROR_NOT_SUPPORTED — reported, never presented as success.
-        let job = match create_kill_on_close_job() {
+        let job = match create_confinement_job() {
             Ok(j) => Some(j),
             Err(e) => {
                 tracing::debug!(
@@ -431,14 +431,20 @@ impl Drop for WindowAceGuard {
     }
 }
 
-fn create_kill_on_close_job() -> io::Result<HANDLE> {
+/// The confinement Job: whole-tree reap on handle close, plus the active-process
+/// ceiling (see [`crate::backend::windows::active_process_cap`]). On this backend the
+/// assignment is best-effort — seclogon may already own the child — so the cap holds
+/// only where the assignment succeeded.
+fn create_confinement_job() -> io::Result<HANDLE> {
     // SAFETY: unnamed job with default security.
     let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
     if job.is_null() {
         return Err(io::Error::last_os_error());
     }
     let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    info.BasicLimitInformation.LimitFlags =
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+    info.BasicLimitInformation.ActiveProcessLimit = crate::backend::windows::active_process_cap();
     // SAFETY: `info` is a correctly-sized JOBOBJECT_EXTENDED_LIMIT_INFORMATION.
     let ok = unsafe {
         SetInformationJobObject(

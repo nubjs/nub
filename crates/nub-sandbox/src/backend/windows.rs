@@ -27,6 +27,9 @@
 //!     exemption exposes every loopback listener, including local forwarders.
 //!   - process-reap: a Job Object with `KILL_ON_JOB_CLOSE`; the whole tree dies when
 //!     the job handle closes (after the child exits, or if nub does).
+//!   - process-count: the same Job carries `ACTIVE_PROCESS` (see
+//!     [`active_process_cap`]) so a fork bomb from confined code is bounded — a
+//!     zero-privilege limit the LowBox token cannot break away from.
 //!
 //! ASCENDANT-ENV READ IS OS-CLOSED (design.md §2.4): a LowBox child CANNOT
 //! `OpenProcess(PROCESS_VM_READ)` the parent to read nub's environ — the AppContainer
@@ -112,6 +115,29 @@ impl WindowsLaunch {
             WindowsLaunch::Account(l) => l.run(),
         }
     }
+}
+
+/// Active-process ceiling applied to every confined launch's Job Object
+/// (`JOB_OBJECT_LIMIT_ACTIVE_PROCESS`), bounding a fork bomb from confined code without
+/// any privilege. Sized from what a LEGITIMATE build actually needs: node-gyp emits no
+/// `-j`, so `make` runs serial, and the measured structural ceiling of a parallel native
+/// build is `2 * cores + 5` (23 at 8 cores, 69 at 32). `8 * cores` is ~4x that headroom;
+/// the 64 floor keeps a low-core runner from getting a cap tighter than a JS-only
+/// script tree ever needs. The scope is deliberately PER LAUNCH (one Job per confined
+/// spawn = one script tree), not per install — a per-install cap would have to be summed
+/// across concurrent scripts and would land ABOVE the ~1,440-process incident it exists
+/// to bound, protecting nothing.
+///
+/// Over-cap failure is an observable spawn error in the child (`ERROR_NOT_ENOUGH_QUOTA`,
+/// 1816), NOT a kill of the tree — a legitimate build that brushes the ceiling reports a
+/// spawn failure through its own toolchain rather than dying silently.
+pub(super) fn active_process_cap() -> u32 {
+    let cores = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    u32::try_from(cores.saturating_mul(8))
+        .unwrap_or(u32::MAX)
+        .max(64)
 }
 
 /// What the allowlist model could NOT express for a policy, so the caller can be told.
@@ -806,9 +832,9 @@ pub(super) mod launch {
         TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
     };
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-        SetInformationJobObject,
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
     };
     use windows_sys::Win32::System::Memory::{GetProcessHeap, HeapFree};
     use windows_sys::Win32::System::Threading::{
@@ -1232,7 +1258,7 @@ pub(super) mod launch {
 
             // 4. Job with KILL_ON_JOB_CLOSE; `_job` closes the handle on drop (declared
             //    LAST ⇒ dropped FIRST ⇒ reaps any lingering tree before ACE revoke).
-            let job = create_kill_on_close_job()?;
+            let job = create_confinement_job()?;
             let _job = HandleGuard(job);
 
             // 5. Proc-thread attribute list: SECURITY_CAPABILITIES, plus a HANDLE_LIST
@@ -1524,13 +1550,20 @@ pub(super) mod launch {
         Ok(buf)
     }
 
-    fn create_kill_on_close_job() -> io::Result<HANDLE> {
+    /// The confinement Job: whole-tree reap on handle close, plus the active-process
+    /// ceiling (see [`super::active_process_cap`]).
+    fn create_confinement_job() -> io::Result<HANDLE> {
         let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if job.is_null() {
             return Err(io::Error::last_os_error());
         }
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // ACTIVE_PROCESS is transitive to grandchildren and refuses CREATE_BREAKAWAY_FROM_JOB,
+        // so confined code cannot escape it; it needs no privilege, which is why it is the
+        // containment lever the zero-privilege jail can actually use.
+        info.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        info.BasicLimitInformation.ActiveProcessLimit = super::active_process_cap();
         let ok = unsafe {
             SetInformationJobObject(
                 job,
@@ -1732,6 +1765,24 @@ pub(super) mod launch {
 mod tests {
     use super::*;
     use crate::policy::{CanonGlob, FsOrigin, FsRule, FsRuleSet, TmpMode};
+
+    /// The cap must clear the measured structural ceiling of a legitimate parallel
+    /// native build (`2 * cores + 5`) on this host with real headroom, and never fall
+    /// below the 64 floor — the two properties that make it defence-in-depth rather
+    /// than a build-breaking limit.
+    #[test]
+    fn active_process_cap_clears_a_legitimate_build_ceiling() {
+        let cores = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1);
+        let cap = active_process_cap();
+        assert!(cap >= 64, "cap {cap} fell below the floor");
+        let build_ceiling = u32::try_from(2 * cores + 5).unwrap();
+        assert!(
+            cap >= build_ceiling * 3,
+            "cap {cap} leaves under 3x headroom over the {build_ceiling}-process build ceiling"
+        );
+    }
 
     fn fs(default_effect: Effect, entries: Vec<FsRule>) -> FsPolicy {
         FsPolicy {

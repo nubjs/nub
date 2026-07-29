@@ -233,6 +233,8 @@ mod win {
             net: NetPolicy::default(),
             env: EnvPolicy::resolved(std::env::vars().collect()),
             pid: PidPolicy::default(),
+            // These probes drive the `nub sandbox` scope, not the dependency build jail.
+            build_jail: false,
         }
     }
     fn rule(p: &Path, access: FsAccess) -> FsRule {
