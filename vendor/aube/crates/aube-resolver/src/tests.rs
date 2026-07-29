@@ -625,7 +625,7 @@ fn test_dep_path_for() {
     assert_eq!(dep_path_for("@babel/core", "7.24.0"), "@babel/core@7.24.0");
 }
 
-fn make_version(name: &str, version: &str) -> VersionMetadata {
+pub(crate) fn make_version(name: &str, version: &str) -> VersionMetadata {
     VersionMetadata {
         name: name.to_string(),
         version: version.to_string(),
@@ -656,7 +656,7 @@ fn make_version(name: &str, version: &str) -> VersionMetadata {
     }
 }
 
-fn make_packument(name: &str, versions: &[&str], latest: &str) -> Packument {
+pub(crate) fn make_packument(name: &str, versions: &[&str], latest: &str) -> Packument {
     let mut ver_map = BTreeMap::new();
     for v in versions {
         ver_map.insert(v.to_string(), make_version(name, v));
@@ -2301,25 +2301,111 @@ fn test_format_iso8601_known_epoch() {
     assert_eq!(format_iso8601_utc(0), "1970-01-01T00:00:00.000Z");
 }
 
+/// Missing publish time under STRICT mode (#581): an undeterminable age never
+/// silently clears the gate, but a packument whose `modified` predates the
+/// cutoff still resolves offline from abbreviated metadata — the property that
+/// keeps corgi registries usable. Lenient mode is pinned separately, below.
 #[test]
-fn test_pick_version_cutoff_allows_missing_time_entries() {
-    let packument = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
-    // Packument has no `time` entries at all — cutoff must not
-    // remove every candidate, or the resolver can never make
-    // progress on abbreviated-packument registries.
-    let cutoff = "2000-01-01T00:00:00.000Z";
-    let result = pick_version(
-        &packument,
+fn pick_version_missing_time_fails_closed_unless_modified_proves_maturity() {
+    const CUTOFF: &str = "2020-01-01T00:00:00.000Z";
+    fn pick(p: &Packument) -> PickResult<'_> {
+        pick_version(
+            p,
+            "^1.0.0",
+            None,
+            false,
+            Some(CUTOFF),
+            None,
+            true,
+            |_, _| false,
+        )
+    }
+
+    // No per-version times and no `modified`: nothing proves either version is
+    // old enough, so both are gated rather than waved through.
+    let bare = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
+    assert!(
+        matches!(pick(&bare), PickResult::AgeGated),
+        "a packument with no time data at all must not clear the cutoff"
+    );
+
+    // `modified` is an upper bound on every version's publish time, so a
+    // document last touched before the cutoff has no immature versions in it.
+    let mut dormant = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
+    dormant.modified = Some("2019-06-01T00:00:00.000Z".to_string());
+    assert_eq!(
+        pick(&dormant).unwrap().version,
+        "1.1.0",
+        "modified <= cutoff proves the whole document is mature"
+    );
+
+    // Same shape, but the document was touched after the cutoff — some version
+    // in it is too new and we cannot tell which, so nothing is admitted.
+    let mut churning = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
+    churning.modified = Some("2026-06-01T00:00:00.000Z".to_string());
+    assert!(
+        matches!(pick(&churning), PickResult::AgeGated),
+        "modified > cutoff leaves each version's age undeterminable"
+    );
+
+    // A hole in an otherwise-populated map is anomalous, not a corgi payload:
+    // 1.0.0 is dated and mature, 1.1.0 is undated and must be excluded even
+    // though `modified` would have vouched for the document as a whole.
+    let mut holed = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
+    holed.modified = Some("2019-06-01T00:00:00.000Z".to_string());
+    holed
+        .time
+        .insert("1.0.0".to_string(), "2019-01-01T00:00:00.000Z".to_string());
+    assert_eq!(
+        pick(&holed).unwrap().version,
+        "1.0.0",
+        "an undated version in a dated map is excluded, not admitted"
+    );
+}
+
+/// Lenient mode keeps upstream aube's default: an undeterminable publish age
+/// stays eligible rather than blocking. Only the embedder's strict posture
+/// (which nub pins on) turns it into a wall, so this change is default-
+/// preserving for standalone aube.
+#[test]
+fn pick_version_lenient_mode_keeps_undated_versions_eligible() {
+    let bare = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
+    let picked = pick_version(
+        &bare,
         "^1.0.0",
         None,
         false,
-        Some(cutoff),
+        Some("2020-01-01T00:00:00.000Z"),
         None,
         false,
         |_, _| false,
-    )
-    .unwrap();
-    assert_eq!(result.version, "1.1.0");
+    );
+    assert_eq!(picked.unwrap().version, "1.1.0");
+}
+
+/// npm's full `time` map always carries `created`/`modified` bookkeeping keys
+/// beside the version keys. A mirror that serves ONLY those must still read as
+/// "no per-version times" and take the `modified` path, not as a fully-holed
+/// map that gates everything.
+#[test]
+fn pick_version_treats_bookkeeping_only_time_map_as_timeless() {
+    let cutoff = "2020-01-01T00:00:00.000Z";
+    let mut p = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
+    p.modified = Some("2019-06-01T00:00:00.000Z".to_string());
+    p.time.insert(
+        "created".to_string(),
+        "2018-01-01T00:00:00.000Z".to_string(),
+    );
+    p.time.insert(
+        "modified".to_string(),
+        "2019-06-01T00:00:00.000Z".to_string(),
+    );
+    assert_eq!(
+        pick_version(&p, "^1.0.0", None, false, Some(cutoff), None, true, |_, _| false)
+            .unwrap()
+            .version,
+        "1.1.0"
+    );
 }
 
 #[test]
@@ -6146,4 +6232,67 @@ async fn optional_dep_with_both_fetches_in_flight() {
     );
 
     server.abort();
+}
+
+/// A registry that carries the package but not the requested version —
+/// a mirror holding only the platform bindings its own users have pulled
+/// — must not fail the install when the dep is optional. Reported as
+/// nubjs/nub#580: `rolldown` lists all 15 `@rolldown/binding-*` as
+/// optional, and the version pick runs before the `os`/`cpu` filter, so a
+/// binding that couldn't resolve aborted the whole install even though
+/// the platform filter was about to drop it.
+#[tokio::test]
+async fn optional_dep_with_no_matching_version_is_skipped() {
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:1/",
+    ));
+    let mut resolver = Resolver::new(client);
+    resolver.cache.insert(
+        "p-map".to_string(),
+        make_packument("p-map", &["7.0.4"], "7.0.4"),
+    );
+    resolver.cache.insert(
+        "native-binding".to_string(),
+        make_packument("native-binding", &["1.1.0", "1.2.0"], "1.2.0"),
+    );
+
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert("p-map".to_string(), "7.0.4".to_string());
+    manifest
+        .optional_dependencies
+        .insert("native-binding".to_string(), "1.0.3".to_string());
+
+    let graph = resolver
+        .resolve(&manifest, None)
+        .await
+        .expect("an optional dep with no matching version must not fail the resolve");
+    assert!(graph_has_package(&graph, "p-map", "7.0.4"));
+    assert!(!graph_has_package(&graph, "native-binding", "1.0.3"));
+}
+
+/// The skip above is scoped to optional deps — a required dep whose range
+/// matches nothing is still a hard failure.
+#[tokio::test]
+async fn required_dep_with_no_matching_version_still_fails() {
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:1/",
+    ));
+    let mut resolver = Resolver::new(client);
+    resolver.cache.insert(
+        "native-binding".to_string(),
+        make_packument("native-binding", &["1.1.0", "1.2.0"], "1.2.0"),
+    );
+
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert("native-binding".to_string(), "1.0.3".to_string());
+
+    let err = resolver
+        .resolve(&manifest, None)
+        .await
+        .expect_err("a required dep with no matching version must fail the resolve");
+    assert!(matches!(err, Error::NoMatch(_)), "got {err:?}");
 }

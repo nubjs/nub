@@ -242,23 +242,30 @@ impl Linker {
                     ));
                 }
             }
-            // Staged through `.tmp-<pid>-<id>` + atomic rename rather than
-            // written straight into the final entry. A direct write that fails
-            // partway leaves a half-populated `<dep_path>/` behind — and every
-            // later run's `exists()` gate then reports that package as already
-            // linked, so the tree never converges and `rm -rf node_modules` is
-            // the only way out (#552). Staging makes the failure atomic: the
-            // remains are a `.tmp-*` dir, which `sweep_stale_tmp_dirs` reclaims
-            // on the next install.
-            self.ensure_in_aube_dir(
-                &aube_dir,
-                dep_path,
-                graph,
-                pkg,
-                index,
-                &mut stats,
-                nested_link_targets.as_ref(),
-            )?;
+            if aube_entry.exists() {
+                stats.packages_cached += 1;
+                crate::quarantine::strip_cached_entry(&aube_entry, &pkg.name, index);
+            } else {
+                // Staged through `.tmp-<pid>-<id>` + atomic rename rather than
+                // written straight into the final entry. A direct write that
+                // fails partway leaves a half-populated `<dep_path>/` behind —
+                // and the `exists()` gate above then reports that package as
+                // already linked on every later run, so the tree never
+                // converges and deleting `node_modules` is the only way out
+                // (#552). Staging makes the failure atomic: the remains are a
+                // `.tmp-*` dir, which `sweep_stale_tmp_dirs` reclaims next
+                // install. The cached branch keeps its own `exists()` test so
+                // the quarantine strip still runs on a warm entry.
+                self.ensure_in_aube_dir(
+                    &aube_dir,
+                    dep_path,
+                    graph,
+                    pkg,
+                    index,
+                    &mut stats,
+                    nested_link_targets.as_ref(),
+                )?;
+            }
         }
 
         if self.use_global_virtual_store {
@@ -336,16 +343,10 @@ impl Linker {
                             // so that gap is unreachable in practice. A
                             // prior GVS install or the fetch prewarm may have left
                             // a symlink here; replace it. An existing real
-                            // directory is reused as cached. Classification uses
-                            // `read_link`, not `file_type().is_symlink()`: on
-                            // Windows the GVS entry is an NTFS junction (created by
-                            // `sys::create_dir_link`) whose `is_symlink()` is false
-                            // and `is_dir()` is true, so the file-type bit would
-                            // misread a stale junction as a real dir and skip the
-                            // conversion. `read_link` succeeds on both Unix symlinks
-                            // and junction reparse points and returns `InvalidInput`
-                            // on a real directory — the same signal `classify_entry_state`
-                            // and `detect_aube_dir_gvs_mode` rely on.
+                            // directory is reused as cached. Neither
+                            // `file_type().is_symlink()` nor a `read_link` error
+                            // kind classifies that correctly on both platforms —
+                            // `aube_util::fs::is_real_dir` carries the split.
                             if self.disk_materialize_matches(&pkg.name) {
                                 // Orphan-safety invariant: disk-materialize gives X
                                 // a real project-local dir so X's OWN undeclared
@@ -376,13 +377,8 @@ impl Linker {
                                     .join(subdir)
                                     .join("node_modules")
                                     .join(&pkg.name);
-                                // `InvalidInput` from `read_link` == a real dir (not
-                                // a symlink/junction). See the classification note
-                                // above for why this beats `is_symlink()`.
-                                let local_is_real_dir = matches!(
-                                    std::fs::read_link(&local_aube_entry),
-                                    Err(e) if e.kind() == std::io::ErrorKind::InvalidInput
-                                );
+                                let local_is_real_dir =
+                                    aube_util::fs::is_real_dir(&local_aube_entry);
                                 if store_pkg_dir.exists() && local_is_real_dir {
                                     // Both placements already correct.
                                     local_stats.packages_cached += 1;
@@ -427,6 +423,16 @@ impl Linker {
                                     // Project-local dir was already correct; only the
                                     // store copy needed (re)placing, done above.
                                     local_stats.packages_cached += 1;
+                                    // The call above already stripped the shared-store
+                                    // copy. This ejected project-local one is what
+                                    // resolution actually reaches, and the index is
+                                    // still in hand here, so strip it too rather than
+                                    // leave the two halves of one branch inconsistent.
+                                    crate::quarantine::strip_cached_entry(
+                                        &local_aube_entry,
+                                        &pkg.name,
+                                        index,
+                                    );
                                     return Ok(local_stats);
                                 }
                                 // Drop a stale shared-store symlink/junction left by
@@ -525,17 +531,20 @@ impl Linker {
                                 nested_link_targets.as_ref(),
                             )?;
 
-                            // Only pay the `remove_dir`/`remove_file` syscalls
-                            // when we actually have something to remove.
-                            // On Windows, `.aube/<dep_path>` is an NTFS
-                            // junction (created via `sys::create_dir_link`);
-                            // `remove_file` can't unlink those, so try
-                            // `remove_dir` first and fall back to
-                            // `remove_file` for the unix case (where
-                            // `symlink` produces a file-style link).
+                            // Only pay the removal syscalls when there is
+                            // something to remove. `Stale` covers more than a
+                            // wrong-target link: a POPULATED real directory
+                            // lands here whenever a package leaves the
+                            // disk-materialize eject set, or a per-project tree
+                            // was only partly converted to the shared store. A
+                            // non-recursive `remove_dir` cannot clear that, and
+                            // the swallowed error then resurfaces as EEXIST /
+                            // os-183 from the junction/symlink creation below.
+                            // `try_remove_entry` clears dir, symlink, junction,
+                            // and dangling-link shapes alike — the same call
+                            // the git/tarball sibling path already uses.
                             if matches!(state, EntryState::Stale) {
-                                let _ = std::fs::remove_dir(&local_aube_entry)
-                                    .or_else(|_| std::fs::remove_file(&local_aube_entry));
+                                try_remove_entry(&local_aube_entry);
                             }
                             // Parent dirs were pre-created above the
                             // par_iter; no per-package `mkdirp` here.
@@ -1024,8 +1033,13 @@ impl Linker {
                     ));
                 }
             }
-            // Staged (see the note in `link_all` step 1); `ensure_in_aube_dir`
-            // owns the exists-is-cached check as well.
+            if aube_entry.exists() {
+                stats.packages_cached += 1;
+                crate::quarantine::strip_cached_entry(&aube_entry, &pkg.name, index);
+                continue;
+            }
+            // Staged (see the note in `link_all` step 1). The `exists()` test
+            // above stays so the quarantine strip still runs on a warm entry.
             self.ensure_in_aube_dir(
                 &aube_dir,
                 dep_path,

@@ -645,6 +645,12 @@
       "exit_code": null
     },
     {
+      "name": "WARN_AUBE_QUARANTINE_STRIP_FAILED",
+      "category": "Install lifecycle",
+      "description": "macOS only: `com.apple.quarantine` could not be removed from a materialized native binary, so Gatekeeper may refuse to load or run it.",
+      "exit_code": null
+    },
+    {
       "name": "WARN_AUBE_INVALID_CONCURRENCY",
       "category": "Settings / config validation",
       "description": "`network-concurrency` or `link-concurrency` was 0 (must be ≥ 1).",

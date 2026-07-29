@@ -323,9 +323,18 @@ pub(super) async fn update_manifest_for_add(
             // lives in `packuments-full-v1` while an ungated one lives
             // in the corgi cache — an offline retry must not fail on a
             // package that's on disk in the other format. The full
-            // payload is a superset of corgi, and corgi's missing
-            // `time` map keeps its versions cutoff-eligible in
-            // `pick_version`, so either format picks correctly.
+            // payload is a superset of corgi, so that direction always
+            // picks correctly.
+            //
+            // The corgi direction is WEAKER than it once was. A missing
+            // `time` map no longer keeps versions cutoff-eligible —
+            // #581 made an undeterminable publish age fail closed — so an
+            // offline add falling back to a corgi-cached packument
+            // resolves only what the document's `modified` timestamp
+            // proves mature, and otherwise reports the age gate instead
+            // of silently installing. Intended: an offline fallback must
+            // not be a way around the gate. But it does mean this
+            // fallback can now fail where it previously succeeded.
             let packument = match primary {
                 Ok(packument) => Ok(packument),
                 Err(primary_err) if offline => {

@@ -170,20 +170,27 @@ pub(crate) fn remove_hidden_hoist_tree(path: &Path) {
 }
 
 /// Best-effort unlink of `path` regardless of whether it's a file,
-/// symlink, junction, or directory. Errors are intentionally ignored
-/// because this is a "clear the slot" operation — the caller is about
-/// to place something else here and any residual entry that survives
-/// will surface as a downstream error.
+/// symlink, junction, or populated directory. Errors are intentionally
+/// ignored because this is a "clear the slot" operation — the caller is
+/// about to place something else here and any residual entry that
+/// survives will surface as a downstream error.
+///
+/// Goes through the Windows retry (a plain passthrough on Unix): the
+/// slots this clears live inside `node_modules`, where a dev server,
+/// watcher, or AV scanner holding a handle turns the delete into a
+/// transient os-5/32 failure. Swallowed here, that failure re-emerges
+/// as an `ERROR_ALREADY_EXISTS` from whatever the caller places next.
 pub(crate) fn try_remove_entry(path: &Path) {
-    // Retried: on Windows a single handle held by a watcher, an editor, or
-    // Defender mid-scan makes `remove_dir_all` abort PARTWAY, leaving some of
-    // the old tree behind. Callers refill the slot afterwards, and a refill
-    // over a surviving old tree silently blends two package versions — files
-    // the old version had and the new one does not are never overwritten, so
-    // they persist and stay resolvable. Backing off clears the common case.
+    // A partial wipe is not just a re-emerging `ERROR_ALREADY_EXISTS` (above):
+    // the refill that follows only writes paths present in the NEW index, so
+    // anything the old version had and the new one does not survives and stays
+    // resolvable, silently blending two package versions.
     //
-    // Short ladder: this runs once per entry inside the sweep loops, where the
-    // full one would multiply into a multi-minute stall.
+    // SHORT ladder, not the full one: this runs once per entry inside three
+    // sweep loops, so the ~10s ladder would not cost 10s — it would cost 10s
+    // PER LOCKED ENTRY, turning a cleanup pass into a multi-minute stall when
+    // a dev server holds several. The transient here is an AV scan window,
+    // which clears well inside a second.
     let _ = with_transient_retry_bounded(4, || std::fs::remove_dir_all(path));
     let _ = std::fs::remove_file(path);
 }

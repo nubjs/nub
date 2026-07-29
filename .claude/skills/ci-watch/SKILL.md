@@ -73,6 +73,23 @@ It's designed to run as a detached `run_in_background` Bash task that re-invokes
 nub scripts/ci-watch.ts --run "$RUN_ID" --repo nubjs/nub   # run_in_background: true
 ```
 
+### NEVER pipe the watcher — a pipe silently discards the verdict you gate on
+
+The exit code IS the contract, and a shell pipeline throws it away: in `ci-watch.ts … | tail -20`, `$?` is **tail's** status, which is 0 essentially always, so a **FAILED CI reads as SUCCESS**. The pipe also buffers stdout until the pipeline ends, so the log stays empty while the watcher runs and there is nothing to eyeball either. This burned a real thread (2026-07-28, PR #604): the watcher ran for minutes, produced no output, and would have reported a red matrix as green.
+
+```bash
+# WRONG — $? is tail's, a red CI looks green, and no interim output
+node scripts/ci-watch.ts --pr 604 --repo nubjs/nub | tail -25; echo "exit=$?"
+
+# RIGHT — redirect, then gate on the watcher's OWN status
+node scripts/ci-watch.ts --pr 604 --repo nubjs/nub > /tmp/ci604.log 2>&1; rc=$?
+tail -15 /tmp/ci604.log; echo "exit=$rc"
+```
+
+`main()` warns on stderr when it detects a piped stdout (fd 1 is a FIFO for `| cmd`, not for `> file`), but do not rely on noticing the warning — redirect by default. Bash `${PIPESTATUS[0]}` / zsh `${pipestatus[1]}` also recover the real status if a pipe is unavoidable.
+
+**Cross-check the rollup regardless of what the watcher says.** Never conclude from watcher output alone that CI is green or that "it's still running, so there's nothing to do" — read `gh pr view <pr> --json statusCheckRollup,mergeStateStatus` directly and act on any FAILURE (AGENTS.md fail-fast discipline). A watcher that has produced nothing for a long stretch is a suspect, not a status.
+
 For a merge-queue drain, prefer `scripts/merge-cascade.ts` (it gates positively and merges on green); reach for `ci-watch.ts` when you just need to block on one run/PR and branch on the result.
 
 ## Merge-on-green — the ORCHESTRATOR runs the watcher as a background shell; NEVER a watcher sub-agent (learned 2026-06-25)

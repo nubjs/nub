@@ -276,6 +276,12 @@ impl Linker {
         if pkg_nm_dir.exists() {
             trace!("virtual store hit: {dep_path}");
             stats.packages_cached += 1;
+            // A cache hit skips materialization, so the cold-path strip
+            // never runs — and the global virtual store outlives
+            // `rm -rf node_modules`, so an entry written by a pre-fix
+            // build would stay quarantined forever. Stripping here is
+            // what makes that removal-and-reinstall recovery heal.
+            crate::quarantine::strip_from_native_binaries(&pkg_nm_dir, index);
             return Ok(());
         }
 
@@ -392,6 +398,12 @@ impl Linker {
         let state = classify_entry_state(&local_aube_entry, &global_entry);
         if matches!(state, EntryState::Fresh) {
             stats.packages_cached += 1;
+            // The local entry already points at a fresh global one, so
+            // nothing is materialized — but the index is a parameter
+            // here, unlike the `link.rs` short-circuits, so the strip is
+            // free. The package lives in the global entry the symlink
+            // resolves to.
+            crate::quarantine::strip_cached_entry(&global_entry, &pkg.name, index);
             return Ok(());
         }
         self.ensure_in_virtual_store(dep_path, graph, pkg, index, stats, nested_link_targets)?;
@@ -438,6 +450,7 @@ impl Linker {
         let final_entry = aube_dir.join(&subdir);
         if final_entry.exists() {
             stats.packages_cached += 1;
+            crate::quarantine::strip_cached_entry(&final_entry, &pkg.name, index);
             return Ok(());
         }
 
@@ -689,6 +702,13 @@ impl Linker {
             apply_multi_file_patch(&pkg_nm_dir, patch_text)
                 .map_err(|msg| Error::Patch(patch_key.clone(), msg))?;
         }
+
+        // Every file this package will ever have now exists, so this is
+        // the earliest point a quarantine strip can be complete. Covers
+        // the whole-dir `clonefile` branch too: that fills the package
+        // without entering the per-file loop, but the index still names
+        // every file it produced.
+        crate::quarantine::strip_from_native_binaries(&pkg_nm_dir, index);
 
         // Create symlinks for transitive dependencies. Parents for
         // scoped packages were added to the `parents` batch above, so

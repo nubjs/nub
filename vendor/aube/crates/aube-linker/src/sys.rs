@@ -61,7 +61,30 @@ use std::path::{Component, Path, PathBuf};
 /// - Unix: a plain symlink (relative or absolute target OK).
 /// - Windows: an NTFS junction (relative targets are resolved to
 ///   absolute against `link`'s parent first).
+///
+/// A leftover link, dangling link, or EMPTY directory occupying `link`
+/// is cleared and the create retried once — `junction::create` opens
+/// with `fs::create_dir`, so anything at the path surfaces as
+/// `ERROR_ALREADY_EXISTS` (os 183) before the reparse write, and the
+/// Unix `symlink` gives the equivalent `EEXIST`. Same shape as
+/// `write_shim_file` below, and the same deliberate restraint: the
+/// non-recursive `remove_dir` will NOT wipe a POPULATED directory, so a
+/// real package tree in the slot still surfaces the error rather than
+/// being silently destroyed by a generic helper. Callers that own the
+/// slot and know a full clear is correct do it themselves before
+/// calling (see the `Stale` branch in `link.rs`).
 pub fn create_dir_link(target: &Path, link: &Path) -> io::Result<()> {
+    match create_dir_link_once(target, link) {
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            let _ = std::fs::remove_file(link);
+            let _ = std::fs::remove_dir(link);
+            create_dir_link_once(target, link)
+        }
+        other => other,
+    }
+}
+
+fn create_dir_link_once(target: &Path, link: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(target, link)
