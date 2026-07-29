@@ -122,10 +122,11 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
 
         // Make node-gyp compile offline. It reads Node headers from `npm_config_nodedir/
         // include/node` (default devdir `~/.cache/node-gyp/<ver>`, unreadable → network
-        // fallback the jail denies). Point nodedir at the provisioned Node root and grant
-        // that root's toolchain subtrees (the store path is outside `$tooldirs` + the
-        // interpreter grant). Set-if-absent: an explicit ambient nodedir is a deliberate
-        // build-against-custom-node choice; the case we fix (nub's own Node) carries none.
+        // fallback the jail denies). Point nodedir at a directory that ACTUALLY HOLDS
+        // them and grant the toolchain subtrees (the store path is outside `$tooldirs` +
+        // the interpreter grant). Set-if-absent: an explicit ambient nodedir is a
+        // deliberate build-against-custom-node choice; the case we fix carries none.
+        let probe = ProbeScope::new(&spawn);
         let mut extra_reads = Vec::new();
         // npm's builtin `lib/node_modules/npm/npmrc` (no leading dot) sits inside the
         // `lib/node_modules` grant below; the Linux deny-search walk must be SEEDED there
@@ -138,14 +139,34 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // root is a hard compile error, unlike the read grants above, which are best-effort
         // `Speculative`.
         let mut npm_builtin_config_deny_root = None;
-        if let Some((nodedir, reads)) = node_toolchain_grant(&ambient) {
-            ambient
-                .entry("npm_config_nodedir".to_string())
-                .or_insert(nodedir);
-            if let Some(lib_node_modules) = reads.get(1) {
-                npm_builtin_config_deny_root = npm_builtin_config_deny_root_for(lib_node_modules);
+        if let Some(layout) = ambient
+            .get("npm_node_execpath")
+            .and_then(|exec| node_layout(Path::new(exec)))
+        {
+            npm_builtin_config_deny_root = npm_builtin_config_deny_root_for(&layout.global_modules);
+            extra_reads.push(layout.headers.clone());
+            extra_reads.push(layout.global_modules.clone());
+            if !ambient.contains_key("npm_config_nodedir") {
+                // WHERE THE HEADERS COME FROM is a property of the distribution, asked of
+                // the disk rather than of the platform. A POSIX distribution ships them in
+                // its own root, so nodedir names that root and nothing is fetched. The
+                // Windows distribution ships none — and its jail is net deny-all, so a
+                // confined node-gyp can neither find nor fetch them — so there they are
+                // prefetched OUT of jail and nodedir names the prefetched tree, which is
+                // granted whole (nub-owned, headers and `node.lib` only).
+                let nodedir = if layout.headers.is_dir() {
+                    Some(layout.root.clone())
+                } else {
+                    super::build_prefetch::node_headers(&ambient, &probe)
+                        .inspect(|dir| extra_reads.push(dir.clone()))
+                };
+                if let Some(nodedir) = nodedir {
+                    ambient.insert(
+                        "npm_config_nodedir".to_string(),
+                        nodedir.to_string_lossy().into_owned(),
+                    );
+                }
             }
-            extra_reads.extend(reads);
         }
 
         // Same shape for node-gyp's OTHER out-of-jail toolchain dependency, Python. See
@@ -170,7 +191,7 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         extra_reads.extend(super::build_prefetch::prefetch(
             &spawn,
             &mut ambient,
-            &ProbeScope::new(&spawn),
+            &probe,
         ));
 
         let homes = sandbox_homes(&spawn.project_root);
@@ -545,54 +566,80 @@ fn sandbox_homes(project_root: &std::path::Path) -> nub_sandbox::Homes {
     }
 }
 
-/// The Node-toolchain additions derived from the effective child env: the
-/// `npm_config_nodedir` value to inject (the Node root — `bin/node`'s grandparent) and
-/// the read subtrees under it. `None` only when `npm_node_execpath` is absent or has
-/// fewer than two parents; the `<root>/bin/node` shape is ASSUMED, not checked, so a
-/// Windows layout (`<root>/node.exe`) derives one level too high and yields paths that
-/// do not exist. That is inert rather than wrong — the grants are `Speculative`, so an
-/// absent path is skipped — but it is why this must not be used to derive anything that
-/// has to be correct. Pure over its input, so the derivation is unit-testable without a
-/// Node on disk.
+/// A Node distribution's on-disk shape, derived from the interpreter path alone.
 ///
-/// Two subtrees, NOT the whole root. `lib/node_modules` is what makes `<root>/bin/npm`,
-/// `npx` and `corepack` resolvable at all: each is a symlink into it, so with only the
-/// bin dir granted all three are DANGLING inside the jail and the standard
-/// `prebuild-install || npm run build` fallback dies at `npm: not found` (measured on
-/// `keytar`: rc 127 → rc 0 once the target is readable). Granting the ROOT instead would
-/// be simpler but is unbounded — `npm_node_execpath` is the user's Node, which on a
-/// Homebrew or `/usr/local` install makes the root a shared system prefix carrying
-/// unrelated `etc/`/`var/` content.
+/// THE FILE NAME IS THE DISCRIMINATOR, and there are exactly two shapes: every POSIX
+/// distribution is `<root>/bin/node` with the global package tree under `<root>/lib`,
+/// while the Windows zip and MSI are FLAT — `<root>\node.exe` with `node_modules` beside
+/// it. nub's own store extracts to whichever the platform ships
+/// (`nub_core::node::discovery::store_node_binary`). Taking the grandparent
+/// unconditionally, as this did before, lands a Windows install on `C:\Program Files`:
+/// one level above the real root, so every path built from it is wrong. That was not
+/// merely inert. `npm_config_nodedir` is derived from it, node-gyp SKIPS its header
+/// download whenever nodedir is set (`configure.js`, `getNodeDir`), and the Windows build
+/// jail is net deny-all — so the wrong root did not degrade to a fetch, it produced a
+/// compile against a directory that does not exist.
 ///
-/// Scope of what this opens: Node's own toolchain plus any globally installed package's
-/// SOURCE (`npm -g` lands in `lib/node_modules`) — third-party code, not user data, and
-/// less sensitive than the `~/.npm/_cacache` tarballs `$tooldirs` already grants. The
-/// `.env*`/`.npmrc` deny floor is re-asserted after these grants and stays authoritative,
-/// including npm's own undotted `lib/node_modules/npm/npmrc` (matched by its own
-/// `ENV_DENY_LEAF_GLOBS` band, not the `.npmrc` glob) — the caller additionally passes
-/// `reads[1]`'s `npm/` subdir as a Linux deny-search root so the floor's recursive mask
-/// walk actually reaches it (see the call site).
-fn node_toolchain_grant(ambient: &BTreeMap<String, String>) -> Option<(String, Vec<PathBuf>)> {
-    let root = ambient
-        .get("npm_node_execpath")
-        .and_then(|exec| Path::new(exec).parent()?.parent().map(Path::to_path_buf))?;
-    let nodedir = root.to_string_lossy().into_owned();
-    let reads = vec![
-        root.join("include").join("node"),
-        root.join("lib").join("node_modules"),
-    ];
-    Some((nodedir, reads))
+/// Pure over its input, so the derivation is unit-testable without a Node on disk.
+struct NodeLayout {
+    /// The distribution root — what `npm_config_nodedir` names when the distribution
+    /// ships its own headers.
+    root: PathBuf,
+    /// Where headers live IF this distribution ships them. POSIX does. The Windows
+    /// distribution ships NONE (verified against `node-v22.20.0-win-x64.zip`: zero
+    /// `include/`, `.h` or `.lib` entries), so there this names a path that never exists
+    /// and the headers have to come from somewhere else — see the call site.
+    headers: PathBuf,
+    /// The globally-installed package tree.
+    ///
+    /// Granted as a subtree, NOT the whole root. It is what makes `npm`, `npx` and
+    /// `corepack` resolvable at all: each entry beside the interpreter is a symlink (or,
+    /// on Windows, a `.cmd` shim) into it, so with only the bin dir granted all three are
+    /// DANGLING inside the jail and the standard `prebuild-install || npm run build`
+    /// fallback dies at `npm: not found` (measured on `keytar`: rc 127 → rc 0 once the
+    /// target is readable). Granting the ROOT instead would be simpler but is unbounded —
+    /// `npm_node_execpath` is the user's Node, which on a Homebrew or `/usr/local`
+    /// install makes the root a shared system prefix carrying unrelated `etc/`/`var/`
+    /// content.
+    ///
+    /// Scope of what this opens: any globally installed package's SOURCE (`npm -g` lands
+    /// here) — third-party code, not user data, and less sensitive than the
+    /// `~/.npm/_cacache` tarballs `$tooldirs` already grants. The `.env*`/`.npmrc` deny
+    /// floor is re-asserted after these grants and stays authoritative, including npm's
+    /// own undotted `node_modules/npm/npmrc` (matched by its own `ENV_DENY_LEAF_GLOBS`
+    /// band, not the `.npmrc` glob) — the caller additionally passes this dir's `npm/`
+    /// subdir as a Linux deny-search root so the floor's recursive mask walk actually
+    /// reaches it (see the call site).
+    global_modules: PathBuf,
 }
 
-/// Whether `lib_node_modules` (the second [`node_toolchain_grant`] read, always
-/// `<node-root>/lib/node_modules`) holds npm's own `npm/` package dir — and if so, its
-/// path, to pass as the extra Linux `deny_search_roots` entry so the recursive mask walk
-/// reaches `npm/npmrc` instead of stopping at the `node_modules`-named ancestor (see the
-/// call site doc). Checked against the real filesystem (unlike the `Speculative` read
-/// grants above): `deny_search_roots` is strict, so an absent root would be a hard
-/// compile error rather than a silently-skipped grant.
-fn npm_builtin_config_deny_root_for(lib_node_modules: &Path) -> Option<PathBuf> {
-    let npm_dir = lib_node_modules.join("npm");
+fn node_layout(exec: &Path) -> Option<NodeLayout> {
+    let dir = exec.parent()?;
+    let flat = exec
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("node.exe"));
+    let (root, global_modules) = if flat {
+        (dir.to_path_buf(), dir.join("node_modules"))
+    } else {
+        let root = dir.parent()?.to_path_buf();
+        let global_modules = root.join("lib").join("node_modules");
+        (root, global_modules)
+    };
+    Some(NodeLayout {
+        headers: root.join("include").join("node"),
+        root,
+        global_modules,
+    })
+}
+
+/// Whether `global_modules` ([`NodeLayout::global_modules`]) holds npm's own `npm/`
+/// package dir — and if so, its path, to pass as the extra Linux `deny_search_roots` entry
+/// so the recursive mask walk reaches `npm/npmrc` instead of stopping at the
+/// `node_modules`-named ancestor (see the call site doc). Checked against the real
+/// filesystem (unlike the `Speculative` read grants above): `deny_search_roots` is strict,
+/// so an absent root would be a hard compile error rather than a silently-skipped grant.
+fn npm_builtin_config_deny_root_for(global_modules: &Path) -> Option<PathBuf> {
+    let npm_dir = global_modules.join("npm");
     npm_dir.is_dir().then_some(npm_dir)
 }
 
@@ -1133,48 +1180,71 @@ mod tests {
     }
 
     #[test]
-    fn node_toolchain_grant_derives_nodedir_headers_and_lib_node_modules() {
-        let ambient: BTreeMap<String, String> = [(
-            "npm_node_execpath".to_string(),
-            "/home/u/.cache/nub/node/v22.14.0/bin/node".to_string(),
-        )]
-        .into_iter()
-        .collect();
-        let (nodedir, reads) = node_toolchain_grant(&ambient).expect("derives a grant");
-        assert_eq!(nodedir, "/home/u/.cache/nub/node/v22.14.0");
+    fn node_layout_reads_the_posix_bin_node_shape() {
+        let layout = node_layout(Path::new("/home/u/.cache/nub/node/v22.14.0/bin/node"))
+            .expect("derives a layout");
         assert_eq!(
-            reads,
-            vec![
-                PathBuf::from("/home/u/.cache/nub/node/v22.14.0/include/node"),
-                PathBuf::from("/home/u/.cache/nub/node/v22.14.0/lib/node_modules"),
-            ]
+            layout.root,
+            PathBuf::from("/home/u/.cache/nub/node/v22.14.0")
         );
+        assert_eq!(
+            layout.headers,
+            PathBuf::from("/home/u/.cache/nub/node/v22.14.0/include/node")
+        );
+        assert_eq!(
+            layout.global_modules,
+            PathBuf::from("/home/u/.cache/nub/node/v22.14.0/lib/node_modules")
+        );
+    }
+
+    /// The regression this whole change exists for. The Windows zip and MSI are FLAT, so
+    /// taking the grandparent walks off the distribution entirely — a stock MSI install
+    /// derives `C:\Program Files`, whose `include/node` and `lib/node_modules` exist under
+    /// no Windows Node whatsoever. Expressed with forward slashes so it pins the
+    /// derivation on every host: the discriminator is the executable's NAME, not the
+    /// platform the test runs on.
+    #[test]
+    fn node_layout_reads_the_flat_windows_shape() {
+        let layout = node_layout(Path::new("/Program Files/nodejs/node.exe")).expect("a layout");
+        assert_eq!(layout.root, PathBuf::from("/Program Files/nodejs"));
+        assert_eq!(
+            layout.global_modules,
+            PathBuf::from("/Program Files/nodejs/node_modules"),
+            "the Windows global package tree sits beside node.exe, not under lib/"
+        );
+        assert_ne!(
+            layout.root,
+            PathBuf::from("/Program Files"),
+            "deriving the grandparent is the mis-derivation this replaces"
+        );
+    }
+
+    /// PATH lookup is case-insensitive on Windows, so `NODE.EXE` names the same file and
+    /// must not fall through to the POSIX branch.
+    #[test]
+    fn node_layout_matches_the_executable_name_case_insensitively() {
+        let layout = node_layout(Path::new("/opt/nodejs/NODE.EXE")).expect("a layout");
+        assert_eq!(layout.root, PathBuf::from("/opt/nodejs"));
     }
 
     /// The grant stays SCOPED to toolchain subtrees. Granting the derived root itself
     /// would hand a dependency build script the whole prefix — for a `/usr/local/bin/node`
     /// or Homebrew Node that is a shared system prefix, not nub's own store.
     #[test]
-    fn node_toolchain_grant_never_grants_the_bare_root() {
-        let ambient: BTreeMap<String, String> = [(
-            "npm_node_execpath".to_string(),
-            "/usr/local/bin/node".to_string(),
-        )]
-        .into_iter()
-        .collect();
-        let (_, reads) = node_toolchain_grant(&ambient).expect("derives a grant");
-        assert!(
-            !reads.contains(&PathBuf::from("/usr/local")),
-            "the shared prefix itself must never be a read grant: {reads:?}"
-        );
+    fn node_layout_subtrees_never_name_the_bare_root() {
+        let layout = node_layout(Path::new("/usr/local/bin/node")).expect("derives a layout");
+        assert_eq!(layout.root, PathBuf::from("/usr/local"));
+        for subtree in [&layout.headers, &layout.global_modules] {
+            assert!(
+                subtree.starts_with("/usr/local") && subtree != Path::new("/usr/local"),
+                "the shared prefix itself must never be a read grant: {subtree:?}"
+            );
+        }
     }
 
     #[test]
-    fn node_toolchain_grant_absent_without_execpath() {
-        let ambient: BTreeMap<String, String> = [("PATH".to_string(), "/usr/bin".to_string())]
-            .into_iter()
-            .collect();
-        assert!(node_toolchain_grant(&ambient).is_none());
+    fn node_layout_absent_without_a_grandparent() {
+        assert!(node_layout(Path::new("/node")).is_none());
     }
 
     #[test]
@@ -1188,11 +1258,10 @@ mod tests {
         );
     }
 
-    /// Absence must be tolerated, not just "usually present": a from-source Node build,
-    /// or the Windows-layout mis-derivation `node_toolchain_grant`'s own doc calls out,
-    /// can hand this a `lib_node_modules` that doesn't exist. `deny_search_roots` is
-    /// strict (an absent root is a hard error), so this must return `None`, never a
-    /// dangling path.
+    /// Absence must be tolerated, not just "usually present": a from-source Node build, or
+    /// a distribution that installs no global packages at all, can hand this a
+    /// `global_modules` that doesn't exist. `deny_search_roots` is strict (an absent root
+    /// is a hard error), so this must return `None`, never a dangling path.
     #[test]
     fn npm_builtin_config_deny_root_absent_when_npm_dir_missing() {
         let tmp = tempfile::tempdir().unwrap();

@@ -170,6 +170,12 @@ serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 sha2.workspace = true
 tracing.workspace = true
 tempfile = "3"
+# Unpacking the Node headers tarball out of jail (pm_engine/build_prefetch.rs) so a
+# confined node-gyp finds `include/node` on disk: the Windows distribution ships no
+# headers and the Windows jail is net deny-all. Both are already in the graph via
+# nub-core, so this adds no build weight.
+tar.workspace = true
+flate2.workspace = true
 toml.workspace = true
 # Comment-preserving JSONC read (serde) + read-modify-write (cst) for nub's own
 # global config file (~/.config/nub/nub.jsonc, see src/config.rs).
