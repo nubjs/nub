@@ -738,6 +738,14 @@ jobs:
       # Root deps are npm-managed (package-lock.json — same PM wpt-worker's
       # root `npm ci` uses; the pnpm domain lives in tools/).
       - run: npm ci
+      # `npm` runs through the Socket Firewall shim, which `exec`s sfw — so sfw's
+      # status IS this step's status. An sfw crash that exits 0 leaves a
+      # half-built tree (package dirs present, package.json missing) and a GREEN
+      # install step; the tree then surfaces six minutes later as unresolvable
+      # helper imports in five unrelated transpile tests. Assert the install
+      # actually produced something resolvable, so infra failure fails here.
+      - name: assert root deps actually installed
+        run: node -e "require.resolve('@oxc-project/runtime/helpers/usingCtx')"
       # The data-format loader tests need the nub-native addon (the npm yaml/toml/
       # json5 parser fallback isn't a dev dep). Built in DEBUG, not release: the
       # tests only need the addon to LOAD (the loaders are exercised at runtime,
