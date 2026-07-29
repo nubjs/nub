@@ -199,6 +199,10 @@ harness = false
 # stdio shim), with the unrepaired control arm in the same run. Self-reexecs as the jailed
 # child, which runs Node under an external bound.
 [[test]]
+name = "windows_restricted_token"
+harness = false
+
+[[test]]
 name = "windows_jail_repairs"
 harness = false
 
