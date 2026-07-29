@@ -1,0 +1,143 @@
+{
+  "_doc": [
+    "Per-class WORK-SIGNAL spec. Each class states (a) what the fixture must contain for the",
+    "package's real code path to be reachable, and (b) the predicate that decides DID-WORK.",
+    "",
+    "Predicate operators, evaluated against the delta produced by delta.mjs and the run log:",
+    "  created_all_of  : every regex must match >=1 entry in CREATED (root:rel form)",
+    "  created_any_of  : >=1 regex must match >=1 CREATED entry",
+    "  changed_any_of  : as created_any_of but over CREATED + MODIFIED",
+    "  min_created     : CREATED count over all roots must be >= n",
+    "  content_nonce   : a CREATED/MODIFIED file matching `where` must CONTAIN the run nonce.",
+    "                    This is the ONLY operator a warm cache cannot satisfy, because the",
+    "                    nonce is generated per run and cannot pre-exist. Prefer it wherever",
+    "                    the class admits it.",
+    "  log_match       : the combined stdout+stderr must match",
+    "",
+    "STRENGTH is recorded per class and is not decoration: a verdict built on a weak signal",
+    "must be labelled weak in the corpus output, or the corpus overstates its own confidence."
+  ],
+
+  "native-build-gyp": {
+    "fixture": [
+      "No project files needed. The hazard is the opposite of a missing input: node-gyp",
+      "packages increasingly ship or fetch a PREBUILD and skip compilation entirely, which is",
+      "a bail-out of the path we mean to test. Force source compilation with",
+      "npm_config_build_from_source=true in the install env, and assert the .o evidence below."
+    ],
+    "predicate": {
+      "created_all_of": [
+        "^pkg:build/Release/[^/]+\\.node$",
+        "^pkg:build/(Makefile|config\\.gypi)$",
+        "\\.o$"
+      ]
+    },
+    "strength": "strong",
+    "why": [
+      "The .o requirement is what separates COMPILED from DOWNLOADED. A prebuild-install",
+      "fallback produces build/Release/*.node with no object files at all, so an artifact-only",
+      "predicate would score a skipped compile as a successful one."
+    ]
+  },
+
+  "native-build-prebuilt": {
+    "fixture": [
+      "Cold download cache, and that cache directory MUST be inside a snapshot root (usually",
+      "$HOME or the package's own cache dir) or the download leaves no observable trace.",
+      "Set npm_config_build_from_source=false so the download path is the one under test."
+    ],
+    "predicate": {
+      "created_any_of": ["\\.node$", "^pkg:(prebuilds|build/Release)/"],
+      "min_created": 1
+    },
+    "strength": "medium",
+    "why": [
+      "No nonce is possible: the artifact is an upstream-fixed binary, so its content cannot",
+      "carry a per-run marker. The signal therefore rests entirely on CREATED-in-window plus a",
+      "verified-cold cache. State that dependency wherever the number is cited."
+    ]
+  },
+
+  "binary-downloader": {
+    "fixture": [
+      "Cold per-package download cache, inside a snapshot root. Many of these consult a",
+      "*_SKIP_DOWNLOAD / *_BINARY_PATH env var; the env must be verified free of them, since",
+      "an inherited skip flag is a silent bail-out that scores as a pass."
+    ],
+    "predicate": {
+      "created_any_of": ["^(pkg|home|store):.*"],
+      "min_created": 1
+    },
+    "strength": "medium",
+    "why": [
+      "Same no-nonce limitation as the prebuilt class. The corroborating signal is that the",
+      "CREATED entry is a large executable; the harness records size so this is checkable",
+      "post hoc rather than baked into the predicate."
+    ]
+  },
+
+  "codegen": {
+    "fixture": [
+      "The generator's INPUT must exist in the project — for Prisma a schema.prisma with a",
+      "generator block and a datasource block. Without it the postinstall exits 0 having done",
+      "nothing, which is the archetypal false pass this whole method exists to catch.",
+      "The schema MUST embed the run nonce (e.g. a model named NubProbe<RUNID>)."
+    ],
+    "predicate": {
+      "content_nonce": { "where": "^(pkg|nm|proj):.*", "must_appear": true }
+    },
+    "strength": "strongest",
+    "why": [
+      "Content-derivation is unforgeable. A generated client carrying a model name that was",
+      "invented for this run cannot have come from a cache, a sibling arm, or a previous run.",
+      "This is the only class where the work-signal is immune to every cache trap by",
+      "construction rather than by hygiene."
+    ]
+  },
+
+  "hook-installer": {
+    "fixture": [
+      "A REAL .git directory — `git init` plus at least one commit, since some installers",
+      "check for a valid repository rather than the directory's mere existence. Also ensure",
+      "the fixture does not set core.hooksPath already, and that HUSKY / lefthook skip vars",
+      "are absent from the environment."
+    ],
+    "predicate": {
+      "changed_any_of": ["^proj:\\.git/hooks/", "^proj:\\.husky/", "^proj:\\.git/config$", "^proj:lefthook"]
+    },
+    "strength": "strong",
+    "why": [
+      "The effect lands in the project tree, which makes this class the sharpest probe of the",
+      "project-file grant axis: under a jail that grants no project access it must fail, and a",
+      "pass would mean the grant is wider than believed."
+    ]
+  },
+
+  "telemetry-nag": {
+    "fixture": ["Nothing. The class has no input requirement, which is itself the problem."],
+    "predicate": { "log_match": null },
+    "strength": "NONE",
+    "why": [
+      "HONEST GAP. This class produces no filesystem effect by design, so the tree delta is",
+      "empty on both the real and the bail path and cannot separate them. The only candidates",
+      "are an attempted-connect (needs a syscall trace, unavailable unprivileged on macOS) and",
+      "an exact stdout string (author-controlled, changes between versions, and absent when the",
+      "package detects a non-TTY or CI). This class is reported as UNSIGNALLED rather than",
+      "given a predicate that would manufacture false confidence."
+    ]
+  },
+
+  "self-configuring": {
+    "fixture": [
+      "Cold cache; and check for an 'already configured' short-circuit, which is the bail-out",
+      "shape for this class."
+    ],
+    "predicate": { "min_created": 1 },
+    "strength": "weak",
+    "why": [
+      "Heterogeneous class with no common artifact. Treated as ACTED-only: it can be separated",
+      "from NEVER-RAN but not verified to have done its specific job, so it must never be",
+      "counted in a 'succeeded' figure without a per-package predicate written by hand."
+    ]
+  }
+}

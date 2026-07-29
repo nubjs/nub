@@ -1,0 +1,122 @@
+name: build-jail-corpus
+
+# BRANCH-SCOPED PROBE — no pull request required. The `push` trigger is what fires
+# this; `workflow_dispatch` stays listed for the day the probe graduates to the
+# default branch, but is inert until the file lands there.
+#
+# A GitHub-hosted runner is disposable by construction, which is the property this
+# probe needs: arm A0 runs dependency lifecycle scripts UNCONFINED, which is not
+# something to do on a development machine.
+on:
+  push:
+    branches: [probe/build-jail-corpus]
+    paths:
+      - 'tests/build-jail-corpus/**'
+      - '.github/workflows/build-jail-corpus.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pilot:
+    # macos-14 is the point of the probe: the macOS backend canonicalizes the
+    # child's PATH, which the Linux backend does not, so the store-side geometry
+    # a lifecycle script sees genuinely differs between them.
+    runs-on: macos-14
+    # A jailed lifecycle script has been observed spawning unboundedly when a
+    # resolution it depends on is denied, so the job carries its own ceiling
+    # rather than relying on the runner surviving it.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: build-jail-corpus-${{ runner.os }}
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5.0.0
+        with:
+          node-version: '26'
+
+      # The build dominates the job, so BOTH arms run against one binary rather
+      # than paying for it twice in two workflow runs.
+      - name: Build the dev binary
+        run: cargo build -p nub-cli --profile fast
+
+      - name: Record provenance
+        id: prov
+        run: |
+          BIN="$PWD/target/fast/nub"
+          echo "bin=$BIN" >> "$GITHUB_OUTPUT"
+          {
+            echo "commit=$(git rev-parse HEAD)"
+            echo "sha256=$(shasum -a 256 "$BIN" | awk '{print $1}')"
+            echo "version=$("$BIN" --version 2>&1 | head -1)"
+            echo "node=$(node --version)"
+            echo "host=$(uname -srm)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # A0 FIRST — it is the denominator. Without it a package that never reaches
+      # its real path scores as "works under the jail", which is worthless.
+      - name: 'Arm A0 (jail off) — the denominator'
+        working-directory: tests/build-jail-corpus
+        env:
+          NUB_BIN: ${{ steps.prov.outputs.bin }}
+          NUB_EXPECT_GIT_SHA: ${{ github.sha }}
+          STUDY_PATH: /usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin
+          OUTROOT: ${{ runner.temp }}/build-jail-corpus
+        run: |
+          chmod +x run-shard.sh
+          START=$(date +%s)
+          ./run-shard.sh pilot shard-pilot.tsv A0
+          echo "A0_SECONDS=$(( $(date +%s) - START ))" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: 'Arm PROD (jail on) — shipped defaults'
+        working-directory: tests/build-jail-corpus
+        env:
+          NUB_BIN: ${{ steps.prov.outputs.bin }}
+          NUB_EXPECT_GIT_SHA: ${{ github.sha }}
+          STUDY_PATH: /usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin
+          OUTROOT: ${{ runner.temp }}/build-jail-corpus
+        run: |
+          START=$(date +%s)
+          ./run-shard.sh pilot shard-pilot.tsv PROD
+          echo "PROD_SECONDS=$(( $(date +%s) - START ))" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Validity-gated verdict table
+        working-directory: tests/build-jail-corpus
+        env:
+          OUTROOT: ${{ runner.temp }}/build-jail-corpus
+        run: |
+          {
+            echo '```'
+            node aggregate.mjs "$OUTROOT"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # The heavy trees are dropped; only the derived JSON and the failure lines
+      # are kept, so the artifact stays small enough to be worth downloading.
+      - name: Collect evidence
+        if: always()
+        working-directory: tests/build-jail-corpus
+        env:
+          OUTROOT: ${{ runner.temp }}/build-jail-corpus
+        run: |
+          mkdir -p evidence
+          for d in "$OUTROOT"/*/; do
+            n=$(basename "$d")
+            mkdir -p "evidence/$n"
+            cp "$d"/report.json "$d"/verdicts.json "evidence/$n/" 2>/dev/null || true
+            grep -iE 'EPERM|EACCES|EROFS|Cannot find module|not permitted|arm_effect|optout_warnings|node_gyp_identity' \
+              "$d"/run.log > "evidence/$n/failures.txt" 2>/dev/null || true
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: always()
+        with:
+          name: build-jail-corpus-macos
+          path: tests/build-jail-corpus/evidence
+          retention-days: 7
