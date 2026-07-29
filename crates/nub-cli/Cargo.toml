@@ -40,6 +40,7 @@ compile = [
     "dep:oxc_parser",
     "dep:oxc_span",
     "dep:glob-match",
+    "dep:oxc_resolver",
     "tokio/full",
 ]
 
@@ -64,6 +65,11 @@ oxc_ast = { version = "=0.140.0", optional = true }
 oxc_ast_visit = { version = "=0.140.0", optional = true }
 oxc_parser = { version = "=0.140.0", optional = true }
 oxc_span = { version = "=0.140.0", optional = true }
+# Reads the entry's effective tsconfig (`extends` chain applied) to decide whether
+# `compilerOptions.jsx` is "preserve". Pinned to the version already in Rolldown's
+# graph — it is the SAME resolver Rolldown loads tsconfigs with, so the answer
+# cannot disagree with what the bundler goes on to do.
+oxc_resolver = { version = "=11.24.2", optional = true }
 # Mach-O section injection + pure-Rust ad-hoc signing of the launcher output.
 libsui = { version = "0.16", optional = true }
 # zstd-19 compression of the embedded Node (encode side; the launcher decodes with

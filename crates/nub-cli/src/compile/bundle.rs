@@ -15,6 +15,15 @@
 //! with no stack-trace clue and nothing the operator can install to fix it. The
 //! only fix is to make the specifier statically analyzable, so an escape hatch
 //! would just defer the same crash to the user's machine.
+//!
+//! The same reasoning drives the two gates that bracket the bundle. BEFORE it,
+//! [`jsx_override`] refuses to let a tsconfig `jsx: "preserve"` through, because
+//! preserved JSX is not JavaScript and cannot run anywhere. AFTER it,
+//! [`reject_invalid_chunks`] re-parses every emitted chunk, so ANY future path
+//! that emits something unparseable fails the compile instead of producing a
+//! binary that dies with `Unexpected token` on first run. The emit check is the
+//! backstop of last resort: it costs one parse per chunk and makes "compiled
+//! successfully" mean the output is at least loadable.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -26,6 +35,7 @@ use rolldown::plugin::{
     HookTransformArgs, HookTransformReturn, HookUsage, Plugin, SharedTransformPluginContext,
 };
 use rolldown::{BundlerBuilder, BundlerOptions, InputItem};
+use rolldown_common::bundler_options::{BundlerTransformOptions, Either, JsxOptions};
 use rolldown_common::{
     InnerOptions, Output, OutputFormat, Platform, RawMinifyOptions, ResolveOptions, SourceMapType,
     StrOrBytes, TreeshakeOptions, TsConfig,
@@ -130,8 +140,18 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
         resolve: Some(ResolveOptions {
             alias: alias_entries(&opts.alias)?,
             condition_names: (!opts.conditions.is_empty()).then(|| opts.conditions.clone()),
+            // `module` BEFORE `main`, inverting Rolldown's node-platform default
+            // (`["main", "module"]`) to Rollup's order. A legacy dual package
+            // with no `exports` map points `main` at a UMD build whose factory
+            // takes `require` as a PARAMETER; those `require()` calls are
+            // ordinary function calls no bundler can rewrite, so they survive
+            // into the artifact and throw MODULE_NOT_FOUND against the extracted
+            // app dir. `module` is by definition the ESM build and has none.
+            // `exports` still outranks both, so this only moves legacy packages.
+            main_fields: Some(vec!["module".to_string(), "main".to_string()]),
             ..Default::default()
         }),
+        transform: jsx_override(entry_abs, opts.tsconfig.as_deref()),
         // Left unset for auto-discovery. An explicit path is made absolute
         // first: Rolldown resolves a relative tsconfig against the bundler's
         // `cwd`, which is the ENTRY's directory, not the shell's.
@@ -195,6 +215,8 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
     if files.is_empty() {
         bail!("the bundler produced no chunks");
     }
+    // `files` is still chunks-only here — maps are merged in below.
+    reject_invalid_chunks(&files)?;
 
     // A referenced map has to travel with the chunk that names it; an external
     // one must NOT, or `--sourcemap=external` would ship the sources it exists
@@ -218,6 +240,56 @@ fn absolutize(path: &Path) -> PathBuf {
         return path.to_path_buf();
     }
     std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
+}
+
+// ---- jsx --------------------------------------------------------------------
+
+/// Neutralize a tsconfig `compilerOptions.jsx: "preserve"`, which Rolldown
+/// otherwise honors by emitting raw JSX — syntax no JavaScript engine parses, so
+/// the artifact dies on first run. "Preserve" means "a later tool transforms
+/// this"; when nub compiles, there IS no later tool, and `nub run` already
+/// refuses to preserve (runtime/transform-core.mjs maps everything but `"react"`
+/// to the automatic runtime), so honoring it here would also drift compile from
+/// run.
+///
+/// Applied ONLY when the entry's own effective tsconfig says `preserve`, because
+/// the only way to defeat it is to name a runtime, and naming one also freezes
+/// Rolldown's PER-FILE choice for the rest of the graph — a project on
+/// `jsx: "react"` (classic, `jsxFactory`) must keep that. `import_source` is
+/// deliberately left unset so Rolldown still fills it per file from each file's
+/// own `jsxImportSource`.
+fn jsx_override(
+    entry_abs: &Path,
+    explicit_tsconfig: Option<&Path>,
+) -> Option<BundlerTransformOptions> {
+    (effective_jsx_setting(entry_abs, explicit_tsconfig)? == "preserve").then(|| {
+        BundlerTransformOptions {
+            jsx: Some(Either::Right(JsxOptions {
+                runtime: Some("automatic".to_string()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    })
+}
+
+/// `compilerOptions.jsx` for the entry, with the `extends` chain applied.
+///
+/// Uses the resolver Rolldown itself resolves tsconfigs with, so a package
+/// `extends` (`@tsconfig/bun/tsconfig.json` — how the opencode tree inherits its
+/// settings) resolves identically to what the bundler will see.
+fn effective_jsx_setting(entry_abs: &Path, explicit_tsconfig: Option<&Path>) -> Option<String> {
+    let path = match explicit_tsconfig {
+        Some(p) => absolutize(p),
+        None => entry_abs
+            .parent()?
+            .ancestors()
+            .map(|dir| dir.join("tsconfig.json"))
+            .find(|p| p.is_file())?,
+    };
+    let resolver = oxc_resolver::Resolver::new(oxc_resolver::ResolveOptions::default());
+    let tsconfig = resolver.resolve_tsconfig(&path).ok()?;
+    tsconfig.compiler_options.jsx.clone()
 }
 
 fn sourcemap_type(mode: SourcemapMode) -> Option<SourceMapType> {
@@ -296,21 +368,37 @@ fn split_once_eq(s: &str) -> Option<(String, String)> {
 
 // ---- unresolvable-import rejection -------------------------------------------
 
-/// One `import(<expression>)` the bundler cannot follow.
+/// Why the bundler cannot follow a site. Each variant is a DIFFERENT authoring
+/// mistake, so each gets its own fix line in the diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SiteKind {
+    /// `import(expr)` — no statically analyzable specifier.
+    Dynamic,
+    /// `require("./x")` whose `require` is a LOCAL binding (a UMD factory
+    /// parameter, or `createRequire`). The specifier is static, but the call is
+    /// an ordinary function call to the bundler, so it is left verbatim and
+    /// resolves — against the extracted app dir — only at runtime.
+    Indirect,
+}
+
+/// One call site the bundler cannot follow.
 #[derive(Debug, Clone)]
 struct DynamicSite {
+    kind: SiteKind,
     module: String,
     line: usize,
     column: usize,
     snippet: String,
 }
 
-/// Collects non-literal dynamic-import sites while the graph loads.
+/// Collects unresolvable `import()` / `require()` sites while the graph loads.
 ///
 /// The `transform` hook is the right seam: it sees every module in the bundle
 /// (dependencies included) with its ORIGINAL path and source, so a diagnostic
 /// can name the real file and line. Scanning the emitted bundle instead would
-/// only ever be able to point at minified output.
+/// only ever be able to point at minified output — and for the indirect-require
+/// case it could not point at anything at all, since minification renames the
+/// shadowing `require` parameter and erases the pattern.
 #[derive(Debug, Default)]
 struct DynamicImportScan {
     sites: Mutex<Vec<DynamicSite>>,
@@ -335,7 +423,7 @@ impl Plugin for DynamicImportScan {
         _ctx: SharedTransformPluginContext,
         args: &HookTransformArgs<'_>,
     ) -> impl std::future::Future<Output = HookTransformReturn> + Send {
-        let found = scan_dynamic_imports(args.id, args.code);
+        let found = scan_unresolvable(args.id, args.code);
         async move {
             if !found.is_empty() {
                 if let Ok(mut sites) = self.sites.lock() {
@@ -351,38 +439,119 @@ impl Plugin for DynamicImportScan {
     }
 }
 
-/// Parse `source` and report every `import(...)` whose specifier is not a static
-/// string. A parse failure yields nothing: the bundler's own parse error is the
-/// better diagnostic, and this pass must never be the thing that fails a build.
-fn scan_dynamic_imports(id: &str, source: &str) -> Vec<DynamicSite> {
+/// Parse `source` and report every `import()` / `require()` that will still need
+/// resolving once the artifact runs. A parse failure yields nothing: the
+/// bundler's own parse error is the better diagnostic, and this pass must never
+/// be the thing that fails a build.
+fn scan_unresolvable(id: &str, source: &str) -> Vec<DynamicSite> {
     use oxc_allocator::Allocator;
-    use oxc_ast::ast::Expression;
+    use oxc_ast::AstKind;
+    use oxc_ast::ast::{BindingPattern, CallExpression, Expression, FormalParameters, Statement};
     use oxc_ast_visit::{Visit, walk};
     use oxc_parser::Parser;
     use oxc_span::{SourceType, Span};
 
     struct Visitor {
-        spans: Vec<Span>,
+        /// One entry per enclosing function; `true` when that function's own
+        /// parameters bind `require`.
+        fn_stack: Vec<bool>,
+        /// A module-level `var/let/const require = …` (the `createRequire` shape)
+        /// shadows for the whole file.
+        module_binds_require: bool,
+        found: Vec<(SiteKind, Span)>,
     }
+
+    impl Visitor {
+        fn require_is_local(&self) -> bool {
+            self.module_binds_require || self.fn_stack.iter().any(|shadows| *shadows)
+        }
+
+        /// `Some` when this `require(...)` is a live, unconditional dependency
+        /// the artifact cannot satisfy. An ordinary top-level `require("pkg")`
+        /// returns `None` — the bundler rewrites those, and genuinely missing
+        /// ones already arrive as Rolldown UNRESOLVED_IMPORT warnings.
+        ///
+        /// A NON-static `require(expr)` is deliberately NOT flagged, unlike its
+        /// `import(expr)` counterpart. Measured against opencode's tree, every
+        /// one of the five instances was a guarded optional loader —
+        /// `@protobufjs/inquire` ("requires a module only if available"),
+        /// node-pty's platform-binding probe, TypeScript's plugin loader,
+        /// yargs-parser's `--config` reader — each wrapped in try/catch or a
+        /// `typeof require` guard, and each harmless in a compiled artifact.
+        /// Failing on them would break compiles that work.
+        fn classify_require(&self, call: &CallExpression<'_>) -> Option<SiteKind> {
+            let Expression::Identifier(callee) = &call.callee else {
+                return None;
+            };
+            if callee.name != "require" {
+                return None;
+            }
+            let spec = static_specifier(call.arguments.first()?.as_expression()?)?;
+            // A builtin resolves from the artifact exactly as it does in
+            // development — it never needed node_modules.
+            if nub_phantom_core::builtins::is_builtin(&spec) {
+                return None;
+            }
+            self.require_is_local().then_some(SiteKind::Indirect)
+        }
+    }
+
     impl<'a> Visit<'a> for Visitor {
+        fn enter_node(&mut self, kind: AstKind<'a>) {
+            match kind {
+                AstKind::Function(f) => self.fn_stack.push(binds_require(&f.params)),
+                AstKind::ArrowFunctionExpression(a) => self.fn_stack.push(binds_require(&a.params)),
+                _ => {}
+            }
+        }
+
+        fn leave_node(&mut self, kind: AstKind<'a>) {
+            if matches!(
+                kind,
+                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
+            ) {
+                self.fn_stack.pop();
+            }
+        }
+
         fn visit_expression(&mut self, expr: &Expression<'a>) {
             if let Expression::ImportExpression(imp) = expr
                 && !is_static_specifier(&imp.source)
             {
-                self.spans.push(imp.span);
+                self.found.push((SiteKind::Dynamic, imp.span));
             }
             walk::walk_expression(self, expr);
         }
+
+        fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+            if let Some(kind) = self.classify_require(call) {
+                self.found.push((kind, call.span));
+            }
+            walk::walk_call_expression(self, call);
+        }
+    }
+
+    fn binds_require(params: &FormalParameters<'_>) -> bool {
+        params.items.iter().any(
+            |p| matches!(&p.pattern, BindingPattern::BindingIdentifier(id) if id.name == "require"),
+        )
     }
 
     /// A template literal with no interpolation is as static as a string
     /// literal — Rolldown resolves both.
-    fn is_static_specifier(expr: &Expression<'_>) -> bool {
+    fn static_specifier(expr: &Expression<'_>) -> Option<String> {
         match expr {
-            Expression::StringLiteral(_) => true,
-            Expression::TemplateLiteral(t) => t.expressions.is_empty(),
-            _ => false,
+            Expression::StringLiteral(s) => Some(s.value.to_string()),
+            Expression::TemplateLiteral(t) if t.expressions.is_empty() => t
+                .quasis
+                .first()
+                .map(|q| q.value.cooked.as_ref().unwrap_or(&q.value.raw).to_string()),
+            _ => None,
         }
+    }
+
+    fn is_static_specifier(expr: &Expression<'_>) -> bool {
+        static_specifier(expr).is_some()
     }
 
     let source_type = SourceType::from_path(id).unwrap_or_else(|_| SourceType::mjs());
@@ -391,16 +560,25 @@ fn scan_dynamic_imports(id: &str, source: &str) -> Vec<DynamicSite> {
     if parsed.panicked {
         return Vec::new();
     }
-    let mut visitor = Visitor { spans: Vec::new() };
+    let mut visitor = Visitor {
+        fn_stack: Vec::new(),
+        module_binds_require: parsed.program.body.iter().any(|stmt| {
+            matches!(stmt, Statement::VariableDeclaration(d)
+            if d.declarations.iter().any(|decl| {
+                matches!(&decl.id, BindingPattern::BindingIdentifier(id) if id.name == "require")
+            }))
+        }),
+        found: Vec::new(),
+    };
     visitor.visit_program(&parsed.program);
 
     visitor
-        .spans
+        .found
         .into_iter()
-        .map(|span| {
-            let start = span.start as usize;
-            let (line, column) = line_col(source, start);
+        .map(|(kind, span)| {
+            let (line, column) = line_col(source, span.start as usize);
             DynamicSite {
+                kind,
                 module: id.to_string(),
                 line,
                 column,
@@ -437,12 +615,14 @@ fn snippet(source: &str, start: usize, end: usize) -> String {
     }
 }
 
-/// Fail the build on any import the bundler could not resolve — the dynamic
-/// `import(expr)` sites the scan found, plus Rolldown's own UNRESOLVED_IMPORT
-/// warnings for named specifiers that resolved to nothing.
+/// Fail the build on any import the bundler could not resolve — the
+/// `import(expr)` / `require(…)` sites the scan found, plus Rolldown's own
+/// UNRESOLVED_IMPORT warnings for named specifiers that resolved to nothing.
 fn reject_unresolved(sites: &[DynamicSite], warnings: &[BuildDiagnostic]) -> Result<()> {
     let mut lines = Vec::new();
+    let mut any_indirect = false;
     for site in sites {
+        any_indirect |= site.kind == SiteKind::Indirect;
         lines.push(format!(
             "\x20\x20{}:{}:{}\n\x20\x20\x20\x20{}",
             site.module, site.line, site.column, site.snippet
@@ -459,13 +639,82 @@ fn reject_unresolved(sites: &[DynamicSite], warnings: &[BuildDiagnostic]) -> Res
         return Ok(());
     }
 
+    // The indirect-require fix is a different action from the dynamic-specifier
+    // one — the specifier is already static; what is wrong is the module format
+    // the resolver picked — so the hint is only shown when it applies.
+    let indirect_hint = if any_indirect {
+        "\n\x20\x20A require() whose `require` is a local binding (a UMD factory parameter) is\n\
+         \x20\x20an ordinary call the bundler cannot rewrite. Depend on the package's ESM\n\
+         \x20\x20build, or alias the specifier to it with --alias."
+    } else {
+        ""
+    };
     bail!(
         "{} import{} could not be resolved at build time:\n{}\n\n\
          \x20\x20A compiled binary carries no node_modules, so an unresolved import fails at\n\
          \x20\x20runtime on the machine you ship to. Make the specifier a static string so\n\
-         \x20\x20the bundler can follow it.",
+         \x20\x20the bundler can follow it.{}",
         lines.len(),
         if lines.len() == 1 { "" } else { "s" },
+        lines.join("\n"),
+        indirect_hint
+    );
+}
+
+// ---- emitted-chunk validity ---------------------------------------------------
+
+/// Re-parse every emitted chunk and fail the compile if any is not valid
+/// JavaScript.
+///
+/// The bundler can emit unparseable output and still report success — a tsconfig
+/// `jsx: "preserve"` writes raw JSX straight through, and any future
+/// transform/plugin gap does the same. The artifact then throws `SyntaxError` on
+/// first import, frequently from a SHARED chunk only some commands reach, so the
+/// failure looks intermittent and points nowhere near the cause. One parse per
+/// chunk is negligible next to bundling, and it is what makes "Compiled …" a
+/// claim about output that can actually load.
+fn reject_invalid_chunks(chunks: &[BundledFile]) -> Result<()> {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let mut lines = Vec::new();
+    for chunk in chunks {
+        let Ok(code) = std::str::from_utf8(&chunk.bytes) else {
+            lines.push(format!("\x20\x20{}: not valid UTF-8", chunk.name));
+            continue;
+        };
+        let allocator = Allocator::default();
+        // ESM with JSX OFF, which is exactly what Node accepts for the `.js`
+        // files this emits: `format` is always `esm` above, and no Node parses
+        // JSX. Anything this rejects, the shipped runtime rejects too.
+        let parsed = Parser::new(&allocator, code, SourceType::mjs()).parse();
+        let Some(first) = parsed.diagnostics.first() else {
+            continue;
+        };
+        let offset = first
+            .labels
+            .as_slice()
+            .first()
+            .map_or(0, |l| l.offset() as usize);
+        let (line, column) = line_col(code, offset);
+        lines.push(format!(
+            "\x20\x20{}:{}:{}\n\x20\x20\x20\x20{}",
+            chunk.name, line, column, first.message
+        ));
+    }
+    if lines.is_empty() {
+        return Ok(());
+    }
+
+    bail!(
+        "the bundler emitted {} chunk{} that {} not valid JavaScript:\n{}\n\n\
+         \x20\x20The compiled binary would throw a SyntaxError on startup. This usually means\n\
+         \x20\x20a source language survived the bundle untransformed — most often JSX, from a\n\
+         \x20\x20tsconfig whose compilerOptions.jsx is \"preserve\".",
+        lines.len(),
+        if lines.len() == 1 { "" } else { "s" },
+        if lines.len() == 1 { "is" } else { "are" },
         lines.join("\n")
     );
 }
@@ -562,7 +811,7 @@ await import(`./also-static.js`);
 const mod = await import(name);
 await import(`./${name}.js`);
 "#;
-        let sites = scan_dynamic_imports("/p/app.ts", src);
+        let sites = scan_unresolvable("/p/app.ts", src);
         assert_eq!(
             sites.len(),
             2,
@@ -576,11 +825,58 @@ await import(`./${name}.js`);
         );
     }
 
+    // The jsonc-parser@2.3.1 shape: a UMD factory takes `require` as a
+    // PARAMETER, so its static `require("./impl/format")` is an ordinary call no
+    // bundler can rewrite, and it reaches the artifact intact. Every other line
+    // is a control that must NOT be flagged — a rewritable top-level require, a
+    // builtin, and a guarded `require(expr)` probe (the shape five real packages
+    // in opencode's tree use, all try/catch'd).
+    #[test]
+    fn scan_flags_require_only_when_the_bundler_cannot_rewrite_it() {
+        let src = r#"
+const fine = require("some-pkg");
+(function (factory) { factory(require, exports); })(function (require, exports) {
+  const fmt = require("./impl/format");
+  const os = require("node:os");
+  try { const opt = require(maybeInstalled); } catch {}
+});
+"#;
+        let sites = scan_unresolvable("/p/umd.js", src);
+        let kinds: Vec<_> = sites.iter().map(|s| (s.kind, s.line)).collect();
+        assert_eq!(
+            kinds,
+            vec![(SiteKind::Indirect, 4)],
+            "only the shadowed relative require is unconditionally broken, got {sites:?}"
+        );
+    }
+
+    // `const require = createRequire(...)` shadows for the whole module, so its
+    // calls are live at runtime too — but a builtin still resolves from inside
+    // the artifact, and failing that would be a false positive.
+    #[test]
+    fn module_level_create_require_shadows_but_builtins_still_pass() {
+        let src = r#"
+import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+const fs = require("node:fs");
+const pkg = require("./package.json");
+"#;
+        let sites = scan_unresolvable("/p/app.mjs", src);
+        assert_eq!(
+            sites.len(),
+            1,
+            "only the non-builtin survives, got {sites:?}"
+        );
+        assert_eq!(sites[0].kind, SiteKind::Indirect);
+        assert!(sites[0].snippet.contains("./package.json"), "{sites:?}");
+    }
+
     // Rejection is unconditional — there is no opt-out — so the error has to
     // carry everything needed to fix the source, and point at the only fix.
     #[test]
     fn rejection_names_the_site_and_the_fix() {
         let sites = vec![DynamicSite {
+            kind: SiteKind::Dynamic,
             module: "/p/src/plugins.ts".into(),
             line: 12,
             column: 20,
@@ -591,6 +887,110 @@ await import(`./${name}.js`);
         assert!(msg.contains("/p/src/plugins.ts:12:20"), "got: {msg}");
         assert!(msg.contains("import(pluginPath)"), "got: {msg}");
         assert!(msg.contains("static string"), "got: {msg}");
+        assert!(
+            !msg.contains("UMD"),
+            "the indirect-require hint must not show for a dynamic-specifier site: {msg}"
+        );
+    }
+
+    // The gate that makes "Compiled …" mean something: a chunk carrying raw JSX
+    // is what `jsx: "preserve"` produced, and it must not reach an artifact.
+    #[test]
+    fn emitted_chunk_gate_rejects_unparseable_output() {
+        let bad = BundledFile {
+            name: "config-a1b2.js".into(),
+            bytes: b"export const view = () => <box width=\"100%\">hi</box>;\n".to_vec(),
+        };
+        let err = reject_invalid_chunks(&[bad]).expect_err("raw JSX must fail the compile");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("config-a1b2.js:1:"),
+            "the failing chunk and position must be named, got: {msg}"
+        );
+        assert!(
+            msg.contains("compilerOptions.jsx"),
+            "the message must point at the usual cause, got: {msg}"
+        );
+
+        // Control: modern syntax the artifact really does run must pass, or the
+        // gate would just be a build-breaker.
+        let good = BundledFile {
+            name: "entry.js".into(),
+            bytes:
+                b"#!/usr/bin/env node\nimport fs from 'node:fs';\n\
+                     const x = globalThis.a?.b ?? 1;\nawait fs.promises.stat('.');\nexport { x };\n"
+                    .to_vec(),
+        };
+        reject_invalid_chunks(&[good]).expect("valid ESM must pass the gate");
+    }
+
+    // End-to-end proof for the two halves of the JSX fix: the override defeats
+    // `preserve`, and the emit gate would have caught it had the override
+    // failed. Bundling a .tsx under a preserve tsconfig must yield JS.
+    #[test]
+    fn jsx_preserve_is_transformed_not_emitted_raw() {
+        let dir = std::env::temp_dir().join(format!("nub-jsx-preserve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("jsx-runtime")).unwrap();
+        std::fs::write(
+            dir.join("tsconfig.json"),
+            r#"{"compilerOptions":{"jsx":"preserve","jsxImportSource":"./jsx-runtime"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("jsx-runtime/package.json"),
+            r#"{"name":"jsx-runtime","type":"module","exports":{"./jsx-runtime":"./jsx-runtime.js"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("jsx-runtime/jsx-runtime.js"),
+            "export function jsx(t, p) { return { t, p }; }\n\
+             export function jsxs(t, p) { return { t, p }; }\n\
+             export const Fragment = 'Fragment';\n",
+        )
+        .unwrap();
+        let entry = dir.join("entry.tsx");
+        std::fs::write(&entry, "globalThis.OUT = <div id=\"a\">hi</div>;\n").unwrap();
+
+        let mut o = opts();
+        o.minify = false;
+        let res = bundle(&entry, &o).expect("a preserve tsconfig must still compile");
+        let code = String::from_utf8(res.files[0].bytes.clone()).unwrap();
+        assert!(
+            !code.contains("<div"),
+            "JSX must not survive into the bundle, got:\n{code}"
+        );
+        assert!(
+            code.contains("jsx"),
+            "the automatic runtime call must be there, got:\n{code}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // `preserve` is the ONLY setting overridden: naming a runtime freezes
+    // Rolldown's per-file choice, so a classic-runtime project must be left to it.
+    #[test]
+    fn jsx_override_applies_only_to_preserve() {
+        let dir = std::env::temp_dir().join(format!("nub-jsx-override-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("entry.tsx");
+        std::fs::write(&entry, "export const x = 1;\n").unwrap();
+
+        for (setting, want_override) in [("preserve", true), ("react", false), ("react-jsx", false)]
+        {
+            std::fs::write(
+                dir.join("tsconfig.json"),
+                format!(r#"{{"compilerOptions":{{"jsx":"{setting}"}}}}"#),
+            )
+            .unwrap();
+            assert_eq!(
+                jsx_override(&entry, None).is_some(),
+                want_override,
+                "jsx: {setting:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn bundle_fixture(source: &str, o: &BundleOptions) -> String {
