@@ -1410,8 +1410,12 @@ fn unshare_one_file(path: &Path, mode: u32) -> std::io::Result<()> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    // `parent` is the caller's own node_modules, and a crashed run leaves this
+    // temp behind (hence the cleanup below), so the leaf is brand-scoped to the
+    // active embedder rather than hardcoded.
     let tmp = parent.join(format!(
-        ".aube-unshare-{}-{}.tmp",
+        ".{}-unshare-{}-{}.tmp",
+        aube_util::prog(),
         std::process::id(),
         file_name
     ));

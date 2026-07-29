@@ -665,7 +665,11 @@ fn nub_never_writes_an_aube_branded_path() {
         .expect("failed to spawn nub");
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    assert_eq!(out.status.code(), Some(0), "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
 
     let node_gyp = stdout
         .lines()
