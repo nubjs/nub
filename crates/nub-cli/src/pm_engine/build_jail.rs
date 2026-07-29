@@ -192,7 +192,12 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
 
         let mut spec = nub_sandbox::CommandSpec::new(&spawn.program)
             .args(&spawn.args)
-            .cwd(&spawn.cwd);
+            .cwd(&spawn.cwd)
+            // Third-party build tooling detaches by design — `node-gyp` backgrounds `make`
+            // — so the shell's pid is no handle on what the script leaves running. Ask for
+            // a process group, which is. Honored by the macOS backend; the other platforms
+            // already reap through a mechanism of their own (see `CommandSpec`).
+            .reap_descendants(true);
         // The `.env*` deny floor is a bounded glob, so the backend needs the dirs whose
         // immediate children it may materialize to enforce it. The PACKAGE DIR is the
         // primary such root: it is the one place the jail both reads and writes. The
@@ -226,12 +231,37 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         if let Some(warning) = prepared.degradation.warning() {
             eprintln!("warning: {warning}");
         }
-        // `status()` spawns and waits. Descendant reaping without aube's job object, by
-        // whichever handle the platform's mechanism affords: on Linux the build jail runs
-        // under Landlock, which has no PID namespace, so the child is made a session leader
-        // and its process GROUP is signalled and swept — weaker than a namespace, since a
-        // script that calls `setsid` itself escapes the group and survives.
-        prepared.status()
+        // The launch handle reaps the script's descendants on return and on drop (which
+        // mechanism, per platform: `nub_sandbox::CommandSpec::reap_descendants`). What it
+        // cannot cover is a `SIGINT`/`SIGTERM` whose default action kills nub, since that
+        // runs no `Drop` at all — and where the launch created a process group, that group
+        // is a BACKGROUND one, so a terminal Ctrl-C no longer reaches the script by
+        // membership either. Enrolling the group in aube's reaper closes both: its handler
+        // sweeps every live group, then re-raises so nub still dies with the right status.
+        #[cfg(unix)]
+        {
+            // Declared BEFORE `child` so it drops AFTER it — locals drop in reverse
+            // declaration order, and the group must be killed before its registry slot is
+            // cleared. Clearing first leaves a signal in between skipping the group.
+            let _enrolled;
+            // Armed before the spawn: the child leaves the foreground group the instant it
+            // starts, and until the handler exists a Ctrl-C reaches neither the script nor
+            // anything that would reap it.
+            aube_scripts::unix_group::arm_group_reaper();
+            let mut child = prepared.spawn()?;
+            // `None` unless the kernel confirmed the child leads its own group — the same
+            // fail-open the Windows job object takes when the OS refuses it.
+            _enrolled = child
+                .process_group_id()
+                .and_then(aube_scripts::unix_group::register_embedder_group);
+            child.wait()
+        }
+        // Windows owns spawn+wait inside its launch plan and refuses the asynchronous
+        // `spawn` seam, so the uniform `status()` verb stays the entry point off unix.
+        #[cfg(not(unix))]
+        {
+            prepared.status()
+        }
     }
 }
 
