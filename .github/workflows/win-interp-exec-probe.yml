@@ -1,0 +1,96 @@
+# Branch-scoped ad-hoc probe: can an AppContainer child EXECUTE the interpreter the build
+# jail granted it? No pull request required (.claude/skills/ci-adhoc-test/SKILL.md). CI is
+# the only venue — AppContainer cannot be launched over SSH (session 0 has no window
+# station, so every launch returns 0xC0000142), which also rules out the standing nub-win VM.
+#
+# THE QUESTION. With the verbatim command line landed, a confined cmd.exe reaches `node` and
+# nub's shim then dies spawning the real binary with `Access is denied. (os error 5)` on
+# `C:\hostedtoolcache\…\node.exe`. Either the ACE never reached that file, or it did and an
+# AppContainer still cannot execute the image from there. The arms differ by exactly one
+# variable each, so the verdict pair names the cause.
+#
+# THE CONTROL. `interpreter-ungranted-refused` runs the identical fixture with the grant
+# removed and must be REFUSED. A probe that cannot fail by permissiveness is the only kind
+# whose green means anything.
+#
+# Every step is `if: always()`, because a red step early in the job must never hide the
+# verdicts this job exists to produce.
+name: win-interp-exec-probe
+
+on:
+  push:
+    branches: [sandbox/win-interp-exec]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      # Matches sandbox-conformance's windows leg: crt-static makes the self-reexec probe
+      # child self-contained, so it starts cleanly under the LowBox token.
+      RUSTFLAGS: "-C target-feature=+crt-static"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Interpreter baseline
+        if: always()
+        shell: bash
+        run: |
+          which node
+          node -p "process.execPath"
+          node -p "process.versions.node"
+
+      - name: Probe — AppContainer exec of the granted interpreter
+        if: always()
+        shell: bash
+        run: |
+          rc=0
+          cargo test -p nub-sandbox --test windows_interpreter_exec > probe.log 2>&1 || rc=$?
+          echo "probe exit=$rc"
+          cat probe.log
+
+      # The verdict is read off the log, never off a step's exit status: a property whose
+      # `prop:` line is ABSENT must fail here, so a probe that never ran cannot be mistaken
+      # for one that passed.
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          fail=0
+          need() {
+            if grep -qF "$1" probe.log 2>/dev/null; then
+              echo "OK   $1"
+            else
+              echo "MISS $1"
+              fail=1
+            fi
+          }
+          [ -s probe.log ] || { echo "MISS the probe produced no output at all"; fail=1; }
+          need "PROBE windows interpreter exec under AppContainer"
+          for p in interpreter-in-place-execs interpreter-ungranted-refused interpreter-copied-execs system-exec-baseline; do
+            grep -q "prop:$p=" probe.log || { echo "MISS property $p never reported"; fail=1; }
+          done
+          # The control and the baseline must hold in EVERY run, whatever the treatment did:
+          # without them a red treatment cannot be told from a broken harness.
+          need "prop:interpreter-ungranted-refused=PASS"
+          need "prop:system-exec-baseline=PASS"
+          echo "---- recorded verdicts ----"
+          grep -E '^(PROBE |  prop:|interpreter: |WINDOWS )' probe.log || true
+          exit $fail
+
+      - name: Upload probe log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-interp-exec-probe
+          path: probe.log
+          if-no-files-found: warn

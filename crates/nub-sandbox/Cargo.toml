@@ -178,6 +178,11 @@ harness = false
 name = "windows_speculative_grants"
 harness = false
 
+# Self-reexecs as the jailed probe child, which in turn spawns the interpreter.
+[[test]]
+name = "windows_interpreter_exec"
+harness = false
+
 # OPT-IN ONLY. This probe is not a unit test: on an unprovisioned machine it exits non-zero
 # by design, and when run elevated it CREATES a local account, a local group, four persistent
 # WFP filters and a Winlogon registry value. Left ungated, bare `cargo test` on a
