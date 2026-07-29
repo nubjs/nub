@@ -200,14 +200,6 @@ fn specs() -> Vec<KeySpec> {
             is_empty: Some(|c| c.install.minimum_release_age_exclude == Some(Vec::new())),
         },
         KeySpec {
-            key: ConfigKey::InstallNodeOptions,
-            name: "install.nodeOptions",
-            set: |c, t| c.install.node_options = Some(strings(t)),
-            matches: |c, t| c.install.node_options == Some(strings(t)),
-            set_empty: Some(|c| c.install.node_options = Some(Vec::new())),
-            is_empty: Some(|c| c.install.node_options == Some(Vec::new())),
-        },
-        KeySpec {
             key: ConfigKey::InstallSandbox,
             name: "install.sandbox",
             set: |c, t| c.install.sandbox = Some(preset(t)),
@@ -264,11 +256,10 @@ fn ordinal(key: ConfigKey) -> usize {
         ConfigKey::InstallHoist => 12,
         ConfigKey::InstallMinimumReleaseAge => 13,
         ConfigKey::InstallMinimumReleaseAgeExclude => 14,
-        ConfigKey::InstallNodeOptions => 15,
-        ConfigKey::InstallSandbox => 16,
-        ConfigKey::DlxConsent => 17,
-        ConfigKey::DlxSandbox => 18,
-        ConfigKey::DlxEnvFile => 19,
+        ConfigKey::InstallSandbox => 15,
+        ConfigKey::DlxConsent => 16,
+        ConfigKey::DlxSandbox => 17,
+        ConfigKey::DlxEnvFile => 18,
     }
 }
 
@@ -306,8 +297,8 @@ fn resolve(layers: [Option<ProjectConfig>; 5]) -> EffectiveConfig {
 #[test]
 fn spec_table_covers_every_config_key_exactly_once() {
     let specs = specs();
-    assert_eq!(specs.len(), 20, "one spec per ConfigKey variant");
-    let mut seen = [false; 20];
+    assert_eq!(specs.len(), 19, "one spec per ConfigKey variant");
+    let mut seen = [false; 19];
     for spec in &specs {
         let idx = ordinal(spec.key);
         assert!(!seen[idx], "duplicate spec for {}", spec.name);

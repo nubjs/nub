@@ -55,7 +55,6 @@ const INSTALL_KEYS: &[&str] = &[
     "hoist",
     "minimumReleaseAge",
     "minimumReleaseAgeExclude",
-    "nodeOptions",
     "sandbox",
 ];
 const DLX_KEYS: &[&str] = &["consent", "sandbox", "envFile"];
@@ -221,7 +220,6 @@ pub struct InstallConfig {
     pub hoist: Option<Hoist>,
     pub minimum_release_age: Option<Duration>,
     pub minimum_release_age_exclude: Option<Vec<String>>,
-    pub node_options: Option<Vec<String>>,
     pub sandbox: Option<SandboxSetting>,
 }
 
@@ -315,7 +313,6 @@ pub enum ConfigKey {
     InstallHoist,
     InstallMinimumReleaseAge,
     InstallMinimumReleaseAgeExclude,
-    InstallNodeOptions,
     InstallSandbox,
     DlxConsent,
     DlxSandbox,
@@ -921,14 +918,6 @@ fn merge_layer(
         sources,
         layer.install,
         source,
-        node_options,
-        ConfigKey::InstallNodeOptions
-    );
-    merge_field!(
-        values.install,
-        sources,
-        layer.install,
-        source,
         sandbox,
         ConfigKey::InstallSandbox
     );
@@ -1227,9 +1216,6 @@ fn validate_install(v: &Value, path: &str) -> Result<InstallConfig> {
             v,
             &child(path, "minimumReleaseAgeExclude"),
         )?);
-    }
-    if let Some(v) = obj.get("nodeOptions") {
-        install.node_options = Some(as_string_array(v, &child(path, "nodeOptions"))?);
     }
     if let Some(v) = obj.get("sandbox") {
         install.sandbox = Some(validate_sandbox(v, &child(path, "sandbox"))?);
@@ -1598,8 +1584,7 @@ mod tests {
                 "symlinkDisablePattern": ["@corp/tool-*"],
                 "hoist": ["*types*"],
                 "minimumReleaseAge": "3d",
-                "minimumReleaseAgeExclude": ["@myorg/*"],
-                "nodeOptions": ["--max-old-space-size=2048"]
+                "minimumReleaseAgeExclude": ["@myorg/*"]
               }
             }"#,
         );
@@ -1619,10 +1604,6 @@ mod tests {
         assert_eq!(
             cfg.install.minimum_release_age_exclude,
             Some(vec!["@myorg/*".into()])
-        );
-        assert_eq!(
-            cfg.install.node_options,
-            Some(vec!["--max-old-space-size=2048".into()])
         );
     }
 
@@ -2313,7 +2294,6 @@ mod tests {
             "hoist": false,
             "minimumReleaseAge": "1d",
             "minimumReleaseAgeExclude": [],
-            "nodeOptions": [],
             "sandbox": false
           }
         }"#;

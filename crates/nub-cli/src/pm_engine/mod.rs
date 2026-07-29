@@ -864,12 +864,7 @@ fn engine_session_inner(
     // share one source. Closes the ABI bug where dep build scripts (node-gyp)
     // compiled against ambient Node instead of the project's. Default-empty
     // overlay when augmentation can't engage ⇒ behavior preserved.
-    apply_lifecycle_augmentation(
-        &cwd,
-        native_install
-            .as_ref()
-            .and_then(|config| config.node_options.as_deref()),
-    );
+    apply_lifecycle_augmentation(&cwd);
     Ok(EngineSession {
         detected,
         runtime: build_runtime()?,
@@ -881,7 +876,6 @@ fn engine_session_inner(
 #[derive(Debug, Default, PartialEq, Eq)]
 struct NativeInstallSettings {
     settings: Vec<(String, String)>,
-    node_options: Option<String>,
     symlink_disable_pattern: Vec<String>,
 }
 
@@ -1005,20 +999,8 @@ fn lower_native_install_settings(
         settings.push(("minimumReleaseAgeExclude".to_string(), exclude.join(",")));
     }
 
-    let node_options = install.node_options.as_ref().map(|options| {
-        options
-            .iter()
-            .map(|option| nub_core::node::spawn::node_options_token(option))
-            .collect::<Vec<_>>()
-            .join(" ")
-    });
-    if let Some(value) = node_options.as_ref() {
-        settings.push(("nodeOptions".to_string(), value.clone()));
-    }
-
     Ok(NativeInstallSettings {
         settings,
-        node_options,
         symlink_disable_pattern: install.symlink_disable_pattern.clone().unwrap_or_default(),
     })
 }
@@ -1579,7 +1561,7 @@ fn lifecycle_node_anchor(cwd: &Path) -> PathBuf {
 /// (behavior preserved) when augmentation can't be computed (compat /
 /// re-entrant / broken install); the resolved Node *version* is published to the
 /// engine either way. Called once per command from [`engine_session`].
-fn apply_lifecycle_augmentation(cwd: &Path, configured_node_options: Option<&str>) {
+fn apply_lifecycle_augmentation(cwd: &Path) {
     let anchor = lifecycle_node_anchor(cwd);
     // The project's Node — pin-aware (`.nvmrc`/`.node-version`/`engines`), NOT
     // the ambient PATH node. This resolved version drives flag injection and its
@@ -1613,11 +1595,12 @@ fn apply_lifecycle_augmentation(cwd: &Path, configured_node_options: Option<&str
     ) else {
         return;
     };
+    // npm/pnpm parity: `npm_config_node_options` seeds a lifecycle script's
+    // NODE_OPTIONS only when the ambient env carries none of its own.
     if std::env::var_os("NODE_OPTIONS").is_none() {
         let selected = std::env::var("NPM_CONFIG_NODE_OPTIONS")
             .ok()
-            .or_else(|| std::env::var("npm_config_node_options").ok())
-            .or_else(|| configured_node_options.map(str::to_string));
+            .or_else(|| std::env::var("npm_config_node_options").ok());
         if let Some(selected) = selected.filter(|value| !value.is_empty()) {
             match aug.node_options.as_mut() {
                 Some(options) => {
@@ -3074,10 +3057,6 @@ mod tests {
             ])),
             minimum_release_age: Some(std::time::Duration::from_secs(61)),
             minimum_release_age_exclude: Some(Vec::new()),
-            node_options: Some(vec![
-                "--max-old-space-size=2048".into(),
-                "--trace-warnings".into(),
-            ]),
             ..InstallConfig::default()
         };
         let lowered = lower_native_install_settings(&install, &[]).unwrap();
@@ -3098,14 +3077,6 @@ mod tests {
             Some("true")
         );
         assert_eq!(get(&lowered.settings, "minimumReleaseAgeExclude"), Some(""));
-        assert_eq!(
-            get(&lowered.settings, "nodeOptions"),
-            Some("--max-old-space-size=2048 --trace-warnings")
-        );
-        assert_eq!(
-            lowered.node_options.as_deref(),
-            Some("--max-old-space-size=2048 --trace-warnings")
-        );
     }
 
     #[test]
@@ -3146,38 +3117,11 @@ mod tests {
             node_linker: Some(NodeLinker::Isolated),
             hoist: Some(Hoist::Bool(false)),
             minimum_release_age_exclude: Some(Vec::new()),
-            node_options: Some(Vec::new()),
             ..InstallConfig::default()
         };
         let lowered = lower_native_install_settings(&install, &[]).unwrap();
         assert_eq!(get(&lowered.settings, "hoist"), Some("false"));
         assert_eq!(get(&lowered.settings, "minimumReleaseAgeExclude"), Some(""));
-        assert_eq!(get(&lowered.settings, "nodeOptions"), Some(""));
-        assert_eq!(lowered.node_options.as_deref(), Some(""));
-    }
-
-    #[test]
-    fn native_node_options_preserve_each_json_element_as_one_token() {
-        let install = InstallConfig {
-            node_options: Some(vec![
-                "--conditions=plain".into(),
-                "--require=/tmp/a path/preload.cjs".into(),
-                r#"--conditions=a"b"#.into(),
-                r#"--require=C:\Users\Jane Doe\preload.cjs"#.into(),
-            ]),
-            ..InstallConfig::default()
-        };
-        let lowered = lower_native_install_settings(&install, &[]).unwrap();
-        assert_eq!(
-            lowered.node_options.as_deref(),
-            Some(
-                r#"--conditions=plain "--require=/tmp/a path/preload.cjs" "--conditions=a\"b" "--require=C:\\Users\\Jane Doe\\preload.cjs""#
-            )
-        );
-        assert_eq!(
-            get(&lowered.settings, "nodeOptions"),
-            lowered.node_options.as_deref()
-        );
     }
 
     #[test]
@@ -3268,8 +3212,7 @@ mod tests {
                 "nodeLinker": "isolated",
                 "hoist": false,
                 "minimumReleaseAge": "3d",
-                "minimumReleaseAgeExclude": ["@internal/*"],
-                "nodeOptions": ["--trace-warnings"]
+                "minimumReleaseAgeExclude": ["@internal/*"]
               }
             }"#,
         )
@@ -3306,10 +3249,6 @@ mod tests {
         assert_eq!(
             get(&lowered.settings, "minimumReleaseAgeExclude"),
             Some("@internal/*")
-        );
-        assert_eq!(
-            get(&lowered.settings, "nodeOptions"),
-            Some("--trace-warnings")
         );
 
         // SAFETY: still under test_env_lock; restores what the process started with.

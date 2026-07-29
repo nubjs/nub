@@ -116,10 +116,6 @@
         "minimumReleaseAgeExclude": {
           "$ref": "#/$defs/stringArray",
           "description": "Package patterns exempt from minimumReleaseAge."
-        },
-        "nodeOptions": {
-          "$ref": "#/$defs/stringArray",
-          "description": "Node options applied to dependency lifecycle scripts."
         }
       }
     },

@@ -261,18 +261,7 @@ A project [`nub.jsonc`](/docs/config) carries an [`install`](/docs/config#instal
 }
 ```
 
-Dependency build scripts take their own Node options:
-
-```jsonc title="nub.jsonc"
-{
-  // ...
-  "install": {
-    "nodeOptions": ["--max-old-space-size=8192"]
-  }
-}
-```
-
-The top-level `nodeOptions` field is separate — it covers runtime commands, not dependency builds. Layout settings live in the same block; see [the virtual store](/docs/install/virtual-store#project-configuration).
+Layout settings live in the same block; see [the virtual store](/docs/install/virtual-store#project-configuration).
 
 ## CLI
 

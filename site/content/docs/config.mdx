@@ -54,10 +54,7 @@ Every field, with its full value set. Each has its own section below.
 
     // <integer><s|m|h|d|w>; a bare number is rejected
     "minimumReleaseAge": "3d",
-    "minimumReleaseAgeExclude": ["@company/*"],
-
-    // for dependency build scripts, not for runs
-    "nodeOptions": ["--max-old-space-size=8192"]
+    "minimumReleaseAgeExclude": ["@company/*"]
   }
 }
 ```
@@ -371,7 +368,7 @@ The `"install"` and `"prompt"` values are accepted for pnpm compatibility and cu
 
 ## `install`
 
-The install block configures Nub's package manager and dependency lifecycle scripts.
+The install block configures Nub's package manager.
 
 It applies when Nub is the project's package manager. A project with an `npm`, `pnpm`, `yarn`, or `bun` lockfile keeps that tool's own configuration, and this block is ignored.
 
@@ -512,21 +509,6 @@ Exclude selected packages when they must update immediately.
     "minimumReleaseAgeExclude": [
       "@company/*",
       "typescript"
-    ]
-  }
-}
-```
-
-### `install.nodeOptions`
-
-Pass Node options to dependency lifecycle scripts.
-
-```jsonc title="nub.jsonc"
-{
-  // ...
-  "install": {
-    "nodeOptions": [
-      "--max-old-space-size=8192"
     ]
   }
 }
