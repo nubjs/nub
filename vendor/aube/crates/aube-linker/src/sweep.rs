@@ -61,29 +61,44 @@ pub(crate) fn is_transient_fs_error(e: &std::io::Error) -> bool {
     matches!(e.raw_os_error(), Some(5 | 32))
 }
 
-/// Retry ladder shared by every operation that can lose a race with
-/// another process's handle: 10 attempts, 50ms doubling to a 2s cap,
-/// ~10s worst case. Long enough to outlast an AV scan, short enough that
-/// a genuinely stuck file fails the install rather than hanging it.
-///
-/// Unix is a straight passthrough — the failure mode does not exist there
-/// (an open file can be replaced or unlinked freely), so behavior off
-/// Windows is byte-for-byte unchanged.
+/// Full ladder for an operation whose failure is FATAL to the install:
+/// 10 attempts, 50ms doubling to a 2s cap, ~10s worst case. Long enough to
+/// outlast an AV scan, short enough that a genuinely stuck file fails the
+/// install rather than hanging it.
 pub(crate) fn with_transient_retry<T>(
+    op: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    with_transient_retry_bounded(10, op)
+}
+
+/// Short ladder for a BEST-EFFORT operation the caller proceeds past either
+/// way: 4 attempts, ~750ms worst case.
+///
+/// The distinction is about where the call sits, not how much we want it to
+/// succeed. Best-effort removals run once per entry inside sweep loops, so a
+/// ~10s ladder does not cost 10s — it costs 10s PER LOCKED ENTRY, and a branch
+/// switch with a dev server running turns that into a multi-minute stall on
+/// what is supposed to be a cleanup pass. The transient being waited out (an
+/// AV scan window) clears well inside a second, so the short ladder catches
+/// essentially all of what the long one would.
+pub(crate) fn with_transient_retry_bounded<T>(
+    #[cfg_attr(not(windows), allow(unused_variables))] attempts: u32,
     mut op: impl FnMut() -> std::io::Result<T>,
 ) -> std::io::Result<T> {
+    // Unix is a straight passthrough — the failure mode does not exist there
+    // (an open file can be replaced or unlinked freely), so behavior off
+    // Windows is byte-for-byte unchanged.
     #[cfg(not(windows))]
     {
         op()
     }
     #[cfg(windows)]
     {
-        const ATTEMPTS: u32 = 10;
-        for attempt in 0..ATTEMPTS {
+        for attempt in 0..attempts.max(1) {
             match op() {
                 Ok(v) => return Ok(v),
                 Err(e) => {
-                    if !is_transient_fs_error(&e) || attempt == ATTEMPTS - 1 {
+                    if !is_transient_fs_error(&e) || attempt == attempts.max(1) - 1 {
                         return Err(e);
                     }
                     let delay = (50u64 << attempt.min(6)).min(2000);
@@ -166,7 +181,10 @@ pub(crate) fn try_remove_entry(path: &Path) {
     // over a surviving old tree silently blends two package versions — files
     // the old version had and the new one does not are never overwritten, so
     // they persist and stay resolvable. Backing off clears the common case.
-    let _ = with_transient_retry(|| std::fs::remove_dir_all(path));
+    //
+    // Short ladder: this runs once per entry inside the sweep loops, where the
+    // full one would multiply into a multi-minute stall.
+    let _ = with_transient_retry_bounded(4, || std::fs::remove_dir_all(path));
     let _ = std::fs::remove_file(path);
 }
 
