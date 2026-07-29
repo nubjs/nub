@@ -20,8 +20,18 @@
 //! `CreateProcessAsUserW` yields an OBSERVABLE child exit code and keeps the SAME session
 //! and window station — load-bearing, because AppContainer cannot be launched from session
 //! 0 at all (every SSH-launched attempt returns 0xC0000142 STATUS_DLL_INIT_FAILED, which is
-//! why CI is the venue). [`deelevated_primary_token`] falls back to a restricted token when
-//! the host has no linked token, and NAMES which route it used.
+//! why CI is the venue).
+//!
+//! …AND WHY THE FALLBACK IS THE ONE THAT ACTUALLY RUNS ON CI: the `windows-latest`
+//! runner has `EnableLUA=1` but its `runneradmin` token is `TokenElevationTypeDefault`, i.e.
+//! NOT a split token, so `TokenLinkedToken` fails with ERROR_NO_SUCH_LOGON_SESSION (1312)
+//! and there is no standard-user half to borrow (measured, run 30424255514). The fallback
+//! therefore synthesizes an equivalent principal: `CreateRestrictedToken` with
+//! `BUILTIN\Administrators` reduced to deny-only and `DISABLE_MAX_PRIVILEGE` (keeping only
+//! `SeChangeNotifyPrivilege`, the traverse-bypass the backend's leaf-only grants already
+//! rely on), then dropped to MEDIUM integrity. On every axis that governs an access check
+//! that is a standard user or stricter. [`deelevated_primary_token`] names the route it
+//! used, and logs why the preferred one was unavailable.
 //!
 //! THE ANTI-HOLLOW CONTRACT: an arm that never ran must never read as a pass. So the arm
 //! reports its OWN token state to a marker file as its first act, and the parent fails
@@ -224,6 +234,91 @@ mod win {
         }
     }
 
+    /// This process's mandatory integrity level as its well-known RID: 4096 Low, 8192
+    /// Medium (what a standard user runs at), 12288 High (what an elevated admin runs at).
+    /// Reported so "the arm is standard-user-equivalent" is a measurement rather than a
+    /// claim — removing admin authority alone would leave the arm at High integrity, which a
+    /// standard user never is.
+    fn integrity_level() -> u32 {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Security::{
+            GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
+            TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenIntegrityLevel,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        // SAFETY: two-call pattern — size the variable-length TOKEN_MANDATORY_LABEL, then
+        // read the label SID's last subauthority, which is the IL RID.
+        unsafe {
+            let mut tok = std::ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) == 0 {
+                return 0;
+            }
+            let mut need = 0u32;
+            GetTokenInformation(tok, TokenIntegrityLevel, std::ptr::null_mut(), 0, &mut need);
+            let mut buf = vec![0u8; need.max(64) as usize];
+            let ok = GetTokenInformation(
+                tok,
+                TokenIntegrityLevel,
+                buf.as_mut_ptr().cast(),
+                buf.len() as u32,
+                &mut need,
+            );
+            CloseHandle(tok);
+            if ok == 0 {
+                return 0;
+            }
+            let label = buf.as_ptr().cast::<TOKEN_MANDATORY_LABEL>();
+            let sid = (*label).Label.Sid;
+            let count = *GetSidSubAuthorityCount(sid);
+            if count == 0 {
+                return 0;
+            }
+            *GetSidSubAuthority(sid, u32::from(count) - 1)
+        }
+    }
+
+    /// Drop `token` to MEDIUM integrity — the level a standard user's token carries.
+    /// `CreateRestrictedToken` removes group authority and privileges but leaves the
+    /// integrity level UNTOUCHED, so without this the de-elevated arm would still run at
+    /// High integrity and would be weaker than a real standard user on exactly one axis.
+    /// Lowering an IL never needs a privilege (only raising one does).
+    fn set_medium_integrity(token: windows_sys::Win32::Foundation::HANDLE) -> std::io::Result<()> {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+        use windows_sys::Win32::Security::{
+            PSID, SID_AND_ATTRIBUTES, SetTokenInformation, TOKEN_MANDATORY_LABEL,
+            TokenIntegrityLevel,
+        };
+        // windows-sys files this under System_SystemServices; spelled out rather than
+        // pulling a whole feature in for one integer.
+        const SE_GROUP_INTEGRITY: u32 = 0x20;
+        let text: Vec<u16> = "S-1-16-8192".encode_utf16().chain([0]).collect();
+        let mut sid: PSID = std::ptr::null_mut();
+        // SAFETY: converts a well-formed SDDL SID string; freed below.
+        if unsafe { ConvertStringSidToSidW(text.as_ptr(), &mut sid) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut label = TOKEN_MANDATORY_LABEL {
+            Label: SID_AND_ATTRIBUTES {
+                Sid: sid,
+                Attributes: SE_GROUP_INTEGRITY,
+            },
+        };
+        // SAFETY: `label` (and the SID it points at) outlives the call.
+        let ok = unsafe {
+            SetTokenInformation(
+                token,
+                TokenIntegrityLevel,
+                std::ptr::from_mut(&mut label).cast(),
+                std::mem::size_of::<TOKEN_MANDATORY_LABEL>() as u32
+                    + windows_sys::Win32::Security::GetLengthSid(sid),
+            )
+        };
+        let err = std::io::Error::last_os_error();
+        unsafe { LocalFree(sid.cast()) };
+        if ok == 0 { Err(err) } else { Ok(()) }
+    }
+
     /// Whether this process actually WIELDS administrative authority, decided by an access
     /// check rather than by a token flag.
     ///
@@ -398,7 +493,16 @@ mod win {
         if ok == 0 {
             return Err(err);
         }
-        Ok((restricted, "restricted-token"))
+        // Fail rather than measure at High integrity: an arm that kept the elevated token's
+        // IL would be weaker than a standard user, which is the one direction this
+        // substitution must never go.
+        set_medium_integrity(restricted).map_err(|e| {
+            unsafe { CloseHandle(restricted) };
+            std::io::Error::other(format!(
+                "could not drop the restricted token to medium IL: {e}"
+            ))
+        })?;
+        Ok((restricted, "restricted-token+medium-il"))
     }
 
     /// Spawn `argv` under `token` in THIS session/window station and return its exit code.
@@ -766,11 +870,13 @@ mod win {
         };
         let _ = writeln!(marker, "elevated={}", u8::from(elevated));
         let _ = writeln!(marker, "admin={}", u8::from(admin));
+        let _ = writeln!(marker, "il={}", integrity_level());
         let _ = marker.flush();
         println!(
-            "ARM elevated={} admin={} elevation-type={} pid={}",
+            "ARM elevated={} admin={} il={} elevation-type={} pid={}",
             u8::from(elevated),
             u8::from(admin),
+            integrity_level(),
             elevation_type(),
             std::process::id()
         );
@@ -1023,6 +1129,8 @@ mod win {
         elevated: bool,
         /// Access-checked administrative authority. THE gate.
         admin: bool,
+        /// Mandatory integrity level RID (8192 Medium = standard-user, 12288 High).
+        il: u32,
         props: Vec<(String, bool)>,
     }
 
@@ -1030,13 +1138,15 @@ mod win {
     /// run" case that must never read as a pass.
     fn read_marker(path: &Path) -> Option<Arm> {
         let raw = std::fs::read_to_string(path).ok()?;
-        let (mut elevated, mut admin) = (None, None);
+        let (mut elevated, mut admin, mut il) = (None, None, None);
         let mut props = Vec::new();
         for line in raw.lines() {
             if let Some(v) = line.strip_prefix("elevated=") {
                 elevated = Some(v.trim() == "1");
             } else if let Some(v) = line.strip_prefix("admin=") {
                 admin = Some(v.trim() == "1");
+            } else if let Some(v) = line.strip_prefix("il=") {
+                il = v.trim().parse().ok();
             } else if let Some(rest) = line.strip_prefix("prop:") {
                 let (name, tail) = rest.split_once('=')?;
                 props.push((name.to_string(), tail.starts_with("PASS")));
@@ -1045,9 +1155,13 @@ mod win {
         Some(Arm {
             elevated: elevated?,
             admin: admin?,
+            il: il?,
             props,
         })
     }
+
+    /// Medium integrity — the level a standard user's token carries.
+    const IL_MEDIUM: u32 = 8192;
 
     pub fn differential_main() -> i32 {
         let parent_elevated = is_elevated();
@@ -1150,6 +1264,16 @@ mod win {
             eprintln!("FATAL: the linked token reports IsElevated=1");
             return 2;
         }
+        // Standard-user-equivalent on the integrity axis too, so the substitution is never
+        // WEAKER than the principal it stands in for.
+        if deelev.il > IL_MEDIUM {
+            eprintln!(
+                "FATAL: the de-elevated arm ran at integrity level {} (> medium {IL_MEDIUM}) — \
+                 it is not standard-user-equivalent",
+                deelev.il
+            );
+            return 2;
+        }
         if deelev.props.is_empty() {
             eprintln!("FATAL: the de-elevated arm recorded zero properties");
             return 2;
@@ -1203,7 +1327,13 @@ mod win {
         );
         println!(
             "{:<28} {:>10} {:>14}",
-            "TokenIsElevated flag",
+            "integrity level",
+            elev_arm.map_or("n/a".to_string(), |a| a.il.to_string()),
+            deelev.il
+        );
+        println!(
+            "{:<28} {:>10} {:>14}",
+            "TokenIsElevated flag (stale)",
             elev_arm.map_or("n/a", |a| if a.elevated { "1" } else { "0" }),
             if deelev.elevated { "1" } else { "0" }
         );
