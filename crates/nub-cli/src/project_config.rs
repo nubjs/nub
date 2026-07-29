@@ -107,6 +107,14 @@ impl ConfigError {
 
     /// The failure beneath the file attribution, so a caller branching on the
     /// kind does not have to know whether a reader wrapped it.
+    ///
+    /// Test-only, and that is the honest state rather than an oversight: no
+    /// production path branches on a `ConfigError` variant. Every one either
+    /// renders it (`write_naming`, which unwraps the attribution itself) or
+    /// propagates it. Assertions need this because only the READERS wrap —
+    /// errors from `parse_project_config` and the `validate_*` helpers arrive
+    /// bare, so a test matching a variant must not care which it got.
+    #[cfg(test)]
     pub fn kind(&self) -> &ConfigError {
         match self {
             ConfigError::InFile { source, .. } => source.kind(),
