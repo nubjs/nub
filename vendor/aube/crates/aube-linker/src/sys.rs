@@ -527,12 +527,15 @@ fn relative_bin_target(base_dir: &Path, target: &Path) -> String {
 /// - A per-dep `.bin/` in a store-shared package is reached through a
 ///   `.store/<name>@<ver>` symlink into the global virtual store, whose
 ///   entries carry a `-<hash>` suffix the surface names lack. The
-///   surface-anchored path dangles there. The physical one also makes
-///   the link project-INDEPENDENT, which matters more than portability
-///   in that directory: an absolute target wrote one project's path into
-///   a directory every project shares, so the next install silently
-///   repointed the earlier project's bin, and deleting that project left
-///   it dangling.
+///   surface-anchored path dangles there. When the target is store-
+///   resident too, the physical form is additionally project-INDEPENDENT,
+///   which matters more than portability in a shared directory: an
+///   absolute target wrote one project's path into a directory every
+///   project shares, so the next install silently repointed the earlier
+///   project's bin, and deleting that project left it dangling. A target
+///   that resolves back into the project (a `diskMaterializePackages`
+///   dep) still yields a project-specific entry — no worse than the
+///   absolute form it replaces, but not fixed by this either.
 ///
 /// Falls back to the absolute target when nothing resolves — a bin whose
 /// target does not exist yet keeps the pre-fix behavior rather than
