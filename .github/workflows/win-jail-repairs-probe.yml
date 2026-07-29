@@ -21,7 +21,12 @@ name: win-jail-repairs-probe
 
 on:
   push:
+    # Path-filtered so a change to a SIBLING probe does not spend ~25 minutes of Windows runner
+    # on this one. Shared capacity: every push here costs the full matrix.
     branches: [sandbox/win-jail-caps]
+    paths:
+      - 'crates/nub-sandbox/**'
+      - '.github/workflows/win-jail-repairs-probe.yml'
   workflow_dispatch:
 
 permissions:
