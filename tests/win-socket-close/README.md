@@ -21,14 +21,15 @@ The client sends its request in two segments with a gap, so the `Abortive` serve
 
 ## Results
 
-macOS 15 / aarch64, local host:
+CI run [30473314496](https://github.com/nubjs/nub/actions/runs/30473314496), 15 requests per mode:
 
-```
-abortive (original fixture)  ok=0   failed=15  WouldBlock: Resource temporarily unavailable (os error 35)
-graceful (fixed fixture)     ok=15  failed=0   -
-```
+| Runner | Abortive | Graceful | How the abortive loss surfaces |
+| --- | --- | --- | --- |
+| `windows-latest` x86_64 | 0/15 | 15/15 | `ConnectionReset` — os error 10054, "forcibly closed by the remote host" |
+| `ubuntu-latest` x86_64 | 0/15 | 15/15 | `ConnectionReset` — os error 104 |
+| `macos-latest` aarch64 | 0/15 | 15/15 | no RST, no FIN — the transfer stalls until the read times out |
 
-The abortive close truncates every response (one instrumented run stopped at 4,015,071 of 4,194,304 bytes), and the loss is silent — no RST, no FIN, just a stalled read. The graceful close never loses a byte.
+The abortive close loses every response; the graceful close loses none. Windows produces exactly the reset that matches the reported transport error. Do not key on the error kind, though — macOS reproduces the same loss with no reset at all, and one instrumented local run simply stopped at 4,015,071 of 4,194,304 bytes.
 
 The mechanism is therefore not Windows-specific. What is inferred rather than proven is why the real fixture only tripped on Windows: a small loopback GET normally arrives in one segment, leaving nothing unread, and Windows presumably split it often enough to matter. `fetch-retries=0` in that test removes any retry cushion.
 
