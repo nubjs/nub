@@ -26,7 +26,22 @@ jobs:
       - name: Runner baseline
         shell: powershell
         run: |
+          $id=[System.Security.Principal.WindowsIdentity]::GetCurrent()
+          $admin=(New-Object System.Security.Principal.WindowsPrincipal($id)).IsInRole([System.Security.Principal.WindowsBuiltinRole]::Administrator)
           Write-Host "cores=$([System.Environment]::ProcessorCount) os=$([System.Environment]::OSVersion.VersionString)"
+          Write-Host "BASELINE user=$($id.Name) IsElevated=$admin"
+
+      # DIAGNOSTIC ONLY, for the de-elevation lane that owns the unprivileged claim —
+      # this decides whether the cheap built-in route (a restricted token, same session,
+      # so no session-0 window-station trap) can launch our probe at all. It asserts
+      # NOTHING about enforcement and must never gate: continue-on-error keeps a failure
+      # here from reading as a sandbox result in either direction.
+      - name: De-elevation route viability (non-gating diagnostic)
+        continue-on-error: true
+        shell: cmd
+        run: |
+          runas /trustlevel:0x20000 "cmd /c whoami /groups | findstr /i integrity"
+          echo DEELEV_ROUTE_EXIT=%ERRORLEVEL%
 
       - name: Windows AppContainer enforcement (incl. the proc-cap arms)
         shell: bash
