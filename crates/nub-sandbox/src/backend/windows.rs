@@ -376,6 +376,20 @@ enum WinNetPlan {
     FailUnelevated,
 }
 
+/// Drop the `\\?\` prefix `std::fs::canonicalize` puts on a Windows path, when the result
+/// is still a plain drive path a normal API accepts.
+///
+/// `\\?\UNC\server\share` is left ALONE: its non-verbatim spelling is `\\server\share`,
+/// a genuine network path, and rewriting it would change which host is addressed. A real
+/// network working directory is not something cmd.exe supports anyway, so stripping there
+/// would trade one failure for a less obvious one.
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
+        Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
+        _ => path,
+    }
+}
+
 /// Decide the net posture. Per-host is signalled by any Allow rule (matches
 /// `backend::start_proxy_if_needed`, which is what actually starts the proxy). A pure
 /// deny-all is coarse (no proxy, no elevation). `elevated` is consulted only on the
@@ -475,7 +489,13 @@ pub(crate) fn apply(
                 )),
             });
         }
-        spec.cwd = Some(effective_cwd);
+        // The DACL checks above want the canonical form; the CHILD must not receive it.
+        // `canonicalize` returns an extended-length `\\?\C:\…` path, and cmd.exe rejects
+        // one as a working directory — it prints "UNC paths are not supported" and silently
+        // runs in the Windows directory instead. Every dependency lifecycle script on
+        // Windows is a cmd.exe invocation, so handing the verbatim form through meant each
+        // one started in the wrong directory and could not find its own package's files.
+        spec.cwd = Some(strip_verbatim_prefix(effective_cwd));
     }
 
     // ── agent-sandbox route (dedicated account + WFP) ────────────────────────────
@@ -1784,6 +1804,37 @@ pub(super) mod launch {
 mod tests {
     use super::*;
     use crate::policy::{CanonGlob, FsOrigin, FsRule, FsRuleSet, TmpMode};
+
+    /// A dependency lifecycle script on Windows is a cmd.exe invocation, and cmd.exe
+    /// REFUSES an extended-length working directory — it prints "UNC paths are not
+    /// supported" and runs in the Windows directory instead, so the script cannot find its
+    /// own package's files. `canonicalize` produces exactly that spelling, so the child's
+    /// cwd has to be handed over in its ordinary form.
+    #[test]
+    fn the_child_cwd_sheds_the_verbatim_prefix_canonicalize_adds() {
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\C:\Users\r\pkg")),
+            PathBuf::from(r"C:\Users\r\pkg")
+        );
+        // Already ordinary, and POSIX-shaped paths (the test host): unchanged.
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"C:\Users\r\pkg")),
+            PathBuf::from(r"C:\Users\r\pkg")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from("/tmp/pkg")),
+            PathBuf::from("/tmp/pkg")
+        );
+    }
+
+    /// A verbatim UNC path must survive INTACT. Stripping `\\?\` from `\\?\UNC\srv\share`
+    /// yields `UNC\srv\share`, a relative path naming a different location entirely — a
+    /// silently wrong working directory rather than a loud failure.
+    #[test]
+    fn a_verbatim_unc_cwd_is_left_alone() {
+        let unc = PathBuf::from(r"\\?\UNC\server\share\pkg");
+        assert_eq!(strip_verbatim_prefix(unc.clone()), unc);
+    }
 
     /// The cap must clear the measured structural ceiling of a legitimate parallel
     /// native build (`2 * cores + 5`) on this host with real headroom, and never fall
