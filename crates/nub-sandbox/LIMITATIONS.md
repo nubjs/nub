@@ -487,7 +487,35 @@ OPENABLE under an ORDINARY `%TEMP%`/profile tree with no `C:\`-owned store (VM-v
   windows-latest the write stalls for minutes with a duration that varies run to run, which is
   what keeps the piped-stdio measurements from running at all. `SetKernelObjectSecurity` is the
   non-propagating primitive this wants; until then the repair works and costs too much per
-  lifecycle spawn to turn on.
+  lifecycle spawn to turn on. **Secondary to the blocker below** — cost only matters for a
+  mechanism that is available, and above the user profile this one is not.
+
+- **BLOCKER: `C:\` and `C:\Users` are unreachable to an unprivileged AppContainer, on every image
+  measured.** Surveyed read-only across three runner images, each labelled, `Get-Acl` only:
+
+  | image | edition | build.UBR | type | `lstat C:\` w/o a grant | `lstat C:\Users` w/o a grant | standard-group WRITE_DAC |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | `windows-11-arm` | Windows 11 Enterprise 25H2 | 26200.8875 | workstation | NO | NO | NO on both |
+  | `windows-latest` | Server 2025 Datacenter 24H2 | 26100.32995 | server | NO | NO | NO on both |
+  | `windows-2022` | Server 2022 Datacenter 21H2 | 20348.5386 | server | NO | NO | NO on both |
+
+  There is **no `ALL APPLICATION PACKAGES` or `ALL RESTRICTED APPLICATION PACKAGES` ACE on any
+  chain member on any image** — the only LowBox-relevant trustee on `C:\` and `C:\Users` is a
+  capability SID, and those cannot be requested. Two independent reasons: `CreateProcessW` refuses
+  the `S-1-15-3-65536-…` form, and `C:\Users`' ACE is `0x100021` — traverse and list, but **no
+  `FILE_READ_ATTRIBUTES`** — so it could not satisfy an `lstat` even if it were holdable.
+
+  Nor can a standard user author the repair there: `C:\` is owned by `NT SERVICE\TrustedInstaller`
+  and `C:\Users` by `NT AUTHORITY\SYSTEM`, neither grants WRITE_DAC to `BUILTIN\Users` /
+  `Authenticated Users` / `Everyone`, and both were measured WRITE_DAC-refused de-elevated. From
+  `%USERPROFILE%` down the user owns the chain and the repair works.
+
+  So the wall is exactly the two directories ABOVE the user profile, and it is not a CI artefact —
+  the workstation image behaves the same as the server images. **Any project inside the user
+  profile therefore cannot have its ancestor chain repaired without elevation**, which the build
+  jail does not get. Scoping this is the maintainer's call: the options that stay unprivileged are
+  a narrower Windows jail, or not confining the operations that need the walk. A residual is
+  acceptable here; requiring privilege is not.
 
 - **The precondition is INHERITABILITY, not a protected ancestor.** Where an
   `ALL APPLICATION PACKAGES` allow-ACE can reach a work dir, an ungranted secret UNDER it is
