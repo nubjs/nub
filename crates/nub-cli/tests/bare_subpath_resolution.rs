@@ -264,15 +264,12 @@ module.exports = { who: v };
 /// COMPAT TIER ONLY, because that is the only band where the behavior exists at
 /// all: resolving an extensionless `main` onto TS source depends on the classic
 /// `require.extensions` keys, which the fast tier never registers — Node 26 reports
-/// the same package missing both before and after this branch. The entry is plain
-/// `.cjs` on purpose; a `.cts` entry trips a SEPARATE pre-existing issue, where the
-/// load-side node_modules gate refuses the symlinked package's TS under this flag,
-/// which nub v0.5.0 exhibits identically and which is not what this pins.
+/// the same package missing both before and after this branch.
 ///
-/// COUPLING with the load side: the classic TS-family `require.extensions` handler
-/// bails on a dependency through the same `isDependencyPath` predicate the
-/// resolve-side retry uses, so it decides on the file's REAL location too. Testing
-/// the literal filename there would break this test and quietly undo the
+/// COUPLING with the load side: every gate that decides how a file loads — the
+/// classic `require.extensions` handler included — goes through the shared
+/// `isDependency` predicate, so all of them judge the file's REAL location. Testing
+/// the literal filename in any of them would break this test and quietly undo the
 /// resolution-side fix.
 #[cfg(unix)]
 #[test]

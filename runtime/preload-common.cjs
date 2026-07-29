@@ -16,7 +16,7 @@
 // (it imported them as ESM), so this module never require()s the core there.
 
 const module_ = require("node:module");
-const { readdirSync, existsSync, realpathSync } = require("node:fs");
+const { readdirSync, existsSync } = require("node:fs");
 const { fileURLToPath, pathToFileURL } = require("node:url");
 const { join, dirname, extname: pathExtname } = require("node:path");
 

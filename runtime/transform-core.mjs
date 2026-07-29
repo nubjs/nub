@@ -266,8 +266,10 @@ export function isNodeModules(url) {
   return url.includes("/node_modules/") || url.includes("\\node_modules\\");
 }
 
-// "Is this really a dependency?" — the ONE definition every gate uses, so the resolve
-// step and each load step cannot disagree about the same file.
+// "Is this really a dependency?" — the ONE definition every gate that decides how a
+// file LOADS uses, so the resolve step and each load step cannot disagree about the
+// same file. (Watch-mode config reporting still uses the plain check: it asks which
+// files to watch, not how they load.)
 //
 // A `/node_modules/` segment normally settles it: Node realpaths a resolved module,
 // so the path we are handed IS the real one. Under `--preserve-symlinks` it does not
@@ -409,7 +411,7 @@ export function resolveSpec(specifier, parentURL) {
   }
 
   // 3. Package clobbering.
-  if (CLOBBER_MAP.has(bare) && !isNodeModules(parentURL || "")) {
+  if (CLOBBER_MAP.has(bare) && !isDependency(parentURL || "")) {
     return { url: `data:text/javascript,${encodeURIComponent(CLOBBER_MAP.get(bare)())}`, shortCircuit: true };
   }
 
