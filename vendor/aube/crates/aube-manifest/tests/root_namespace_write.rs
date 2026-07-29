@@ -12,10 +12,12 @@
 //! root and whose read side gates the `pnpm` namespace off — so a nested
 //! `pnpm.*` write would be orphaned.
 
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
 use aube_manifest::{
     AllowBuildRaw, PackageJson, workspace::edit_setting_map, workspace::set_allow_builds,
 };
-use aube_util::Embedder;
+use aube_util::{Embedder, EngineContext};
 
 static ROOT_TOOL: Embedder = Embedder {
     name: "roottool",
@@ -59,6 +61,63 @@ static ROOT_TOOL: Embedder = Embedder {
 fn read_manifest(dir: &std::path::Path) -> serde_json::Value {
     let raw = std::fs::read_to_string(dir.join("package.json")).unwrap();
     serde_json::from_str(&raw).unwrap()
+}
+
+/// The surface gates (`read_branded_pnpm_config` / `read_manifest_root_config`)
+/// live on the process-global `EngineContext`, and the code under test reads
+/// them back out of that global mid-call — `workspace::mutations`'s
+/// `root_write_unread_but_yaml_read`, `workspace::config`'s
+/// `config_write_target`, `PackageJson::pnpm_allow_builds`. There is no
+/// per-call seam to thread a posture through (nor should there be: at runtime
+/// the posture genuinely is one-per-process), so two `#[test]`s that set
+/// different gates interleave and one reads the other's — which is why this
+/// file passed only under `--test-threads=1`.
+///
+/// A posture-sensitive test therefore claims the gates for its whole body:
+/// [`Posture::claim`] serializes against its siblings, sets *every* gate the
+/// test depends on rather than inheriting one, and restores the upstream
+/// default on drop. Hermetic under any thread count and any ordering. Mirrors
+/// nub's `pm_engine::ENGINE_GLOBAL_LOCK`, which guards the same global for the
+/// same reason.
+static POSTURE: Mutex<()> = Mutex::new(());
+
+struct Posture {
+    _guard: MutexGuard<'static, ()>,
+}
+
+impl Posture {
+    fn claim(read_branded_pnpm_config: bool, read_manifest_root_config: bool) -> Self {
+        // Poison is inert here: the guarded data is `()` and every claim
+        // overwrites both gates outright, so a panicking sibling leaves nothing
+        // observable behind — inheriting its lock is correct, not a hazard.
+        let guard = POSTURE.lock().unwrap_or_else(PoisonError::into_inner);
+        aube_util::set_embedder(&ROOT_TOOL);
+        set_gates(read_branded_pnpm_config, read_manifest_root_config);
+        Self { _guard: guard }
+    }
+
+    /// Re-point the gates without yielding the claim — for the test that walks
+    /// every surface against one parsed manifest.
+    fn switch(&self, read_branded_pnpm_config: bool, read_manifest_root_config: bool) {
+        set_gates(read_branded_pnpm_config, read_manifest_root_config);
+    }
+}
+
+impl Drop for Posture {
+    fn drop(&mut self) {
+        let upstream = EngineContext::default();
+        set_gates(
+            upstream.read_branded_pnpm_config,
+            upstream.read_manifest_root_config,
+        );
+    }
+}
+
+fn set_gates(read_branded_pnpm_config: bool, read_manifest_root_config: bool) {
+    aube_util::update_engine_context(|ctx| {
+        ctx.read_branded_pnpm_config = read_branded_pnpm_config;
+        ctx.read_manifest_root_config = read_manifest_root_config;
+    });
 }
 
 /// A map setting written under a `manifest_namespace=""` embedder lands at the
@@ -113,7 +172,7 @@ fn root_embedder_writes_map_settings_at_manifest_root() {
 
 #[test]
 fn root_embedder_reads_neutral_top_level_allow_builds_on_every_surface() {
-    aube_util::set_embedder(&ROOT_TOOL);
+    let posture = Posture::claim(false, false);
 
     let manifest = PackageJson::parse(
         std::path::Path::new("package.json"),
@@ -138,10 +197,6 @@ fn root_embedder_reads_neutral_top_level_allow_builds_on_every_surface() {
     // un-branded key and is read on EVERY surface — so `approve-builds` heals
     // here (the npm/bun/yarn incumbent case). The pnpm-branded `left-pad` entry
     // is NOT read on this surface.
-    aube_util::update_engine_context(|ctx| {
-        ctx.read_branded_pnpm_config = false;
-        ctx.read_manifest_root_config = false;
-    });
     let compat = manifest.pnpm_allow_builds();
     assert!(matches!(
         compat.get("esbuild"),
@@ -159,10 +214,7 @@ fn root_embedder_reads_neutral_top_level_allow_builds_on_every_surface() {
     // Pnpm/fresh mode reads the pnpm-branded config; the neutral top-level key
     // is also read (it's the embedder's own un-branded key), merged with
     // later-wins so a top-level entry can override a pnpm one on key conflict.
-    aube_util::update_engine_context(|ctx| {
-        ctx.read_branded_pnpm_config = true;
-        ctx.read_manifest_root_config = false;
-    });
+    posture.switch(true, false);
     let pnpm = manifest.pnpm_allow_builds();
     assert!(matches!(
         pnpm.get("left-pad"),
@@ -175,10 +227,7 @@ fn root_embedder_reads_neutral_top_level_allow_builds_on_every_surface() {
 
     // NubIdentity-style mode gates pnpm off and reads root `allowBuilds` as the
     // native config surface produced by `pm use nub`.
-    aube_util::update_engine_context(|ctx| {
-        ctx.read_branded_pnpm_config = false;
-        ctx.read_manifest_root_config = true;
-    });
+    posture.switch(false, true);
     let root = manifest.pnpm_allow_builds();
     assert!(matches!(
         root.get("esbuild"),
@@ -200,11 +249,7 @@ fn root_embedder_reads_neutral_top_level_allow_builds_on_every_surface() {
 /// read side to prove the write is visible.
 #[test]
 fn set_allow_builds_writes_pnpm_only_built_deps_on_pnpm_surface_no_yaml() {
-    aube_util::set_embedder(&ROOT_TOOL);
-    aube_util::update_engine_context(|ctx| {
-        ctx.read_branded_pnpm_config = true;
-        ctx.read_manifest_root_config = false;
-    });
+    let _posture = Posture::claim(true, false);
 
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -255,11 +300,7 @@ fn set_allow_builds_writes_pnpm_only_built_deps_on_pnpm_surface_no_yaml() {
 /// rather than splitting it into `package.json`.
 #[test]
 fn set_allow_builds_appends_existing_yaml_on_pnpm_surface() {
-    aube_util::set_embedder(&ROOT_TOOL);
-    aube_util::update_engine_context(|ctx| {
-        ctx.read_branded_pnpm_config = true;
-        ctx.read_manifest_root_config = false;
-    });
+    let _posture = Posture::claim(true, false);
 
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("package.json"), "{\n  \"name\": \"x\"\n}\n").unwrap();
@@ -293,11 +334,7 @@ fn set_allow_builds_appends_existing_yaml_on_pnpm_surface() {
 /// `false`), again without creating a workspace yaml.
 #[test]
 fn set_allow_builds_writes_pnpm_allow_builds_map_for_denial_no_yaml() {
-    aube_util::set_embedder(&ROOT_TOOL);
-    aube_util::update_engine_context(|ctx| {
-        ctx.read_branded_pnpm_config = true;
-        ctx.read_manifest_root_config = false;
-    });
+    let _posture = Posture::claim(true, false);
 
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("package.json"), "{\n  \"name\": \"x\"\n}\n").unwrap();
@@ -336,13 +373,9 @@ fn set_allow_builds_writes_pnpm_allow_builds_map_for_denial_no_yaml() {
 /// install runs the script. (Previously a documented no-op; the gap is closed.)
 #[test]
 fn set_allow_builds_heals_on_non_pnpm_compat_surface() {
-    aube_util::set_embedder(&ROOT_TOOL);
     // npm/bun/yarn incumbent: the pnpm namespace is gated off and this is not
     // nub identity, but the neutral top-level key is still read.
-    aube_util::update_engine_context(|ctx| {
-        ctx.read_branded_pnpm_config = false;
-        ctx.read_manifest_root_config = false;
-    });
+    let _posture = Posture::claim(false, false);
 
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("package.json"), "{\n  \"name\": \"x\"\n}\n").unwrap();
@@ -388,11 +421,7 @@ fn set_allow_builds_heals_on_non_pnpm_compat_surface() {
 /// nub-identity surface).
 #[test]
 fn set_allow_builds_writes_root_key_under_nub_identity() {
-    aube_util::set_embedder(&ROOT_TOOL);
-    aube_util::update_engine_context(|ctx| {
-        ctx.read_branded_pnpm_config = false;
-        ctx.read_manifest_root_config = true;
-    });
+    let _posture = Posture::claim(false, true);
 
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("package.json"), "{\n  \"name\": \"x\"\n}\n").unwrap();
