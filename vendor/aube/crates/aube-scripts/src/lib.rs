@@ -1113,8 +1113,10 @@ async fn run_command_killing_descendants(
         .spawn()
         .map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))?;
     // Declared AFTER `child` so it drops BEFORE it (locals drop in reverse
-    // declaration order): the group kill has to land while the shell is still
-    // unreaped, which is what pins the pgid against reuse.
+    // declaration order). That ordering is what makes the ABORT path exact: the
+    // kill lands while the shell is still unreaped, so the pgid cannot have been
+    // recycled. On the normal path `wait` has already reaped the leader, and the
+    // guard accepts the residual reuse window documented on its `Drop`.
     #[cfg(unix)]
     let _group = unix_group::ProcessGroupReaper::arm(&child, script_name);
     #[cfg(windows)]

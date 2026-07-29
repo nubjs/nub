@@ -6,7 +6,7 @@
 //! build tools reparent to init, and they keep writing into `node_modules` long
 //! after aube returned. Measured on a 50-package build corpus: 2,105 lines of
 //! script output *after* the command reported its result, and one shard that
-//! leaked 11,401. The kernel already tracks exactly the set we need — a process
+//! leaked 11,407. The kernel already tracks exactly the set we need — a process
 //! GROUP, which every `fork` inherits — so the fix is to give each shell its own
 //! group and signal `-pgid`.
 //!
@@ -59,10 +59,18 @@ const REAPED_SIGNALS: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIG
 /// scripts that write to it. The job-control stops are the one cost of leaving
 /// the foreground group — a background read on the terminal would otherwise
 /// raise `SIGTTIN` and STOP the whole build tree — so both are ignored here.
-/// `SIG_IGN` turns that stop into an `EIO` the reading tool reports and moves
-/// past, which is what npm and pnpm produce anyway by never handing install
-/// scripts the terminal's stdin in the first place.
+/// Ignoring `SIGTTIN` turns that stop into an `EIO` the reading tool reports and
+/// moves past; a hung install is the worse of the two. Ignoring `SIGTTOU` is
+/// behaviour-preserving — it just lets a terminal-mode change succeed as it
+/// does today. NOTE this reaches ROOT scripts too (`prepare`, `prepack`,
+/// `prepublishOnly`), which are likelier than a dependency's to want the
+/// terminal; an interactive read there now fails rather than blocking.
 pub(crate) fn group_on_spawn(cmd: &mut tokio::process::Command) {
+    // BEFORE the spawn, not at registration time: the child leaves the
+    // foreground process group the instant `pre_exec` runs, and from then until
+    // the handler exists a terminal Ctrl-C reaches neither the script nor
+    // anything that would reap it — the exact window the handler is for.
+    install_signal_handler();
     // SAFETY: `setpgid` and `signal` are async-signal-safe, touch no parent
     // state, and allocate nothing — the only things permitted between `fork`
     // and `execve` in a multithreaded parent.
@@ -81,7 +89,7 @@ pub(crate) fn group_on_spawn(cmd: &mut tokio::process::Command) {
 ///
 /// Reaping on the NORMAL return too is deliberate and matches both sibling
 /// implementations: the Windows job object fires on every exit from
-/// `run_command_reaping_descendants`, and nub's Landlock path signals the group
+/// `run_command_killing_descendants`, and nub's Landlock path signals the group
 /// after a successful `status()`. A script that leaves a build daemon running
 /// past its own exit is the same orphan, whether or not the script failed.
 pub(crate) struct ProcessGroupReaper {
@@ -100,10 +108,11 @@ impl ProcessGroupReaper {
     /// an unrelated process and kill it. Owning a `&Child` is what makes that
     /// unrepresentable; the pid is only read back out here.
     ///
-    /// The `getpgid == pid` check that follows is then a genuine confirmation:
-    /// it is false exactly when BOTH `setpgid` calls failed, which leaves the
+    /// The `getpgid == pid` check that follows is then a genuine confirmation.
+    /// Its main failure mode is both `setpgid` calls failing, which leaves the
     /// child in aube's own group, where `kill(-pid, …)` would name a group aube
-    /// belongs to and kill the installer along with every other running script.
+    /// belongs to and kill the installer along with every other running script;
+    /// it also declines if `getpgid` errors or the shell relocated itself.
     /// That case degrades to `kill_on_drop`-only — the same fail-open posture
     /// the Windows job-object path takes when the OS refuses it.
     pub(crate) fn arm(child: &tokio::process::Child, script_name: &str) -> Option<Self> {
@@ -135,9 +144,6 @@ impl ProcessGroupReaper {
 
 impl Drop for ProcessGroupReaper {
     fn drop(&mut self) {
-        if let Some(slot) = self.slot {
-            REGISTRY[slot].store(0, Ordering::SeqCst);
-        }
         // SIGKILL rather than a TERM-then-KILL escalation: `Drop` cannot await,
         // and blocking a runtime worker on a grace period is worse than the
         // hard kill `kill_on_drop` and the Windows job object already apply to
@@ -150,11 +156,17 @@ impl Drop for ProcessGroupReaper {
         // this exists for.
         // SAFETY: `kill` on a group id this guard owns.
         unsafe { libc::kill(-self.pgid, libc::SIGKILL) };
+        // Cleared AFTER the kill, never before: a signal landing in between
+        // would otherwise find the slot empty, skip this group, and the process
+        // would die at handler return with the group leaked. Killing twice is
+        // ESRCH; killing zero times is the leak.
+        if let Some(slot) = self.slot {
+            REGISTRY[slot].store(0, Ordering::SeqCst);
+        }
     }
 }
 
 fn register(pgid: libc::pid_t) -> Option<usize> {
-    install_signal_handler();
     REGISTRY.iter().position(|slot| {
         slot.compare_exchange(0, pgid, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
@@ -201,9 +213,21 @@ fn install_signal_handler() {
     });
 }
 
-/// Signal handler: `kill`, `raise` and relaxed atomic loads are the only things
-/// it does, all async-signal-safe.
+/// Signal handler. Everything it touches — atomic loads, `kill`, `sigaction`,
+/// `raise` — is on POSIX's async-signal-safe list.
 extern "C" fn reap_and_resignal(signo: libc::c_int) {
+    // `SA_RESETHAND` is NOT enough to guarantee the `raise` below terminates.
+    // A chaining registrar layered over this disposition — which is what
+    // `signal-hook`, and therefore `tokio::signal`, installs — calls us from
+    // inside ITS handler, so the kernel never applied our reset: the `raise`
+    // re-enters through the chain instead of dying. Measured with the real
+    // `signal-hook-registry`: unchained the process exits 130, chained it
+    // re-entered >100,000 times and never terminated. So force the default
+    // disposition here rather than trusting the flag, and refuse re-entry.
+    static REENTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if REENTERED.swap(true, Ordering::SeqCst) {
+        return;
+    }
     for slot in REGISTRY.iter() {
         let pgid = slot.load(Ordering::SeqCst);
         if pgid != 0 {
@@ -211,9 +235,15 @@ extern "C" fn reap_and_resignal(signo: libc::c_int) {
             unsafe { libc::kill(-pgid, libc::SIGKILL) };
         }
     }
-    // SAFETY: re-raise so the default action (already restored by SA_RESETHAND)
-    // produces the exit status the caller would have seen without this handler.
-    unsafe { libc::raise(signo) };
+    // SAFETY: install SIG_DFL for this signal, then re-raise, so the process
+    // dies with the status it would have had without this handler.
+    unsafe {
+        let mut dfl: libc::sigaction = std::mem::zeroed();
+        dfl.sa_sigaction = libc::SIG_DFL;
+        libc::sigemptyset(&mut dfl.sa_mask);
+        libc::sigaction(signo, &dfl, std::ptr::null_mut());
+        libc::raise(signo);
+    }
 }
 
 // No unit test asserts the "refuses a non-leader pid" branch. Reaching it

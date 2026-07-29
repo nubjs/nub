@@ -369,8 +369,7 @@ pub(crate) fn link_all_bins(input: LinkAllBinsInput<'_>) -> miette::Result<()> {
             // Workspace member's own `bin` (discussion #228). `manifests`
             // was parsed once upstream and keys by importer relpath. See
             // the root self-bin call site for why this forces a POSIX shim.
-            if let Some((_, member_manifest)) =
-                manifests.iter().find(|(p, _)| p == importer_path)
+            if let Some((_, member_manifest)) = manifests.iter().find(|(p, _)| p == importer_path)
                 && let Some(bin) = member_manifest.extra.get("bin")
             {
                 let self_shim_opts = aube_linker::BinShimOptions {

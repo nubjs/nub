@@ -660,6 +660,14 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     // completion and only the install's exit status carries the failure.
     // `JoinSet` is still the right container — dropping a `Vec<JoinHandle>`
     // detaches rather than cancels, so a panic path would leak live tasks.
+    //
+    // ACCEPTED COST: the abort was also the only bound on a hung sibling. aube
+    // has no lifecycle-script timeout, so a dependency whose script never exits
+    // now hangs the install after an unrelated failure instead of being killed
+    // on the way out. Taken deliberately — the abort's "bound" was killing a
+    // shell whose compilers kept running anyway, so it bounded the process, not
+    // the machine — and pnpm has the same property. A real fix is a per-script
+    // timeout, which is a separate change.
     let concurrency = child_concurrency.max(1);
     let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
@@ -679,13 +687,6 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         let failed = failed.clone();
         let task = crate::dep_chain::scope_current(async move {
             let _permit = sem.acquire().await.unwrap();
-            // Checked after the permit, so this is the moment a queued job would
-            // otherwise have started building. The install is already failing;
-            // starting a build whose result is about to be discarded only adds
-            // more half-written package dirs.
-            if failed.load(std::sync::atomic::Ordering::Relaxed) {
-                return Ok(0);
-            }
             if should_restore_side_effects_cache && let Some(cache_entry) = job.cache_entry.clone()
             {
                 let package_dir = job.package_dir.clone();
@@ -706,6 +707,15 @@ pub(crate) async fn run_dep_lifecycle_scripts(
                     }
                     SideEffectsCacheRestore::Miss => {}
                 }
+            }
+            // Placed BELOW the side-effects-cache restore and above the build:
+            // this is the moment a queued job would otherwise start compiling.
+            // The install is already failing, and starting a build whose result
+            // is about to be discarded only adds half-written package dirs — but
+            // a cache RESTORE is a directory copy, not a build, and skipping it
+            // would cost the user that work again on the retry.
+            if failed.load(std::sync::atomic::Ordering::Relaxed) {
+                return Ok(0);
             }
             // Before the lifecycle script runs in-place inside the
             // materialized package directory, break any hardlinks that
@@ -1419,8 +1429,14 @@ mod tests {
     fn embedder_owned_lifecycle_sandbox_suppresses_aubes_jail() {
         // Standalone aube (flag false): `jailBuilds`/`paranoid` engage aube's own jail
         // exactly as before — byte-for-byte default behavior.
-        assert!(jail_enabled(false, true, false), "jailBuilds engages the jail");
-        assert!(jail_enabled(false, false, true), "paranoid engages the jail");
+        assert!(
+            jail_enabled(false, true, false),
+            "jailBuilds engages the jail"
+        );
+        assert!(
+            jail_enabled(false, false, true),
+            "paranoid engages the jail"
+        );
         assert!(!jail_enabled(false, false, false), "neither set → no jail");
         // Embedder-owned confinement (flag true, nub): aube's jail NEVER engages, even
         // when a user (or a compat project's .npmrc) sets jailBuilds/paranoid — the
