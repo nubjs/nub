@@ -37,9 +37,9 @@ pub(crate) use materialize::{
     invalidate_stale_index_for_package, validate_index_key, validate_package_link_name,
 };
 pub use patches::Patches;
-pub use quarantine::strip_quarantine_from_tree;
 pub(crate) use patches::apply_multi_file_patch;
 pub use pool::default_linker_parallelism;
+pub use quarantine::strip_quarantine_from_tree;
 pub use sweep::{is_physical_importer, mkdirp, remove_dir_all_with_retry, sweep_stale_tmp_dirs};
 pub(crate) use sweep::{sweep_stale_top_level_entries, try_remove_entry};
 pub use sys::{
@@ -283,6 +283,16 @@ pub struct Linker {
     /// `.aube/node_modules/`, a blanket alias for every graph package. That
     /// replaced the former per-importer phantom-target hoist.
     disk_materialize: std::collections::HashSet<String>,
+    /// Dep paths the CALLER vouches are already correctly placed on disk, so
+    /// the hoisted pass may leave their directories alone instead of wiping
+    /// and refilling them.
+    ///
+    /// The vouch has to come from the driver, not from this crate: the only
+    /// trustworthy answer combines the package's content fingerprint against
+    /// the last install's with proof that the last link ran to completion,
+    /// and the linker sees neither. Empty for standalone callers and every
+    /// existing test → the hoisted pass is byte-for-byte unchanged.
+    reusable_hoisted: std::collections::HashSet<String>,
 }
 
 /// Strategy for linking files from the store to node_modules.

@@ -3988,6 +3988,55 @@ fn finish_watch_probe(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+/// Wait for a RESTART to produce `needle`, re-applying `poke` as it polls.
+///
+/// Node's `--watch` supervisor builds its watch set asynchronously, and an
+/// `--env-file` is consumed before user code runs — so the first snapshot
+/// proves the child STARTED, not that the env file is being watched yet. A
+/// single write can land in that gap, be missed entirely, and then nothing
+/// ever restarts: the wait burns its full budget and the test fails having
+/// only ever seen the startup snapshot. Measured at 7 failures / 200 runs on
+/// `bac8e7be4d` before this.
+///
+/// Re-applying the same write closes the race without weakening anything —
+/// the restarted child must still report the new values to satisfy the
+/// caller's assertions. Only the reload waits need this; a wait for the
+/// FIRST snapshot has no such race and uses `wait_for_watch_snapshot`.
+fn wait_for_watch_reload(
+    path: &Path,
+    needle: &str,
+    child: &mut std::process::Child,
+    stderr: &Path,
+    mut poke: impl FnMut(),
+) -> String {
+    for i in 0..150 {
+        if let Ok(snapshot) = std::fs::read_to_string(path)
+            && snapshot.contains(needle)
+        {
+            return snapshot;
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            finish_watch_probe(child);
+            panic!(
+                "watch probe exited {status} before writing {needle:?}; stderr: {:?}",
+                std::fs::read_to_string(stderr).ok()
+            );
+        }
+        // Every ~1s, not every tick: enough to outlast watcher registration
+        // without spamming the filesystem the watcher is reading.
+        if i % 10 == 9 {
+            poke();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    finish_watch_probe(child);
+    panic!(
+        "watch probe never reloaded to {needle:?}; last snapshot: {:?}; stderr: {:?}",
+        std::fs::read_to_string(path).ok(),
+        std::fs::read_to_string(stderr).ok()
+    );
+}
+
 fn wait_for_watch_snapshot(
     path: &Path,
     needle: &str,
@@ -4302,17 +4351,22 @@ fn watch_filters_late_runtime_control_env_keys_but_reloads_ordinary_vars() {
         "first child: {first}"
     );
 
-    std::fs::write(
-        dir.join(".env"),
-        "NODE_OPTIONS=--require ./attacker.cjs\n\
+    let env_file = dir.join(".env");
+    let reloaded_env = "NODE_OPTIONS=--require ./attacker.cjs\n\
          NODE_TLS_REJECT_UNAUTHORIZED=0\n\
          NODE_EXTRA_CA_CERTS=/definitely/not/a/ca.pem\n\
          node_repl_external_module=./attacker.cjs\n\
-         ORDINARY=two\n",
-    )
-    .unwrap();
-    let snapshots_text =
-        wait_for_watch_snapshot(&snapshots, r#""ordinary":"two""#, &mut child, &stderr);
+         ORDINARY=two\n";
+    std::fs::write(&env_file, reloaded_env).unwrap();
+    let snapshots_text = wait_for_watch_reload(
+        &snapshots,
+        r#""ordinary":"two""#,
+        &mut child,
+        &stderr,
+        || {
+            let _ = std::fs::write(&env_file, reloaded_env);
+        },
+    );
     finish_watch_probe(&mut child);
 
     for line in snapshots_text.lines() {
@@ -4375,8 +4429,18 @@ fn watch_reloads_explicit_env_file_across_restarts() {
 
     // Changed values AND keys added after startup must both reach the
     // restarted child (the #479 failure froze the startup snapshot).
-    std::fs::write(dir.join("custom.env"), "ORDINARY=two\nADDED=three\n").unwrap();
-    let reloaded = wait_for_watch_snapshot(&snapshots, r#""ordinary":"two""#, &mut child, &stderr);
+    let env_file = dir.join("custom.env");
+    let reloaded_env = "ORDINARY=two\nADDED=three\n";
+    std::fs::write(&env_file, reloaded_env).unwrap();
+    let reloaded = wait_for_watch_reload(
+        &snapshots,
+        r#""ordinary":"two""#,
+        &mut child,
+        &stderr,
+        || {
+            let _ = std::fs::write(&env_file, reloaded_env);
+        },
+    );
     finish_watch_probe(&mut child);
 
     assert!(

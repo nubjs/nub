@@ -310,7 +310,10 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
     // `virtual_store_subdir` (the shared global store, which `file:` deps
     // never enter), never by the `aube_dir_entry_name` that
     // `materialized_pkg_dir` reconstructs.
-    sbx.cmd().args(["approve-builds", "--all"]).assert().success();
+    sbx.cmd()
+        .args(["approve-builds", "--all"])
+        .assert()
+        .success();
     assert!(
         marker_exists_under(&node_modules, "BUILT_527_MARKER"),
         "approve-builds must run a local-source dep's build in the same invocation"

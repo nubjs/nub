@@ -751,6 +751,29 @@ fn materialize_hoisted_node(
         });
     }
 
+    // Reuse an intact placement instead of wiping and refilling it.
+    //
+    // The wipe below is unconditional today, so every relink destroys and
+    // restores each package — including packages nothing touched. That is
+    // what deletes postinstall build output (`build/Release/*.node`, a
+    // downloaded binary), because the refill restores the published tarball
+    // and nothing else. npm and pnpm — including pnpm's own hoisted layout —
+    // leave an unchanged package directory alone, and this brings the hoisted
+    // linker in line.
+    //
+    // `reusable` is the caller's vouch, and it is deliberately NOT derived
+    // from what is on disk: the install driver only vouches for a package
+    // whose content fingerprint is unchanged AND whose tree was left intact
+    // by a link that ran to completion. Disk shape alone cannot tell a
+    // complete directory from one an interrupted install abandoned halfway.
+    if linker.reusable_hoisted.contains(dep_path) && pkg_dir.join("package.json").is_file() {
+        stats.packages_cached += 1;
+        return Ok(NodeOutcome {
+            stats,
+            placement: Some((dep_path.to_string(), pkg_dir)),
+        });
+    }
+
     // Registry (or `file:`) package — needs a PackageIndex to find the
     // store-backed file set. `package_indices` is sparse on warm
     // installs, so lazy-load from the store on miss. `registry_name()`
@@ -986,6 +1009,11 @@ pub(crate) fn materialize_plan(
             let outcome = result?;
             stats.files_linked += outcome.stats.files_linked;
             stats.packages_linked += outcome.stats.packages_linked;
+            // Reused placements land here. Dropping this made a relink that
+            // reused EVERY package report zero work of any kind, which trips
+            // the driver's "no packages were linked" sanity check — a `remove`
+            // that legitimately had nothing to materialize failed the install.
+            stats.packages_cached += outcome.stats.packages_cached;
             if let Some((dep_path, pkg_dir)) = outcome.placement {
                 placements.record(&dep_path, pkg_dir);
             }

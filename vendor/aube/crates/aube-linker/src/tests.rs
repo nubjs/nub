@@ -2422,6 +2422,64 @@ fn gvs_relink_replaces_a_populated_real_dir_in_the_entry_slot() {
     assert!(entry.join("node_modules/bar/index.js").exists());
 }
 
+// The workspace twin of the test above. `link_all` and `link_workspace`
+// carry near-duplicate step-1 GVS-populate loops, and the fix for
+// nub#566 / nub#576 landed only in `link_all` — so the identical
+// `EntryState::Stale` arm here kept its non-recursive removal and a
+// WORKSPACE wedged permanently on os-183 where a single-package project
+// recovered. Confirmed on a real Windows box against
+// `0.6.0-canary.20260729.129`: same fixture, same perturbation, same
+// command — single package exit 0, workspace exit 1 with
+// `failed to link workspace node_modules`.
+//
+// Reached deliberately rather than naturally: the mode-change wipe in
+// `detect_aube_dir_gvs_mode` normally pre-empts a mixed tree, and that
+// wipe is a DIFFERENT layer. Any other source of one — a partial cache
+// restore, a crash, external tooling — lands straight here.
+#[test]
+fn gvs_workspace_relink_replaces_a_populated_real_dir_in_the_entry_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let root_dir = dir.path().join("workspace");
+    let (store, indices) = setup_store_with_files(dir.path());
+
+    // Two members sharing one dependency, so the entry under test is
+    // reached from more than one importer.
+    let mut graph = make_graph();
+    let foo = graph.importers.get(".").cloned().unwrap_or_default();
+    graph
+        .importers
+        .insert("packages/a".to_string(), foo.clone());
+    graph.importers.insert("packages/b".to_string(), foo);
+
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true).with_hoist(false);
+    linker
+        .link_workspace(&root_dir, &graph, &indices, &BTreeMap::new())
+        .unwrap();
+
+    // Rewrite one shared entry into the per-project shape.
+    let entry = root_dir
+        .join("node_modules/.aube")
+        .join(dep_path_to_filename(
+            "bar@2.0.0",
+            DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH,
+        ));
+    try_remove_entry(&entry);
+    let pkg_dir = entry.join("node_modules/bar");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::write(pkg_dir.join("index.js"), b"stale per-project copy").unwrap();
+    assert!(aube_util::fs::is_real_dir(&entry));
+
+    linker
+        .link_workspace(&root_dir, &graph, &indices, &BTreeMap::new())
+        .expect("workspace relink must reclaim a populated per-project entry, not collide with it");
+
+    assert!(
+        std::fs::read_link(&entry).is_ok(),
+        "entry must end up a link into the shared store"
+    );
+    assert!(entry.join("node_modules/bar/index.js").exists());
+}
+
 // `is_real_dir` exists to tell a plain directory apart from a
 // directory-SHAPED link, so the link case is the whole point — and it is
 // only meaningful against the real primitive: `create_dir_link` writes a

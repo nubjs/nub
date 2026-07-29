@@ -454,7 +454,10 @@ pub(super) struct SelectLockfileInput<'a> {
 /// packageExtensions drift, gated on the embedder posture. Returns `Fresh`
 /// when the embedder doesn't enforce the checksum (standalone aube), so the
 /// check is a nub-only layer that never fires on aube's default path.
-fn package_extensions_drift(graph: &LockfileGraph, effective_checksum: Option<&str>) -> DriftStatus {
+fn package_extensions_drift(
+    graph: &LockfileGraph,
+    effective_checksum: Option<&str>,
+) -> DriftStatus {
     if aube_util::engine_context().enforce_package_extensions_checksum {
         graph.check_package_extensions_drift(effective_checksum)
     } else {

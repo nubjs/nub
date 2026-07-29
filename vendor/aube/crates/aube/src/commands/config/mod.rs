@@ -119,8 +119,8 @@ pub(crate) use aube_config::{
     load_user_entries as load_user_aube_config_entries,
 };
 pub(crate) use get_cmd::GetArgs;
-pub use set_cmd::set_project_scalar_to_workspace_yaml;
 pub(crate) use set_cmd::SetArgs;
+pub use set_cmd::set_project_scalar_to_workspace_yaml;
 
 impl Location {
     pub(super) fn path(self) -> miette::Result<PathBuf> {

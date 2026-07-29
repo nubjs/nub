@@ -54,9 +54,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its
-      # version tags, so pinned SHAs go unreachable; commit verified genuine upstream.
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
 
       # On DEPOT runners this transparently writes to Depot Cache (25 GB on the Developer
       # plan) instead of GitHub's — which matters, because this repo's GitHub Actions cache is

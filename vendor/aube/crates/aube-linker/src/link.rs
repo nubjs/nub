@@ -44,6 +44,7 @@ impl Linker {
             link_progress: self.link_progress.clone(),
             disk_materialize: self.disk_materialize.clone(),
             project_local_dep_paths: self.project_local_dep_paths.clone(),
+            reusable_hoisted: self.reusable_hoisted.clone(),
         }
     }
 
@@ -1178,9 +1179,15 @@ impl Linker {
                                 nested_link_targets.as_ref(),
                             )?;
 
+                            // Same `Stale` shapes as `link_all`'s step 1, and
+                            // the same reason a non-recursive `remove_dir`
+                            // cannot clear them — see the comment there. This
+                            // arm is the workspace twin of that code and was
+                            // left on the old removal, so a workspace wedged
+                            // permanently on os-183 where a single-package
+                            // project self-healed.
                             if matches!(state, EntryState::Stale) {
-                                let _ = std::fs::remove_dir(&local_aube_entry)
-                                    .or_else(|_| std::fs::remove_file(&local_aube_entry));
+                                try_remove_entry(&local_aube_entry);
                             }
                             // Parent dirs were pre-created above the
                             // par_iter; no per-package `mkdirp` here.
