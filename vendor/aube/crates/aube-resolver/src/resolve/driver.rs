@@ -854,7 +854,12 @@ impl<'a> ResolveDriver<'a> {
                                 .fetch_packument_with_time_cached(&registry_name, dir)
                                 .await
                         }
-                        None => self.resolver.client.fetch_packument(&registry_name).await,
+                        None => {
+                            self.resolver
+                                .client
+                                .fetch_packument_with_time(&registry_name)
+                                .await
+                        }
                     }
                     .map_err(|e| Error::Registry(registry_name.clone(), e.to_string()))?;
                     self.packument_fetch_time += fetch_start.elapsed();
@@ -930,7 +935,12 @@ impl<'a> ResolveDriver<'a> {
                                     .fetch_packument_with_time_cached(&registry_name, dir)
                                     .await
                             }
-                            None => self.resolver.client.fetch_packument(&registry_name).await,
+                            None => {
+                                self.resolver
+                                    .client
+                                    .fetch_packument_with_time(&registry_name)
+                                    .await
+                            }
                         }
                     } else {
                         match self.resolver.client.fetch_packument(&registry_name).await {
@@ -965,7 +975,12 @@ impl<'a> ResolveDriver<'a> {
                                     .fetch_packument_with_time_cached(&registry_name, dir)
                                     .await
                             }
-                            None => self.resolver.client.fetch_packument(&registry_name).await,
+                            None => {
+                                self.resolver
+                                    .client
+                                    .fetch_packument_with_time(&registry_name)
+                                    .await
+                            }
                         }
                     } else {
                         match self.resolver.client.fetch_packument(&registry_name).await {
@@ -1007,6 +1022,34 @@ impl<'a> ResolveDriver<'a> {
                         ))));
                     }
                 },
+                // An optional dep whose range matches nothing is skipped
+                // rather than fatal, matching the fetch-failure and
+                // platform-mismatch paths. A registry carrying only some
+                // of a package's platform bindings would otherwise fail
+                // the whole install over a dep the platform filter below
+                // is about to drop anyway. The age-gate arm above stays
+                // fatal on purpose — that's a supply-chain signal the
+                // user opted into, not a package the registry lacks.
+                PickResult::NoMatch if task.dep_type == DepType::Optional => {
+                    tracing::warn!(
+                        code = aube_codes::warnings::WARN_AUBE_SKIPPED_OPTIONAL_NO_MATCHING_VERSION,
+                        "skipping optional dep {}: no version matches `{}`",
+                        task.name,
+                        task.range,
+                    );
+                    if task.is_root
+                        && let Some(spec) = task.original_specifier.as_ref()
+                    {
+                        self.skipped_optional_dependencies
+                            .entry(task.importer.clone())
+                            .or_default()
+                            .insert(task.name.clone(), spec.clone());
+                    }
+                    if task.is_root {
+                        self.note_root_done();
+                    }
+                    return Ok(());
+                }
                 PickResult::NoMatch => {
                     return Err(Error::NoMatch(Box::new(error::build_no_match(
                         &task, packument,

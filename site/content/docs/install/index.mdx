@@ -426,6 +426,29 @@ Approval takes effect immediately: `nub approve-builds` records the decision and
 
 Which manifest field grants permission tracks the inferred incumbent: pnpm projects use `pnpm.onlyBuiltDependencies` / `pnpm.allowBuilds`, Bun projects use `trustedDependencies`, and the neutral `allowBuilds` field plus `nub approve-builds` apply in any project. An explicit denial (`allowBuilds: { pkg: false }`, `neverBuiltDependencies`) always wins. A package that wants to build but isn't allowed is skipped, with `WARN_NUB_IGNORED_BUILD_SCRIPTS` naming it and `nub approve-builds` as the remedy.
 
+### Cooling window
+
+A registry-resolved version must be older than `minimumReleaseAge` — 24 hours by default — before Nub will install it. The window is what keeps a compromised publish out of your tree during the hours between it going up and being caught.
+
+Publish dates come from the registry's `time` metadata, so the gate is only as strong as what the registry serves. Under the default `minimumReleaseAgeStrict=true`, an age Nub cannot establish counts as a failure rather than a pass:
+
+| Registry metadata | Outcome |
+|---|---|
+| A publish date for the resolved version | Checked against the window |
+| Dates for other versions, none for this one | Blocked |
+| No per-version dates, document older than the window | Allowed — the document's own timestamp bounds every version in it |
+| No per-version dates, document newer than the window | Blocked |
+
+Loosening strictness reverses both blocked rows: an undateable version becomes eligible again, and the lowest satisfying one is picked.
+
+Registries that publish no dates at all — some private mirrors, older Verdaccio — hit the last row, and the error names that as the cause rather than reporting a missed cutoff. Three ways through:
+
+```ini
+minimumReleaseAgeExclude=internal-pkg   # exempt one package (comma-separated)
+minimumReleaseAgeStrict=false           # fall back to the lowest satisfying version
+minimumReleaseAge=0                     # turn the window off
+```
+
 ### Default-trust floor
 
 Beyond the packages you approve explicitly, a curated set of well-known packages may build without approval — but only when **all three** gates hold at once:
@@ -479,9 +502,9 @@ Nub also weighs trust *evidence* across a package's release history — OIDC pro
 The comparison is by publish date, so a legitimate maintenance release on an older major — shipped after a newer major adopted provenance — can trip it. Nub exempts any version older than 14 days, so an aged, un-yanked backport resolves while a freshly published downgrade is still checked against the full history. Widen the window, clear a single package, or turn the check off in `.npmrc`:
 
 ```ini
-trustPolicyIgnoreAfter=20160          # age exemption in minutes (default 14 days)
-trustPolicyExclude[]=tailwind-merge   # exempt one package regardless of age
-trustPolicy=off                       # disable the check entirely
+trustPolicyIgnoreAfter=20160        # age exemption in minutes (default 14 days)
+trustPolicyExclude=tailwind-merge   # exempt one package regardless of age
+trustPolicy=off                     # disable the check entirely
 ```
 
 ## Store and disk layout

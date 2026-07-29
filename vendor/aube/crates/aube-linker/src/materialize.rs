@@ -42,13 +42,42 @@ fn place_materialized_entry(src: &Path, dst: &Path) -> io::Result<MaterializePla
 }
 
 fn is_transient_rename_error(err: &io::Error) -> bool {
-    matches!(
+    if matches!(
         err.kind(),
         io::ErrorKind::AlreadyExists
             | io::ErrorKind::PermissionDenied
             | io::ErrorKind::Interrupted
             | io::ErrorKind::WouldBlock
-    )
+    ) {
+        return true;
+    }
+    // `ERROR_SHARING_VIOLATION` (32) has no `ErrorKind` mapping in std — it
+    // decodes to `Uncategorized`, which no `matches!` arm can name — so the
+    // list above was silently blind to the most common transient this rename
+    // hits (#552). Gated to Windows because raw 32 is EPIPE on Unix, an
+    // unrelated errno that must not be treated as a retriable rename.
+    #[cfg(windows)]
+    {
+        return crate::sweep::is_transient_fs_error(err);
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+/// The terminal byte-transfer of a materialized file, retried through
+/// transient Windows sharing violations.
+///
+/// Every strategy in `link_file_fresh` ends here: reflink and hardlink both
+/// degrade to a copy, and `LinkStrategy::Copy` starts here. That makes this
+/// the one place where a lost race with another process's handle is FATAL to
+/// the whole install rather than recoverable — a single `ERROR_SHARING_VIOLATION`
+/// on any one of tens of thousands of files aborted the entire link (#552),
+/// while the junction and directory-removal paths had carried a retry all
+/// along. The upstream `hard_link`/`reflink` attempts deliberately do NOT
+/// retry: they already fall through to this copy, so retrying them too would
+/// double the worst-case stall per file for no added recovery.
+fn copy_through_transients(src: &Path, dst: &Path) -> io::Result<u64> {
+    crate::sweep::with_transient_retry(|| std::fs::copy(src, dst))
 }
 
 /// Test-only switch that forces the reflink attempt in
@@ -129,8 +158,12 @@ impl Linker {
             return *hit;
         }
 
-        let test_src = src_dir.join(".aube-link-test-src");
-        let test_dst = dst_dir.join(".aube-link-test-dst");
+        // Probe files land in the caller's real store / node_modules dirs, so
+        // the leaf is brand-scoped to the active embedder rather than hardcoded
+        // to `aube` (`prog()` is `"aube"` by default — standalone aube unchanged).
+        let brand = aube_util::prog();
+        let test_src = src_dir.join(format!(".{brand}-link-test-src"));
+        let test_dst = dst_dir.join(format!(".{brand}-link-test-dst"));
 
         let strategy = if std::fs::write(&test_src, b"test").is_ok() {
             let result = if std::fs::hard_link(&test_src, &test_dst).is_ok() {
@@ -247,6 +280,12 @@ impl Linker {
         if pkg_nm_dir.exists() {
             trace!("virtual store hit: {dep_path}");
             stats.packages_cached += 1;
+            // A cache hit skips materialization, so the cold-path strip
+            // never runs — and the global virtual store outlives
+            // `rm -rf node_modules`, so an entry written by a pre-fix
+            // build would stay quarantined forever. Stripping here is
+            // what makes that removal-and-reinstall recovery heal.
+            crate::quarantine::strip_from_native_binaries(&pkg_nm_dir, index);
             return Ok(());
         }
 
@@ -363,6 +402,12 @@ impl Linker {
         let state = classify_entry_state(&local_aube_entry, &global_entry);
         if matches!(state, EntryState::Fresh) {
             stats.packages_cached += 1;
+            // The local entry already points at a fresh global one, so
+            // nothing is materialized — but the index is a parameter
+            // here, unlike the `link.rs` short-circuits, so the strip is
+            // free. The package lives in the global entry the symlink
+            // resolves to.
+            crate::quarantine::strip_cached_entry(&global_entry, &pkg.name, index);
             return Ok(());
         }
         self.ensure_in_virtual_store(dep_path, graph, pkg, index, stats, nested_link_targets)?;
@@ -409,6 +454,7 @@ impl Linker {
         let final_entry = aube_dir.join(&subdir);
         if final_entry.exists() {
             stats.packages_cached += 1;
+            crate::quarantine::strip_cached_entry(&final_entry, &pkg.name, index);
             return Ok(());
         }
 
@@ -661,6 +707,13 @@ impl Linker {
                 .map_err(|msg| Error::Patch(patch_key.clone(), msg))?;
         }
 
+        // Every file this package will ever have now exists, so this is
+        // the earliest point a quarantine strip can be complete. Covers
+        // the whole-dir `clonefile` branch too: that fills the package
+        // without entering the per-file loop, but the index still names
+        // every file it produced.
+        crate::quarantine::strip_from_native_binaries(&pkg_nm_dir, index);
+
         // Create symlinks for transitive dependencies. Parents for
         // scoped packages were added to the `parents` batch above, so
         // we no longer need a per-symlink mkdirp. We also skip the
@@ -792,8 +845,7 @@ impl Linker {
 
     /// Hardlink-or-copy a file into a freshly-created destination.
     /// Assumes `dst` does not exist — callers (`materialize_into`)
-    /// always write into a `.tmp-<pid>-...` staging dir or a
-    /// just-wiped per-project `.aube/<dep_path>`, so the defensive
+    /// always write into a `.tmp-<pid>-...` staging dir, so the defensive
     /// `remove_file(dst)` an idempotent variant would need is skipped.
     /// Eliminates one syscall per linked file (~45k on the medium
     /// benchmark fixture).
@@ -834,7 +886,7 @@ impl Linker {
                 let auto = matches!(self.strategy, LinkStrategy::ReflinkAuto);
                 #[cfg(target_os = "macos")]
                 if matches!(stored.size, Some(size) if size <= SMALL_FILE_COPY_MAX) {
-                    std::fs::copy(&stored.store_path, dst).map_err(map_io)?;
+                    copy_through_transients(&stored.store_path, dst).map_err(map_io)?;
                     if let Some(t0) = diag_t0 {
                         aube_util::diag::event(
                             aube_util::diag::Category::Linker,
@@ -910,7 +962,7 @@ impl Linker {
                         if !auto {
                             trace!("reflink failed, falling back to copy: {e}");
                         }
-                        std::fs::copy(&stored.store_path, dst).map_err(map_io)?;
+                        copy_through_transients(&stored.store_path, dst).map_err(map_io)?;
                         realized = "reflink_fallback_copy";
                     }
                 } else {
@@ -925,14 +977,14 @@ impl Linker {
                     }
                     // Fall back to copy on cross-filesystem errors (EXDEV)
                     trace!("hardlink failed, falling back to copy: {e}");
-                    std::fs::copy(&stored.store_path, dst).map_err(map_io)?;
+                    copy_through_transients(&stored.store_path, dst).map_err(map_io)?;
                     realized = "hardlink_fallback_copy";
                 } else {
                     realized = "hardlink";
                 }
             }
             LinkStrategy::Copy => {
-                std::fs::copy(&stored.store_path, dst).map_err(map_io)?;
+                copy_through_transients(&stored.store_path, dst).map_err(map_io)?;
                 realized = "copy";
             }
         }
@@ -1385,6 +1437,35 @@ fn is_safe_package_component(component: &str) -> bool {
                 | std::path::Component::Prefix(_)
         )
     })
+}
+
+#[cfg(test)]
+mod transient_error_tests {
+    use super::*;
+
+    #[test]
+    fn sharing_violation_is_retriable_only_on_windows() {
+        // Rust maps ERROR_SHARING_VIOLATION (32) to no `ErrorKind` at all — it
+        // decodes to `Uncategorized` — so the ErrorKind-only predicate this
+        // guards silently never fired for the most common Windows transient
+        // (#552). Raw 32 is EPIPE on Unix, an unrelated errno that must NOT
+        // become a retriable rename.
+        assert_eq!(
+            is_transient_rename_error(&io::Error::from_raw_os_error(32)),
+            cfg!(windows),
+            "os 32 = SHARING_VIOLATION on Windows (retriable), EPIPE on Unix (not)"
+        );
+    }
+
+    #[test]
+    fn mapped_error_kinds_stay_retriable_everywhere() {
+        assert!(is_transient_rename_error(&io::Error::from(
+            io::ErrorKind::AlreadyExists
+        )));
+        assert!(!is_transient_rename_error(&io::Error::from(
+            io::ErrorKind::NotFound
+        )));
+    }
 }
 
 #[cfg(test)]

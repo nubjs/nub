@@ -1659,6 +1659,30 @@ mod tests {
         );
     }
 
+    /// `pnpm-workspace.yaml` is the file pnpm actually reads
+    /// `registrySupportsTimeField` from — never `.npmrc` — so the yaml source
+    /// is what mirroring a pnpm incumbent depends on. Asserts the value
+    /// RESOLVES, not merely that the metadata names a real struct field: the
+    /// `meta.rs` self-test covers the latter and would pass on a key nothing
+    /// ever reads.
+    #[test]
+    fn registry_supports_time_field_resolves_from_workspace_yaml() {
+        let ws = raw_yaml("registrySupportsTimeField: true\n");
+        let ctx = ResolveCtx {
+            managed_aube_config: &[],
+            project_aube_config: &[],
+            project_npmrc: &[],
+            user_aube_config: &[],
+            user_npmrc: &[],
+            workspace_yaml: &ws,
+            global_config_yaml: empty_yaml_map(),
+            env: &[],
+            cli: &[],
+            embedder_defaults: &[],
+        };
+        assert!(resolved::registry_supports_time_field(&ctx));
+    }
+
     #[test]
     fn global_config_yaml_wins_over_project_npmrc_by_default() {
         // pnpm v11 ranks the global `<configDir>/config.yaml` above the

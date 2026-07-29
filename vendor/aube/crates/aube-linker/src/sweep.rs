@@ -43,6 +43,73 @@ pub fn sweep_stale_tmp_dirs(virtual_store: &Path) {
     }
 }
 
+/// Whether a Windows filesystem error is the transient
+/// somebody-else-holds-a-handle kind that backing off will clear:
+/// `ERROR_SHARING_VIOLATION` (32) or `ERROR_ACCESS_DENIED` (5), raised
+/// whenever another process has the file open — Defender mid-scan, the
+/// search indexer, a dev server, a `--watch` task, an editor.
+///
+/// Test the RAW code, never `ErrorKind` alone. Rust maps
+/// `ERROR_ACCESS_DENIED` to `PermissionDenied` but has NO mapping for
+/// `ERROR_SHARING_VIOLATION` — it falls through `decode_error_kind` into
+/// `Uncategorized`, which no `matches!` arm can name. An `ErrorKind`-only
+/// predicate therefore silently never fires for the single most common
+/// transient on Windows, which is how the rename retry in
+/// `place_materialized_entry` came to be dead code for os 32 (#552).
+#[cfg(windows)]
+pub(crate) fn is_transient_fs_error(e: &std::io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(5 | 32))
+}
+
+/// Full ladder for an operation whose failure is FATAL to the install:
+/// 10 attempts, 50ms doubling to a 2s cap, ~10s worst case. Long enough to
+/// outlast an AV scan, short enough that a genuinely stuck file fails the
+/// install rather than hanging it.
+pub(crate) fn with_transient_retry<T>(
+    op: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    with_transient_retry_bounded(10, op)
+}
+
+/// Short ladder for a BEST-EFFORT operation the caller proceeds past either
+/// way: 4 attempts, ~750ms worst case.
+///
+/// The distinction is about where the call sits, not how much we want it to
+/// succeed. Best-effort removals run once per entry inside sweep loops, so a
+/// ~10s ladder does not cost 10s — it costs 10s PER LOCKED ENTRY, and a branch
+/// switch with a dev server running turns that into a multi-minute stall on
+/// what is supposed to be a cleanup pass. The transient being waited out (an
+/// AV scan window) clears well inside a second, so the short ladder catches
+/// essentially all of what the long one would.
+pub(crate) fn with_transient_retry_bounded<T>(
+    #[cfg_attr(not(windows), allow(unused_variables))] attempts: u32,
+    mut op: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    // Unix is a straight passthrough — the failure mode does not exist there
+    // (an open file can be replaced or unlinked freely), so behavior off
+    // Windows is byte-for-byte unchanged.
+    #[cfg(not(windows))]
+    {
+        op()
+    }
+    #[cfg(windows)]
+    {
+        for attempt in 0..attempts.max(1) {
+            match op() {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    if !is_transient_fs_error(&e) || attempt == attempts.max(1) - 1 {
+                        return Err(e);
+                    }
+                    let delay = (50u64 << attempt.min(6)).min(2000);
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                }
+            }
+        }
+        unreachable!("the loop returns on the final attempt")
+    }
+}
+
 /// Remove a directory with retry on Windows sharing violations.
 ///
 /// Windows does not let you delete a file while another process holds
@@ -51,10 +118,6 @@ pub fn sweep_stale_tmp_dirs(virtual_store: &Path) {
 /// 32 (SHARING_VIOLATION) or ERROR 5 (ACCESS_DENIED, AV scanner
 /// mid-scan) and leaves a half-deleted virtual store. pnpm, npm,
 /// rimraf all retry with backoff. Do the same. Unix passthrough.
-///
-/// Retries 10 times with exponential backoff starting at 50ms. Total
-/// worst case around 10 seconds which is tolerable for an install
-/// already paying for filesystem work.
 pub fn remove_dir_all_with_retry(path: &Path) -> std::io::Result<()> {
     #[cfg(not(windows))]
     {
@@ -62,29 +125,12 @@ pub fn remove_dir_all_with_retry(path: &Path) -> std::io::Result<()> {
     }
     #[cfg(windows)]
     {
-        use std::io::ErrorKind;
-        let mut delay_ms = 50u64;
-        for attempt in 0..10 {
-            match std::fs::remove_dir_all(path) {
-                Ok(()) => return Ok(()),
-                Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
-                Err(e) => {
-                    // Sharing violation and PermissionDenied both
-                    // map to retriable Windows errors. Bail on
-                    // attempt 10.
-                    let retriable =
-                        matches!(e.kind(), ErrorKind::PermissionDenied | ErrorKind::Other)
-                            || e.raw_os_error() == Some(32);
-                    if !retriable || attempt == 9 {
-                        return Err(e);
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                    delay_ms = (delay_ms * 2).min(2000);
-                }
-            }
+        // Already gone — including a concurrent remover winning the race —
+        // is success, not failure.
+        match with_transient_retry(|| std::fs::remove_dir_all(path)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
         }
-        // Unreachable, loop always returns by attempt 10.
-        Ok(())
     }
 }
 
@@ -124,21 +170,49 @@ pub(crate) fn remove_hidden_hoist_tree(path: &Path) {
 }
 
 /// Best-effort unlink of `path` regardless of whether it's a file,
-/// symlink, junction, or directory. Errors are intentionally ignored
-/// because this is a "clear the slot" operation — the caller is about
-/// to place something else here and any residual entry that survives
-/// will surface as a downstream error.
+/// symlink, junction, or populated directory. Errors are intentionally
+/// ignored because this is a "clear the slot" operation — the caller is
+/// about to place something else here and any residual entry that
+/// survives will surface as a downstream error.
+///
+/// Goes through the Windows retry (a plain passthrough on Unix): the
+/// slots this clears live inside `node_modules`, where a dev server,
+/// watcher, or AV scanner holding a handle turns the delete into a
+/// transient os-5/32 failure. Swallowed here, that failure re-emerges
+/// as an `ERROR_ALREADY_EXISTS` from whatever the caller places next.
 pub(crate) fn try_remove_entry(path: &Path) {
-    let _ = std::fs::remove_dir_all(path);
+    // A partial wipe is not just a re-emerging `ERROR_ALREADY_EXISTS` (above):
+    // the refill that follows only writes paths present in the NEW index, so
+    // anything the old version had and the new one does not survives and stays
+    // resolvable, silently blending two package versions.
+    //
+    // SHORT ladder, not the full one: this runs once per entry inside three
+    // sweep loops, so the ~10s ladder would not cost 10s — it would cost 10s
+    // PER LOCKED ENTRY, turning a cleanup pass into a multi-minute stall when
+    // a dev server holds several. The transient here is an AV scan window,
+    // which clears well inside a second.
+    let _ = with_transient_retry_bounded(4, || std::fs::remove_dir_all(path));
     let _ = std::fs::remove_file(path);
 }
 
-/// `xx::file::mkdirp` wrapped with the linker's `Error::Xx` conversion.
-/// Every materialize pass calls this before creating a symlink /
-/// junction, so the lossy `.to_string()` wrap lives in exactly one
-/// place.
+/// Recursive directory creation, retried through Windows' transient
+/// sharing errors. Every materialize pass calls this before creating a
+/// symlink / junction, so the retry and the path-carrying error
+/// conversion live in exactly one place.
 pub fn mkdirp(dir: &Path) -> Result<(), Error> {
-    xx::file::mkdirp(dir).map_err(|e| Error::Xx(e.to_string()))
+    // Calls `std::fs::create_dir_all` rather than `xx::file::mkdirp` so the
+    // raw OS error survives: `xx` wraps it in its own error type, and the
+    // retry predicate below matches on `raw_os_error()`, so a wrapped error
+    // would silently never be retriable. `xx::file::mkdirp` is an `exists()`
+    // check plus this same call, and `create_dir_all` is already a no-op on an
+    // existing directory, so dropping the check changes nothing.
+    //
+    // Retried because creating a directory whose slot is in Windows'
+    // pending-delete state returns ACCESS_DENIED — a state reachable precisely
+    // because a wipe just ran against a path something else holds open.
+    // Failure here is fatal to the install.
+    with_transient_retry(|| std::fs::create_dir_all(dir))
+        .map_err(|e| Error::Io(dir.to_path_buf(), e))
 }
 
 /// Classification of a `.aube/<dep_path>` symlink relative to the

@@ -349,6 +349,22 @@ impl RegistryClient {
         Ok(packument)
     }
 
+    /// Fetch the full (non-corgi) packument fresh — no disk cache — and
+    /// parse it into [`Packument`], `time` map included. The uncached
+    /// sibling of [`Self::fetch_packument_with_time_cached`], for callers
+    /// that need publish times (`minimumReleaseAge`, time-based mode,
+    /// `trustPolicy=no-downgrade`) while deliberately running without the
+    /// full-packument disk cache (`aube update`'s dist-tag freshness
+    /// rule). Falling back to [`Self::fetch_packument`] there instead
+    /// returns the abbreviated corgi document, whose missing `time` map
+    /// silently disables the age gate at the pick site.
+    pub async fn fetch_packument_with_time(&self, name: &str) -> Result<Packument, Error> {
+        let value = self.fetch_packument_json_fresh(name).await?;
+        let packument: Packument = serde_json::from_value(value)
+            .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+        Ok(packument)
+    }
+
     pub async fn fetch_packument_with_time_cached_after_lookup(
         &self,
         name: &str,

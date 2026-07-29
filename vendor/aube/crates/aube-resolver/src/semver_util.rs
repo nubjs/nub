@@ -78,15 +78,67 @@ pub fn pick_version_for_add<'a>(
     )
 }
 
+/// Does `ver` clear `effective`, the publish-age cutoff that applies to it?
+/// `None` means no wall is in effect, so everything clears.
+///
+/// A known publish time is always compared. When one is missing, the packument's
+/// `modified` timestamp is tried first as an UPPER BOUND on every version's
+/// publish time: `modified <= cutoff` proves the whole document predates the
+/// wall, so every version in it is mature. That is what keeps abbreviated
+/// (corgi) metadata usable without a full-packument fetch for the dormant
+/// majority of a dependency tree.
+///
+/// When even that cannot settle it, the age is UNDETERMINABLE and `strict`
+/// decides:
+///
+/// - **`strict`** — block. A gate is only as strong as the metadata feeding it,
+///   and an unprovable age must not be a silent bypass (#581). nub pins
+///   `minimumReleaseAgeStrict` on, so this is nub's posture.
+/// - **lenient** — stay eligible, preserving upstream aube's default: lenient
+///   mode already means "fall back rather than fail", and gating it here would
+///   change standalone aube's out-of-box behavior rather than the embedder's.
+///
+/// A hole in an otherwise-populated `time` map is treated as undeterminable
+/// too — anomalous, and not evidence of maturity.
+///
+/// Shared with the vulnerability re-pick (`resolve::vulnerable`), which passes
+/// `strict` to mean "provably mature" for its first-choice tier.
+pub(crate) fn version_clears_cutoff(
+    packument: &Packument,
+    ver: &str,
+    effective: Option<&str>,
+    strict: bool,
+) -> bool {
+    let Some(c) = effective else { return true };
+    match packument.time.get(ver) {
+        Some(t) => t.as_str() <= c,
+        // npm's FULL `time` map always carries the `created`/`modified`
+        // bookkeeping keys beside the version keys, so a raw `is_empty()` would
+        // misread a mirror serving only those as "populated, with holes" and
+        // gate every version. Key on any non-bookkeeping entry instead.
+        None => {
+            let has_version_times = packument
+                .time
+                .keys()
+                .any(|k| k != "created" && k != "modified");
+            let modified_proves_maturity =
+                !has_version_times && packument.modified.as_deref().is_some_and(|m| m <= c);
+            modified_proves_maturity || !strict
+        }
+    }
+}
+
 /// Pick the best version from a packument that satisfies the given range.
 ///
 /// `pick_lowest` flips the scan order — used by
 /// `resolution-mode=time-based` for direct deps. `cutoff` filters out
 /// versions whose registry publish time is later than the cutoff
 /// (lexicographic compare on ISO-8601 UTC strings, which sort
-/// correctly). When the packument has no `time` entry for a version
-/// (e.g. abbreviated corgi payload in `Highest` mode), lenient mode keeps the
-/// version eligible while strict mode fails closed.
+/// correctly). When the packument carries no `time` entry for a version,
+/// the packument's `modified` timestamp can still prove the whole
+/// document mature; failing that the age is undeterminable, and `strict`
+/// decides whether it blocks (#581) or stays eligible. See
+/// [`version_clears_cutoff`].
 ///
 /// `strict` controls fallback when the cutoff filters out every
 /// satisfying version: with `strict=true` we return `None` and the
@@ -163,15 +215,8 @@ pub(crate) fn pick_version<'a>(
         }
     };
 
-    // Does `ver` clear `effective` (the cutoff that applies to it)?
-    // `None` => no wall, keep the version. Missing time stays eligible in
-    // lenient mode, but strict mode treats an unverifiable age as gated.
-    let passes_effective_cutoff = |ver: &str, effective: Option<&str>| -> bool {
-        let Some(c) = effective else { return true };
-        match packument.time.get(ver) {
-            Some(t) => t.as_str() <= c,
-            None => !strict,
-        }
+    let passes_effective_cutoff = |ver: &str, effective: Option<&str>| {
+        version_clears_cutoff(packument, ver, effective, strict)
     };
 
     // A version's effective cutoff: exempt versions answer to the

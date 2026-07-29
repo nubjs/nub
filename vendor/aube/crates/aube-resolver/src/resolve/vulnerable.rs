@@ -48,24 +48,43 @@ pub(super) fn prefer_non_vulnerable_pick<'a>(
         } else {
             cutoff
         };
-        let Some(c) = effective else { return true };
-        match packument.time.get(ver) {
-            Some(t) => t.as_str() <= c,
-            None => true,
-        }
+        crate::semver_util::version_clears_cutoff(packument, ver, effective, true)
     };
+
+    // Two tiers, because this function is a PREFERENCE, not a gate: its only
+    // caller already holds a version it knows to be vulnerable, and whatever
+    // this returns is what gets installed. So the age wall ranks candidates
+    // here; it never vetoes one down to the vulnerable fallback.
+    //
+    // Tier 1 is a non-vulnerable version that also clears the wall. Tier 2 is
+    // a non-vulnerable version whose publish age is merely UNDETERMINABLE.
+    // Tier 2 still beats returning `fallback`: a confirmed advisory hit is a
+    // concrete harm, an unprovable publish date is a hypothetical one, and
+    // trading the former for the latter is not a trade worth making. This is
+    // the deliberate asymmetry with `pick_version`, which has no such
+    // second-worst option to fall to and so blocks outright (#581).
+    //
+    // A version with a KNOWN publish time that is too new belongs to NEITHER
+    // tier: that is the freshly-published-compromise case the gate exists to
+    // stop, and it stays excluded even against a vulnerable fallback.
     let mut best: Option<(node_semver::Version, &'a aube_registry::VersionMetadata)> = None;
+    let mut best_undated: Option<(node_semver::Version, &'a aube_registry::VersionMetadata)> = None;
     for (ver_str, meta) in &packument.versions {
         let Ok(version) = node_semver::Version::parse(ver_str) else {
             continue;
         };
-        if !version.satisfies(&range)
-            || !passes_cutoff(ver_str, Some(&version))
-            || is_vulnerable(package_name, ver_str, vulnerable_ranges)
-        {
+        if !version.satisfies(&range) || is_vulnerable(package_name, ver_str, vulnerable_ranges) {
             continue;
         }
-        let replace = best.as_ref().is_none_or(|(cur, _)| {
+        let tier = if passes_cutoff(ver_str, Some(&version)) {
+            &mut best
+        } else if packument.time.contains_key(ver_str) {
+            // Dated and too new — excluded outright.
+            continue;
+        } else {
+            &mut best_undated
+        };
+        let replace = tier.as_ref().is_none_or(|(cur, _)| {
             if pick_lowest {
                 version < *cur
             } else {
@@ -73,8 +92,74 @@ pub(super) fn prefer_non_vulnerable_pick<'a>(
             }
         });
         if replace {
-            best = Some((version, meta));
+            *tier = Some((version, meta));
         }
     }
-    best.map(|(_, meta)| meta).unwrap_or(fallback)
+    best.or(best_undated)
+        .map(|(_, meta)| meta)
+        .unwrap_or(fallback)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::make_packument;
+
+    const CUTOFF: &str = "2020-01-01T00:00:00.000Z";
+
+    fn ranges(name: &str, range: &str) -> BTreeMap<String, Vec<String>> {
+        BTreeMap::from([(name.to_string(), vec![range.to_string()])])
+    }
+
+    /// The re-pick ranks by publish age but never vetoes down to the
+    /// vulnerable fallback: an undated non-vulnerable version is a better
+    /// outcome than a confirmed advisory hit. A DATED-but-too-new version is
+    /// still excluded outright — that is the fresh-compromise case.
+    #[test]
+    fn undated_safe_version_beats_a_vulnerable_fallback_but_a_fresh_one_does_not() {
+        let vuln = ranges("foo", "<1.1.0");
+
+        // 1.1.0 has no time entry; 1.0.0 is vulnerable. Prefer the undated
+        // safe version rather than keeping the known-vulnerable one.
+        let mut undated = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
+        undated
+            .time
+            .insert("1.0.0".to_string(), "2019-01-01T00:00:00.000Z".to_string());
+        let fallback = undated.versions.get("1.0.0").unwrap();
+        let picked = prefer_non_vulnerable_pick(
+            "foo",
+            &undated,
+            "^1.0.0",
+            fallback,
+            false,
+            Some(CUTOFF),
+            None,
+            &vuln,
+            |_, _| false,
+        );
+        assert_eq!(picked.version, "1.1.0");
+
+        // Same shape, but 1.1.0 is dated and too new: its age is KNOWN to
+        // violate the floor, so it stays excluded and the fallback stands.
+        let mut fresh = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
+        fresh
+            .time
+            .insert("1.0.0".to_string(), "2019-01-01T00:00:00.000Z".to_string());
+        fresh
+            .time
+            .insert("1.1.0".to_string(), "2026-01-01T00:00:00.000Z".to_string());
+        let fallback = fresh.versions.get("1.0.0").unwrap();
+        let picked = prefer_non_vulnerable_pick(
+            "foo",
+            &fresh,
+            "^1.0.0",
+            fallback,
+            false,
+            Some(CUTOFF),
+            None,
+            &vuln,
+            |_, _| false,
+        );
+        assert_eq!(picked.version, "1.0.0");
+    }
 }

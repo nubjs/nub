@@ -69,7 +69,7 @@ pub(super) async fn import_local_source(
             let script = aube_resolver::resolve_exec_script_path(local, project_root)
                 .map_err(|e| miette!("exec dependency {}: {e}{chain}", local.specifier()))?;
             let temp = tempfile::Builder::new()
-                .prefix("aube-exec-")
+                .prefix(&format!("{}-exec-", aube_util::prog()))
                 .tempdir()
                 .into_diagnostic()
                 .wrap_err_with(|| format!("create temp dir for {}{chain}", local.specifier()))?;

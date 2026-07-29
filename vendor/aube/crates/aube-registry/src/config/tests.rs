@@ -2505,7 +2505,17 @@ fn test_load_npmrc_entries_orders_user_before_project() {
     );
 }
 
+// Windows-quarantined: these three build their `auth.ini` fixture at
+// `pnpm_config_dir_with(Some(tmp_home), None)`, and that helper DISCARDS the
+// injected home on Windows — it returns the real `%LOCALAPPDATA%\pnpm\config`
+// (`aube_util::env::pnpm_config_dir_with`). So the fixture escapes its tempdir
+// into the actual user profile, where it both contaminates every sibling test
+// that resolves a token and would clobber a real developer's pnpm credentials.
+// The XDG short-circuit in that helper is hermetic on every platform, but these
+// tests deliberately exercise the per-OS branch, so the fix is to make that
+// branch injectable rather than to reroute the tests. Tracked in nub#605.
 #[test]
+#[cfg_attr(windows, ignore = "escapes its tempdir on Windows; nub#605")]
 fn pnpm_global_auth_ini_loads_and_overrides_user_rc() {
     // `~/.config/pnpm/auth.ini` is pnpm's out-of-band credential
     // file. Aube needs to read it so users who stash tokens there
@@ -2589,6 +2599,7 @@ fn pnpm_global_auth_ini_honors_xdg_config_home_override() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "escapes its tempdir on Windows; nub#605")]
 fn pnpm_global_auth_ini_loses_to_project_npmrc() {
     // Project `.npmrc` pins still win — per-repo configuration is
     // the most specific layer, and a user's global auth.ini
@@ -2622,6 +2633,7 @@ fn pnpm_global_auth_ini_loses_to_project_npmrc() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "escapes its tempdir on Windows; nub#605")]
 fn pnpm_global_auth_ini_not_read_when_gate_disabled() {
     // The pnpm-NAMED GLOBAL `~/.config/pnpm/auth.ini` is gated by the
     // GLOBAL-scope `read_pnpm_global_config` posture — NOT the project-scope

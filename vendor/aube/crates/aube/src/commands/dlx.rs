@@ -190,7 +190,7 @@ pub async fn run_with_child_env(
     }
 
     let tmp = tempfile::Builder::new()
-        .prefix("aube-dlx-")
+        .prefix(&format!("{}-dlx-", aube_util::prog()))
         .tempdir()
         .into_diagnostic()
         .wrap_err("failed to create dlx scratch dir")?;

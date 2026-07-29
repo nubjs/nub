@@ -544,6 +544,14 @@ pub struct WorkspaceConfig {
     #[serde(default)]
     pub minimum_release_age_strict: Option<bool>,
 
+    /// Whether the configured registry returns per-version `time:` data in
+    /// its abbreviated (corgi) packument, letting the resolver skip the
+    /// extra full-packument fetch when a publish-age cutoff is active.
+    /// pnpm reads this from `pnpm-workspace.yaml` only, so the yaml is the
+    /// source that matters for mirroring a pnpm incumbent.
+    #[serde(default)]
+    pub registry_supports_time_field: Option<bool>,
+
     /// OSV `MAL-*` advisory check policy for `aube add`. One of
     /// `"on"` (default, fail open on fetch error), `"required"` (fail
     /// closed on fetch error), or `"off"`.

@@ -99,6 +99,7 @@ verify:
 	NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-targets --all-features -- -D warnings
 	(cd crates/nub-native && NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-features -- -D warnings)
 	tests/brand-lint/check-env-reads.sh
+	tests/brand-lint/check-path-literals.sh
 	NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" test
 
 # Run the integration suite across a Node version matrix (18.19 floor → 22.15
