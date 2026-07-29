@@ -241,7 +241,9 @@ exec "$real" "$@"
     // the shell `node-gyp` shim above). It resolves the real node-gyp the
     // same way — via the hidden `__node-gyp-bootstrap` subcommand — then
     // forwards argv. Falls back to a `node-gyp` on PATH when aube's env
-    // markers are absent (e.g. a script spawned outside aube's wrappers).
+    // markers are absent (e.g. a script spawned outside aube's wrappers) —
+    // bounded by a re-entry counter, because that PATH lookup can resolve
+    // back to this shim and recurse without limit (see the fallback below).
     let js = r#"#!/usr/bin/env node
 "use strict";
 // aube lazy node-gyp stand-in for npm_config_node_gyp. Resolves (and
@@ -257,6 +259,23 @@ if (exe) {
   const dir = process.env.AUBE_NODE_GYP_PROJECT_DIR || process.cwd();
   real = execFileSync(exe, ["__node-gyp-bootstrap", dir], { encoding: "utf8" }).trim();
 } else {
+  // The PATH fallback can resolve back to THIS shim, and then it never terminates:
+  // npm's run-script prepends its own node-gyp bin dir to PATH *and* points
+  // npm_config_node_gyp here, so a bare `node-gyp` finds npm's stub, which re-execs
+  // this file, which falls back to a bare `node-gyp` again. Every hop holds a live
+  // synchronous spawnSync, so the cycle consumes memory rather than CPU and is not
+  // self-limiting (measured under nub's build jail: ~1500 processes, 15 GB, load ~1).
+  // Bound the RE-ENTRY, not any single build's nesting: a genuine nested native build
+  // is a couple of hops deep, a cycle is unbounded.
+  const depth = Number(process.env.AUBE_NODE_GYP_SHIM_DEPTH || 0) + 1;
+  if (depth > 3) {
+    console.error(
+      "aube: node-gyp shim re-entered " + depth + " times without reaching a real " +
+      "node-gyp — `node-gyp` on PATH resolves back to this shim. Refusing to recurse."
+    );
+    process.exit(1);
+  }
+  process.env.AUBE_NODE_GYP_SHIM_DEPTH = String(depth);
   real = isWin ? "node-gyp.cmd" : "node-gyp";
 }
 const result = spawnSync(real, process.argv.slice(2), { stdio: "inherit", shell: isWin });
@@ -521,5 +540,114 @@ mod tests {
         // Guards the fast path: a false negative here would re-run the
         // recursive install on every native dependency.
         assert!(tool_tree_usable(&tool_dir, &bin_dir));
+    }
+
+    /// Stage the real generated `node-gyp.js` plus a `node-gyp` on PATH that
+    /// tallies each invocation, and return `(shim, bin_dir, tally)`. `body` is
+    /// the tallying shim's payload after it records itself.
+    #[cfg(unix)]
+    fn staged_path_node_gyp(tmp: &std::path::Path, body: &str) -> (PathBuf, PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let shim_dir = tmp.join("lazy-bin");
+        std::fs::create_dir_all(&shim_dir).expect("shim dir");
+        write_lazy_shims(&shim_dir).expect("write shims");
+        let bin_dir = tmp.join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let tally = tmp.join("tally");
+        let path_gyp = bin_dir.join("node-gyp");
+        // The stub enforces its OWN ceiling before running `body`. Without it, a
+        // regression that removes the shim's guard would make this test fork-bomb
+        // the CI runner instead of failing; with it, the cycle stops at 25 hops and
+        // the assertions below report a clean failure.
+        std::fs::write(
+            &path_gyp,
+            format!(
+                "#!/bin/sh\necho x >> '{t}'\n\
+                 if [ \"$(wc -l < '{t}')\" -ge 25 ]; then\n\
+                 \x20 echo 'stub: re-entry ceiling hit — the shim did not stop' >&2; exit 90\n\
+                 fi\n{body}\n",
+                t = tally.display()
+            ),
+        )
+        .expect("write path node-gyp");
+        std::fs::set_permissions(&path_gyp, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        (shim_dir.join("node-gyp.js"), bin_dir, tally)
+    }
+
+    #[cfg(unix)]
+    fn run_shim(shim: &std::path::Path, bin_dir: &std::path::Path) -> std::process::Output {
+        std::process::Command::new("node")
+            .arg(shim)
+            .arg("rebuild")
+            // No AUBE_NODE_GYP_EXE: this is the bare-PATH fallback branch.
+            .env_remove("AUBE_NODE_GYP_EXE")
+            .env_remove("AUBE_NODE_GYP_SHIM_DEPTH")
+            // `bin_dir` FIRST so a bare `node-gyp` hits the staged stub, but the
+            // ambient PATH must stay reachable or the stub cannot find `node`.
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin_dir.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .output()
+            .expect("node must be on PATH to exercise the generated shim")
+    }
+
+    /// THE REGRESSION. npm's run-script puts its own `node-gyp` stub first on
+    /// PATH and points `npm_config_node_gyp` at this shim, so the shim's bare
+    /// fallback resolves back to itself. Unguarded that never terminates —
+    /// measured under nub's build jail at ~1500 processes and 15 GB, with load
+    /// near idle because every hop is a blocking `spawnSync`. The tally is what
+    /// makes this non-hollow: it counts real re-entries, so reverting the guard
+    /// makes the run diverge instead of quietly passing.
+    #[cfg(unix)]
+    #[test]
+    fn the_path_fallback_refuses_to_resolve_back_into_itself() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (shim, bin_dir, tally) = staged_path_node_gyp(tmp.path(), "exec node \"$0.js\" \"$@\"");
+        // `$0.js` is the tallying stub re-execing the shim beside it, which is
+        // exactly npm's stub bouncing back through `npm_config_node_gyp`.
+        let link = bin_dir.join("node-gyp.js");
+        std::fs::copy(&shim, &link).expect("stage the shim next to the stub");
+
+        let out = run_shim(&shim, &bin_dir);
+        assert!(!out.status.success(), "a self-resolving fallback must fail");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("Refusing to recurse"),
+            "must name the cycle it refused; got: {stderr}"
+        );
+        let hops = std::fs::read_to_string(&tally)
+            .map(|t| t.lines().count())
+            .unwrap_or(0);
+        assert!(
+            hops <= 4,
+            "re-entry must be bounded; the stub ran {hops} times"
+        );
+    }
+
+    /// The CONTROL that keeps the guard honest: when the `node-gyp` on PATH is
+    /// a real one, the fallback must still forward to it and succeed, exactly
+    /// once. A guard that broke this would break every legitimate native build
+    /// that reaches node-gyp through the PATH fallback.
+    #[cfg(unix)]
+    #[test]
+    fn the_path_fallback_still_forwards_to_a_real_node_gyp() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (shim, bin_dir, tally) = staged_path_node_gyp(tmp.path(), "exit 0");
+
+        let out = run_shim(&shim, &bin_dir);
+        assert!(
+            out.status.success(),
+            "the fallback must still reach a real node-gyp; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let hops = std::fs::read_to_string(&tally)
+            .map(|t| t.lines().count())
+            .unwrap_or(0);
+        assert_eq!(hops, 1, "the real node-gyp must run exactly once");
     }
 }
