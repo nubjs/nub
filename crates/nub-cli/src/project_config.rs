@@ -17,8 +17,6 @@
 //! by the schema, so an editor still completes and validates both files.
 //!
 //! Project files are discovered from the invocation's final working directory.
-//! Sandbox values are parsed and retained for forward compatibility, but no
-//! runtime, install, or dlx consumer applies them yet.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -45,7 +43,6 @@ const ROOT_KEYS: &[&str] = &[
     "conditions",
     "tsconfig",
     "verifyDeps",
-    "sandbox",
     "install",
     "dlx",
 ];
@@ -54,10 +51,8 @@ const INSTALL_KEYS: &[&str] = &[
     "publicHoist",
     "minimumReleaseAge",
     "minimumReleaseAgeExclude",
-    "sandbox",
 ];
-const DLX_KEYS: &[&str] = &["consent", "sandbox", "envFile"];
-const SANDBOX_AXIS_KEYS: &[&str] = &["fs", "net", "env"];
+const DLX_KEYS: &[&str] = &["consent", "envFile"];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Error type — fail-loud, with a JSON path so a bad file self-describes.
@@ -172,9 +167,7 @@ impl std::error::Error for ConfigError {}
 type Result<T> = std::result::Result<T, ConfigError>;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// The typed config shape. Runtime, install, and dlx values are consumed by their
-// command paths. Sandbox values are shape-validated and retained, but remain
-// inert until the sandbox frontend is enabled.
+// The typed config shape. Every field is consumed by its command path.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The parsed, validated `nub.jsonc`. Absent fields are `None`; explicitly empty
@@ -192,9 +185,6 @@ pub struct ProjectConfig {
     pub conditions: Option<Vec<String>>,
     pub tsconfig: Option<String>,
     pub verify_deps: Option<VerifyDeps>,
-
-    // ── the default sandbox (parsed and retained, not consumed) ──
-    pub sandbox: Option<SandboxSetting>,
 
     // ── install phase ──
     pub install: InstallConfig,
@@ -253,16 +243,14 @@ pub enum VerifyDeps {
     Prompt,
 }
 
-/// The `install` block. The native PM consumes the non-sandbox fields through
-/// its aube settings bridge; `sandbox` remains inert until the sandbox execution
-/// slice lands.
+/// The `install` block, consumed by the native PM through its aube settings
+/// bridge.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct InstallConfig {
     pub linker: Option<LinkerConfig>,
     pub public_hoist: Option<PublicHoist>,
     pub minimum_release_age: Option<Duration>,
     pub minimum_release_age_exclude: Option<Vec<String>>,
-    pub sandbox: Option<SandboxSetting>,
 }
 
 /// The layout, discriminated on `strategy`, carrying only the knob that layout
@@ -313,7 +301,6 @@ pub enum PublicHoist {
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct DlxConfig {
     pub consent: Option<ImplicitDlx>,
-    pub sandbox: Option<SandboxSetting>,
     pub env_file: Option<EnvFileSetting>,
 }
 
@@ -373,14 +360,11 @@ pub enum ConfigKey {
     Conditions,
     Tsconfig,
     VerifyDeps,
-    Sandbox,
     InstallLinker,
     InstallPublicHoist,
     InstallMinimumReleaseAge,
     InstallMinimumReleaseAgeExclude,
-    InstallSandbox,
     DlxConsent,
-    DlxSandbox,
     DlxEnvFile,
 }
 
@@ -441,48 +425,6 @@ impl Default for RuntimeConfig {
             tsconfig: None,
         }
     }
-}
-
-// ── sandbox skeleton ─────────────────────────────────────────────────────────
-
-/// The `sandbox` wrapper trichotomy (skeleton). Shape-validated here; the Phase-1
-/// compiler owns resolution (presets → policy, spread, layering, env grammar).
-/// Preset vs file-ref disambiguation: a path-like string (leading `./`/`../`/`/`/
-/// `~`, or carrying an extension) is a file-ref; a bare identifier is a preset.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SandboxSetting {
-    /// `false` — fully unjail.
-    Disabled,
-    /// `true` — secure defaults / inherit.
-    Enabled,
-    /// A bare-identifier preset name (e.g. `"build-jail"`).
-    Preset(String),
-    /// A `"./file.json"` external sandbox config reference.
-    FileRef(String),
-    /// The granular `{ fs, net, env }` object form.
-    Granular(SandboxAxes),
-}
-
-/// The three sandbox axes. Each is independently optional; the Phase-1 compiler
-/// assigns the decided floor/inheritance semantics.
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct SandboxAxes {
-    pub fs: Option<SandboxAxis>,
-    pub net: Option<SandboxAxis>,
-    pub env: Option<SandboxAxis>,
-}
-
-/// One axis value. Both surface forms are accepted (spec: every axis takes
-/// `false | true | array | pattern-keyed object`). Entry semantics (polarity,
-/// per-axis value ladder, env grammar) are the Phase-1 compiler's job — the
-/// object form keeps its raw values so nothing is lost before then.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SandboxAxis {
-    Bool(bool),
-    /// Array form: ordered glob entries (validated all-strings).
-    Array(Vec<String>),
-    /// Pattern-keyed object form: `{ "<pattern>": <value> }`, values kept raw.
-    Object(BTreeMap<String, Value>),
 }
 
 /// Walk up from `start` (inclusive) to the filesystem root, returning the first
@@ -963,7 +905,6 @@ fn merge_layer(
         verify_deps,
         ConfigKey::VerifyDeps
     );
-    merge_field!(values, sources, layer, source, sandbox, ConfigKey::Sandbox);
 
     merge_field!(
         values.install,
@@ -998,28 +939,12 @@ fn merge_layer(
         ConfigKey::InstallMinimumReleaseAgeExclude
     );
     merge_field!(
-        values.install,
-        sources,
-        layer.install,
-        source,
-        sandbox,
-        ConfigKey::InstallSandbox
-    );
-    merge_field!(
         values.dlx,
         sources,
         layer.dlx,
         source,
         consent,
         ConfigKey::DlxConsent
-    );
-    merge_field!(
-        values.dlx,
-        sources,
-        layer.dlx,
-        source,
-        sandbox,
-        ConfigKey::DlxSandbox
     );
     merge_field!(
         values.dlx,
@@ -1200,9 +1125,6 @@ fn validate_root(
     }
     if let Some(v) = obj.get("verifyDeps") {
         cfg.verify_deps = Some(validate_verify_deps(v, "verifyDeps")?);
-    }
-    if let Some(v) = obj.get("sandbox") {
-        cfg.sandbox = Some(validate_sandbox(v, "sandbox")?);
     }
     if let Some(v) = obj.get("install") {
         cfg.install = validate_install(v, "install")?;
@@ -1398,9 +1320,6 @@ fn validate_install(v: &Value, path: &str) -> Result<InstallConfig> {
             &child(path, "minimumReleaseAgeExclude"),
         )?);
     }
-    if let Some(v) = obj.get("sandbox") {
-        install.sandbox = Some(validate_sandbox(v, &child(path, "sandbox"))?);
-    }
     Ok(install)
 }
 
@@ -1417,78 +1336,10 @@ fn validate_dlx(v: &Value, path: &str) -> Result<DlxConfig> {
             message: format!("unknown value `{s}` (expected \"prompt\" or \"never\")"),
         })?);
     }
-    if let Some(v) = obj.get("sandbox") {
-        dlx.sandbox = Some(validate_sandbox(v, &child(path, "sandbox"))?);
-    }
     if let Some(v) = obj.get("envFile") {
         dlx.env_file = Some(validate_env_file_setting(v, &child(path, "envFile"))?);
     }
     Ok(dlx)
-}
-
-/// The `sandbox` trichotomy skeleton. Shape only — the Phase-1 compiler resolves
-/// presets/spread/grammar; here we just classify the wrapper and validate axis
-/// forms so the schema is right.
-fn validate_sandbox(v: &Value, path: &str) -> Result<SandboxSetting> {
-    match v {
-        Value::Bool(true) => Ok(SandboxSetting::Enabled),
-        Value::Bool(false) => Ok(SandboxSetting::Disabled),
-        Value::String(s) => Ok(classify_sandbox_string(s)),
-        Value::Object(_) => Ok(SandboxSetting::Granular(validate_sandbox_axes(v, path)?)),
-        _ => Err(ConfigError::Type {
-            path: path.into(),
-            expected: "a boolean, string (preset or \"./file.json\"), or object",
-        }),
-    }
-}
-
-/// Preset (bare identifier) vs file-ref (path-like) — the disambiguation rule
-/// from the config spec. Unknown-preset validation is the compiler's job (it owns
-/// the closed preset vocabulary), so the skeleton only classifies the string.
-fn classify_sandbox_string(s: &str) -> SandboxSetting {
-    let path_like = s.starts_with("./")
-        || s.starts_with("../")
-        || s.starts_with('/')
-        || s.starts_with('~')
-        || Path::new(s).extension().is_some();
-    if path_like {
-        SandboxSetting::FileRef(s.to_string())
-    } else {
-        SandboxSetting::Preset(s.to_string())
-    }
-}
-
-fn validate_sandbox_axes(v: &Value, path: &str) -> Result<SandboxAxes> {
-    let obj = as_object(v, path)?;
-    reject_unknown_keys(obj, path, SANDBOX_AXIS_KEYS)?;
-
-    let mut axes = SandboxAxes::default();
-    if let Some(v) = obj.get("fs") {
-        axes.fs = Some(validate_sandbox_axis(v, &child(path, "fs"))?);
-    }
-    if let Some(v) = obj.get("net") {
-        axes.net = Some(validate_sandbox_axis(v, &child(path, "net"))?);
-    }
-    if let Some(v) = obj.get("env") {
-        axes.env = Some(validate_sandbox_axis(v, &child(path, "env"))?);
-    }
-    Ok(axes)
-}
-
-fn validate_sandbox_axis(v: &Value, path: &str) -> Result<SandboxAxis> {
-    match v {
-        Value::Bool(b) => Ok(SandboxAxis::Bool(*b)),
-        Value::Array(_) => Ok(SandboxAxis::Array(as_string_array(v, path)?)),
-        Value::Object(obj) => Ok(SandboxAxis::Object(
-            obj.iter()
-                .map(|(k, val)| (k.clone(), val.clone()))
-                .collect(),
-        )),
-        _ => Err(ConfigError::Type {
-            path: path.into(),
-            expected: "a boolean, array, or object",
-        }),
-    }
 }
 
 /// Parse the strict `minimumReleaseAge` duration grammar: `<integer><unit>`,
@@ -1528,9 +1379,8 @@ fn parse_duration(s: &str, path: &str) -> Result<Duration> {
         .ok_or_else(|| invalid("overflows"))
 }
 
-// P5/P6 test packages (separate files; children of this module so they reach
-// the private resolver). `sandbox_shapes` also exports the shared five-shape
-// table pm_engine's install-lowering test reuses.
+// P5 test packages (separate files; children of this module so they reach the
+// private resolver).
 #[cfg(test)]
 #[path = "project_config_schema_matrix.rs"]
 mod schema_matrix;
@@ -1538,10 +1388,6 @@ mod schema_matrix;
 #[cfg(test)]
 #[path = "project_config_precedence_matrix.rs"]
 mod precedence_matrix;
-
-#[cfg(test)]
-#[path = "project_config_sandbox_shapes.rs"]
-pub(crate) mod sandbox_shapes;
 
 #[cfg(test)]
 mod tests {
@@ -1943,14 +1789,12 @@ mod tests {
             r#"{
               "dlx": {
                 "consent": "never",
-                "sandbox": { "net": ["registry.npmjs.org"] },
                 "envFile": false
               }
             }"#,
         );
         assert_eq!(cfg.dlx.consent, Some(ImplicitDlx::Never));
         assert_eq!(cfg.dlx.env_file, Some(EnvFileSetting::Disabled));
-        assert!(matches!(cfg.dlx.sandbox, Some(SandboxSetting::Granular(_))));
     }
 
     #[test]
@@ -2004,124 +1848,6 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_trichotomy_classifies_every_form() {
-        assert_eq!(
-            parse(r#"{ "sandbox": false }"#).sandbox,
-            Some(SandboxSetting::Disabled)
-        );
-        assert_eq!(
-            parse(r#"{ "sandbox": true }"#).sandbox,
-            Some(SandboxSetting::Enabled)
-        );
-        assert_eq!(
-            parse(r#"{ "sandbox": "build-jail" }"#).sandbox,
-            Some(SandboxSetting::Preset("build-jail".into()))
-        );
-        assert_eq!(
-            parse(r#"{ "sandbox": "./policy.json" }"#).sandbox,
-            Some(SandboxSetting::FileRef("./policy.json".into()))
-        );
-        assert!(matches!(
-            parse(r#"{ "sandbox": { "fs": {} } }"#).sandbox,
-            Some(SandboxSetting::Granular(_))
-        ));
-    }
-
-    #[test]
-    fn sandbox_five_shapes_are_lossless_and_inert_in_the_snapshot() {
-        let granular = serde_json::json!({
-            "fs": { "./data": { "read": true, "write": false } },
-            "net": [],
-            "env": false
-        });
-        let cases = vec![
-            ("false".to_string(), SandboxSetting::Disabled),
-            ("true".to_string(), SandboxSetting::Enabled),
-            (
-                r#""build-jail""#.to_string(),
-                SandboxSetting::Preset("build-jail".into()),
-            ),
-            (
-                r#""./team.json""#.to_string(),
-                SandboxSetting::FileRef("./team.json".into()),
-            ),
-            (
-                granular.to_string(),
-                SandboxSetting::Granular(SandboxAxes {
-                    fs: Some(SandboxAxis::Object(BTreeMap::from([(
-                        "./data".into(),
-                        serde_json::json!({ "read": true, "write": false }),
-                    )]))),
-                    net: Some(SandboxAxis::Array(Vec::new())),
-                    env: Some(SandboxAxis::Bool(false)),
-                }),
-            ),
-        ];
-
-        for (raw, expected) in cases {
-            let parsed = parse(&format!(r#"{{ "sandbox": {raw} }}"#));
-            assert_eq!(parsed.sandbox, Some(expected.clone()));
-            let snapshot = resolve_effective_config(
-                Path::new("/effective"),
-                None,
-                Some(LoadedConfig {
-                    source: ConfigSource::file(
-                        ConfigSourceKind::Project,
-                        Path::new("/project/nub.jsonc"),
-                    ),
-                    values: parsed,
-                }),
-                ConfigOverlays::default(),
-            );
-            assert_eq!(snapshot.values.sandbox, Some(expected));
-        }
-    }
-
-    #[test]
-    fn sandbox_axes_accept_array_and_object_forms() {
-        let cfg = parse(
-            r#"{
-              "sandbox": {
-                "env": ["NODE_ENV", "VITE_*", "!*_TOKEN"],
-                "fs": { "./data": "rw", "~/.ssh": false },
-                "net": { "*.sentry.io": true, "*": false }
-              }
-            }"#,
-        );
-        let Some(SandboxSetting::Granular(axes)) = cfg.sandbox else {
-            panic!("expected granular sandbox");
-        };
-        assert_eq!(
-            axes.env,
-            Some(SandboxAxis::Array(vec![
-                "NODE_ENV".into(),
-                "VITE_*".into(),
-                "!*_TOKEN".into()
-            ]))
-        );
-        assert!(matches!(axes.fs, Some(SandboxAxis::Object(_))));
-        assert!(matches!(axes.net, Some(SandboxAxis::Object(_))));
-    }
-
-    #[test]
-    fn sandbox_axis_array_rejects_non_strings() {
-        let err = parse_project_config(r#"{ "sandbox": { "env": ["OK", 5] } }"#).unwrap_err();
-        assert!(matches!(err, ConfigError::Type { .. }));
-    }
-
-    #[test]
-    fn unknown_sandbox_axis_fails_loud() {
-        let err = parse_project_config(r#"{ "sandbox": { "disk": true } }"#).unwrap_err();
-        match err {
-            ConfigError::UnknownKey { path, key } => {
-                assert_eq!(path, "sandbox");
-                assert_eq!(key, "disk");
-            }
-            other => panic!("expected UnknownKey, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn hostile_input_never_panics() {
         // A malicious/broken project file must degrade to Ok/Err, never panic or
         // stack-overflow. Deep nesting, huge arrays, duplicate keys, embedded NUL.
@@ -2140,7 +1866,7 @@ mod tests {
     }
 
     #[test]
-    fn published_schema_exposes_every_active_parser_key() {
+    fn published_schema_exposes_every_parser_key() {
         fn keys(value: &Value, pointer: &str) -> std::collections::BTreeSet<String> {
             value
                 .pointer(pointer)
@@ -2154,32 +1880,25 @@ mod tests {
         // global-only sections included. Scope is the parser's job and it fails
         // loud with a message naming the file to move the block to; the schema's
         // job is completion and value validation, and splitting it per file
-        // would leave the global file with none at all.
-        //
-        // `sandbox` is the one omission, for the opposite reason: it parses but
-        // nothing consumes it, so offering it would invite a security policy
-        // that silently does nothing.
-        fn active(values: &[&str]) -> std::collections::BTreeSet<String> {
-            values
-                .iter()
-                .filter(|value| **value != "sandbox")
-                .map(|value| (*value).to_string())
-                .collect()
+        // would leave the global file with none at all. The two key sets are
+        // therefore compared with no exemptions: a key the parser accepts and
+        // the schema does not is an editor reporting a valid file as invalid.
+        fn expected(values: &[&str]) -> std::collections::BTreeSet<String> {
+            values.iter().map(|value| (*value).to_string()).collect()
         }
 
         let schema: Value =
             serde_json::from_str(include_str!("../../../site/public/schema/latest.json"))
                 .expect("the published nub.json schema must be valid JSON");
-        assert_eq!(keys(&schema, "/properties"), active(ROOT_KEYS));
+        assert_eq!(keys(&schema, "/properties"), expected(ROOT_KEYS));
         assert_eq!(
             keys(&schema, "/properties/install/properties"),
-            active(INSTALL_KEYS)
+            expected(INSTALL_KEYS)
         );
         assert_eq!(
             keys(&schema, "/properties/dlx/properties"),
-            active(DLX_KEYS)
+            expected(DLX_KEYS)
         );
-        assert!(schema.pointer("/$defs/sandboxSetting").is_none());
         assert_eq!(
             schema.get("$id").and_then(Value::as_str),
             Some("https://nubjs.com/schema/latest.json")
@@ -2303,7 +2022,7 @@ mod tests {
     }
 
     #[test]
-    fn dlx_env_file_disabled_empty_and_sandbox_only_are_inert() {
+    fn dlx_env_file_disabled_and_empty_source_lists_are_inert() {
         for (env_file, expected) in [
             (Some(EnvFileSetting::Disabled), Some(BTreeMap::new())),
             (
@@ -2322,7 +2041,6 @@ mod tests {
                     values: ProjectConfig {
                         dlx: DlxConfig {
                             env_file,
-                            sandbox: Some(SandboxSetting::Enabled),
                             ..DlxConfig::default()
                         },
                         ..ProjectConfig::default()
@@ -2535,7 +2253,6 @@ mod tests {
                 "conditions",
                 "tsconfig",
                 "verifyDeps",
-                "sandbox",
                 "install",
                 "dlx",
             ]
@@ -2558,13 +2275,11 @@ mod tests {
           "conditions": [],
           "tsconfig": "./tsconfig.json",
           "verifyDeps": false,
-          "sandbox": false,
           "install": {
             "linker": { "strategy": "isolated", "hoist": false },
             "publicHoist": false,
             "minimumReleaseAge": "1d",
-            "minimumReleaseAgeExclude": [],
-            "sandbox": false
+            "minimumReleaseAgeExclude": []
           }
         }"#;
         let dir = tempfile::tempdir().unwrap();
@@ -2580,14 +2295,13 @@ mod tests {
 
         let with_dlx = r#"{
           "nodeCompat": false,
-          "dlx": { "consent": "prompt", "sandbox": false, "envFile": false }
+          "dlx": { "consent": "prompt", "envFile": false }
         }"#;
         std::fs::write(&project_path, with_dlx).unwrap();
         std::fs::write(&global_path, with_dlx).unwrap();
         let global = read_global_config_at(&global_path).unwrap();
         assert_eq!(global.values.dlx.consent, Some(ImplicitDlx::Prompt));
         assert_eq!(global.values.dlx.env_file, Some(EnvFileSetting::Disabled));
-        assert_eq!(global.values.dlx.sandbox, Some(SandboxSetting::Disabled));
         let err = read_project_config_at(&project_path).unwrap_err();
         assert!(matches!(err.kind(), ConfigError::GlobalOnlyKey { .. }));
     }

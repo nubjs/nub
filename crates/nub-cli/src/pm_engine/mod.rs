@@ -3247,34 +3247,14 @@ mod tests {
 
     #[test]
     fn pnp_linker_is_reserved_and_aborts_the_install() {
-        // `tests/project_config_sandbox_inert.rs` uses this abort as its
-        // liveness probe that project config reaches the install at all — the
-        // code, not just the failure, is load-bearing.
+        // `pnp` parses but has no write path, so the reservation is enforced
+        // here, at lowering. The CODE is asserted, not just the failure: it is
+        // what tells an author their `linker` was understood and refused rather
+        // than mis-parsed into something else.
         let err = lower_native_install_settings(&with_linker(LinkerConfig::Pnp), &[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("ERR_NUB_CONFIG_UNSUPPORTED"), "{err}");
-    }
-
-    #[test]
-    fn install_sandbox_remains_inert() {
-        // Every policy shape (not just `false`) must lower identically to the
-        // no-sandbox baseline until the sandbox execution slice lands.
-        let baseline = lower_native_install_settings(&InstallConfig::default(), &[]).unwrap();
-        for (raw, shape) in crate::project_config::sandbox_shapes::five_shapes() {
-            let configured = lower_native_install_settings(
-                &InstallConfig {
-                    sandbox: Some(shape),
-                    ..InstallConfig::default()
-                },
-                &[],
-            )
-            .unwrap();
-            assert_eq!(
-                configured, baseline,
-                "install lowering must not react to sandbox shape {raw}"
-            );
-        }
     }
 
     #[test]

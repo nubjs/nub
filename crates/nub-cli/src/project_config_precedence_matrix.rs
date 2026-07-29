@@ -70,10 +70,6 @@ fn consent(tag: usize) -> ImplicitDlx {
     }
 }
 
-fn preset(tag: usize) -> SandboxSetting {
-    SandboxSetting::Preset(format!("preset-{tag}"))
-}
-
 fn specs() -> Vec<KeySpec> {
     vec![
         KeySpec {
@@ -151,15 +147,6 @@ fn specs() -> Vec<KeySpec> {
             is_empty: Some(|c| c.verify_deps == Some(VerifyDeps::Enabled(false))),
         },
         KeySpec {
-            key: ConfigKey::Sandbox,
-            name: "sandbox",
-            set: |c, t| c.sandbox = Some(preset(t)),
-            matches: |c, t| c.sandbox == Some(preset(t)),
-            // `sandbox: false` — the explicit unjail — must beat a lower preset.
-            set_empty: Some(|c| c.sandbox = Some(SandboxSetting::Disabled)),
-            is_empty: Some(|c| c.sandbox == Some(SandboxSetting::Disabled)),
-        },
-        KeySpec {
             key: ConfigKey::InstallLinker,
             name: "install.linker",
             set: |c, t| c.install.linker = Some(linker(t)),
@@ -209,14 +196,6 @@ fn specs() -> Vec<KeySpec> {
             is_empty: Some(|c| c.install.minimum_release_age_exclude == Some(Vec::new())),
         },
         KeySpec {
-            key: ConfigKey::InstallSandbox,
-            name: "install.sandbox",
-            set: |c, t| c.install.sandbox = Some(preset(t)),
-            matches: |c, t| c.install.sandbox == Some(preset(t)),
-            set_empty: Some(|c| c.install.sandbox = Some(SandboxSetting::Disabled)),
-            is_empty: Some(|c| c.install.sandbox == Some(SandboxSetting::Disabled)),
-        },
-        KeySpec {
             key: ConfigKey::DlxConsent,
             name: "dlx.consent",
             set: |c, t| c.dlx.consent = Some(consent(t)),
@@ -224,14 +203,6 @@ fn specs() -> Vec<KeySpec> {
             // The restrictive arm must beat a lower `prompt`.
             set_empty: Some(|c| c.dlx.consent = Some(ImplicitDlx::Never)),
             is_empty: Some(|c| c.dlx.consent == Some(ImplicitDlx::Never)),
-        },
-        KeySpec {
-            key: ConfigKey::DlxSandbox,
-            name: "dlx.sandbox",
-            set: |c, t| c.dlx.sandbox = Some(preset(t)),
-            matches: |c, t| c.dlx.sandbox == Some(preset(t)),
-            set_empty: Some(|c| c.dlx.sandbox = Some(SandboxSetting::Disabled)),
-            is_empty: Some(|c| c.dlx.sandbox == Some(SandboxSetting::Disabled)),
         },
         KeySpec {
             key: ConfigKey::DlxEnvFile,
@@ -259,15 +230,12 @@ fn ordinal(key: ConfigKey) -> usize {
         ConfigKey::Conditions => 6,
         ConfigKey::Tsconfig => 7,
         ConfigKey::VerifyDeps => 8,
-        ConfigKey::Sandbox => 9,
-        ConfigKey::InstallLinker => 10,
-        ConfigKey::InstallPublicHoist => 11,
-        ConfigKey::InstallMinimumReleaseAge => 12,
-        ConfigKey::InstallMinimumReleaseAgeExclude => 13,
-        ConfigKey::InstallSandbox => 14,
-        ConfigKey::DlxConsent => 15,
-        ConfigKey::DlxSandbox => 16,
-        ConfigKey::DlxEnvFile => 17,
+        ConfigKey::InstallLinker => 9,
+        ConfigKey::InstallPublicHoist => 10,
+        ConfigKey::InstallMinimumReleaseAge => 11,
+        ConfigKey::InstallMinimumReleaseAgeExclude => 12,
+        ConfigKey::DlxConsent => 13,
+        ConfigKey::DlxEnvFile => 14,
     }
 }
 
@@ -305,8 +273,8 @@ fn resolve(layers: [Option<ProjectConfig>; 5]) -> EffectiveConfig {
 #[test]
 fn spec_table_covers_every_config_key_exactly_once() {
     let specs = specs();
-    assert_eq!(specs.len(), 18, "one spec per ConfigKey variant");
-    let mut seen = [false; 18];
+    assert_eq!(specs.len(), 15, "one spec per ConfigKey variant");
+    let mut seen = [false; 15];
     for spec in &specs {
         let idx = ordinal(spec.key);
         assert!(!seen[idx], "duplicate spec for {}", spec.name);

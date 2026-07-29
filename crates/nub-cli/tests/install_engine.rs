@@ -94,11 +94,7 @@ fn install_dir_initializes_one_project_snapshot_from_final_cwd() {
         r#"{"name":"target","version":"1.0.0"}"#,
     )
     .unwrap();
-    std::fs::write(
-        target.join("nub.jsonc"),
-        r#"{ "sandbox": { "fs": false, "net": false, "env": false } }"#,
-    )
-    .unwrap();
+    std::fs::write(target.join("nub.jsonc"), r#"{ "conditions": [] }"#).unwrap();
 
     for (idx, args) in [
         vec!["install", "--dir", "target", "--lockfile-only", "--offline"],

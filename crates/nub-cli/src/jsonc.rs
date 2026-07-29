@@ -21,8 +21,8 @@ use std::path::Path;
 use jsonc_parser::ParseOptions;
 use serde_json::Value;
 
-/// Deepest `{`/`[` nesting accepted. Nub's own schema bottoms out around four
-/// levels (`install.sandbox.fs.read[]`), so this leaves an order of magnitude of
+/// Deepest `{`/`[` nesting accepted. Nub's own schema bottoms out around three
+/// levels (`install.linker.hoist[]`), so this leaves an order of magnitude of
 /// headroom for hand-authored files while staying far below the ~380 levels a
 /// debug build survives on a 1 MiB Windows stack.
 pub(crate) const MAX_NESTING_DEPTH: usize = 64;

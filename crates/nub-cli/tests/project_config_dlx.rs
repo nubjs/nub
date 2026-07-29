@@ -111,7 +111,7 @@ fn a_project_dlx_block_aborts_the_command_and_names_the_global_file() {
 
 #[cfg(unix)]
 #[test]
-fn dlx_env_controls_nubx_without_enabling_dlx_sandbox() {
+fn dlx_env_file_controls_the_environment_nubx_hands_a_tool() {
     use std::os::unix::fs::PermissionsExt;
 
     let temp = tempfile::tempdir().unwrap();
@@ -138,10 +138,7 @@ fn dlx_env_controls_nubx_without_enabling_dlx_sandbox() {
     let absent = run_nubx(&alias, &cwd, &config_home, &["show-dlx-env"]);
     assert_eq!(String::from_utf8_lossy(&absent.stdout).trim(), "missing");
 
-    let global_root = write_global(
-        &config_home,
-        r#"{ "dlx": { "envFile": false, "sandbox": { "net": false } } }"#,
-    );
+    let global_root = write_global(&config_home, r#"{ "dlx": { "envFile": false } }"#);
     let disabled = run_nubx(&alias, &cwd, &config_home, &["show-dlx-env"]);
     assert_eq!(String::from_utf8_lossy(&disabled.stdout).trim(), "missing");
 
@@ -152,12 +149,8 @@ fn dlx_env_controls_nubx_without_enabling_dlx_sandbox() {
     let global_env = global_root.join("env");
     std::fs::create_dir_all(&global_env).unwrap();
     std::fs::write(global_env.join("dlx.env"), "DLX_CONFIG_VALUE=source-root\n").unwrap();
-    // A fully-restrictive dlx sandbox must not affect env sourcing (P6 inertness).
     // The relative source proves the anchor is the config file, not the cwd.
-    let _ = write_global(
-        &config_home,
-        r#"{ "dlx": { "envFile": "./env/dlx.env", "sandbox": { "fs": false, "net": false, "env": false } } }"#,
-    );
+    let _ = write_global(&config_home, r#"{ "dlx": { "envFile": "./env/dlx.env" } }"#);
     let sourced = run_nubx(&alias, &cwd, &config_home, &["show-dlx-env"]);
     assert_eq!(
         String::from_utf8_lossy(&sourced.stdout).trim(),
@@ -209,13 +202,7 @@ fn nubx_node_suppresses_config_env_for_local_and_forced_fetch() {
     permissions.set_mode(0o755);
     std::fs::set_permissions(&package_bin, permissions).unwrap();
 
-    let global_root = write_global(
-        &config_home,
-        r#"{ "dlx": {
-          "envFile": "./env/dlx.env",
-          "sandbox": { "fs": false, "net": false, "env": false }
-        } }"#,
-    );
+    let global_root = write_global(&config_home, r#"{ "dlx": { "envFile": "./env/dlx.env" } }"#);
     std::fs::create_dir_all(global_root.join("env")).unwrap();
     std::fs::write(
         global_root.join("env/dlx.env"),
@@ -290,10 +277,7 @@ fn nub_dlx_and_x_apply_the_same_configured_environment_to_local_bins() {
     permissions.set_mode(0o755);
     std::fs::set_permissions(&bin, permissions).unwrap();
 
-    let global_root = write_global(
-        &config_home,
-        r#"{ "dlx": { "envFile": "./env/dlx.env", "sandbox": true } }"#,
-    );
+    let global_root = write_global(&config_home, r#"{ "dlx": { "envFile": "./env/dlx.env" } }"#);
     std::fs::create_dir_all(global_root.join("env")).unwrap();
     std::fs::write(
         global_root.join("env/dlx.env"),

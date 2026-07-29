@@ -1,9 +1,9 @@
 //! P5 — golden matrix over the `nub.jsonc` schema/validator. Complements the
 //! per-field tests in the sibling `tests` module (unknown root/install keys,
 //! type errors, duration grammar, loader vocabulary): this matrix owns the
-//! `$schema` typing rule, unknown-key rejection at every REMAINING object level
-//! (`dlx`, `install.sandbox` axes, `dlx.sandbox` axes), wrapper-type errors at
-//! the nested positions, and one full-surface golden shape.
+//! `$schema` typing rule, unknown-key rejection in `dlx` (the one object level
+//! the sibling module does not reach), wrapper-type errors reported against
+//! their nested paths, and one full-surface golden shape.
 //!
 //! `dlx` is global-only, so every case that reaches into it goes through
 //! [`parse_global_config`]; the project parser refuses the section outright.
@@ -17,38 +17,34 @@ const PROJECT: Parse = parse_project_config;
 const GLOBAL: Parse = parse_global_config;
 
 #[test]
-fn golden_full_surface_config_parses_with_all_three_sandbox_positions() {
+fn golden_full_surface_config_parses() {
     let cfg = parse_global_config(
         r#"{
           "$schema": "https://nubjs.com/schema/latest.json",
           "nodeCompat": false,
-          "sandbox": { "fs": false, "net": ["registry.npmjs.org"], "env": true },
           "install": {
             "linker": { "strategy": "isolated", "hoist": false },
-            "sandbox": "./install-policy.json"
+            "minimumReleaseAge": "3d"
           },
           "dlx": {
             "consent": "never",
-            "sandbox": "publish-jail",
             "envFile": false
           }
         }"#,
     )
     .expect("the full-surface golden shape is valid");
     assert_eq!(cfg.node_compat, Some(false));
-    assert!(
-        matches!(cfg.sandbox, Some(SandboxSetting::Granular(_))),
-        "top-level sandbox: {:?}",
-        cfg.sandbox
+    assert_eq!(
+        cfg.install.linker,
+        Some(LinkerConfig::Isolated {
+            hoist: Some(Hoist::Bool(false))
+        })
     );
     assert_eq!(
-        cfg.install.sandbox,
-        Some(SandboxSetting::FileRef("./install-policy.json".into()))
+        cfg.install.minimum_release_age,
+        Some(Duration::from_secs(3 * 86_400))
     );
-    assert_eq!(
-        cfg.dlx.sandbox,
-        Some(SandboxSetting::Preset("publish-jail".into()))
-    );
+    assert_eq!(cfg.dlx.consent, Some(ImplicitDlx::Never));
     assert_eq!(cfg.dlx.env_file, Some(EnvFileSetting::Disabled));
 }
 
@@ -75,7 +71,6 @@ fn schema_key_is_blessed_at_the_root_only() {
     for (parse, text, path) in [
         (PROJECT, r#"{ "install": { "$schema": "x" } }"#, "install"),
         (GLOBAL, r#"{ "dlx": { "$schema": "x" } }"#, "dlx"),
-        (PROJECT, r#"{ "sandbox": { "$schema": "x" } }"#, "sandbox"),
     ] {
         let err = parse(text).expect_err("nested $schema must fail loud");
         match err {
@@ -92,40 +87,17 @@ fn schema_key_is_blessed_at_the_root_only() {
 }
 
 #[test]
-fn unknown_keys_fail_loud_at_every_nested_object_level() {
-    // Root, `install`, and top-level `sandbox` axes are covered by the sibling
-    // tests module; these are the remaining object levels.
-    for (parse, text, path, key) in [
-        (
-            GLOBAL,
-            r#"{ "dlx": { "consnt": "never" } }"#,
-            "dlx",
-            "consnt",
-        ),
-        (
-            PROJECT,
-            r#"{ "install": { "sandbox": { "disk": true } } }"#,
-            "install.sandbox",
-            "disk",
-        ),
-        (
-            GLOBAL,
-            r#"{ "dlx": { "sandbox": { "network": [] } } }"#,
-            "dlx.sandbox",
-            "network",
-        ),
-    ] {
-        let err = parse(text).expect_err(&format!("{text} must fail loud"));
-        match err {
-            ConfigError::UnknownKey {
-                path: got_path,
-                key: got_key,
-            } => {
-                assert_eq!(got_path, path, "{text}");
-                assert_eq!(got_key, key, "{text}");
-            }
-            other => panic!("{text}: expected UnknownKey, got {other:?}"),
+fn an_unknown_dlx_key_fails_loud_against_its_own_path() {
+    // Root and `install` are covered by the sibling tests module; `dlx` is the
+    // only other object level with a flat key set of its own.
+    let err = parse_global_config(r#"{ "dlx": { "consnt": "never" } }"#)
+        .expect_err("an unknown dlx key must fail loud");
+    match err {
+        ConfigError::UnknownKey { path, key } => {
+            assert_eq!(path, "dlx");
+            assert_eq!(key, "consnt");
         }
+        other => panic!("expected UnknownKey, got {other:?}"),
     }
 }
 
@@ -133,23 +105,18 @@ fn unknown_keys_fail_loud_at_every_nested_object_level() {
 fn wrong_wrapper_types_report_the_nested_path() {
     for (parse, text, path, expected) in [
         (GLOBAL, r#"{ "dlx": [] }"#, "dlx", "an object"),
+        (PROJECT, r#"{ "install": [] }"#, "install", "an object"),
         (
             PROJECT,
-            r#"{ "install": { "sandbox": 5 } }"#,
-            "install.sandbox",
-            "a boolean, string (preset or \"./file.json\"), or object",
+            r#"{ "install": { "publicHoist": 5 } }"#,
+            "install.publicHoist",
+            "a boolean or array of strings",
         ),
         (
             GLOBAL,
-            r#"{ "dlx": { "sandbox": 5 } }"#,
-            "dlx.sandbox",
-            "a boolean, string (preset or \"./file.json\"), or object",
-        ),
-        (
-            GLOBAL,
-            r#"{ "dlx": { "sandbox": { "fs": "rw" } } }"#,
-            "dlx.sandbox.fs",
-            "a boolean, array, or object",
+            r#"{ "dlx": { "envFile": 5 } }"#,
+            "dlx.envFile",
+            "a boolean, string, or array of strings",
         ),
     ] {
         let err = parse(text).expect_err(&format!("{text} must fail loud"));

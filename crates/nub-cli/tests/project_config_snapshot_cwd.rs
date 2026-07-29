@@ -21,11 +21,7 @@ fn global_cwd_flag_initializes_one_snapshot_from_the_requested_dir() {
     // The ambient file is malformed, while the requested directory has a valid
     // config. Success proves discovery starts after `--cwd` is applied.
     std::fs::write(ambient.join("nub.jsonc"), "{ malformed").unwrap();
-    std::fs::write(
-        target.join("nub.jsonc"),
-        r#"{ "sandbox": { "fs": false, "net": false, "env": false } }"#,
-    )
-    .unwrap();
+    std::fs::write(target.join("nub.jsonc"), r#"{ "conditions": [] }"#).unwrap();
     std::fs::write(target.join("probe.js"), "console.log('probe-ok');\n").unwrap();
     let log = temp.path().join("snapshot.log");
 

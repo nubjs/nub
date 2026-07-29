@@ -1,5 +1,4 @@
-//! End-to-end coverage for project `nub.jsonc` runtime consumers. Every route
-//! also carries a restrictive sandbox value to prove sandbox config stays inert.
+//! End-to-end coverage for project `nub.jsonc` runtime consumers.
 
 #![cfg(unix)]
 
@@ -37,8 +36,6 @@ impl Fixture {
         std::fs::create_dir_all(project.join("node_modules/conditional-pkg")).unwrap();
         std::fs::create_dir_all(&config_root).unwrap();
 
-        // The project file is live, while the restrictive sandbox value remains
-        // inert. The runtime assertions below make that distinction non-vacuous.
         std::fs::write(
             config_root.join("nub.jsonc"),
             r#"{
@@ -48,8 +45,7 @@ impl Fixture {
               "envFile": "./runtime.env",
               "loader": { ".blob": "text", ".view": "jsx" },
               "conditions": ["runtime-config"],
-              "tsconfig": "./tsconfig.runtime.jsonc",
-              "sandbox": { "fs": false, "net": false, "env": false }
+              "tsconfig": "./tsconfig.runtime.jsonc"
             }"#,
         )
         .unwrap();
@@ -185,7 +181,7 @@ console.log(JSON.stringify({
                 .expect("runtime snapshot reaches the augmented child"),
         )
         .expect("runtime snapshot is JSON");
-        for key in ["sandbox", "install", "dlx"] {
+        for key in ["install", "dlx"] {
             assert!(
                 snapshot.get(key).is_none(),
                 "runtime transport must exclude {key}: {snapshot}"
@@ -221,13 +217,16 @@ fn runtime_snapshot_reaches_file_script_node_argv0_exec_and_nubx() {
 }
 
 #[test]
-fn inherited_runtime_snapshot_ignores_all_sandbox_config_positions() {
+fn inherited_runtime_snapshot_tolerates_a_field_this_binary_does_not_know() {
     let fixture = Fixture::new();
     std::fs::write(
         fixture.project.join("inherited.js"),
         "console.log('inherited')\n",
     )
     .unwrap();
+    // The wire shape a parent nub writes, plus one field only a NEWER nub would
+    // emit. A malformed snapshot is a hard error, so version skew across a
+    // nested launch must not be able to abort the child.
     let snapshot = r#"{
       "nodeCompat": false,
       "preload": [],
@@ -237,9 +236,7 @@ fn inherited_runtime_snapshot_ignores_all_sandbox_config_positions() {
       "loader": {},
       "conditions": [],
       "tsconfig": null,
-      "sandbox": { "fs": false, "net": false, "env": false },
-      "install": { "sandbox": { "fs": false, "net": false, "env": false } },
-      "dlx": { "sandbox": { "fs": false, "net": false, "env": false } }
+      "fieldFromANewerNub": { "unrecognized": true }
     }"#;
     let output = fixture
         .command()
@@ -249,7 +246,7 @@ fn inherited_runtime_snapshot_ignores_all_sandbox_config_positions() {
         .unwrap();
     assert!(
         output.status.success(),
-        "sandbox-only inherited fields must deserialize inertly: {}",
+        "an unrecognized snapshot field must deserialize inertly: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "inherited");
