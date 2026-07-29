@@ -8,15 +8,23 @@ use std::process::Command;
 /// `env!` freezes whichever manifest dir compiled the build script into the
 /// binary. Build-script binaries are cached per target dir, and this repo shares
 /// ONE target dir across git worktrees, so an `env!` path stays pinned to the
-/// worktree that happened to build it first: later builds from a sibling
-/// worktree silently read THAT tree's files, and once it is deleted they fail
-/// outright on a path absent from the current checkout. The runtime lookup
-/// resolves per invocation instead. `cargo publish --verify` is unaffected —
-/// cargo sets the variable from the package being built, so it still points
-/// inside `target/package/<crate>-<ver>/`.
-fn manifest_dir() -> String {
-    std::env::var("CARGO_MANIFEST_DIR")
-        .expect("cargo always sets CARGO_MANIFEST_DIR for build scripts")
+/// worktree that built it first.
+///
+/// This lookup fixes RESOLUTION only. It is half the fix: cargo will not rerun
+/// a build script it considers fresh, and the recorded `rerun-if-changed` paths
+/// are the first tree's absolutes, so a sibling tree would keep consuming that
+/// tree's generated output without the script ever running. The paired
+/// `cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR` below is what makes cargo
+/// rerun on a tree switch; neither half works without the other.
+///
+/// `cargo publish --verify` is unaffected — cargo sets the variable from the
+/// package being built, so it still points inside
+/// `target/package/<crate>-<ver>/`.
+fn manifest_dir() -> PathBuf {
+    PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR")
+            .expect("cargo always sets CARGO_MANIFEST_DIR for build scripts"),
+    )
 }
 
 fn main() {
@@ -55,6 +63,9 @@ fn main() {
         );
     }
     println!("cargo:rerun-if-env-changed=NUB_NATIVE_BUILD_ID");
+    // The .git watches above are absolute and per-worktree; without this a
+    // sibling tree reuses this tree's short SHA and mis-keys the transpile cache.
+    println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR");
 }
 
 /// `<short-sha>` or `<short-sha>-dirty`, or `None` on any git failure.
@@ -84,7 +95,7 @@ fn git_dir() -> Option<std::path::PathBuf> {
     if dir.is_absolute() {
         Some(dir.to_path_buf())
     } else {
-        Some(PathBuf::from(manifest_dir()).join(dir))
+        Some(manifest_dir().join(dir))
     }
 }
 

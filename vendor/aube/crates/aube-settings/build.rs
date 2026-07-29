@@ -102,15 +102,23 @@ struct Sources {
 /// `env!` freezes whichever manifest dir compiled the build script into the
 /// binary. Build-script binaries are cached per target dir, and this repo shares
 /// ONE target dir across git worktrees, so an `env!` path stays pinned to the
-/// worktree that happened to build it first: later builds from a sibling
-/// worktree silently read THAT tree's files, and once it is deleted they fail
-/// outright on a path absent from the current checkout. The runtime lookup
-/// resolves per invocation instead. `cargo publish --verify` is unaffected —
-/// cargo sets the variable from the package being built, so it still points
-/// inside `target/package/<crate>-<ver>/`.
-fn manifest_dir() -> String {
-    std::env::var("CARGO_MANIFEST_DIR")
-        .expect("cargo always sets CARGO_MANIFEST_DIR for build scripts")
+/// worktree that built it first.
+///
+/// This lookup fixes RESOLUTION only. It is half the fix: cargo will not rerun
+/// a build script it considers fresh, and the recorded `rerun-if-changed` paths
+/// are the first tree's absolutes, so a sibling tree would keep consuming that
+/// tree's generated output without the script ever running. The paired
+/// `cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR` below is what makes cargo
+/// rerun on a tree switch; neither half works without the other.
+///
+/// `cargo publish --verify` is unaffected — cargo sets the variable from the
+/// package being built, so it still points inside
+/// `target/package/<crate>-<ver>/`.
+fn manifest_dir() -> PathBuf {
+    PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR")
+            .expect("cargo always sets CARGO_MANIFEST_DIR for build scripts"),
+    )
 }
 
 fn main() {
@@ -119,9 +127,12 @@ fn main() {
     // script from `target/package/aube-settings-<ver>/`, which can
     // only see files under the crate root. That property comes from
     // where the file lives, not from how the path is resolved.
-    let settings_path = PathBuf::from(manifest_dir()).join("settings.toml");
+    let settings_path = manifest_dir().join("settings.toml");
 
     println!("cargo:rerun-if-changed={}", settings_path.display());
+    // The path above is absolute, so a shared target dir would otherwise keep a
+    // sibling worktree's generated settings without rerunning this script.
+    println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR");
 
     let raw = fs::read_to_string(&settings_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", settings_path.display()));
