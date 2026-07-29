@@ -16,7 +16,7 @@ import { config } from "./config";
 import { handler } from "./handler.js";
 ```
 
-If your editor's Go-to-Definition works on an import and `tsc` accepts it, Nub resolves it the same way at runtime — no `tsconfig-paths` package, no build step. Nub owns exactly the cases Node has no opinion on: `tsconfig.json` path aliases, extensionless imports in TypeScript files, and the `.js`→`.ts` emit-convention swap. Everything else (node_modules, `exports` / `imports` maps, export conditions, package names) falls through to Node unchanged.
+If your editor's Go-to-Definition works on an import and `tsc` accepts it, Nub resolves it the same way at runtime — no `tsconfig-paths` package, no build step. Nub owns exactly the cases Node has no opinion on: `tsconfig.json` path aliases, extensionless imports in TypeScript files, the `.js`→`.ts` emit-convention swap, and subpaths into dependencies that declare no `exports`. Everything else — package names, `exports` / `imports` maps, export conditions — falls through to Node unchanged.
 
 ## `tsconfig.json`
 
@@ -45,7 +45,7 @@ import { Button } from "@/components/Button";
 
 Matching follows the `tsc` rules: an exact pattern wins outright, and among wildcard patterns the longest matching prefix wins. Node builtins always take precedence — `import "os"` is `node:os`, never `baseUrl/os.ts`.
 
-Path aliases work from any file, not just TypeScript ones — a `.js` file that imports a `paths` alias resolves it too. (The extensionless and `.js`→`.ts` behaviors below are the ones scoped to TypeScript-family parents.)
+Path aliases work from any file, not just TypeScript ones — a `.js` file that imports a `paths` alias resolves it too. (The relative extensionless and `.js`→`.ts` behaviors below are the ones scoped to TypeScript-family parents.)
 
 ### `baseUrl`
 
@@ -89,15 +89,50 @@ The probe order is extension-aware — it depends on the parent file's extension
 
 A directory import honors the directory's `package.json` `"main"` before falling back to probing `index.<ext>` in that same parent-aware order. Only `"main"` is consulted — `exports` is never read for a directory-path import, matching Node, which honors `exports` only for package-name resolution.
 
-This probing is scoped to TypeScript-family parent files (`.ts` / `.tsx` / `.mts` / `.cts`) with a relative specifier. A plain `.js` file stays strict about extensions, exactly like vanilla Node.
+This probing is scoped to TypeScript-family parent files (`.ts` / `.tsx` / `.mts` / `.cts`) with a relative specifier. A plain `.js` file stays strict about relative extensions, exactly like vanilla Node. Subpaths into a dependency are covered below and follow a different rule.
+
+## Package subpaths
+
+A subpath into a dependency gets the same probing, so an extensionless import finds the file on disk and a workspace package whose `main` points at TypeScript source resolves by subpath too.
+
+```ts
+// finds node_modules/prismjs/components/prism-python.js
+import "prismjs/components/prism-python";
+
+// a workspace package with "main": "./index.ts" and no exports map
+import { createPrompt } from "@repo/lib/prompt";   // resolves packages/lib/prompt.ts
+```
+
+The order here is fixed, and unlike relative imports it does not vary with the importing file's extension:
+
+```text
+.js  .json  .ts  .tsx
+```
+
+JavaScript sorts first because a published package's `.ts` is unshipped source that Nub does not transpile inside node_modules. A workspace package symlinked into node_modules ships no `.js` at all, so the same order still lands on its TypeScript.
+
+Because the rule is about the dependency's shape rather than the importer's, it is not scoped to TypeScript-family parents — a `.js` file in a `checkJs` project resolves these the same way.
+
+A subpath naming a directory resolves that directory's `index` file, the way a `require` of the same subpath already does:
+
+```ts
+import { parse } from "qs/lib";   // resolves qs/lib/index.js
+```
+
+Only `index` is consulted. A directory's own `package.json` `main` is not read for a subpath — Node's `require` reads it, and deferring keeps both resolvers on the same answer. A trailing slash means what it says: `qs/lib/` is the directory, never a `qs/lib.js` beside it.
+
+<Callout>A dependency that declares `exports` is never probed. Its map decides what is reachable, exactly as on Node, so a subpath it withholds stays an error.</Callout>
 
 ## .js → .ts resolution
 
-With `moduleResolution: "nodenext"`, `tsc` wants a `.js` extension on relative imports even though the file on disk is `.ts`. Nub reverses that at runtime, so the same source runs before and after a build.
+With `moduleResolution: "nodenext"`, `tsc` wants a `.js` extension even though the file on disk is `.ts`. Nub reverses that at runtime, so the same source runs before and after a build.
 
 ```ts
 // resolves ./handler.ts when no ./handler.js exists
 import { handler } from "./handler.js";
+
+// and across a package subpath, into a workspace package built from TS source
+import { createPrompt } from "@repo/lib/prompt.js";
 ```
 
 The literal extension always wins first: a real on-disk `./handler.js` is used as-is, and the swap only fires when the written extension points at a file that doesn't exist. The same rewrite covers `.jsx → .tsx`, `.mjs → .mts`, and `.cjs → .cts` — and likewise, a real `.cjs` beats a sibling `.cts`. This is the `tsc`/`tsx` emit convention, not a guess at the file's type.
@@ -106,10 +141,10 @@ The literal extension always wins first: a real on-disk `./handler.js` is used a
 
 Nub resolves only the TypeScript-aware cases Node has no opinion on. Everything else is Node's job, handled by Node's own resolver unchanged:
 
-- `node_modules` resolution
+- package names
 - `exports` / `imports` maps
 - export conditions
-- package names
+- every subpath into a dependency that declares `exports`
 
 ## Yarn Plug'n'Play
 

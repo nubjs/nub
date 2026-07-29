@@ -3,6 +3,7 @@
 
 - **Usage**: `aube ci [FLAGS]`
 - **Aliases**: `clean-install`
+- **Effect**: modifies state
 
 Clean install: delete node_modules, then install with frozen lockfile.
 

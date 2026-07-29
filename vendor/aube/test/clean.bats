@@ -37,7 +37,35 @@ EOF
 	run aube clean
 	assert_success
 	assert_output --partial "Removed 1 node_modules"
-	assert [ ! -e node_modules ]
+	assert [ -d node_modules ]
+	assert [ ! -e node_modules/foo ]
+}
+
+@test "aube clean preserves third-party caches and removes aube-owned hidden entries" {
+	cat >package.json <<'EOF'
+{"name":"demo","version":"1.0.0"}
+EOF
+	mkdir -p node_modules/foo node_modules/.aube node_modules/.bin node_modules/.pnpm \
+		node_modules/.aube-state node_modules/.vite/deps node_modules/.vite-temp
+	: >node_modules/.modules.yaml
+	: >node_modules/.aube-applied-patches.json
+	: >node_modules/.pnpm-workspace-state-v1.json
+	: >node_modules/.vite/deps/cache
+	: >node_modules/.vite-temp/cache
+
+	run aube clean
+	assert_success
+	assert [ -d node_modules ]
+	assert [ ! -e node_modules/foo ]
+	assert [ ! -e node_modules/.aube ]
+	assert [ ! -e node_modules/.bin ]
+	assert [ ! -e node_modules/.aube-state ]
+	assert [ ! -e node_modules/.modules.yaml ]
+	assert [ ! -e node_modules/.aube-applied-patches.json ]
+	assert [ ! -e node_modules/.pnpm ]
+	assert [ ! -e node_modules/.pnpm-workspace-state-v1.json ]
+	assert [ -e node_modules/.vite/deps/cache ]
+	assert [ -e node_modules/.vite-temp/cache ]
 }
 
 @test "aube clean --lockfile also removes the root lockfile(s)" {
@@ -74,14 +102,17 @@ EOF
 	cat >packages/b/package.json <<'EOF'
 {"name":"b","version":"1.0.0"}
 EOF
-	mkdir -p node_modules packages/a/node_modules packages/b/node_modules
+	mkdir -p node_modules/foo packages/a/node_modules/foo packages/b/node_modules/foo
 
 	run aube clean
 	assert_success
 	assert_output --partial "Removed 3 node_modules"
-	assert [ ! -e node_modules ]
-	assert [ ! -e packages/a/node_modules ]
-	assert [ ! -e packages/b/node_modules ]
+	assert [ -d node_modules ]
+	assert [ -d packages/a/node_modules ]
+	assert [ -d packages/b/node_modules ]
+	assert [ ! -e node_modules/foo ]
+	assert [ ! -e packages/a/node_modules/foo ]
+	assert [ ! -e packages/b/node_modules/foo ]
 }
 
 @test "aube clean defers to a user-defined clean script" {
@@ -127,7 +158,7 @@ EOF
 	cat >package.json <<'EOF'
 {"name":"demo","version":"1.0.0"}
 EOF
-	mkdir -p node_modules
+	mkdir -p node_modules/foo
 
 	run aube clean --lockfile
 	assert_success
@@ -139,12 +170,13 @@ EOF
 	cat >package.json <<'EOF'
 {"name":"demo","version":"1.0.0"}
 EOF
-	mkdir -p node_modules
+	mkdir -p node_modules/foo
 
 	run aube purge
 	assert_success
 	assert_output --partial "Removed 1 node_modules"
-	assert [ ! -e node_modules ]
+	assert [ -d node_modules ]
+	assert [ ! -e node_modules/foo ]
 }
 
 @test "aube purge defers to a user-defined purge script" {

@@ -1,5 +1,14 @@
 use miette::{Context, IntoDiagnostic};
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum CatalogSource {
+    WorkspaceYaml(std::path::PathBuf),
+    PackageJson {
+        path: std::path::PathBuf,
+        namespace: String,
+    },
+}
+
 /// Type alias for the catalog map the resolver consumes — outer key is
 /// the catalog name (`default` for the unnamed catalog), inner map goes
 /// from package name to version range.
@@ -234,6 +243,79 @@ pub(crate) fn discover_named_registries(
     }
 
     out
+}
+
+fn manifest_catalog_source(
+    path: &std::path::Path,
+    catalog: &str,
+    package: &str,
+) -> Option<CatalogSource> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let root = json.as_object()?;
+    let mut source = None;
+    let id = aube_util::embedder();
+    let namespaces = std::iter::once("workspaces")
+        .chain(id.compatible_names.iter().copied())
+        .chain((!id.manifest_namespace.is_empty()).then_some(id.manifest_namespace));
+    for namespace in namespaces {
+        let Some(config) = root.get(namespace).and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        let entries = if catalog == "default" {
+            config.get("catalog").and_then(serde_json::Value::as_object)
+        } else {
+            config
+                .get("catalogs")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|catalogs| catalogs.get(catalog))
+                .and_then(serde_json::Value::as_object)
+        };
+        if entries.is_some_and(|entries| entries.contains_key(package)) {
+            source = Some(CatalogSource::PackageJson {
+                path: path.to_path_buf(),
+                namespace: namespace.to_string(),
+            });
+        }
+    }
+    source
+}
+
+/// Locate the highest-precedence source that supplied one catalog entry.
+pub(crate) fn catalog_entry_source(
+    project_root: &std::path::Path,
+    catalog: &str,
+    package: &str,
+) -> Option<CatalogSource> {
+    let project_manifest = project_root.join("package.json");
+    let mut source = manifest_catalog_source(&project_manifest, catalog, package);
+    let workspace_root = crate::dirs::find_workspace_root(project_root);
+    if let Some(root) = &workspace_root
+        && root != project_root
+        && let Some(root_source) =
+            manifest_catalog_source(&root.join("package.json"), catalog, package)
+    {
+        source = Some(root_source);
+    }
+
+    let yaml_dir = crate::dirs::find_workspace_yaml_root(project_root);
+    if let Some(dir) = yaml_dir
+        && let Some(path) = aube_manifest::workspace::workspace_yaml_existing(&dir)
+        && let Ok(config) = aube_manifest::workspace::WorkspaceConfig::load(&dir)
+    {
+        let entries = if catalog == "default" {
+            config.catalog.get(package)
+        } else {
+            config
+                .catalogs
+                .get(catalog)
+                .and_then(|entries| entries.get(package))
+        };
+        if entries.is_some() {
+            source = Some(CatalogSource::WorkspaceYaml(path));
+        }
+    }
+    source
 }
 
 #[cfg(test)]

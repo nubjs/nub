@@ -14,12 +14,18 @@ Aube generates this page from [`settings.toml`](https://github.com/jdx/aube/blob
 | [`packageExtensions`](#setting-packageextensions) | `object` | Extend existing package definitions with additional information. |
 | [`allowedDeprecatedVersions`](#setting-alloweddeprecatedversions) | `object` | Mute deprecation warnings for specific package versions. |
 | [`deprecationWarnings`](#setting-deprecationwarnings) | `"none" \| "direct" \| "all" \| "summary"` | Scope of deprecation warnings shown during install. |
-| [`updateConfig.ignoreDependencies`](#setting-updateconfig-ignoredependencies) | `list<string>` | List of packages to ignore during update checks. |
+| [`updateConfig.ignoreDependencies`](#setting-updateconfig-ignoredependencies) | `list<string>` | Deprecated list of packages to ignore during update checks. |
+| [`update.ignoreDeps`](#setting-update-ignoredeps) | `list<string>` | List of packages to ignore during update checks. |
+| [`audit.level`](#setting-audit-level) | `string` | Minimum advisory severity reported by audit. |
+| [`audit.ignore`](#setting-audit-ignore) | `list<string>` | Advisory identifiers ignored by audit. |
+| [`auditConfig.ignoreGhsas`](#setting-auditconfig-ignoreghsas) | `list<string>` | Deprecated list of GHSA identifiers ignored by audit. |
+| [`auditConfig.ignoreCves`](#setting-auditconfig-ignorecves) | `list<string>` | Deprecated list of CVE identifiers ignored by audit. |
 | [`supportedArchitectures`](#setting-supportedarchitectures) | `object` | Specify architectures for optional dependency installation. |
 | [`ignoredOptionalDependencies`](#setting-ignoredoptionaldependencies) | `list<string>` | Skip optional dependencies by name. |
 | [`pnpmfilePath`](#setting-pnpmfilepath) | `string` | Location of the pnpmfile hook file. |
 | [`globalPnpmfile`](#setting-globalpnpmfile) | `string` | Path to a second pnpmfile that runs before the project's pnpmfile. |
 | [`minimumReleaseAge`](#setting-minimumreleaseage) | `int` | Delay installation of newly published versions (minutes). |
+| [`minimumPackageAge`](#setting-minimumpackageage) | `int` | Challenge newly registered package names during `aube add` (minutes). |
 | [`minimumReleaseAgeExclude`](#setting-minimumreleaseageexclude) | `list<string>` | Packages exempt from the minimumReleaseAge requirement. |
 | [`minimumReleaseAgeStrict`](#setting-minimumreleaseagestrict) | `bool` | Fail the install when no version satisfies the minimumReleaseAge cutoff. |
 | [`securityScanner`](#setting-securityscanner) | `string` | Bun-compatible security scanner module. |
@@ -28,7 +34,7 @@ Aube generates this page from [`settings.toml`](https://github.com/jdx/aube/blob
 | [`advisoryBloomCheck`](#setting-advisorybloomcheck) | `"on" \| "required" \| "off"` | Bloom-filter prefilter for OSV `MAL-*` advisories on lockfile-driven installs. |
 | [`advisoryCheckEveryInstall`](#setting-advisorycheckeveryinstall) | `bool` | Force the live-API OSV `MAL-*` check on every install (including frozen reinstalls). |
 | [`lowDownloadThreshold`](#setting-lowdownloadthreshold) | `int` | Weekly-download floor for `aube add` (typosquat prompt). |
-| [`allowedUnpopularPackages`](#setting-allowedunpopularpackages) | `list<string>` | Glob patterns exempted from the `lowDownloadThreshold` gate. |
+| [`allowedUnpopularPackages`](#setting-allowedunpopularpackages) | `list<string>` | Glob patterns exempted from add-time package reputation gates. |
 | [`paranoid`](#setting-paranoid) | `bool` | Turn on the strict-security setting bundle in one switch. |
 | [`trustPolicy`](#setting-trustpolicy) | `"no-downgrade" \| "off"` | Fail install when a package's trust evidence weakens between releases. |
 | [`trustPolicyExclude`](#setting-trustpolicyexclude) | `list<string>` | Packages exempt from `trustPolicy` checks. |
@@ -52,6 +58,7 @@ Aube generates this page from [`settings.toml`](https://github.com/jdx/aube/blob
 | [`modulesCacheMaxAge`](#setting-modulescachemaxage) | `int` | Minutes before orphan packages are removed from the virtual store. |
 | [`dlxCacheMaxAge`](#setting-dlxcachemaxage) | `int` | Minutes before the dlx cache is considered stale. |
 | [`enableGlobalVirtualStore`](#setting-enableglobalvirtualstore) | `bool` | Use a per-user virtual store for all projects. |
+| [`globalVirtualStoreDir`](#setting-globalvirtualstoredir) | `path` | Location of the shared virtual store used by every project. |
 | [`disableGlobalVirtualStoreForPackages`](#setting-disableglobalvirtualstoreforpackages) | `list<string>` | Package names whose presence in any importer forces per-project materialization. |
 | [`storeDir`](#setting-storedir) | `path` | Location where packages are saved on disk (content-addressable store). |
 | [`verifyStoreIntegrity`](#setting-verifystoreintegrity) | `bool` | Check store file integrity before linking. |
@@ -127,7 +134,7 @@ Aube generates this page from [`settings.toml`](https://github.com/jdx/aube/blob
 | [`globalBinDir`](#setting-globalbindir) | `path` | Directory where global binaries are symlinked. |
 | [`npmrcAuthFile`](#setting-npmrcauthfile) | `path` | Path to an additional .npmrc file consulted for registry authentication tokens. |
 | [`stateDir`](#setting-statedir) | `path` | Directory for aube install-state files. |
-| [`cacheDir`](#setting-cachedir) | `path` | Directory for package metadata and dlx cache. |
+| [`cacheDir`](#setting-cachedir) | `path` | Directory for the global virtual store and cached package metadata. |
 | [`useStderr`](#setting-usestderr) | `bool` | Write all output to stderr instead of stdout. |
 | [`updateNotifier`](#setting-updatenotifier) | `bool` | Show an update notification when a newer aube is available. |
 | [`updateRewritesSpecifier`](#setting-updaterewritesspecifier) | `bool` | Rewrite caret/tilde manifest specifiers on `aube update` without `--latest`. |
@@ -221,7 +228,7 @@ Examples:
 
 ### `updateConfig.ignoreDependencies` {#setting-updateconfig-ignoredependencies}
 
-List of packages to ignore during update checks.
+Deprecated list of packages to ignore during update checks.
 
 - Type: `list<string>`
 - Default: `undefined`
@@ -231,6 +238,68 @@ List of packages to ignore during update checks.
 
 Packages in this list are never bumped by `aube update`, even when a
 newer version matching their range exists.
+
+### `update.ignoreDeps` {#setting-update-ignoredeps}
+
+List of packages to ignore during update checks.
+
+- Type: `list<string>`
+- Default: `undefined`
+- Environment: `npm_config_update_ignore_deps`, `NPM_CONFIG_UPDATE_IGNORE_DEPS`, `AUBE_UPDATE_IGNORE_DEPS`
+- .npmrc keys: `update.ignoreDeps`, `update.ignore-deps`
+- Workspace YAML keys: `update.ignoreDeps`
+
+Packages in this list are never bumped by `aube update` or reported by
+`aube outdated`. This is the canonical pnpm 11.16+ spelling and takes
+precedence over `updateConfig.ignoreDependencies`.
+
+### `audit.level` {#setting-audit-level}
+
+Minimum advisory severity reported by audit.
+
+- Type: `string`
+- Default: `undefined`
+- Environment: `npm_config_audit_level`, `NPM_CONFIG_AUDIT_LEVEL`, `AUBE_AUDIT_LEVEL`
+- .npmrc keys: `audit.level`, `audit-level`, `auditLevel`
+- Workspace YAML keys: `audit.level`
+
+Sets the default severity threshold for `aube audit`. A command-line
+`--audit-level` value takes precedence.
+
+### `audit.ignore` {#setting-audit-ignore}
+
+Advisory identifiers ignored by audit.
+
+- Type: `list<string>`
+- Default: `undefined`
+- Environment: `npm_config_audit_ignore`, `NPM_CONFIG_AUDIT_IGNORE`, `AUBE_AUDIT_IGNORE`
+- .npmrc keys: `audit.ignore`
+- Workspace YAML keys: `audit.ignore`
+
+Advisory IDs in this list are filtered from `aube audit`. Values may be
+numeric npm advisory IDs, GHSA identifiers, or CVE identifiers.
+
+### `auditConfig.ignoreGhsas` {#setting-auditconfig-ignoreghsas}
+
+Deprecated list of GHSA identifiers ignored by audit.
+
+- Type: `list<string>`
+- Default: `undefined`
+- .npmrc keys: `auditConfig.ignoreGhsas`, `audit-config.ignore-ghsas`
+- Workspace YAML keys: `auditConfig.ignoreGhsas`
+
+Use `audit.ignore` instead.
+
+### `auditConfig.ignoreCves` {#setting-auditconfig-ignorecves}
+
+Deprecated list of CVE identifiers ignored by audit.
+
+- Type: `list<string>`
+- Default: `undefined`
+- .npmrc keys: `auditConfig.ignoreCves`, `audit-config.ignore-cves`
+- Workspace YAML keys: `auditConfig.ignoreCves`
+
+Use `audit.ignore` instead.
 
 ### `supportedArchitectures` {#setting-supportedarchitectures}
 
@@ -312,11 +381,33 @@ Delay installation of newly published versions (minutes).
 - Workspace YAML keys: `minimumReleaseAge`
 - Managed policy: `max`
 
-Supply-chain attack mitigation: packages published within the last N
+Supply-chain attack mitigation: versions published within the last N
 minutes are skipped by the resolver. By default the resolver falls back
 to the next-oldest version that satisfies the range; set
 `minimumReleaseAgeStrict=true` to fail the install instead. Defaults to
 24 hours, matching pnpm v11. Set to `0` to disable.
+
+### `minimumPackageAge` {#setting-minimumpackageage}
+
+Challenge newly registered package names during `aube add` (minutes).
+
+- Type: `int`
+- Default: `43200`
+- Environment: `npm_config_minimum_package_age`, `NPM_CONFIG_MINIMUM_PACKAGE_AGE`, `AUBE_MINIMUM_PACKAGE_AGE`
+- .npmrc keys: `minimumPackageAge`, `minimum-package-age`
+- Workspace YAML keys: `minimumPackageAge`
+- Managed policy: `max`
+
+Slopsquatting mitigation: `aube add` challenges public npm package names
+first registered within the last N minutes. Interactive sessions prompt
+for confirmation; non-interactive sessions fail with
+`ERR_AUBE_NEW_PACKAGE_NAME`. Defaults to 30 days, deliberately much
+longer than the 24-hour `minimumReleaseAge` quarantine for ordinary new
+versions. Existing lockfile entries and `allowedUnpopularPackages` are
+trusted. Set to `0` to disable, or pass `--allow-low-downloads` after
+verifying one new name out of band.
+If npm's creation-time metadata is missing or unavailable, the check fails
+closed with `ERR_AUBE_PACKAGE_AGE_CHECK_FAILED`.
 
 ### `minimumReleaseAgeExclude` {#setting-minimumreleaseageexclude}
 
@@ -556,7 +647,7 @@ Packages that route through a non-`registry.npmjs.org` registry are
 skipped automatically: a scoped override like
 `@myorg:registry=https://npm.internal.example/` or a swapped-out
 default registry both mean npmjs has no signal on the package, so
-neither the downloads gate nor the OSV `MAL-*` check fires.
+neither the reputation gates nor the OSV `MAL-*` check fires.
 Workspace deps and git/local specs are also skipped. To exempt
 specific names that *do* resolve through npmjs (e.g. you publish a
 low-download but trusted package internally), see
@@ -566,7 +657,7 @@ Set to `0` to disable.
 
 ### `allowedUnpopularPackages` {#setting-allowedunpopularpackages}
 
-Glob patterns exempted from the `lowDownloadThreshold` gate.
+Glob patterns exempted from add-time package reputation gates.
 
 - Type: `list<string>`
 - Default: `undefined`
@@ -576,10 +667,10 @@ Glob patterns exempted from the `lowDownloadThreshold` gate.
 - Managed policy: `managedWins`
 
 Each pattern is matched against the registry name (`@scope/foo` or
-`bar`) of every candidate the `lowDownloadThreshold` gate would
-otherwise probe. Matches skip the weekly-downloads lookup entirely,
-so internal/low-traffic packages don't trip the prompt in CI or the
-`y/N` prompt locally.
+`bar`) of every candidate the similar-name, package-age, and
+`lowDownloadThreshold` gates would otherwise probe. Matches skip all
+three checks, so internal/low-traffic packages don't trip the prompt
+in CI or the `y/N` prompt locally.
 
 Patterns are full-name globs (the [`glob`](https://docs.rs/glob)
 crate's syntax — `*`, `?`, `[…]`). Match-everything (`*`) is allowed
@@ -1113,12 +1204,48 @@ Examples:
 - `aube --disable-global-virtual-store install`
 - `aube dlx --enable-gvs create-vite`
 
+### `globalVirtualStoreDir` {#setting-globalvirtualstoredir}
+
+Location of the shared virtual store used by every project.
+
+- Type: `path`
+- Default: `undefined`
+- Environment: `npm_config_global_virtual_store_dir`, `NPM_CONFIG_GLOBAL_VIRTUAL_STORE_DIR`, `AUBE_GLOBAL_VIRTUAL_STORE_DIR`
+- .npmrc keys: `globalVirtualStoreDir`, `global-virtual-store-dir`
+- Workspace YAML keys: `globalVirtualStoreDir`
+
+Relocates the global virtual store — the shared tree of materialized
+package directories that `node_modules/.aube/<dep>` symlinks into when
+`enableGlobalVirtualStore` is on. Unset, it lives at
+`<cacheDir>/virtual-store/`.
+
+Set this when the global virtual store belongs somewhere other than
+the rest of the cache — typically to put it on the same volume as
+`storeDir` while leaving packument metadata on the system disk.
+Setting `cacheDir` moves the virtual store too, so reach for that one
+when you want the whole cache to travel together and this one when you
+want to split them.
+
+Entries in the global virtual store are hardlinked out of the content
+store, so keep this on the same volume as `storeDir`. When they land
+on different filesystems aube warns (`WARN_AUBE_GVS_CROSS_VOLUME`) and
+every install falls back to a per-file copy.
+
+Path interpretation matches `storeDir`: `~` expands to the user's home
+directory and relative paths resolve against the project root. The
+path is used verbatim — no schema suffix is appended — so point it at
+a directory aube can own.
+
+Examples:
+
+- `AUBE_GLOBAL_VIRTUAL_STORE_DIR=/mnt/dev/aube-virtual-store aube install`
+
 ### `disableGlobalVirtualStoreForPackages` {#setting-disableglobalvirtualstoreforpackages}
 
 Package names whose presence in any importer forces per-project materialization.
 
 - Type: `list<string>`
-- Default: `["next", "nuxt", "vite", "vitepress", "parcel"]`
+- Default: `["next", "nuxt", "parcel"]`
 - Environment: `npm_config_disable_global_virtual_store_for_packages`, `NPM_CONFIG_DISABLE_GLOBAL_VIRTUAL_STORE_FOR_PACKAGES`, `AUBE_DISABLE_GLOBAL_VIRTUAL_STORE_FOR_PACKAGES`
 - .npmrc keys: `disableGlobalVirtualStoreForPackages`, `disable-global-virtual-store-for-packages`
 - Workspace YAML keys: `disableGlobalVirtualStoreForPackages`
@@ -1135,12 +1262,17 @@ When `aube install` finds one of these names in any importer's
 forces per-project materialization for that install and prints a
 one-line warning naming the trigger.
 
-The default list — `next`, `nuxt`, `vite`, `vitepress`, `parcel` —
+The default list — `next`, `nuxt`, `parcel` —
 covers the tools with concrete walk-up failures: Next.js's Turbopack
-canonicalizes through symlinks and walks up for app-router/monorepo
-detection, Vite/VitePress/Nuxt plugins walk up for config discovery
-(see [jdx/mise#9261](https://github.com/jdx/mise/pull/9261) for the
-VitePress case), and Parcel's resolver walks up for `.parcelrc`.
+canonicalizes through symlinks and walks up for app-router/monorepo detection,
+Nuxt plugins walk up for config discovery, and Parcel's resolver walks up for
+`.parcelrc`. Vite and VitePress are compatible with the global virtual store:
+aube writes `node_modules/.modules.yaml` with the store location, which Vite
+8.1+ reads when constructing its filesystem allow-list. For older Vite
+versions, aube materializes only the Vite dependency path locally and backports
+the same allow-list lookup into that project-local copy; unrelated dependencies
+remain in the shared store.
+
 Webpack and Rollup are *not* on the default list: plain Webpack
 resolves via the sibling symlinks aube already places inside
 `.aube/<pkg>/node_modules/`, and Rollup is rarely a direct dep (it's
@@ -2315,7 +2447,6 @@ Explicitly allow or disallow script execution per package.
 
 - Type: `object`
 - Default: `undefined`
-- .npmrc keys: `allowBuilds`, `allow-builds`
 - Workspace YAML keys: `allowBuilds`
 
 Per-package review map for dependency lifecycle scripts. Read from
@@ -2582,14 +2713,41 @@ Overrides the directory that holds the `.aube-state` install-state file. Default
 
 ### `cacheDir` {#setting-cachedir}
 
-Directory for package metadata and dlx cache.
+Directory for the global virtual store and cached package metadata.
 
 - Type: `path`
-- Default: `~/.cache/aube`
+- Default: `` platform cache dir (`$XDG_CACHE_HOME/aube`) ``
 - Environment: `npm_config_cache_dir`, `NPM_CONFIG_CACHE_DIR`, `AUBE_CACHE_DIR`
 - .npmrc keys: `cache-dir`, `cacheDir`
 
-Overrides the cache directory. `XDG_CACHE_HOME` is honored by the platform default (`aube_store::dirs::cache_dir`) which appends `/aube`; this setting takes a complete path.
+Overrides the cache directory. Unset, aube derives it per platform
+(`aube_store::dirs::cache_dir`): `$XDG_CACHE_HOME/aube` when
+`XDG_CACHE_HOME` is set, `%LOCALAPPDATA%\aube` on Windows, else
+`~/.cache/aube`. Those are all *base* directories that aube appends
+its own name to; this setting takes a complete path instead, so
+`AUBE_CACHE_DIR=/mnt/fast/aube` puts the cache directly there.
+
+The global virtual store (`<cacheDir>/virtual-store/`) and cached
+packument metadata (`<cacheDir>/packuments-v1/`,
+`<cacheDir>/packuments-full-v1/`) live under this directory. The
+content-addressable store is *not* here — it is `storeDir`, which
+defaults under `$XDG_DATA_HOME` instead. A few smaller caches (the OSV
+advisory mirror, the bootstrapped `node-gyp`, git clones) still follow
+the platform cache dir regardless of this setting.
+
+Set this alongside `storeDir` when the store lives on a non-default
+volume. Entries in the global virtual store are hardlinked out of the
+CAS, so on installs with the global virtual store enabled, a `cacheDir`
+and `storeDir` split across filesystems degrades every install to a
+per-file copy and aube warns about it. Pointing both at the same volume
+(`AUBE_CACHE_DIR=/mnt/dev/cache/aube` plus
+`AUBE_STORE_DIR=/mnt/dev/stores/aube`) keeps the hardlink fast path.
+Use `globalVirtualStoreDir` to move only the virtual store and leave
+the metadata caches where they are.
+
+Examples:
+
+- `AUBE_CACHE_DIR=/mnt/dev/cache/aube AUBE_STORE_DIR=/mnt/dev/stores/aube aube install`
 
 ### `useStderr` {#setting-usestderr}
 

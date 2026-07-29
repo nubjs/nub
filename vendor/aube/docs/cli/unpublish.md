@@ -2,6 +2,7 @@
 # `aube unpublish`
 
 - **Usage**: `aube unpublish [FLAGS] [SPEC]`
+- **Effect**: destructive — may delete or irreversibly overwrite
 
 Remove a package (or a single version) from the registry
 

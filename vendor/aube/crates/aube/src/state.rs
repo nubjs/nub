@@ -834,6 +834,14 @@ pub fn read_state_package_content_hashes(project_dir: &Path) -> Option<BTreeMap<
     Some(state.package_content_hashes)
 }
 
+/// Read the installed layout snapshot used by the install warm path.
+///
+/// Missing layout state means the install predates layout tracking and
+/// should take the normal path once to refresh derived metadata.
+pub fn read_state_layout(project_dir: &Path) -> Option<InstallLayoutState> {
+    read_state(&state_dir(project_dir))?.layout
+}
+
 /// Read the LtHash accumulator digest the last install wrote, if
 /// any. Empty string on fresh state or pre-lthash aube versions.
 pub fn read_state_graph_lthash(project_dir: &Path) -> Option<String> {
@@ -873,6 +881,46 @@ pub fn read_state_dep_build_policy_hash(project_dir: &Path) -> Option<String> {
 /// layout tracking.
 pub fn read_state_layout_linker(project_dir: &Path) -> Option<InstallLayoutMode> {
     Some(read_state(&state_dir(project_dir))?.layout?.linker)
+}
+
+/// Name of the sentinel that marks a link phase as IN PROGRESS.
+fn link_sentinel(project_dir: &Path) -> PathBuf {
+    state_dir(project_dir).join("link-in-progress")
+}
+
+/// Mark the tree as mid-link. Called before the linker is allowed to
+/// mutate `node_modules`, and cleared only once the install finishes.
+///
+/// This exists because the install state alone cannot answer "is the tree
+/// on disk intact?". State is rewritten at the END of a successful install
+/// and removed only on `--force` / a GVS switch, so state written by a
+/// SUCCESSFUL install outlives a LATER install that died partway through
+/// relinking. Anything keying reuse on state alone would then treat a
+/// half-materialized package directory as complete — the same class of bug
+/// as nubjs/nub#552, arrived at from the other side.
+///
+/// Best-effort: a sentinel we fail to write just means the next install
+/// declines to reuse and does the full wipe-and-refill, which is exactly
+/// today's behavior. Failing the install over it would be worse.
+pub fn mark_link_in_progress(project_dir: &Path) {
+    let path = link_sentinel(project_dir);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, b"");
+}
+
+/// Clear the mid-link sentinel. Called once the install has completed and
+/// the tree is known to match the state written alongside it.
+pub fn clear_link_in_progress(project_dir: &Path) {
+    let _ = std::fs::remove_file(link_sentinel(project_dir));
+}
+
+/// Whether the last link phase ran to completion. `false` means either a
+/// link is in flight or one died partway, and in both cases nothing on
+/// disk may be reused.
+pub fn link_completed_cleanly(project_dir: &Path) -> bool {
+    !link_sentinel(project_dir).exists()
 }
 
 /// Read the unreviewed-builds spec keys recorded by the last

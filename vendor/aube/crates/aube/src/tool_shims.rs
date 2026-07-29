@@ -3,6 +3,8 @@ use std::path::{Component, Path, PathBuf};
 
 pub(crate) const SHIM_DIR_ENV: &str = "AUBE_SHIM_DIR";
 
+pub(crate) const DISPATCH_ARG: &str = "__aube-shim";
+
 pub(crate) const TOOL_SHIMS: &[&str] = &["node", "npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg"];
 
 pub(crate) fn shim_file_name(name: &str) -> String {

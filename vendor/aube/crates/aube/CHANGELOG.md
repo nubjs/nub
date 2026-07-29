@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.35.0](https://github.com/jdx/aube/compare/v1.34.0...v1.35.0) - 2026-07-28
+
+### Added
+
+- *(embed)* add configurable workspace discovery ([#1169](https://github.com/jdx/aube/pull/1169))
+- *(embed)* expose package manifest types ([#1168](https://github.com/jdx/aube/pull/1168))
+- *(add)* block new and lookalike package names ([#1157](https://github.com/jdx/aube/pull/1157))
+- *(add)* route embedded confirmations through host handlers ([#1154](https://github.com/jdx/aube/pull/1154))
+- *(settings)* let cacheDir relocate the global virtual store ([#1146](https://github.com/jdx/aube/pull/1146))
+- *(trust)* add package publishing checks ([#1144](https://github.com/jdx/aube/pull/1144))
+
+### Fixed
+
+- *(update)* update catalog entries selected for upgrade ([#1166](https://github.com/jdx/aube/pull/1166))
+- *(list)* accept --lockfile-only ([#1161](https://github.com/jdx/aube/pull/1161))
+- *(clean)* preserve third-party caches ([#1163](https://github.com/jdx/aube/pull/1163))
+- *(config)* ignore unsupported allowBuilds npmrc values ([#1159](https://github.com/jdx/aube/pull/1159))
+- *(install)* preserve platform optionals with supported architectures ([#1156](https://github.com/jdx/aube/pull/1156))
+- *(add)* trust locked packages without embedded prompts ([#1143](https://github.com/jdx/aube/pull/1143))
+- launch native package bins directly ([#1141](https://github.com/jdx/aube/pull/1141))
+
+### Other
+
+- refresh benchmarks for v1.34.0 ([#1124](https://github.com/jdx/aube/pull/1124))
+
+## [1.34.0](https://github.com/jdx/aube/compare/v1.33.1...v1.34.0) - 2026-07-27
+
+### Added
+
+- *(completion)* add aubx and dynamic value completers ([#1130](https://github.com/jdx/aube/pull/1130))
+- *(usage)* declare what each command does to the world ([#1122](https://github.com/jdx/aube/pull/1122))
+
+### Fixed
+
+- *(resolver)* never prefer a deprecated version inside a range ([#1136](https://github.com/jdx/aube/pull/1136))
+- *(install)* clear progress row for no-op installs ([#1132](https://github.com/jdx/aube/pull/1132))
+- *(runtime)* replace activated shims atomically ([#1131](https://github.com/jdx/aube/pull/1131))
+- *(runtime)* keep activated shims stable across upgrades ([#1129](https://github.com/jdx/aube/pull/1129))
+- *(run)* complete package scripts through aubr ([#1128](https://github.com/jdx/aube/pull/1128))
+
+### Other
+
+- *(install)* prioritize opencode-ai builds ([#1127](https://github.com/jdx/aube/pull/1127))
+
+## [1.33.1](https://github.com/jdx/aube/compare/v1.33.0...v1.33.1) - 2026-07-25
+
+### Fixed
+
+- *(install)* restore animated progress bar in interactive terminals ([#1117](https://github.com/jdx/aube/pull/1117))
+- *(install)* bootstrap node-gyp in-process instead of re-execing aube ([#1114](https://github.com/jdx/aube/pull/1114))
+
+## [1.33.0](https://github.com/jdx/aube/compare/v1.32.0...v1.33.0) - 2026-07-25
+
+### Added
+
+- *(run)* complete package.json scripts in shell completions ([#1108](https://github.com/jdx/aube/pull/1108))
+- *(embed)* let hosts wrap the Node runtime, not just select one ([#1086](https://github.com/jdx/aube/pull/1086))
+- *(settings)* adopt canonical update and audit sections ([#1104](https://github.com/jdx/aube/pull/1104))
+- *(release)* support version from-git ([#1102](https://github.com/jdx/aube/pull/1102))
+- *(runtime)* detect FreeBSD as a supported host platform ([#1084](https://github.com/jdx/aube/pull/1084))
+
+### Fixed
+
+- *(run)* start script picker in search mode and prevent wrapping ([#1109](https://github.com/jdx/aube/pull/1109))
+- *(linker)* expose global virtual store to Vite ([#1106](https://github.com/jdx/aube/pull/1106))
+- *(linker)* apply registry-name patches to npm-aliased installs ([#1085](https://github.com/jdx/aube/pull/1085))
+
+### Other
+
+- refresh benchmarks for v1.32.0 ([#1080](https://github.com/jdx/aube/pull/1080))
+
+### Security
+
+- *(login)* cap web token responses ([#1103](https://github.com/jdx/aube/pull/1103))
+
 ## [1.32.0](https://github.com/jdx/aube/compare/v1.31.0...v1.32.0) - 2026-07-22
 
 ### Added

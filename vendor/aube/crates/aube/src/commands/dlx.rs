@@ -6,7 +6,7 @@ use miette::{Context, IntoDiagnostic, miette};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 // dlx forwards everything after `<command>` to the bin it runs, including
 // `--help` and `--version`. Let clap auto-inject its own `-h`/`--help` and
 // `--version` handlers and they'd silently swallow those flags before they
@@ -80,6 +80,17 @@ pub struct DlxArgs {
 ///   3. Exec `<tmp>/node_modules/.bin/<command>` from the user's original cwd.
 ///   4. tempfile removes the scratch dir on drop.
 pub async fn run(args: DlxArgs) -> miette::Result<Option<i32>> {
+    run_in(args, None).await
+}
+
+/// `dlx` rooted at an explicit `base_dir` instead of the process cwd for
+/// runtime resolution and the local-bin fast path — the in-process
+/// embedding entry. `None` reproduces the CLI behavior. The transient
+/// install still runs in its own scratch project regardless.
+pub async fn run_in(
+    args: DlxArgs,
+    base_dir: Option<std::path::PathBuf>,
+) -> miette::Result<Option<i32>> {
     args.network.install_overrides();
     args.lockfile.install_overrides();
     args.virtual_store.install_overrides();
@@ -152,7 +163,10 @@ pub async fn run(args: DlxArgs) -> miette::Result<Option<i32>> {
     // local-bin bin and `aubx` honor the project's .nvmrc / devEngines. The
     // fast path replaces the image immediately, so this must run before it or
     // a local `dlx` bin would launch with the ambient runtime.
-    let initial_cwd = crate::dirs::cwd()?;
+    let initial_cwd = match base_dir {
+        Some(dir) => dir,
+        None => crate::dirs::cwd()?,
+    };
     crate::runtime::ensure_for_cwd(&initial_cwd).await?;
 
     let bin_name = bin_name_for(&command);
@@ -282,25 +296,14 @@ pub async fn run(args: DlxArgs) -> miette::Result<Option<i32>> {
                 aube_util::cmd("dlx")
             ));
         }
-        // The linker writes three shims for every bin on Windows:
-        // `<name>.cmd`, `<name>.ps1`, and a bare extensionless sh shim
-        // (for use under bash / git-bash). CreateProcess can only
-        // launch real PE executables and `.cmd`/`.bat` files — handing
-        // it the sh shim fails with `%1 is not a valid Win32 application`
-        // (os error 193). Prefer the `.cmd` shim on Windows; on Unix
-        // the bare shim is the executable.
-        let exec_path = super::exec::resolve_exec_shim(&bin_path);
-        let mut cmd = tokio::process::Command::new(&exec_path);
-        cmd.args(&bin_args)
-            .current_dir(&prev_cwd)
-            .stderr(aube_scripts::child_stderr());
-        // Shebang shims resolve `node` through PATH — give them the
-        // switched runtime.
-        let runtime_dirs = crate::runtime::path_entries();
-        if !runtime_dirs.is_empty() {
-            cmd.env("PATH", aube_scripts::prepend_paths(&runtime_dirs));
-        }
-        crate::runtime::apply_child_env(&mut cmd);
+        let cmd = super::exec::build_bin_command(
+            &prev_cwd,
+            &bin_path,
+            &resolved_bin_name,
+            &bin_args,
+            &[],
+            false,
+        );
         crate::process_guard::spawn_and_wait(cmd)
             .await
             .into_diagnostic()

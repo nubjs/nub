@@ -2,6 +2,7 @@
 # `aube access grant`
 
 - **Usage**: `aube access grant <ARGS>…`
+- **Effect**: modifies state
 
 Grant a team read-only or read-write access to a package
 

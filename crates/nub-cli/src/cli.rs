@@ -4829,12 +4829,15 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         let mut node_args = vec!["--watch".to_string(), "--watch-preserve-output".to_string()];
         node_args.push(file.to_string());
         node_args.extend(args.iter().cloned());
-        let status = std::process::Command::new(node.path.as_str())
-            .args(&node_args)
+        let mut cmd = std::process::Command::new(node.path.as_str());
+        cmd.args(&node_args)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status()?;
+            .stderr(std::process::Stdio::inherit());
+        // Not `.status()` — see the note on the augmented path below. `node --watch`
+        // never exits on its own, so a bare status() leaks the supervisor and its
+        // watched child on leader death.
+        let status = nub_core::node::spawn::status_forwarding_signals(&mut cmd)?;
         return Ok(nub_core::node::spawn::exit_code_from_status(&status));
     }
 
@@ -5081,7 +5084,19 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         // Strip below-floor version-gated flags just as the direct-spawn sites do.
         cmd.env("NODE_OPTIONS", existing);
     }
-    let status = cmd.status()?;
+    // NOT `cmd.status()`. Every other long-lived spawn in nub goes through a
+    // process-group + reaper path; watch was the sole exception, and it is the one
+    // that matters most: `node --watch` is a supervisor that by design never exits,
+    // and it spawns a watched grandchild of its own. A bare `status()` leaves both
+    // outside nub's group, so when the leader dies (a killed agent session, a test
+    // harness that gives up, a closed terminal) they reparent to launchd and run
+    // forever, each holding an fsevents watch on a source tree. They accumulate
+    // monotonically — 99 such orphans were found on the dev host, the oldest 17h
+    // old, none of them rustc or cargo. `status_forwarding_signals` is the
+    // signal-faithful equivalent of `status()`: own process group, the #480
+    // SIGKILL-on-leader reaper held across the wait, and terminating signals
+    // forwarded to the whole subtree.
+    let status = nub_core::node::spawn::status_forwarding_signals(&mut cmd)?;
 
     // PATH shim cleanup is handled once at the top level (see `run`).
     Ok(nub_core::node::spawn::exit_code_from_status(&status))

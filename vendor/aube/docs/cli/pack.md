@@ -2,6 +2,7 @@
 # `aube pack`
 
 - **Usage**: `aube pack [FLAGS]`
+- **Effect**: modifies state
 
 Create a publishable `.tgz` tarball from the current project
 

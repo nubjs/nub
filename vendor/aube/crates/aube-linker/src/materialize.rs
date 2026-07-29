@@ -701,10 +701,9 @@ impl Linker {
         // patched bytes live alongside the unpatched ones at a
         // distinct subdir (the graph hash callback is responsible for
         // making sure that's true).
-        let patch_key = pkg.spec_key();
-        if let Some(patch_text) = self.patches.get(&patch_key) {
+        if let Some((patch_key, patch_text)) = pkg.lookup_patch(&self.patches) {
             apply_multi_file_patch(&pkg_nm_dir, patch_text)
-                .map_err(|msg| Error::Patch(patch_key.clone(), msg))?;
+                .map_err(|msg| Error::Patch(patch_key, msg))?;
         }
 
         // Every file this package will ever have now exists, so this is

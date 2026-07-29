@@ -37,15 +37,14 @@ pub(crate) use materialize::{
     invalidate_stale_index_for_package, validate_index_key, validate_package_link_name,
 };
 pub use patches::Patches;
-pub use quarantine::strip_quarantine_from_tree;
 pub(crate) use patches::apply_multi_file_patch;
 pub use pool::default_linker_parallelism;
+pub use quarantine::strip_quarantine_from_tree;
 pub use sweep::{is_physical_importer, mkdirp, remove_dir_all_with_retry, sweep_stale_tmp_dirs};
 pub(crate) use sweep::{sweep_stale_top_level_entries, try_remove_entry};
 pub use sys::{
-    BinShimOptions, create_bin_shim, create_dir_link, is_native_executable,
-    is_native_executable_target, normalize_path, parse_posix_shim_target, remove_bin_shim,
-    validate_bin_name, validate_bin_target,
+    BinShimOptions, create_bin_shim, create_dir_link, is_native_executable, normalize_path,
+    parse_posix_shim_target, remove_bin_shim, validate_bin_name, validate_bin_target,
 };
 
 /// Strategy for arranging packages under `node_modules/`.
@@ -109,6 +108,11 @@ pub struct Linker {
     /// `allowBuilds` entries flipped, engine version bumped).
     pub(crate) store: Store,
     use_global_virtual_store: bool,
+    /// Exact dep paths that must be materialized into the project's
+    /// `.aube/` tree even while the rest of the graph uses the global
+    /// virtual store. This is reserved for compatibility transforms
+    /// that need to mutate one package without touching shared bytes.
+    project_local_dep_paths: rustc_hash::FxHashSet<String>,
     strategy: LinkStrategy,
     /// Per-`name@version` patch contents applied at materialize
     /// time. Empty when the project has no `pnpm.patchedDependencies`.
@@ -279,6 +283,16 @@ pub struct Linker {
     /// `.aube/node_modules/`, a blanket alias for every graph package. That
     /// replaced the former per-importer phantom-target hoist.
     disk_materialize: std::collections::HashSet<String>,
+    /// Dep paths the CALLER vouches are already correctly placed on disk, so
+    /// the hoisted pass may leave their directories alone instead of wiping
+    /// and refilling them.
+    ///
+    /// The vouch has to come from the driver, not from this crate: the only
+    /// trustworthy answer combines the package's content fingerprint against
+    /// the last install's with proof that the last link ran to completion,
+    /// and the linker sees neither. Empty for standalone callers and every
+    /// existing test → the hoisted pass is byte-for-byte unchanged.
+    reusable_hoisted: std::collections::HashSet<String>,
 }
 
 /// Strategy for linking files from the store to node_modules.

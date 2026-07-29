@@ -2,6 +2,7 @@
 # `aube peers check`
 
 - **Usage**: `aube peers check [--json]`
+- **Effect**: read-only
 
 Check for unmet and missing peer-dependency issues by reading the lockfile.
 

@@ -44,15 +44,15 @@ jobs:
     env:
       RUSTFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: namespacelabs/nscloud-cache-action@58bf6e08898e88803c098e2b522668541cd3b2e3 # v1.6.0
+      - uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1.6.1
         with:
           cache: rust
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1 # zizmor: ignore[cache-poisoning] PRs restore only; saves are restricted to main
         with:
-          cache: false
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
       - run: mise run build
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -73,15 +73,15 @@ jobs:
     env:
       RUSTFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: namespacelabs/nscloud-cache-action@58bf6e08898e88803c098e2b522668541cd3b2e3 # v1.6.0
+      - uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1.6.1
         with:
           cache: rust
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1 # zizmor: ignore[cache-poisoning] PRs restore only; saves are restricted to main
         with:
-          cache: false
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
       - run: node benchmarks/validate-results.mts
       - run: mise run test
       - run: mise run lint
@@ -99,6 +99,100 @@ jobs:
             exit 1
           fi
       - run: mise run docs:build
+
+  # Guards the embedding API surfaces `embed` introduced against
+  # unintended breaks:
+  #   * Rust library crates (aube-codes/aube-settings/aube-util) via
+  #     cargo-semver-checks, baselined against main.
+  #   * The C ABI export set via the cdylib's dynamic symbol table diffed
+  #     against the frozen crates/aube-ffi/abi-symbols.txt manifest.
+  # A Rust break is allowed only when the PR is explicitly marked
+  # breaking — a `!` in the conventional-commit title (feat(ffi)!: ...),
+  # a `BREAKING CHANGE:` footer in the body, or the `breaking-api`
+  # label — the same signals that drive release-plz's major bump, so the
+  # gate and the version bump agree.
+  # Symbol drift always blocks (keeps the manifest honest); removing an
+  # export shows as a manifest deletion in the diff and must ride a
+  # breaking PR.
+  api-stability:
+    # PR-time gate only: the checks read `github.event.pull_request.*` and
+    # baseline against main, which is meaningless on push/tag/dispatch runs
+    # (those fields are undefined there). `final` treats the resulting
+    # `skipped` as a pass.
+    if: github.event_name == 'pull_request'
+    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=aube-rust-linux
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1.6.1
+        with:
+          cache: rust
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1 # zizmor: ignore[cache-poisoning] PRs restore only; saves are restricted to main
+        with:
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
+      - name: Fetch semver baseline
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+      - name: Determine breaking-change override
+        id: gate
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          breaking=false
+          # conventional-commit breaking marker: type(scope)!: or type!:
+          if printf '%s' "$PR_TITLE" | grep -qE '^[a-z]+(\([^)]*\))?!:'; then breaking=true; fi
+          # conventional-commit breaking footer in the body (release-plz
+          # honors `BREAKING CHANGE:` / `BREAKING-CHANGE:` for the major bump).
+          if printf '%s' "$PR_BODY" | grep -qE '^BREAKING[ -]CHANGE:'; then breaking=true; fi
+          if printf '%s' "$PR_LABELS" | grep -q '"breaking-api"'; then breaking=true; fi
+          echo "breaking=$breaking" >> "$GITHUB_OUTPUT"
+          echo "breaking override: $breaking"
+      - name: Rust embedding API — cargo-semver-checks
+        id: semver
+        continue-on-error: true
+        # Version pinned in bin/cargo-semver-checks (mise tool-stub).
+        run: |
+          ./bin/cargo-semver-checks semver-checks \
+            --baseline-rev origin/main \
+            --package aube-codes --package aube-settings --package aube-util
+      - name: C ABI — frozen export set
+        id: ffi
+        continue-on-error: true
+        run: |
+          cargo build --locked --profile ffi -p aube-ffi
+          grep -vE '^[[:space:]]*(#|$)' crates/aube-ffi/abi-symbols.txt | sort -u > /tmp/abi-expected.txt
+          nm -D --defined-only --extern-only target/ffi/libaube_ffi.so \
+            | awk '{ print $3 }' | grep '^aube_' | sort -u > /tmp/abi-actual.txt
+          diff -u /tmp/abi-expected.txt /tmp/abi-actual.txt
+      - name: Enforce API stability
+        if: always()
+        env:
+          SEMVER: ${{ steps.semver.outcome }}
+          FFI: ${{ steps.ffi.outcome }}
+          BREAKING: ${{ steps.gate.outputs.breaking }}
+        run: |
+          fail=0
+          if [ "$FFI" = failure ]; then
+            echo "::error::C ABI exports drifted from crates/aube-ffi/abi-symbols.txt. Update the manifest to match; removing or renaming an export is a breaking change — also mark the PR breaking (a '!' in the title or the 'breaking-api' label)."
+            fail=1
+          fi
+          if [ "$SEMVER" = failure ]; then
+            if [ "$BREAKING" = true ]; then
+              echo "::notice::Rust embedding API compatibility check failed; allowed because this PR is marked breaking. Inspect the cargo-semver-checks output to confirm the failure is expected."
+            else
+              echo "::error::Rust embedding API compatibility check failed. Inspect the cargo-semver-checks output above. If it reports an intentional breaking change, mark the PR breaking: a '!' in the conventional-commit title (e.g. feat(settings)!: ...), a 'BREAKING CHANGE:' footer in the body, or the 'breaking-api' label."
+              fail=1
+            fi
+          fi
+          exit $fail
 
   # BATS integration shards. Linux runs 4 shards (matches Buildkite),
   # macOS runs 2. Keep these on GitHub-hosted runners: the jail-build
@@ -148,7 +242,7 @@ jobs:
       AUBE_BATS_SHARD_INDEX: ${{ matrix.shard }}
       AUBE_BATS_SHARD_COUNT: ${{ matrix.count }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install GNU parallel (ubuntu)
@@ -157,9 +251,9 @@ jobs:
       - name: Install GNU parallel (macos)
         if: startsWith(matrix.os, 'macos')
         run: brew install parallel
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1 # zizmor: ignore[cache-poisoning] PRs restore only; saves are restricted to main
         with:
-          cache: false
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: aube-${{ matrix.os }}
@@ -193,7 +287,7 @@ jobs:
     env:
       AUBE_CI_OS: ${{ startsWith(matrix.os, 'ubuntu') && 'linux' || 'macos' }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install GNU parallel (ubuntu)
@@ -202,9 +296,9 @@ jobs:
       - name: Install GNU parallel (macos)
         if: startsWith(matrix.os, 'macos')
         run: brew install parallel
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1 # zizmor: ignore[cache-poisoning] PRs restore only; saves are restricted to main
         with:
-          cache: false
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: aube-${{ matrix.os }}
@@ -228,7 +322,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 # zizmor: ignore[cache-poisoning] save-if gates writes to main; PRs read-only
@@ -244,6 +338,8 @@ jobs:
   # Aggregator that required-status-checks can target. If any upstream job
   # failed, was cancelled, or was skipped, this step exits non-zero so the PR is
   # blocked. Lets the branch-protection rule depend on one name instead of ten.
+  # Exception: jobs in SKIP_OK below (api-stability, a PR-only gate) are allowed
+  # to skip on push/tag/dispatch runs without failing the aggregate.
   final:
     needs:
       - build
@@ -251,6 +347,7 @@ jobs:
       - bats
       - bats-serial
       - windows
+      - api-stability
     runs-on: namespace-profile-endev-linux-amd64
     timeout-minutes: 2
     permissions: {}
@@ -267,12 +364,18 @@ jobs:
           import os
           import sys
 
+          # Jobs whose `if:` legitimately skips them on non-PR runs. A skip
+          # here is a pass; every other job must actually succeed.
+          SKIP_OK = {"api-stability"}
+
           needs = json.loads(os.environ["NEEDS_JSON"])
           failed = False
           for name, data in sorted(needs.items()):
               result = data.get("result", "unknown")
               if result == "success":
                   print(f"::notice::{name}: {result}")
+              elif result == "skipped" and name in SKIP_OK:
+                  print(f"::notice::{name}: {result} (allowed to skip)")
               else:
                   print(f"::error::{name}: {result}")
                   failed = True

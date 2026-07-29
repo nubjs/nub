@@ -322,7 +322,7 @@ async fn run_list() -> miette::Result<()> {
             None => println!("node: none found on PATH and no project pin"),
         },
     }
-    if let Some(bin) = &ctx.node_bin {
+    if let Some(bin) = &ctx.node_program {
         println!("  bin: {}", bin.display());
     }
 

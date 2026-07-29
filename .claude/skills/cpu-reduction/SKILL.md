@@ -10,10 +10,13 @@ description: >-
   agent's surviving background build) holding target-dir LOCKS and burning cores,
   plus stale per-worktree `target/` dirs eating tens of GB of disk; (2) orphaned
   NODE test processes from dead `cargo test`/fixture harnesses, which are the
-  bigger CPU contributor. Encodes the measure→identify→preserve→sweep→verify
-  loop, what is safe to kill vs must be kept, and the gotchas (kill silently
-  no-ops, reparenting needs multiple passes, load average lags). For PREVENTING
-  orphan builds in the first place, see the `rust-build-hygiene` skill.
+  bigger CPU contributor; (3) orphaned SYNTHETIC LOAD GENERATORS — `while :; do
+  :; done` shells a probe spawned to make a contended measurement and never
+  reaped, which drive load into the hundreds. Encodes the
+  measure→identify→preserve→sweep→verify loop, what is safe to kill vs must be
+  kept, and the gotchas (kill silently no-ops, reparenting needs multiple passes,
+  load average lags, `pgrep -f` can silently see nothing). For PREVENTING orphan
+  builds in the first place, see the `rust-build-hygiene` skill.
 metadata:
   internal: true
 ---
@@ -28,6 +31,7 @@ before sweeping — do not assume.
 | --- | --- | --- | --- |
 | **Old Rust builds** | a build hangs on `Blocking waiting for file lock`; a few `rustc`/`cargo`/`lld` pegged; disk filling | LOCK contention (stalls other builds) + CPU + tens of GB of `target/` disk | detached/orphaned builds that outlived their launcher; abandoned worktree `target/` dirs |
 | **Orphaned node tests** | load floor sits ~20 with nothing building | CPU (the load) + swap (memory ballast) | `node`/`tsx`/`esbuild`/`tsc -w` reparented to launchd when their `cargo test`/fixture harness died |
+| **Orphaned load generators** | load in the **hundreds**; N identical `/bin/zsh` at 25–70% each, consecutive PIDs, same start second | CPU — starves every build on the box | a probe spawned `(while :; do :; done) &` to force a contended measurement, then died before its own cleanup line ran |
 
 The headline lesson (verified 2026-07-26): **a high load FLOOR with nothing building is almost never
 active compilation — it is orphaned node test processes.** A single sweep that day killed 219
@@ -98,6 +102,44 @@ worktree is abandoned (merged/dead branch, no running build) first.
 Rare (Rust builds are noisy but they *finish*), but if `ps` shows a long-`etime` `rustc`/`cc1plus`/
 `lld` at high %cpu with no parent cargo, it's an orphan from a killed build — safe to `kill -9` once
 you've confirmed it's not part of a live build tree (check its `ppid` chain).
+
+## 2d. Orphaned synthetic load generators (load in the hundreds)
+
+A probe that needs a *contended* measurement sometimes manufactures the contention:
+
+```sh
+for c in 1 2 3 4 5 6 7 8 9 10; do (while :; do :; done) & done
+LOADPIDS=$(jobs -p)
+... measure ...
+kill $LOADPIDS 2>/dev/null      # <-- never runs if the agent dies first
+```
+
+When the agent is interrupted before that last line, the busy-loops reparent to launchd and spin
+**forever**. Observed 2026-07-28: ten of them at ~65% CPU each — **234% of a 10-core box** — for
+3h55m, driving load to **277** and starving ~28 worktrees' builds. Every timing taken during that
+window was garbage.
+
+Signature (all four together — do not kill on `/bin/zsh` alone):
+```sh
+ps -Ao pid=,ppid=,%cpu=,etime=,comm= | awk '$2==1 && $3>20 && $5=="/bin/zsh"'
+ps -o command= -p <pid>          # full argv reveals the `while :; do :; done` and its dead cleanup
+pgrep -P <pid>                   # NO children — it is not wrapping a real build
+```
+Consecutive PIDs + an identical start second + `PPID=1` + no children + a spinning loop in the argv
+= safe to `kill -9`. **Read the full argv first**: an agent's own background `cargo` also runs as
+`/bin/zsh -c source <snapshot> && …`, and that one *does* have children and must be left alone.
+
+**Diagnostic trap that wasted a cycle here:** `pgrep -f` returned **0 for everything** — including
+`claude`, which was certainly running — because it could not read other processes' argv under the
+sandbox. It reports absence, not an error. Cross-check with `ps aux | grep` before concluding
+"nothing is running"; a `pgrep` zero is not evidence.
+
+**Prevention (belongs in the probe, not here):** any script spawning load generators must trap its
+own cleanup the moment it captures the PIDs, so an interrupted agent still reaps them:
+```sh
+LOADPIDS=$(jobs -p)
+trap 'kill $LOADPIDS 2>/dev/null' EXIT INT TERM
+```
 
 ## 3. Orphaned node test processes (the load floor)
 

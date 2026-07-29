@@ -84,13 +84,9 @@ pub(super) fn prefer_non_vulnerable_pick<'a>(
         } else {
             &mut best_undated
         };
-        let replace = tier.as_ref().is_none_or(|(cur, _)| {
-            if pick_lowest {
-                version < *cur
-            } else {
-                version > *cur
-            }
-        });
+        // Rank within a tier, never across one: `outranks` decides
+        // deprecation-then-direction, the tier decides age.
+        let replace = crate::semver_util::outranks(&version, meta, tier.as_ref(), pick_lowest);
         if replace {
             *tier = Some((version, meta));
         }

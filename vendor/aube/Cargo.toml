@@ -31,7 +31,7 @@ inherits = "release"
 panic = "unwind"
 
 [workspace.package]
-version = "1.32.0"
+version = "1.35.0"
 edition = "2024"
 # DELIBERATE NUB FORK DELTA — do not converge to upstream on a sync.
 # Upstream holds this at 1.91 so mise (which embeds aube's library crates and
@@ -67,7 +67,9 @@ yaml_serde = "0.10.4"
 # yamlpatch uses yaml_serde for patch payloads; serde_yaml remains only
 # for the manual block injector that works around nested Add formatting.
 yamlpatch = "1.25"
-yamlpath = "1.25"
+# yamlpath 1.28 does not declare the Rust 1.97 requirement it inherits
+# from tree-sitter-iter 1.28, so resolver 3 cannot avoid it.
+yamlpath = ">=1.25, <1.28"
 serde_yaml = "0.9"
 sonic-rs = "0.5"
 toml = "1.1"
@@ -102,7 +104,11 @@ reflink-copy = "0.1"
 # applied to native addons as they land in the CAS. The `addon` feature
 # unwraps a napi `--compress` hybrid back to the raw `.node` before the
 # kernel re-compresses it transparently.
-decmpfs = { version = "0.1", features = ["addon"] }
+# Pinned to 0.1.0: 0.1.2's FICLONE reflink path types the ioctl request as
+# `libc::c_ulong`, which is `libc::Ioctl` on glibc but `c_int` on musl, so it
+# fails to compile for *-unknown-linux-musl. Unpin once
+# https://github.com/SocketDev/decmpfs releases a fix.
+decmpfs = { version = "=0.1.0", features = ["addon"] }
 glob = "0.3"
 # BurntSushi's gitignore matcher (from ripgrep). Used by `aube pack` /
 # `aube publish` to honor `.npmignore` / `.gitignore` with full
@@ -152,7 +158,7 @@ libc = "0.2"
 seccompiler = "0.5"
 
 # Progress UI
-clx = "2"
+clx = "3"
 
 # Logging
 tracing = "0.1"
@@ -190,19 +196,19 @@ diffy = "0.5"
 # Internal crates — `version` is required so `cargo publish` can resolve
 # transitive crate dependencies via crates.io. release-plz keeps these
 # versions in sync with [workspace.package].version during release PRs.
-aube = { path = "crates/aube", version = "1.32.0", default-features = false }
-aube-codes = { path = "crates/aube-codes", version = "1.32.0" }
-aube-settings = { path = "crates/aube-settings", version = "1.32.0" }
-aube-resolver = { path = "crates/aube-resolver", version = "1.32.0" }
-aube-registry = { path = "crates/aube-registry", version = "1.32.0" }
-aube-store = { path = "crates/aube-store", version = "1.32.0" }
-aube-linker = { path = "crates/aube-linker", version = "1.32.0" }
-aube-lockfile = { path = "crates/aube-lockfile", version = "1.32.0" }
-aube-manifest = { path = "crates/aube-manifest", version = "1.32.0" }
-aube-runtime = { path = "crates/aube-runtime", version = "1.32.0" }
-aube-scripts = { path = "crates/aube-scripts", version = "1.32.0" }
-aube-workspace = { path = "crates/aube-workspace", version = "1.32.0" }
-aube-util = { path = "crates/aube-util", version = "1.32.0" }
+aube = { path = "crates/aube", version = "1.35.0", default-features = false }
+aube-codes = { path = "crates/aube-codes", version = "1.35.0" }
+aube-settings = { path = "crates/aube-settings", version = "1.35.0" }
+aube-resolver = { path = "crates/aube-resolver", version = "1.35.0" }
+aube-registry = { path = "crates/aube-registry", version = "1.35.0" }
+aube-store = { path = "crates/aube-store", version = "1.35.0" }
+aube-linker = { path = "crates/aube-linker", version = "1.35.0" }
+aube-lockfile = { path = "crates/aube-lockfile", version = "1.35.0" }
+aube-manifest = { path = "crates/aube-manifest", version = "1.35.0" }
+aube-runtime = { path = "crates/aube-runtime", version = "1.35.0" }
+aube-scripts = { path = "crates/aube-scripts", version = "1.35.0" }
+aube-workspace = { path = "crates/aube-workspace", version = "1.35.0" }
+aube-util = { path = "crates/aube-util", version = "1.35.0" }
 
 [profile.dev]
 debug = 1

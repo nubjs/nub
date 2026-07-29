@@ -309,7 +309,7 @@ impl InstallArgs {
             // every install — neither needs the caller to opt in.
             osv_transitive_check: false,
             control: super::InstallControl::default(),
-            embedder_node_bin_dir: None,
+            embedder_runtime: None,
         }
     }
 }
@@ -445,12 +445,14 @@ pub struct InstallOptions {
     /// embedders can select structured events or silence independently for
     /// each concurrent install.
     pub control: super::InstallControl,
-    /// Directory containing the `node` executable an embedding host wants
-    /// lifecycle scripts to run on. When set, it seeds the install's runtime
-    /// slot ([`crate::runtime::seed_embedder_node`]) so scripts spawn on that
-    /// node and find it on PATH — aube does no runtime resolution of its own.
-    /// `None` keeps aube's normal runtime switching / PATH fallback.
-    pub embedder_node_bin_dir: Option<std::path::PathBuf>,
+    /// How an embedding host wants Node invoked for lifecycle scripts. When
+    /// set, it seeds the install's runtime slot
+    /// ([`crate::runtime::seed_install_embedder_runtime`]) so scripts invoke
+    /// that Node and find it on PATH — aube does no runtime resolution of its
+    /// own. Takes precedence over any process-wide
+    /// [`crate::runtime::set_embedder_runtime`]. `None` falls back to the
+    /// process-wide runtime, else aube's normal switching / PATH fallback.
+    pub embedder_runtime: Option<crate::runtime::EmbedderRuntime>,
 }
 
 impl InstallOptions {
@@ -495,7 +497,7 @@ impl InstallOptions {
             // fallback) instead of an unconditional API hit.
             osv_transitive_check: false,
             control: super::InstallControl::default(),
-            embedder_node_bin_dir: None,
+            embedder_runtime: None,
         }
     }
 }

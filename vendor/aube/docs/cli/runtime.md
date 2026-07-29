@@ -3,6 +3,7 @@
 
 - **Usage**: `aube runtime <SUBCOMMAND>`
 - **Aliases**: `rt`
+- **Effect**: read-only
 
 Manage the project's Node.js runtime (pin, install, inspect)
 

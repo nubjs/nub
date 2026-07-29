@@ -8,10 +8,41 @@
 pub mod selector;
 pub mod topo;
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub use aube_manifest::workspace::WorkspaceConfig;
 pub use selector::{Selector, WorkspacePkg};
+
+/// Whether workspace globs may select packages outside the workspace root.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WorkspaceBoundary {
+    /// Preserve pnpm-compatible behavior, including patterns such as `../**`.
+    #[default]
+    AllowOutsideRoot,
+    /// Reject absolute and parent-relative patterns.
+    ///
+    /// Embedding hosts that discover projects inside a preselected repository
+    /// should use this mode so workspace configuration cannot expand the scan
+    /// beyond that repository.
+    ConfinedToRoot,
+}
+
+/// Controls workspace package discovery.
+#[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
+pub struct WorkspaceDiscoveryOptions {
+    /// Boundary applied to positive and negative workspace patterns.
+    pub boundary: WorkspaceBoundary,
+}
+
+impl WorkspaceDiscoveryOptions {
+    /// Restrict discovery to packages beneath the workspace root.
+    pub fn confined_to_root() -> Self {
+        Self {
+            boundary: WorkspaceBoundary::ConfinedToRoot,
+        }
+    }
+}
 
 /// Whether `project_dir` is the root of a workspace project — i.e.
 /// the user has set up workspace mode via `aube-workspace.yaml` /
@@ -47,13 +78,28 @@ pub fn is_workspace_project_root(project_dir: &Path) -> bool {
 /// 2. `package.json#workspaces` (yarn/npm/bun shape — array form or the
 ///    `{ packages: [...] }` object form).
 pub fn find_workspace_packages(project_dir: &Path) -> Result<Vec<PathBuf>, Error> {
+    find_workspace_packages_with_options(project_dir, WorkspaceDiscoveryOptions::default())
+}
+
+/// Discover workspace package directories with host-selected policy.
+///
+/// This has the same source precedence and matching behavior as
+/// [`find_workspace_packages`]. The options only constrain behavior that an
+/// embedding host may need to make stricter than the package-manager CLI.
+/// [`WorkspaceBoundary::ConfinedToRoot`] returns canonical package paths so a
+/// validated symlink cannot be redirected before the host consumes the result.
+pub fn find_workspace_packages_with_options(
+    project_dir: &Path,
+    options: WorkspaceDiscoveryOptions,
+) -> Result<Vec<PathBuf>, Error> {
     let config = WorkspaceConfig::load(project_dir).map_err(|e| match e {
         aube_manifest::Error::Io(p, e) => Error::Io(p, e),
         aube_manifest::Error::YamlParse(p, e) => Error::Parse(p, e),
         aube_manifest::Error::Parse(pe) => Error::ParseDiag(pe),
     })?;
 
-    let patterns: Vec<String> = if !config.packages.is_empty() {
+    let workspace_yaml = aube_manifest::workspace::workspace_yaml_existing(project_dir);
+    let patterns: Vec<String> = if workspace_yaml.is_some() {
         config.packages.clone()
     } else {
         package_json_workspace_patterns(project_dir)?
@@ -63,27 +109,40 @@ pub fn find_workspace_packages(project_dir: &Path) -> Result<Vec<PathBuf>, Error
         return Ok(vec![]);
     }
 
+    let definition_path = workspace_yaml.unwrap_or_else(|| project_dir.join("package.json"));
+    let confined_root = (options.boundary == WorkspaceBoundary::ConfinedToRoot)
+        .then(|| {
+            project_dir
+                .canonicalize()
+                .map_err(|error| Error::Io(project_dir.to_path_buf(), error))
+        })
+        .transpose()?;
     let mut neg_matchers = Vec::new();
     let mut positives = Vec::new();
     for raw in &patterns {
-        if let Some(rest) = raw.strip_prefix('!') {
-            let mk = |p: &str| {
-                glob::Pattern::new(p).map_err(|e| {
-                    Error::Parse(project_dir.join("pnpm-workspace.yaml"), e.to_string())
-                })
-            };
-            // pnpm uses micromatch where `**` matches zero-or-more
-            // path components, so `!**/example/**` excludes the
-            // directory `example` itself. The `glob` crate requires
-            // `**` to consume at least one component, so emit a
-            // companion matcher with the trailing `/**` stripped to
-            // catch the directory itself in addition to its descendants.
-            neg_matchers.push(mk(rest)?);
-            if let Some(self_form) = rest.strip_suffix("/**") {
-                neg_matchers.push(mk(self_form)?);
+        let (negated, pattern) = raw
+            .strip_prefix('!')
+            .map_or((false, raw.as_str()), |pattern| (true, pattern));
+        for expanded in expand_braces(pattern) {
+            validate_workspace_pattern(&definition_path, &expanded, options.boundary)?;
+            if negated {
+                let mk = |p: &str| {
+                    glob::Pattern::new(p)
+                        .map_err(|e| Error::Parse(definition_path.clone(), e.to_string()))
+                };
+                // pnpm uses micromatch where `**` matches zero-or-more
+                // path components, so `!**/example/**` excludes the
+                // directory `example` itself. The `glob` crate requires
+                // `**` to consume at least one component, so emit a
+                // companion matcher with the trailing `/**` stripped to
+                // catch the directory itself in addition to its descendants.
+                neg_matchers.push(mk(&expanded)?);
+                if let Some(self_form) = expanded.strip_suffix("/**") {
+                    neg_matchers.push(mk(self_form)?);
+                }
+            } else {
+                positives.push(expanded);
             }
-        } else {
-            positives.push(raw.as_str());
         }
     }
 
@@ -97,7 +156,7 @@ pub fn find_workspace_packages(project_dir: &Path) -> Result<Vec<PathBuf>, Error
     let mut seen = std::collections::HashSet::new();
     let mut packages = Vec::new();
     for pattern in &positives {
-        for pkg_dir in expand_workspace_pattern(project_dir, pattern)? {
+        for pkg_dir in expand_workspace_pattern(project_dir, &definition_path, pattern)? {
             // `pathdiff` produces the as-written-from-`project_dir`
             // form (`../sibling` for parent-tree matches), which is
             // what the negation matcher was compiled against. Falling
@@ -109,8 +168,25 @@ pub fn find_workspace_packages(project_dir: &Path) -> Result<Vec<PathBuf>, Error
             if neg_matchers.iter().any(|m| m.matches_path(rel)) {
                 continue;
             }
-            if seen.insert(pkg_dir.clone()) {
-                packages.push(pkg_dir);
+            let package_path = if let Some(confined_root) = &confined_root {
+                let canonical_package = pkg_dir
+                    .canonicalize()
+                    .map_err(|error| Error::Io(pkg_dir.clone(), error))?;
+                if !canonical_package.starts_with(confined_root) {
+                    return Err(Error::Parse(
+                        definition_path.clone(),
+                        format!(
+                            "workspace package {} resolves outside the workspace root",
+                            pkg_dir.display()
+                        ),
+                    ));
+                }
+                canonical_package
+            } else {
+                pkg_dir
+            };
+            if seen.insert(package_path.clone()) {
+                packages.push(package_path);
             }
         }
     }
@@ -119,9 +195,83 @@ pub fn find_workspace_packages(project_dir: &Path) -> Result<Vec<PathBuf>, Error
     Ok(packages)
 }
 
-fn expand_workspace_pattern(project_dir: &Path, pattern: &str) -> Result<Vec<PathBuf>, Error> {
+fn validate_workspace_pattern(
+    definition_path: &Path,
+    pattern: &str,
+    boundary: WorkspaceBoundary,
+) -> Result<(), Error> {
+    if boundary == WorkspaceBoundary::ConfinedToRoot
+        && (Path::new(pattern).is_absolute()
+            || Path::new(pattern)
+                .components()
+                .any(|component| component == Component::ParentDir))
+    {
+        return Err(Error::Parse(
+            definition_path.to_path_buf(),
+            format!(
+                "workspace pattern {pattern:?} must be relative and cannot escape the workspace root"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn expand_braces(pattern: &str) -> Vec<String> {
+    let mut depth = 0;
+    let mut open = None;
+    let mut commas = Vec::new();
+    for (index, character) in pattern.char_indices() {
+        match character {
+            '{' => {
+                if depth == 0 {
+                    open = Some(index);
+                    commas.clear();
+                }
+                depth += 1;
+            }
+            ',' if depth == 1 => commas.push(index),
+            '}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    let Some(open_index) = open else {
+                        continue;
+                    };
+                    if commas.is_empty() {
+                        open = None;
+                        continue;
+                    }
+                    let mut boundaries = Vec::with_capacity(commas.len() + 2);
+                    boundaries.push(open_index + 1);
+                    boundaries.extend(commas.iter().map(|comma| comma + 1));
+                    boundaries.push(index + 1);
+                    return boundaries
+                        .windows(2)
+                        .flat_map(|window| {
+                            let end = window[1] - 1;
+                            let expanded = format!(
+                                "{}{}{}",
+                                &pattern[..open_index],
+                                &pattern[window[0]..end],
+                                &pattern[index + 1..]
+                            );
+                            expand_braces(&expanded)
+                        })
+                        .collect();
+                }
+            }
+            _ => {}
+        }
+    }
+    vec![pattern.to_string()]
+}
+
+fn expand_workspace_pattern(
+    project_dir: &Path,
+    definition_path: &Path,
+    pattern: &str,
+) -> Result<Vec<PathBuf>, Error> {
     let matcher = glob::Pattern::new(pattern)
-        .map_err(|e| Error::Parse(project_dir.join("pnpm-workspace.yaml"), e.to_string()))?;
+        .map_err(|e| Error::Parse(definition_path.to_path_buf(), e.to_string()))?;
     if !pattern.contains("**") {
         return Ok(glob_workspace_pattern(project_dir, pattern));
     }
@@ -212,7 +362,6 @@ fn workspace_pattern_root(project_dir: &Path, pattern: &str) -> PathBuf {
     // same way they do for in-tree patterns.
     let mut anchor = PathBuf::from(project_dir);
     for component in Path::new(dir_prefix).components() {
-        use std::path::Component;
         match component {
             Component::ParentDir => {
                 anchor.pop();
@@ -335,6 +484,131 @@ mod tests {
             names(found),
             ["example"].iter().map(|s| s.to_string()).collect()
         );
+    }
+
+    #[test]
+    fn expands_brace_workspace_patterns() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path().join("package.json"),
+            r#"{"workspaces":["{apps,packages}/{web,lib}","!{apps,packages}/excluded/**"]}"#,
+        );
+        write(&dir.path().join("apps/web/package.json"), "{}");
+        write(&dir.path().join("packages/lib/package.json"), "{}");
+        write(
+            &dir.path().join("packages/excluded/example/package.json"),
+            "{}",
+        );
+
+        let found = find_workspace_packages(dir.path()).unwrap();
+        assert_eq!(
+            names(found),
+            ["lib", "web"].iter().map(|s| s.to_string()).collect()
+        );
+    }
+
+    #[test]
+    fn confined_discovery_rejects_parent_relative_patterns() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - '../packages/**'\n",
+        );
+
+        let err = find_workspace_packages_with_options(
+            dir.path(),
+            WorkspaceDiscoveryOptions::confined_to_root(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::Parse(_, _)));
+        assert!(err.to_string().contains("cannot escape the workspace root"));
+    }
+
+    #[test]
+    fn confined_discovery_validates_expanded_brace_alternatives() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path().join("package.json"),
+            r#"{"workspaces":["{../outside,packages}/*"]}"#,
+        );
+
+        let err = find_workspace_packages_with_options(
+            dir.path(),
+            WorkspaceDiscoveryOptions::confined_to_root(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::Parse(_, _)));
+        assert!(err.to_string().contains("../outside/*"));
+        assert!(err.to_string().contains("cannot escape the workspace root"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_discovery_rejects_symlinks_outside_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        let outside = dir.path().join("outside");
+        write(
+            &workspace.join("package.json"),
+            r#"{"workspaces":["packages/*"]}"#,
+        );
+        write(&outside.join("package.json"), "{}");
+        std::fs::create_dir_all(workspace.join("packages")).unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join("packages/linked")).unwrap();
+
+        let err = find_workspace_packages_with_options(
+            &workspace,
+            WorkspaceDiscoveryOptions::confined_to_root(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::Parse(_, _)));
+        assert!(err.to_string().contains("resolves outside"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_discovery_returns_the_validated_canonical_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        let package = workspace.join("packages/app");
+        let link = workspace.join("aliases/app");
+        let outside = dir.path().join("outside");
+        write(
+            &workspace.join("package.json"),
+            r#"{"workspaces":["aliases/*"]}"#,
+        );
+        write(&package.join("package.json"), "{}");
+        write(&outside.join("package.json"), "{}");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&package, &link).unwrap();
+
+        let found = find_workspace_packages_with_options(
+            &workspace,
+            WorkspaceDiscoveryOptions::confined_to_root(),
+        )
+        .unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        assert_eq!(found, vec![package.canonicalize().unwrap()]);
+        assert_ne!(found, vec![link.canonicalize().unwrap()]);
+    }
+
+    #[test]
+    fn empty_workspace_yaml_remains_authoritative() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("pnpm-workspace.yaml"), "packages: []\n");
+        write(
+            &dir.path().join("package.json"),
+            r#"{"workspaces":["packages/*"]}"#,
+        );
+        write(&dir.path().join("packages/app/package.json"), "{}");
+
+        let found = find_workspace_packages(dir.path()).unwrap();
+        assert!(found.is_empty());
     }
 
     #[test]

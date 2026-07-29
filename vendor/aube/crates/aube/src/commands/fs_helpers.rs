@@ -25,16 +25,33 @@ pub(crate) fn format_virtual_store_display_prefix(
     format!("{}/", aube_dir.display())
 }
 
+/// Whether metadata describes a POSIX symlink, Windows symlink, or NTFS
+/// junction. Rust reports junctions as directories rather than symlinks, so
+/// Windows callers must also inspect the reparse-point attribute before
+/// traversing a path.
+pub(crate) fn is_link_or_junction_metadata(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
+}
+
 /// Remove an existing file/dir/symlink at the given path, if present.
 ///
-/// Windows quirk: directory junctions and directory symlinks report as
-/// symlinks via `symlink_metadata`, but `std::fs::remove_file` returns
-/// `Access is denied (os error 5)` for them — the Win32 `DeleteFile`
-/// syscall only works on file-shaped entries. The link entry has to be
-/// torn down with `RemoveDirectory` (= `std::fs::remove_dir`), which is
-/// non-recursive and so leaves the junction target untouched. Falling
-/// back on `remove_file` failure keeps every other platform on the
-/// usual single-syscall path.
+/// Windows quirk: directory symlinks report as symlinks, while NTFS junctions
+/// report as directories. `remove_dir_all` handles the latter without
+/// traversing the reparse point. For directory symlinks, `remove_file` may
+/// return `Access is denied (os error 5)` because Win32 requires
+/// `RemoveDirectory` for directory-shaped links, so fall back to
+/// `std::fs::remove_dir`.
 pub(crate) fn remove_existing(path: &std::path::Path) -> miette::Result<()> {
     let Ok(md) = path.symlink_metadata() else {
         return Ok(());
@@ -84,6 +101,9 @@ mod tests {
         #[cfg(windows)]
         aube_linker::create_dir_link(&target, &link).unwrap();
 
+        assert!(is_link_or_junction_metadata(
+            &link.symlink_metadata().unwrap()
+        ));
         remove_existing(&link).unwrap();
         assert!(!link.exists());
         assert!(

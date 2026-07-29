@@ -2,6 +2,7 @@
 # `aube approve-builds`
 
 - **Usage**: `aube approve-builds [--all] [-g --global] [PKG]…`
+- **Effect**: modifies state
 
 Approve ignored dependency build scripts.
 

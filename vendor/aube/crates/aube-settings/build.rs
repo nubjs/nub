@@ -491,7 +491,10 @@ fn default_expr(name: &str, def: &SettingDef, kind: Kind, rust_ty: &str) -> Opti
     // in aube or routed through a crate-specific helper so callers
     // still need to distinguish "not configured" from "configured to
     // this literal value".
-    if matches!(name, "preferFrozenLockfile" | "storeDir" | "nodeVersion") {
+    if matches!(
+        name,
+        "preferFrozenLockfile" | "storeDir" | "cacheDir" | "nodeVersion"
+    ) {
         return None;
     }
     let raw = def.default.trim();
