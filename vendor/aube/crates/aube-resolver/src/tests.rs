@@ -247,9 +247,10 @@ fn age_gate_names_missing_publish_times_as_the_cause() {
 #[test]
 fn age_gate_with_a_partially_dated_packument_is_not_the_missing_times_case() {
     let mut packument = make_packument("lodash", &["4.17.20", "4.17.21"], "4.17.21");
-    packument
-        .time
-        .insert("4.17.20".to_string(), "2026-07-01T00:00:00.000Z".to_string());
+    packument.time.insert(
+        "4.17.20".to_string(),
+        "2026-07-01T00:00:00.000Z".to_string(),
+    );
     let task = ResolveTask {
         name: "lodash".into(),
         range: "^4".into(),
@@ -2572,9 +2573,18 @@ fn pick_version_treats_bookkeeping_only_time_map_as_timeless() {
         "2019-06-01T00:00:00.000Z".to_string(),
     );
     assert_eq!(
-        pick_version(&p, "^1.0.0", None, false, Some(cutoff), None, true, |_, _| false)
-            .unwrap()
-            .version,
+        pick_version(
+            &p,
+            "^1.0.0",
+            None,
+            false,
+            Some(cutoff),
+            None,
+            true,
+            |_, _| false
+        )
+        .unwrap()
+        .version,
         "1.1.0"
     );
 }
