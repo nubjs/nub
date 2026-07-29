@@ -84,9 +84,12 @@ pub fn pick_version_for_add<'a>(
 /// `resolution-mode=time-based` for direct deps. `cutoff` filters out
 /// versions whose registry publish time is later than the cutoff
 /// (lexicographic compare on ISO-8601 UTC strings, which sort
-/// correctly). When the packument has no `time` entry for a version
-/// (e.g. abbreviated corgi payload in `Highest` mode), the cutoff is
-/// ignored and the version stays eligible.
+/// correctly). When the packument carries no `time` entry for a version
+/// the cutoff FAILS CLOSED rather than waving the version through — an
+/// undeterminable publish age must not silently disable the gate
+/// (#581) — except where the packument's `modified` timestamp is itself
+/// at or before the cutoff, which proves every version in the document
+/// is old enough. See `passes_effective_cutoff` for the three cases.
 ///
 /// `strict` controls fallback when the cutoff filters out every
 /// satisfying version: with `strict=true` we return `None` and the
@@ -163,15 +166,39 @@ pub(crate) fn pick_version<'a>(
         }
     };
 
+    // Whether the packument carries per-version publish times at all. npm's
+    // FULL `time` map always includes the `created`/`modified` bookkeeping keys
+    // alongside the version keys, so a raw `is_empty()` would misread a mirror
+    // serving only those as "has times, with holes" and gate every version.
+    // Keyed on the presence of any non-bookkeeping key instead.
+    let has_version_times = packument
+        .time
+        .keys()
+        .any(|k| k != "created" && k != "modified");
+
     // Does `ver` clear `effective` (the cutoff that applies to it)?
-    // `None` => no wall, keep the version. Missing time => keep it: we'd
-    // rather risk a slightly newer transitive than fail to resolve the
-    // range entirely.
+    // `None` => no wall, keep the version. A missing publish time is NOT a
+    // silent bypass (#581): the gate's guarantee is only as strong as the
+    // metadata feeding it, so an undeterminable age FAILS CLOSED. Three cases,
+    // matching pnpm's `pickPackageFromMeta` + `filterPkgMetadataByPublishDate`:
+    //   - time known                -> compare it
+    //   - times present, this one    -> block. An anomalous hole in an otherwise
+    //     absent                        populated map, never a reason to admit.
+    //   - no per-version times at all-> fall back to the packument's `modified`,
+    //                                   an UPPER BOUND on every version's publish
+    //                                   time: `modified <= cutoff` proves the whole
+    //                                   document predates the wall, so every version
+    //                                   is mature. This is what keeps abbreviated
+    //                                   (corgi) metadata usable without a full fetch
+    //                                   for the dormant majority of a tree. When
+    //                                   `modified` is absent or too new, nothing is
+    //                                   provable and the version is blocked.
     let passes_effective_cutoff = |ver: &str, effective: Option<&str>| -> bool {
         let Some(c) = effective else { return true };
         match packument.time.get(ver) {
             Some(t) => t.as_str() <= c,
-            None => true,
+            None if has_version_times => false,
+            None => packument.modified.as_deref().is_some_and(|m| m <= c),
         }
     };
 

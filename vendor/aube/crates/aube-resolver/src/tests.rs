@@ -2301,25 +2301,91 @@ fn test_format_iso8601_known_epoch() {
     assert_eq!(format_iso8601_utc(0), "1970-01-01T00:00:00.000Z");
 }
 
+/// The three missing-publish-time cases (#581). Together these pin the whole
+/// contract: an undeterminable age never silently clears the gate, but a
+/// packument whose `modified` predates the cutoff still resolves offline from
+/// abbreviated metadata — the property that keeps corgi registries usable.
 #[test]
-fn test_pick_version_cutoff_allows_missing_time_entries() {
-    let packument = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
-    // Packument has no `time` entries at all — cutoff must not
-    // remove every candidate, or the resolver can never make
-    // progress on abbreviated-packument registries.
-    let cutoff = "2000-01-01T00:00:00.000Z";
-    let result = pick_version(
-        &packument,
-        "^1.0.0",
-        None,
-        false,
-        Some(cutoff),
-        None,
-        false,
-        |_, _| false,
-    )
-    .unwrap();
-    assert_eq!(result.version, "1.1.0");
+fn pick_version_missing_time_fails_closed_unless_modified_proves_maturity() {
+    const CUTOFF: &str = "2020-01-01T00:00:00.000Z";
+    fn pick(p: &Packument) -> PickResult<'_> {
+        pick_version(
+            p,
+            "^1.0.0",
+            None,
+            false,
+            Some(CUTOFF),
+            None,
+            true,
+            |_, _| false,
+        )
+    }
+
+    // No per-version times and no `modified`: nothing proves either version is
+    // old enough, so both are gated rather than waved through.
+    let bare = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
+    assert!(
+        matches!(pick(&bare), PickResult::AgeGated),
+        "a packument with no time data at all must not clear the cutoff"
+    );
+
+    // `modified` is an upper bound on every version's publish time, so a
+    // document last touched before the cutoff has no immature versions in it.
+    let mut dormant = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
+    dormant.modified = Some("2019-06-01T00:00:00.000Z".to_string());
+    assert_eq!(
+        pick(&dormant).unwrap().version,
+        "1.1.0",
+        "modified <= cutoff proves the whole document is mature"
+    );
+
+    // Same shape, but the document was touched after the cutoff — some version
+    // in it is too new and we cannot tell which, so nothing is admitted.
+    let mut churning = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
+    churning.modified = Some("2026-06-01T00:00:00.000Z".to_string());
+    assert!(
+        matches!(pick(&churning), PickResult::AgeGated),
+        "modified > cutoff leaves each version's age undeterminable"
+    );
+
+    // A hole in an otherwise-populated map is anomalous, not a corgi payload:
+    // 1.0.0 is dated and mature, 1.1.0 is undated and must be excluded even
+    // though `modified` would have vouched for the document as a whole.
+    let mut holed = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
+    holed.modified = Some("2019-06-01T00:00:00.000Z".to_string());
+    holed
+        .time
+        .insert("1.0.0".to_string(), "2019-01-01T00:00:00.000Z".to_string());
+    assert_eq!(
+        pick(&holed).unwrap().version,
+        "1.0.0",
+        "an undated version in a dated map is excluded, not admitted"
+    );
+}
+
+/// npm's full `time` map always carries `created`/`modified` bookkeeping keys
+/// beside the version keys. A mirror that serves ONLY those must still read as
+/// "no per-version times" and take the `modified` path, not as a fully-holed
+/// map that gates everything.
+#[test]
+fn pick_version_treats_bookkeeping_only_time_map_as_timeless() {
+    let cutoff = "2020-01-01T00:00:00.000Z";
+    let mut p = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
+    p.modified = Some("2019-06-01T00:00:00.000Z".to_string());
+    p.time.insert(
+        "created".to_string(),
+        "2018-01-01T00:00:00.000Z".to_string(),
+    );
+    p.time.insert(
+        "modified".to_string(),
+        "2019-06-01T00:00:00.000Z".to_string(),
+    );
+    assert_eq!(
+        pick_version(&p, "^1.0.0", None, false, Some(cutoff), None, true, |_, _| false)
+            .unwrap()
+            .version,
+        "1.1.0"
+    );
 }
 
 #[test]
