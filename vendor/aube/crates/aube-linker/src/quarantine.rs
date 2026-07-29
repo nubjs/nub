@@ -38,19 +38,26 @@
 //! global virtual store is on by default and lives outside the project,
 //! so an entry written by a pre-fix build survives `rm -rf node_modules`
 //! and would be re-linked, still quarantined, forever — which is exactly
-//! the state #575 reports. Stripping at both seams makes one invariant
-//! hold: every package the linker touches has its native binaries
-//! stripped, whether or not this run created them. That is deliberately
-//! preferred over a one-shot migration marker, which would have to
-//! choose between sweeping the whole store and marking it swept while
-//! most entries were never visited.
+//! the state #575 reports. Stripping the cached entry is what makes the
+//! recovery that issue describes — remove `node_modules`, reinstall —
+//! actually heal a poisoned store. That is deliberately preferred over a
+//! one-shot migration marker, which would have to choose between
+//! sweeping the whole store and marking it swept while most entries were
+//! never visited.
 //!
 //! ## Known boundaries
 //!
-//! - An install that relinks nothing at all (the frozen fast path, which
-//!   short-circuits before the linker) strips nothing. Removing
-//!   `node_modules` invalidates that path and heals the store on the
-//!   next install.
+//! - Reach is "every package this run links", not "every package on
+//!   disk". Besides the frozen fast path, which short-circuits before
+//!   the linker entirely, several per-package warm checks return earlier
+//!   still — `EntryState::Fresh` in `link.rs` and
+//!   `ensure_shared_local_in_global_store`, and the `aube_entry.exists()`
+//!   checks the install fast path relies on. Those deliberately never
+//!   load the package index, so stripping there would cost a
+//!   `load_index` per package on the warm path — far more than the strip
+//!   it enables. The practical consequence: a repeat install with
+//!   `node_modules` intact strips nothing new, and healing a poisoned
+//!   store goes through the remove-and-reinstall path above.
 //! - The index is the tarball's file list, so files written into a
 //!   package *after* linking are invisible here: `node-gyp` output
 //!   (`build/Release/*.node`) and side-effects-cache restores, which
@@ -293,6 +300,34 @@ mod imp {
             let attrs = xattrs(&target);
             assert!(!attrs.iter().any(|a| a == QUARANTINE));
             assert!(attrs.iter().any(|a| a == "user.keepme"), "got {attrs:?}");
+        }
+
+        /// Pins the `<entry>/node_modules/<name>` composition against
+        /// `materialize_into`'s layout. Nothing else couples the two,
+        /// and because the strip is best-effort a path that drifted
+        /// would degrade to a silent no-op — on the warm seam, which is
+        /// the half that heals an already-poisoned store.
+        #[test]
+        fn strip_cached_entry_resolves_the_virtual_store_entry_layout() {
+            let dir = tempfile::tempdir().unwrap();
+            let entry = dir.path().join("lightningcss@1.30.2-abc123");
+            // Scoped names nest one level deeper; cover that too.
+            for name in ["lightningcss-darwin-arm64", "@scope/pkg"] {
+                let pkg_dir = entry.join("node_modules").join(name);
+                std::fs::create_dir_all(&pkg_dir).unwrap();
+                let target = pkg_dir.join("native.node");
+                std::fs::write(&target, b"x").unwrap();
+                set_quarantine(&target);
+
+                let mut index = PackageIndex::default();
+                index.insert("native.node".into(), stored(false));
+                strip_cached_entry(&entry, name, &index);
+
+                assert!(
+                    !is_quarantined(&target),
+                    "{name}: strip_cached_entry did not resolve to the package dir"
+                );
+            }
         }
 
         /// A missing entry (dropped or renamed after indexing) is a
