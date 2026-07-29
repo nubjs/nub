@@ -109,14 +109,8 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // instead of widening the allowlist to grant nub's own runtime into untrusted code.
         ambient.insert("NODE_COMPAT".to_string(), "1".to_string());
 
-        // NOTHING IS STAMPED FOR THE WINDOWS REALPATH DEFECT, deliberately. Under the
-        // AppContainer every absolute `require()` dies on `EPERM: lstat 'C:\'`, and the one
-        // NODE_OPTIONS repair that clears it (`--preserve-symlinks`) is REFUSED here: under
-        // nub's DEFAULT isolated layout it silently resolves a dependency to the WRONG version
-        // rather than failing. Measured, not reasoned — the evidence and the surviving options
-        // live on `nub_sandbox::windows_realpath_node_options`. A confined Windows lifecycle
-        // script therefore still fails, but it fails LOUDLY, which is the only property worth
-        // holding until a real fix lands.
+        // Windows stamps `NODE_OPTIONS` too — below, where the interpreter's version is
+        // already known.
 
         // The interpreter closure to grant READ. nub provisions its own Node under its
         // store (not `/usr`), so the tight-read base can't reach it. Under nub a bare
@@ -136,6 +130,30 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // the interpreter grant). Set-if-absent: an explicit ambient nodedir is a
         // deliberate build-against-custom-node choice; the case we fix carries none.
         let probe = ProbeScope::new(&spawn);
+
+        // WINDOWS: deliver the `child_process` stdio shim. A piped spawn under the
+        // AppContainer does not fail, it SPINS — libuv retries the refused named pipe
+        // forever inside `uv_spawn`, before any timeout can arm — and every `node-gyp`
+        // configure pipes. Rationale and the residual it leaves (`fork`/IPC, which no file
+        // can emulate) are on `nub_sandbox::windows_build_jail_node_options`.
+        //
+        // UNCONDITIONAL, like `NODE_COMPAT` above: it OVERWRITES any ambient value, which is
+        // also the ONLY thing that keeps the env allowlist's `NODE_OPTIONS` entry from
+        // becoming an ambient code-injection channel into every lifecycle script. Gated on
+        // the interpreter supporting `--import` (20.6+) because an unrecognised option in
+        // `NODE_OPTIONS` aborts Node at startup — that would turn a missing repair into a
+        // broken install. An interpreter that cannot be asked gets no stamp, and with it no
+        // shim: the same piped-spawn hang as before, never a worse failure.
+        #[cfg(windows)]
+        if super::build_prefetch::node_version(&ambient, &probe).is_some_and(supports_import) {
+            ambient.insert(
+                "NODE_OPTIONS".to_string(),
+                nub_sandbox::windows_build_jail_node_options(),
+            );
+        } else {
+            ambient.remove("NODE_OPTIONS");
+        }
+
         let mut extra_reads = Vec::new();
         // npm's builtin `lib/node_modules/npm/npmrc` (no leading dot) sits inside the
         // `lib/node_modules` grant below; the Linux deny-search walk must be SEEDED there
@@ -633,6 +651,18 @@ struct NodeLayout {
     global_modules: PathBuf,
 }
 
+/// Whether a `process.versions.node` string names a Node that accepts `--import`, the flag
+/// the Windows stdio shim is delivered on (landed in 20.6.0). Unparseable ⇒ `false`: the
+/// stamp is a repair, and guessing wrong costs a startup abort on every lifecycle script.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn supports_import(version: &str) -> bool {
+    let mut parts = version.split('.').map(str::parse::<u32>);
+    match (parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => major > 20 || (major == 20 && minor >= 6),
+        _ => false,
+    }
+}
+
 fn node_layout(exec: &Path) -> Option<NodeLayout> {
     let dir = exec.parent()?;
     let flat = exec
@@ -1085,6 +1115,19 @@ fn symlink_hop_dirs(path: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gate on the Windows stdio-shim stamp. Getting it wrong in the permissive
+    /// direction does not degrade the repair, it aborts Node at startup for every lifecycle
+    /// script — so the boundary and the unparseable case are both pinned.
+    #[test]
+    fn only_a_node_that_accepts_import_gets_the_shim_stamp() {
+        assert!(!supports_import("18.19.0"));
+        assert!(!supports_import("20.5.1"));
+        assert!(supports_import("20.6.0"));
+        assert!(supports_import("22.23.1"));
+        assert!(!supports_import(""));
+        assert!(!supports_import("v20.6.0"));
+    }
 
     /// Only an explicit `false` unjails. The `true` and absent cases are not symmetry
     /// for its own sake: they are what keeps the field a narrowing switch, so no manifest

@@ -140,7 +140,10 @@ pub use compiler::{
     compile, compile_build_jail, compile_with_warnings,
 };
 #[cfg(windows)]
-pub use compiler::{windows_native_realpath_shim_node_options, windows_realpath_node_options};
+pub use compiler::{
+    windows_build_jail_node_options, windows_native_realpath_shim_node_options,
+    windows_realpath_node_options,
+};
 pub use matcher::Homes;
 
 /// One-time privileged host setup for the Linux agent-sandbox — the implementation behind

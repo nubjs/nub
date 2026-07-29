@@ -288,11 +288,19 @@ mod win {
                     Err(e) => spawn_err(marker, &e),
                 }
             }
-            // namedpipe <marker> — the primitive under `Command::output`, with no process
-            // creation in the way at all. Rust's Windows anonymous pipe is a NAMED pipe
-            // (`\\.\pipe\__rust_anonymous_pipe1__.<pid>.<n>`, `sys::pal::windows::pipe`), so
-            // if an AppContainer refuses NPFS then every captured-stdio spawn fails for a
-            // reason that has nothing to do with the image being executed.
+            // namedpipe <marker> — an NPFS creation on its own, with no process creation in
+            // the way at all.
+            //
+            // It was added on the premise that `Command::output`'s pipes are these pipes, so
+            // that a refusal here would explain a refused captured-stdio spawn. That premise
+            // is REFUTED: the sibling shape matrix ran a cell replicating std's exact flags
+            // and name alongside a real `Stdio::piped()` spawn, in one arm, and the cell was
+            // refused while the spawn succeeded and returned its child's bytes (run
+            // 30473523088, `rust-exact-jail-net-deny` vs `rust-stdio-piped-jail-net-deny`).
+            // Whatever std reaches for on this Windows, it is not the object measured below.
+            // The cell is KEPT because the question it actually answers — can a confined
+            // child create a global-namespace named pipe — is the one that decides Node's
+            // piped `child_process` spawn, and the answer there is no.
             Some("namedpipe") => {
                 use windows_sys::Win32::System::Pipes::CreateNamedPipeW;
                 let name: Vec<u16> = format!(r"\\.\pipe\nub-interp-probe-{}", std::process::id())

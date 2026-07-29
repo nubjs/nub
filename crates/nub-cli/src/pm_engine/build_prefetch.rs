@@ -244,6 +244,17 @@ fn node_facts(
         .as_ref()
 }
 
+/// The interpreter's `process.versions.node`, when it could be asked. Shares the memo above,
+/// so a caller that only wants the version pays nothing beyond what the header prefetch has
+/// already spent.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(super) fn node_version(
+    ambient: &BTreeMap<String, String>,
+    probe: &ProbeScope,
+) -> Option<&'static str> {
+    node_facts(ambient, probe).map(|facts| facts.version.as_str())
+}
+
 /// Separated from the spawn so the parse is unit-testable without a Node on disk.
 fn parse_node_facts(stdout: &str) -> Option<NodeFacts> {
     let line = stdout.lines().next()?;

@@ -122,6 +122,35 @@ deferred, and the cooperative redirect above is the shipped tier.
 
 An AppContainer child is blocked from loopback destinations by default. The package-wide loopback exemption needed to reach a proxy exposes every local listener, not just the proxy port. The backend therefore rejects per-host and MITM policies before launch, rather than installing the exemption. Coarse `net: true` permits public outbound connections but is not full host networking; coarse deny remains available without elevation.
 
+### Windows: `child_process` IPC is unavailable in the build jail
+
+Global NPFS (`\\.\pipe\…`) is closed to a LowBox token. Under one policy and one grant set,
+`\\.\pipe\LOCAL\…` was CREATED while `\\.\pipe\…` was REFUSED — the gate is the object
+NAMESPACE, not any permission, so no filesystem rule reaches it and a maximally loose policy
+still fails. libuv creates a named pipe per piped stdio stream and spells only the global form,
+and `uv__pipe_server` treats the refusal as a name collision and retries forever inside
+`uv_spawn`, before any timer arms: a confined piped spawn SPINS rather than failing (cpu ≈ wall,
+measured). Compiler Explorer hit the same wall under an AppContainer
+([ninja-build/ninja#2354](https://github.com/ninja-build/ninja/pull/2354)).
+
+- **What is repaired.** The build jail preloads a shim that rewrites every `'pipe'` stdio slot
+  into a scratch FILE, which the same jail permits. `exec`, `execFile`, `execSync`,
+  `execFileSync` and `spawnSync` buffer to completion anyway, so for them the repair is exact —
+  this is the shape `node-gyp` uses (`lib/util.js` wraps `cp.execFile` with a callback).
+- **Residual: a streaming `spawn()`.** Output is delivered at child exit rather than as it is
+  produced. Buffered consumers cannot tell; a caller rendering progress can.
+- **Residual: `fork()` and an explicit `'ipc'` slot.** An IPC channel is a duplex pipe and a
+  file cannot emulate one. These now FAIL FAST with `ERR_NUB_SANDBOX_NO_IPC`, naming the
+  per-package opt-out, rather than becoming an unkillable spin. A refusal is recoverable; the
+  hang was not.
+- **Residual: Node below 20.6.** The shim is delivered on `--import`, so an older interpreter
+  gets no shim and the original hang stands. Stamping it blind would abort Node at startup,
+  which is worse than the defect.
+- **Residual: a child conversing over `stdin`.** Its stdin is an already-EOF file; writes to
+  `child.stdin` are accepted and discarded.
+- **Residual: `maxBuffer` stops applying.** A file has no backpressure, so a runaway child
+  fills the disk rather than tripping `ERR_CHILD_PROCESS_STDIO_MAXBUFFER`.
+
 ### MITM tier: credential-brokering residuals (INFO, doc-only)
 
 The capability-derived MITM tier (see
@@ -427,14 +456,28 @@ paths, it does not probe the host).
   the allow-set. A system interpreter is covered by the essential base and never hits
   this.
 
-### Windows confined work dirs need a CLEAN-DACL root (not a nub-owned store; not ancestor traverse grants)
+### Windows confined work dirs need a CLEAN-DACL root (not a nub-owned store)
 
-Superseded — a LowBox token retains SeChangeNotifyPrivilege (Bypass Traverse Checking) and
-standard NTFS volumes carry `FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL`, so intermediate-dir
-ACLs are NOT access-checked: a leaf-only AC-SID grant is reachable under an ORDINARY
-`%TEMP%`/profile tree with no ancestor traverse grants and no `C:\`-owned store (VM-verified
-under `%TEMP%`, `tests/windows_enforcement.rs` + `windows_residuals.rs`). nub never needs
-`WRITE_DAC` on a shared ancestor.
+A LowBox token retains SeChangeNotifyPrivilege (Bypass Traverse Checking) and standard NTFS
+volumes carry `FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL`, so a leaf-only AC-SID grant is
+OPENABLE under an ORDINARY `%TEMP%`/profile tree with no `C:\`-owned store (VM-verified under
+`%TEMP%`, `tests/windows_enforcement.rs` + `windows_residuals.rs`).
+
+- **Traverse-bypass does not make an ancestor openable as a TARGET, and Node opens every one.**
+  `realpathSync` walks a path prefix by prefix from the volume root, so an absolute `require()`
+  died on `EPERM: lstat 'C:\'` while the granted leaf itself read fine. The backend reaches the
+  chain two ways, neither needing elevation: a NON-INHERITED traverse + read-attributes ACE
+  where the unprivileged user can write one (their own profile and below), and the capability
+  SIDs Windows already placed on `C:\` and `C:\Users` where they cannot, harvested off those
+  DACLs and requested in `SECURITY_CAPABILITIES`. Non-inherited is the load-bearing word: the
+  ACE governs the directory object alone, so an ancestor never becomes a subtree read, and
+  there is no DACL propagation to pay for per spawn. Both halves are best-effort — a refused
+  ACE write is skipped, never fatal.
+- **What the capability half costs.** A capability is a machine-wide key: holding one also
+  opens every other object whose DACL grants it. The set is bounded to what already sits on
+  this launch's own ancestor chain, and it is the coarse half of a deliberately best-effort
+  jail — one that blocks the bulk of supply-chain attack shapes, not one that claims a
+  watertight boundary.
 
 - **The precondition is INHERITABILITY, not a protected ancestor.** Where an
   `ALL APPLICATION PACKAGES` allow-ACE can reach a work dir, an ungranted secret UNDER it is
