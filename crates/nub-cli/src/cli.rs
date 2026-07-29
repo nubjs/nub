@@ -6323,11 +6323,18 @@ fn swap_dir(install_dir: &Path, name: &str, new_src: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Set the executable bit (0o755) on a freshly-installed binary. The release
-/// archive ships the binary at 0o644 — CI's upload/download-artifact round-trip
-/// strips the +x install.sh would otherwise rely on — so the self-owned upgrade
-/// path must re-apply it or the upgraded `nub` is non-executable. Not compiled
-/// on Windows (executability is by extension, not a mode bit).
+/// Make a freshly-downloaded binary runnable: set the executable bit
+/// (0o755), then clear `com.apple.quarantine`.
+///
+/// The release archive ships the binary at 0o644 — CI's
+/// upload/download-artifact round-trip strips the +x install.sh would
+/// otherwise rely on — so the self-owned upgrade path must re-apply it or
+/// the upgraded `nub` is non-executable. Both callers hand this an
+/// archive nub itself downloaded and checksum-verified, and both then run
+/// it (the upgrade swap, and the self-shim's provision-then-exec), so the
+/// quarantine strip belongs on the same seam; see `drop_quarantine`.
+/// Not compiled on Windows (executability is by extension, not a mode
+/// bit, and quarantine is a macOS concept).
 #[cfg(not(windows))]
 fn ensure_bin_executable(path: &Path) -> Result<()> {
     #[cfg(unix)]
@@ -6341,8 +6348,59 @@ fn ensure_bin_executable(path: &Path) -> Result<()> {
             )
         })?;
     }
+    drop_quarantine(path);
     Ok(())
 }
+
+/// Drop `com.apple.quarantine` from the freshly swapped-in binary.
+///
+/// Released nub binaries are ad-hoc signed — `codesign` reports
+/// `adhoc, linker-signed` with no Team ID — and macOS kills a quarantined
+/// ad-hoc-signed executable on exec rather than merely warning about it.
+/// `curl` and `tar` above run as children of this process, so when nub is
+/// invoked from a terminal that inherited quarantine flags (one embedded
+/// in a Gatekeeper-enabled app), everything they write is stamped and the
+/// upgrade would install a nub that cannot start. The archive's SHA-256 is
+/// checked against the published checksum before the swap, so clearing the
+/// attribute afterwards is the same trade Homebrew makes for a verified
+/// download.
+///
+/// Best-effort by the resilience contract in `perform_selfowned_upgrade`:
+/// the binary is already swapped and executable, so a failure here warns
+/// with the manual fix rather than failing the upgrade.
+#[cfg(target_os = "macos")]
+fn drop_quarantine(path: &Path) {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
+        return;
+    };
+    // SAFETY: both pointers are NUL-terminated C strings that outlive the
+    // call. `XATTR_NOFOLLOW` keeps a symlinked path from redirecting the
+    // removal onto whatever it points at.
+    let rc = unsafe {
+        libc::removexattr(
+            c_path.as_ptr(),
+            c"com.apple.quarantine".as_ptr(),
+            libc::XATTR_NOFOLLOW,
+        )
+    };
+    if rc != 0 {
+        // ENOATTR — nothing to remove — is the overwhelmingly common case.
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::ENOATTR) {
+            eprintln!(
+                "nub upgrade: warning: could not clear com.apple.quarantine on {p} ({err}); \
+                 if macOS refuses to run it, clear it with: xattr -d com.apple.quarantine {p}",
+                p = path.display()
+            );
+        }
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), not(windows)))]
+fn drop_quarantine(_path: &Path) {}
 
 /// Extract a release archive into `dest` by shelling to `tar`, returning whether
 /// tar succeeded (spawn failure is the `Err`). Handles both artifact formats:

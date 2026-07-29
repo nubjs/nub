@@ -64,7 +64,6 @@
 //!   package. Both are real and both are out of this module's reach by
 //!   construction — do not assume this seam covers build output.
 
-use aube_store::StoredFile;
 use std::path::Path;
 
 /// Gatekeeper only inspects Mach-O images, and neither obvious signal
@@ -88,8 +87,8 @@ use std::path::Path;
 /// file the CI gate can reach: aube's suite runs `cargo test --workspace`
 /// on ubuntu, where everything below compiles away.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn is_gatekeeper_guarded(rel_path: &str, stored: &StoredFile) -> bool {
-    stored.executable
+fn is_gatekeeper_guarded(rel_path: &str, executable: bool) -> bool {
+    executable
         || matches!(
             Path::new(rel_path).extension().and_then(|ext| ext.to_str()),
             Some("node" | "dylib" | "so")
@@ -164,7 +163,7 @@ mod imp {
     /// the files individually.
     pub(crate) fn strip_from_native_binaries(pkg_dir: &Path, index: &PackageIndex) {
         for (rel_path, stored) in index {
-            if is_gatekeeper_guarded(rel_path, stored) {
+            if is_gatekeeper_guarded(rel_path, stored.executable) {
                 remove_quarantine(&pkg_dir.join(rel_path));
             }
         }
@@ -176,6 +175,37 @@ mod imp {
     /// layout `materialize_into` writes.
     pub(crate) fn strip_cached_entry(entry_dir: &Path, pkg_name: &str, index: &PackageIndex) {
         strip_from_native_binaries(&entry_dir.join("node_modules").join(pkg_name), index);
+    }
+
+    /// Walk `dir` and strip every Gatekeeper-relevant file under it.
+    ///
+    /// The index-driven entry points above cannot serve a caller whose
+    /// files never came from a tarball, which is what build output
+    /// restored from the side-effects cache is. Executability comes from
+    /// the mode bits instead of a `StoredFile`.
+    ///
+    /// Uses `symlink_metadata` and never descends a symlink, so a link
+    /// inside a cached tree cannot walk the strip out of `dir`.
+    pub fn strip_quarantine_from_tree(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.is_dir() {
+                strip_quarantine_from_tree(&path);
+            } else if meta.is_file() {
+                let executable = meta.permissions().mode() & 0o111 != 0;
+                if is_gatekeeper_guarded(&entry.file_name().to_string_lossy(), executable) {
+                    remove_quarantine(&path);
+                }
+            }
+        }
     }
 
     /// Behavioural coverage for the strip itself. macOS-only by
@@ -269,6 +299,57 @@ mod imp {
             assert!(
                 is_quarantined(&pkg.join("index.js")),
                 "plain .js left alone"
+            );
+        }
+
+        /// The walk-driven entry point, which serves callers with no
+        /// package index — a side-effects-cache restore. Executability
+        /// comes from the mode bits here, so a `node-gyp` addon nested
+        /// under `build/Release` must be found by extension while an
+        /// ordinary file beside it is left alone.
+        #[test]
+        fn tree_walk_strips_nested_build_output_only() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = tempfile::tempdir().unwrap();
+            let deep = dir.path().join("build/Release");
+            std::fs::create_dir_all(&deep).unwrap();
+            let addon = deep.join("binding.node");
+            let helper = deep.join("helper");
+            let readme = dir.path().join("README.md");
+            for p in [&addon, &helper, &readme] {
+                std::fs::write(p, b"x").unwrap();
+                set_quarantine(p);
+            }
+            // 0755 with no extension: the exec-kill shape.
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            strip_quarantine_from_tree(dir.path());
+
+            assert!(!is_quarantined(&addon), "nested .node must be stripped");
+            assert!(!is_quarantined(&helper), "0755 binary must be stripped");
+            assert!(is_quarantined(&readme), "plain file must be left alone");
+        }
+
+        /// A symlink planted in a cached tree must not walk the strip out
+        /// of the directory it was pointed at.
+        #[test]
+        fn tree_walk_does_not_follow_symlinks_out_of_the_tree() {
+            let dir = tempfile::tempdir().unwrap();
+            let outside = dir.path().join("outside.node");
+            std::fs::write(&outside, b"x").unwrap();
+            set_quarantine(&outside);
+
+            let tree = dir.path().join("tree");
+            std::fs::create_dir_all(tree.join("sub")).unwrap();
+            symlink(&outside, tree.join("link.node")).unwrap();
+            symlink(dir.path(), tree.join("sub/escape")).unwrap();
+
+            strip_quarantine_from_tree(&tree);
+
+            assert!(
+                is_quarantined(&outside),
+                "the strip escaped the tree through a symlink"
             );
         }
 
@@ -451,6 +532,8 @@ mod imp {
 }
 
 #[cfg(target_os = "macos")]
+pub use imp::strip_quarantine_from_tree;
+#[cfg(target_os = "macos")]
 pub(crate) use imp::{strip_cached_entry, strip_from_native_binaries};
 
 /// Quarantine is a macOS concept; every other platform links without it.
@@ -460,6 +543,10 @@ pub(crate) fn strip_from_native_binaries(
     _index: &aube_store::PackageIndex,
 ) {
 }
+
+/// Quarantine is a macOS concept; every other platform restores without it.
+#[cfg(not(target_os = "macos"))]
+pub fn strip_quarantine_from_tree(_dir: &std::path::Path) {}
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn strip_cached_entry(
@@ -477,15 +564,6 @@ pub(crate) fn strip_cached_entry(
 mod filter_tests {
     use super::*;
 
-    fn stored(executable: bool) -> StoredFile {
-        StoredFile {
-            hex_hash: String::new(),
-            store_path: std::path::PathBuf::new(),
-            executable,
-            size: None,
-        }
-    }
-
     /// The union is the whole point: npm ships loadable modules
     /// non-executable and native CLI binaries extension-less, so either
     /// signal alone misses real Mach-O that Gatekeeper will block.
@@ -493,18 +571,18 @@ mod filter_tests {
     fn selects_loadable_modules_and_executables_but_not_plain_files() {
         for rel in ["lib/binding.node", "lib/libvips.dylib", "lib/native.so"] {
             assert!(
-                is_gatekeeper_guarded(rel, &stored(false)),
+                is_gatekeeper_guarded(rel, false),
                 "{rel} is a loadable module and npm ships it mode 0644"
             );
         }
         assert!(
-            is_gatekeeper_guarded("bin/esbuild", &stored(true)),
+            is_gatekeeper_guarded("bin/esbuild", true),
             "extension-less 0755 binaries are the exec-kill case"
         );
-        assert!(!is_gatekeeper_guarded("index.js", &stored(false)));
-        assert!(!is_gatekeeper_guarded("README.md", &stored(false)));
+        assert!(!is_gatekeeper_guarded("index.js", false));
+        assert!(!is_gatekeeper_guarded("README.md", false));
         // Only the final extension counts — `.node` as a directory
         // component must not match.
-        assert!(!is_gatekeeper_guarded("node/index.js", &stored(false)));
+        assert!(!is_gatekeeper_guarded("node/index.js", false));
     }
 }
