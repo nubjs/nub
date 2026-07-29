@@ -175,6 +175,9 @@ mod win {
                 Ok(c) => live.push(c),
                 Err(e) => {
                     err = e.raw_os_error().unwrap_or(-1);
+                    // The text a real build's toolchain would relay, verbatim — the
+                    // record of what a capped user actually sees.
+                    println!("  [over-cap spawn error] {e}");
                     break;
                 }
             }
