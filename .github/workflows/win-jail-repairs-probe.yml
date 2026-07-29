@@ -128,6 +128,7 @@ jobs:
           # red build. Only ABSENCE is an error: a shape that was never measured tells us nothing.
           echo "---- blast radius: which shapes survive with the repair OFF ----"
           for p in shape-eval-only-completes-unrepaired \
+                   shape-eval-builtin-only-completes-unrepaired \
                    shape-eval-then-absolute-require-completes-unrepaired \
                    shape-eval-then-relative-require-completes-unrepaired \
                    shape-eval-then-bare-require-through-junction-completes-unrepaired \

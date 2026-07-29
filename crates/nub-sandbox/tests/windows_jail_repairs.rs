@@ -573,10 +573,21 @@ mod win {
         secs: u32,
         body: &str,
     ) -> NodeArm {
-        let script = dir.join(format!("{tag}.js"));
         let sink = dir.join(format!("{tag}.sink"));
         let outer_marker = dir.join(format!("{tag}.outer"));
-        std::fs::write(&script, body).unwrap();
+        // A `-e:` body is passed STRAIGHT THROUGH, never written to a file. Writing it out was a
+        // real bug in the first revision: all five require-shape cells silently became
+        // entry-point cells running a .js file whose text happened to start with `-e:`, so they
+        // measured `resolveMainPath` five times and the eval isolation the group exists for
+        // never ran. `-e` is the ONLY way to reach a require without a main module.
+        let script = match body.starts_with("-e:") {
+            true => body.to_string(),
+            false => {
+                let path = dir.join(format!("{tag}.js"));
+                std::fs::write(&path, body).unwrap();
+                path.to_string_lossy().into_owned()
+            }
+        };
         let (code, outer) = run_jailed(
             f,
             policy,
@@ -586,7 +597,7 @@ mod win {
             &[
                 secs.to_string(),
                 node.to_string_lossy().into_owned(),
-                script.to_string_lossy().into_owned(),
+                script.clone(),
                 sink.to_string_lossy().into_owned(),
             ],
         );
@@ -950,6 +961,15 @@ require({dep});
             (
                 "eval-then-relative-require",
                 "-e:require('./dep.js')".to_string(),
+            ),
+            // A builtin needs no resolution and no realpath. If even THIS cannot run, the wall is
+            // not the module system at all and every other cell is over-attributed.
+            (
+                "eval-builtin-only",
+                format!(
+                    "-e:require('fs').writeFileSync({m},'eval-ran')",
+                    m = js_literal(&marker("eval"))
+                ),
             ),
             (
                 "eval-then-bare-require-through-junction",
