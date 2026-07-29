@@ -92,10 +92,19 @@ fn malformed_project_config_stops_before_the_entry_file_runs() {
         .expect("run nub with malformed project config");
 
     assert!(!output.status.success());
+    // The message must LOCATE the offending file, not merely name it: discovery
+    // walks the ancestor chain unbounded, so a stray `nub.jsonc` above the cwd is
+    // otherwise unfindable. Only the trailing components are pinned — the parent
+    // prefix differs by platform (the macOS `/private` symlink, Windows 8.3).
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let located = format!(
+        "{}{}nub.jsonc",
+        temp.path().file_name().unwrap().to_string_lossy(),
+        std::path::MAIN_SEPARATOR
+    );
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("parsing nub.jsonc"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        stderr.contains("parsing ") && stderr.contains(&located),
+        "{stderr}"
     );
     assert!(!temp.path().join("must-not-run").exists());
 }

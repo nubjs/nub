@@ -84,15 +84,45 @@ pub enum ConfigError {
     },
     /// The value at `path` is the right type but semantically invalid.
     Value { path: String, message: String },
+    /// A failure attributed to the file it was read from. The readers wrap what
+    /// they return in this; the parsers, which take text and know no path, do
+    /// not. Kept a wrapper rather than a field on every variant so the ~30
+    /// construction sites stay path-free.
+    InFile {
+        path: PathBuf,
+        source: Box<ConfigError>,
+    },
 }
 
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl ConfigError {
+    /// Attribute a failure to the file it came from. Discovery walks the ancestor
+    /// chain unbounded, so the offending file can sit arbitrarily far above the
+    /// cwd — a message naming only `nub.jsonc` sends the author hunting.
+    fn in_file(self, path: &Path) -> Self {
+        ConfigError::InFile {
+            path: path.to_path_buf(),
+            source: Box::new(self),
+        }
+    }
+
+    /// The failure beneath the file attribution, so a caller branching on the
+    /// kind does not have to know whether a reader wrapped it.
+    pub fn kind(&self) -> &ConfigError {
         match self {
-            ConfigError::Io(e) => write!(f, "reading {FILE_NAME}: {e}"),
-            ConfigError::Parse(m) => write!(f, "parsing {FILE_NAME}: {m}"),
+            ConfigError::InFile { source, .. } => source.kind(),
+            other => other,
+        }
+    }
+
+    /// Render naming `file` — the reader's absolute path when the failure is
+    /// attributed, the bare filename when a parser was called without one.
+    fn write_naming(&self, f: &mut fmt::Formatter<'_>, file: &dyn fmt::Display) -> fmt::Result {
+        match self {
+            ConfigError::InFile { path, source } => source.write_naming(f, &path.display()),
+            ConfigError::Io(e) => write!(f, "reading {file}: {e}"),
+            ConfigError::Parse(m) => write!(f, "parsing {file}: {m}"),
             ConfigError::UnknownKey { path, key } => {
-                write!(f, "unknown key `{key}` in {path} of {FILE_NAME}")
+                write!(f, "unknown key `{key}` in {path} of {file}")
             }
             ConfigError::GlobalOnlyKey { key } => {
                 // Name the destination concretely — the whole failure mode is an
@@ -114,12 +144,18 @@ impl fmt::Display for ConfigError {
                 }
             }
             ConfigError::Type { path, expected } => {
-                write!(f, "`{path}` in {FILE_NAME} must be {expected}")
+                write!(f, "`{path}` in {file} must be {expected}")
             }
             ConfigError::Value { path, message } => {
-                write!(f, "`{path}` in {FILE_NAME}: {message}")
+                write!(f, "`{path}` in {file}: {message}")
             }
         }
+    }
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.write_naming(f, &FILE_NAME)
     }
 }
 
@@ -457,20 +493,23 @@ pub fn discover_project_config(start: &Path) -> Option<PathBuf> {
 /// FAIL-LOUD: an unknown key or malformed value is a [`ConfigError`], NOT a
 /// silent degrade (unlike the best-effort global reader).
 pub fn read_project_config_at(path: &Path) -> Result<LoadedConfig> {
-    let text = crate::jsonc::read_guarded(path).map_err(ConfigError::Io)?;
+    // Resolved before the read so an I/O failure is attributable too.
     let source_path = std::path::absolute(path).map_err(ConfigError::Io)?;
+    let text =
+        crate::jsonc::read_guarded(path).map_err(|e| ConfigError::Io(e).in_file(&source_path))?;
     Ok(LoadedConfig {
         source: ConfigSource::file(ConfigSourceKind::Project, &source_path),
-        values: parse_project_config(&text)?,
+        values: parse_project_config(&text).map_err(|e| e.in_file(&source_path))?,
     })
 }
 
 pub(crate) fn read_global_config_at(path: &Path) -> Result<LoadedConfig> {
-    let text = crate::jsonc::read_guarded(path).map_err(ConfigError::Io)?;
     let source_path = std::path::absolute(path).map_err(ConfigError::Io)?;
+    let text =
+        crate::jsonc::read_guarded(path).map_err(|e| ConfigError::Io(e).in_file(&source_path))?;
     Ok(LoadedConfig {
         source: ConfigSource::file(ConfigSourceKind::Global, &source_path),
-        values: parse_global_config(&text)?,
+        values: parse_global_config(&text).map_err(|e| e.in_file(&source_path))?,
     })
 }
 
@@ -534,7 +573,29 @@ pub fn initialize_effective_config(
     if let Some(config) = EFFECTIVE_CONFIG.get() {
         return Ok(config);
     }
-    let config = load_effective_config(cwd, overlays)?;
+    Ok(retain_effective_config(load_effective_config(
+        cwd, overlays,
+    )?))
+}
+
+/// Initialize the snapshot with the project file layer DROPPED; the CLI,
+/// environment, global, and default layers still resolve normally. The
+/// forced-compat runtime entrypoints call this once the project file has failed
+/// to load — see `cli::initialize_runtime_config_snapshot` for why that degrade
+/// is sound, and why leaving the snapshot uninitialized instead would not be
+/// (`NODE_COMPAT` reaches the runtime only through these overlays).
+pub fn initialize_effective_config_without_project(
+    cwd: &Path,
+    overlays: ConfigOverlays,
+) -> &'static EffectiveConfig {
+    if let Some(config) = EFFECTIVE_CONFIG.get() {
+        return config;
+    }
+    let global = crate::config::load_global_config();
+    retain_effective_config(resolve_effective_config(cwd, global, None, overlays))
+}
+
+fn retain_effective_config(config: EffectiveConfig) -> &'static EffectiveConfig {
     if EFFECTIVE_CONFIG.set(config).is_ok() {
         record_snapshot_initialization_for_tests(
             EFFECTIVE_CONFIG
@@ -542,9 +603,9 @@ pub fn initialize_effective_config(
                 .expect("effective config was initialized"),
         );
     }
-    Ok(EFFECTIVE_CONFIG
+    EFFECTIVE_CONFIG
         .get()
-        .expect("effective config was initialized"))
+        .expect("effective config was initialized")
 }
 
 fn record_snapshot_initialization_for_tests(config: &EffectiveConfig) {
@@ -2152,10 +2213,8 @@ mod tests {
     fn load_surfaces_a_malformed_file() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(FILE_NAME), "{ broken").unwrap();
-        assert!(matches!(
-            load_project_config(dir.path()),
-            Err(ConfigError::Parse(_))
-        ));
+        let err = load_project_config(dir.path()).unwrap_err();
+        assert!(matches!(err.kind(), ConfigError::Parse(_)));
     }
 
     #[test]
@@ -2521,10 +2580,8 @@ mod tests {
         assert_eq!(global.values.dlx.consent, Some(ImplicitDlx::Prompt));
         assert_eq!(global.values.dlx.env_file, Some(EnvFileSetting::Disabled));
         assert_eq!(global.values.dlx.sandbox, Some(SandboxSetting::Disabled));
-        assert!(matches!(
-            read_project_config_at(&project_path),
-            Err(ConfigError::GlobalOnlyKey { .. })
-        ));
+        let err = read_project_config_at(&project_path).unwrap_err();
+        assert!(matches!(err.kind(), ConfigError::GlobalOnlyKey { .. }));
     }
 
     #[test]
@@ -2539,10 +2596,8 @@ mod tests {
         assert_eq!(second.unwrap().values.node_compat, Some(true));
 
         std::fs::write(&path, "{ malformed").unwrap();
-        assert!(matches!(
-            load_project_config(dir.path()),
-            Err(ConfigError::Parse(_))
-        ));
+        let err = load_project_config(dir.path()).unwrap_err();
+        assert!(matches!(err.kind(), ConfigError::Parse(_)));
     }
 
     #[cfg(unix)]
@@ -2558,10 +2613,8 @@ mod tests {
         unreadable.set_mode(0o000);
         std::fs::set_permissions(&path, unreadable).unwrap();
 
-        assert!(matches!(
-            load_project_config(dir.path()),
-            Err(ConfigError::Io(_))
-        ));
+        let err = load_project_config(dir.path()).unwrap_err();
+        assert!(matches!(err.kind(), ConfigError::Io(_)));
 
         std::fs::set_permissions(&path, original).unwrap();
     }
@@ -2569,9 +2622,17 @@ mod tests {
     #[test]
     fn malformed_file_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(FILE_NAME), "{ broken").unwrap();
-        let result = load_project_config(dir.path());
-        assert!(matches!(result, Err(ConfigError::Parse(_))));
+        let path = dir.path().join(FILE_NAME);
+        std::fs::write(&path, "{ broken").unwrap();
+        let err = load_project_config(dir.path()).unwrap_err();
+        assert!(matches!(err.kind(), ConfigError::Parse(_)));
+        // The reader attributes the failure to the file it read: discovery walks
+        // up unbounded, so a bare filename can name a file far above the cwd.
+        assert!(
+            err.to_string()
+                .contains(&std::path::absolute(&path).unwrap().display().to_string()),
+            "{err}"
+        );
     }
 
     #[test]

@@ -171,6 +171,19 @@ fn resolve_policy(project: &Project) -> Policy {
     {
         return p;
     }
+    // `NUB_VERIFY_DEPS_BEFORE_RUN` was this variable's name until the config
+    // field it mirrors became `verifyDeps`. Honoring it silently would keep two
+    // spellings alive forever; ignoring it silently would revert someone's CI to
+    // the default policy with no signal — the exact quiet no-op this config
+    // surface is fail-loud to avoid. So: say it moved, then apply it.
+    if let Ok(raw) = std::env::var("NUB_VERIFY_DEPS_BEFORE_RUN")
+        && let Some(p) = parse_policy(&raw)
+    {
+        eprintln!(
+            "nub: NUB_VERIFY_DEPS_BEFORE_RUN is now NUB_VERIFY_DEPS; rename it to silence this."
+        );
+        return p;
+    }
     let workspace_root = project.workspace_root.as_deref().unwrap_or(&project.root);
     if let PnpmIncumbency::Major(major) = pnpm_incumbency(workspace_root)
         && major >= 11

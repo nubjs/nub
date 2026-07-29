@@ -108,8 +108,9 @@ export default function SchemaIndexPage() {
       )}
 
       <p className="mt-8 font-sans text-xs text-fd-muted-foreground">
-        A versioned file is frozen at the release it names. Pin one when you want the schema to stop
-        changing under you; use the rolling file to pick up new fields as they ship.
+        A versioned file names a minor series, not one release: every release in the series rewrites
+        it from the rolling file, so it changes only when the field surface does. Pin one to track a
+        single series; use the rolling file to pick up new fields as they ship.
       </p>
     </main>
   );

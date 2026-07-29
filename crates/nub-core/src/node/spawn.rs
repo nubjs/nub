@@ -2163,8 +2163,20 @@ fn restore_compat_environment(cmd: &mut Command) {
             let filtered = env::split_paths(&path)
                 .filter(|entry| entry.as_os_str() != shim_dir.as_os_str())
                 .collect::<Vec<_>>();
-            if let Ok(path) = env::join_paths(filtered) {
-                cmd.env("PATH", path);
+            // A join failure is only reachable when an entry contains the
+            // separator itself, which `split_paths` can produce on Windows by
+            // stripping quotes around one. There is no correct rejoin, so the
+            // shim stays on PATH and a bare `node` under this child re-enters
+            // nub — the one way compat silently stops being compat. This spawn
+            // is still vanilla; a nested one would not be, so say so.
+            match env::join_paths(filtered) {
+                Ok(path) => {
+                    cmd.env("PATH", path);
+                }
+                Err(e) => eprintln!(
+                    "nub: could not remove the compat shim from PATH ({e}); \
+                     a bare `node` run from this process may re-enter nub"
+                ),
             }
         }
         cmd.env_remove(COMPAT_SHIM_DIR_ENV);

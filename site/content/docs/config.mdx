@@ -485,6 +485,10 @@ Durations use an integer plus one unit.
 2w   # weeks
 ```
 
+The gate fails closed. When no version in a range is old enough the install stops rather than quietly resolving an older one, and a package whose publish time the registry does not report counts as too young. pnpm falls back by default; Nub does not, because a fallback resolves something other than what you asked for without saying so.
+
+Exempt the packages that need to move faster, rather than widening the window for everything.
+
 Exclude selected packages when they must update immediately.
 
 ```jsonc title="nub.jsonc"

@@ -330,10 +330,10 @@ mod tests {
                 crate::project_config::ProjectConfig::default()
             );
 
-            let project = crate::project_config::read_project_config_at(&path);
+            let project = crate::project_config::read_project_config_at(&path).unwrap_err();
             assert!(matches!(
-                project,
-                Err(crate::project_config::ConfigError::UnknownKey { .. })
+                project.kind(),
+                crate::project_config::ConfigError::UnknownKey { .. }
             ));
         });
     }

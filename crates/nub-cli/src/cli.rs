@@ -1886,10 +1886,6 @@ fn run_nub() -> Result<i32> {
         env::set_current_dir(dir)?;
     }
 
-    if !subcommand_found {
-        initialize_config_snapshot(compat, no_check)?;
-    }
-
     // `--node` wins over nub's help/version short-circuit: `nub --node -h` and
     // `nub --node -v` print the resolved Node's own help/version (the project's
     // pinned Node, vanilla), not nub's. Strip nub-owned `--node` and pass the
@@ -1903,6 +1899,11 @@ fn run_nub() -> Result<i32> {
         } else {
             "-h"
         };
+        // Unlike nub's own version/help below, this SPAWNS the resolved Node, so
+        // it still needs the snapshot.
+        if !subcommand_found {
+            initialize_runtime_config_snapshot(compat, no_check)?;
+        }
         return run_file_with_compat(&[flag.to_string()], true);
     }
 
@@ -1921,6 +1922,14 @@ fn run_nub() -> Result<i32> {
             .filter(|s| is_help_routable(s));
         run_help(sub, help_verbose);
         return Ok(0);
+    }
+
+    // AFTER the version/help short-circuits: neither consumes project config, and
+    // discovery walks unbounded to the filesystem root, so initializing ahead of
+    // them let one malformed `nub.jsonc` anywhere above the cwd break the two
+    // commands a user reaches for when something is already broken.
+    if !subcommand_found {
+        initialize_runtime_config_snapshot(compat, no_check)?;
     }
 
     if watch {
@@ -2215,9 +2224,10 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     // offline fallbacks for the homepage prompt's fetch of start.md/skill.md).
     // Like `node`/`pm`, it's a non-forwarding manual sub-verb match — its
     // bare-usage and invalid-verb messages read consistently and it never reaches
-    // clap dispatch. Spec: .fray/ai-friendliness.md.
+    // clap dispatch. Spec: .fray/ai-friendliness.md. Print-only, so it reads no
+    // project config and never initializes the snapshot — a malformed `nub.jsonc`
+    // in some ancestor must not silence the offline docs.
     if subcommand == "agent" {
-        initialize_config_snapshot(false, false)?;
         return crate::agent::run(&rest[1..]);
     }
 
@@ -2287,15 +2297,26 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
         env::set_current_dir(dir)?;
     }
     let (config_node, config_no_check) = command_config_flags(&cli.command);
-    // Install-family commands own a verb-local `-C/--dir` that is parsed below
-    // this point. Their engine session applies it first, then initializes the
-    // one process snapshot from that final cwd. Every other command has already
-    // reached its final cwd here and initializes normally.
-    if !matches!(
-        &cli.command,
-        Some(Command::Install { .. } | Command::Ci { .. })
-    ) {
-        initialize_config_snapshot(config_node, config_no_check)?;
+    match &cli.command {
+        // Install-family commands own a verb-local `-C/--dir` that is parsed
+        // below this point. Their engine session applies it first, then
+        // initializes the one process snapshot from that final cwd.
+        Some(Command::Install { .. } | Command::Ci { .. }) => {}
+        // Self-update, the scaffold, and the help pages consume no project
+        // config, and `upgrade` is a plausible remedy for whatever broke it —
+        // none of them may be gated on a file they never read. `init`'s
+        // in-process install initializes the snapshot itself, from the
+        // scaffold's final cwd.
+        Some(Command::Init { .. } | Command::Upgrade { .. } | Command::Help { .. }) => {}
+        // The runtime entrypoints, where forced compat degrades an unloadable
+        // file rather than aborting.
+        Some(
+            Command::Run { .. }
+            | Command::Watch { .. }
+            | Command::Exec { .. }
+            | Command::Nubx { .. },
+        ) => initialize_runtime_config_snapshot(config_node, config_no_check)?,
+        _ => initialize_config_snapshot(config_node, config_no_check)?,
     }
 
     match cli.command {
@@ -2767,7 +2788,7 @@ fn run_as_node() -> Result<i32> {
     // (temp-dir shim, inside a `nub …` subtree the user opted into) keeps
     // augment-by-default. `--node`/`NODE_COMPAT` force vanilla in either case.
     let compat = compat_flag || nub_core::node::shim::invoked_as_persistent_node_shim();
-    initialize_config_snapshot(compat, false)?;
+    initialize_runtime_config_snapshot(compat, false)?;
     if compat {
         run_file_with_compat(&forwarded, true)
     } else {
@@ -2879,10 +2900,9 @@ fn command_config_flags(command: &Option<Command>) -> (bool, bool) {
     }
 }
 
-pub(crate) fn initialize_config_snapshot(cli_node: bool, cli_no_check: bool) -> Result<()> {
+fn config_overlays(cli_node: bool, cli_no_check: bool) -> crate::project_config::ConfigOverlays {
     use crate::project_config::{ConfigOverlays, ProjectConfig, VerifyDeps};
 
-    let cwd = env::current_dir()?;
     let mut overlays = ConfigOverlays {
         defaults: ProjectConfig::builtin_defaults(),
         ..ConfigOverlays::default()
@@ -2898,7 +2918,52 @@ pub(crate) fn initialize_config_snapshot(cli_node: bool, cli_no_check: bool) -> 
         verify_deps: verify_deps_env_setting(),
         ..ProjectConfig::default()
     };
-    crate::project_config::initialize_effective_config(&cwd, overlays)?;
+    overlays
+}
+
+pub(crate) fn initialize_config_snapshot(cli_node: bool, cli_no_check: bool) -> Result<()> {
+    let cwd = env::current_dir()?;
+    crate::project_config::initialize_effective_config(
+        &cwd,
+        config_overlays(cli_node, cli_no_check),
+    )?;
+    debug_assert!(crate::project_config::effective_config().is_some());
+    Ok(())
+}
+
+/// The runtime entrypoints' snapshot init (`nub <file>`, `run`/`exec`/`nubx`/
+/// `watch`, the `node` hijack). Identical to [`initialize_config_snapshot`]
+/// except when compat is already FORCED — the `--node` flag, a truthy
+/// `NODE_COMPAT`, or the persistent `node` shim. There an unloadable
+/// `nub.jsonc` degrades to the built-in defaults with a warning instead of
+/// aborting: [`effective_compat_mode`] only ORs the file's `nodeCompat` in, so a
+/// file that cannot be read cannot change the outcome, and failing shut would
+/// disarm the zero-augmentation escape hatch exactly when a broken config is
+/// what the user is escaping. Discovery walks to the filesystem root, so the
+/// offending file is often one the user did not author and cannot see.
+///
+/// Compat is NOT inferred for the install/PM paths, which keep
+/// [`initialize_config_snapshot`]: `--node`/`NODE_COMPAT` disable runtime
+/// augmentation only, and `install.*` still decides linker, soak window, and
+/// registry behavior there — degrading those to defaults would silently ignore
+/// settings the invocation really does consume.
+fn initialize_runtime_config_snapshot(cli_node: bool, cli_no_check: bool) -> Result<()> {
+    let cwd = env::current_dir()?;
+    let overlays = config_overlays(cli_node, cli_no_check);
+    let forced_compat = cli_node || overlays.environment.node_compat == Some(true);
+    match crate::project_config::initialize_effective_config(&cwd, overlays.clone()) {
+        Ok(_) => {}
+        // The error names the offending file by absolute path, which is what
+        // makes a degrade visible when the file sits above the cwd.
+        Err(error) if forced_compat => {
+            eprintln!(
+                "nub: {error}\n\x20\x20ignored — compat mode (--node / NODE_COMPAT) runs with \
+                 no project config"
+            );
+            crate::project_config::initialize_effective_config_without_project(&cwd, overlays);
+        }
+        Err(error) => return Err(error.into()),
+    }
     debug_assert!(crate::project_config::effective_config().is_some());
     Ok(())
 }

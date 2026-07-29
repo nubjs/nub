@@ -840,7 +840,13 @@ fn engine_session_inner(
     let setting_defaults =
         nub_setting_defaults(detected.as_ref(), truly_fresh, &cwd, store_locality);
     let native_mode = native_pm_mode(detected.as_ref(), truly_fresh, &cwd);
-    let native_install = if noise == ConfigScopeNoise::Warn && native_mode {
+    // Keyed on native mode ALONE. `noise` decides whether config-SCOPING
+    // WARNINGS print, which is a separate question from whether the project's
+    // `install` block applies — and the read-only families (`why`, `outdated`,
+    // `list`) run Silent precisely so they can report what a real install would
+    // produce. Folding `noise` in here dropped their project-config tier, so
+    // they resolved against a linker and release-age policy no install uses.
+    let native_install = if native_mode {
         native_install_settings(detected.as_ref(), truly_fresh, &cwd, &setting_defaults)?
     } else {
         None
@@ -2354,7 +2360,7 @@ fn strip_yarnrc_value(rest: &str) -> &str {
 /// - Layout policy: EVERY project defaults to the isolated layout
 ///   (`nodeLinker=isolated`) — strict (no phantom deps) and GVS-fast; a project
 ///   that relies on phantom deps opts back into the flat tree with
-///   `install.nodeLinker="hoisted"`. Hoisting is left GVS-AWARE via the engine's
+///   `install.linker: "hoisted"`. Hoisting is left GVS-AWARE via the engine's
 ///   `gvs_over_default_hoist` profile: a NON-injected project leaves `hoist` at
 ///   the built-in default (`true`), and under that profile a DEFAULT hoist no
 ///   longer vetoes the shared store — so the global virtual store engages
