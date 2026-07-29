@@ -142,7 +142,7 @@ The poisoned arm carries the original defect byte for byte:
 ```
 
 The fixed arm carries no such message, and the confined `cmd.exe` gets far enough to
-invoke `node`. What it hits **next** is a different defect, one this branch uncovered by
+invoke `node`. What it hit **next** was a different defect, one this branch uncovered by
 clearing the thing in front of it:
 
 ```
@@ -150,14 +150,36 @@ Error: failed to detect Node version:
   "C:\hostedtoolcache\windows\node\22.23.1\x64\node.exe": Access is denied. (os error 5)
 ```
 
-nub's own version detection is refused execute on the toolchain interpreter under the
-AppContainer, so the script's body never runs. That is why `script-ran` is **not** gated in
-the Windows fixed arm — gating on it would re-measure someone else's bug — and why the
-gated property is the shell's rather than the script's. Both are printed as diagnostics so
-neither is designed around.
+That reads as the AppContainer withholding execute on the toolchain interpreter, and it is
+not what was happening. `ERROR_ACCESS_DENIED` surfaces at Rust's `Command` API for every
+object a spawn touches, and a captured-output spawn touches several before `CreateProcessW`
+runs. Measured one at a time on `windows-latest`
+(`crates/nub-sandbox/tests/windows_interpreter_exec.rs`), a LowBox child reads both the
+granted interpreter and the `ALL APPLICATION PACKAGES`-granted System32 image, calls
+`CreateProcessW`, spawns with inherited stdio, and pipes through `CreatePipe` — but cannot
+open the **`NUL` device**, for read or for write. `Command::output()` redirects stdin to
+`Stdio::null()`, so nub's version detection failed before the interpreter was ever opened
+and reported it against the interpreter's path. The grant was correct throughout; the probe
+prints the real `compile_build_jail` rules carrying that `node.exe`.
+
+With detection off `NUL`, `node` starts under the jail and reaches the CJS loader, which
+`realpathSync`s the file it was asked to require:
+
+```
+Error: EPERM: operation not permitted, lstat 'C:\'
+    at Object.realpathSync (node:fs:2749:25)
+    at toRealPath (node:internal/modules/helpers:61:13)
+    at Function._findPath (node:internal/modules/cjs/loader:747:24)
+```
+
+`realpath` stats every prefix of the path, up to and including the drive root. Leaf-only
+granting rests on traverse-bypass, which lets a deep path be OPENED without rights on its
+ancestors but does not make an ancestor statable in its own right — so no ancestor of a
+granted file can be `lstat`ed. That is why `script-ran` is **not** gated in the Windows
+fixed arm; the gate there is that the interpreter defect above must not reappear. Both are
+printed as diagnostics so neither is designed around.
 
 The same run says something about the sibling `strip_verbatim_prefix` fix: cmd.exe's
 `UNC paths are not supported` refusal appears in **neither** arm, so it is accepting the
-working directory it is handed. That is symptom-level confirmation, not the full property —
-`cwd-is-package-dir` is read from inside the script's body, which the interpreter defect
-above still blocks on Windows.
+working directory it is handed. That is still symptom-level confirmation — `cwd-is-package-dir`
+is read from inside the script's body, which the ancestor-lstat defect blocks on Windows.
