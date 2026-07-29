@@ -108,7 +108,27 @@ pub(crate) fn ensure_runtime() -> Option<PathBuf> {
 }
 
 fn extract_once() -> Option<PathBuf> {
-    extract_with(&base_candidates())
+    let dir = extract_with(&base_candidates())?;
+    // The addon is a Mach-O with no `codesign` step, so macOS refuses to
+    // `dlopen` it once quarantined — and `transform-core.mjs` swallows that
+    // load failure into a null handle it then calls unguarded, making every
+    // TypeScript transpile a hard failure. The inodes are created in-process
+    // (or adopted from a concurrent winner), so a nub carrying inherited
+    // quarantine flags stamps them itself.
+    //
+    // Deliberately on the warm path too, not just a fresh extract:
+    // `VERIFIED_ENTRYPOINTS` compares content hashes, and an xattr does not
+    // change a file's bytes, so a dir poisoned by an older build verifies
+    // clean forever and the self-heal re-extract never fires. Costs one
+    // syscall per process — this sits behind the `OnceLock`.
+    let addon = dir.join("addons").join("nub-native.node");
+    if let Err(e) = crate::quarantine::clear(&addon) {
+        tracing::debug!(
+            "could not clear com.apple.quarantine on {}: {e}",
+            addon.display()
+        );
+    }
+    Some(dir)
 }
 
 /// The candidate-driven core of [`extract_once`], split out so tests can drive it

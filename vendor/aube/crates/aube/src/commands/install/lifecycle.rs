@@ -717,6 +717,18 @@ pub(crate) async fn run_dep_lifecycle_scripts(
                     ran_here += 1;
                 }
             }
+            if ran_here > 0 {
+                // A dep build writes its output in place — `node-gyp` emits
+                // `build/Release/*.node` right here — and those inodes are
+                // created by child processes that inherited this one's
+                // quarantine flags. A locally built addon is ad-hoc signed at
+                // best, so Gatekeeper refuses to load it. This runs before the
+                // cache save below so the saved entry is clean as well;
+                // stripping only on restore would leave the install that
+                // *built* the addon broken and seed every later restore from a
+                // poisoned tree. No-op off macOS.
+                aube_linker::strip_quarantine_from_tree(&job.package_dir);
+            }
             if should_save_side_effects_cache
                 && ran_here > 0
                 && let Some(cache_entry) = job.cache_entry.clone()
