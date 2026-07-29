@@ -1381,8 +1381,14 @@ mod tests {
     fn embedder_owned_lifecycle_sandbox_suppresses_aubes_jail() {
         // Standalone aube (flag false): `jailBuilds`/`paranoid` engage aube's own jail
         // exactly as before — byte-for-byte default behavior.
-        assert!(jail_enabled(false, true, false), "jailBuilds engages the jail");
-        assert!(jail_enabled(false, false, true), "paranoid engages the jail");
+        assert!(
+            jail_enabled(false, true, false),
+            "jailBuilds engages the jail"
+        );
+        assert!(
+            jail_enabled(false, false, true),
+            "paranoid engages the jail"
+        );
         assert!(!jail_enabled(false, false, false), "neither set → no jail");
         // Embedder-owned confinement (flag true, nub): aube's jail NEVER engages, even
         // when a user (or a compat project's .npmrc) sets jailBuilds/paranoid — the

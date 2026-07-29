@@ -221,10 +221,18 @@ pub fn lazy_js_shim_path() -> miette::Result<PathBuf> {
 /// directly and skip the shim's two resolution channels — the
 /// `AUBE_NODE_GYP_EXE` trampoline (an exec of the PM binary, which a sandbox
 /// need not grant) and the bare-`node-gyp`-on-PATH fallback (which loses to
-/// whatever an intermediate `npm run` prepends). It must be the `.js` entry and
-/// never the `.bin` shim: consumers run `node $npm_config_node_gyp`, and npm's
-/// own `node-gyp-bin` stub is literally `node "$npm_config_node_gyp" "$@"`, so a
-/// shell shim there dies as a syntax error. Standalone aube never calls this.
+/// whatever an intermediate `npm run` prepends).
+///
+/// TWO invariants, and the value needs BOTH because npm's `node-gyp` stub has
+/// been spelled two ways and nub does not choose which npm a project runs. It
+/// must be node-gyp's own `bin/node-gyp.js` — npm ≥7's `@npmcli/run-script` stub
+/// is `node "$npm_config_node_gyp" "$@"`, which a `.bin` shell shim would fail
+/// as a syntax error — AND that file must keep its exec bit and `#!/usr/bin/env
+/// node` shebang, because npm ≤6 unshifted its own `bin/node-gyp-bin` stub,
+/// which execs `"$npm_config_node_gyp"` DIRECTLY. Satisfying only one spelling
+/// breaks the other half of the ecosystem, and it breaks silently: the stub that
+/// fails is chosen by the consumer's npm, not by anything visible here.
+/// Standalone aube never calls this.
 pub fn cached_js_entry() -> miette::Result<Option<PathBuf>> {
     Ok(js_entry_in(&tool_root()?.join(BUCKET)))
 }
@@ -559,24 +567,58 @@ mod tests {
         );
     }
 
-    /// A confining embedder stamps this path as `npm_config_node_gyp`, and npm's
-    /// own `node-gyp-bin` stub runs it as `node "$npm_config_node_gyp"` — so
-    /// naming the `.bin` shell shim instead would feed a `sh` script to Node.
-    /// The `None` half keeps the embedder on the lazy shim rather than a path
-    /// that dies at exec.
+    /// A confining embedder stamps this path as `npm_config_node_gyp`, which npm
+    /// invokes one of TWO ways depending on its version — `node "$value"` (npm
+    /// ≥7) or `"$value"` directly (npm ≤6) — so the returned path must be both a
+    /// `.js` entry and executable with a shebang. Naming the `.bin` shell shim
+    /// breaks the first; losing the mode bit breaks the second, and each breaks
+    /// only for the npm the user happens to run.
+    ///
+    /// SCOPE: this pins the contract `js_entry_in` hands its caller, staged to
+    /// mirror the materialized layout. It does NOT prove the store preserves the
+    /// mode end-to-end — the CAS writes every blob `0o644` and carries
+    /// executability as a separate index boolean re-applied at link time, so
+    /// that half is covered by materialization, not here.
     #[test]
-    fn the_cached_entry_is_the_js_file_node_can_run() {
+    fn the_cached_entry_is_a_runnable_node_gyp_entry() {
         let t = isolated_tree();
         let pkg = t.store.join("node_modules/node-gyp");
         std::fs::create_dir_all(pkg.join("bin")).expect("bin dir");
         assert_eq!(js_entry_in(&t.tool_dir), None, "no bin/node-gyp.js yet");
 
-        std::fs::write(pkg.join("bin/node-gyp.js"), b"#!/usr/bin/env node\n").expect("entry");
+        let staged = pkg.join("bin/node-gyp.js");
+        std::fs::write(&staged, b"#!/usr/bin/env node\n").expect("entry");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+
+        let entry = js_entry_in(&t.tool_dir).expect("a usable tree must yield an entry");
         assert_eq!(
-            js_entry_in(&t.tool_dir),
-            Some(t.tool_dir.join("node_modules/node-gyp/bin/node-gyp.js")),
+            entry,
+            t.tool_dir.join("node_modules/node-gyp/bin/node-gyp.js"),
             "must resolve through the virtual store to the package's JS entry"
         );
+        assert!(
+            std::fs::read(&entry)
+                .expect("read entry")
+                .starts_with(b"#!"),
+            "npm ≤6 execs this path directly, so it must carry a shebang"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&entry)
+                .expect("stat entry")
+                .permissions()
+                .mode();
+            assert!(
+                mode & 0o111 != 0,
+                "npm ≤6 execs this path directly, so it must stay executable; mode {mode:o}"
+            );
+        }
 
         std::fs::remove_dir_all(&t.store).expect("purge store");
         assert_eq!(
