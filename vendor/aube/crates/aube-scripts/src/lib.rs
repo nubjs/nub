@@ -1276,8 +1276,7 @@ pub async fn run_script(
         .filter(|(scope, hook)| hook.confines(scope.package_name, scope.project_root))
     {
         Some((scope, hook)) => {
-            let spawn =
-                lifecycle_sandbox_spawn(&cmd, script_dir, scope.project_root, scope.package_dir);
+            let spawn = lifecycle_sandbox_spawn(&cmd, script_dir, &scope);
             // The host sandbox owns a synchronous spawn+wait (nub-sandbox drives an
             // outer bwrap / Seatbelt child), so run it off the async runtime.
             tokio::task::spawn_blocking(move || hook.run(spawn))
@@ -1306,19 +1305,21 @@ pub async fn run_script(
 /// Reads the program/args/env back off the built command so the embedder confines the
 /// SAME spawn aube would have run; the env is handed over as the command's explicit
 /// operations (the unconfined spawn inherits the aube-process env and layers these).
+/// Takes the whole [`SandboxScope`] rather than its parts so the identity the hook was
+/// ASKED about in `confines` is the identity it is HANDED in `run` — they cannot drift.
 fn lifecycle_sandbox_spawn(
     cmd: &tokio::process::Command,
     script_dir: &Path,
-    project_root: &Path,
-    package_dir: &Path,
+    scope: &SandboxScope<'_>,
 ) -> aube_util::LifecycleSandboxSpawn {
     let std_cmd = cmd.as_std();
     aube_util::LifecycleSandboxSpawn {
         program: std_cmd.get_program().to_os_string(),
         args: std_cmd.get_args().map(|a| a.to_os_string()).collect(),
         cwd: script_dir.to_path_buf(),
-        project_root: project_root.to_path_buf(),
-        package_dir: package_dir.to_path_buf(),
+        project_root: scope.project_root.to_path_buf(),
+        package_dir: scope.package_dir.to_path_buf(),
+        package_name: scope.package_name.map(str::to_string),
         env_delta: std_cmd
             .get_envs()
             .map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string())))

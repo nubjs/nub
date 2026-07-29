@@ -174,9 +174,14 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         ));
 
         let homes = sandbox_homes(&spawn.project_root);
+        // The name is aube's `registry_name()` — the SAME identity `opted_out` keys the
+        // per-package opt-out on, and for the same reason: a dependency cannot rename
+        // itself into it, and aube withholds it entirely once its root is a checkout it
+        // fetched. It selects a curated exception only; it can never widen the baseline.
         let policy = nub_sandbox::compile_build_jail(
             homes,
             &spawn.package_dir,
+            spawn.package_name.as_deref(),
             interpreter,
             extra_reads,
             ambient,

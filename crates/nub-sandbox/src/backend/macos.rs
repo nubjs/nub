@@ -1610,6 +1610,7 @@ mod tests {
         let jail = compile_build_jail(
             homes(),
             Path::new("/proj/node_modules/somepkg"),
+            None,
             vec![PathBuf::from("/testhome/.cache/nub/node/v26/bin/node")],
             Vec::new(),
             BTreeMap::new(),

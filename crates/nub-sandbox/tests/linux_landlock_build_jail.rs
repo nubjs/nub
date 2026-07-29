@@ -61,6 +61,7 @@ impl Jail {
                 project: self.project.clone(),
             },
             &self.package_dir,
+            None,
             Vec::new(),
             Vec::new(),
             ambient,

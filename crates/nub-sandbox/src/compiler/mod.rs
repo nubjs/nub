@@ -12,6 +12,7 @@
 
 mod builtin_sets;
 mod clobber;
+mod curated;
 mod defaults;
 mod env_grammar;
 mod fold;
