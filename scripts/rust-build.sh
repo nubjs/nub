@@ -122,18 +122,35 @@ bucket="$shared${key:+-$key}"
 seed_from() {
   [ -d "$1" ] || return 1
   [ -e "$2" ] && return 1
-  _tmp="$2.seeding.$$"
-  rm -rf "$_tmp" 2>/dev/null
-  if cp -c -a "$1" "$_tmp" 2>/dev/null \
-    || cp -a --reflink=always "$1" "$_tmp" 2>/dev/null; then
-    # `mv` onto an EXISTING dir moves the source inside it, so re-check first.
-    # A loser here wastes a clone; it can never publish a partial tree.
-    if [ ! -e "$2" ] && mv "$_tmp" "$2" 2>/dev/null; then
+  # A FIXED-name claim dir is both the mutual-exclusion token and the staging
+  # area. Fixed rather than per-pid so exactly one racer clones: a per-pid temp
+  # would have every worktree in the first post-merge wave clone the same source
+  # and then discard it, and a bare test-then-`mv` is still a race — `mv a b`
+  # with `b` an existing dir yields `b/a`, nesting a full clone inside the
+  # winner's bucket where the GC's -maxdepth 1 never reaches it.
+  _claim="$2.seeding"
+  # Retire an abandoned claim (a clone killed mid-flight — routine here). Guards
+  # both call sites, including the private target dir, which the sweep below
+  # cannot see because it lives in the worktree, not beside the shared dir.
+  if [ -d "$_claim" ] && [ -z "$(find "$_claim" -maxdepth 0 -mmin -120 2>/dev/null)" ]; then
+    rm -rf "$_claim" 2>/dev/null
+  fi
+  mkdir "$_claim" 2>/dev/null || return 1
+  if cp -c -a "$1/." "$_claim/" 2>/dev/null \
+    || cp -a --reflink=always "$1/." "$_claim/" 2>/dev/null; then
+    if [ ! -e "$2" ] && mv "$_claim" "$2" 2>/dev/null; then
       return 0
     fi
   fi
-  rm -rf "$_tmp" 2>/dev/null
+  rm -rf "$_claim" 2>/dev/null
   return 1
+}
+
+# The newest bucket on disk, or nothing. Buckets are only ever created by
+# NON-diverged worktrees, so every bucket name is a base-content key.
+newest_bucket() {
+  # shellcheck disable=SC2012  # names are ours and contain no newlines
+  ls -dt "$shared"-* 2>/dev/null | head -1
 }
 
 if [ -n "$diverged" ] || [ -n "$untracked" ]; then
@@ -142,8 +159,25 @@ if [ -n "$diverged" ] || [ -n "$untracked" ]; then
   # Seed from the shared cache on FIRST creation only. A relocated target dir
   # keeps its dependency artifacts (see the header), so this turns a ~3-min cold
   # build into a rebuild of just the diverged crates.
-  if seed_from "$bucket" "$target"; then
-    why="$why (seeded from $(basename "$bucket"))"
+  #
+  # ANY bucket will do, and the fallback is what makes seeding work at all for
+  # the common case. $bucket is keyed by THIS worktree's index, but we are on
+  # this branch precisely because the content diverges, and buckets are only ever
+  # created by non-diverged worktrees — so whenever the divergence is COMMITTED
+  # or staged (i.e. any ordinary feature branch) no bucket carries this key and
+  # an exact-match seed silently never fires. It only worked for unstaged edits,
+  # where the index still matches the base.
+  #
+  # Seeding from a base-content bucket is sound here in a way it would NOT be on
+  # the shared branch: this destination is PRIVATE to one worktree, so a stale
+  # workspace-crate artifact can't clobber a sibling — cargo just fingerprints it
+  # as changed and rebuilds it. What we are actually after is the ~700 crates.io
+  # rlibs, which are identical across every bucket.
+  _seed="$bucket"
+  [ -d "$_seed" ] || _seed=$(newest_bucket)
+  [ -n "$_seed" ] && [ -d "$_seed" ] || _seed="$shared"
+  if seed_from "$_seed" "$target"; then
+    why="$why (seeded from $(basename "$_seed"))"
   fi
 else
   target="$bucket"        # shared fast path, content-keyed
@@ -181,7 +215,7 @@ _base=$(basename "$shared")
 find "$(dirname "$shared")" -maxdepth 1 -type d \
   \( -name "$_base" -o -name "$_base-*" \) -mtime +14 \
   -exec rm -rf {} + 2>/dev/null || true
-find "$(dirname "$shared")" -maxdepth 1 -type d -name "*.seeding.*" -mtime +1 \
+find "$(dirname "$shared")" -maxdepth 1 -type d -name "$_base*.seeding" -mmin +120 \
   -exec rm -rf {} + 2>/dev/null || true
 
 # CONTENTION CONTROL. Many agent worktrees build concurrently, and every cargo
