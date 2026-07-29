@@ -195,7 +195,7 @@ fn remove_if_external_symlink(
     let vstore_leaf = pnpm_raw
         .file_name()
         .map(|s| s.to_owned())
-        .unwrap_or_else(|| std::ffi::OsString::from(format!(".{}", aube_util::prog())));
+        .unwrap_or_else(|| std::ffi::OsString::from(".aube"));
 
     match std::fs::canonicalize(&abs_target) {
         Ok(canonical) => {

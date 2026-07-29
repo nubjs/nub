@@ -68,6 +68,24 @@ PATH_CALL='join\(|push\(|prefix\(|with_file_name\(|set_file_name\(|create_dir|Pa
 #                      because the window catches an adjacent `Vec::push`.
 is_allowed() {
   case "$1" in
+    # UNREACHABLE UNDER NUB — deliberately left as upstream wrote them, so the
+    # vendored delta stays small and upstream merges stay cheap. Each entry is a
+    # reachability claim; if one of these paths ever becomes reachable under an
+    # embedder, drop the entry and compose the name from `prog()` instead.
+    #   self_install.rs  — aube's self-update versions dir. `self_update_enabled`
+    #                      is false in the NUB profile and every caller of
+    #                      `self_dir()` is self-update machinery.
+    #   fs_atomic.rs     — sibling-temp name used ONLY when the destination has
+    #                      no file name; every caller passes a real file path.
+    #   settings_context / state.rs — store-dir fallbacks taken only when
+    #                      neither XDG nor HOME resolves.
+    #   unlink.rs        — virtual-store leaf fallback, only when the resolved
+    #                      store path has no file name.
+    vendor/aube/crates/aube-runtime/src/self_install.rs:*\"aube/self\"*) return 0 ;;
+    vendor/aube/crates/aube-util/src/fs_atomic.rs:*\"aube-tmp\"*) return 0 ;;
+    vendor/aube/crates/aube/src/commands/settings_context.rs:*temp_dir*join*\"aube\"*) return 0 ;;
+    vendor/aube/crates/aube/src/state.rs:*temp_dir*join*\"aube\"*) return 0 ;;
+    vendor/aube/crates/aube/src/commands/unlink.rs:*OsString::from*\".aube\"*) return 0 ;;
     vendor/aube/crates/aube/src/argv.rs:*args\[0\]*) return 0 ;;
     vendor/aube/crates/aube/src/commands/patch.rs:*aube-patch-*) return 0 ;;
     vendor/aube/crates/aube-runtime/src/self_install.rs:*mise_tool_installs_dir*) return 0 ;;

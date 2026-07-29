@@ -257,11 +257,8 @@ pub(crate) fn open_store(cwd: &std::path::Path) -> miette::Result<aube_store::St
         // No configured `storeDir`: the aube-owned default under XDG/HOME, or a
         // `$TMPDIR`-rooted store when neither is available (matches the cache
         // fallback above rather than aborting the install).
-        None => aube_store::dirs::store_dir().unwrap_or_else(|| {
-            std::env::temp_dir()
-                .join(aube_util::prog())
-                .join("store/v1/files")
-        }),
+        None => aube_store::dirs::store_dir()
+            .unwrap_or_else(|| std::env::temp_dir().join("aube").join("store/v1/files")),
     };
     aube_store::Store::with_root_and_cache(root, cache_dir)
         .into_diagnostic()
@@ -496,14 +493,11 @@ pub(crate) fn resolve_fetch_policy(cwd: &std::path::Path) -> aube_registry::conf
 ///
 /// Note: `XDG_CACHE_HOME` is intentionally *not* a source for this
 /// setting — it's a base directory, and `aube_store::dirs::cache_dir()`
-/// already appends the embedder's cache namespace. Routing it through the
-/// settings accessor
+/// already appends `/aube`. Routing it through the settings accessor
 /// would lose the subdirectory.
 pub(crate) fn resolved_cache_dir(cwd: &std::path::Path) -> std::path::PathBuf {
-    let platform_default = || {
-        aube_store::dirs::cache_dir()
-            .unwrap_or_else(|| std::env::temp_dir().join(aube_util::prog()))
-    };
+    let platform_default =
+        || aube_store::dirs::cache_dir().unwrap_or_else(|| std::env::temp_dir().join("aube"));
     // Check whether .npmrc explicitly sets cacheDir, rather than comparing
     // the resolved value against the default string — a user who writes
     // `cacheDir=~/.cache/aube` explicitly should get that literal path,
