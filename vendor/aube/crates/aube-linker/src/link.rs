@@ -341,9 +341,10 @@ impl Linker {
                             // and `is_dir()` is true, so the file-type bit would
                             // misread a stale junction as a real dir and skip the
                             // conversion. `read_link` succeeds on both Unix symlinks
-                            // and junction reparse points and returns `InvalidInput`
-                            // on a real directory — the same signal `classify_entry_state`
-                            // and `detect_aube_dir_gvs_mode` rely on.
+                            // and junction reparse points and fails on a real
+                            // directory — but with DIFFERENT errors per platform, so
+                            // the test goes through `crate::is_real_dir` rather than a
+                            // bare `InvalidInput` match (see `sweep::is_not_a_link_error`).
                             if self.disk_materialize_matches(&pkg.name) {
                                 // Orphan-safety invariant: disk-materialize gives X
                                 // a real project-local dir so X's OWN undeclared
@@ -374,13 +375,7 @@ impl Linker {
                                     .join(subdir)
                                     .join("node_modules")
                                     .join(&pkg.name);
-                                // `InvalidInput` from `read_link` == a real dir (not
-                                // a symlink/junction). See the classification note
-                                // above for why this beats `is_symlink()`.
-                                let local_is_real_dir = matches!(
-                                    std::fs::read_link(&local_aube_entry),
-                                    Err(e) if e.kind() == std::io::ErrorKind::InvalidInput
-                                );
+                                let local_is_real_dir = crate::is_real_dir(&local_aube_entry);
                                 if store_pkg_dir.exists() && local_is_real_dir {
                                     // Both placements already correct.
                                     local_stats.packages_cached += 1;
@@ -505,17 +500,18 @@ impl Linker {
                                 nested_link_targets.as_ref(),
                             )?;
 
-                            // Only pay the `remove_dir`/`remove_file` syscalls
-                            // when we actually have something to remove.
-                            // On Windows, `.aube/<dep_path>` is an NTFS
-                            // junction (created via `sys::create_dir_link`);
-                            // `remove_file` can't unlink those, so try
-                            // `remove_dir` first and fall back to
-                            // `remove_file` for the unix case (where
-                            // `symlink` produces a file-style link).
+                            // Only pay the removal syscalls when we actually
+                            // have something to remove. `Stale` covers three
+                            // shapes — a Unix symlink, a Windows junction, and
+                            // a populated real directory left by a per-project
+                            // install — and `try_remove_entry` is the only
+                            // helper that evicts all three (a bare `remove_dir`
+                            // returns `ERROR_DIR_NOT_EMPTY` on the last one and
+                            // the `remove_file` fallback then returns
+                            // `ERROR_ACCESS_DENIED`, leaving the entry in place
+                            // for `create_dir_link` to collide with — #566).
                             if matches!(state, EntryState::Stale) {
-                                let _ = std::fs::remove_dir(&local_aube_entry)
-                                    .or_else(|_| std::fs::remove_file(&local_aube_entry));
+                                try_remove_entry(&local_aube_entry);
                             }
                             // Parent dirs were pre-created above the
                             // par_iter; no per-package `mkdirp` here.
@@ -1093,9 +1089,11 @@ impl Linker {
                                 nested_link_targets.as_ref(),
                             )?;
 
+                            // Evicts all three `Stale` shapes; see the matching
+                            // block in `link_isolated` for why `remove_dir`
+                            // alone cannot (#566).
                             if matches!(state, EntryState::Stale) {
-                                let _ = std::fs::remove_dir(&local_aube_entry)
-                                    .or_else(|_| std::fs::remove_file(&local_aube_entry));
+                                try_remove_entry(&local_aube_entry);
                             }
                             // Parent dirs were pre-created above the
                             // par_iter; no per-package `mkdirp` here.
@@ -1870,7 +1868,17 @@ fn reconcile_top_level_link(link_path: &Path, expected_target: &Path) -> Result<
         if link_path.symlink_metadata().is_err() {
             return Ok(false);
         }
-        match std::fs::remove_dir(link_path).or_else(|_| std::fs::remove_file(link_path)) {
+        // Widening order: `remove_dir` unlinks a junction or an empty dir
+        // without a recursive walk, `remove_dir_all` handles a POPULATED real
+        // directory (an incumbent npm/yarn tree being taken over — `remove_dir`
+        // returns `ERROR_DIR_NOT_EMPTY` there and the old `remove_file`
+        // fallback then returned `ERROR_ACCESS_DENIED`, aborting the install
+        // with a bare `os error 5` on the first hoisted dep), and `remove_file`
+        // covers a plain file. Matches what the Unix branch below already does.
+        match std::fs::remove_dir(link_path)
+            .or_else(|_| std::fs::remove_dir_all(link_path))
+            .or_else(|_| std::fs::remove_file(link_path))
+        {
             Ok(()) => Ok(false),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(Error::Io(link_path.to_path_buf(), e)),

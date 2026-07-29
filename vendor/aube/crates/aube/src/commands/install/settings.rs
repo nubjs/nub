@@ -200,13 +200,18 @@ pub(super) fn detect_aube_dir_gvs_mode(aube_dir: &std::path::Path) -> Option<boo
         // making a gvs-on entry indistinguishable from a per-project
         // real directory via the file-type bit. `read_link` succeeds on
         // both Unix symlinks and Windows junction reparse points, and
-        // returns `Err(InvalidInput)` on a regular directory — exactly
-        // the signal we need. Non-link IO errors just skip the entry
-        // and move on to the next candidate.
-        match std::fs::read_link(entry.path()) {
-            Ok(_) => return Some(true),
-            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => saw_real_dir = true,
-            Err(_) => continue,
+        // fails on a regular directory — but with a platform-specific
+        // error (EINVAL on Unix, raw `ERROR_NOT_A_REPARSE_POINT` on
+        // Windows, which std leaves `Uncategorized`), so the "real dir"
+        // arm goes through `aube_linker::is_real_dir`. Matching
+        // `InvalidInput` directly made `saw_real_dir` unreachable on
+        // Windows, so a per-project tree returned `None` and the caller's
+        // mode-change wipe never fired.
+        if std::fs::read_link(entry.path()).is_ok() {
+            return Some(true);
+        }
+        if aube_linker::is_real_dir(&entry.path()) {
+            saw_real_dir = true;
         }
     }
     saw_real_dir.then_some(false)
@@ -1281,10 +1286,22 @@ mod network_concurrency_tests {
     }
 }
 
-#[cfg(all(test, unix))]
+// Runs on every platform. Gating this on `unix` is what let the Windows
+// `read_link` classification hole survive: `all_real_dirs_reads_as_per_project`
+// is exactly the assertion that failed there. `create_dir_link` gives the
+// platform-correct link shape (POSIX symlink / NTFS junction), so the same
+// bodies exercise both.
+#[cfg(test)]
 mod gvs_mode_detect_tests {
     use super::*;
-    use std::os::unix::fs::symlink;
+    use aube_linker::create_dir_link;
+    use std::path::Path;
+
+    /// Point at a sibling that is never created. A dangling entry is still a
+    /// link on both platforms, which is the only property these tests need.
+    fn dangling_link(at: std::path::PathBuf) {
+        create_dir_link(Path::new("nonexistent-store-target"), &at).unwrap();
+    }
 
     // `diskMaterializePackages` produces a MIXED `.aube` tree — some entries
     // are shared-store symlinks, some are disk-materialized real dirs. The
@@ -1296,7 +1313,7 @@ mod gvs_mode_detect_tests {
         let dir = tempfile::tempdir().unwrap();
         let aube = dir.path();
         std::fs::create_dir_all(aube.join("real@1.0.0/node_modules/real")).unwrap();
-        symlink("/nonexistent-store/dep@2.0.0", aube.join("dep@2.0.0")).unwrap();
+        dangling_link(aube.join("dep@2.0.0"));
         assert_eq!(detect_aube_dir_gvs_mode(aube), Some(true));
     }
 
@@ -1313,8 +1330,8 @@ mod gvs_mode_detect_tests {
     fn all_symlinks_reads_as_gvs() {
         let dir = tempfile::tempdir().unwrap();
         let aube = dir.path();
-        symlink("/store/a@1.0.0", aube.join("a@1.0.0")).unwrap();
-        symlink("/store/b@1.0.0", aube.join("b@1.0.0")).unwrap();
+        dangling_link(aube.join("a@1.0.0"));
+        dangling_link(aube.join("b@1.0.0"));
         assert_eq!(detect_aube_dir_gvs_mode(aube), Some(true));
     }
 }

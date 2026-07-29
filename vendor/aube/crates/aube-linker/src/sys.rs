@@ -61,10 +61,41 @@ use std::path::{Component, Path, PathBuf};
 /// - Unix: a plain symlink (relative or absolute target OK).
 /// - Windows: an NTFS junction (relative targets are resolved to
 ///   absolute against `link`'s parent first).
+///
+/// **Convergent**: an occupied `link` that already points at `target` is a
+/// no-op success, and any other occupant is cleared and replaced. Callers
+/// re-link into live `node_modules` trees on every `add` / `remove`, so a
+/// create that hard-failed on collision aborted whole installs over entries
+/// that survived the previous run (nubjs/nub#576, #566). The clean-create
+/// fast path is unchanged — the reconcile costs nothing until a collision.
 pub fn create_dir_link(target: &Path, link: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(target, link)
+        match std::os::unix::fs::symlink(target, link) {
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                // Same convergence contract as the Windows branch below, so
+                // callers get one platform-independent guarantee. A POSIX
+                // symlink stores the caller's target bytes verbatim, so the
+                // "already correct" test is a direct compare.
+                if matches!(std::fs::read_link(link), Ok(existing) if existing == target) {
+                    return Ok(());
+                }
+                crate::try_remove_entry(link);
+                match std::os::unix::fs::symlink(target, link) {
+                    // A concurrent linker thread refilled the slot between the
+                    // clear and the retry. It writes the same target we do, so
+                    // an identical entry is success, not a collision.
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                        match std::fs::read_link(link) {
+                            Ok(existing) if existing == target => Ok(()),
+                            _ => Err(e),
+                        }
+                    }
+                    other => other,
+                }
+            }
+            other => other,
+        }
     }
     #[cfg(windows)]
     {
@@ -95,9 +126,34 @@ pub fn create_dir_link(target: &Path, link: &Path) -> io::Result<()> {
 fn create_junction_with_retry(target: &Path, link: &Path) -> io::Result<()> {
     let mut attempt = 0;
     let mut delay_ms = 50u64;
+    let mut reconciled = false;
     loop {
         match junction::create(target, link) {
             Ok(()) => return Ok(()),
+            // `junction::create` opens with `fs::create_dir(link)`, so ANY
+            // occupied path — an identical junction included — comes back as
+            // `ERROR_ALREADY_EXISTS`. The linker re-links into a live
+            // `node_modules` on every `add` / `remove`, so a non-idempotent
+            // create aborts the whole install the moment one entry survives
+            // from the previous run (nubjs/nub#576, #566). Converge instead:
+            // accept an entry that already points where we want, otherwise
+            // clear the slot and try again. The "already correct" test runs on
+            // EVERY collision (a concurrent linker thread that refilled the
+            // slot wrote the same target we want, so that is success), but the
+            // slot is cleared at most ONCE — a second collision against a
+            // DIFFERENT target means something outside the linker owns the
+            // path, and clearing again would be an unbounded delete/recreate
+            // fight with whoever that is.
+            Err(e) if is_already_exists(&e) => {
+                if junction_points_at(link, target) {
+                    return Ok(());
+                }
+                if reconciled {
+                    return Err(e);
+                }
+                reconciled = true;
+                crate::try_remove_entry(link);
+            }
             Err(e) if is_retriable_link_error(&e) && attempt < 9 => {
                 std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                 delay_ms = (delay_ms * 2).min(2000);
@@ -106,6 +162,30 @@ fn create_junction_with_retry(target: &Path, link: &Path) -> io::Result<()> {
             Err(e) => return Err(e),
         }
     }
+}
+
+/// `junction::create` normalizes its target through `GetFullPathName` and
+/// stores it absolute; `read_link` hands that same absolute path back with no
+/// `\??\` / `\\?\` prefix, so a direct compare round-trips. Canonicalize both
+/// sides when the raw strings differ — 8.3 short names and drive-letter case
+/// make the textual compare miss links that do resolve to the same directory.
+#[cfg(windows)]
+fn junction_points_at(link: &Path, target: &Path) -> bool {
+    let Ok(existing) = std::fs::read_link(link) else {
+        return false;
+    };
+    if existing == target {
+        return true;
+    }
+    matches!(
+        (existing.canonicalize(), target.canonicalize()),
+        (Ok(a), Ok(b)) if a == b
+    )
+}
+
+#[cfg(windows)]
+fn is_already_exists(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::AlreadyExists || error.raw_os_error() == Some(183)
 }
 
 #[cfg(windows)]
@@ -1134,6 +1214,90 @@ mod tests {
         create_dir_link(&rel, &link).unwrap();
 
         assert_eq!(std::fs::read(link.join("marker.txt")).unwrap(), b"hi");
+    }
+
+    /// The convergence contract of `create_dir_link`, exercised against every
+    /// shape an occupied link path takes across a re-link of a live
+    /// `node_modules`. Regression for nubjs/nub#576 (a surviving sibling link
+    /// inside `.store/<entry>/node_modules/`) and #566 (a surviving
+    /// `.store/<entry>` itself). Runs on both platforms — the failure was
+    /// Windows-only because `junction::create` reports EVERY occupant as
+    /// `ERROR_ALREADY_EXISTS`, but the contract is the same either way.
+    ///
+    /// `occupy` builds the occupant; the assertion is that a subsequent
+    /// `create_dir_link` succeeds, the link resolves to `target`, and the
+    /// target's own contents were not recursed into while clearing the slot.
+    fn assert_converges(occupy: impl FnOnce(&Path)) {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("marker.txt"), b"hi").unwrap();
+
+        let link = dir.path().join("link");
+        occupy(&link);
+        create_dir_link(&target, &link).unwrap();
+
+        assert_eq!(
+            std::fs::read(link.join("marker.txt")).unwrap(),
+            b"hi",
+            "link does not resolve to the requested target after reconcile"
+        );
+        // The target's own contents must survive the reconcile — clearing the
+        // slot must unlink the entry, never recurse through it.
+        assert!(target.join("marker.txt").exists());
+    }
+
+    #[test]
+    fn create_dir_link_converges_over_empty_dir() {
+        assert_converges(|link| std::fs::create_dir_all(link).unwrap());
+    }
+
+    #[test]
+    fn create_dir_link_converges_over_populated_dir() {
+        assert_converges(|link| {
+            std::fs::create_dir_all(link.join("nested")).unwrap();
+            std::fs::write(link.join("stale.txt"), b"stale").unwrap();
+        });
+    }
+
+    #[test]
+    fn create_dir_link_converges_over_file() {
+        assert_converges(|link| std::fs::write(link, b"stale").unwrap());
+    }
+
+    #[test]
+    fn create_dir_link_converges_over_link_to_other_target() {
+        assert_converges(|link| {
+            let other = link.parent().unwrap().join("other-target");
+            std::fs::create_dir_all(&other).unwrap();
+            create_dir_link(&other, link).unwrap();
+        });
+    }
+
+    /// The hot case, and literally the shape #576 reports: a warm re-link
+    /// where the entry is already exactly right must succeed rather than
+    /// collide. (That it takes the early-return path without churning the
+    /// entry is a property of the code, not of this assertion — a
+    /// clear-and-recreate would also leave the link resolving correctly.)
+    #[test]
+    fn create_dir_link_is_a_noop_when_already_correct() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = dir.path().join("link");
+
+        create_dir_link(&target, &link).unwrap();
+        std::fs::write(target.join("witness.txt"), b"1").unwrap();
+        create_dir_link(&target, &link).unwrap();
+
+        assert!(link.join("witness.txt").exists());
+    }
+
+    #[test]
+    fn create_dir_link_converges_over_dangling_link() {
+        assert_converges(|link| {
+            create_dir_link(Path::new("never-created"), link).unwrap();
+        });
     }
 
     #[cfg(windows)]

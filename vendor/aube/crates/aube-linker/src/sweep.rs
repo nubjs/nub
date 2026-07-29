@@ -133,6 +133,31 @@ pub(crate) fn try_remove_entry(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
+/// True when a `read_link` failure means "an entry is here but it is not
+/// a link" rather than "nothing is here".
+///
+/// Unix `readlink(2)` reports EINVAL for a non-link, which std maps to
+/// `ErrorKind::InvalidInput`. Windows answers the same question through
+/// `DeviceIoControl(FSCTL_GET_REPARSE_POINT)`, which fails with the raw
+/// `ERROR_NOT_A_REPARSE_POINT` (4390); std has no `ErrorKind` for that
+/// code, so it arrives as `Uncategorized`. Matching `InvalidInput` alone
+/// therefore answers "is this a real directory?" with `false` for EVERY
+/// real directory on Windows — the classification hole behind nubjs/nub#576
+/// and #566. Callers that need the distinction must go through here.
+pub(crate) fn is_not_a_link_error(e: &std::io::Error) -> bool {
+    const ERROR_NOT_A_REPARSE_POINT: i32 = 4390;
+    e.kind() == std::io::ErrorKind::InvalidInput
+        || e.raw_os_error() == Some(ERROR_NOT_A_REPARSE_POINT)
+}
+
+/// Whether `path` is a real directory — it exists and is not a symlink
+/// or a reparse point. Goes through `is_not_a_link_error` rather than a
+/// bare `InvalidInput` match, which answers `false` for every real
+/// directory on Windows.
+pub fn is_real_dir(path: &Path) -> bool {
+    matches!(std::fs::read_link(path), Err(e) if is_not_a_link_error(&e)) && path.is_dir()
+}
+
 /// `xx::file::mkdirp` wrapped with the linker's `Error::Xx` conversion.
 /// Every materialize pass calls this before creating a symlink /
 /// junction, so the lossy `.to_string()` wrap lives in exactly one
@@ -308,7 +333,57 @@ pub(crate) fn classify_entry_state(link_path: &Path, expected: &Path) -> EntrySt
 
 #[cfg(test)]
 mod tests {
-    use super::is_physical_importer;
+    use super::{is_physical_importer, is_real_dir, try_remove_entry};
+
+    /// The classification the GVS-mode detector and the disk-materialize
+    /// cache check are built on. Asserting it per-shape on every platform is
+    /// what a bare `read_link(..) == InvalidInput` match failed on Windows,
+    /// where a real directory reports `ERROR_NOT_A_REPARSE_POINT` instead.
+    #[test]
+    fn is_real_dir_distinguishes_dirs_from_links_and_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let file = tmp.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+        let link = tmp.path().join("link");
+        crate::sys::create_dir_link(&real, &link).unwrap();
+
+        assert!(is_real_dir(&real));
+        assert!(!is_real_dir(&link), "a link to a dir is not a real dir");
+        assert!(!is_real_dir(&file));
+        assert!(!is_real_dir(&tmp.path().join("missing")));
+    }
+
+    /// `remove_dir` alone returns `ERROR_DIR_NOT_EMPTY` on a populated real
+    /// directory and `remove_file` then returns `ERROR_ACCESS_DENIED`, which
+    /// is how a stale per-project store entry survived into the following
+    /// link creation (nubjs/nub#566).
+    #[test]
+    fn try_remove_entry_evicts_every_occupant_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+
+        let populated = tmp.path().join("populated");
+        std::fs::create_dir_all(populated.join("nested")).unwrap();
+        std::fs::write(populated.join("f.txt"), b"x").unwrap();
+        let link = tmp.path().join("link");
+        crate::sys::create_dir_link(&target, &link).unwrap();
+        let file = tmp.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+
+        for path in [&populated, &link, &file] {
+            try_remove_entry(path);
+            assert!(
+                path.symlink_metadata().is_err(),
+                "{} survived try_remove_entry",
+                path.display()
+            );
+        }
+        // Clearing a link must unlink the entry, not recurse through it.
+        assert!(target.is_dir());
+    }
 
     #[test]
     fn root_is_physical() {
