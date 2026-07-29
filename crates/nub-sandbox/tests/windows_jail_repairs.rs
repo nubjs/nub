@@ -128,7 +128,85 @@ mod win {
             }
             // node <marker> <deadline_secs> <node.exe> <script.js> <sink>
             Some("node") => run_node_bounded(&a[1], &a[2], &a[3], &a[4], &a[5]),
+            Some("privs") => report_privileges(Path::new(&a[1])),
             _ => 2,
+        }
+    }
+
+    /// Whether the LowBox token holds SeChangeNotifyPrivilege — "bypass traverse checking".
+    ///
+    /// This is what decides how much of the ancestor problem is real. Windows does not
+    /// access-check intermediate path components when the caller holds it, so an open of a
+    /// GRANTED leaf succeeds with no ace anywhere on its ancestors — which is exactly what the
+    /// jail is measured to do. `lstat C:\` fails for a different reason: realpath opens `C:\`
+    /// as the TARGET object, and a target is always checked. If the privilege is present, the
+    /// ancestor-ACE repair was never about traversal at all; it was about realpath specifically.
+    fn report_privileges(marker: &Path) -> i32 {
+        use windows_sys::Win32::Foundation::LUID;
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
+            SE_PRIVILEGE_ENABLED_BY_DEFAULT, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenPrivileges,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+        let name: Vec<u16> = "SeChangeNotifyPrivilege"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: every out-param is initialised before use; the token handle is closed below.
+        let text = unsafe {
+            let mut wanted = LUID {
+                LowPart: 0,
+                HighPart: 0,
+            };
+            if LookupPrivilegeValueW(std::ptr::null(), name.as_ptr(), &mut wanted) == 0 {
+                return write_marker(marker, "lookup-failed");
+            }
+            let mut token = std::ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return write_marker(marker, "open-token-failed");
+            }
+            let mut needed = 0u32;
+            GetTokenInformation(token, TokenPrivileges, std::ptr::null_mut(), 0, &mut needed);
+            let mut buf = vec![0u8; needed.max(4) as usize];
+            let ok = GetTokenInformation(
+                token,
+                TokenPrivileges,
+                buf.as_mut_ptr().cast(),
+                needed,
+                &mut needed,
+            );
+            windows_sys::Win32::Foundation::CloseHandle(token);
+            if ok == 0 {
+                return write_marker(marker, "query-failed");
+            }
+            let header = buf.as_ptr().cast::<TOKEN_PRIVILEGES>();
+            let count = (*header).PrivilegeCount as usize;
+            let entries = std::ptr::addr_of!((*header).Privileges)
+                .cast::<windows_sys::Win32::Security::LUID_AND_ATTRIBUTES>();
+            let mut found = None;
+            for i in 0..count {
+                let e = &*entries.add(i);
+                if e.Luid.LowPart == wanted.LowPart && e.Luid.HighPart == wanted.HighPart {
+                    let enabled = e.Attributes
+                        & (SE_PRIVILEGE_ENABLED | SE_PRIVILEGE_ENABLED_BY_DEFAULT)
+                        != 0;
+                    found = Some(enabled);
+                }
+            }
+            match found {
+                Some(true) => format!("present-enabled total={count}"),
+                Some(false) => format!("present-disabled total={count}"),
+                None => format!("absent total={count}"),
+            }
+        };
+        write_marker(marker, &text)
+    }
+
+    fn write_marker(marker: &Path, text: &str) -> i32 {
+        match std::fs::write(marker, text) {
+            Ok(()) => 0,
+            Err(_) => 9,
         }
     }
 
@@ -885,6 +963,25 @@ require({dep});
         }
     }
 
+    /// Does the LowBox token bypass traverse checking? Reported as a FACT plus one verdict,
+    /// because it reframes everything else rather than gating it: if the privilege is held, an
+    /// open of a granted leaf never checks its ancestors, and the ancestor-ACE repair was only
+    /// ever needed for the one operation that opens ancestors ON PURPOSE.
+    fn token_privileges(fails: &mut u32) {
+        let f = Fixture::new("privs");
+        let marker = f.work.join("privs.marker");
+        let policy = jail_shaped(&f, Vec::new(), &[]);
+        let (code, text) =
+            without_ancestor_repair(|| run_jailed(&f, &policy, &f.work, "privs", &marker, &[]));
+        println!("  fact:lowbox-sechangenotify={text}");
+        report(
+            fails,
+            "lowbox-token-privileges-readable",
+            !text.starts_with("<no marker>") && !text.ends_with("-failed"),
+            &format!("exit={code} {text}"),
+        );
+    }
+
     /// WHICH REQUIRE SHAPES COST A WALK ABOVE THE USER PROFILE — the blast-radius measurement.
     ///
     /// Every cell here runs with the repair OFF, which is the UNPRIVILEGED REALITY: a standard
@@ -907,8 +1004,8 @@ require({dep});
     /// directory — exactly the shape that forces a realpath even where a plain directory might
     /// not. `mklink /J` is used rather than a symlink because a junction needs no privilege,
     /// which keeps the fixture representative of what an unprivileged install produces.
-    fn require_shapes(fails: &mut u32, node: &Path) {
-        let f = Fixture::new("shapes");
+    fn require_shapes(fails: &mut u32, node: &Path, arm: &str, extra_env: &[(&str, String)]) {
+        let f = Fixture::new(&format!("shapes-{arm}"));
         let dir = f.work.join("shapes");
         std::fs::create_dir_all(&dir).unwrap();
         seed_package(&dir);
@@ -977,14 +1074,22 @@ require({dep});
             ),
         ];
 
-        println!("  ---- require shapes, repair OFF (the shipping configuration) ----");
+        println!("  ---- require shapes [{arm}], repair OFF (the shipping configuration) ----");
         for (id, script) in &cells {
             for m in ["eval", "path", "bare"] {
                 let _ = std::fs::remove_file(marker(m));
             }
-            let policy = jail_shaped(&f, vec![read_rule(node)], &[]);
+            let policy = jail_shaped(&f, vec![read_rule(node)], extra_env);
             let run = without_ancestor_repair(|| {
-                node_arm(&f, &policy, id, node, &dir, 30, script.as_str())
+                node_arm(
+                    &f,
+                    &policy,
+                    &format!("{arm}-{id}"),
+                    node,
+                    &dir,
+                    30,
+                    script.as_str(),
+                )
             });
             let reached = ["eval", "path", "bare"]
                 .iter()
@@ -993,7 +1098,7 @@ require({dep});
                 > 0;
             report(
                 fails,
-                &format!("shape-{id}-completes-unrepaired"),
+                &format!("shape-{arm}-{id}-completes-unrepaired"),
                 reached,
                 &format!(
                     "marker-written={reached} outer={} sink={}",
@@ -1006,11 +1111,11 @@ require({dep});
         // the blast radius: if `node <file>` cannot start, every shape above is unreachable in
         // practice regardless of how it scored.
         let entry = without_ancestor_repair(|| {
-            let policy = jail_shaped(&f, vec![read_rule(node)], &[]);
+            let policy = jail_shaped(&f, vec![read_rule(node)], extra_env);
             node_arm(
                 &f,
                 &policy,
-                "entry-file",
+                &format!("{arm}-entry-file"),
                 node,
                 &dir,
                 30,
@@ -1022,7 +1127,7 @@ require({dep});
         });
         report(
             fails,
-            "shape-entry-file-completes-unrepaired",
+            &format!("shape-{arm}-entry-file-completes-unrepaired"),
             std::fs::read_to_string(marker("entry")).is_ok(),
             &format!("outer={} sink={}", entry.outer, entry.sink),
         );
@@ -1361,8 +1466,23 @@ try {{
         // ancestor ace at all (every cell is repair-OFF), and it therefore cannot trigger the
         // DACL-propagation stall that has taken the later groups down. Ordering a group that
         // cannot stall behind one that can is how three runs lost the answer they were for.
-        step("require_shapes");
-        require_shapes(&mut fails, node.as_path());
+        step("token_privileges");
+        token_privileges(&mut fails);
+
+        // BASELINE then TREATMENT, one variable between them. `plain` is the shipping
+        // configuration; `psymlinks` adds the only flag pair that stops Node calling realpath at
+        // all, which is inert in a hoisted layout (`preserve_symlinks_hoisted_layout`) and
+        // disqualifying in the default isolated one (`preserve_symlinks_isolated_layout`).
+        step("require_shapes plain");
+        require_shapes(&mut fails, node.as_path(), "plain", &[]);
+
+        step("require_shapes psymlinks");
+        require_shapes(
+            &mut fails,
+            node.as_path(),
+            "psymlinks",
+            &[("NODE_OPTIONS", nub_sandbox::windows_realpath_node_options())],
+        );
 
         step("ancestor_repair");
         ancestor_repair(&mut fails, node.as_path());

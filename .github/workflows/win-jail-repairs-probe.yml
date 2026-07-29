@@ -127,14 +127,17 @@ jobs:
           # breaks in the shipping configuration, so gating on PASS would turn the answer into a
           # red build. Only ABSENCE is an error: a shape that was never measured tells us nothing.
           echo "---- blast radius: which shapes survive with the repair OFF ----"
-          for p in shape-eval-only-completes-unrepaired \
-                   shape-eval-builtin-only-completes-unrepaired \
-                   shape-eval-then-absolute-require-completes-unrepaired \
-                   shape-eval-then-relative-require-completes-unrepaired \
-                   shape-eval-then-bare-require-through-junction-completes-unrepaired \
-                   shape-entry-file-completes-unrepaired; do
+          grep -E 'fact:lowbox-sechangenotify=' probe.log || { echo "MISS the token privilege fact"; fail=1; }
+          for arm in plain psymlinks; do
+          for p in shape-$arm-eval-only-completes-unrepaired \
+                   shape-$arm-eval-builtin-only-completes-unrepaired \
+                   shape-$arm-eval-then-absolute-require-completes-unrepaired \
+                   shape-$arm-eval-then-relative-require-completes-unrepaired \
+                   shape-$arm-eval-then-bare-require-through-junction-completes-unrepaired \
+                   shape-$arm-entry-file-completes-unrepaired; do
             grep -q "prop:$p=" probe.log || { echo "MISS $p (never measured)"; fail=1; }
             grep -E "prop:$p=" probe.log || true
+          done
           done
 
           echo "---- ancestor reachability ----"
