@@ -297,10 +297,15 @@ mod win {
         }
     }
 
-    fn spec(f: &Fixture, args: &[String]) -> CommandSpec {
+    /// `cwd` is a PARAMETER, not a constant, because it is itself a variable under test:
+    /// `CreateProcessW` opens the CALLER's working directory to hand the child a handle to
+    /// it, so a confined process whose own cwd is ungranted cannot spawn anything at all —
+    /// and the failure is `ERROR_ACCESS_DENIED` on the SPAWN, indistinguishable at the
+    /// `Command` API from the image being refused.
+    fn spec(f: &Fixture, cwd: &Path, args: &[String]) -> CommandSpec {
         let mut a = vec!["__sbxchild__".to_string()];
         a.extend(args.iter().cloned());
-        CommandSpec::new(f.child.as_os_str()).args(a).cwd(&f.root)
+        CommandSpec::new(f.child.as_os_str()).args(a).cwd(cwd)
     }
 
     fn report(fails: &mut u32, prop: &str, ok: bool, detail: &str) {
@@ -363,8 +368,9 @@ mod win {
         println!("---- end icacls chain ({label}) ----");
     }
 
-    /// Run one child arm and return `(exit_code, marker_text)`. `mode` selects the child
-    /// entry point; `argv` is whatever that mode takes after the marker path.
+    /// Run one child arm in the GRANTED working directory and return
+    /// `(exit_code, marker_text)`. `mode` selects the child entry point; `argv` is whatever
+    /// that mode takes after the marker path.
     fn run_child(
         f: &Fixture,
         policy: &SandboxPolicy,
@@ -372,9 +378,20 @@ mod win {
         marker: &Path,
         argv: &[String],
     ) -> (i32, String) {
+        run_child_in(f, policy, &f.work.clone(), mode, marker, argv)
+    }
+
+    fn run_child_in(
+        f: &Fixture,
+        policy: &SandboxPolicy,
+        cwd: &Path,
+        mode: &str,
+        marker: &Path,
+        argv: &[String],
+    ) -> (i32, String) {
         let mut args = vec![mode.to_string(), marker.to_string_lossy().into_owned()];
         args.extend(argv.iter().cloned());
-        let outcome = apply(policy, spec(f, &args)).map(|p| p.status());
+        let outcome = apply(policy, spec(f, cwd, &args)).map(|p| p.status());
         let code = match outcome {
             Ok(Ok(status)) => status.code().unwrap_or(-1),
             Ok(Err(error)) => {
@@ -409,6 +426,7 @@ mod win {
         dump_acl_chain("before any grant", &node);
 
         named_pipe_refused(&mut fails);
+        spawn_cwd_differential(&mut fails);
         system_exec_baseline(&mut fails);
         interpreter_in_place(&mut fails, node.as_path());
         interpreter_ungranted_refused(&mut fails, node.as_path());
@@ -424,6 +442,46 @@ mod win {
             eprintln!("{fails} propert(y/ies) failed");
             1
         }
+    }
+
+    /// THE WORKING-DIRECTORY VARIABLE, isolated. `CreateProcessW` duplicates a handle to the
+    /// CALLER's current directory into the child, so a confined process standing in a
+    /// directory it was not granted cannot spawn ANYTHING — and the error is
+    /// `ERROR_ACCESS_DENIED` on the spawn, which at the `Command` API is indistinguishable
+    /// from the image being refused. Same fixture, same policy, same image, one variable:
+    /// the directory the caller stands in.
+    fn spawn_cwd_differential(fails: &mut u32) {
+        let f = Fixture::new("cwd");
+        let policy = jail_shaped(&f, Vec::new());
+        let cmd = PathBuf::from(std::env::var("SystemRoot").unwrap_or_default())
+            .join("System32")
+            .join("cmd.exe");
+        let argv = [
+            cmd.to_string_lossy().into_owned(),
+            "/c".to_string(),
+            "ver".to_string(),
+        ];
+
+        println!("  arm spawn-from-granted-cwd:");
+        let granted = f.work.join("cwd-granted.txt");
+        let (code, text) = run_child_in(&f, &policy, &f.work.clone(), "execstatus", &granted, &argv);
+        report(
+            fails,
+            "spawn-from-granted-cwd",
+            code == 0,
+            &format!("exit={code} marker={text}"),
+        );
+
+        println!("  arm spawn-from-ungranted-cwd-refused:");
+        let ungranted = f.work.join("cwd-ungranted.txt");
+        let (code, text) =
+            run_child_in(&f, &policy, &f.root.clone(), "execstatus", &ungranted, &argv);
+        report(
+            fails,
+            "spawn-from-ungranted-cwd-refused",
+            code == 5,
+            &format!("exit={code} (want 5) marker={text}"),
+        );
     }
 
     /// THE PRIMITIVE, with no process creation in the way. Rust's Windows "anonymous" pipe
@@ -516,7 +574,7 @@ mod win {
             marker.to_string_lossy().into_owned(),
             node.to_string_lossy().into_owned(),
         ];
-        let outcome = apply(&policy, spec(&f, &args)).map(|p| p.status());
+        let outcome = apply(&policy, spec(&f, &f.work, &args)).map(|p| p.status());
         println!("---- icacls of the interpreter WITH the grant live (from inside the jail) ----");
         println!("  launch outcome: {outcome:?}");
         match std::fs::read_to_string(&marker) {
