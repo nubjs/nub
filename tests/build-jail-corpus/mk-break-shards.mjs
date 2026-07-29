@@ -59,9 +59,14 @@ for (const r of table.rows) {
   const broke = r.admissible && r.jail_cost && r.jail_cost !== 'OK';
   const denied = (r.prod_denied_hosts?.length || 0) + (r.prod_denied_paths?.length || 0) > 0;
   if (!broke && !denied) continue;
-  const s = src.get(r.pkg);
+  // The verdict table keys a row `name@version`; a manifest's first column is the
+  // bare name. Matching them directly finds nothing — silently, producing zero shards
+  // and an empty carve-out list that looks like "no breaks" rather than a lookup bug.
+  // Scoped names carry their own @, so split on the LAST one.
+  const name = r.pkg.slice(0, r.pkg.lastIndexOf('@'));
+  const s = src.get(name) || src.get(r.pkg);
   if (!s) { console.error(`skip ${r.pkg}: not found in any source manifest`); continue; }
-  wanted.set(r.pkg, { ...s, reason: broke ? r.jail_cost : 'denial-signature-only' });
+  wanted.set(name, { ...s, reason: broke ? r.jail_cost : 'denial-signature-only' });
 }
 
 fs.mkdirSync(outDir, { recursive: true });
