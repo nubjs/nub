@@ -24,6 +24,11 @@ SHARD="${1:?shard name}"; MANIFEST="${2:?manifest tsv}"; ARM="${3:?A0|PROD}"
 HARNESS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NUB="${NUB_BIN:?set NUB_BIN}"; EXPECT_SHA="${NUB_EXPECT_GIT_SHA:?set NUB_EXPECT_GIT_SHA}"
 LEVER="${LEVER:-}"
+# A4 — the project-grant arm. `env -i` in runnub() discards every variable it is not
+# handed explicitly, so a set-but-undelivered NUB_BUILD_JAIL_PROJECT_GRANT makes the
+# arm silently INERT and A4 measures PROD while claiming otherwise. Delivered through
+# the same idiom as LEVER, and asserted from the binary's own banner below.
+GRANT_ARM="${GRANT_ARM:-}"
 # THE FIXTURE PROJECT MUST NOT LIVE INSIDE A REPOSITORY. Lockfile discovery walks
 # UP from the project root, so a fixture nested under a checkout inherits that
 # checkout's own lockfiles and the install aborts before a single script runs
@@ -152,6 +157,8 @@ snap() {
 # relative one and a "successful write" silently lands in the cwd.
 FORCE=""
 [ "$LEVER" = "npm_config_build_from_source=true" ] && FORCE="npm_config_build_from_source=true"
+GRANT_ENV=""
+[ -n "$GRANT_ARM" ] && GRANT_ENV="NUB_BUILD_JAIL_PROJECT_GRANT=$GRANT_ARM"
 # `timeout` is GNU coreutils and is ABSENT from a stock macOS. A Mac with Homebrew
 # coreutils has it, so a local run succeeds while a clean runner returns 127
 # ("command not found") for every invocation — which reads as "nothing installed"
@@ -184,6 +191,7 @@ runnub() {
   ( cd "$PROJ" && env -i \
       PATH="$STUDY_PATH" HOME="$H" TMPDIR="$TMPD" \
       NUB_CACHE_DIR="$CACHE" npm_config_cache="$CACHE/npm" \
+      ${GRANT_ENV:+$GRANT_ENV} \
       ${FORCE:+$FORCE} ${TIMEOUT_BIN:+"$TIMEOUT_BIN" 3000} "$NUB" "$@" ) >> "$LOG" 2>&1
   return $?
 }
@@ -198,6 +206,69 @@ echo "--- phase 2: approve-builds  <<<< THE LIFECYCLE-SCRIPT WINDOW >>>>" >> "$L
 # phases and destroying the measurement window the whole method rests on.
 runnub approve-builds --all; RC_SCRIPT=$?
 echo "approve rc=$RC_SCRIPT" >> "$LOG"
+
+# ── THE WINDOW DOES NOT CLOSE WHEN THE COMMAND RETURNS ────────────────────────
+# MEASURED, and it is arm-dependent, which is why it silently corrupted only one
+# side of the comparison. Counting log lines that arrived after `approve rc=` on the
+# first full Linux run (6 is the harness's own trailing output, i.e. "nothing
+# leaked"):  A0 = 391, 7, 1475, 6, 14, 57, 766 across the seven shards;
+# PROD = 6, 6, 6, 6, 6, 6, 6. The leaked lines are real lifecycle-script output —
+# whole node-pre-gyp/node-gyp native compiles for grpc@1.24.11 and hummus@1.0.118,
+# including their final `not ok` lines — arriving after the command had returned.
+#
+# So the jail path reaps its children and the per-package opt-out path does not.
+# The consequence for the study is specific and severe: the post-snapshot on those
+# shards was taken over a tree that was still being written, so the UNCONFINED
+# DENOMINATOR — the arm every jail verdict is gated against — was not reproducible.
+# This is reported as a probable nub defect; the gate below is the harness making
+# its own measurement admissible in the meantime, not a fix for it.
+#
+# THREE SIGNALS, because each alone has a hole:
+#   log size stable      — the direct symptom, but blind to a child in a long silent
+#                          compile that produces no output for the quiet period;
+#   no holder of the log — a leaked child inherited the redirect, so an open fd on
+#                          the log is proof one is alive; needs lsof, absent on some
+#                          minimal images, hence the -o /proc fallback and the
+#                          honest degradation when neither is available;
+#   nothing newer than a stamp — catches a child writing to the tree with its output
+#                          closed. POSIX `find -newer <file>`, so it works on BSD.
+# A timeout is RECORDED AND PROPAGATED, never swallowed: a shard that never went
+# quiet is reported as unmeasured rather than folded into a number.
+SETTLE_QUIET="${SETTLE_QUIET:-20}"; SETTLE_BUDGET="${SETTLE_BUDGET:-900}"
+settle() {
+  local t0=$SECONDS stamp="$OUT/.settle-stamp" size last_size=-1 quiet_since=$SECONDS holders
+  while :; do
+    : > "$stamp"
+    sleep 5
+    size=$(wc -c < "$LOG" | tr -d ' ')
+    holders=0
+    if command -v lsof >/dev/null 2>&1; then
+      holders=$(lsof -t -- "$LOG" 2>/dev/null | wc -l | tr -d ' ')
+    elif [ -d /proc ]; then
+      holders=$(find /proc -maxdepth 3 -path '/proc/[0-9]*/fd/*' -lname "$LOG" 2>/dev/null | wc -l | tr -d ' ')
+    else
+      holders=-1   # unknown: this signal is unavailable on this host
+    fi
+    local newer; newer=$(find "$PROJ" "$H" "$TMPD" -newer "$stamp" -print -quit 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$size" = "$last_size" ] && [ "$holders" -le 0 ] && [ "$newer" -eq 0 ]; then
+      if [ $((SECONDS - quiet_since)) -ge "$SETTLE_QUIET" ]; then
+        SETTLE_STATE=quiet; SETTLE_WAITED=$((SECONDS - t0)); SETTLE_HOLDERS=$holders; return 0
+      fi
+    else
+      quiet_since=$SECONDS
+    fi
+    last_size=$size
+    if [ $((SECONDS - t0)) -ge "$SETTLE_BUDGET" ]; then
+      SETTLE_STATE=TIMEOUT; SETTLE_WAITED=$((SECONDS - t0)); SETTLE_HOLDERS=$holders; return 0
+    fi
+  done
+}
+settle
+# Counted BEFORE the settle line is appended, or the measurement includes its own
+# report. This is the number the defect is quantified by, so it has to be clean.
+POST_APPROVE_LINES=$(awk '/^approve rc=/{f=NR} END{print (f?NR-f:0)}' "$LOG")
+echo "settle state=$SETTLE_STATE waited=${SETTLE_WAITED}s log_holders=$SETTLE_HOLDERS quiet=${SETTLE_QUIET}s budget=${SETTLE_BUDGET}s" >> "$LOG"
+echo "post_approve_log_lines=$POST_APPROVE_LINES" >> "$LOG"
 snap "$OUT/post.ndjson"
 
 # ── ARM-EFFECT ASSERTION — the control that makes every number admissible ──────
@@ -217,6 +288,16 @@ elif [ "$ARM" = "A0" ]; then
 else
   [ "$WARN_COUNT" -eq 0 ] && ARM_EFFECT=confirmed || ARM_EFFECT=FAILED-optout-leaked
 fi
+# A4 CARRIES ITS OWN POSITIVE CONTROL. The opt-out assertion above is blind to it —
+# a grant-dropped run prints a DIFFERENT banner, so a run whose variable never
+# reached the binary satisfies every check above while measuring the default arm.
+# Assert the binary itself announced the arm.
+GRANT_BANNERS=0
+if [ -n "$GRANT_ARM" ]; then
+  GRANT_BANNERS=$(grep -c "build-jail project read grant DROPPED" "$LOG" || true)
+  [ "$GRANT_BANNERS" -gt 0 ] || ARM_EFFECT="FAILED-no-project-grant-banner"
+fi
+echo "grant_arm=${GRANT_ARM:-none} project_grant_banners=$GRANT_BANNERS" >> "$LOG"
 # ── node-gyp IDENTITY — three facts, because one of them alone is ambiguous ────
 # A bare-PATH `node-gyp` on this host resolves a stale global 3.8.0, so an
 # unverified native-build verdict is worth nothing. The first cut grepped only the
@@ -240,6 +321,7 @@ NONCE="$NONCE" SHARD="$SHARD" ARM="$ARM" RC_SCRIPT="$RC_SCRIPT" RC_INSTALL="$RC_
 
 ARM_EFFECT="$ARM_EFFECT" WARN_COUNT="$WARN_COUNT" GYP_ID="$GYP_ID" PLATFORM="$PLATFORM" \
   LEVER="${LEVER:-none}" NONCE="$NONCE" \
+  SETTLE_STATE="$SETTLE_STATE" SETTLE_WAITED="$SETTLE_WAITED" POST_APPROVE_LINES="$POST_APPROVE_LINES" \
   node "$HARNESS/lib/errsig.mjs" "$LOG" "$MANIFEST" "$OUT/verdicts.json" "$OUT/report.json"
 echo "OUT=$OUT  arm_effect=$ARM_EFFECT  node_gyp=${GYP_ID:-none}"
 

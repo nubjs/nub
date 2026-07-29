@@ -13,6 +13,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { isBinaryPayload, BINARY_MIN_BYTES } from './attribute.mjs';
 
 const [deltaF, manifestF, logF, outF] = process.argv.slice(2);
 const delta = JSON.parse(fs.readFileSync(deltaF, 'utf8'));
@@ -36,7 +37,7 @@ const manifest = fs
 // check while nothing had been generated. Delta-scoping is what closes that.
 function nonceInOwnerDelta(ownerDetail, cellAbsBase) {
   if (!nonce || !ownerDetail) return false;
-  for (const rel of [...(ownerDetail.created || []), ...(ownerDetail.modified || [])]) {
+  for (const { p: rel } of [...(ownerDetail.created || []), ...(ownerDetail.modified || [])]) {
     const abs = path.join(cellAbsBase, rel);
     try {
       const st = fs.statSync(abs);
@@ -68,6 +69,7 @@ for (const m of manifest) {
   const acted = kind === 'script-output' && changed.length > 0;
 
   let effect = null;
+  let binaryEvidence = null;
   const reasons = [];
   const P = spec.predicate || {};
   if (spec.strength === 'NONE') {
@@ -76,17 +78,38 @@ for (const m of manifest) {
   } else {
     effect = true;
     if (P.created_all_of) for (const re of P.created_all_of) {
-      const hit = created.some((p) => new RegExp(re.replace(/^\^pkg:/, '')).test(p));
+      const hit = created.some((e) => new RegExp(re.replace(/^\^pkg:/, '')).test(e.p));
       reasons.push(`all_of ${re}: ${hit ? 'HIT' : 'MISS'}`); if (!hit) effect = false;
     }
     if (P.created_any_of) {
-      const hit = P.created_any_of.some((re) => created.some((p) => new RegExp(re.replace(/^\^[a-z|()]*pkg[a-z|()]*:/, '')).test(p)));
+      const hit = P.created_any_of.some((re) => created.some((e) => new RegExp(re.replace(/^\^[a-z|()]*pkg[a-z|()]*:/, '')).test(e.p)));
       reasons.push(`any_of: ${hit ? 'HIT' : 'MISS'}`); if (!hit) effect = false;
+    }
+    if (P.created_binary) {
+      // The artifact, not its existence. `evidence` names the file that satisfied the
+      // predicate (or the largest created file that failed to), so a reader can judge
+      // the 1 MiB floor against what was actually on disk instead of taking it on faith.
+      const min = P.created_binary.min_bytes ?? BINARY_MIN_BYTES;
+      const hit = created.find((e) => isBinaryPayload(e) && e.sz >= min);
+      const biggest = created.reduce((a, e) => ((e.sz ?? 0) > (a?.sz ?? -1) ? e : a), null);
+      binaryEvidence = hit ?? biggest ?? null;
+      reasons.push(
+        hit
+          ? `created_binary: HIT ${hit.p} ${hit.sz}b mode=${(hit.mode ?? 0).toString(8)}`
+          : `created_binary: MISS (>=${min}b regular file, executable or native ext) — largest created: ${
+              biggest ? `${biggest.p} ${biggest.sz}b mode=${(biggest.mode ?? 0).toString(8)}` : 'none'
+            }`,
+      );
+      if (!hit) effect = false;
     }
     if (P.changed_any_of) {
       // Project-scoped predicates (hook installers) look at the project delta,
       // not the package's own cell — the effect lands outside the writer.
-      const projPaths = (delta.unattributed_sample['project-file'] || []).map((e) => e.path);
+      // THE FULL LIST, not unattributed_sample: that field is capped at 40 entries
+      // for display, and a shard's project delta runs well past 40, so a hook write
+      // could fall off the end and read as MISS. A predicate must never be evaluated
+      // against a display cap.
+      const projPaths = delta.project_paths || (delta.unattributed_sample['project-file'] || []).map((e) => e.path);
       const hit = P.changed_any_of.some((re) => projPaths.some((p) => new RegExp(re).test(p)));
       reasons.push(`changed_any_of(project): ${hit ? 'HIT' : 'MISS'}`); if (!hit) effect = false;
     }
@@ -125,7 +148,37 @@ for (const m of manifest) {
   else if (acted) verdict = 'DID-WORK-AND-FAILED';
   else verdict = 'NEVER-RAN-ITS-REAL-PATH';
 
-  results.push({ pkg: m.pkg, version: m.version, class: m.cls, kind, acted, changed: changed.length, effect, verdict, reasons });
+  // The five largest created files, always — regardless of verdict. This is what
+  // makes the 1 MiB binary floor auditable rather than asserted: a reader can see
+  // the actual size distribution the predicate was applied to and refute the floor
+  // if the two distributions turn out not to be separated the way the class doc
+  // claims. It is also the only record of WHAT a package produced, which the prior
+  // harness discarded entirely (verdicts carried a count and nothing else).
+  const artifacts = [...created]
+    .sort((a, b) => (b.sz ?? 0) - (a.sz ?? 0))
+    .slice(0, 5)
+    .map((e) => ({ p: e.p, sz: e.sz, mode: (e.mode ?? 0).toString(8), ty: e.ty, binary: isBinaryPayload(e) }));
+
+  results.push({
+    pkg: m.pkg, version: m.version, class: m.cls, kind, acted,
+    changed: changed.length, effect, verdict, reasons,
+    artifacts,
+    binary_evidence: binaryEvidence
+      ? { p: binaryEvidence.p, sz: binaryEvidence.sz, mode: (binaryEvidence.mode ?? 0).toString(8), binary: isBinaryPayload(binaryEvidence) }
+      : null,
+  });
+}
+
+// A downloader that lands its payload outside its own store cell is unattributable
+// by path, so its row goes inadmissible rather than counted (classes.json states
+// this loss explicitly). Surfacing the writes here is what keeps that gap visible:
+// a large executable appearing under $HOME during the window, with no owner, is a
+// carve-out candidate that the verdict table alone would never show.
+const binaryWritesOutsideCells = [];
+for (const [kind, entries] of Object.entries(delta.unattributed_sample || {})) {
+  for (const e of entries) {
+    if (isBinaryPayload({ ...e, p: e.path })) binaryWritesOutsideCells.push({ kind, ...e });
+  }
 }
 
 const summary = {};
@@ -135,6 +188,15 @@ const out = {
   rc_install: Number(process.env.RC_INSTALL || 0), rc_script: rcScript,
   suppressed: (log.match(/SUPPRESSED capability: (\S+)/) || [])[1] || null,
   summary, results,
+  // Which predicate produced each verdict, recorded per run rather than left to be
+  // inferred from whichever classes.json the reader happens to have. A verdict table
+  // whose predicates changed between runs is unreadable without this.
+  predicate_spec: Object.fromEntries(
+    Object.entries(classes)
+      .filter(([k]) => !k.startsWith('_'))
+      .map(([k, v]) => [k, { strength: v.strength, predicate: v.predicate }]),
+  ),
+  binary_writes_outside_cells: binaryWritesOutsideCells,
   unattributed: delta.unattributed_counts,
   interaction_candidates: (delta.unattributed_sample['cell-dependency-link'] || []).slice(0, 20),
 };

@@ -71,13 +71,66 @@ function attributeLine(line) {
   return null;
 }
 
+// ── WHAT THE PACKAGE ACTUALLY NEEDED — the study's real deliverable ───────────
+// The survival percentage is not the point. The point is which network hosts and
+// which filesystem paths must be carved out for the ecosystem to work under the
+// jail. That list was not obtainable from this file, for two reasons now fixed: the
+// per-package record kept only FOUR sample lines, so any package denied more than
+// four things reported an arbitrary subset; and hosts and paths were never extracted
+// at all, leaving a reader to eyeball prose out of the truncated sample.
+//
+// Both are extracted as deduplicated, uncapped SETS. A host or path that cannot be
+// attributed still lands in the shard-level union below, so the carve-out list never
+// shrinks because a line failed to name its owner.
+const HOST_PATTERNS = [
+  /\b(?:getaddrinfo|connect)\s+(?:EAI_AGAIN|ENOTFOUND|EPERM|EACCES|ECONNREFUSED|ENETUNREACH|ETIMEDOUT)\s+([A-Za-z0-9._-]+\.[A-Za-z]{2,})/g,
+  /\brequest to https?:\/\/([A-Za-z0-9._-]+\.[A-Za-z]{2,})/g,
+  /\bCONNECT\s+([A-Za-z0-9._-]+\.[A-Za-z]{2,})(?::\d+)?\b/g,
+  /\b(?:GET|POST|HEAD)\s+https?:\/\/([A-Za-z0-9._-]+\.[A-Za-z]{2,})/g,
+  /https?:\/\/([A-Za-z0-9._-]+\.[A-Za-z]{2,})[^\s]*[^\n]*?(?:failed|denied|403|407|502)/gi,
+  /(?:fetching|downloading|download failed)[^\n]*?https?:\/\/([A-Za-z0-9._-]+\.[A-Za-z]{2,})/gi,
+];
+// Landlock renders a denial as EACCES on a visible path, Seatbelt as EPERM. Node's
+// message shape puts the path in single quotes; the quoted-generic form is the
+// fallback for tools that print their own wording.
+const PATH_PATTERNS = [
+  /\b(?:EACCES|EPERM|EROFS)[^\n]*?,\s*\w+\s+'([^']+)'/g,
+  /\b(?:permission denied|Operation not permitted)[^\n]*?['"]([^'"]+)['"]/gi,
+];
+
+function extract(line, patterns) {
+  const out = [];
+  for (const re of patterns) {
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(line)) !== null) if (m[1]) out.push(m[1]);
+  }
+  return out;
+}
+
 const hits = [];
+// PROXIMITY ATTRIBUTION, kept strictly separate from the exact path parse. A denial
+// line often names no package at all — "Error fetching release: getaddrinfo EAI_AGAIN
+// workers.cloudflare.com" is the whole line — which on the first full run pushed most
+// net denials to `(shard-level)`, i.e. exactly the information the carve-out list
+// needs, unattributed. The cursor remembers the last package a store path named, and
+// its guess is LABELLED so it can never be mistaken for the exact parse. Treat a
+// `proximity` attribution as a lead: the single-package re-run of the break set is
+// what settles ownership.
+let cursor = null;
+let cursorAge = Infinity;
 for (let i = 0; i < lines.length; i++) {
+  const named = attributeLine(lines[i]);
+  if (named) { cursor = named; cursorAge = 0; } else cursorAge++;
   const kind = classify(lines[i]);
   if (!kind) continue;
+  const exact = named ?? attributeLine(lines.slice(Math.max(0, i - 6), i).join('\n'));
   hits.push({
     kind,
-    pkg: attributeLine(lines[i]) ?? attributeLine(lines.slice(Math.max(0, i - 6), i).join('\n')),
+    pkg: exact ?? (cursorAge <= 40 ? cursor : null),
+    attribution: exact ? 'path' : cursorAge <= 40 ? 'proximity' : 'none',
+    hosts: kind === 'net' ? extract(lines[i], HOST_PATTERNS) : [],
+    paths: kind === 'fs' ? extract(lines[i], PATH_PATTERNS) : [],
     line: lines[i].trim().slice(0, 400),
   });
 }
@@ -85,10 +138,20 @@ for (let i = 0; i < lines.length; i++) {
 const byPkg = {};
 for (const h of hits) {
   const k = h.pkg || '(shard-level)';
-  byPkg[k] ??= { fs: 0, net: 0, build: 0, engine: 0, samples: [] };
+  byPkg[k] ??= { fs: 0, net: 0, build: 0, engine: 0, denied_hosts: [], denied_paths: [], attribution: {}, samples: [] };
   byPkg[k][h.kind]++;
-  if (byPkg[k].samples.length < 4) byPkg[k].samples.push(`[${h.kind}] ${h.line}`);
+  byPkg[k].attribution[h.attribution] = (byPkg[k].attribution[h.attribution] || 0) + 1;
+  for (const x of h.hosts) if (!byPkg[k].denied_hosts.includes(x)) byPkg[k].denied_hosts.push(x);
+  for (const x of h.paths) if (!byPkg[k].denied_paths.includes(x)) byPkg[k].denied_paths.push(x);
+  // 12, not 4 — four was below the number of distinct denials a single package
+  // routinely produces, so the record was a truncation rather than a summary.
+  if (byPkg[k].samples.length < 12) byPkg[k].samples.push(`[${h.kind}/${h.attribution}] ${h.line}`);
 }
+
+// The union, independent of attribution: the list that answers "what would have to be
+// carved out". It must not shrink when a line fails to name an owner.
+const allHosts = [...new Set(hits.flatMap((h) => h.hosts))].sort();
+const allPaths = [...new Set(hits.flatMap((h) => h.paths))].sort();
 
 const totals = hits.reduce((a, h) => ((a[h.kind] = (a[h.kind] || 0) + 1), a), {});
 const out = {
@@ -104,11 +167,25 @@ const out = {
   // A bare-PATH `node-gyp` on this host resolves a stale global 3.8.0, so which one
   // actually ran is recorded rather than assumed.
   node_gyp_identity: process.env.GYP_ID || 'none-observed',
+  // Whether the lifecycle-script window actually CLOSED before the post-snapshot.
+  // `TIMEOUT` means work was still in flight when the delta was taken, so the run's
+  // verdicts are over a partially-written tree and must not be folded into a number.
+  // post_approve_log_lines quantifies the leak: 6 is the harness's own trailing
+  // output, anything above it is script output that arrived after the command returned.
+  settle_state: process.env.SETTLE_STATE || 'not-measured',
+  settle_waited_s: Number(process.env.SETTLE_WAITED || 0),
+  post_approve_log_lines: Number(process.env.POST_APPROVE_LINES || 0),
   rc_install: verdicts.rc_install,
   rc_script: verdicts.rc_script,
   verdict_summary: verdicts.summary,
+  predicate_spec: verdicts.predicate_spec,
   failure_signature_totals: totals,
   failure_signatures_by_package: byPkg,
+  // THE CARVE-OUT DELIVERABLE. Attribution-independent, so it is complete even where
+  // ownership is not resolved.
+  denied_hosts_all: allHosts,
+  denied_paths_all: allPaths,
+  binary_writes_outside_cells: verdicts.binary_writes_outside_cells,
   verdicts: verdicts.results,
   unattributed: verdicts.unattributed,
   interaction_candidates: verdicts.interaction_candidates,

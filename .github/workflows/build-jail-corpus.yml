@@ -9,7 +9,7 @@ name: build-jail-corpus
 # something to do on a development machine.
 on:
   push:
-    branches: [probe/build-jail-corpus]
+    branches: [probe/build-jail-corpus, probe/build-jail-corpus-tight]
     paths:
       - 'tests/build-jail-corpus/**'
       - '.github/workflows/build-jail-corpus.yml'
@@ -28,6 +28,19 @@ jobs:
     # resolution it depends on is denied, so the job carries its own ceiling
     # rather than relying on the runner surviving it.
     timeout-minutes: 150
+    # ⭐ REPEATED PASSES, IN PARALLEL — a single pass is not a result.
+    # Seven repeats of one shard produced survive counts of {17, 18}, and three
+    # packages succeeded in exactly 1 of 7: roughly 4% of verdicts are unstable
+    # across identical runs. So the matrix runs the whole corpus N times and
+    # summarize-repeats.mjs folds the passes into a RANGE and a MODAL value.
+    # Parallel jobs rather than a loop inside one job because a full pass is ~40
+    # min of arm time and three sequential passes would not fit the job ceiling.
+    # `fail-fast: false` so one pass dying does not discard the others — two
+    # passes still bound the instability, one does not.
+    strategy:
+      fail-fast: false
+      matrix:
+        pass: [1, 2, 3]
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
@@ -76,7 +89,7 @@ jobs:
           NUB_BIN: ${{ steps.prov.outputs.bin }}
           NUB_EXPECT_GIT_SHA: ${{ github.sha }}
           STUDY_PATH: /usr/bin:/bin:/usr/sbin:/sbin
-          OUTROOT: ${{ runner.temp }}/build-jail-corpus
+          OUTROOT: ${{ runner.temp }}/build-jail-corpus-pass${{ matrix.pass }}
         run: |
           chmod +x run-shard.sh
           FAILED=""
@@ -100,8 +113,13 @@ jobs:
       - name: Validity-gated verdict table
         working-directory: tests/build-jail-corpus
         env:
-          OUTROOT: ${{ runner.temp }}/build-jail-corpus
+          OUTROOT: ${{ runner.temp }}/build-jail-corpus-pass${{ matrix.pass }}
+          # Into the uploaded artifact, not beside the (deleted) run trees. The table
+          # is the input summarize-repeats.mjs folds across passes, so a pass whose
+          # table is not downloadable cannot contribute to the range or the mode.
+          AGGREGATE_OUT: evidence/verdict-table.json
         run: |
+          mkdir -p evidence
           {
             echo '```'
             node aggregate.mjs "$OUTROOT"
@@ -114,7 +132,7 @@ jobs:
         if: always()
         working-directory: tests/build-jail-corpus
         env:
-          OUTROOT: ${{ runner.temp }}/build-jail-corpus
+          OUTROOT: ${{ runner.temp }}/build-jail-corpus-pass${{ matrix.pass }}
         run: |
           mkdir -p evidence
           for d in "$OUTROOT"/*/; do
@@ -130,6 +148,6 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
-          name: build-jail-corpus-macos
+          name: build-jail-corpus-macos-pass${{ matrix.pass }}
           path: tests/build-jail-corpus/evidence
           retention-days: 7

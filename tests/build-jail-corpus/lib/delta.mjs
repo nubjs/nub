@@ -67,10 +67,16 @@ for (const [k, b] of post) {
   const a = pre.get(k);
   if (isNoise(k)) { if (!a) excluded.created++; else if (a.digest !== b.digest) excluded.modified++; continue; }
   if (!a) {
-    created.push({ root: b.root, rel: b.rel, type: b.type, size: b.size, digest: b.digest });
+    // `mode` rides along because a class predicate has to be able to describe the
+    // ARTIFACT, not merely its existence. "Some file appeared" is satisfied by a
+    // bookkeeping write from a script that then died; "an executable of plausible
+    // size appeared" is not. Dropping mode here is what left `binary-downloader`
+    // with nothing to say beyond `min_created: 1`.
+    created.push({ root: b.root, rel: b.rel, type: b.type, size: b.size, mode: b.mode, digest: b.digest });
   } else if (a.digest !== b.digest || a.size !== b.size || a.type !== b.type) {
     modified.push({
       root: b.root, rel: b.rel, type: b.type,
+      size: b.size, mode: b.mode,
       size_before: a.size, size_after: b.size,
       digest_before: a.digest, digest_after: b.digest,
     });
@@ -118,6 +124,12 @@ fs.writeFileSync(
       by_owner: owners,
       installed_cells: [...new Set([...preCells, ...cellsPresentIn(postRecs)])],
       unattributed_counts,
+      // UNCAPPED, and separate from unattributed_sample on purpose. The
+      // hook-installer predicate is evaluated against the project delta, and it was
+      // being evaluated against the 40-entry DISPLAY SAMPLE below — so a hook write
+      // past the fortieth project entry read as MISS. A predicate must never see a
+      // truncated view of its own input.
+      project_paths: (attrib.unattributed['project-file'] || []).map((e) => e.path),
       unattributed_sample: Object.fromEntries(Object.entries(attrib.unattributed).map(([k, v]) => [k, v.slice(0, 40)])),
       owner_detail: Object.fromEntries([...attrib.byOwner].map(([o, v]) => [o, { created: v.created.slice(0, 200), modified: v.modified.slice(0, 100) }])),
       counts: { created: created.length, modified: modified.length, deleted: deleted.length, touched: touched.length },

@@ -92,13 +92,38 @@ export function groupByOwner(delta) {
       if (a.kind === 'pm-meta') continue;
       if (a.owner && a.kind === 'own-package-dir') {
         if (!byOwner.has(a.owner)) byOwner.set(a.owner, { created: [], modified: [], deleted: [] });
-        byOwner.get(a.owner)[cls].push(a.inner);
+        // An OBJECT, not a bare path. A predicate that can only see the path is
+        // structurally unable to ask whether the thing a downloader produced is a
+        // binary, so it degenerates to counting files — which is exactly the weak
+        // signal the tightened classes.json replaces. `p` stays first and keeps the
+        // same meaning the old string had.
+        byOwner.get(a.owner)[cls].push({ p: a.inner, sz: e.size ?? null, mode: e.mode ?? null, ty: e.type ?? null });
       } else {
-        (unattributed[a.kind] ||= []).push({ cls, path: k, owner: a.owner ?? null });
+        (unattributed[a.kind] ||= []).push({ cls, path: k, owner: a.owner ?? null, sz: e.size ?? null, mode: e.mode ?? null, ty: e.type ?? null });
       }
     }
   }
   return { byOwner, unattributed };
+}
+
+/// A regular file that looks like a shipped executable payload rather than
+/// bookkeeping. Shared by the `binary-downloader` predicate and by the
+/// outside-the-cell diagnostic, so the two always agree on what "a binary" means.
+///
+/// THE EXEC BIT ALONE IS NOT ENOUGH and the size floor alone is not either:
+///   * a symlink is mode 0777 on Linux, so `type` must be pinned to a regular file;
+///   * a 200-byte shell shim is executable, and a partially-written download or an
+///     HTTP error page saved to disk is a small regular file — both are excluded by
+///     the floor, and both are precisely the "it wrote something then died" shape;
+///   * a downloaded `.node` / `.so` / `.dll` is often mode 0644, so extension is a
+///     second admissible route rather than a redundant one.
+export const BINARY_MIN_BYTES = 1024 * 1024;
+const BINARY_EXT = /\.(node|so|so\.\d+|dylib|dll|wasm|a|exe|jar)$/i;
+export function isBinaryPayload(e) {
+  if (!e || e.ty !== 'file') return false;
+  if (!(e.sz >= BINARY_MIN_BYTES)) return false;
+  const executable = e.mode != null && (e.mode & 0o111) !== 0;
+  return executable || BINARY_EXT.test(e.p ?? e.path ?? '');
 }
 
 // Distinguish SCRIPT OUTPUT from PM MATERIALISATION inside the same window.
