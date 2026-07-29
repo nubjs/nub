@@ -194,25 +194,20 @@ pub(super) fn detect_aube_dir_gvs_mode(aube_dir: &std::path::Path) -> Option<boo
         if name_str == "node_modules" || name_str.starts_with('.') {
             continue;
         }
-        // Classify via `read_link`, not `file_type().is_symlink()`.
-        // On Windows, `sys::create_dir_link` produces an NTFS junction
-        // whose `is_symlink()` is `false` and `is_dir()` is `true`,
-        // making a gvs-on entry indistinguishable from a per-project
-        // real directory via the file-type bit. `read_link` succeeds on
-        // both Unix symlinks and Windows junction reparse points, and
-        // fails on a regular directory — but with a platform-specific
-        // error (EINVAL on Unix, raw `ERROR_NOT_A_REPARSE_POINT` on
-        // Windows, which std leaves `Uncategorized`), so the "real dir"
-        // arm goes through `aube_linker::is_real_dir`. Matching
-        // `InvalidInput` directly made `saw_real_dir` unreachable on
-        // Windows, so a per-project tree returned `None` and the caller's
-        // mode-change wipe never fired.
+        // `read_link` succeeds on both a Unix symlink and a Windows junction
+        // reparse point, so it identifies a gvs-on entry on either platform.
+        // The per-project arm is the one that was broken: it matched
+        // `read_link`'s error against `InvalidInput`, which is EINVAL on Unix
+        // but the raw `ERROR_NOT_A_REPARSE_POINT` on Windows — a code std
+        // leaves `Uncategorized`. `saw_real_dir` was therefore unreachable on
+        // Windows, a per-project tree classified as `None`, and the caller's
+        // mode-change wipe never fired. `aube_linker::is_real_dir` settles it
+        // with one `lstat` instead.
         //
-        // `is_real_dir` additionally requires the entry BE a directory, so a
-        // stray regular file directly under `.aube/` no longer counts as
-        // evidence of a per-project tree (it did on Unix, where `read_link` on
-        // a file is also EINVAL). A loose file is not a package entry, so it
-        // should not decide the mode either way.
+        // It also requires the entry BE a directory, so a stray regular file
+        // directly under `.aube/` no longer counts as evidence of a per-project
+        // tree (it did on Unix, where `read_link` on a file is also EINVAL). A
+        // loose file is not a package entry and should not decide the mode.
         if std::fs::read_link(entry.path()).is_ok() {
             return Some(true);
         }

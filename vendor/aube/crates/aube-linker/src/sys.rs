@@ -70,13 +70,14 @@ use std::path::{Component, Path, PathBuf};
 /// path is unchanged — the reconcile costs nothing until a collision.
 ///
 /// A POPULATED REAL DIRECTORY is deliberately NOT cleared: this primitive never
-/// recurses. Every caller that legitimately replaces real content clears the
-/// slot itself first (`try_remove_entry` / `remove_existing` /
-/// `reconcile_top_level_link`), so real content still occupying a link path
-/// means the linker is about to write over something it does not own — most
-/// sharply, a package's own just-materialized files when a dependency name
-/// collides with the package's under case folding. That stays a loud error, on
-/// every platform, rather than a silent recursive delete.
+/// recurses. Callers that legitimately replace real content clear the slot
+/// themselves first — `try_remove_entry`, `remove_existing`,
+/// `reconcile_top_level_link`, or an inline removal — and the transitive-sibling
+/// pass in `materialize_into` clears nothing because its slot is expected empty.
+/// That pass is where the refusal earns its keep: under case folding a
+/// dependency name can collide with the package's own, aiming the link at the
+/// package's just-materialized directory. That stays a loud error, on every
+/// platform, rather than a silent recursive delete.
 pub fn create_dir_link(target: &Path, link: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -216,10 +217,24 @@ fn junction_points_at(link: &Path, target: &Path) -> bool {
 /// stays loud. See `create_dir_link` for why that shape must not be recursed
 /// into. `NotFound` is success — something else already cleared the slot.
 fn clear_link_slot(link: &Path) -> io::Result<()> {
-    match std::fs::remove_dir(link).or_else(|_| std::fs::remove_file(link)) {
+    let dir_err = match std::fs::remove_dir(link) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        // The refusal case, and the one whose error the caller most needs.
+        // Report `DirectoryNotEmpty` rather than falling through: `remove_file`
+        // on a directory answers with something actively misleading —
+        // `ERROR_ACCESS_DENIED` on Windows, `EPERM` on macOS — which reads as a
+        // permissions problem, and on Windows is the same `os error 5` shape as
+        // the unrelated npm-incumbent-tree abort this PR also fixes.
+        Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => return Err(e),
+        Err(e) => e,
+    };
+    match std::fs::remove_file(link) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
+        // Neither removal applied. `remove_dir`'s error describes the OCCUPANT;
+        // `remove_file`'s describes only its own refusal to unlink a directory.
+        Err(_) => Err(dir_err),
     }
 }
 
@@ -1302,10 +1317,13 @@ mod tests {
         std::fs::create_dir_all(link.join("nested")).unwrap();
         std::fs::write(link.join("precious.txt"), b"precious").unwrap();
 
-        assert!(
-            create_dir_link(&target, &link).is_err(),
-            "populated real directory was silently replaced"
-        );
+        let err = create_dir_link(&target, &link)
+            .expect_err("populated real directory was silently replaced");
+        // The occupant's own error, not `remove_file`'s refusal to unlink a
+        // directory (`PermissionDenied` on Windows/macOS, `IsADirectory` on
+        // Linux) — that one reads as a permissions fault and points the reader
+        // at the wrong problem.
+        assert_eq!(err.kind(), io::ErrorKind::DirectoryNotEmpty, "{err:?}");
         assert_eq!(
             std::fs::read(link.join("precious.txt")).unwrap(),
             b"precious"
@@ -1318,10 +1336,13 @@ mod tests {
         assert_converges(|link| std::fs::write(link, b"stale").unwrap());
     }
 
-    /// Repointing a link must unlink the OLD entry, never recurse through it
-    /// into the directory it referenced. Written out longhand rather than via
-    /// `assert_converges` because the assertion that matters here is about the
-    /// abandoned target, which the helper has no handle on.
+    /// Repointing a link unlinks the OLD entry and leaves the directory it
+    /// referenced alone. Written longhand rather than via `assert_converges`
+    /// because the assertion is about the abandoned target, which the helper
+    /// has no handle on. Note this pins behavior rather than catching a
+    /// regression in it: std's `remove_dir_all` does not follow a reparse point
+    /// or a symlink either, so the assertion also held before the clear was
+    /// made non-recursive.
     #[test]
     fn create_dir_link_repoint_does_not_follow_the_old_link() {
         let dir = tempfile::tempdir().unwrap();

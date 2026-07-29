@@ -701,19 +701,27 @@ impl Linker {
             // package resolves to its own files, matching what npm /
             // pnpm / yarn end up with after their hoisting passes.
             //
-            // Case folding makes this an exact-match skip over a path
-            // comparison that is not exact: where the filesystem folds case
-            // (Windows, a default macOS volume, a casefold ext4 directory, a
-            // Docker-on-macOS bind mount) a `foo` edge on a package named
-            // `Foo` computes a `symlink_path` that IS `pkg_nm_dir`. That is
-            // not detectable from the name alone — the property belongs to the
-            // mount, not the platform — so the backstop lives in
-            // `create_dir_link`, which refuses to clear a populated real
-            // directory and keeps the collision a loud error everywhere.
-            if dep_name == &pkg.name {
+            // Case folding widens "same name" to "same directory": where the
+            // mount folds case (Windows, a default macOS volume, a casefold
+            // ext4 directory, a Docker-on-macOS bind mount) a `foo` edge on a
+            // package named `Foo` resolves to `pkg_nm_dir` itself. Folding is a
+            // property of the MOUNT, not the platform, so it is settled by
+            // asking the filesystem rather than by a `cfg!`: `pkg_nm_dir` is
+            // already materialized here, so on a folding mount the two paths
+            // canonicalize to one and on a non-folding one the sibling path
+            // does not resolve at all. The name test short-circuits first, so
+            // the common edge pays no syscall. `create_dir_link` refusing to
+            // clear a populated real directory is the backstop if this misses.
+            let symlink_path = pkg_nm_parent.join(dep_name);
+            if dep_name == &pkg.name
+                || (dep_name.eq_ignore_ascii_case(&pkg.name)
+                    && matches!(
+                        (symlink_path.canonicalize(), pkg_nm_dir.canonicalize()),
+                        (Ok(a), Ok(b)) if a == b
+                    ))
+            {
                 continue;
             }
-            let symlink_path = pkg_nm_parent.join(dep_name);
             // `link:` transitive: the resolver pinned an absolute
             // on-disk target. Skip the virtual-store sibling lookup
             // (there is no `.aube/<dep>@link+...` entry for these) and

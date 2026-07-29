@@ -133,29 +133,20 @@ pub(crate) fn try_remove_entry(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
-/// True when a `read_link` failure means "an entry is here but it is not
-/// a link" rather than "nothing is here".
+/// Whether `path` is a real directory — it exists, and is not a symlink or a
+/// reparse point.
 ///
-/// Unix `readlink(2)` reports EINVAL for a non-link, which std maps to
-/// `ErrorKind::InvalidInput`. Windows answers the same question through
-/// `DeviceIoControl(FSCTL_GET_REPARSE_POINT)`, which fails with the raw
-/// `ERROR_NOT_A_REPARSE_POINT` (4390); std has no `ErrorKind` for that
-/// code, so it arrives as `Uncategorized`. Matching `InvalidInput` alone
-/// therefore answers "is this a real directory?" with `false` for EVERY
-/// real directory on Windows — the classification hole behind nubjs/nub#576
-/// and #566. Callers that need the distinction must go through here.
-pub(crate) fn is_not_a_link_error(e: &std::io::Error) -> bool {
-    const ERROR_NOT_A_REPARSE_POINT: i32 = 4390;
-    e.kind() == std::io::ErrorKind::InvalidInput
-        || e.raw_os_error() == Some(ERROR_NOT_A_REPARSE_POINT)
-}
-
-/// Whether `path` is a real directory — it exists and is not a symlink
-/// or a reparse point. Goes through `is_not_a_link_error` rather than a
-/// bare `InvalidInput` match, which answers `false` for every real
-/// directory on Windows.
+/// One `lstat`. `FileType::is_dir` is already `!is_symlink && is_directory`,
+/// and on Windows std derives `is_symlink` from the reparse TAG — a junction
+/// carries `IO_REPARSE_TAG_MOUNT_POINT`, whose name-surrogate bit is set, so a
+/// junction reports `is_symlink() == true` and `is_dir() == false`. Classifying
+/// off the error code of `read_link` instead (`InvalidInput` on Unix, raw
+/// `ERROR_NOT_A_REPARSE_POINT` on Windows) needs a magic number, costs a handle
+/// open plus a `DeviceIoControl`, and answers `false` for every directory on a
+/// volume whose driver reports that ioctl differently — FAT32, exFAT, ReFS, a
+/// network share.
 pub fn is_real_dir(path: &Path) -> bool {
-    matches!(std::fs::read_link(path), Err(e) if is_not_a_link_error(&e)) && path.is_dir()
+    matches!(std::fs::symlink_metadata(path), Ok(md) if md.file_type().is_dir())
 }
 
 /// `xx::file::mkdirp` wrapped with the linker's `Error::Xx` conversion.
@@ -325,11 +316,11 @@ pub(crate) fn classify_entry_state(link_path: &Path, expected: &Path) -> EntrySt
         Ok(_) => EntryState::Stale,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => EntryState::Missing,
         // Not a link. Dominated by "it is a real directory" — a per-project
-        // entry where a shared-store one is wanted, which on Windows arrives as
-        // the raw `ERROR_NOT_A_REPARSE_POINT` rather than any mapped kind (see
-        // `is_not_a_link_error`) — plus genuine IO errors like permission.
-        // `Stale` is the right action for both: the caller clears the entry and
-        // recreates it, and a real failure resurfaces at that point.
+        // entry where a shared-store one is wanted, which arrives as EINVAL on
+        // Unix and the raw `ERROR_NOT_A_REPARSE_POINT` on Windows — plus
+        // genuine IO errors like permission. `Stale` is the right action for
+        // both: the caller clears the entry and recreates it, and a real
+        // failure resurfaces at that point.
         Err(_) => EntryState::Stale,
     }
 }

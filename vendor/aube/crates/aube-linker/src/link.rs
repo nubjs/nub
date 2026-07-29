@@ -334,17 +334,11 @@ impl Linker {
                             // so that gap is unreachable in practice. A
                             // prior GVS install or the fetch prewarm may have left
                             // a symlink here; replace it. An existing real
-                            // directory is reused as cached. Classification uses
-                            // `read_link`, not `file_type().is_symlink()`: on
-                            // Windows the GVS entry is an NTFS junction (created by
-                            // `sys::create_dir_link`) whose `is_symlink()` is false
-                            // and `is_dir()` is true, so the file-type bit would
-                            // misread a stale junction as a real dir and skip the
-                            // conversion. `read_link` succeeds on both Unix symlinks
-                            // and junction reparse points and fails on a real
-                            // directory — but with DIFFERENT errors per platform, so
-                            // the test goes through `crate::is_real_dir` rather than a
-                            // bare `InvalidInput` match (see `sweep::is_not_a_link_error`).
+                            // directory is reused as cached. `crate::is_real_dir`
+                            // owns the distinction: a Windows junction carries a
+                            // name-surrogate reparse tag, so std reports it as a
+                            // symlink and NOT as a directory, which is exactly the
+                            // classification wanted here.
                             if self.disk_materialize_matches(&pkg.name) {
                                 // Orphan-safety invariant: disk-materialize gives X
                                 // a real project-local dir so X's OWN undeclared
