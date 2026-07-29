@@ -102,19 +102,38 @@ key=$(git -C "$root" ls-files -s -- vendor/aube crates $leaves 2>/dev/null \
   | shasum 2>/dev/null | cut -c1-12 || true)
 bucket="$shared${key:+-$key}"
 
-# CoW-clone $1 into $2, claiming the destination ATOMICALLY. `mkdir` is the claim:
-# it fails if the dir already exists, so two worktrees racing to seed the same
-# bucket can't both copy — the loser would otherwise `cp` INTO the winner's dir
-# and nest a second full copy inside it. Clone-only: `cp -c` (APFS) and
-# `--reflink=always` (btrfs/XFS) FAIL rather than silently falling back to a real
-# multi-GB copy, which would trade minutes of CPU for gigabytes of disk. Any
-# failure is non-fatal — the caller just gets a cold build.
+# CoW-clone $1 into $2, PUBLISHING BY RENAME so the destination is never visible
+# in a partial state. This is the whole point: the caller assigns $target and
+# `exec cargo` runs against it regardless of what this returns, so a destination
+# that exists-but-is-half-copied would hand cargo a target dir with fingerprints
+# whose artifacts are missing — precisely the confusing artifact-level failure
+# this script exists to prevent. A claim-then-fill scheme (mkdir, then copy)
+# cannot give that guarantee: it serializes the copiers but not the consumers,
+# and an interrupted copy leaves a permanently half-populated dir that looks
+# claimed forever. Agent builds here are killed routinely, so that is a real
+# case, not a theoretical one.
+#
+# Copy into a temp sibling, then rename into place only once the copy has
+# returned 0. The exposure window shrinks from minutes of tree-walking to a
+# single rename, and a killed copy leaves only an unreferenced temp (swept by
+# the GC below). Clone-only: `cp -c` (APFS) and `--reflink=always` (btrfs/XFS)
+# FAIL rather than silently falling back to a real multi-GB copy, which would
+# trade minutes of CPU for gigabytes of disk.
 seed_from() {
   [ -d "$1" ] || return 1
-  mkdir "$2" 2>/dev/null || return 1
-  cp -c -a "$1/." "$2/" 2>/dev/null \
-    || cp -a --reflink=always "$1/." "$2/" 2>/dev/null \
-    || return 1
+  [ -e "$2" ] && return 1
+  _tmp="$2.seeding.$$"
+  rm -rf "$_tmp" 2>/dev/null
+  if cp -c -a "$1" "$_tmp" 2>/dev/null \
+    || cp -a --reflink=always "$1" "$_tmp" 2>/dev/null; then
+    # `mv` onto an EXISTING dir moves the source inside it, so re-check first.
+    # A loser here wastes a clone; it can never publish a partial tree.
+    if [ ! -e "$2" ] && mv "$_tmp" "$2" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  rm -rf "$_tmp" 2>/dev/null
+  return 1
 }
 
 if [ -n "$diverged" ] || [ -n "$untracked" ]; then
@@ -140,19 +159,30 @@ else
 fi
 
 mkdir -p "$target"
+# `touch` is what makes the GC's mtime rule a real liveness signal, and it is NOT
+# redundant with the mkdir above. Verified: `mkdir -p` on an existing dir does not
+# update its mtime, and neither does a nested write — a cargo target dir's top
+# level goes quiescent after the first build, so a bucket in continuous use would
+# otherwise age past the window and be collected mid-build. That is a FAILED
+# build, not a cold one.
+touch "$target" 2>/dev/null || true
 
-# Buckets are pure content-addressed caches, so mtime GC needs no liveness check
-# (unlike a per-worktree dir, which can belong to a live build). Cheap, silent,
-# and bounded to this script's own dirs.
+# Buckets are content-addressed caches, so a stale-mtime sweep is enough — no
+# liveness check beyond the `touch` above, which every invocation applies to the
+# dir it is about to use. Cheap, silent, and bounded to this script's own dirs.
 #
-# The glob covers the legacy unkeyed dir as well as the keyed buckets, which is
-# what makes the migration above genuinely self-retiring — a `-*` glob would
-# never match the bare legacy name and it would sit there forever. mtime is a
-# sound liveness proxy for it too: anything still building there keeps it fresh,
-# and `mkdir -p "$target"` above just touched the dir this invocation uses. A
-# collected dir costs one cold build, never correctness.
-find "$(dirname "$shared")" -maxdepth 1 -name "$(basename "$shared")*" \
-  -type d -mtime +14 -exec rm -rf {} + 2>/dev/null || true
+# Matched by EXACT names, not a prefix glob: the keyed buckets plus the bare
+# legacy dir (which is what makes the migration genuinely self-retiring — a `-*`
+# glob alone never matches the legacy name, and a `*` glob would also swallow an
+# unrelated prefix-sharing sibling such as a hand-made `shared-target.bak`).
+# Half-written `.seeding.<pid>` temps from a killed clone are swept on the same
+# pass; they are never referenced by anything.
+_base=$(basename "$shared")
+find "$(dirname "$shared")" -maxdepth 1 -type d \
+  \( -name "$_base" -o -name "$_base-*" \) -mtime +14 \
+  -exec rm -rf {} + 2>/dev/null || true
+find "$(dirname "$shared")" -maxdepth 1 -type d -name "*.seeding.*" -mtime +1 \
+  -exec rm -rf {} + 2>/dev/null || true
 
 # CONTENTION CONTROL. Many agent worktrees build concurrently, and every cargo
 # assumes it owns the machine — ~20 parallel builds drove the 10-core dev host to
