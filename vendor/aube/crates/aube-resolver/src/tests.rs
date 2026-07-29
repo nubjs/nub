@@ -625,7 +625,7 @@ fn test_dep_path_for() {
     assert_eq!(dep_path_for("@babel/core", "7.24.0"), "@babel/core@7.24.0");
 }
 
-fn make_version(name: &str, version: &str) -> VersionMetadata {
+pub(crate) fn make_version(name: &str, version: &str) -> VersionMetadata {
     VersionMetadata {
         name: name.to_string(),
         version: version.to_string(),
@@ -656,7 +656,7 @@ fn make_version(name: &str, version: &str) -> VersionMetadata {
     }
 }
 
-fn make_packument(name: &str, versions: &[&str], latest: &str) -> Packument {
+pub(crate) fn make_packument(name: &str, versions: &[&str], latest: &str) -> Packument {
     let mut ver_map = BTreeMap::new();
     for v in versions {
         ver_map.insert(v.to_string(), make_version(name, v));
