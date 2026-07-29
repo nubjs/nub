@@ -39,6 +39,7 @@ compile = [
     "dep:oxc_ast_visit",
     "dep:oxc_parser",
     "dep:oxc_span",
+    "dep:glob-match",
     "tokio/full",
 ]
 
@@ -68,6 +69,10 @@ libsui = { version = "0.16", optional = true }
 # zstd-19 compression of the embedded Node (encode side; the launcher decodes with
 # pure-Rust ruzstd).
 zstd = { version = "0.13", optional = true }
+# `--include`/`--exclude` matching. Already in the tree at this version as a
+# nub-core dependency, so the compile feature adds no build cost — declared here
+# rather than reached through nub-core, which does not re-export it.
+glob-match = { version = "0.2", optional = true }
 # Shared phantom-classification primitives (specifier extraction + guard modeling
 # + builtin/name classification) for the pre-run phantom scan (src/phantom_scan.rs).
 # Depends on the LEAN oxc parser subset, not the full `oxc` umbrella — see the

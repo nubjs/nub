@@ -28,6 +28,7 @@ use nub_core::node::version::{NodeVersion, VersionPin};
 use nub_core::version_management::{self, NodeArch, NodeOs};
 use sha2::{Digest, Sha256};
 
+mod assets;
 pub mod bundle;
 mod inject;
 
@@ -45,6 +46,10 @@ pub struct CompileOptions {
     /// Explicit `--target`; `None` → infer from the project's pin chain.
     pub target: Option<String>,
     pub platform: Option<String>,
+    /// `--include`: paths embedded verbatim, never bundled or transformed.
+    pub include: Vec<String>,
+    /// `--exclude`: paths pruned from what `--include` selected.
+    pub exclude: Vec<String>,
     /// Custom first-run line; `None` takes [`DEFAULT_INSTALL_MESSAGE`]. The flag
     /// only customizes the text — there is no spelling that suppresses it, since
     /// the alternative is a multi-second silent hang while Node is unpacked.
@@ -80,18 +85,28 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(format!("{stem}{}", target.exe_suffix())));
 
-    // 1. Bundle (Rolldown, in-process). The target's platform/arch are baked in
+    // 1. Resolve `--include`/`--exclude` BEFORE bundling: a typo'd include is a
+    //    sub-second failure, and paying for a full bundle first would hide that
+    //    behind the slowest step in the pipeline.
+    let entry_dir = entry_abs.parent().unwrap_or(Path::new("."));
+    let cwd = std::env::current_dir().context("resolving the current directory")?;
+    let layout = assets::plan(entry_dir, &cwd, &opts.include, &opts.exclude)?;
+
+    // 2. Bundle (Rolldown, in-process). The target's platform/arch are baked in
     //    as defines UNDER the user's, so a cross-compiled `process.platform`
     //    branch dead-code-eliminates for the machine the artifact will run on,
     //    not the one it was built on.
     opts.bundle.auto_define = target_defines(&target);
     eprintln!("Bundling {} …", opts.entry);
     let bundled = bundle::bundle(&entry_abs, &opts.bundle)?;
-    let entry_name = bundled.entry.clone();
-    let app_files = assemble_app(&bundled);
+    let entry_name = layout.bundle_path(&bundled.entry);
+    let app_files = assemble_app(&bundled, &layout)?;
     let app_sha = sha256_of_app(&app_files);
+    if !layout.assets.is_empty() {
+        eprintln!("Embedding {} file(s) …", layout.assets.len());
+    }
 
-    // 2. Resolve the Node version through nub run's SAME pin chain (so compile
+    // 3. Resolve the Node version through nub run's SAME pin chain (so compile
     //    can't drift from run); --target overrides it. The pin context is the
     //    entry's project dir (walk up from there).
     let shape = if opts.smol { Shape::Smol } else { Shape::Embed };
@@ -125,7 +140,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         (exact, None, blob, sha)
     };
 
-    // 3. Manifest + payload.
+    // 4. Manifest + payload.
     let manifest = Manifest {
         shape,
         entry: entry_name,
@@ -139,7 +154,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     };
     let payload = encode(&manifest, &app_files, &node_blob);
 
-    // 4. Inject the payload into the target's launcher template.
+    // 5. Inject the payload into the target's launcher template.
     let template = fs::read(&template_path)
         .with_context(|| format!("reading launcher template {}", template_path.display()))?;
     inject::inject(&target, &template, &payload, &out_path)
@@ -268,14 +283,58 @@ fn target_defines(target: &TargetPlatform) -> Vec<(String, String)> {
 
 /// The app file set: every emitted file verbatim, plus a `package.json
 /// {"type":"module"}` so Node runs the ESM `.js` entry as ESM.
-fn assemble_app(bundled: &bundle::BundleResult) -> AppFiles {
+/// Bundle output + embedded assets, in the payload's write order.
+///
+/// The synthesized `package.json` sits BESIDE the entry rather than at the app
+/// root: Node resolves a module's type from the nearest package.json above it,
+/// so the entry's own directory is the one position no `--include`d file can
+/// shadow. With no assets the entry is already at the root, so this is the same
+/// file in the same place it has always been.
+fn assemble_app(bundled: &bundle::BundleResult, layout: &assets::Layout) -> Result<AppFiles> {
     let mut files: AppFiles = bundled
         .files
         .iter()
-        .map(|f| (f.name.clone(), f.bytes.clone()))
+        .map(|f| (layout.bundle_path(&f.name), f.bytes.clone()))
         .collect();
-    files.push(("package.json".to_string(), br#"{"type":"module"}"#.to_vec()));
-    files
+
+    for asset in &layout.assets {
+        // Overwriting a chunk would replace compiled code with whatever the user
+        // pointed at — always a mistake, and silent until the binary runs.
+        if files.iter().any(|(name, _)| *name == asset.rel) {
+            bail!(
+                "--include would overwrite compiled output: {} is also a bundle chunk. \
+                 Rename the file or drop it from --include.",
+                asset.rel
+            );
+        }
+        let bytes = fs::read(&asset.source)
+            .with_context(|| format!("reading {}", asset.source.display()))?;
+        files.push((asset.rel.clone(), bytes));
+    }
+
+    let pkg = layout.bundle_path("package.json");
+    match files.iter().find(|(name, _)| *name == pkg) {
+        // An embedded package.json ships verbatim — that is what --include
+        // promises — so it, not nub, governs the entry's module type. The bundle
+        // is ESM, so a manifest that says otherwise is a compile-time error
+        // rather than a "Cannot use import statement outside a module" on a
+        // user's machine.
+        Some((_, bytes)) => {
+            let declares_esm = serde_json::from_slice::<serde_json::Value>(bytes)
+                .ok()
+                .and_then(|v| v.get("type")?.as_str().map(str::to_owned))
+                .is_some_and(|t| t == "module");
+            if !declares_esm {
+                bail!(
+                    "the embedded {pkg} must declare \"type\": \"module\" — it sits beside the \
+                     compiled entry, which is an ES module. Add the field, or drop the file \
+                     from --include."
+                );
+            }
+        }
+        None => files.push((pkg, br#"{"type":"module"}"#.to_vec())),
+    }
+    Ok(files)
 }
 
 /// `--sourcemap=external` maps land BESIDE the executable, deliberately outside
@@ -716,6 +775,8 @@ mod tests {
             smol: false,
             target: None,
             platform: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
             install_message: install_message.map(str::to_string),
             bundle: BundleOptions {
                 minify: true,

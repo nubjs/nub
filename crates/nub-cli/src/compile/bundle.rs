@@ -177,8 +177,10 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
                     bytes: c.code.as_bytes().to_vec(),
                 });
             }
-            // Only source maps are collected: general static-asset emit
-            // (`--include`/`--exclude`) is a separate work unit.
+            // Only source maps are collected. Nothing configures a loader that
+            // emits other assets, and `--include` never routes through the
+            // bundler at all — it embeds bytes straight from disk, which is what
+            // makes it verbatim.
             Output::Asset(a) if a.filename.ends_with(".map") => maps.push(BundledFile {
                 name: a.filename.to_string(),
                 bytes: match &a.source {

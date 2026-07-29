@@ -905,6 +905,18 @@ pub enum Command {
         #[arg(long, value_name = "KEY=VALUE", action = ArgAction::Append)]
         define: Vec<String>,
 
+        /// Embed a file or directory in the executable, byte for byte, repeatable.
+        /// Accepts globs. Embedded files are extracted beside the compiled entry,
+        /// keeping the layout they had in your source tree, so the app reads them
+        /// through the same relative paths it always did.
+        #[arg(long, value_name = "PATH", action = ArgAction::Append)]
+        include: Vec<String>,
+
+        /// Leave a path out of what `--include` embeds, repeatable. Accepts globs.
+        /// A pattern that matches nothing is ignored.
+        #[arg(long, value_name = "PATH", action = ArgAction::Append)]
+        exclude: Vec<String>,
+
         /// Custom message the compiled binary shows on a terminal while it sets
         /// itself up on first run. Default: `Initializing...`.
         #[arg(long, value_name = "TEXT")]
@@ -2550,6 +2562,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             no_minify,
             sourcemap,
             define,
+            include,
+            exclude,
             install_message,
             no_keep_names,
             no_treeshake,
@@ -2564,6 +2578,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             smol,
             target,
             platform,
+            include,
+            exclude,
             install_message,
             bundle: crate::compile::BundleOptions {
                 minify: !no_minify,

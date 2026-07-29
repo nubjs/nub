@@ -163,6 +163,59 @@ if (process.platform === "win32") { useNamedPipe(); }
 else { useUnixSocket(); }         // the only branch in a linux-x64 binary
 ```
 
+## `--include`
+
+Embed a file or directory in the executable, byte for byte. The bundler never touches an embedded file — the bytes ship exactly as they sit on disk, and the app reads them at runtime through ordinary filesystem calls.
+
+```bash
+nub compile src/index.ts --include=src/instructions.md --include=assets/
+```
+
+Embedded files are extracted beside the compiled entry, keeping the layout they had in your source tree, so the paths your code already uses keep working:
+
+```ts
+// src/index.ts, compiled with the command above
+const instructions = readFileSync(new URL("./instructions.md", import.meta.url), "utf8");
+const icons = createReadStream(join(__dirname, "..", "assets", "icons.xml"));
+```
+
+Because they are real files, every filesystem API works on them — `readFile`, `createReadStream`, `stat`, `readdir`, and a native addon opening the path itself.
+
+Repeat the flag per path, and use a glob where a pattern is easier to write:
+
+```bash
+nub compile app.ts --include='data/**/*.json' --include=schema.sql
+```
+
+A pattern that matches nothing fails the build, since the alternative is discovering the missing file on someone else's machine:
+
+```console
+$ nub compile app.ts --include=data/missing.json
+Error: --include "data/missing.json" matched no files (the path does not exist)
+```
+
+## `--exclude`
+
+Drop paths from what `--include` selected, for when a directory is almost the right set:
+
+```bash
+nub compile app.ts --include=data --exclude=data/fixtures --exclude='**/*.tmp'
+```
+
+An `--exclude` that matches nothing is ignored rather than an error, so it can outlive the files it was written for. That also means a mistyped one prunes nothing — check what shipped if a path was meant to stay out.
+
+## Asset paths resolve from the entry
+
+Compiling bundles every module into one file at the entry's location, so in the compiled app `import.meta.url` and `__dirname` always point at the entry's directory — including in code that lived in a subdirectory beforehand. Write asset paths as the entry would see them:
+
+```ts
+// Entry src/index.ts, helper src/shapes/lib.ts, asset at assets/icons.xml.
+join(__dirname, "..", "assets", "icons.xml")        // from the entry — works either way
+join(__dirname, "..", "..", "assets", "icons.xml")  // from the helper — breaks once compiled
+```
+
+The helper's path is right until it is bundled into the entry, one directory up. Computing asset paths in the entry, or from a single exported base directory, keeps both forms working.
+
 ## `--install-message`
 
 The first run sets itself up before the app starts — extracting the embedded Node, or downloading one under `--smol`. On a terminal the launcher shows a centered box with a spinner while that runs:
