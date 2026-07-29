@@ -690,10 +690,12 @@ mod win {
         let f = Fixture::new("matrix");
         let jail = jail_shaped(&f, Vec::new(), true, &[]);
         let jail_net = jail_shaped(&f, Vec::new(), false, &[]);
+        let jail_loose = jail_shaped(&f, loosest_reachable_grants(), false, &[]);
 
         for (label, policy) in [
             ("jail-net-deny", Some(&jail)),
             ("jail-net-open", Some(&jail_net)),
+            ("jail-loose", Some(&jail_loose)),
             ("unconfined", None),
         ] {
             println!("  ---- arm {label} ----");
@@ -706,7 +708,7 @@ mod win {
             report(
                 fails,
                 &format!("anon-pipe-{label}"),
-                code == 0 && text == "CREATED",
+                code == 0 && text.starts_with("CREATED"),
                 &format!("exit={code} marker={text} (the arm's liveness control)"),
             );
 
@@ -736,7 +738,7 @@ mod win {
                     report(
                         fails,
                         &format!("{}-creatable-unconfined", cell.id),
-                        text == "CREATED",
+                        text.starts_with("CREATED"),
                         &format!(
                             "marker={text} (a cell that cannot be created at all is a broken cell)"
                         ),
@@ -766,6 +768,33 @@ mod win {
                 &format!("exit={code}"),
             );
         }
+    }
+
+    /// THE LOOSE END OF THE BISECTION. Granting MORE never needs elevation — a lifecycle
+    /// script runs with the user's complete access by default, so every grant is a reduction
+    /// from the status quo. What is genuinely unreachable unprivileged is authoring an ACE
+    /// on a path the user does not own (`C:\` was measured refused de-elevated), so this is
+    /// the loosest configuration nub can actually produce: read+write on the user's whole
+    /// profile, the temp tree, the tool cache, and `ProgramData`, with net unconfined on top.
+    /// If a shape is still refused here, no amount of loosening reaches it.
+    fn loosest_reachable_grants() -> Vec<FsRule> {
+        let mut rules = Vec::new();
+        for key in ["USERPROFILE", "LOCALAPPDATA", "TEMP", "ProgramData"] {
+            if let Ok(v) = std::env::var(key) {
+                rules.push(FsRule {
+                    matcher: CanonGlob(canon(Path::new(&v))),
+                    effect: Effect::Allow,
+                    access: FsAccess::ReadWrite,
+                    origin: FsOrigin::Authored,
+                });
+            }
+        }
+        for dir in [r"C:\hostedtoolcache", r"C:\Program Files", r"C:\Windows"] {
+            if Path::new(dir).is_dir() {
+                rules.push(read_rule(Path::new(dir)));
+            }
+        }
+        rules
     }
 
     /// The Node shapes a lifecycle script actually uses. Each script is a FILE, so no
@@ -800,69 +829,120 @@ mod win {
             &[("NODE_OPTIONS", nub_sandbox::windows_realpath_node_options())],
         );
 
-        // (id, the stdio option source, whether the callee's bytes are recoverable)
-        // `piped` runs LAST deliberately: it is the shape that hangs, and an arm that has
-        // to be killed must not be able to discard the arms that answer everything else.
-        let shapes: &[(&str, &str)] = &[
-            ("inherit", r#"{ stdio: "inherit" }"#),
-            ("fdfile", r#"{ stdio: [0, FD, FD] }"#),
-            ("ignore", r#"{ stdio: "ignore" }"#),
-            ("piped", r#"{ encoding: "utf8" }"#),
+        // The loose end of the bisection, applied to the shape that actually hangs. Same
+        // grants as `jail-loose` above plus what Node itself needs.
+        let mut loose_extra = loosest_reachable_grants();
+        loose_extra.push(read_rule(&node));
+        if let Some(dir) = node.parent() {
+            loose_extra.push(read_rule(dir));
+        }
+        let jail_loose = jail_shaped(
+            &f,
+            loose_extra,
+            false,
+            &[("NODE_OPTIONS", nub_sandbox::windows_realpath_node_options())],
+        );
+
+        // `SHIM` is the candidate mitigation: `stdio: [0, fd, fd]` is measured to work, so a
+        // preload that rewrites a buffered `pipe` into file-backed descriptors would recover
+        // the callee's bytes without ever asking NPFS for a name. Measured here rather than
+        // argued, because a mitigation nobody ran is a proposal, not a finding.
+        const SHIM: &str = r#"
+const _orig = cp.execFileSync;
+cp.execFileSync = function (file, args, options) {
+  const o = Object.assign({}, options);
+  const fd = fs.openSync(CAPTURE, "w");
+  o.stdio = [0, fd, fd];
+  try { _orig(file, args, o); } finally { fs.closeSync(fd); }
+  const buf = fs.readFileSync(CAPTURE);
+  return o.encoding && o.encoding !== "buffer" ? buf.toString(o.encoding) : buf;
+};
+"#;
+
+        // `piped` runs LAST in each policy deliberately: it is the shape that hangs, and an
+        // arm that has to be killed must not discard the arms that answer everything else.
+        let shapes: &[(&str, &str, &str)] = &[
+            ("inherit", "", r#"{ stdio: "inherit" }"#),
+            ("fdfile", "", r#"{ stdio: [0, FD, FD] }"#),
+            ("ignore", "", r#"{ stdio: "ignore" }"#),
+            ("shimmed", SHIM, r#"{ encoding: "utf8" }"#),
+            ("piped", "", r#"{ encoding: "utf8" }"#),
         ];
 
-        for (id, opts) in shapes {
-            let nodemarker = f.work.join(format!("node-{id}.marker"));
-            let capture = f.work.join(format!("node-{id}.capture"));
-            let sink = f.work.join(format!("node-{id}.sink"));
-            let script = f.work.join(format!("node-{id}.js"));
-            let body = format!(
-                r#"const fs = require("fs");
+        for (id, preamble, opts) in shapes {
+            node_shape(fails, &f, &jail, "tight", &node, id, preamble, opts);
+        }
+        // Only the two that decide the question are repeated at the loose end; each `piped`
+        // arm costs the full 25s bound.
+        for (id, preamble, opts) in shapes.iter().filter(|s| s.0 == "piped") {
+            node_shape(fails, &f, &jail_loose, "loose", &node, id, preamble, opts);
+        }
+    }
+
+    /// Run ONE Node stdio shape under ONE policy, and report both markers.
+    #[allow(clippy::too_many_arguments)]
+    fn node_shape(
+        fails: &mut u32,
+        f: &Fixture,
+        policy: &SandboxPolicy,
+        arm: &str,
+        node: &Path,
+        id: &str,
+        preamble: &str,
+        opts: &str,
+    ) {
+        let nodemarker = f.work.join(format!("node-{arm}-{id}.marker"));
+        let capture = f.work.join(format!("node-{arm}-{id}.capture"));
+        let sink = f.work.join(format!("node-{arm}-{id}.sink"));
+        let script = f.work.join(format!("node-{arm}-{id}.js"));
+        let body = format!(
+            r#"const fs = require("fs");
 const cp = require("child_process");
 const M = {marker};
+const CAPTURE = {capture};
 fs.writeFileSync(M, "start");
-const FD = fs.openSync({capture}, "w");
+const FD = fs.openSync(CAPTURE, "w");
+{preamble}
 try {{
   const out = cp.execFileSync({node}, ["-e", "process.stdout.write('pong')"], {opts});
-  fs.writeFileSync(M, "RETURNED " + (out === undefined ? "<no-capture>" : String(out)));
+  fs.writeFileSync(M, "RETURNED " + (out === undefined ? "<no-capture>" : String(out).trim()));
 }} catch (e) {{
   fs.writeFileSync(M, "THREW " + (e.code || "") + " | " + String(e.message).split("\n")[0]);
 }}
 "#,
-                marker = js_literal(&nodemarker),
-                capture = js_literal(&capture),
-                node = js_literal(&node),
-                opts = opts,
-            );
-            std::fs::write(&script, body).unwrap();
+            marker = js_literal(&nodemarker),
+            capture = js_literal(&capture),
+            node = js_literal(node),
+        );
+        std::fs::write(&script, body).unwrap();
 
-            println!("  ---- node stdio shape {id} ----");
-            let m = f.work.join(format!("node-{id}.outer"));
-            let (code, outer) = run_jailed(
-                &f,
-                &jail,
-                "node",
-                &m,
-                &[
-                    node.to_string_lossy().into_owned(),
-                    script.to_string_lossy().into_owned(),
-                    sink.to_string_lossy().into_owned(),
-                ],
-            );
-            let inner =
-                std::fs::read_to_string(&nodemarker).unwrap_or_else(|_| "<no marker>".to_string());
-            let stderr = std::fs::read_to_string(&sink).unwrap_or_default();
-            println!("  fact:node-stdio-{id}-outer={outer}");
-            println!("  fact:node-stdio-{id}-inner={inner}");
-            if !stderr.trim().is_empty() {
-                println!("  diag:node-stdio-{id}-sink={}", stderr.trim());
-            }
-            report(
-                fails,
-                &format!("node-stdio-{id}-measured"),
-                outer != "<no marker>" && inner != "<no marker>",
-                &format!("exit={code} outer={outer} inner={inner}"),
-            );
+        println!("  ---- node stdio shape {id} ({arm}) ----");
+        let m = f.work.join(format!("node-{arm}-{id}.outer"));
+        let (code, outer) = run_jailed(
+            f,
+            policy,
+            "node",
+            &m,
+            &[
+                node.to_string_lossy().into_owned(),
+                script.to_string_lossy().into_owned(),
+                sink.to_string_lossy().into_owned(),
+            ],
+        );
+        let inner =
+            std::fs::read_to_string(&nodemarker).unwrap_or_else(|_| "<no marker>".to_string());
+        let stderr = std::fs::read_to_string(&sink).unwrap_or_default();
+        println!("  fact:node-{arm}-{id}-outer={outer}");
+        println!("  fact:node-{arm}-{id}-inner={inner}");
+        if !stderr.trim().is_empty() {
+            println!("  diag:node-{arm}-{id}-sink={}", stderr.trim());
         }
+        report(
+            fails,
+            &format!("node-{arm}-{id}-measured"),
+            outer != "<no marker>" && inner != "<no marker>",
+            &format!("exit={code} outer={outer} inner={inner}"),
+        );
     }
 
     /// A Windows path as a JS string literal. Backslashes are escaped rather than using a

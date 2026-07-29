@@ -81,15 +81,15 @@ jobs:
           [ -s probe.log ] || { echo "MISS the probe produced no output at all"; fail=1; }
           need "PROBE windows pipe shapes under AppContainer"
           # The liveness control for each arm, and the cell-validity control.
-          for a in jail-net-deny jail-net-open unconfined; do
+          for a in jail-net-deny jail-net-open jail-loose unconfined; do
             need "prop:anon-pipe-$a=PASS"
           done
           for c in libuv-exact-outbound libuv-exact-inbound libuv-plus-reject-remote \
                    libuv-flags-flat-name rust-exact rust-minus-reject-remote \
                    rust-minus-overlapped reject-remote-only original-anchor \
-                   original-anchor-local-ns libuv-flags-local-ns; do
+                   original-anchor-local-ns libuv-flags-local-ns libuv-uvdir-local-ns; do
             need "prop:$c-creatable-unconfined=PASS"
-            for a in jail-net-deny jail-net-open unconfined; do
+            for a in jail-net-deny jail-net-open jail-loose unconfined; do
               grep -q "prop:$c-$a-measured=PASS" probe.log || { echo "MISS $c not measured in arm $a"; fail=1; }
             done
           done
