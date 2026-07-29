@@ -168,22 +168,109 @@ pub(super) fn link_bins_for_dep(
         virtual_store_dir_max_length,
         placements,
     );
-    if let Some(pkg_json) = read_materialized_pkg_json_cached(
+    let pkg_json = read_materialized_pkg_json_cached(
         cache,
         aube_dir,
         dep_path,
         name,
         virtual_store_dir_max_length,
         placements,
-    )? {
+    )?;
+    link_bins_of_pkg_dir(
+        bin_dir,
+        &pkg_dir,
+        name,
+        pkg_json.as_ref(),
+        graph,
+        dep_path,
+        shim_opts,
+    )
+}
+
+/// Shim one package's own bins (plus its bundled deps') into `bin_dir`,
+/// resolving every target against the caller's `pkg_dir`.
+///
+/// Split out of [`link_bins_for_dep`] so the hoisted pass can hand in a
+/// *concrete* placement directory. A package whose name conflicts with a
+/// shallower version is materialized once per site, and each site's shims
+/// must point at its own copy — `materialized_pkg_dir` only ever returns
+/// the shallowest, so the deeper sites need their path passed in.
+fn link_bins_of_pkg_dir(
+    bin_dir: &std::path::Path,
+    pkg_dir: &std::path::Path,
+    name: &str,
+    pkg_json: Option<&serde_json::Value>,
+    graph: &aube_lockfile::LockfileGraph,
+    dep_path: &str,
+    shim_opts: aube_linker::BinShimOptions,
+) -> miette::Result<()> {
+    if let Some(pkg_json) = pkg_json {
         if let Some(bin) = pkg_json.get("bin") {
-            link_bin_entries(bin_dir, &pkg_dir, Some(name), bin, shim_opts)?;
+            link_bin_entries(bin_dir, pkg_dir, Some(name), bin, shim_opts)?;
         } else if let Some(dir_bin) = pkg_json.get("directories").and_then(|d| d.get("bin")) {
             // `bin` wins; `directories.bin` is the fallback only.
-            link_dir_bins(bin_dir, &pkg_dir, dir_bin, shim_opts)?;
+            link_dir_bins(bin_dir, pkg_dir, dir_bin, shim_opts)?;
         }
     }
-    link_bundled_bins(bin_dir, &pkg_dir, graph, dep_path, shim_opts)?;
+    link_bundled_bins(bin_dir, pkg_dir, graph, dep_path, shim_opts)?;
+    Ok(())
+}
+
+/// Hoisted layout: shim every placed package's bins into the `.bin` of
+/// the `node_modules/` it was hoisted into.
+///
+/// The isolated layout gets this for free — each package owns a private
+/// `.aube/<dep_path>/node_modules/`, and `link_dep_bins` fills that
+/// directory's `.bin`. Hoisted has no per-dep directory: transitives share
+/// a `node_modules/` with everything else hoisted to that level, and the
+/// only pass covering that directory handled the importer's *direct* deps.
+/// A hoisted transitive's bins were therefore linked nowhere, and any
+/// lifecycle script invoking one exited 127 (#570 — `bufferutil`'s
+/// `install` script shells out to `node-gyp-build`).
+///
+/// Mirrors pnpm's hoisted layout, which runs `linkBins(modulesDir,
+/// binsDir)` once per `node_modules/` in the tree and links the bins of
+/// every package sitting directly inside it.
+///
+/// ORDERING is the conflict resolution. This pass runs before the
+/// direct-dep and self-bin passes, whose writes then overwrite it
+/// (`create_bin_shim` unlinks first), reproducing pnpm's
+/// `preferDirectCmds` — a direct dep's bin beats a hoisted transitive's —
+/// without a separate conflict table. Among colliding transitives,
+/// `HoistedPlacements::iter` yields dep_paths in `BTreeMap` order, so the
+/// greatest dep_path wins: deterministic across runs and platforms, and
+/// the same package pnpm's `localeCompare` tiebreak lands on.
+fn link_hoisted_placement_bins(
+    aube_dir: &std::path::Path,
+    graph: &aube_lockfile::LockfileGraph,
+    virtual_store_dir_max_length: usize,
+    placements: &aube_linker::HoistedPlacements,
+    shim_opts: aube_linker::BinShimOptions,
+    cache: &mut PkgJsonCache,
+) -> miette::Result<()> {
+    for (dep_path, pkg_dir) in placements.iter() {
+        let Some(pkg) = graph.get_package(dep_path) else {
+            continue;
+        };
+        let pkg_json = read_materialized_pkg_json_cached(
+            cache,
+            aube_dir,
+            dep_path,
+            &pkg.name,
+            virtual_store_dir_max_length,
+            Some(placements),
+        )?;
+        let bin_dir = dep_modules_dir_for(pkg_dir, &pkg.name).join(".bin");
+        link_bins_of_pkg_dir(
+            &bin_dir,
+            pkg_dir,
+            &pkg.name,
+            pkg_json.as_ref(),
+            graph,
+            dep_path,
+            shim_opts,
+        )?;
+    }
     Ok(())
 }
 
@@ -301,6 +388,42 @@ pub(crate) fn link_all_bins(input: LinkAllBinsInput<'_>) -> miette::Result<()> {
     let mut pkg_json_cache = PkgJsonCache::new();
     let mut ws_pkg_json_cache = WsPkgJsonCache::new();
     let ws_dirs_for_bins = has_workspace.then_some(ws_dirs);
+    // Lowest-precedence bin writers run first; every later pass overwrites
+    // a same-named shim (`create_bin_shim` unlinks before it writes), so
+    // the sequence below IS the conflict-resolution order:
+    //   dep-lifecycle bins < hoisted placements < direct deps < self-bin.
+    //
+    // The first two are hoisted-only in practice. Under isolated both write
+    // exclusively into `.aube/<dep_path>/node_modules/.bin`, which no other
+    // pass touches, so their position here is immaterial there.
+    //
+    // Gate matches the lifecycle phase's (`finalize.rs`) via the shared
+    // `dep_build_scripts_may_run` predicate, threaded through
+    // `maybe_link_dep_bins`: the `defaultTrust` floor can authorize a
+    // package's build scripts with no explicit allow rule, and those
+    // scripts call binaries declared in the package's own `dependencies`
+    // — which must be shimmed into the dep's `.bin` and put on PATH.
+    maybe_link_dep_bins(
+        ignore_scripts,
+        has_any_allow_rule,
+        floor_may_allow_any,
+        aube_dir,
+        graph_for_link,
+        virtual_store_dir_max_length,
+        placements,
+        shim_opts,
+        &mut pkg_json_cache,
+    )?;
+    if let Some(placements) = placements {
+        link_hoisted_placement_bins(
+            aube_dir,
+            graph_for_link,
+            virtual_store_dir_max_length,
+            placements,
+            shim_opts,
+            &mut pkg_json_cache,
+        )?;
+    }
     link_bins(
         cwd,
         modules_dir_name,
@@ -397,23 +520,6 @@ pub(crate) fn link_all_bins(input: LinkAllBinsInput<'_>) -> miette::Result<()> {
             }
         }
     }
-    // Gate matches the lifecycle phase's (`finalize.rs`) via the shared
-    // `dep_build_scripts_may_run` predicate, threaded through
-    // `maybe_link_dep_bins`: the `defaultTrust` floor can authorize a
-    // package's build scripts with no explicit allow rule, and those
-    // scripts call binaries declared in the package's own `dependencies`
-    // — which must be shimmed into the dep's `.bin` and put on PATH.
-    maybe_link_dep_bins(
-        ignore_scripts,
-        has_any_allow_rule,
-        floor_may_allow_any,
-        aube_dir,
-        graph_for_link,
-        virtual_store_dir_max_length,
-        placements,
-        shim_opts,
-        &mut pkg_json_cache,
-    )?;
     Ok(())
 }
 
@@ -479,10 +585,12 @@ pub(super) fn link_bins_for_workspace_dep(
 /// dep-local `.bin` (via `dep_modules_dir_for`) before the
 /// project-level one so the dep's own transitive bins always win.
 ///
-/// Isolated mode only. Hoisted mode materializes deps at the project
-/// root's `node_modules/` and generally relies on the single top-level
-/// `.bin`; nested transitive bins under hoisted are a known rough edge
-/// and out of scope here.
+/// Runs under both layouts. Under hoisted, `dep_modules_dir_for` resolves
+/// to whichever `node_modules/` the dep was hoisted into, so a nested
+/// child's bins land in the directory the parent's script actually gets on
+/// PATH — `run_dep_hook` prepends exactly one dep `.bin`, and for a nested
+/// child that is *not* the child's own sibling `.bin`. This pass is what
+/// closes that gap; `link_hoisted_placement_bins` handles the layout side.
 /// Gate + run the per-dep `.bin` linking pass.
 ///
 /// The link site in `run_link_phase` and the lifecycle site in
@@ -534,10 +642,6 @@ pub(crate) fn link_dep_bins(
     shim_opts: aube_linker::BinShimOptions,
     cache: &mut PkgJsonCache,
 ) -> miette::Result<()> {
-    if placements.is_some() {
-        // Hoisted — skip. See function doc.
-        return Ok(());
-    }
     for (dep_path, pkg) in &graph.packages {
         if pkg.dependencies.is_empty() {
             continue;
@@ -1501,6 +1605,115 @@ mod tests {
         assert!(
             !bin.join("escaped").exists(),
             "a file reachable only through a symlinked subdir must NOT link"
+        );
+    }
+
+    /// Hoisted precedence. Both passes write `node_modules/.bin/probe`;
+    /// the ORDER in `link_all_bins` is what resolves the collision, so a
+    /// direct dep's bin must survive a hoisted transitive's. Names are
+    /// chosen so dep_path order alone would pick the WRONG winner:
+    /// `z-transitive` sorts last, so it wins inside the placements pass
+    /// and only the later direct-dep pass can dislodge it. Reordering the
+    /// two calls flips this assertion.
+    #[test]
+    fn hoisted_direct_dep_bin_beats_a_hoisted_transitive_of_the_same_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let modules = root.join("node_modules");
+
+        let write_pkg = |name: &str| {
+            let pkg_dir = modules.join(name);
+            std::fs::create_dir_all(&pkg_dir).unwrap();
+            std::fs::write(
+                pkg_dir.join("package.json"),
+                format!(
+                    r#"{{"name":"{name}","version":"1.0.0","bin":{{"probe":"cli.js"}}}}"#
+                ),
+            )
+            .unwrap();
+            std::fs::write(pkg_dir.join("cli.js"), "#!/usr/bin/env node\n").unwrap();
+        };
+        write_pkg("a-direct");
+        write_pkg("z-transitive");
+
+        let bin_with_probe = || {
+            let mut b = BTreeMap::new();
+            b.insert("probe".to_string(), "cli.js".to_string());
+            b
+        };
+        let mut direct = locked("a-direct", "1.0.0", bin_with_probe());
+        direct
+            .dependencies
+            .insert("z-transitive".to_string(), "1.0.0".to_string());
+
+        let mut packages = BTreeMap::new();
+        packages.insert("a-direct@1.0.0".to_string(), direct);
+        packages.insert(
+            "z-transitive@1.0.0".to_string(),
+            locked("z-transitive", "1.0.0", bin_with_probe()),
+        );
+        let mut importers = BTreeMap::new();
+        importers.insert(
+            ".".to_string(),
+            vec![DirectDep {
+                name: "a-direct".to_string(),
+                dep_path: "a-direct@1.0.0".to_string(),
+                dep_type: DepType::Production,
+                specifier: Some("^1.0.0".to_string()),
+            }],
+        );
+        let graph = LockfileGraph {
+            packages,
+            importers,
+            ..Default::default()
+        };
+
+        let placements = aube_linker::HoistedPlacements::from_graph(
+            root,
+            &graph,
+            "node_modules",
+            aube_linker::HoistingLimits::None,
+        )
+        .unwrap();
+        assert!(
+            placements.package_dir("z-transitive@1.0.0").is_some(),
+            "fixture is inert unless the transitive was actually placed"
+        );
+
+        let aube_dir = modules.join(".aube");
+        let shim_opts = aube_linker::BinShimOptions::default();
+        let mut cache = PkgJsonCache::new();
+        // Same order as `link_all_bins`: placements, then direct deps.
+        link_hoisted_placement_bins(&aube_dir, &graph, 120, &placements, shim_opts, &mut cache)
+            .unwrap();
+        assert!(
+            modules.join(".bin/probe").symlink_metadata().is_ok(),
+            "the hoisted transitive's bin must be linked at all (the bug)"
+        );
+        link_bins(
+            root,
+            "node_modules",
+            &aube_dir,
+            &graph,
+            120,
+            Some(&placements),
+            shim_opts,
+            &mut cache,
+            None,
+            &mut WsPkgJsonCache::new(),
+        )
+        .unwrap();
+
+        // Canonicalize BOTH sides: on macOS a tempdir lives under `/var`, a
+        // symlink to `/private/var`, so resolving only one side fails the
+        // prefix check on the path spelling rather than on the behavior.
+        let resolved = std::fs::canonicalize(modules.join(".bin/probe")).unwrap();
+        let expected_owner = std::fs::canonicalize(modules.join("a-direct")).unwrap();
+        assert!(
+            resolved.starts_with(&expected_owner),
+            "direct dep must win the name collision; `probe` resolved to {}, expected a target under {}",
+            resolved.display(),
+            expected_owner.display()
         );
     }
 }
