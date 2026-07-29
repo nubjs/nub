@@ -517,6 +517,41 @@ OPENABLE under an ORDINARY `%TEMP%`/profile tree with no `C:\`-owned store (VM-v
   a narrower Windows jail, or not confining the operations that need the walk. A residual is
   acceptable here; requiring privilege is not.
 
+- **BLAST RADIUS: essentially every Node lifecycle script, and the boundary is "any file module
+  at all".** Measured with the repair OFF, which is the shipping configuration above the profile.
+  The builtin-only row is the control — without it a uniformly red group cannot be told from a
+  broken harness:
+
+  | shape | unrepaired |
+  | --- | --- |
+  | `node -e`, no require | starts, exit 0 |
+  | `node -e require('fs')` (builtin) | starts, exit 0 |
+  | `node -e require('<absolute>')` | refused, `realpathSync` on `C:\` |
+  | `node -e require('./dep.js')` | refused, same |
+  | `node -e require('dep')` through a junction | refused, same |
+  | `node <file>` | refused, same, at `resolveMainPath` |
+
+  So this is not a require-SHAPE distinction. Node starts and builtins work; the instant any
+  file-based module resolution happens — entry point or require, absolute or relative or bare —
+  `realpathSync` lstats the volume root and the LowBox check refuses it. `resolveMainPath`
+  realpaths the main script before a line of user code runs, so a script's content is irrelevant
+  to whether it starts.
+
+  Against the 346-package lifecycle corpus: 319 run a script that makes `node` execute a FILE, and
+  the 8 that use only `node -e` load a relative file, which realpaths too (`loader.js` non-main
+  branch, ESM `resolve.js`) — **327 of 346 reach `realpathSync`**. The 19 that never invoke Node
+  are mostly `chmod` and `.sh`, only about 4 of which run under `cmd.exe` at all. By class the
+  breakage is near-total everywhere: native-build-prebuilt 104/105, binary-downloader 76/77,
+  hook-installer 11/11. (That corpus was selected for HAVING lifecycle scripts, so this is
+  composition within it, not a ratio over all of npm.)
+
+  **The posture consequence, stated plainly: a Windows build jail that cannot repair above the
+  user profile confines almost nothing while appearing to.** Some of those scripts fail SILENTLY —
+  `core-js` runs `node -e "try{require('./postinstall')}catch(e){}"`, and the `|| exit 0` fallback
+  chains through the gyp rows do the same — so a default-on jail would report success while the
+  package's work never happened. That is the false-assurance case, and it is why this is a posture
+  question rather than a coverage percentage.
+
 - **The precondition is INHERITABILITY, not a protected ancestor.** Where an
   `ALL APPLICATION PACKAGES` allow-ACE can reach a work dir, an ungranted secret UNDER it is
   readable regardless of the allow-set — the AAP grant satisfies the LowBox check before
