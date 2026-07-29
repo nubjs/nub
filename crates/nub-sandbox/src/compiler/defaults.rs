@@ -525,6 +525,14 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
     }
     #[cfg(windows)]
     {
+        // WINDOWS ONLY, and safe only because the jail STAMPS it: `build_jail.rs` inserts
+        // nub's own value into `ambient` before this scrub runs, so an ambient user value is
+        // already overwritten and can never ride this entry in. `NODE_OPTIONS` carries
+        // `--import`, so admitting an ambient one would hand a dependency's lifecycle script
+        // an arbitrary-code channel. No other platform stamps it, and none may admit it.
+        if key.eq_ignore_ascii_case("NODE_OPTIONS") {
+            return true;
+        }
         BUILD_JAIL_EXTRA_EXACT
             .iter()
             .any(|e| e.eq_ignore_ascii_case(key))
@@ -538,6 +546,61 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
         BUILD_JAIL_EXTRA_EXACT.contains(&key)
             || BUILD_JAIL_EXTRA_PREFIXES.iter().any(|p| key.starts_with(p))
     }
+}
+
+/// The `NODE_OPTIONS` the Windows build jail stamps, repairing Node's module resolution
+/// under the AppContainer without loosening a single grant.
+///
+/// THE DEFECT. Node's JS `realpathSync` walks a path component by component and, on Windows,
+/// `lstat`s the VOLUME ROOT first. The jail grants leaf-only and leans on traverse-bypass
+/// (`SeChangeNotifyPrivilege` + `FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL`), which exempts
+/// INTERMEDIATE components of a single open — it does not make an ancestor openable as a
+/// TARGET. So every `require()` of an absolute path dies on `EPERM: lstat 'C:\'`.
+///
+/// WHY NOT AN ANCESTOR ACE. Writing one needs `WRITE_DAC`, and `C:\` and `C:\Users` are
+/// Administrators-owned; a standard user cannot. A jail that needs elevation cannot be
+/// default-on, so that repair is disqualified rather than merely awkward.
+///
+/// WHAT THIS DOES INSTEAD. Two pieces, each earning its place:
+///  - `--preserve-symlinks-main` clears the ONE realpath that happens before any preload can
+///    run (`resolveMainPath`, `internal/modules/run_main.js`). It affects only the entry
+///    module's own path — never dependency resolution.
+///  - The `data:` preload resolves with NO filesystem access at all (`defaultResolve`
+///    short-circuits on the `data:` protocol), which is the only reason a preload can be
+///    delivered into a jail whose realpath is broken. It points `fs.realpathSync` at its
+///    NATIVE twin, whose single `GetFinalPathNameByHandleW` on the LEAF resolves symlinks
+///    identically while opening exactly the object the jail already granted.
+///
+/// So resolution SEMANTICS are preserved — a symlinked (isolated) `node_modules` still
+/// resolves to real paths — which is what `--preserve-symlinks` alone would have broken.
+///
+/// The seam is one Node documents as monkey-patchable (`internal/modules/helpers.js`:
+/// "Import all of `fs` so that it can be monkey-patched"), and both the CJS and ESM
+/// resolvers read `fs.realpathSync` as a live property. Node's ESM resolver carries a note
+/// that internals MAY stop routing through the JS `fs` module someday; if that lands, this
+/// stamp silently stops helping and the Windows jail regresses to the defect above, which is
+/// what `windows_realpath_ancestors`'s `node-plain-fails` control exists to catch.
+/// VERSION FLOOR. `--import` is only legal inside `NODE_OPTIONS` from Node 18.18 (measured:
+/// 16.16 and 18.7 refuse to start at all with `--import is not allowed in NODE_OPTIONS`,
+/// 18.18/18.19/20.10/20.19/22 all accept it). That threshold sits BELOW nub's own 18.19
+/// support floor, so every interpreter nub supports accepts this stamp and no version gate is
+/// warranted. Below it the failure is loud — the process refuses to start — not silent.
+///
+/// SCOPE. Only the SYNC realpath is redirected, because that is the one both module
+/// resolvers call. `fs.realpath` (async) and `fs.promises.realpath` keep Node's JS walk and
+/// so keep the OS limitation — unfixed, but not a regression, since they failed before this
+/// stamp too. The replacement re-exposes `.native` on itself so package code calling
+/// `fs.realpathSync.native(…)` keeps working; without that this stamp would BREAK such
+/// callers, trading one defect for another.
+#[cfg(windows)]
+pub fn windows_realpath_node_options() -> String {
+    // Percent-encoded because NODE_OPTIONS is whitespace-separated; only space and quote
+    // need it here.
+    let shim = "import fs from \"node:fs\";\
+                const n=fs.realpathSync.native;n.native=n;fs.realpathSync=n;"
+        .replace(' ', "%20")
+        .replace('"', "%22");
+    format!("--preserve-symlinks-main --import data:text/javascript,{shim}")
 }
 
 /// The build-jail ENV posture (D1): a DEFAULT-DENY allowlist over the effective child

@@ -109,6 +109,19 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // instead of widening the allowlist to grant nub's own runtime into untrusted code.
         ambient.insert("NODE_COMPAT".to_string(), "1".to_string());
 
+        // Windows: repair Node's module resolution under the AppContainer, which otherwise
+        // dies on `EPERM: lstat 'C:\'` for every absolute `require()` — the jail grants
+        // leaf-only, and no ACE can fix it without elevation. Rationale, and why this
+        // preserves resolution semantics rather than merely disabling realpath, in
+        // `windows_realpath_node_options`. Unconditional like NODE_COMPAT above: it
+        // OVERWRITES any ambient value, which is also what keeps the env allowlist's
+        // `NODE_OPTIONS` entry from becoming an ambient code-injection channel.
+        #[cfg(windows)]
+        ambient.insert(
+            "NODE_OPTIONS".to_string(),
+            nub_sandbox::windows_realpath_node_options(),
+        );
+
         // The interpreter closure to grant READ. nub provisions its own Node under its
         // store (not `/usr`), so the tight-read base can't reach it. Under nub a bare
         // `node` resolves via the PATH-prepended shim (`NODE`) which re-execs the real

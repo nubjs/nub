@@ -135,6 +135,8 @@ pub mod host_probe {
 pub mod windows_admin {
     pub use crate::backend::windows_account::{SETUP_COMMAND, clean, setup, status, teardown};
 }
+#[cfg(windows)]
+pub use compiler::windows_realpath_node_options;
 pub use compiler::{
     CommandRunner, CompileCtx, CompileError, CompileWarning, DOWNLOAD_HOSTS, ScopeCapabilities,
     compile, compile_build_jail, compile_with_warnings,
