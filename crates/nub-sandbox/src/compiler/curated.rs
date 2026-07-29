@@ -203,7 +203,26 @@ pub fn grant_curated_package(
     package_dir: &Path,
     package_name: Option<&str>,
 ) {
-    let Some(grant) = package_name.and_then(lookup) else {
+    grant_from_table(
+        CURATED_GRANTS,
+        policy,
+        project_root,
+        package_dir,
+        package_name,
+    );
+}
+
+/// The table is a parameter so the equivalence test can drive the SAME rule-building code
+/// with the pre-catalog literal and diff the resulting policies. Duplicating this logic in
+/// the test instead would let the copy drift and pass while production diverged.
+fn grant_from_table(
+    table: &[(&str, CuratedGrant)],
+    policy: &mut SandboxPolicy,
+    project_root: &Path,
+    package_dir: &Path,
+    package_name: Option<&str>,
+) {
+    let Some(grant) = package_name.and_then(|n| lookup(table, n)) else {
         return;
     };
     let mut rules = Vec::new();
@@ -231,8 +250,8 @@ pub fn grant_curated_package(
     policy.fs.rules.entries.extend(rules);
 }
 
-fn lookup(name: &str) -> Option<CuratedGrant> {
-    CURATED_GRANTS
+fn lookup(table: &[(&str, CuratedGrant)], name: &str) -> Option<CuratedGrant> {
+    table
         .iter()
         .find(|(key, _)| *key == name)
         .map(|(_, grant)| *grant)
@@ -359,6 +378,46 @@ mod tests {
             CURATED_GRANTS, GOLDEN_PRE_CATALOG_GRANTS,
             "the generated table diverged from the hand-written one it replaced"
         );
+    }
+
+    /// Equal tables are the input; equal POLICIES are the thing that actually has to hold.
+    /// Both arms run the production rule-builder — only the table differs — so this closes
+    /// the gap the table comparison leaves: a field the generator populates correctly but
+    /// that reaches the compiler differently would pass above and fail here.
+    #[test]
+    fn both_tables_compile_to_the_same_policy() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let project = root.path();
+        // msw's grant is the one that reads the consumer's manifest, so a real file is
+        // needed for the ManifestField arm to resolve to anything at all.
+        std::fs::write(
+            project.join("package.json"),
+            r#"{"msw":{"workerDirectory":["public","static"]}}"#,
+        )
+        .expect("write manifest");
+
+        for (name, _) in GOLDEN_PRE_CATALOG_GRANTS {
+            let dir = project.join(format!("node_modules/.store/{name}@1/node_modules/{name}"));
+            let compile = |table| {
+                let mut p = SandboxPolicy::default();
+                grant_from_table(table, &mut p, project, &dir, Some(name));
+                p.fs.rules
+                    .entries
+                    .iter()
+                    .map(|r| format!("{} {:?} {:?}", r.matcher.as_str(), r.effect, r.access))
+                    .collect::<Vec<_>>()
+            };
+            let from_catalog = compile(CURATED_GRANTS);
+            assert!(
+                !from_catalog.is_empty(),
+                "{name} compiled to no rules — the comparison below would be vacuous"
+            );
+            assert_eq!(
+                from_catalog,
+                compile(GOLDEN_PRE_CATALOG_GRANTS),
+                "{name}: the catalog-derived policy diverged from the pre-catalog one"
+            );
+        }
     }
 
     /// Shapes the generator must refuse, asserted against the DATA rather than the
