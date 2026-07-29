@@ -30,6 +30,17 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest]
+    env:
+      # A HARNESS ACCOMMODATION FOR A SEPARATE DEFECT, deliberately not a product change.
+      # Windows gives the main thread a 1MB stack against Linux's 8MB, and the unoptimized
+      # `fast` profile overflows it inside `nub install` before any lifecycle script runs —
+      # measured on this branch's first two runs as rc 3221225725 (0xC00000FD,
+      # STATUS_STACK_OVERFLOW) with "thread 'main' has overflowed its stack", identically in
+      # the FIXED and POISONED arms and for both fixture shapes. Identical in both arms is
+      # what makes it pre-existing rather than anything this branch introduced. Linking the
+      # probe binary with a Linux-sized stack lets the probe measure the jail instead of a
+      # debug-build frame-size artifact; the overflow itself is reported separately.
+      RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-C link-arg=/STACK:8388608' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
