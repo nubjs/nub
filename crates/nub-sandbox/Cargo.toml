@@ -163,6 +163,12 @@ harness = false
 name = "windows_clean_root"
 harness = false
 
+# Owns a real `main` for the same reason as `windows_enforcement`: it self-reexecs both as
+# the jailed probe child AND as the arm the parent launches under a second primary token.
+[[test]]
+name = "windows_deelevated_jail"
+harness = false
+
 # OPT-IN ONLY. This probe is not a unit test: on an unprovisioned machine it exits non-zero
 # by design, and when run elevated it CREATES a local account, a local group, four persistent
 # WFP filters and a Winlogon registry value. Left ungated, bare `cargo test` on a

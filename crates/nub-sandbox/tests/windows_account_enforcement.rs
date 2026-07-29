@@ -210,6 +210,8 @@ mod win {
             // stays false, so seclogon still builds the account's own profile environment).
             env: EnvPolicy::resolved(std::env::vars().collect()),
             pid: PidPolicy::default(),
+            // This probe drives the `nub sandbox` scope, not the dependency build jail.
+            build_jail: false,
         }
     }
 

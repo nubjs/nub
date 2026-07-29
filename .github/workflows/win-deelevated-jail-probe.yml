@@ -1,0 +1,60 @@
+# Branch-scoped ad-hoc probe: does the Windows build jail hold with NO ELEVATION?
+# No PR required (see .claude/skills/ci-adhoc-test/SKILL.md). CI is the only venue —
+# AppContainer cannot be launched over SSH (OpenSSH lands in session 0 with no window
+# station, so every launch returns 0xC0000142 STATUS_DLL_INIT_FAILED), which also rules out
+# the standing nub-win VM. Delete once the de-elevated arm joins sandbox-conformance's
+# windows leg on main.
+name: win-deelevated-jail-probe
+
+on:
+  push:
+    branches: [sandbox/win-deelevated-jail]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      # Matches sandbox-conformance's windows leg: crt-static makes the self-reexec probe
+      # child self-contained, so it starts cleanly under the LowBox token.
+      RUSTFLAGS: "-C target-feature=+crt-static"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Runner baseline
+        shell: powershell
+        run: |
+          $id=[System.Security.Principal.WindowsIdentity]::GetCurrent()
+          $admin=(New-Object System.Security.Principal.WindowsPrincipal($id)).IsInRole([System.Security.Principal.WindowsBuiltinRole]::Administrator)
+          Write-Host "cores=$([System.Environment]::ProcessorCount) os=$([System.Environment]::OSVersion.VersionString)"
+          Write-Host "BASELINE runner user=$($id.Name) IsElevated=$admin"
+          Write-Host "EnableLUA=$((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name EnableLUA -ErrorAction SilentlyContinue).EnableLUA)"
+
+      - name: Paired elevated / de-elevated build-jail differential
+        shell: bash
+        run: cargo test -p nub-sandbox --test windows_deelevated_jail 2>&1 | tee probe.log
+
+      # The guard this study keeps needing: a job that exits 0 having measured nothing is
+      # worse than a red one. The harness gates on these itself; asserting them again here
+      # means a future change that softens an in-binary check still cannot go quietly green.
+      - name: Assert BOTH arms actually ran, and that arm B was really de-elevated
+        shell: bash
+        run: |
+          fail=0
+          grep -q 'ARM elevated=1'  probe.log || { echo "MISSING: the elevated arm never reported"; fail=1; }
+          grep -q 'ARM elevated=0'  probe.log || { echo "MISSING: the DE-ELEVATED arm never reported — nothing was measured"; fail=1; }
+          grep -q '^DEELEV route='  probe.log || { echo "MISSING: no de-elevation route was recorded"; fail=1; }
+          grep -q 'WINDOWS BUILD JAIL HOLDS WITH NO ELEVATION' probe.log || { echo "MISSING: the differential did not conclude"; fail=1; }
+          # Every property must carry a verdict in the de-elevated arm; a silently dropped
+          # one would otherwise leave the table looking complete.
+          for p in profile-create-and-launch acl-grant-allow acl-grant-deny teardown job-reap egress-deny production-jail-launch production-jail-egress; do
+            grep -q "prop:$p=" probe.log || { echo "MISSING: property $p never reported"; fail=1; }
+          done
+          echo "── recorded verdicts ──"
+          grep -E '^(ARM |DEELEV |  prop:)' probe.log
+          exit $fail
