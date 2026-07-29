@@ -1066,6 +1066,7 @@ put("done=ok");
         let policy = match nub_sandbox::compile_build_jail(
             homes,
             &pkg,
+            None,
             vec![node.to_path_buf()],
             Vec::new(),
             env,

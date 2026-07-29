@@ -381,6 +381,7 @@ mod win {
         let policy = match nub_sandbox::compile_build_jail(
             homes,
             &package_dir,
+            None,
             interpreter,
             extra_reads,
             os_essential_env(),

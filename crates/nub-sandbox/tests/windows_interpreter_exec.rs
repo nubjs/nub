@@ -976,6 +976,7 @@ mod win {
         let policy = nub_sandbox::compile_build_jail(
             homes,
             &f.work,
+            None,
             vec![node.to_path_buf()],
             Vec::new(),
             os_essential_env(),
