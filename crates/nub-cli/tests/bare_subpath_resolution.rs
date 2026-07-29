@@ -433,6 +433,12 @@ fn emit_swap_onto_dep_mts_and_cts_is_discarded() {
         r#"export const v: string = "unshipped-mts";"#,
     );
     write(
+        &dir.join("node_modules/mp/other.cts"),
+        r#"const v: string = "unshipped-cts";
+module.exports = { v };
+"#,
+    );
+    write(
         &dir.join("entry.ts"),
         r#"import { v } from "mp/deep.mjs";
 console.log("LOADED:" + v);
@@ -443,7 +449,27 @@ console.log("LOADED:" + v);
     assert!(
         stderr.contains("ERR_MODULE_NOT_FOUND")
             && !stderr.contains("ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING"),
-        "expected Node's own ERR_MODULE_NOT_FOUND, got: {stderr}"
+        "expected Node's own ERR_MODULE_NOT_FOUND for .mts, got: {stderr}"
+    );
+
+    // The symmetric `.cjs`→`.cts` arm, through require so it exercises the CJS path.
+    write(
+        &dir.join("entry.cts"),
+        r#"try {
+  console.log("LOADED:" + require("mp/other.cjs").v);
+} catch {
+  console.log("refused");
+}
+"#,
+    );
+    let (stdout, stderr) = run(&dir, "entry.cts");
+    assert!(
+        !stdout.contains("LOADED"),
+        "the .cjs→.cts swap reached a dependency's unshipped source: {stdout} / {stderr}"
+    );
+    assert!(
+        stdout.contains("refused"),
+        "the require neither loaded nor threw: {stdout} / {stderr}"
     );
 }
 
@@ -496,6 +522,55 @@ console.log("same:" + (viaBare === viaSubpath));
     assert!(
         stdout.contains("same:true"),
         "the same module was instantiated twice under --preserve-symlinks: {stdout} / {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The #562 headline shape must survive `--preserve-symlinks` on every tier. This is
+/// the combination the resolver and the load hooks have to agree on: the resolver
+/// deliberately keys the module by its symlink path so it is not instantiated twice,
+/// and every load gate has to recognise that same path as project source anyway.
+/// Deciding it on the literal URL in either place refuses the workspace package's
+/// TypeScript — which is exactly the import #562 was filed about.
+#[cfg(unix)]
+#[test]
+fn preserve_symlinks_still_loads_a_workspace_ts_subpath() {
+    let dir = fixture("preserve-symlinks-ts");
+    write(
+        &dir.join("packages/lib/package.json"),
+        r#"{"name":"@repro/lib","main":"./index.ts"}"#,
+    );
+    write(&dir.join("packages/lib/index.ts"), "export const root = 1;");
+    write(
+        &dir.join("packages/lib/prompt.ts"),
+        r#"export const x: string = "ws-ts-subpath";"#,
+    );
+    std::fs::create_dir_all(dir.join("node_modules/@repro")).unwrap();
+    std::os::unix::fs::symlink(
+        dir.join("packages/lib"),
+        dir.join("node_modules/@repro/lib"),
+    )
+    .unwrap();
+    write(
+        &dir.join("entry.ts"),
+        r#"import { x } from "@repro/lib/prompt";
+console.log("got:" + x);
+"#,
+    );
+    let out = Command::new(nub_binary())
+        .arg(dir.join("entry.ts").to_str().unwrap())
+        .current_dir(&dir)
+        .env("NODE_OPTIONS", "--preserve-symlinks")
+        .env(
+            "XDG_CACHE_HOME",
+            std::env::temp_dir().join(format!("nub-subpath-cache-{}", std::process::id())),
+        )
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("got:ws-ts-subpath"),
+        "a symlinked workspace package's TS subpath was refused under --preserve-symlinks: {stdout} / {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }

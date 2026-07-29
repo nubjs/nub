@@ -523,13 +523,13 @@ function makeHooks(core, watchReporting) {
   function loadViaDisk(url, ext) {
     try {
       const path = fileURLToPath(url);
-      if (core.TRANSPILE_EXTS.has(ext) && !core.isNodeModules(url)) {
+      if (core.TRANSPILE_EXTS.has(ext) && !core.isDependency(url)) {
         return core.loadTranspile(url, ext);
       }
       // Plain JS: transpile only when transformable; else fall through to the raw-
       // source path below (which hands CJS back as `source:null` → Node's native
       // CJS loader), byte-identical to a non-intercepted file.
-      if (core.PLAIN_JS_EXTS.has(ext) && !core.isNodeModules(url)) {
+      if (core.PLAIN_JS_EXTS.has(ext) && !core.isDependency(url)) {
         const r = core.maybeTranspilePlainJs(url, ext);
         if (r) return r;
       }
@@ -606,7 +606,7 @@ function makeHooks(core, watchReporting) {
     // handling (and its error) applies. (The TS-parent extensionless resolution in
     // the resolve hook is intended and stays — only this load-time transpile is
     // gated.)
-    if (core.TRANSPILE_EXTS.has(ext) && !core.isNodeModules(url)) {
+    if (core.TRANSPILE_EXTS.has(ext) && !core.isDependency(url)) {
       return core.loadTranspile(url, ext);
     }
     // Project-source plain JS (`.js`/`.mjs`/`.cjs`): transpile ONLY when it carries
@@ -614,7 +614,7 @@ function makeHooks(core, watchReporting) {
     // to Node's native loader (the `nextLoad`/relabel path below) BYTE-FOR-BYTE — it
     // is never intercepted, so native CJS/ESM behavior (the relabel, require.cache,
     // the require-of-ESM-syntax-`.cjs` error) is preserved. node_modules excluded.
-    if (core.PLAIN_JS_EXTS.has(ext) && !core.isNodeModules(url)) {
+    if (core.PLAIN_JS_EXTS.has(ext) && !core.isDependency(url)) {
       const r = core.maybeTranspilePlainJs(url, ext);
       if (r) return r;
     }
@@ -824,28 +824,10 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       for (const [ext, handler] of saved) module_._extensions[ext] = handler;
     }
   };
-  // "Is this really a dependency?" — the ONE definition the resolve-side retry and
-  // the load-side bail both use, so the two layers cannot drift into disagreeing.
-  //
-  // A path that doesn't even mention node_modules is project source, answered
-  // without touching the disk. Only a path that LOOKS like a dependency pays a stat,
-  // and it has to: under `--preserve-symlinks` Node hands back un-realpathed paths,
-  // so a workspace package symlinked into node_modules still carries a
-  // `/node_modules/` segment and would otherwise be misread as a dependency —
-  // costing it the TypeScript that IS its build output.
-  const isDependencyPath = (filename) => {
-    if (typeof filename !== "string") return false;
-    if (!core.isNodeModules(pathToFileURL(filename).href)) return false;
-    try {
-      return core.isNodeModules(pathToFileURL(realpathSync(filename)).href);
-    } catch {
-      return true; // unreadable: trust the literal path
-    }
-  };
   const isDepTsHit = (filename) =>
     typeof filename === "string" &&
     TS_CLASSIC_EXTS.includes(pathExtname(filename)) &&
-    isDependencyPath(filename);
+    core.isDependency(pathToFileURL(filename).href);
 
   module_._resolveFilename = function (request, parent, isMain, options) {
     let resolved = null;
@@ -933,7 +915,7 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   // reproduces plain Node's own error instead of inventing one nub would have to own.
   const nativeJs = module_._extensions[".js"];
   const transpileExtension = (mod, filename) => {
-    if (isDependencyPath(filename)) {
+    if (core.isDependency(pathToFileURL(filename).href)) {
       return nativeJs.call(module_._extensions, mod, filename);
     }
     const { source, format } = core.loadTranspile(pathToFileURL(filename).href, pathExtname(filename));
@@ -964,7 +946,7 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   for (const ext of [".js", ".cjs"]) {
     const origExtension = module_._extensions[ext] || nativeJs;
     module_._extensions[ext] = (mod, filename) => {
-      if (core.isNodeModules(pathToFileURL(filename).href)) {
+      if (core.isDependency(pathToFileURL(filename).href)) {
         return origExtension.call(module_._extensions, mod, filename); // (1)
       }
       const r = core.maybeTranspilePlainJs(pathToFileURL(filename).href, pathExtname(filename));

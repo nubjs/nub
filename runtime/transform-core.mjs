@@ -112,7 +112,7 @@ function __getBuiltin(id) {
 // Builtin bindings + the native addon, populated by __ensureBuiltins(). They stay
 // `let` (not `const`) because on the floor they are filled on first hook use rather
 // than at module eval — see the lazy-vs-eager note above.
-let createRequire, __require, module, readFileSync, writeFileSync, mkdirSync, statSync;
+let createRequire, __require, module, readFileSync, writeFileSync, mkdirSync, statSync, realpathSync;
 let fileURLToPath, pathToFileURL, join, dirname;
 // Nub's N-API addon — the in-process TS/JSX transpiler (`transform`,
 // `transformCached`, `detectModuleInfo`), the tsconfig reader + additive
@@ -138,7 +138,7 @@ function __ensureBuiltins() {
   ({ createRequire } = __getBuiltin("node:module"));
   __require = createRequire(import.meta.url);
   module = __getBuiltin("node:module");
-  ({ readFileSync, writeFileSync, mkdirSync, statSync } = __getBuiltin("node:fs"));
+  ({ readFileSync, writeFileSync, mkdirSync, statSync, realpathSync } = __getBuiltin("node:fs"));
   ({ fileURLToPath, pathToFileURL } = __getBuiltin("node:url"));
   ({ join, dirname } = __getBuiltin("node:path"));
   for (const rel of ["./addons/nub-native.node", "../runtime/addons/nub-native.node"]) {
@@ -264,6 +264,26 @@ export function extname(url) {
 
 export function isNodeModules(url) {
   return url.includes("/node_modules/") || url.includes("\\node_modules\\");
+}
+
+// "Is this really a dependency?" — the ONE definition every gate uses, so the resolve
+// step and each load step cannot disagree about the same file.
+//
+// A `/node_modules/` segment normally settles it: Node realpaths a resolved module,
+// so the path we are handed IS the real one. Under `--preserve-symlinks` it does not
+// — a workspace package symlinked into node_modules keeps that segment while its
+// files genuinely live in the project, and calling it a dependency would refuse the
+// TypeScript that is its build output. The stat therefore happens only under the
+// flag, and only for paths that already look like a dependency; the default path
+// stays the pure substring test it always was.
+export function isDependency(url) {
+  if (!isNodeModules(url)) return false;
+  if (!PRESERVE_SYMLINKS) return true;
+  try {
+    return isNodeModules(pathToFileURL(realpathSync(fileURLToPath(url))).href);
+  } catch {
+    return true; // unreadable: trust the literal path
+  }
 }
 
 export function fileExists(filePath) {

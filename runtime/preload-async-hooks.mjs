@@ -29,7 +29,7 @@
 import "./floor-builtin.mjs";
 import {
   TRANSPILE_EXTS, PLAIN_JS_EXTS, DATA_EXTS,
-  extname, resolveSpec, loadTranspile, maybeTranspilePlainJs, loadData, loadTextImport, isNodeModules,
+  extname, resolveSpec, loadTranspile, maybeTranspilePlainJs, loadData, loadTextImport, isNodeModules, isDependency,
 } from "./transform-core.mjs";
 import { createRequire, isBuiltin } from "node:module";
 import { existsSync } from "node:fs";
@@ -99,7 +99,7 @@ export async function load(url, context, nextLoad) {
   // the compat tier would route every dependency `.js` through oxc. (loadTranspile's
   // own skip-gate handles the project-source no-op case; this keeps deps off the
   // pipeline entirely.) Mirrors the fast-tier sync hook's `!isNodeModules` gate.
-  if (TRANSPILE_EXTS.has(ext) && !isNodeModules(url)) {
+  if (TRANSPILE_EXTS.has(ext) && !isDependency(url)) {
     // Module-format + decorator detection inside loadTranspile is a synchronous
     // native call (nub's addon), available on every supported Node — no parser
     // warm-up needed (the old `await ensureParser()` for the ESM-only oxc-parser
@@ -110,7 +110,7 @@ export async function load(url, context, nextLoad) {
   // no-op plain-JS file returns null and falls through to `nextLoad` — Node's own
   // loader handles it byte-identically, preserving every native CJS/ESM behavior.
   // node_modules excluded (the byte-parity boundary).
-  if (PLAIN_JS_EXTS.has(ext) && !isNodeModules(url)) {
+  if (PLAIN_JS_EXTS.has(ext) && !isDependency(url)) {
     const r = maybeTranspilePlainJs(url, ext);
     if (r) return r;
   }
