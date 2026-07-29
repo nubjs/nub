@@ -355,7 +355,7 @@ mod win {
         };
         let handle = child.as_raw_handle();
         let start = std::time::Instant::now();
-        let deadline = std::time::Duration::from_secs(25);
+        let deadline = std::time::Duration::from_secs(15);
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -692,6 +692,13 @@ mod win {
         let jail_net = jail_shaped(&f, Vec::new(), false, &[]);
         let jail_loose = jail_shaped(&f, loosest_reachable_grants(), false, &[]);
 
+        // `jail-loose` carries only the two cells that decide the question. Its grants are
+        // applied as INHERITABLE ACEs on each granted tree and revoked afterwards, so a broad
+        // grant costs a full DACL propagation across the user profile PER LAUNCH — the first
+        // attempt ran all twelve cells there and blew a 25-minute step budget partway through
+        // the arm. That cost is itself a finding about how coarse a Windows grant can be.
+        let loose_cells = ["libuv-exact-inbound", "original-anchor-local-ns"];
+
         for (label, policy) in [
             ("jail-net-deny", Some(&jail)),
             ("jail-net-open", Some(&jail_net)),
@@ -699,6 +706,14 @@ mod win {
             ("unconfined", None),
         ] {
             println!("  ---- arm {label} ----");
+            let cells: Vec<&Cell> = if label == "jail-loose" {
+                CELLS
+                    .iter()
+                    .filter(|c| loose_cells.contains(&c.id))
+                    .collect()
+            } else {
+                CELLS.iter().collect()
+            };
 
             let m = f.work.join(format!("anon-{label}.txt"));
             let (code, text) = match policy {
@@ -712,7 +727,7 @@ mod win {
                 &format!("exit={code} marker={text} (the arm's liveness control)"),
             );
 
-            for cell in CELLS {
+            for cell in &cells {
                 let m = f.work.join(format!("{}-{label}.txt", cell.id));
                 let (code, text) = match policy {
                     Some(p) => run_jailed(&f, p, "np", &m, &[cell.id.to_string()]),

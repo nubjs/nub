@@ -30,7 +30,7 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       # Matches the sibling probes: crt-static makes the self-reexec probe child
       # self-contained, so it starts cleanly under the LowBox token.
@@ -54,7 +54,7 @@ jobs:
 
       - name: Probe — AppContainer named-pipe shape matrix
         if: always()
-        timeout-minutes: 25
+        timeout-minutes: 40
         shell: bash
         run: |
           rc=0
@@ -89,9 +89,18 @@ jobs:
                    rust-minus-overlapped reject-remote-only original-anchor \
                    original-anchor-local-ns libuv-flags-local-ns libuv-uvdir-local-ns; do
             need "prop:$c-creatable-unconfined=PASS"
-            for a in jail-net-deny jail-net-open jail-loose unconfined; do
+            for a in jail-net-deny jail-net-open unconfined; do
               grep -q "prop:$c-$a-measured=PASS" probe.log || { echo "MISS $c not measured in arm $a"; fail=1; }
             done
+          done
+          # The loose arm carries only the two cells that decide the question — a broad grant
+          # is applied as inheritable ACEs per launch, so running all twelve there cost more
+          # than the whole step budget.
+          for c in libuv-exact-inbound original-anchor-local-ns; do
+            grep -q "prop:$c-jail-loose-measured=PASS" probe.log || { echo "MISS $c not measured in arm jail-loose"; fail=1; }
+          done
+          for n in tight-inherit tight-fdfile tight-ignore tight-shimmed tight-piped loose-piped; do
+            grep -q "prop:node-$n-measured=PASS" probe.log || { echo "MISS node arm $n never reported"; fail=1; }
           done
           echo "---- the matrix ----"
           grep -E '^  (fact|diag):' probe.log || true
