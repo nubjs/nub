@@ -195,7 +195,7 @@ pub(crate) async fn resolve_exec_manifest(
     })?;
 
     let temp = tempfile::Builder::new()
-        .prefix("aube-exec-resolve-")
+        .prefix(&format!("{}-exec-resolve-", aube_util::prog()))
         .tempdir()
         .map_err(|e| Error::Registry(name.to_string(), e.to_string()))?;
     let build_dir = temp.path().join("build");

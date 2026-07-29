@@ -28,6 +28,7 @@ pub const WARN_AUBE_LTHASH_MISMATCH: &str = "WARN_AUBE_LTHASH_MISMATCH";
 pub const WARN_AUBE_DELTA_INVALIDATE_FAILED: &str = "WARN_AUBE_DELTA_INVALIDATE_FAILED";
 pub const WARN_AUBE_GVS_INCOMPATIBLE: &str = "WARN_AUBE_GVS_INCOMPATIBLE";
 pub const WARN_AUBE_GVS_MODE_CHANGED: &str = "WARN_AUBE_GVS_MODE_CHANGED";
+#[rustfmt::skip] pub const WARN_AUBE_QUARANTINE_STRIP_FAILED: &str = "WARN_AUBE_QUARANTINE_STRIP_FAILED";
 
 // ── settings / config validation ────────────────────────────────────
 pub const WARN_AUBE_INVALID_CONCURRENCY: &str = "WARN_AUBE_INVALID_CONCURRENCY";
@@ -86,6 +87,7 @@ pub const WARN_AUBE_INVALID_CLIENT_CERT: &str = "WARN_AUBE_INVALID_CLIENT_CERT";
 
 // ── resolver ────────────────────────────────────────────────────────
 pub const WARN_AUBE_UNSUPPORTED_PLATFORM_INSTALL: &str = "WARN_AUBE_UNSUPPORTED_PLATFORM_INSTALL";
+#[rustfmt::skip] pub const WARN_AUBE_SKIPPED_OPTIONAL_NO_MATCHING_VERSION: &str = "WARN_AUBE_SKIPPED_OPTIONAL_NO_MATCHING_VERSION";
 pub const WARN_AUBE_EXOTIC_SUBDEP_SKIPPED: &str = "WARN_AUBE_EXOTIC_SUBDEP_SKIPPED";
 pub const WARN_AUBE_PEER_DEDUPE_COLLISION: &str = "WARN_AUBE_PEER_DEDUPE_COLLISION";
 
@@ -251,6 +253,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_GVS_MODE_CHANGED,
         category: category::INSTALL_LIFECYCLE,
         description: "Switching between gvs-on and gvs-off; removing `node_modules` and reinstalling from scratch.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_QUARANTINE_STRIP_FAILED,
+        category: category::INSTALL_LIFECYCLE,
+        description: "macOS only: `com.apple.quarantine` could not be removed from a materialized native binary, so Gatekeeper may refuse to load or run it.",
         exit_code: None,
     },
     // Settings / config validation
@@ -493,6 +501,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_UNSUPPORTED_PLATFORM_INSTALL,
         category: category::RESOLVER,
         description: "A required (non-optional) dep declared a platform aube doesn't satisfy; installing anyway.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_SKIPPED_OPTIONAL_NO_MATCHING_VERSION,
+        category: category::RESOLVER,
+        description: "No version of an optional dep matched its range, so the dep was skipped instead of failing the install.",
         exit_code: None,
     },
     CodeMeta {

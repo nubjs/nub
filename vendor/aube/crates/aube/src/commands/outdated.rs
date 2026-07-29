@@ -14,7 +14,7 @@ use aube_registry::Packument;
 use clap::Args;
 use miette::{Context, IntoDiagnostic};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 pub const AFTER_LONG_HELP: &str = "\
@@ -406,13 +406,32 @@ async fn collect_rows(
     let client = std::sync::Arc::new(make_client(cwd));
     let cache_dir = packument_cache_dir();
 
+    // An `npm:` alias carries the alias as `DirectDep.name`, which the
+    // registry has never heard of — fetching by it produced a bogus
+    // "failed to fetch packument for <alias>" warning and then reported
+    // the dep as up to date forever. The real name lives on the resolved
+    // package, so key every fetch on `registry_name()` while rows keep
+    // displaying the alias the user actually wrote in package.json.
+    let registry_name_for = |dep: &DirectDep| -> String {
+        graph
+            .get_package(&dep.dep_path)
+            .map(|p| p.registry_name().to_string())
+            .unwrap_or_else(|| dep.name.clone())
+    };
+
     // Fetch every packument in parallel via a JoinSet. Failures are surfaced
     // per-row so a single missing package doesn't sink the whole report.
+    // Deduplicated by registry name so two aliases of one package (or an
+    // alias alongside the real dep) don't fetch it twice.
     let mut set = tokio::task::JoinSet::new();
+    let mut fetching: HashSet<String> = HashSet::new();
     for dep in &roots {
+        let name = registry_name_for(dep);
+        if !fetching.insert(name.clone()) {
+            continue;
+        }
         let client = client.clone();
         let cache_dir = cache_dir.clone();
-        let name = dep.name.clone();
         set.spawn(async move {
             let result = client.fetch_packument_cached(&name, &cache_dir).await;
             (name, result)
@@ -426,8 +445,14 @@ async fn collect_rows(
     }
 
     let mut rows: Vec<Row> = Vec::new();
+    // Several deps can share one registry name, and the lookup below reads
+    // the shared entry rather than consuming it, so a failed fetch would
+    // otherwise warn once per dep.
+    let mut warned: HashSet<String> = HashSet::new();
     for dep in &roots {
-        let packument = packuments.remove(&dep.name);
+        let registry_name = registry_name_for(dep);
+        // `get`, not `remove`: several deps can share one registry name.
+        let packument = packuments.get(&registry_name);
         let current = match graph.get_package(&dep.dep_path) {
             Some(p) => p.version.clone(),
             None => "(missing)".to_string(),
@@ -435,7 +460,9 @@ async fn collect_rows(
         let packument = match packument {
             Some(Ok(p)) => p,
             Some(Err(e)) => {
-                eprintln!("warn: failed to fetch packument for {}: {e}", dep.name);
+                if warned.insert(registry_name.clone()) {
+                    eprintln!("warn: failed to fetch packument for {registry_name}: {e}");
+                }
                 continue;
             }
             None => continue,
@@ -452,7 +479,7 @@ async fn collect_rows(
         let wanted = dep
             .specifier
             .as_deref()
-            .and_then(|spec| super::max_satisfying_version(&packument, spec))
+            .and_then(|spec| super::max_satisfying_version(packument, spec))
             .unwrap_or_else(|| current.clone());
 
         let latest_known = latest.is_some();

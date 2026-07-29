@@ -40,10 +40,10 @@ on:
       - "tests/aube-conformance/**"
   schedule:
     # Nightly at 06:30 UTC. The Windows conformance leg is gated off
-    # pull_request (it is the only Windows-runner contributor in this workflow);
-    # the nightly schedule keeps that Windows coverage running on a cadence even
-    # between vendor/aube bumps. Scheduled runs ignore the path filters above and
-    # exercise the full workflow, Windows leg included.
+    # pull_request; the nightly schedule keeps that coverage running on a
+    # cadence even between vendor/aube bumps. (The Windows `cargo test` leg
+    # does gate PRs — see the rationale on that job.) Scheduled runs ignore
+    # the path filters above and exercise the full workflow.
     - cron: "30 6 * * *"
 
 concurrency:
@@ -84,6 +84,40 @@ jobs:
       # NUB-ADAPTED bats run below is a different animal: it needs only the
       # vendored bats + committed Verdaccio fixtures, with nub standing in
       # for aube.
+
+  aube-parity-windows:
+    name: aube cargo test (windows)
+    # UNLIKE the conformance Windows leg below, this one DOES gate pull
+    # requests. The linker's Windows arm is a genuinely separate
+    # implementation — NTFS junctions instead of symlinks, reparse-point
+    # attributes instead of file types, a different error-code space — and
+    # running aube's suite on ubuntu only meant none of it was ever
+    # executed. nub#566 / nub#576 are what that cost: `read_link` failing
+    # with `InvalidInput` was used as the "this is a real directory" test,
+    # which is Unix-only (Windows gives ERROR_NOT_A_REPARSE_POINT), and the
+    # test that would have caught it was itself `#[cfg(all(test, unix))]`.
+    # Both defects reached users. The workflow is path-filtered to
+    # vendor/aube edits, so this leg costs zero runner minutes on every PR
+    # that does not touch the vendored tree.
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    timeout-minutes: 60
+    steps:
+      # The runner image ships core.autocrlf=true, which would CRLF-ify the
+      # committed fixtures the suite asserts against. Must precede checkout.
+      - name: Force LF checkout
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          workspaces: vendor/aube
+      - name: Run aube's own test suite
+        working-directory: vendor/aube
+        run: cargo test --workspace
 
   aube-bats-nub:
     name: aube bats, nub-adapted (ubuntu)

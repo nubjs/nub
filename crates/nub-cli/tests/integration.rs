@@ -1244,6 +1244,298 @@ console.log(JSON.stringify({ okB64, okUrl, okHex, order: order.join(","), agg, a
     );
 }
 
+#[test]
+fn polyfills_never_clobber_native() {
+    // THE no-clobber guard. Installs a recognizable sentinel on every surface any
+    // installer in runtime/polyfills.cjs touches, runs installSyncPolyfills, and
+    // fails if a single sentinel was replaced. A polyfill that overwrites rather
+    // than defers to an existing implementation cannot survive this test.
+    //
+    // Deliberately driven by PLAIN `node` against the runtime file rather than
+    // through the nub binary: the preload necessarily runs before any user code, so
+    // sentinels could not be planted first. Running under the host node means the
+    // CI Node-matrix legs exercise it across versions for free — on a newer Node
+    // most surfaces are genuinely native, which is exactly the case that matters.
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let polyfills = Path::new(&manifest).join("../../runtime/polyfills.cjs");
+    assert!(polyfills.is_file(), "missing {}", polyfills.display());
+
+    let work = unique_test_cache();
+    std::fs::create_dir_all(&work).unwrap();
+    let script = work.join("_noclobber.mjs");
+    std::fs::write(
+        &script,
+        r#"
+import { createRequire } from "node:module";
+const TAP = Object.getPrototypeOf(Int8Array.prototype);
+const IP = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+const targets = [
+  [Promise, "allKeyed"], [Promise, "allSettledKeyed"], [Promise, "withResolvers"], [Promise, "try"],
+  [RegExp, "escape"], [Error, "isError"], [URL, "parse"],
+  [String.prototype, "isWellFormed"], [String.prototype, "toWellFormed"],
+  [Object, "groupBy"], [Map, "groupBy"],
+  [Array.prototype, "toSorted"], [Array.prototype, "toReversed"], [Array.prototype, "toSpliced"], [Array.prototype, "with"],
+  [TAP, "toSorted"], [TAP, "toReversed"], [TAP, "with"],
+  [ArrayBuffer.prototype, "transfer"], [ArrayBuffer.prototype, "transferToFixedLength"], [Atomics, "pause"],
+  [Set.prototype, "union"], [Set.prototype, "intersection"], [Set.prototype, "difference"],
+  [Set.prototype, "symmetricDifference"], [Set.prototype, "isSubsetOf"], [Set.prototype, "isSupersetOf"],
+  [Set.prototype, "isDisjointFrom"], [Array, "fromAsync"],
+  [Map.prototype, "getOrInsert"], [Map.prototype, "getOrInsertComputed"],
+  [WeakMap.prototype, "getOrInsert"], [WeakMap.prototype, "getOrInsertComputed"],
+  [Math, "sumPrecise"],
+  [IP, "map"], [IP, "filter"], [IP, "take"], [IP, "drop"], [IP, "flatMap"], [IP, "reduce"],
+  [IP, "toArray"], [IP, "some"], [IP, "every"], [IP, "find"], [IP, "forEach"],
+  [IP, "chunks"], [IP, "windows"], [IP, "includes"], [IP, "join"],
+  [Uint8Array.prototype, "toBase64"], [Uint8Array.prototype, "toHex"], [Uint8Array, "fromBase64"],
+  [globalThis, "DisposableStack"], [globalThis, "AsyncDisposableStack"],
+  [globalThis, "SuppressedError"], [globalThis, "reportError"],
+];
+if (globalThis.Iterator) {
+  for (const k of ["from", "concat", "zip", "zipKeyed"]) targets.push([globalThis.Iterator, k]);
+}
+const planted = [];
+for (const [holder, key] of targets) {
+  const sentinel = function nubSentinel() {};
+  Object.defineProperty(holder, key, { value: sentinel, writable: true, enumerable: false, configurable: true });
+  planted.push([holder, key, sentinel]);
+}
+// The one accessor in the set needs its own sentinel shape.
+Object.defineProperty(ArrayBuffer.prototype, "detached", {
+  get: function nubSentinelGetter() { return "SENTINEL"; },
+  enumerable: false, configurable: true,
+});
+createRequire(import.meta.url)(process.argv[2]).installSyncPolyfills({});
+const clobbered = planted.filter(([h, k, s]) => h[k] !== s).map(([, k]) => k);
+const d = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "detached");
+if (!d || d.get?.name !== "nubSentinelGetter") clobbered.push("detached");
+console.log(JSON.stringify({ checked: planted.length + 1, clobbered }));
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("node")
+        .arg(&script)
+        .arg(&polyfills)
+        .current_dir(&work)
+        .output()
+        .expect("failed to spawn node");
+
+    let _ = std::fs::remove_dir_all(&work);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("bad output {stdout:?} ({e}); stderr: {stderr}"));
+    assert_eq!(
+        parsed["clobbered"].as_array().map(Vec::len),
+        Some(0),
+        "polyfills overwrote an existing implementation: {} (stderr: {stderr})",
+        parsed["clobbered"]
+    );
+    // Guard against the target list silently emptying out.
+    assert!(
+        parsed["checked"].as_u64().unwrap_or(0) >= 50,
+        "expected >=50 surfaces checked, got {}",
+        parsed["checked"]
+    );
+}
+
+#[test]
+fn esnext_library_polyfills() {
+    // The Stage 3+ library families: new Set methods, Array.fromAsync, the Iterator
+    // surface (helpers + from/concat/zip/zipKeyed + the Stage 3 chunks/windows/
+    // includes/join), Map/WeakMap getOrInsert, Math.sumPrecise and Symbol.metadata.
+    // Spec fidelity is verified by batteries that run the SAME assertions against
+    // the polyfill and against native (and, for Math.sumPrecise which no Node ships,
+    // against bun's native implementation); this asserts reachability + correctness
+    // through nub's real preload chain. Isolated tmpdir + cache as elsewhere.
+    let work = unique_test_cache();
+    std::fs::create_dir_all(&work).unwrap();
+    let test_file = work.join("_esnext_check.mjs");
+    std::fs::write(
+        &test_file,
+        r#"
+const setOk = [...new Set([1, 2, 3]).union(new Set([4]))].join(",") === "1,2,3,4" &&
+  [...new Set([1, 2]).intersection(new Set([2]))].join(",") === "2" &&
+  new Set([1]).isSubsetOf(new Set([1, 2])) === true &&
+  // The argument only has to be set-like: a size plus callable has/keys.
+  [...new Set([1]).union({ size: 1, has: (v) => v === 5, keys: () => [5][Symbol.iterator]() })].join(",") === "1,5";
+const fromAsyncOk = (await Array.fromAsync([Promise.resolve(1), 2])).join(",") === "1,2";
+const iterOk = [1, 2, 3, 4][Symbol.iterator]().map((x) => x * 2).filter((x) => x > 2).toArray().join(",") === "4,6,8" &&
+  Iterator.from([1, 2]).toArray().join(",") === "1,2" &&
+  Iterator.concat([1], [2]).toArray().join(",") === "1,2" &&
+  JSON.stringify(Iterator.zip([[1, 2], ["a", "b"]]).toArray()) === '[[1,"a"],[2,"b"]]' &&
+  Iterator.zipKeyed({ a: [1], b: [2] }).toArray()[0].a === 1 &&
+  JSON.stringify([1, 2, 3][Symbol.iterator]().chunks(2).toArray()) === "[[1,2],[3]]" &&
+  [1, 2, 3][Symbol.iterator]().includes(2) === true &&
+  [1, 2][Symbol.iterator]().join("-") === "1-2";
+const m = new Map();
+const mapOk = m.getOrInsert("a", 1) === 1 && m.getOrInsert("a", 9) === 1 &&
+  m.getOrInsertComputed("b", () => 2) === 2;
+// Exact summation: a left-to-right reduce overflows to Infinity here.
+const sumOk = Math.sumPrecise([1e308, 1e308, -1e308, -1e308]) === 0 &&
+  Math.sumPrecise([1, 1e100, 1, -1e100]) === 2;
+const symOk = typeof Symbol.metadata === "symbol";
+console.log(JSON.stringify({ setOk, fromAsyncOk, iterOk, mapOk, sumOk, symOk }));
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(nub_binary())
+        .arg(test_file.to_str().unwrap())
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("failed to spawn nub");
+
+    let _ = std::fs::remove_dir_all(&work);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stdout,
+        r#"{"setOk":true,"fromAsyncOk":true,"iterOk":true,"mapOk":true,"sumOk":true,"symOk":true}"#,
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn floor_builtin_polyfills() {
+    // Shipped-standard builtins that are native only on a NEWER Node than the
+    // 18.19 support floor, so each is a compat-tier-only hole. Spec fidelity is
+    // verified separately by a battery that runs the SAME assertions against the
+    // polyfill (18.19-21.x) and against NATIVE (22.15+/24/26), so native is the
+    // oracle; this asserts reachability + correctness through nub's real preload
+    // chain. Isolated tmpdir + cache, as `polyfills_available`.
+    let work = unique_test_cache();
+    std::fs::create_dir_all(&work).unwrap();
+    let test_file = work.join("_floor_check.mjs");
+    std::fs::write(
+        &test_file,
+        r#"
+const urlOk = URL.parse("https://a.example/x").href === "https://a.example/x" && URL.parse("!!") === null;
+const strOk = "a\uD800b".isWellFormed() === false && "a\uD800b".toWellFormed() === "a\uFFFDb";
+const grouped = Object.groupBy([1, 2, 3], (n) => (n % 2 ? "odd" : "even"));
+const groupOk = Object.getPrototypeOf(grouped) === null &&
+  grouped.odd.join(",") === "1,3" &&
+  Map.groupBy([1, 2], (n) => n % 2).get(1).join(",") === "1";
+const copyOk = [3, 1, 2].toSorted().join(",") === "1,2,3" &&
+  [3, 1, 2].toReversed().join(",") === "2,1,3" &&
+  [3, 1, 2].with(0, 9).join(",") === "9,1,2" &&
+  [3, 1, 2].toSpliced(1, 1).join(",") === "3,2" &&
+  new Int8Array([3, 1]).toSorted().constructor === Int8Array;
+// transfer must perform a REAL detach, not just zero the length.
+const buf = new ArrayBuffer(2);
+new Uint8Array(buf).set([7, 8]);
+const moved = buf.transfer();
+let viewThrew = false;
+try { new Uint8Array(buf); } catch { viewThrew = true; }
+const abOk = [...new Uint8Array(moved)].join(",") === "7,8" && buf.detached === true &&
+  viewThrew && new ArrayBuffer(0).detached === false;
+const pauseOk = Atomics.pause() === undefined;
+console.log(JSON.stringify({ urlOk, strOk, groupOk, copyOk, abOk, pauseOk }));
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(nub_binary())
+        .arg(test_file.to_str().unwrap())
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("failed to spawn nub");
+
+    let _ = std::fs::remove_dir_all(&work);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stdout,
+        r#"{"urlOk":true,"strOk":true,"groupOk":true,"copyOk":true,"abOk":true,"pauseOk":true}"#,
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn keyed_promise_combinator_polyfills() {
+    // Promise.allKeyed / Promise.allSettledKeyed (TC39 "await dictionary", Stage 3)
+    // ship in no engine, so this exercises the polyfill on every Node — there is no
+    // native branch to fall through to. Spec fidelity is verified separately by the
+    // differential battery (18.19 through 26.5); this asserts the API is reachable
+    // and correct through nub's real preload chain, on the three semantics a naive
+    // implementation gets wrong: the result object's NULL prototype, own-enumerable
+    // keys INCLUDING symbols, and non-enumerable installation on `Promise`.
+    // Isolated tmpdir + cache for the same hermeticity reasons as
+    // `polyfills_available`.
+    let work = unique_test_cache();
+    std::fs::create_dir_all(&work).unwrap();
+    let test_file = work.join("_keyed_check.mjs");
+    std::fs::write(
+        &test_file,
+        r#"
+const sym = Symbol("s");
+const src = Object.create(
+  { inherited: Promise.resolve("leaked") },
+  {
+    shape: { value: Promise.resolve("square"), enumerable: true },
+    mass: { value: 12, enumerable: true },
+    hidden: { value: Promise.resolve("leaked"), enumerable: false },
+    [sym]: { value: Promise.resolve("sym"), enumerable: true },
+  },
+);
+const dict = await Promise.allKeyed(src);
+const { shape, mass } = dict;
+const keyed = shape === "square" && mass === 12 && dict[sym] === "sym";
+const scoped = !("hidden" in dict) && !("inherited" in dict);
+const nullProto = Object.getPrototypeOf(dict) === null;
+const settled = await Promise.allSettledKeyed({
+  ok: Promise.resolve(1),
+  bad: Promise.reject(new Error("nope")),
+});
+const statuses = settled.ok.status + "/" + settled.bad.status + "/" + settled.bad.reason.message;
+let rejected = "";
+try {
+  await Promise.allKeyed({ a: Promise.reject(new Error("first")), b: Promise.resolve(2) });
+} catch (e) {
+  rejected = e.message;
+}
+// Promise.withResolvers: native on Node 22+, polyfilled on the 18.19-21.x compat
+// tier where it was previously missing entirely.
+const wr = Promise.withResolvers();
+wr.resolve("wr-ok");
+const withResolvers =
+  Object.getPrototypeOf(wr) === Object.prototype &&
+  Object.keys(wr).join(",") === "promise,resolve,reject" &&
+  (await wr.promise) === "wr-ok";
+// The additive contract: nub's additions stay invisible to enumeration.
+const hidden = Object.keys(Promise).filter(
+  (k) => k.endsWith("Keyed") || k === "withResolvers",
+).length;
+console.log(
+  JSON.stringify({ keyed, scoped, nullProto, statuses, rejected, withResolvers, hidden }),
+);
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(nub_binary())
+        .arg(test_file.to_str().unwrap())
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("failed to spawn nub");
+
+    let _ = std::fs::remove_dir_all(&work);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stdout,
+        r#"{"keyed":true,"scoped":true,"nullProto":true,"statuses":"fulfilled/rejected/nope","rejected":"first","withResolvers":true,"hidden":0}"#,
+        "stderr: {stderr}"
+    );
+}
+
 /// Child processes spawned via `execSync("node ...")` inside a Nub-run
 /// script should inherit Nub's TypeScript augmentation through the PATH
 /// shim — `node` resolves to the shim symlink which points back to `nub`.

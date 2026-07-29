@@ -817,7 +817,8 @@ fn materialize_hoisted_node(
             }
         }
         for parent in &parents {
-            std::fs::create_dir_all(parent).map_err(|e| Error::Io(parent.clone(), e))?;
+            crate::sweep::with_transient_retry(|| std::fs::create_dir_all(parent))
+                .map_err(|e| Error::Io(parent.clone(), e))?;
         }
 
         for (rel_path, stored) in index {
@@ -848,6 +849,11 @@ fn materialize_hoisted_node(
         apply_multi_file_patch(&pkg_dir, patch_text)
             .map_err(|msg| Error::Patch(patch_key.clone(), msg))?;
     }
+
+    // Same seam as the isolated linker: after the last step that can
+    // create a file under `pkg_dir`, and covering this layout's own
+    // whole-dir `clonefile` branch, which skips the per-file loop.
+    crate::quarantine::strip_from_native_binaries(&pkg_dir, index);
 
     stats.packages_linked += 1;
     Ok(NodeOutcome {

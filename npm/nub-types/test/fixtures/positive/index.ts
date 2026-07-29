@@ -41,6 +41,21 @@ void inlineWorker;
 // reportError (WinterTC global; not in @types/node).
 reportError(new Error("boom"));
 
+// Promise.allKeyed / Promise.allSettledKeyed (TC39 await dictionary). The result
+// properties are pinned to concrete types so a mapped-type regression — losing
+// `Awaited`, or widening a value to `any` — fails this fixture instead of
+// silently typechecking.
+const dict = await Promise.allKeyed({ shape: Promise.resolve("square"), mass: 12 });
+const dictShape: string = dict.shape;
+const dictMass: number = dict.mass;
+void dictShape;
+void dictMass;
+const settledDict = await Promise.allSettledKeyed({ ok: Promise.resolve(1) });
+if (settledDict.ok.status === "fulfilled") {
+  const okValue: number = settledDict.ok.value;
+  void okValue;
+}
+
 // Temporal namespace (inlined from @js-temporal/polyfill).
 const instant: Temporal.Instant = Temporal.Now.instant();
 const duration: Temporal.Duration = Temporal.Duration.from({ hours: 2, minutes: 30 });

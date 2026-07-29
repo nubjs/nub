@@ -494,6 +494,312 @@ static FEATURES: &[Feature] = &[
         ],
         evidence: "native on Node 24+",
     },
+    // ── Stage 3+ library surfaces ───────────────────────────────────────────
+    // union is the detect anchor for all SEVEN set methods (union/intersection/
+    // difference/symmetricDifference/isSubsetOf/isSupersetOf/isDisjointFrom); each
+    // is still guarded individually in the runtime file.
+    Feature {
+        name: "Set.union",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((22, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Set.prototype.union",
+                },
+            ),
+            (band((22, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4 / ES2025 (new Set methods); native on Node 22+",
+    },
+    Feature {
+        name: "Array.fromAsync",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((22, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Array.fromAsync",
+                },
+            ),
+            (band((22, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4 / ES2025; native on Node 22+",
+    },
+    // Shipped under the name getOrInsert, NOT the proposal's original `upsert` --
+    // no runtime ever exposed `upsert`. Anchor also covers getOrInsertComputed and
+    // the WeakMap forms.
+    Feature {
+        name: "Map.getOrInsert",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((26, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Map.prototype.getOrInsert",
+                },
+            ),
+            (band((26, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4 / ES2026 (upsert, shipped as getOrInsert); native on Node 26+",
+    },
+    // Anchor for Iterator.from plus the eleven ES2025 helpers (map/filter/take/drop/
+    // flatMap/reduce/toArray/some/every/find/forEach).
+    Feature {
+        name: "Iterator.from",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((22, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Iterator.from",
+                },
+            ),
+            (band((22, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4 / ES2025 (sync iterator helpers); native on Node 22+",
+    },
+    Feature {
+        name: "Iterator.concat",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((26, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Iterator.concat",
+                },
+            ),
+            (band((26, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4 (iterator-sequencing); native on Node 26+",
+    },
+    // joint-iteration is the ITERATOR twin of Promise.allKeyed -- the await-dictionary
+    // proposal explicitly follows its shape. Stage 4 yet shipped by no engine.
+    Feature {
+        name: "Iterator.zip",
+        mitigations: &[(
+            band((18, 19, 0), None),
+            Mitigation::Polyfill {
+                runtime_file: "polyfills.cjs",
+                global: "Iterator.zip",
+            },
+        )],
+        evidence: "Stage 4 (joint-iteration); absent on every Node through 26.5",
+    },
+    Feature {
+        name: "Iterator.zipKeyed",
+        mitigations: &[(
+            band((18, 19, 0), None),
+            Mitigation::Polyfill {
+                runtime_file: "polyfills.cjs",
+                global: "Iterator.zipKeyed",
+            },
+        )],
+        evidence: "Stage 4 (joint-iteration); absent on every Node through 26.5",
+    },
+    // Anchor for the Stage 3 prototype additions: chunks/windows (iterator-chunking),
+    // includes (iterator-includes) and join (iterator-join). These install even where
+    // the ES2025 helpers above are already native.
+    Feature {
+        name: "Iterator.chunks",
+        mitigations: &[(
+            band((18, 19, 0), None),
+            Mitigation::Polyfill {
+                runtime_file: "polyfills.cjs",
+                global: "Iterator.prototype.chunks",
+            },
+        )],
+        evidence: "Stage 3 (iterator-chunking/includes/join); absent on every Node through 26.5",
+    },
+    Feature {
+        name: "Math.sumPrecise",
+        mitigations: &[(
+            band((18, 19, 0), None),
+            Mitigation::Polyfill {
+                runtime_file: "polyfills.cjs",
+                global: "Math.sumPrecise",
+            },
+        )],
+        evidence: "Stage 3 (proposal-math-sum); absent on every Node through 26.5 (bun ships it)",
+    },
+    // Only the well-known symbol; POPULATING class metadata is the decorator
+    // transform's job, and the spec's value for an undecorated class is undefined.
+    Feature {
+        name: "Symbol.metadata",
+        mitigations: &[(
+            band((18, 19, 0), None),
+            Mitigation::Polyfill {
+                runtime_file: "polyfills.cjs",
+                global: "Symbol.metadata",
+            },
+        )],
+        evidence: "Stage 3 (decorator metadata); absent on every Node through 26.5",
+    },
+    // ── Shipped-standard builtins missing below their Node line ─────────────
+    // All Stage 4 except Atomics.pause (Stage 3). Each was left unpolyfilled by the
+    // same stale-floor premise as Promise.withResolvers below; bands are measured,
+    // not read off release notes.
+    //
+    // URL.parse is the awkward one: Node backported it to 20.19 but the 21.x line
+    // never got it, so the row has a HOLE — native on 20.19-20.x, absent again
+    // across all of 21.x, native from 22.1. Same shape as the eventsource 21.x hole.
+    Feature {
+        name: "URL.parse",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((20, 19, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "URL.parse",
+                },
+            ),
+            (band((20, 19, 0), Some((21, 0, 0))), Mitigation::Native),
+            (
+                band((21, 0, 0), Some((22, 1, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "URL.parse",
+                },
+            ),
+            (band((22, 1, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4; native 22.1 and backported to 20.19; the 21.x line never got it",
+    },
+    // isWellFormed/toWellFormed ship together; isWellFormed is the detect anchor.
+    Feature {
+        name: "String.isWellFormed",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((20, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "String.prototype.isWellFormed",
+                },
+            ),
+            (band((20, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4 (well-formed unicode strings); native on Node 20+",
+    },
+    Feature {
+        name: "Object.groupBy",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((21, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Object.groupBy",
+                },
+            ),
+            (band((21, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4; native on Node 21+ (V8 12.0)",
+    },
+    Feature {
+        name: "Map.groupBy",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((21, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Map.groupBy",
+                },
+            ),
+            (band((21, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4; native on Node 21+ (V8 12.0)",
+    },
+    // Change-array-by-copy. toSorted is the detect anchor for the whole family
+    // (Array toSorted/toReversed/toSpliced/with + the TypedArray forms, which get
+    // everything but toSpliced since a typed array cannot change length).
+    Feature {
+        name: "Array.toSorted",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((20, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Array.prototype.toSorted",
+                },
+            ),
+            (band((20, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4 (change array by copy); native on Node 20+",
+    },
+    // transfer/transferToFixedLength/detached. Polyfillable ONLY because
+    // structuredClone's transfer list performs a real detach on the floor.
+    Feature {
+        name: "ArrayBuffer.transfer",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((21, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "ArrayBuffer.prototype.transfer",
+                },
+            ),
+            (band((21, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4 (resizable ArrayBuffer / transfer); native on Node 21+",
+    },
+    // Stage 3, in no Node. A micro-architectural hint, so a validate-and-return
+    // implementation is fully faithful — the spec lets an implementation do nothing.
+    Feature {
+        name: "Atomics.pause",
+        mitigations: &[(
+            band((18, 19, 0), None),
+            Mitigation::Polyfill {
+                runtime_file: "polyfills.cjs",
+                global: "Atomics.pause",
+            },
+        )],
+        evidence: "TC39 Stage 3 (proposal-atomics-microwait); absent on every Node through 26.5",
+    },
+    // ── Promise.withResolvers ───────────────────────────────────────────────
+    // TC39 Stage 4 / ES2024; native on Node 22+, absent on the 18.19–21.x compat
+    // tier. It went unpolyfilled until 2026-07 because the candidates survey
+    // judged it "native on Nub's floor" while the floor was still 22.15; the
+    // verdict was never revisited when the floor moved to 18.19.
+    Feature {
+        name: "Promise.withResolvers",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((22, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Promise.withResolvers",
+                },
+            ),
+            (band((22, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "TC39 Stage 4 / ES2024; native on Node 22.0+ (V8 12.4)",
+    },
+    // ── Promise.allKeyed / Promise.allSettledKeyed ──────────────────────────
+    // TC39 "await dictionary", Stage 3. Shipped by NO engine, so unlike the rows
+    // above there is no Native band to fall through to — the whole supported range
+    // is polyfilled, the same shape as reportError. The runtime feature-detect is
+    // what steps aside once V8 lands it, so this row needs no revision then.
+    Feature {
+        name: "Promise.allKeyed",
+        mitigations: &[(
+            band((18, 19, 0), None),
+            Mitigation::Polyfill {
+                runtime_file: "polyfills.cjs",
+                global: "Promise.allKeyed",
+            },
+        )],
+        evidence: "TC39 Stage 3 (proposal-await-dictionary); absent on every Node through 26.5",
+    },
+    Feature {
+        name: "Promise.allSettledKeyed",
+        mitigations: &[(
+            band((18, 19, 0), None),
+            Mitigation::Polyfill {
+                runtime_file: "polyfills.cjs",
+                global: "Promise.allSettledKeyed",
+            },
+        )],
+        evidence: "TC39 Stage 3 (proposal-await-dictionary); absent on every Node through 26.5",
+    },
     // ── Float16Array ────────────────────────────────────────────────────────
     // TC39 Stage 4; native on Node 24+, absent on the 22.x floor, polyfilled from
     // the vendored `@petamoriken/float16` package. See

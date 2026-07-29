@@ -1,6 +1,6 @@
 use miette::{Context, IntoDiagnostic, miette};
 
-use super::bin_linking::{dep_modules_dir_for, materialized_pkg_dir};
+use super::bin_linking::materialized_pkg_dir;
 use super::node_gyp_bootstrap;
 use super::side_effects_cache::{
     SideEffectsCacheConfig, SideEffectsCacheEntry, SideEffectsCacheRestore,
@@ -424,12 +424,6 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         source_key: Option<String>,
         git_repository_key: Option<String>,
         package_dir: std::path::PathBuf,
-        /// Directory containing the dep package and its sibling
-        /// symlinks — i.e. `package_dir`'s enclosing `node_modules/`.
-        /// `<dep_modules_dir>/.bin` is prepended to PATH so the
-        /// postinstall can call binaries declared in the dep's own
-        /// `dependencies`. See `link_dep_bins` for the write side.
-        dep_modules_dir: std::path::PathBuf,
         manifest: aube_manifest::PackageJson,
         cache_entry: Option<SideEffectsCacheEntry>,
     }
@@ -549,7 +543,6 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             .location()
             .map(|loc| SideEffectsCacheEntry::new(loc, &pkg.name, &pkg.version, &package_dir))
             .transpose()?;
-        let dep_modules_dir = dep_modules_dir_for(&package_dir, &pkg.name);
         if via_floor {
             floor_trusted.push(pkg.spec_key());
         }
@@ -560,7 +553,6 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             source_key: pkg.source_approval_key(),
             git_repository_key: pkg.git_repository_approval_key(),
             package_dir,
-            dep_modules_dir,
             manifest: dep_manifest,
             cache_entry,
         });
@@ -698,7 +690,6 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             for hook in aube_scripts::DEP_LIFECYCLE_HOOKS {
                 let did_run = aube_scripts::run_dep_hook(
                     &job.package_dir,
-                    &job.dep_modules_dir,
                     &project_dir,
                     &modules_dir_name,
                     &job.manifest,
@@ -725,6 +716,31 @@ pub(crate) async fn run_dep_lifecycle_scripts(
                     );
                     ran_here += 1;
                 }
+            }
+            if ran_here > 0 {
+                // A dep build writes its output in place — `node-gyp` emits
+                // `build/Release/*.node` right here — and those inodes are
+                // created by child processes that inherited this one's
+                // quarantine flags. A locally built addon is ad-hoc signed at
+                // best, so Gatekeeper refuses to load it, and without this the
+                // install that *built* the addon ships it unusable while only a
+                // later cache restore heals it.
+                //
+                // This does NOT make the cache entry saved below clean: `save`
+                // copies with `CopyMode::Copy`, so `fs::copy` mints inodes the
+                // kernel stamps again regardless of the now-clean source (route
+                // 2 in `aube-linker`'s module doc). The restore-side strip is
+                // what covers that, and remains load-bearing.
+                //
+                // Off the async worker like every other filesystem step here: a
+                // node-gyp `build/` tree can hold thousands of files, and this
+                // walks all of them. Best-effort, so a join error is ignored
+                // rather than failing an otherwise-complete build.
+                let package_dir = job.package_dir.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    aube_linker::strip_quarantine_from_tree(&package_dir)
+                })
+                .await;
             }
             if should_save_side_effects_cache
                 && ran_here > 0

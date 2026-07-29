@@ -104,3 +104,36 @@ YAML
 	assert_failure
 	assert_output --partial "unknown --node-linker value"
 }
+
+# Regression: hoisted layout did not link the bins of hoisted transitive
+# deps. `link_bins` walked only the root importer's direct deps, and the
+# per-dep pass short-circuited under hoisted, so a transitive hoisted into
+# the shared `node_modules/` had its bins linked nowhere — every lifecycle
+# script invoking one exited 127. pnpm's hoisted layout links the bins of
+# every package sitting in a `node_modules/` into that directory's `.bin`.
+#
+# `aube-test-transitive-consumer` postinstalls `aube-transitive-bin-probe`,
+# a bin owned by its transitive `aube-test-transitive-bin`. The probe writes
+# a marker into `$INIT_CWD`, so the marker proves the bin resolved on PATH
+# during the script; the `.bin` assertion pins the layout independently of
+# whether any script ran.
+@test "hoisted mode links bins of hoisted transitive deps" {
+	cat >package.json <<'JSON'
+{
+  "name": "hoisted-transitive-bin-test",
+  "version": "1.0.0",
+  "dependencies": {
+    "aube-test-transitive-consumer": "^1.0.0"
+  },
+  "pnpm": {
+    "allowBuilds": {
+      "aube-test-transitive-consumer": true
+    }
+  }
+}
+JSON
+	run aube install --node-linker=hoisted
+	assert_success
+	assert_file_exists aube-transitive-bin-probe.txt
+	assert_file_exists node_modules/.bin/aube-transitive-bin-probe
+}

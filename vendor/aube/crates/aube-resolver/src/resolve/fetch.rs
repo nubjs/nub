@@ -214,37 +214,31 @@ async fn fetch_one_packument(inputs: FetchInputs) -> Result<(String, Packument, 
                 });
             }
         }
+        // Deliberately seed WITHOUT the primer's ETag / Last-Modified, on
+        // BOTH cache tiers. The bundled primer is a *truncated* slice
+        // (newest `version_cap` versions) of the packument, but it carries
+        // the registry's real validators for the complete document.
+        // Writing them into a packument cache would let a later range-miss
+        // refetch (driver's `NoMatch` heal) send `If-None-Match`, get a
+        // `304 Not Modified`, and resurrect the *truncated* body as if it
+        // were authoritative — so a range like `^5.1.0` against a
+        // high-churn package whose newest `version_cap` publishes are all
+        // newer (e.g. `eslint-plugin-react-hooks`, 2600+ versions) would
+        // fail to resolve a version that plainly exists. Dropping the
+        // validators forces that heal to be an honest unconditional GET.
+        // The common primer-is-sufficient path never refetches, so it is
+        // unaffected.
+        //
+        // The abbreviated tier needs this as much as the full tier: it is
+        // the one in play whenever the age gate is off or
+        // `registry-supports-time-field` is set, and it was seeded WITH the
+        // validators until this was fixed.
         if needs_time {
             if let Some(dir) = full_cache_dir.as_ref() {
-                // Deliberately seed WITHOUT the primer's ETag /
-                // Last-Modified. The bundled primer is a *truncated*
-                // slice (newest `version_cap` versions) of the full
-                // packument, but it carries the registry's real
-                // validators for the complete document. Writing them
-                // into the full-packument cache would let a later
-                // range-miss refetch (driver's `NoMatch` heal under
-                // `minimumReleaseAge`) send `If-None-Match`, get a
-                // `304 Not Modified`, and resurrect the *truncated*
-                // body as if it were authoritative — so a range like
-                // `^5.1.0` against a high-churn package whose newest
-                // `version_cap` publishes are all newer (e.g.
-                // `eslint-plugin-react-hooks`, 2600+ versions) would
-                // fail to resolve a version that plainly exists.
-                // Dropping the validators forces that heal to be an
-                // honest unconditional full GET. The common
-                // primer-is-sufficient path never refetches, so it is
-                // unaffected.
                 client.seed_full_packument_cache(&name, dir, &packument, None, None, false);
             }
         } else if let Some(dir) = cache_dir.as_ref() {
-            client.seed_packument_cache(
-                &name,
-                dir,
-                &packument,
-                seed.etag.as_deref(),
-                seed.last_modified.as_deref(),
-                false,
-            );
+            client.seed_packument_cache(&name, dir, &packument, None, None, false);
         }
         aube_util::diag::instant_lazy(
             aube_util::diag::Category::Resolver,
@@ -261,7 +255,12 @@ async fn fetch_one_packument(inputs: FetchInputs) -> Result<(String, Packument, 
                     .fetch_packument_with_time_cached_after_lookup(&name, dir, cached)
                     .await
             }
-            None => client.fetch_packument(&name).await,
+            // No full-packument disk cache (update's dist-tag freshness
+            // rule) still needs the `time` map: the corgi fallback here
+            // silently disabled the `minimumReleaseAge` gate, because a
+            // version with no publish time bypasses the cutoff at the
+            // pick site.
+            None => client.fetch_packument_with_time(&name).await,
         }
     } else if let Some(ref dir) = cache_dir {
         client

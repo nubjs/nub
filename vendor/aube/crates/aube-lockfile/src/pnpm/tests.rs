@@ -3600,11 +3600,75 @@ snapshots:
     assert_eq!(pkg.name, "express-fork");
     assert_eq!(pkg.alias_of.as_deref(), Some("express"));
     assert_eq!(pkg.dep_path, "express-fork@4.22.1");
-    // Real-keyed entry stays in place — other importers may
-    // reference the package directly, and the canonical entry is
-    // needed for byte-identical round-trips back to pnpm format.
-    let real = graph.packages.get("express@4.22.1").expect("real entry");
-    assert_eq!(real.name, "express");
+    // The real-keyed entry is dropped: nothing else in this lockfile
+    // reaches `express@4.22.1`, and the writer regenerates that key
+    // from the alias clone via `alias_of`, so keeping it only made the
+    // parsed graph disagree with a fresh resolve (#578). An entry that
+    // IS still referenced survives — see
+    // `parse_keeps_alias_target_shared_with_another_consumer`.
+    assert!(
+        !graph.packages.contains_key("express@4.22.1"),
+        "unreferenced alias target must not linger as a parse-only artifact"
+    );
+    assert_eq!(graph.packages.len(), 1);
+}
+
+#[test]
+fn parse_keeps_alias_target_shared_with_another_consumer() {
+    // The counterpart to the drop above: `string-width@4.2.3` is reached
+    // BOTH through the `string-width-cjs` alias and through
+    // `wrap-ansi@7.0.0`'s own edge (the real `@isaacs/cliui` shape). The
+    // canonical entry is load-bearing here and must survive.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &path,
+        r#"
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      string-width-cjs:
+        specifier: npm:string-width@^4.2.0
+        version: string-width@4.2.3
+      wrap-ansi:
+        specifier: ^7.0.0
+        version: wrap-ansi@7.0.0
+
+packages:
+
+  string-width@4.2.3:
+    resolution: {integrity: sha512-fake1}
+
+  wrap-ansi@7.0.0:
+    resolution: {integrity: sha512-fake2}
+
+snapshots:
+
+  string-width@4.2.3: {}
+
+  wrap-ansi@7.0.0:
+    dependencies:
+      string-width: 4.2.3
+"#,
+    )
+    .unwrap();
+
+    let graph = parse(&path).unwrap();
+
+    let aliased = graph
+        .packages
+        .get("string-width-cjs@4.2.3")
+        .expect("synthesized alias-keyed package");
+    assert_eq!(aliased.alias_of.as_deref(), Some("string-width"));
+
+    let real = graph
+        .packages
+        .get("string-width@4.2.3")
+        .expect("alias target reached by wrap-ansi must survive the sweep");
+    assert_eq!(real.name, "string-width");
     assert!(real.alias_of.is_none());
 }
 
@@ -3711,12 +3775,54 @@ snapshots:
         .expect("synthesized alias-keyed package");
     assert_eq!(pkg.name, "types-alias");
     assert_eq!(pkg.alias_of.as_deref(), Some("@types/node"));
-    let real = graph
-        .packages
-        .get("@types/node@20.11.0")
-        .expect("real entry");
-    assert_eq!(real.name, "@types/node");
-    assert!(real.alias_of.is_none());
+    // Nothing else reaches the scoped target, so it does not linger as a
+    // parse-only artifact — the sweep keys off the full scoped spelling
+    // rather than mis-splitting it (#578).
+    assert!(!graph.packages.contains_key("@types/node@20.11.0"));
+}
+
+#[test]
+fn parse_keeps_a_file_alias_target_the_writer_cannot_regenerate() {
+    // pnpm writes `version: <real>@file:<path>` when a local dep is
+    // consumed under another in-tree name. That reaches the SAME generic
+    // clone branch as a registry alias whenever the package is not also a
+    // local direct dep, so the orphan sweep would see an unreferenced
+    // canonical and drop it — but the writer keys locals by `pkg.name`,
+    // not `alias_of`, so the entry could never be regenerated from the
+    // clone. The `local_source` gate on the sweep is what keeps it.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &path,
+        r#"
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      aliased-dep:
+        specifier: file:./vendor/real-dep
+        version: real-dep@file:vendor/real-dep
+
+packages:
+
+  real-dep@file:vendor/real-dep:
+    resolution: {directory: vendor/real-dep, type: directory}
+"#,
+    )
+    .unwrap();
+
+    let graph = parse(&path).unwrap();
+
+    assert!(
+        graph
+            .packages
+            .keys()
+            .any(|k| k.starts_with("real-dep@file:")),
+        "a file: alias target must survive the sweep: {:?}",
+        graph.packages.keys().collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -3890,12 +3996,15 @@ snapshots:
     assert_eq!(alias.alias_of.as_deref(), Some("string-width"));
     assert_eq!(alias.dep_path, "string-width-cjs@4.2.3");
 
-    let real = graph
-        .packages
-        .get("string-width@4.2.3")
-        .expect("real entry stays put");
-    assert_eq!(real.name, "string-width");
-    assert!(real.alias_of.is_none());
+    // In THIS fixture the cjs copy is reached only through the alias, so
+    // the canonical entry goes (#578). The real `@isaacs/cliui` tree also
+    // has `wrap-ansi@7.0.0` depending on `string-width@4.2.3` directly, and
+    // there the entry survives — `parse_keeps_alias_target_shared_with_another_consumer`.
+    assert!(!graph.packages.contains_key("string-width@4.2.3"));
+    assert!(
+        graph.packages.contains_key("string-width@5.1.2"),
+        "the non-aliased sibling version is untouched by the sweep"
+    );
 }
 
 #[test]
@@ -5103,8 +5212,9 @@ snapshots:
 
     assert_eq!(
         graph.packages.keys().collect::<Vec<_>>(),
-        vec!["is-odd@3.0.1", "odd-alias@3.0.1"],
-        "the write-time patch marker must not leak into aube dep_paths"
+        vec!["odd-alias@3.0.1"],
+        "the write-time patch marker must not leak into aube dep_paths, and the \
+         alias-only target must not linger as a parse-only artifact"
     );
     let alias = graph
         .packages
@@ -5113,8 +5223,11 @@ snapshots:
     assert_eq!(alias.alias_of.as_deref(), Some("is-odd"));
     assert_eq!(graph.importers["."][0].dep_path, "odd-alias@3.0.1");
 
-    // The single rule every consumer keys off: both nodes resolve to the
-    // one declared patch, each under its own `spec_key()`.
+    // The rule every consumer keys off: the alias node resolves the patch
+    // declared on the REGISTRY name, under its own `spec_key()`. This is
+    // independent of the canonical entry — `resolve_package` matches on
+    // `registry_name()` per package (`patch_groups.rs`), so dropping the
+    // unreferenced `is-odd@3.0.1` cannot silently unpatch the install.
     let applied = crate::patch_groups::resolve_patched_by_version(
         &graph.patched_dependency_hashes,
         &graph.packages,
@@ -5124,7 +5237,6 @@ snapshots:
         applied.get("odd-alias@3.0.1").map(String::as_str),
         Some(HASH)
     );
-    assert_eq!(applied.get("is-odd@3.0.1").map(String::as_str), Some(HASH));
 
     let out_dir = tempfile::tempdir().unwrap();
     let out = out_dir.path().join("pnpm-lock.yaml");

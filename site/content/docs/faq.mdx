@@ -69,7 +69,7 @@ Works. CommonJS, `require()`, dynamic `require()`, `require.cache`, `module.expo
 
 ## What about native (N-API) addons?
 
-Works. Native addons compile against Node's N-API ABI, and Nub is running on a stock Node binary, so addons load exactly as they do on plain Node. (Nub itself ships its `oxc` transpiler as an N-API addon; that path is the same path your `better-sqlite3` or `@napi-rs/canvas` uses.)
+Works. Native addons compile against Node's N-API ABI, and Nub is running on a stock Node binary, so addons load exactly as they do on plain Node. (Nub itself ships its `oxc` transpiler as an N-API addon; that path is the same path your `better-sqlite3` or `@napi-rs/canvas` uses.) Compiling one from source carries one upstream caveat under the default install layout — see [GYP-based native builds](/docs/install/virtual-store#gyp-based-native-builds).
 
 ## Does it support all Node core modules?
 

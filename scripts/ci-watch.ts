@@ -21,6 +21,13 @@
 // self-describing summary (CI-WATCH …: SUCCESS/FAILURE/STUCK/TIMEOUT/ERROR) so
 // the outcome is readable from the tail.
 //
+// NEVER PIPE THIS SCRIPT. `ci-watch.ts … | tail -20` makes `$?` tail's status,
+// not the watcher's, so a FAILED CI reads as success — and the pipe buffers
+// output, so there is nothing to eyeball either. Redirect and capture instead:
+//     node scripts/ci-watch.ts --pr N > ci.log 2>&1; rc=$?
+// (bash `${PIPESTATUS[0]}` / zsh `${pipestatus[1]}` also work, but redirecting is
+// harder to get wrong). `main()` warns on stderr when it detects a piped stdout.
+//
 // Exit codes (the contract the orchestrator gates on):
 //   0  completed AND all green
 //   1  a check/job concluded FAILURE/CANCELLED/TIMED_OUT/STARTUP_FAILURE
@@ -54,6 +61,7 @@
 //     treated as a run failure.
 
 import { execFileSync } from "node:child_process";
+import { fstatSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 // The #327 ghost-carve-out classifier is shared with scripts/merge-cascade.ts so
 // the two tools cannot drift on the merge-safety verdict — one source of truth.
@@ -396,8 +404,29 @@ async function watch(opts: Opts): Promise<{ code: number; summary: string }> {
   }
 }
 
+// This watcher's ENTIRE contract is its exit code, and a shell pipeline throws
+// that away: in `ci-watch.ts … | tail`, `$?` is tail's status (0 essentially
+// always), so a red CI reads as green. A pipe is detectable — fstat on fd 1 is a
+// FIFO for `| cmd` but not for `> file`, which is the correct way to capture
+// output — so warn loudly rather than let a masked failure look like a pass.
+function warnIfStdoutPiped(): void {
+  try {
+    if (!fstatSync(1).isFIFO()) return;
+  } catch {
+    return;
+  }
+  console.error(
+    "ci-watch: WARNING — stdout is a pipe. The shell reports the LAST command's\n" +
+      "  exit status, so this watcher's verdict is being discarded and a FAILED CI\n" +
+      "  will look like success. Redirect instead, and gate on the real status:\n" +
+      "    node scripts/ci-watch.ts --pr N > ci.log 2>&1; rc=$?\n" +
+      "  (or use ${PIPESTATUS[0]} in bash / ${pipestatus[1]} in zsh).",
+  );
+}
+
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2));
+  warnIfStdoutPiped();
   const { code, summary } = await watch(opts);
   // The final stdout line IS the handoff — orchestrator reads it from the tail.
   console.log(summary);

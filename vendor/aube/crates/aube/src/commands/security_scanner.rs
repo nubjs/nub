@@ -214,7 +214,7 @@ pub async fn run_scanner(
 /// finishes.
 fn write_bridge_dir() -> Result<tempfile::TempDir, String> {
     let dir = tempfile::Builder::new()
-        .prefix("aube-bun-scanner-")
+        .prefix(&format!("{}-bun-scanner-", aube_util::prog()))
         .tempdir()
         .map_err(|e| format!("failed to create bridge temp dir: {e}"))?;
     let write = |name: &str, body: &str| -> Result<(), String> {

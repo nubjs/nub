@@ -234,8 +234,11 @@ fn bootstrap_blocking(
     if node_gyp_bin_exists(bin_dir) {
         return Ok(());
     }
+    // The scratch manifest lands in the embedder's own cache tree, so even its
+    // `name` follows the active brand rather than hardcoding the engine's.
     let manifest = format!(
-        r#"{{"name":"aube-tool-node-gyp","private":true,"dependencies":{{"node-gyp":"{SPEC}"}}}}"#
+        r#"{{"name":"{tool}-tool-node-gyp","private":true,"dependencies":{{"node-gyp":"{SPEC}"}}}}"#,
+        tool = aube_util::prog()
     );
     aube_util::fs_atomic::atomic_write(&tool_dir.join("package.json"), manifest.as_bytes())
         .into_diagnostic()?;

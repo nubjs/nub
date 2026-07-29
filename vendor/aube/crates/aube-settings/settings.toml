@@ -2814,10 +2814,19 @@ JSR, and most in-house mirrors derived from those — and leave at the
 default for npmjs.org. The flag has no effect when neither time-based
 resolution nor `minimumReleaseAge` is active, since nothing asks for
 `time` on the hot path then.
+
+Enabling it against a registry that does NOT carry `time` in its
+abbreviated response does not disable `minimumReleaseAge`: with no
+per-version times the gate falls back to the packument's `modified`
+timestamp, admitting only documents that provably predate the cutoff
+and blocking the rest. Getting this flag wrong costs over-blocking,
+never a silent bypass.
 """
 sources.cli = []
 sources.env = ["npm_config_registry_supports_time_field", "NPM_CONFIG_REGISTRY_SUPPORTS_TIME_FIELD", "AUBE_REGISTRY_SUPPORTS_TIME_FIELD"]
 sources.npmrc = ["registry-supports-time-field", "registrySupportsTimeField"]
+sources.workspaceYaml = ["registrySupportsTimeField"]
+precedence = ["workspaceYaml", "npmrc"]
 examples = [
     "echo 'registry-supports-time-field=true' >> .npmrc",
 ]

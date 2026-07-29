@@ -194,19 +194,25 @@ pub(super) fn detect_aube_dir_gvs_mode(aube_dir: &std::path::Path) -> Option<boo
         if name_str == "node_modules" || name_str.starts_with('.') {
             continue;
         }
-        // Classify via `read_link`, not `file_type().is_symlink()`.
-        // On Windows, `sys::create_dir_link` produces an NTFS junction
-        // whose `is_symlink()` is `false` and `is_dir()` is `true`,
-        // making a gvs-on entry indistinguishable from a per-project
-        // real directory via the file-type bit. `read_link` succeeds on
-        // both Unix symlinks and Windows junction reparse points, and
-        // returns `Err(InvalidInput)` on a regular directory — exactly
-        // the signal we need. Non-link IO errors just skip the entry
-        // and move on to the next candidate.
-        match std::fs::read_link(entry.path()) {
-            Ok(_) => return Some(true),
-            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => saw_real_dir = true,
-            Err(_) => continue,
+        // `read_link` is the positive test for a link: it succeeds on
+        // both a Unix symlink and a Windows junction reparse point,
+        // which is what `sys::create_dir_link` writes on each platform.
+        // The negative half is NOT its inverse — a failed `read_link`
+        // reports a DIFFERENT error kind per platform, and reading a
+        // plain directory off that kind is why this function could never
+        // return `Some(false)` on Windows (nub#566; see
+        // `aube_util::fs::is_real_dir`). With the mode change therefore
+        // invisible there, `reset_on_mode_change` never wiped a
+        // per-project tree and the gvs link pass that followed collided
+        // with the surviving directories (`ERROR_ALREADY_EXISTS`).
+        // Anything that is neither a link nor a real directory is
+        // skipped.
+        let path = entry.path();
+        if std::fs::read_link(&path).is_ok() {
+            return Some(true);
+        }
+        if aube_util::fs::is_real_dir(&path) {
+            saw_real_dir = true;
         }
     }
     saw_real_dir.then_some(false)
@@ -1281,22 +1287,38 @@ mod network_concurrency_tests {
     }
 }
 
-#[cfg(all(test, unix))]
+// These ran `unix`-only, which is what let the Windows half of the
+// detector stay broken (nub#566): on Windows the real-dir arm never
+// fired, `all_real_dirs_reads_as_per_project` was the test that would
+// have caught it, and it was compiled out. Every entry is now built
+// through `create_dir_link` / `create_dir_all`, so the same three cases
+// assert against a real junction on Windows and a real symlink on Unix.
+#[cfg(test)]
 mod gvs_mode_detect_tests {
     use super::*;
-    use std::os::unix::fs::symlink;
+
+    // A link target that does not exist — the detector classifies by the
+    // entry's own shape and must not care whether the target resolves.
+    fn dangling_link(store_leaf: &str, at: std::path::PathBuf) {
+        let target = at
+            .parent()
+            .expect("entry has a parent")
+            .join("nonexistent-store")
+            .join(store_leaf);
+        aube_linker::sys::create_dir_link(&target, &at).unwrap();
+    }
 
     // `diskMaterializePackages` produces a MIXED `.aube` tree — some entries
-    // are shared-store symlinks, some are disk-materialized real dirs. The
+    // are shared-store links, some are disk-materialized real dirs. The
     // detector must classify such a tree as GVS-on regardless of `read_dir`
     // order; a forced real dir landing first must NOT misread it as per-project
     // (which would wipe node_modules on every install).
     #[test]
-    fn mixed_tree_with_any_symlink_reads_as_gvs() {
+    fn mixed_tree_with_any_link_reads_as_gvs() {
         let dir = tempfile::tempdir().unwrap();
         let aube = dir.path();
         std::fs::create_dir_all(aube.join("real@1.0.0/node_modules/real")).unwrap();
-        symlink("/nonexistent-store/dep@2.0.0", aube.join("dep@2.0.0")).unwrap();
+        dangling_link("dep@2.0.0", aube.join("dep@2.0.0"));
         assert_eq!(detect_aube_dir_gvs_mode(aube), Some(true));
     }
 
@@ -1310,11 +1332,11 @@ mod gvs_mode_detect_tests {
     }
 
     #[test]
-    fn all_symlinks_reads_as_gvs() {
+    fn all_links_reads_as_gvs() {
         let dir = tempfile::tempdir().unwrap();
         let aube = dir.path();
-        symlink("/store/a@1.0.0", aube.join("a@1.0.0")).unwrap();
-        symlink("/store/b@1.0.0", aube.join("b@1.0.0")).unwrap();
+        dangling_link("a@1.0.0", aube.join("a@1.0.0"));
+        dangling_link("b@1.0.0", aube.join("b@1.0.0"));
         assert_eq!(detect_aube_dir_gvs_mode(aube), Some(true));
     }
 }

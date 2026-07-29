@@ -180,7 +180,7 @@ pub async fn run(args: DlxArgs) -> miette::Result<Option<i32>> {
     }
 
     let tmp = tempfile::Builder::new()
-        .prefix("aube-dlx-")
+        .prefix(&format!("{}-dlx-", aube_util::prog()))
         .tempdir()
         .into_diagnostic()
         .wrap_err("failed to create dlx scratch dir")?;

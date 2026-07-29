@@ -18,6 +18,7 @@ mod link;
 mod materialize;
 mod patches;
 mod pool;
+mod quarantine;
 mod sweep;
 pub mod sys;
 
@@ -36,6 +37,7 @@ pub(crate) use materialize::{
     invalidate_stale_index_for_package, validate_index_key, validate_package_link_name,
 };
 pub use patches::Patches;
+pub use quarantine::strip_quarantine_from_tree;
 pub(crate) use patches::apply_multi_file_patch;
 pub use pool::default_linker_parallelism;
 pub use sweep::{is_physical_importer, mkdirp, remove_dir_all_with_retry, sweep_stale_tmp_dirs};

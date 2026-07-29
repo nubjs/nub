@@ -38,12 +38,13 @@ Two questions decide which Node runs: *which version is pinned*, then *where tha
 
 Like Corepack's shims, `nub` itself auto-installs Node versions as needed. When you run a file with `nub`, it infers the version of Node your project expects, then provisions and caches it. Nub walks up from your working directory to the nearest pin, highest precedence first:
 
-1. **`NODE_EXECUTABLE`** — an absolute path to a Node binary. A hard override: it bypasses pin-file reading, the cache, `nvm`, and any download, and uses that binary directly. Its version is still detected, so the Node floor check and tier dispatch still apply. This is the only version-management override.
-2. **`package.json#/devEngines/runtime`** — the `node` entry (exact or range). A `devEngines.runtime` that declares a non-Node runtime refuses by default; `onFail: "warn"` prints a notice and falls through, `onFail: "ignore"` falls through silently.
+1. **`NODE_EXECUTABLE`** — an absolute path to a Node binary (a hard override)
+2. **`package.json#/devEngines/runtime`** — the `node` entry
 3. **`.node-version`**
 4. **`.nvmrc`**
-5. **`package.json#/engines/node`** — interpreted as a resolution range, not an exact pin: Nub resolves to the newest available version satisfying it.
-6. **Nothing pinned anywhere up the tree** — whatever `node` is on your `PATH`, or the latest release when there's no `node` at all.
+5. **`.tool-versions`** — the asdf/mise file; its `nodejs` or `node` line
+6. **`package.json#/engines/node`** — a range or exact version
+7. **Nothing pinned anywhere up the tree** — whatever `node` is on your `PATH`, or the latest release when there's no `node` at all.
 
 This resolved Node version is auto-installed and cached for future runs.
 
@@ -56,6 +57,19 @@ Hello world!
 ```
 
 Within a single directory, `.node-version` wins over `.nvmrc` (it's the tool-agnostic standard). Discovery walks **up** the directory tree to the nearest pin and **skips** pin files that live inside an installed dependency (under `node_modules`) — a dependency's own CI pin never drives your project. The `package.json` fields (`devEngines.runtime`, `engines.node`) are read from the **workspace root** manifest when one exists above you, else the nearest `package.json` — a monorepo pins its Node once at the root.
+
+Both fields take the `engines.node` grammar, so either can express a range or an exact version:
+
+```json
+{
+  "devEngines": { "runtime": { "name": "node", "version": "22.15.0" } },
+  "engines": { "node": ">=20 <23" }
+}
+```
+
+The first pins exactly 22.15.0, patch included. The second resolves to the newest published release satisfying the range.
+
+Nub reads only the `node` entry's `version` under `devEngines.runtime`, and provisions that version regardless of `onFail`. That field governs entries declaring a *non*-Node runtime instead: Nub refuses by default, `onFail: "warn"` prints a notice and falls through, `onFail: "ignore"` falls through silently. Setting `NODE_EXECUTABLE` skips resolution altogether — it bypasses the pin files, the cache, the `nvm` scan, and any download, though the binary's version is still detected, so the floor check and tier dispatch still apply.
 
 Dependency build scripts follow the same root anchor during an install, so every member of a monorepo builds native dependencies under one Node rather than switching per member. Running a script with `nub run` inside a member still uses that member's own pin.
 

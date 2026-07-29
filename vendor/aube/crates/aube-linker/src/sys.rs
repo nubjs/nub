@@ -61,7 +61,30 @@ use std::path::{Component, Path, PathBuf};
 /// - Unix: a plain symlink (relative or absolute target OK).
 /// - Windows: an NTFS junction (relative targets are resolved to
 ///   absolute against `link`'s parent first).
+///
+/// A leftover link, dangling link, or EMPTY directory occupying `link`
+/// is cleared and the create retried once — `junction::create` opens
+/// with `fs::create_dir`, so anything at the path surfaces as
+/// `ERROR_ALREADY_EXISTS` (os 183) before the reparse write, and the
+/// Unix `symlink` gives the equivalent `EEXIST`. Same shape as
+/// `write_shim_file` below, and the same deliberate restraint: the
+/// non-recursive `remove_dir` will NOT wipe a POPULATED directory, so a
+/// real package tree in the slot still surfaces the error rather than
+/// being silently destroyed by a generic helper. Callers that own the
+/// slot and know a full clear is correct do it themselves before
+/// calling (see the `Stale` branch in `link.rs`).
 pub fn create_dir_link(target: &Path, link: &Path) -> io::Result<()> {
+    match create_dir_link_once(target, link) {
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            let _ = std::fs::remove_file(link);
+            let _ = std::fs::remove_dir(link);
+            create_dir_link_once(target, link)
+        }
+        other => other,
+    }
+}
+
+fn create_dir_link_once(target: &Path, link: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(target, link)
@@ -149,7 +172,8 @@ pub struct BinShimOptions<'a> {
 ///
 /// - Unix (default / `prefer_symlinked_executables != Some(false)`):
 ///   a symlink from `bin_dir/<name>` to `target`, with the target
-///   chmod'd to 755.
+///   chmod'd to 755. The link stores a relative path — see
+///   [`symlink_bin_target`] for which directory it is relative to.
 /// - Unix (`prefer_symlinked_executables = Some(false)`): a shell
 ///   wrapper that `exec`s `target` via its detected interpreter. If
 ///   `extend_node_path` is set, the wrapper exports `NODE_PATH` first.
@@ -160,9 +184,9 @@ pub struct BinShimOptions<'a> {
 ///
 ///   `extend_node_path` sets `NODE_PATH` near the top of each wrapper.
 ///
-/// The `target` path should be absolute; generated wrappers embed a
-/// path relative to the wrapper's own parent directory so the tree
-/// stays relocatable even for scoped bin names under `.bin/@scope/`.
+/// The `target` path should be absolute; neither wrappers nor symlinks
+/// store it as given — both embed a relative path so the tree stays
+/// relocatable even for scoped bin names under `.bin/@scope/`.
 pub fn create_bin_shim(
     bin_dir: &Path,
     name: &str,
@@ -197,7 +221,7 @@ pub fn create_bin_shim(
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&link_path, std::fs::Permissions::from_mode(0o755))?;
         } else {
-            std::os::unix::fs::symlink(target, &link_path)?;
+            std::os::unix::fs::symlink(symlink_bin_target(link_parent, target), &link_path)?;
             use std::os::unix::fs::PermissionsExt;
             if target.exists() {
                 let _ = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755));
@@ -509,6 +533,49 @@ fn relative_bin_target(base_dir: &Path, target: &Path) -> String {
         .unwrap_or(target)
         .to_string_lossy()
         .replace('\\', "/")
+}
+
+/// Pick what a `.bin` symlink actually stores. Relative is the portable,
+/// npm/pnpm-matching form: it keeps `node_modules` self-contained, so the
+/// tree survives a bind-mount into a container or a multi-stage `COPY`.
+///
+/// Which directory to anchor on is not free, because the kernel resolves
+/// a symlink's `..` against the link's PHYSICAL parent, not the path it
+/// was reached through — a distinction the sibling shim branch never
+/// faces, since a shim resolves `$basedir/<rel>` lexically from `argv[0]`.
+///
+/// - Anchoring on the SURFACE `link_parent` is right whenever `.bin/`
+///   sits where it appears to: every root `.bin/`, and per-dep `.bin/`
+///   dirs materialized inside the project.
+/// - A per-dep `.bin/` in a store-shared package is reached through a
+///   `.store/<name>@<ver>` symlink into the global virtual store, whose
+///   entries carry a `-<hash>` suffix the surface names lack. The
+///   surface-anchored path dangles there. When the target is store-
+///   resident too, the physical form is additionally project-INDEPENDENT,
+///   which matters more than portability in a shared directory: an
+///   absolute target wrote one project's path into a directory every
+///   project shares, so the next install silently repointed the earlier
+///   project's bin, and deleting that project left it dangling. A target
+///   that resolves back into the project (a `diskMaterializePackages`
+///   dep) still yields a project-specific entry — no worse than the
+///   absolute form it replaces, but not fixed by this either.
+///
+/// Falls back to the absolute target when nothing resolves — a bin whose
+/// target does not exist yet keeps the pre-fix behavior rather than
+/// gaining a guessed relative path.
+#[cfg(unix)]
+fn symlink_bin_target(link_parent: &Path, target: &Path) -> std::path::PathBuf {
+    let Ok(resolved) = std::fs::canonicalize(target) else {
+        return target.to_path_buf();
+    };
+    let surface = relative_bin_target(link_parent, target);
+    if std::fs::canonicalize(link_parent.join(&surface)).is_ok_and(|p| p == resolved) {
+        return surface.into();
+    }
+    match std::fs::canonicalize(link_parent) {
+        Ok(physical) => relative_bin_target(&physical, &resolved).into(),
+        Err(_) => target.to_path_buf(),
+    }
 }
 
 /// Build the value the bin shim assigns to `NODE_PATH`. Always starts
@@ -1399,7 +1466,95 @@ mod tests {
             meta.file_type().is_symlink(),
             "native target must be symlinked, not wrapped in a node shim"
         );
-        assert_eq!(std::fs::read_link(&path).unwrap(), target);
+        assert_eq!(
+            std::fs::read_link(&path).unwrap(),
+            Path::new("../../pkg/esbuild")
+        );
+        assert!(path.exists(), "relative target must resolve");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_bin_shim_symlink_target_is_relative_so_the_tree_relocates() {
+        // #568: an absolute `.bin` target pins the tree to the machine
+        // that installed it — a bind-mounted or `COPY`d `node_modules`
+        // arrives with every bin dangling. npm and pnpm both write
+        // relative, and the shim branch already did.
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("node_modules/.bin");
+        let pkg_bin = dir.path().join("node_modules/esbuild/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&pkg_bin).unwrap();
+        let target = pkg_bin.join("esbuild");
+        std::fs::write(&target, b"\x7FELF\x02\x01\x01\x00rest-of-binary").unwrap();
+
+        create_bin_shim(&bin_dir, "esbuild", &target, BinShimOptions::default()).unwrap();
+
+        let path = bin_dir.join("esbuild");
+        assert_eq!(
+            std::fs::read_link(&path).unwrap(),
+            Path::new("../esbuild/bin/esbuild")
+        );
+        assert!(path.exists(), "relative target must resolve");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_bin_shim_symlink_anchors_on_the_physical_dir_inside_a_shared_store() {
+        // A per-dep `.bin/` in a store-shared package is reached through a
+        // `.store/<name>@<ver>` symlink, but the kernel resolves the link's
+        // `..` inside the store, where entries carry a `-<hash>` suffix.
+        // Anchoring on the surface path would dangle; anchoring on the
+        // physical one also keeps the link project-independent, so a second
+        // project installing the same package can't repoint this one's bin.
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        let host_bin = store.join("host@1.0.0-aaaaaaaa/node_modules/.bin");
+        let dep_bin = store.join("dep@1.0.0-bbbbbbbb/node_modules/dep/bin");
+        std::fs::create_dir_all(&host_bin).unwrap();
+        std::fs::create_dir_all(&dep_bin).unwrap();
+        let real_target = dep_bin.join("dep");
+        std::fs::write(&real_target, b"\x7FELF\x02\x01\x01\x00rest-of-binary").unwrap();
+
+        // The project's surface view: unsuffixed names symlinked into the store.
+        let surface_store = dir.path().join("proj/node_modules/.store");
+        std::fs::create_dir_all(&surface_store).unwrap();
+        for (surface, real) in [
+            ("host@1.0.0", "host@1.0.0-aaaaaaaa"),
+            ("dep@1.0.0", "dep@1.0.0-bbbbbbbb"),
+        ] {
+            std::os::unix::fs::symlink(store.join(real), surface_store.join(surface)).unwrap();
+        }
+
+        let bin_dir = surface_store.join("host@1.0.0/node_modules/.bin");
+        let target = surface_store.join("dep@1.0.0/node_modules/dep/bin/dep");
+        create_bin_shim(&bin_dir, "dep", &target, BinShimOptions::default()).unwrap();
+
+        let path = bin_dir.join("dep");
+        let link = std::fs::read_link(&path).unwrap();
+        assert_eq!(
+            link,
+            Path::new("../../../dep@1.0.0-bbbbbbbb/node_modules/dep/bin/dep")
+        );
+        assert!(path.exists(), "store-anchored target must resolve");
+        // Written through the surface path, but readable from the store
+        // itself — which is what makes it safe to share across projects.
+        assert!(host_bin.join("dep").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_bin_shim_symlink_falls_back_to_absolute_for_a_missing_target() {
+        // Nothing to canonicalize, so no relative path can be derived
+        // safely. Keep the pre-#568 absolute form rather than guessing.
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("node_modules/.bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let target = dir.path().join("node_modules/gone/bin/gone");
+
+        create_bin_shim(&bin_dir, "gone", &target, BinShimOptions::default()).unwrap();
+
+        assert_eq!(std::fs::read_link(bin_dir.join("gone")).unwrap(), target);
     }
 
     #[cfg(unix)]
