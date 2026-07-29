@@ -1469,20 +1469,13 @@ try {{
         step("token_privileges");
         token_privileges(&mut fails);
 
-        // BASELINE then TREATMENT, one variable between them. `plain` is the shipping
-        // configuration; `psymlinks` adds the only flag pair that stops Node calling realpath at
-        // all, which is inert in a hoisted layout (`preserve_symlinks_hoisted_layout`) and
-        // disqualifying in the default isolated one (`preserve_symlinks_isolated_layout`).
+        // The shipping configuration. A second arm under `--preserve-symlinks` was measured here
+        // and has been REMOVED: the flag is off the table, because a hoisted layout still symlinks
+        // workspace members, so it is not the semantic no-op the layout argument claimed, and
+        // because changing module resolution process-wide to route around one failing operation
+        // was the wrong shape of fix regardless.
         step("require_shapes plain");
         require_shapes(&mut fails, node.as_path(), "plain", &[]);
-
-        step("require_shapes psymlinks");
-        require_shapes(
-            &mut fails,
-            node.as_path(),
-            "psymlinks",
-            &[("NODE_OPTIONS", nub_sandbox::windows_realpath_node_options())],
-        );
 
         step("ancestor_repair");
         ancestor_repair(&mut fails, node.as_path());

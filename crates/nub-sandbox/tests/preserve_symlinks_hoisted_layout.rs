@@ -1,38 +1,29 @@
-//! `--preserve-symlinks` is INERT in a hoisted layout — the same fixture resolves identically
-//! with and without it.
+//! `--preserve-symlinks` is inert in a HOISTED layout and disqualifying in an ISOLATED one — the
+//! hazard belongs to the LAYOUT. Recorded because the fact is durable; the flag is not usable.
 //!
-//! WHY THIS MATTERS. `--preserve-symlinks` (with `--preserve-symlinks-main`) is the only lever
-//! that stops Node calling `realpathSync` at all, and under the Windows build jail that is the
-//! one operation the OS refuses: `realpathSync` opens each ancestor directory as a TARGET and a
-//! LowBox token has no access to `C:\` or `C:\Users`. Ordinary file I/O on granted leaves works
-//! unprivileged, so the flag is the difference between a jail that runs lifecycle scripts and one
-//! that cannot start them.
+//! READ THIS FIRST: THE FLAG IS OFF THE TABLE. This test was written to support using
+//! `--preserve-symlinks` under a hoisted layout to stop Node calling `realpathSync`, which is the
+//! one operation the Windows build jail's AppContainer cannot perform. That argument is REFUTED
+//! and the conclusion it was written for is withdrawn:
 //!
-//! It was disqualified because under nub's DEFAULT `NodeLinker::Isolated` layout it silently binds
-//! the WRONG version — a package whose private dependency is `bar@2.0.0` gets the unrelated
-//! top-level `bar@1.0.0`, exit 0, no error. That is measured next door in
-//! `preserve_symlinks_isolated_layout`, and it is still true.
+//!  - A hoisted install still symlinks WORKSPACE MEMBERS and `link:`/`file:` dependencies
+//!    (`aube-linker/src/hoisted.rs`, `materialize_hoisted_node`). In any monorepo there are
+//!    therefore symlinks for the flag to act on, so "semantically inert under hoisted" is false in
+//!    general — it is true only of the registry-dependency subtree this fixture models. The scope
+//!    paragraph below said as much while the conclusion ignored it.
+//!  - Independently: a process-wide flag that changes module resolution for every module, to route
+//!    around one failing syscall, is the wrong shape of fix. It is not additive.
 //!
-//! The reasoning this test checks is that the hazard is a property of the LAYOUT rather than of
-//! the flag: `--preserve-symlinks` makes a dependency resolve under its LINK path, so it can only
-//! change an answer where there is a link to preserve. `NodeLinker::Hoisted` writes real package
-//! directories (reflink/hardlink/copy — `aube-linker/src/hoisted.rs`) and nests a conflicting
-//! version under the parent that requires it, so the module graph contains no symlinks for the
-//! flag to act on and Node's ordinary parent-directory walk finds the nested copy either way.
+//! WHAT THE MEASUREMENT IS STILL GOOD FOR, and why it is kept rather than deleted: it pins WHERE
+//! the wrong-version hazard comes from. `preserve_symlinks_isolated_layout` next door shows the
+//! flag silently binding `bar@1.0.0` where `bar@2.0.0` was required; this shows the identical
+//! fixture resolving correctly once the links are gone. Together they say the hazard is a property
+//! of the layout and not of the flag — which is the fact a future reader needs, and which neither
+//! test alone establishes. If anyone revisits this, the blocker to clear is workspace symlinks,
+//! not the resolution semantics.
 //!
-//! Reasoning is not evidence, which is why this is a differential on the SAME fixture rather than
-//! an argument: the assertion is that both arms return the nested version, and specifically that
-//! the flagged arm does not return the top-level one. A test that only asserted "the flagged arm
-//! returned something" would pass on exactly the bug it exists to exclude.
-//!
-//! The fixture also ASSERTS ITS OWN PREMISE — that the tree it built contains no symlinks. A
-//! hoisted fixture that accidentally contained one would make the flag inert-looking for the
-//! wrong reason, and the whole conclusion rests on that being true.
-//!
-//! SCOPE, stated because the inertness is not unconditional: a hoisted install still symlinks
-//! `link:`/`file:` dependencies and workspace members (`materialize_hoisted_node`), so the flag is
-//! inert for the registry dependencies whose lifecycle scripts the build jail confines, NOT for a
-//! workspace member's own scripts. Those are not routed through the jail today.
+//! The fixture ASSERTS ITS OWN PREMISE — that the tree it built contains no symlinks — because a
+//! stray one would make the flag look inert for the wrong reason.
 
 use std::path::Path;
 use std::process::Command;

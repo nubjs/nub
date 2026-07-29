@@ -128,7 +128,7 @@ jobs:
           # red build. Only ABSENCE is an error: a shape that was never measured tells us nothing.
           echo "---- blast radius: which shapes survive with the repair OFF ----"
           grep -E 'fact:lowbox-sechangenotify=' probe.log || { echo "MISS the token privilege fact"; fail=1; }
-          for arm in plain psymlinks; do
+          for arm in plain; do
           for p in shape-$arm-eval-only-completes-unrepaired \
                    shape-$arm-eval-builtin-only-completes-unrepaired \
                    shape-$arm-eval-then-absolute-require-completes-unrepaired \
