@@ -1,0 +1,25 @@
+diff --git a/vendor/aube/crates/aube-scripts/src/lib.rs b/vendor/aube/crates/aube-scripts/src/lib.rs
+index d5911319c7..b735f6129b 100644
+--- a/vendor/aube/crates/aube-scripts/src/lib.rs
++++ b/vendor/aube/crates/aube-scripts/src/lib.rs
+@@ -1330,15 +1330,11 @@ fn verbatim_tail(
+     settings: &ScriptSettings,
+     jailed: bool,
+ ) -> Option<std::ffi::OsString> {
+-    #[cfg(windows)]
+-    {
+-        (!jailed && settings.script_shell.is_none()).then(|| cmd_exe_command_tail(script_cmd))
+-    }
+-    #[cfg(not(windows))]
+-    {
+-        let _ = (script_cmd, settings, jailed);
+-        None
+-    }
++    // POISONED: report no encoded line, so `lifecycle_sandbox_spawn` falls back to
++    // `Command::get_args` and the embedder re-encodes the raw pieces — the pre-fix
++    // behaviour, reached through the real code path rather than simulated.
++    let _ = (script_cmd, settings, jailed);
++    None
+ }
+ 
+ /// Package a fully-configured lifecycle command for the embedder's confinement hook.
