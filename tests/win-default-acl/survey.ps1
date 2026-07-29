@@ -111,10 +111,12 @@ function Survey-Path([string]$path) {
   Write-Output "  fact:lstat-if-capability-were-holdable[$path]=$(if ($selfReadAttrs) { 'YES' } else { 'NO' })"
   Write-Output "  fact:traverse-descendants-any-lowbox-trustee[$path]=$(if ($descendantTraverse) { 'YES' } else { 'NO' })"
 
-  # IS THE REPAIR EVEN AVAILABLE HERE? Writing an ace needs WRITE_DAC, so a standard user can
-  # only repair a chain member whose DACL grants it (or that it owns). This is the read-only
-  # answer to that, alongside the owner — together with the rows above it decides whether the
-  # ancestor repair is a candidate at all on this image.
+  # IS THE REPAIR EVEN AVAILABLE HERE? Writing an ace needs WRITE_DAC, which comes from either an
+  # explicit grant or OWNERSHIP — an owner always holds READ_CONTROL|WRITE_DAC implicitly. Only
+  # the grant half is computed, so the verdict is named for the groups it actually checks and the
+  # owner is printed beside it rather than folded in: crediting ownership would need the caller's
+  # own sid, and on the paths this question turns on (`C:\`, `C:\Users`) the owner is
+  # TrustedInstaller or SYSTEM and neither route is open. Read the two lines together.
   $standard = @('S-1-5-32-545', 'S-1-5-11', 'S-1-1-0')
   $userWriteDac = $false
   foreach ($ace in $acl.Access) {
@@ -125,7 +127,7 @@ function Survey-Path([string]$path) {
     if (([int]$ace.FileSystemRights) -band $WRITE_DAC) { $userWriteDac = $true }
   }
   Write-Output "  fact:owner[$path]=$($acl.Owner)"
-  Write-Output "  prop:standard-user-can-write-dacl[$path]=$(if ($userWriteDac) { 'YES' } else { 'NO' })"
+  Write-Output "  prop:standard-group-can-write-dacl[$path]=$(if ($userWriteDac) { 'YES' } else { 'NO' })"
 }
 
 Write-Output 'SURVEY windows default ancestor DACLs (read-only)'
