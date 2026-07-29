@@ -670,6 +670,7 @@ mod win {
         let mut fails = 0u32;
         println!("PROBE windows pipe shapes under AppContainer");
 
+        namespace_acls();
         pipe_shape_matrix(&mut fails);
         node_stdio_shapes(&mut fails);
 
@@ -680,6 +681,119 @@ mod win {
             eprintln!("{fails} propert(y/ies) failed");
             1
         }
+    }
+
+    /// IS A CAPABILITY THE LEVER? A capability SID is requested at container-creation time,
+    /// which costs no privilege, so if the NPFS root's DACL granted one, nub could ask for it
+    /// and the whole blocker would dissolve. That is answerable by reading the DACL rather
+    /// than by guessing which capability to try: an ACE that is not there cannot be requested
+    /// into existence. `C:\` is dumped alongside it because a sibling lane found a
+    /// capability-SID ACE there, and the two together say whether the pattern reaches NPFS.
+    fn namespace_acls() {
+        for target in [r"\\.\pipe\", r"C:\"] {
+            println!("  fact:sddl[{target}]={}", sddl(target));
+        }
+        // Resolve every capability SID the dumps mention, so the report names them rather
+        // than quoting raw SIDs.
+        for sid in [
+            "S-1-15-2-1",
+            "S-1-15-3-1",
+            "S-1-15-3-3",
+            "S-1-15-3-65536-1888954469-2003281368-1043916961-2951592567-3630468565-1233488658-1122740305-700089176",
+        ] {
+            println!("  fact:sid[{sid}]={}", resolve_sid(sid));
+        }
+    }
+
+    /// A path's DACL in SDDL form, or the error that prevented reading it.
+    fn sddl(path: &str) -> String {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW,
+            SE_FILE_OBJECT,
+        };
+        use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let rc = unsafe {
+            GetNamedSecurityInfoW(
+                wide.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut sd,
+            )
+        };
+        if rc != 0 {
+            return format!("<GetNamedSecurityInfoW failed rc={rc}>");
+        }
+        let mut out: *mut u16 = std::ptr::null_mut();
+        let mut len: u32 = 0;
+        let ok = unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                sd,
+                1, // SDDL_REVISION_1
+                DACL_SECURITY_INFORMATION,
+                &mut out,
+                &mut len,
+            )
+        };
+        let text = if ok == 0 {
+            format!("<convert failed {:?}>", std::io::Error::last_os_error())
+        } else {
+            let slice = unsafe { std::slice::from_raw_parts(out, len as usize) };
+            String::from_utf16_lossy(slice)
+        };
+        unsafe {
+            if !out.is_null() {
+                LocalFree(out.cast());
+            }
+            LocalFree(sd.cast());
+        }
+        text
+    }
+
+    /// A SID string as the account name Windows knows it by, so capability SIDs read as
+    /// `APPLICATION PACKAGE AUTHORITY\…` rather than as digits.
+    fn resolve_sid(sid_str: &str) -> String {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+        use windows_sys::Win32::Security::LookupAccountSidW;
+        let wide: Vec<u16> = sid_str.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut sid = std::ptr::null_mut();
+        if unsafe { ConvertStringSidToSidW(wide.as_ptr(), &mut sid) } == 0 {
+            return "<not a valid SID>".to_string();
+        }
+        let mut name = [0u16; 256];
+        let mut domain = [0u16; 256];
+        let mut nlen = name.len() as u32;
+        let mut dlen = domain.len() as u32;
+        let mut kind = 0i32;
+        let ok = unsafe {
+            LookupAccountSidW(
+                std::ptr::null(),
+                sid,
+                name.as_mut_ptr(),
+                &mut nlen,
+                domain.as_mut_ptr(),
+                &mut dlen,
+                &mut kind,
+            )
+        };
+        let text = if ok == 0 {
+            format!("<unresolved {:?}>", std::io::Error::last_os_error())
+        } else {
+            format!(
+                "{}\\{}",
+                String::from_utf16_lossy(&domain[..dlen as usize]),
+                String::from_utf16_lossy(&name[..nlen as usize])
+            )
+        };
+        unsafe { LocalFree(sid.cast()) };
+        text
     }
 
     /// THE MATRIX. Every cell in three arms. The two things that must hold for the run to

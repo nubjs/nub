@@ -80,6 +80,7 @@ jobs:
           }
           [ -s probe.log ] || { echo "MISS the probe produced no output at all"; fail=1; }
           need "PROBE windows pipe shapes under AppContainer"
+          need "fact:sddl[\\\\.\\pipe\\]="
           # The liveness control for each arm, and the cell-validity control.
           for a in jail-net-deny jail-net-open jail-loose unconfined; do
             need "prop:anon-pipe-$a=PASS"
