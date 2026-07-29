@@ -196,20 +196,48 @@ mod tests {
         g
     }
 
-    /// The #578 contract, at the layer that turns the graph shape into the
-    /// user-visible symptom. The pnpm reader used to leave the canonical
-    /// `is-number@7.0.0` alongside the alias clone while a fresh resolve
-    /// emitted only the clone, so this diff reported a removal on every
-    /// run and `dedupe --check` failed forever on a byte-identical
-    /// lockfile. The reader now sweeps the orphan; both sides agree.
+    /// Parse `yaml` as a pnpm lockfile, so the fixture below exercises the
+    /// real reader rather than a hand-built stand-in — `diff_graphs` never
+    /// reads `alias_of`, so only the reader's own output can demonstrate
+    /// that the orphan sweep happened.
+    fn parse_pnpm(yaml: &str) -> LockfileGraph {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pnpm-lock.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        aube_lockfile::pnpm::parse(&path).unwrap()
+    }
+
+    /// The #578 contract, end to end from the reader: an `npm:` alias whose
+    /// target nothing else reaches must parse to the same key set a fresh
+    /// resolve emits, so `dedupe` sees no change. The reader used to leave
+    /// the canonical `is-number@7.0.0` beside the alias clone, which made
+    /// this diff report a removal on every run and `--check` fail forever
+    /// on a byte-identical lockfile. Fails if that sweep regresses.
     #[test]
-    fn npm_alias_parses_and_resolves_to_the_same_key_set() {
-        let parsed = graph(vec![pkg(
-            "number-alias@7.0.0",
-            "number-alias",
-            "7.0.0",
-            Some("is-number"),
-        )]);
+    fn an_orphan_alias_target_is_swept_so_dedupe_sees_no_change() {
+        let parsed = parse_pnpm(
+            r#"
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      number-alias:
+        specifier: npm:is-number@7.0.0
+        version: is-number@7.0.0
+
+packages:
+
+  is-number@7.0.0:
+    resolution: {integrity: sha512-fake}
+
+snapshots:
+
+  is-number@7.0.0: {}
+"#,
+        );
+        // What the resolver emits for this manifest: the alias key only.
         let fresh = graph(vec![pkg(
             "number-alias@7.0.0",
             "number-alias",
@@ -219,7 +247,8 @@ mod tests {
         assert_eq!(
             diff_graphs(Some(&parsed), &fresh),
             (Vec::new(), Vec::new()),
-            "an aliased dep must not read as a change on a re-resolve"
+            "parsed keys {:?} must match a fresh resolve",
+            parsed.packages.keys().collect::<Vec<_>>()
         );
     }
 
@@ -248,25 +277,60 @@ mod tests {
         assert!(added.is_empty());
     }
 
-    /// An alias target a second consumer also depends on is present in
-    /// BOTH graphs, so it stays out of the diff — the case that makes the
-    /// reader's sweep conditional rather than unconditional.
+    /// The counterpart the sweep must NOT touch: `wrap-ansi` depends on
+    /// `string-width@4.2.3` directly, so the canonical entry is live even
+    /// though `string-width-cjs` also aliases it (the real `@isaacs/cliui`
+    /// shape). An over-eager sweep drops it here and the diff reports an
+    /// addition the lockfile never makes.
     #[test]
-    fn a_shared_alias_target_is_not_a_change() {
-        let shared = || {
-            vec![
-                pkg("string-width@4.2.3", "string-width", "4.2.3", None),
-                pkg(
-                    "string-width-cjs@4.2.3",
-                    "string-width-cjs",
-                    "4.2.3",
-                    Some("string-width"),
-                ),
-            ]
-        };
+    fn an_alias_target_a_second_consumer_needs_survives_the_sweep() {
+        let parsed = parse_pnpm(
+            r#"
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      string-width-cjs:
+        specifier: npm:string-width@^4.2.0
+        version: string-width@4.2.3
+      wrap-ansi:
+        specifier: ^7.0.0
+        version: wrap-ansi@7.0.0
+
+packages:
+
+  string-width@4.2.3:
+    resolution: {integrity: sha512-fake1}
+
+  wrap-ansi@7.0.0:
+    resolution: {integrity: sha512-fake2}
+
+snapshots:
+
+  string-width@4.2.3: {}
+
+  wrap-ansi@7.0.0:
+    dependencies:
+      string-width: 4.2.3
+"#,
+        );
+        let fresh = graph(vec![
+            pkg("string-width@4.2.3", "string-width", "4.2.3", None),
+            pkg(
+                "string-width-cjs@4.2.3",
+                "string-width-cjs",
+                "4.2.3",
+                Some("string-width"),
+            ),
+            pkg("wrap-ansi@7.0.0", "wrap-ansi", "7.0.0", None),
+        ]);
         assert_eq!(
-            diff_graphs(Some(&graph(shared())), &graph(shared())),
-            (Vec::new(), Vec::new())
+            diff_graphs(Some(&parsed), &fresh),
+            (Vec::new(), Vec::new()),
+            "parsed keys {:?} must match a fresh resolve",
+            parsed.packages.keys().collect::<Vec<_>>()
         );
     }
 }
