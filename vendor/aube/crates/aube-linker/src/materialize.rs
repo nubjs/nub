@@ -661,6 +661,15 @@ impl Linker {
                 .map_err(|msg| Error::Patch(patch_key.clone(), msg))?;
         }
 
+        // Every file this package will ever have now exists, so this is
+        // the earliest point a quarantine strip can be complete — and it
+        // still precedes the caller's atomic rename into the virtual
+        // store, so nothing observes a quarantined file at its final
+        // path. Covers the whole-dir `clonefile` branch too: that fills
+        // the package without entering the per-file loop, but the index
+        // still names every file it produced.
+        crate::quarantine::strip_from_native_binaries(&pkg_nm_dir, index);
+
         // Create symlinks for transitive dependencies. Parents for
         // scoped packages were added to the `parents` batch above, so
         // we no longer need a per-symlink mkdirp. We also skip the

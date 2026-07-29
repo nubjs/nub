@@ -849,6 +849,11 @@ fn materialize_hoisted_node(
             .map_err(|msg| Error::Patch(patch_key.clone(), msg))?;
     }
 
+    // Same seam as the isolated linker: after the last step that can
+    // create a file under `pkg_dir`, and covering this layout's own
+    // whole-dir `clonefile` branch, which skips the per-file loop.
+    crate::quarantine::strip_from_native_binaries(&pkg_dir, index);
+
     stats.packages_linked += 1;
     Ok(NodeOutcome {
         stats,

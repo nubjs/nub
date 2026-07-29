@@ -18,6 +18,7 @@ mod link;
 mod materialize;
 mod patches;
 mod pool;
+mod quarantine;
 mod sweep;
 pub mod sys;
 
