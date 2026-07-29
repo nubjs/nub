@@ -195,6 +195,13 @@ harness = false
 name = "windows_pipe_shapes"
 harness = false
 
+# The acceptance measurement for both jail repairs (ancestor reachability + the child_process
+# stdio shim), with the unrepaired control arm in the same run. Self-reexecs as the jailed
+# child, which runs Node under an external bound.
+[[test]]
+name = "windows_jail_repairs"
+harness = false
+
 # OPT-IN ONLY. This probe is not a unit test: on an unprovisioned machine it exits non-zero
 # by design, and when run elevated it CREATES a local account, a local group, four persistent
 # WFP filters and a Winlogon registry value. Left ungated, bare `cargo test` on a
