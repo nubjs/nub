@@ -809,6 +809,7 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   // the two tiers in agreement. The check is on Node's ANSWER rather than a guess about
   // the request, so nothing is re-resolved unless our own keys actually changed the
   // outcome; the retry then reports whatever Node itself would, error included.
+  //
   // Every extension nub adds to `Module._extensions` that Node does not have of its
   // own. `.cjs` belongs here with the TypeScript family: Node registers only `.js`,
   // `.json` and `.node`, so nub's `.cjs` handler likewise widens LOAD_AS_FILE and

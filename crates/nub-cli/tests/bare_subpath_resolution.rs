@@ -671,6 +671,54 @@ try {
     );
 }
 
+/// The same directory rule on the RELATIVE branch, which had it too: `./sub/` names
+/// a directory, so it must never be answered with a sibling `./sub.ts`. An interior
+/// dot-segment is a different matter and must still resolve — Node normalizes
+/// `./d/./x` and loads it — which is why only the LAST segment decides.
+#[test]
+fn a_trailing_slash_means_the_directory_for_relative_specifiers_too() {
+    let dir = fixture("relative-trailing-slash");
+    write(&dir.join("sub.ts"), r#"export const w = "SIBLING-FILE";"#);
+    write(
+        &dir.join("sub/index.ts"),
+        r#"export const w = "DIR-INDEX";"#,
+    );
+    write(&dir.join("d/x.ts"), r#"export const w = "INTERIOR-OK";"#);
+    write(
+        &dir.join("entry.ts"),
+        r#"const out: string[] = [];
+try {
+  const m = await import("./sub/");
+  out.push("dir:" + m.w);
+} catch (e) {
+  out.push("dir:" + (e as { code?: string }).code);
+}
+const i = await import("./d/./x");
+out.push("interior:" + i.w);
+const p = await import("./sub");
+out.push("plain:" + p.w);
+console.log(out.join(" "));
+"#,
+    );
+    let (stdout, stderr) = run(&dir, "entry.ts");
+    assert!(
+        !stdout.contains("dir:SIBLING-FILE"),
+        "a trailing-slash relative specifier resolved a sibling file: {stdout} / {stderr}"
+    );
+    assert!(
+        stdout.contains("dir:ERR_UNSUPPORTED_DIR_IMPORT"),
+        "expected Node's own directory-import error: {stdout} / {stderr}"
+    );
+    assert!(
+        stdout.contains("interior:INTERIOR-OK"),
+        "an interior dot-segment must still resolve: {stdout} / {stderr}"
+    );
+    assert!(
+        stdout.contains("plain:SIBLING-FILE"),
+        "an ordinary relative TS import must be untouched: {stdout} / {stderr}"
+    );
+}
+
 /// THE ENCAPSULATION GUARD. A package that declares `exports` owns its subpath
 /// map; probing must never reach a path it withheld. Without this, #562's fix
 /// would be a sandbox escape out of every `exports` map on disk.

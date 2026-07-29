@@ -80,7 +80,7 @@ pub fn resolve_ts(
 
     // Extensionless / emit-swap branch — only when the importer is itself a TS
     // file and the specifier is relative.
-    if is_ts_parent(&parent_ext) && is_relative {
+    if is_ts_parent(&parent_ext) && is_relative && !names_a_directory(&specifier) {
         let target = path_join_resolve(&parent_dir, &specifier);
         if let Some(resolved) = try_resolve_file(&target, true, probe_order(&parent_ext)) {
             return Some(resolved);
@@ -165,16 +165,17 @@ fn resolve_bare_subpath(
         return None;
     }
 
-    // Node realpaths a resolved module by default, and nub's load hooks REFUSE to
-    // transpile anything under a `node_modules/` path. A workspace package symlinked
-    // into node_modules (the `main: ./index.ts` monorepo shape) is only loadable once
-    // that hop is resolved away.
     // `allow_dir_main: false`. Directory INDEX probing is deliberate — tsx resolves
     // `pkg/dir` to `dir/index.js` and that is the parity target — but honoring a
     // nested directory's own `package.json` `main` goes beyond both tsx and Node's
     // ESM resolver, and CJS does not need it: declining here falls through to Node,
     // whose LOAD_AS_DIRECTORY already reads that `main`.
     let candidate = try_resolve_file(&target, false, &NODE_MODULES_PROBE)?;
+
+    // Node realpaths a resolved module by default, and nub's load hooks REFUSE to
+    // transpile anything under a `node_modules/` path. A workspace package symlinked
+    // into node_modules (the `main: ./index.ts` monorepo shape) is only loadable once
+    // that hop is resolved away.
     let resolved = real_path(&candidate);
 
     // A TS hit STILL under node_modules after the symlink hop is unshipped source the
@@ -202,6 +203,25 @@ fn resolve_bare_subpath(
     } else {
         resolved
     })
+}
+
+/// Does this specifier NAME A DIRECTORY rather than a file — a trailing separator
+/// (`./sub/`) or a trailing `.` (`./sub/.`)?
+///
+/// Node treats that as decisive: its CJS resolver reads the trailing slash off the
+/// RAW request and goes straight to LOAD_AS_DIRECTORY, skipping file probing
+/// entirely, and its ESM resolver carries it through URL resolution to
+/// `ERR_UNSUPPORTED_DIR_IMPORT`. Lexical normalization erases it — `Path::components`
+/// yields nothing for a trailing separator — so probing would answer `./sub/` with a
+/// sibling `./sub.ts` and resolve `./lone/` where Node reports it missing, both
+/// silently.
+///
+/// Only the LAST segment is consulted, which is what separates this from the
+/// stricter rule in [`resolve_bare_subpath`]. An interior dot-segment is legitimate
+/// in a relative specifier — Node normalizes `./sub/./x` and resolves it — whereas a
+/// package subpath carrying one is Node's to answer.
+fn names_a_directory(specifier: &str) -> bool {
+    matches!(specifier.rsplit(['/', '\\']).next(), Some("") | Some("."))
 }
 
 /// Probe order for a bare package subpath — JS FIRST, and deliberately NOT
