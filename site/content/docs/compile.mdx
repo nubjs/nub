@@ -309,6 +309,9 @@ Addons are named as they are embedded:
 
 ```console
 $ nub compile app.ts
+Bundling app.ts …
+Native addons: nice.darwin-arm64.node
+Compiled app — embed shape, Node 26.5.0, darwin-arm64, 31.9 MB
 ```
 
 ### Cross-compiling
@@ -317,6 +320,16 @@ An addon is machine code for one platform, so `--platform` needs that platform's
 
 ```console
 $ nub compile app.ts --platform linux-x64
+Bundling app.ts …
+Error: the bundler failed:
+  app.ts:1:19
+    Could not load node_modules/local-addon/addon.node (imported by app.ts) - plugin `nub:native-addons` threw an error.
+
+this native addon is built for macOS, but the binary targets linux-x64: node_modules/local-addon/addon.node
+  A native addon is machine code for one platform, and a compiled binary loads it
+  from a real file at run time — there is no later step that could translate it.
+  Install this dependency for the target (its platform package) and compile again,
+  or drop --platform to build for this machine.
 ```
 
 Installing the target's platform package is enough to fix it. Package managers skip a dependency whose `os` or `cpu` does not match the machine installing it, so a cross-compile usually has to ask for that package by name.

@@ -256,8 +256,15 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
     // improve that from the hook — Rolldown replaces a plugin error with its own
     // `UNLOADABLE_DEPENDENCY`. So the hint is attached here, to the failure the
     // user actually sees.
+    // A rejected native addon is the same shape and needs the same treatment:
+    // Rolldown reports only "plugin `nub:native-addons` threw an error", which
+    // names neither the platform mismatch nor what to do about it (measured
+    // 2026-07-30 — the message really is dropped, not merely reformatted).
     let output = output.map_err(|e| {
-        let hints = files_plugin.case_hints();
+        let mut hints = files_plugin.case_hints();
+        if let Some(plugin) = &native_plugin {
+            hints.extend(plugin.rejections());
+        }
         if hints.is_empty() {
             e
         } else {

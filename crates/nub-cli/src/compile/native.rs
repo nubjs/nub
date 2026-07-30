@@ -84,6 +84,15 @@ pub struct NativeAddons {
     /// summary. Keyed by PAYLOAD name because that is what survives to the far
     /// side of tree-shaking; see [`Self::survivors`].
     embedded: Mutex<BTreeMap<String, String>>,
+    /// Why an addon was refused, for `bundle` to attach to the failure.
+    ///
+    /// Kept here rather than carried by the hook's error because Rolldown
+    /// replaces a plugin error with its own "plugin `X` threw an error" and DROPS
+    /// the message — so a refusal reported only through the hook fails the build
+    /// while telling the user nothing about which platform, or what to do
+    /// (measured 2026-07-30). Same problem and same fix as
+    /// `FilePlugin::case_hints`.
+    rejections: Mutex<BTreeSet<String>>,
 }
 
 impl NativeAddons {
@@ -93,7 +102,16 @@ impl NativeAddons {
             collected,
             user_mapped,
             embedded: Mutex::new(BTreeMap::new()),
+            rejections: Mutex::new(BTreeSet::new()),
         }
+    }
+
+    /// What to add to a failed bundle's error, if an addon was refused.
+    pub fn rejections(&self) -> Vec<String> {
+        self.rejections
+            .lock()
+            .map(|r| r.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// The addons that actually reached the payload, named as the user knows them.
@@ -149,7 +167,12 @@ impl Plugin for NativeAddons {
             let path = Path::new(&id);
             let bytes = std::fs::read(path)
                 .map_err(|e| anyhow::anyhow!("reading the native addon {id}: {e}"))?;
-            check_target(&bytes, path, &self.target)?;
+            if let Err(why) = check_target(&bytes, path, &self.target) {
+                if let Ok(mut seen) = self.rejections.lock() {
+                    seen.insert(format!("{why:#}"));
+                }
+                return Err(why);
+            }
             let payload = self.collected.add(path, bytes)?;
             if let Some(name) = path.file_name().and_then(|n| n.to_str())
                 && let Ok(mut seen) = self.embedded.lock()
