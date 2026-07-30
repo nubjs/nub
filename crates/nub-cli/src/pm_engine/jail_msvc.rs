@@ -282,12 +282,9 @@ fn accept(
     // `findVisualStudio2019OrNewerFromSpecifiedLocation` supports are accepted — 15/2017 is
     // reachable only below Node 22 and its MSBuild layout differs, so it declines to the
     // pre-existing behaviour instead of stamping a shape this has never measured.
-    let year = match major_minor(&vscmd_ver)? {
-        (16, _) => 2019,
-        (17, _) => 2022,
-        (18, _) => 2026,
-        _ => return None,
-    };
+    if !matches!(major_minor(&vscmd_ver)?.0, 16..=18) {
+        return None;
+    }
 
     // `findVSFromSpecifiedLocation`: `/^(\d+)\.(\d+)\.(\d+)\..*/` on `WindowsSDKVersion` is the
     // ONLY source of a `Windows10SDK.<n>.Desktop` package, and `getSDK` returning null makes
@@ -299,20 +296,26 @@ fn accept(
     // node-gyp reads the VS root as `path.win32.resolve(VCINSTALLDIR, '..')`.
     let root = windows_parent(&vc_install_dir)?;
 
-    // `getMSBuild`: for 2022 and 2026 both branches fall through to an `existsSync`, so a
-    // stamp whose MSBuild is missing OR UNREADABLE FROM INSIDE THE JAIL yields `msBuild: null`
-    // and the installation is skipped. 2019 returns its path unchecked, but a stamp naming an
-    // absent MSBuild only defers the failure to the build, so it is checked the same way.
-    let msbuild_present = [
-        r"MSBuild\Current\Bin\MSBuild.exe",
-        r"MSBuild\Current\Bin\arm64\MSBuild.exe",
-    ]
-    .iter()
-    .any(|rel| exists(&PathBuf::from(format!(r"{root}\{rel}"))));
-    if !msbuild_present {
+    // `getMSBuild`: for 2022 and 2026 both branches fall through to an `existsSync`, so a stamp
+    // whose MSBuild is missing OR UNREADABLE FROM INSIDE THE JAIL yields `msBuild: null` and the
+    // installation is skipped. 2019 returns its path unchecked, but a stamp naming an absent
+    // MSBuild only defers the failure to the build, so it is checked the same way.
+    //
+    // The arm64 spelling is a candidate ONLY on arm64, which is node-gyp's rule and not an
+    // accident of ordering: on x64 it consults the plain path alone, so accepting the arm64 one
+    // there would stamp a trio node-gyp then rejects. It reads `process.arch` of the confined
+    // Node while this reads nub's own — the same proxy [`VCVARS_ARCH`] makes, and wrong only on
+    // a cross-architecture pairing that the interpreter staging does not produce.
+    let mut candidates = vec![r"MSBuild\Current\Bin\MSBuild.exe"];
+    if cfg!(target_arch = "aarch64") {
+        candidates.insert(0, r"MSBuild\Current\Bin\arm64\MSBuild.exe");
+    }
+    if !candidates
+        .iter()
+        .any(|rel| exists(&PathBuf::from(format!(r"{root}\{rel}"))))
+    {
         return None;
     }
-    debug_assert!(matches!(year, 2019 | 2022 | 2026));
 
     let mut reads = vec![PathBuf::from(&root)];
     // The SDK lives OUTSIDE the Visual Studio installation, so its root is a second grant.
@@ -417,16 +420,25 @@ mod tests {
     #[test]
     fn declines_when_node_gyp_would_not_find_msbuild() {
         assert_eq!(accept(&vs2022(), &|_| false), None);
+
         let seen = std::cell::RefCell::new(Vec::new());
         accept(&vs2022(), &|p| {
-            seen.borrow_mut().push(p.to_path_buf());
+            seen.borrow_mut().push(p.to_string_lossy().into_owned());
             false
         });
+        let probed = seen.borrow();
+        let root =
+            "C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\MSBuild\\Current\\Bin";
+        assert!(
+            probed.contains(&format!("{root}\\MSBuild.exe")),
+            "the plain spelling is node-gyp's only candidate on x64: {probed:?}"
+        );
+        // node-gyp consults the arm64 spelling only when `process.arch` is arm64. Probing it on
+        // x64 would stamp a trio node-gyp then rejects, so the asymmetry is the assertion.
         assert_eq!(
-            seen.borrow()[0],
-            PathBuf::from(
-                "C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\MSBuild\\Current\\Bin\\MSBuild.exe"
-            )
+            probed.contains(&format!("{root}\\arm64\\MSBuild.exe")),
+            cfg!(target_arch = "aarch64"),
+            "{probed:?}"
         );
     }
 
