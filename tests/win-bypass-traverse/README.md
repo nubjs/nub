@@ -2,6 +2,8 @@
 
 Settles one question with a real AppContainer launch: **does bypass-traverse let a LowBox child read deep into `%USERPROFILE%` when only a directory *beneath* the profile carries an ACE, with `C:\` and `C:\Users` left untouched?**
 
+**Answer: yes.** Findings, numbers and run ids in [`results.md`](results.md).
+
 ## Why it needed measuring
 
 nub's Windows build jail has two candidate unprivileged mechanisms, and this decides between them.
@@ -23,7 +25,7 @@ An AppContainer cannot be launched over OpenSSH. sshd lands you in services sess
 
 `probe.ps1` mirrors `crates/nub-sandbox/src/backend/windows.rs`'s `run()` step for step — `CreateAppContainerProfile` for a per-run AC SID, inheritable `GRANT_ACCESS` ACEs on the allowed leaves, then `CreateProcessW` with `EXTENDED_STARTUPINFO_PRESENT` and `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` at capability count **zero**, so `internetClient` is withheld and egress is denied by construction. It writes **no** ACE, label, or DACL of any kind on `C:\` or `C:\Users`; both are read with `icacls` and reported as facts, and otherwise left exactly as the image ships them.
 
-Six launches, each one variable from its neighbour:
+Eight launches, each one variable from its neighbour:
 
 | arm | AppContainer | grants | what it isolates |
 | --- | --- | --- | --- |
@@ -33,6 +35,8 @@ Six launches, each one variable from its neighbour:
 | `ac-data-ungranted` | yes | `runtime` only | **control** — the data grant withheld. The deep read must FAIL. |
 | `ac-cwd-deep` | yes | leaf grants | launch-time cwd five components below the last grant |
 | `ac-entry-deep` | yes | leaf grants | `node <deep file>` as the entry point, so `resolveMainPath`'s realpath runs before user code |
+| `ac-noflags` | yes | leaf grants | **control** — the two realpath-skipping flags withheld. The defect must reproduce here, or the flagged arms prove nothing about the flags. |
+| `ac-derive-only` | yes | leaf grants | the SID hash-derived with no profile registered, so the zero-setup answer is structural rather than a property of the teardown |
 
 ## The controls, and why a result without them is worthless
 
