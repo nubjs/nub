@@ -235,6 +235,27 @@ run sudo chroot "$JAIL" /bin/sh -c '
 '
 G=$?; note "node-gyp in jail: rc=$G"
 
+sub "10b DIRECT clang compile — the ABI criterion without node-gyp in the way"
+# node-gyp's python probe reads back sys.executable, which resolves EMPTY inside the chroot,
+# so it never reaches the compiler. That is an integration detail; the criterion that matters
+# is whether the jail's toolchain emits a host-ABI-correct loadable addon. Drive clang
+# directly to answer it.
+run sudo chroot "$JAIL" /bin/sh -c '
+  export TMPDIR=/tmp PATH=/usr/bin:/bin
+  /usr/bin/python3 -c "import sys; print(\"sys.executable=[\" + sys.executable + \"]\")"
+  cd /work/addon
+  /usr/bin/clang -shared -fPIC -o hello_direct.node hello.c \
+    -I/work/nodedir/include/node -undefined dynamic_lookup -arch arm64 2>&1 | tail -5
+  ls -l hello_direct.node
+'
+D=$?; note "direct clang compile in jail: rc=$D"
+run sudo file "$JAIL/work/addon/hello_direct.node"
+run sudo chroot "$JAIL" /opt/node/bin/node -e 'console.log("in-jail load:", require("/work/addon/hello_direct.node").hello())'
+note "in-jail load of direct build: rc=$?"
+# THE criterion: the jail-built artifact must load on the UNJAILED host.
+run node -e "console.log('HOST load of jail-built addon:', require('$JAIL/work/addon/hello_direct.node').hello())"
+note "HOST load of direct build: rc=$?"
+
 sub "the artifact"
 run sudo file "$JAIL/work/addon/build/Release/hello.node"
 run sudo chroot "$JAIL" /opt/node/bin/node -e 'console.log("in-jail load:", require("/work/addon/build/Release/hello.node").hello())'
