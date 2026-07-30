@@ -271,7 +271,7 @@ fn label_plan(
                             .get(dep.as_str())
                             .map(|dep_version| Reason::ImporterOf(format!("{dep}@{dep_version}")))
                     })
-                    .unwrap_or(Reason::Configured)
+                    .unwrap_or(Reason::Closure)
             };
             Materialized {
                 name: (*name).to_string(),

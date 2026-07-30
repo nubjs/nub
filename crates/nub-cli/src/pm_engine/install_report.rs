@@ -658,6 +658,15 @@ pub(super) enum Reason {
     /// Imports a package that had to move, so it moves too — otherwise it would
     /// keep resolving the store-resident copy and split the singleton.
     ImporterOf(String),
+    /// In the closure for a reason this walk could not name — it matched no
+    /// seed, and no declared dependency of it was found in the plan.
+    ///
+    /// Its own variant rather than falling back to [`Reason::Configured`],
+    /// which is the shape this had and which was simply false: it told the
+    /// reader config named a package config never mentions, and that is a claim
+    /// they can go check. Vague and true beats specific and wrong on a line
+    /// whose entire job is explaining why something moved.
+    Closure,
 }
 
 impl Reason {
@@ -669,6 +678,7 @@ impl Reason {
             Reason::LegacyVite => "vite below 8.1".to_string(),
             Reason::Configured => "named by config".to_string(),
             Reason::ImporterOf(spec) => format!("imports {spec}"),
+            Reason::Closure => "pulled in by the materialized set".to_string(),
         }
     }
 }
@@ -1344,6 +1354,59 @@ mod tests {
     fn empty_digest_renders_nothing() {
         assert!(digest_rows(&[], false).is_empty());
         assert!(digest_rows(&[], true).is_empty());
+    }
+
+    /// A package in the closure whose edge could not be located must not claim
+    /// config named it. `Reason::Configured` was the fallback for that case, so
+    /// the digest told the reader to go look in `install.linker.eject` for a
+    /// package that is not there — a specific, checkable, wrong answer on the
+    /// one line whose whole job is saying why something moved.
+    #[test]
+    fn an_unattributed_closure_member_does_not_blame_config() {
+        assert_eq!(
+            Reason::Closure.render(),
+            "pulled in by the materialized set"
+        );
+        assert_ne!(
+            Reason::Closure.render(),
+            Reason::Configured.render(),
+            "the two must stay distinguishable — collapsing them is the defect"
+        );
+    }
+
+    /// The plan is built from hash sets, so `record_plan` sorts before storing
+    /// or an install's own output reorders between identical runs. The digest
+    /// tests all call `digest_rows` on already-ordered input and would not
+    /// notice the sort disappearing; this goes through the recording path.
+    #[test]
+    fn a_recorded_plan_is_ordered_regardless_of_insertion() {
+        let _guard = crate::pm_engine::ENGINE_GLOBAL_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let entry = |name: &str, version: &str| Materialized {
+            name: name.to_string(),
+            version: version.to_string(),
+            reason: Reason::Closure,
+        };
+        record_plan(vec![
+            entry("zod", "3.23.8"),
+            entry("next", "15.0.0"),
+            entry("next", "14.2.0"),
+            entry("acorn", "8.12.1"),
+        ]);
+
+        let ordered: Vec<_> = recorded_plan()
+            .into_iter()
+            .map(|m| format!("{}@{}", m.name, m.version))
+            .collect();
+        assert_eq!(
+            ordered,
+            ["acorn@8.12.1", "next@14.2.0", "next@15.0.0", "zod@3.23.8"],
+            "sorted by name then version, not by insertion"
+        );
+
+        record_plan(Vec::new());
     }
 
     /// Provenance names the surface the reader can act on: the `nub.jsonc` field
