@@ -874,6 +874,7 @@ name = "nub-launcher"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "dirs-next",
  "libc",
  "libsui",
  "nub-core",

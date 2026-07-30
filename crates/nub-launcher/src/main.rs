@@ -96,26 +96,34 @@ fn launch(view: &PayloadView<'_>) -> Result<ExitStatus> {
     let base = cache::resolve()?;
     let notice = FirstRun::new(view.manifest.install_message.as_deref());
 
-    let node_path = acquire_node(view, &base, &notice)?;
+    let (node_path, version, origin) = acquire_node(view, &base, &notice)?;
     let app_dir = ensure_app(view, &base)?;
     // Hand the terminal back BEFORE anything the app might print — the box lives
     // on the alternate screen, so this restores the user's scrollback intact.
     notice.finish();
     let entry = app_dir.join(&view.manifest.entry);
 
-    let version: NodeVersion = view
-        .manifest
-        .node_version
-        .parse()
-        .unwrap_or_else(|_| NodeVersion::new(22, 15, 0));
-
     let user_args: Vec<String> = std::env::args().skip(1).collect();
     let node_options = std::env::var("NODE_OPTIONS").ok();
-    // Pure version-banded flags (source-maps, disable-warning, experimental
-    // unflags). `None` accepted-flag set = version-band behavior without the
-    // extra allowed-flags probe spawn; safe for a known embedded/provisioned Node.
-    let inject =
-        flags::compute_inject_flags(version, &user_args, node_options.as_deref(), false, None);
+    // A DISCOVERED Node is intersected with what the binary actually accepts; a
+    // MANAGED one takes the version band alone. The probe is what stops an
+    // open-ended `Unflag [lo, ∞)` band from injecting a flag Node has since
+    // hard-removed (`--experimental-permission` died at 24.0) and aborting startup
+    // — and it is also the backstop for a version inferred from a directory name
+    // that lies. Skipping it for a Node nub embedded or just provisioned keeps the
+    // common path at zero extra spawns; `accepted_env_flags` caches per
+    // (path, mtime), so even the discovered path pays the probe once.
+    let accepted = match origin {
+        NodeOrigin::Managed => None,
+        NodeOrigin::Discovered => discovery::accepted_env_flags(&node_path),
+    };
+    let inject = flags::compute_inject_flags(
+        version,
+        &user_args,
+        node_options.as_deref(),
+        false,
+        accepted.as_ref(),
+    );
 
     let mut cmd = Command::new(node_path.as_os_str());
     // argv0 fidelity: process.argv0 / process.title report "node" (execPath still
@@ -175,9 +183,40 @@ fn probe() -> i32 {
 
 // ---- Node acquisition ---------------------------------------------------------
 
-fn acquire_node(view: &PayloadView<'_>, base: &Path, notice: &FirstRun) -> Result<PathBuf> {
+/// How much nub knows about the Node it is about to spawn, which decides whether
+/// its accepted-flag set has to be probed before injecting a version band.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum NodeOrigin {
+    /// nub shipped this binary or just installed it at a version it chose, so the
+    /// version is exact and the band alone is sound.
+    Managed,
+    /// An arbitrary Node found on the host. Its version was inferred from a
+    /// directory name or a `--version` call, and which experimental flags it still
+    /// accepts is not predictable from that version.
+    Discovered,
+}
+
+/// The Node to run AND its own concrete version — the version the flag injection
+/// must be keyed to. For `smol` the manifest carries only the acceptance FLOOR, so
+/// keying off it would hand a discovered Node 26 the 22.x flag band: every flag
+/// added since 22 is withheld (`--experimental-ffi`, `--experimental-vfs`, …) and
+/// any flag Node has since REMOVED is injected, which is a startup abort. Embed is
+/// the one case where the manifest is the truth, because it bakes the exact binary.
+fn acquire_node(
+    view: &PayloadView<'_>,
+    base: &Path,
+    notice: &FirstRun,
+) -> Result<(PathBuf, NodeVersion, NodeOrigin)> {
     match view.manifest.shape {
-        Shape::Embed => acquire_embedded_node(view, base, notice),
+        Shape::Embed => {
+            let path = acquire_embedded_node(view, base, notice)?;
+            let version = view
+                .manifest
+                .node_version
+                .parse()
+                .unwrap_or_else(|_| NodeVersion::new(22, 15, 0));
+            Ok((path, version, NodeOrigin::Managed))
+        }
         Shape::Smol => acquire_smol_node(&view.manifest, base, notice),
     }
 }
@@ -211,7 +250,7 @@ fn acquire_embedded_node(
     // path; reusing it would spawn a Node the host's loader can't resolve
     // (`libstdc++.so.6` relocation errors). Gate the reuse on libc compatibility.
     for store in node_stores(base) {
-        let official = node_in_version_dir(&store.join(&m.node_version));
+        let official = node_in_version_dir(&store.root.join(&m.node_version));
         if official.is_file() && store_node_matches_target(&official, &m.triple) {
             return Ok(official);
         }
@@ -251,11 +290,15 @@ fn acquire_embedded_node(
     Ok(node_bin)
 }
 
-/// `smol` shape discovery + provisioning. Order: nub's own Node store → PATH →
-/// shell-out provision. Acceptance rule (orchestrator default): any discovered
-/// Node `>= --target` (regardless of major) qualifies; provision the exact target
-/// only when nothing does.
-fn acquire_smol_node(m: &Manifest, base: &Path, notice: &FirstRun) -> Result<PathBuf> {
+/// `smol` shape discovery + provisioning. Order: nub's own Node store → the known
+/// version-manager layouts → PATH → shell-out provision. Acceptance rule
+/// (orchestrator default): any discovered Node `>= --target` (regardless of major)
+/// qualifies; provision the exact target only when nothing does.
+fn acquire_smol_node(
+    m: &Manifest,
+    base: &Path,
+    notice: &FirstRun,
+) -> Result<(PathBuf, NodeVersion, NodeOrigin)> {
     let target: NodeVersion = m.node_version.parse().map_err(|_| {
         anyhow!(
             "compiled target version '{}' is unparseable",
@@ -263,22 +306,37 @@ fn acquire_smol_node(m: &Manifest, base: &Path, notice: &FirstRun) -> Result<Pat
         )
     })?;
 
-    // 1. nub's Node store — a version dir named by its concrete version.
+    // 1. nub's Node store, then every version manager's install root. nub's store
+    //    is checked first (it is the one nub itself provisioned into), but WITHIN
+    //    the version managers the newest satisfying install wins rather than
+    //    whichever manager happens to sort first.
     for store in node_stores(base) {
-        if let Some(node) = best_store_node(&store, &target) {
-            return Ok(node);
+        if let Some((path, ver)) = best_node_in(&store, &target, &m.triple) {
+            return Ok((path, ver, NodeOrigin::Discovered));
         }
+    }
+    let mut best: Option<(PathBuf, NodeVersion)> = None;
+    for dir in version_manager_dirs() {
+        if let Some(found) = best_node_in(&dir, &target, &m.triple) {
+            if best.as_ref().is_none_or(|(_, b)| found.1 > *b) {
+                best = Some(found);
+            }
+        }
+    }
+    if let Some((path, ver)) = best {
+        return Ok((path, ver, NodeOrigin::Discovered));
     }
 
     // 2. PATH node, if it satisfies the target.
     if let Some((path, ver)) = probe_path_node() {
         if ver >= target {
-            return Ok(path);
+            return Ok((path, ver, NodeOrigin::Discovered));
         }
     }
 
     // 3. Provision the exact target via shell-out.
-    provision_smol_node(&target, base, notice)
+    let path = provision_smol_node(&target, base, notice)?;
+    Ok((path, target, NodeOrigin::Managed))
 }
 
 /// Node stores to READ, nearest first: the probed cache base, then the location
@@ -286,36 +344,186 @@ fn acquire_smol_node(m: &Manifest, base: &Path, notice: &FirstRun) -> Result<Pat
 /// — an explicit `NUB_COMPILE_CACHE_DIR`, or a read-only home on Lambda — and a
 /// Node the CLI installed earlier still counts on a box where only one of the two
 /// is writable now.
-fn node_stores(base: &Path) -> Vec<PathBuf> {
-    let mut out = vec![base.join("node")];
+fn node_stores(base: &Path) -> Vec<NodeDir> {
+    let mut out = vec![NodeDir::plain(base.join("node"))];
     if let Some(store) = discovery::node_store_dir() {
-        if store != out[0] {
-            out.push(store);
+        if store != out[0].root {
+            out.push(NodeDir::plain(store));
         }
     }
     out
 }
 
-/// Scan nub's store (`<cache>/node/<version>/bin/node`) for the newest installed
-/// Node satisfying `target`.
-fn best_store_node(store: &Path, target: &NodeVersion) -> Option<PathBuf> {
-    let mut best: Option<(NodeVersion, PathBuf)> = None;
-    for entry in fs::read_dir(store).ok()?.flatten() {
+/// A directory holding one sub-directory per installed Node. Every layout below
+/// is `<root>/<version>/<inner>/bin/node` — only the root and the interior
+/// segment differ, so one scanner covers nub's own store and every version
+/// manager.
+struct NodeDir {
+    root: PathBuf,
+    /// Between the version dir and the executable dir. Empty everywhere but fnm,
+    /// which nests the unpacked dist under `installation/`.
+    inner: &'static str,
+}
+
+/// One candidate install root: `(base, subpath-to-the-version-dirs, interior)`.
+/// Kept as data so the platform tables below read as layouts rather than control
+/// flow, and a `None` base (env unset, no home) drops out with the missing dirs.
+type Candidate = (Option<PathBuf>, &'static str, &'static str);
+
+impl NodeDir {
+    fn plain(root: PathBuf) -> Self {
+        Self { root, inner: "" }
+    }
+}
+
+/// The install roots of the version managers a developer machine actually has —
+/// nvm, fnm, Volta, asdf, mise. Without these a box with a perfectly good Node
+/// under `~/.nvm/versions/node/` downloads another one on first run, because the
+/// managers put nothing on a non-interactive `PATH` (they are shell-hook /
+/// shim-based, and a compiled binary is routinely launched from a service manager
+/// or a cron shell that sourced no profile).
+///
+/// EVERY candidate root is probed rather than resolved to one winner: the managers
+/// themselves pick a base dir by first-existing (fnm walks XDG data → legacy
+/// `~/.fnm` → the macOS Application Support dir), so a box that has migrated may
+/// still hold installs under the old one.
+///
+/// Layouts were read from each tool's own source, never from memory — fnm
+/// `src/directories.rs` + `src/config.rs`, Volta `crates/volta-layout/src/v4.rs` +
+/// `layout/{unix,windows}.rs`, mise `src/env.rs`, nvm `install.sh`, asdf
+/// `internal/config`. Two traps they encode: nvm's non-env default is
+/// `$XDG_CONFIG_HOME/nvm` (CONFIG, not DATA) when that var is set, and the Windows
+/// bases are the AppData dirs, not `~/.<tool>`.
+///
+/// A version dir whose name is not a full `x.y.z` is skipped, which is what drops
+/// mise's alias dirs (`22`, `lts`, `latest`) without a special case — each is a
+/// duplicate of a concrete install that IS listed.
+fn version_manager_dirs() -> Vec<NodeDir> {
+    // Absolute-only: an empty or relative override would otherwise make every root
+    // below CWD-relative, and scan — then execute a `node` from — whatever tree the
+    // process happens to be sitting in.
+    let env_dir = |key: &str| {
+        std::env::var_os(key)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+    };
+    let home = dirs_next::home_dir();
+    let under_home = |rel: &'static str| home.as_ref().map(|h| h.join(rel));
+
+    #[cfg(not(windows))]
+    let candidates: Vec<Candidate> = {
+        let xdg_data = env_dir("XDG_DATA_HOME").or_else(|| under_home(".local/share"));
+        let under_xdg = |rel: &'static str| xdg_data.as_ref().map(|d| d.join(rel));
+        vec![
+            // nvm — `<base>/versions/node/v<ver>/bin/node`.
+            (env_dir("NVM_DIR"), "versions/node", ""),
+            (
+                env_dir("XDG_CONFIG_HOME").map(|d| d.join("nvm")),
+                "versions/node",
+                "",
+            ),
+            (under_home(".nvm"), "versions/node", ""),
+            // fnm — `<base>/node-versions/v<ver>/installation/bin/node`.
+            (env_dir("FNM_DIR"), "node-versions", "installation"),
+            (under_xdg("fnm"), "node-versions", "installation"),
+            (under_home(".fnm"), "node-versions", "installation"),
+            (
+                under_home("Library/Application Support/fnm"),
+                "node-versions",
+                "installation",
+            ),
+            // Volta — `<base>/tools/image/node/<ver>/bin/node`.
+            (env_dir("VOLTA_HOME"), "tools/image/node", ""),
+            (under_home(".volta"), "tools/image/node", ""),
+            // asdf — `<base>/installs/nodejs/<ver>/bin/node`. The plugin is named
+            // `nodejs`, unlike mise's `node`.
+            (env_dir("ASDF_DATA_DIR"), "installs/nodejs", ""),
+            (under_home(".asdf"), "installs/nodejs", ""),
+            // mise — `<base>/installs/node/<ver>/bin/node`.
+            (env_dir("MISE_DATA_DIR"), "installs/node", ""),
+            (under_xdg("mise"), "installs/node", ""),
+        ]
+    };
+
+    // Windows managers key off the AppData dirs, and nvm-windows drops the
+    // `versions/node` segment entirely — `%NVM_HOME%\v<ver>\node.exe`. asdf and
+    // nvm-sh are Unix-only, so neither appears here.
+    #[cfg(windows)]
+    let candidates: Vec<Candidate> = vec![
+        (env_dir("NVM_HOME"), "", ""),
+        (env_dir("FNM_DIR"), "node-versions", "installation"),
+        (
+            env_dir("APPDATA").map(|d| d.join("fnm")),
+            "node-versions",
+            "installation",
+        ),
+        (env_dir("VOLTA_HOME"), "tools/image/node", ""),
+        (
+            env_dir("LOCALAPPDATA").map(|d| d.join("Volta")),
+            "tools/image/node",
+            "",
+        ),
+        (env_dir("MISE_DATA_DIR"), "installs/node", ""),
+        (
+            env_dir("LOCALAPPDATA").map(|d| d.join("mise")),
+            "installs/node",
+            "",
+        ),
+    ];
+
+    candidates
+        .into_iter()
+        .filter_map(|(base, rel, inner)| {
+            let root = base?.join(rel);
+            root.is_dir().then_some(NodeDir { root, inner })
+        })
+        .collect()
+}
+
+/// Scan one install root for the newest Node satisfying `target` that can also
+/// actually RUN here — the same libc gate the embed-shape dedup applies, which
+/// matters more for a version manager's tree than for nub's own store, since
+/// nothing nub controls put it there.
+fn best_node_in(
+    dir: &NodeDir,
+    target: &NodeVersion,
+    triple: &str,
+) -> Option<(PathBuf, NodeVersion)> {
+    let mut best: Option<(PathBuf, NodeVersion)> = None;
+    for entry in fs::read_dir(&dir.root).ok()?.flatten() {
         let Ok(ver) = entry.file_name().to_string_lossy().parse::<NodeVersion>() else {
             continue;
         };
         if ver < *target {
             continue;
         }
-        let bin = node_in_version_dir(&entry.path());
-        if !bin.is_file() {
+        let mut version_dir = entry.path();
+        if !dir.inner.is_empty() {
+            version_dir = version_dir.join(dir.inner);
+        }
+        let bin = node_in_version_dir(&version_dir);
+        if !is_executable_file(&bin) || !store_node_matches_target(&bin, triple) {
             continue;
         }
-        if best.as_ref().is_none_or(|(b, _)| ver > *b) {
-            best = Some((ver, bin));
+        if best.as_ref().is_none_or(|(_, b)| ver > *b) {
+            best = Some((bin, ver));
         }
     }
-    best.map(|(_, p)| p)
+    best
+}
+
+/// A half-extracted or permission-stripped `bin/node` in a tree nub does not own
+/// must lose to the next candidate rather than be selected and fail at spawn — the
+/// `noexec` remedy only covers paths under the launcher's own cache base, so a
+/// version manager's would surface as a bare "Permission denied".
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// Resolve `node` on PATH to its path + version, or `None` if absent/unparseable.
@@ -840,6 +1048,86 @@ mod tests {
         assert!(msg.contains("embed-Node"), "got: {msg}");
 
         assert!(ensure_smol_provision_supported("tar.xz", &version).is_ok());
+    }
+
+    /// The install-root scanner behind both nub's own store and every version
+    /// manager: newest satisfying install wins, a below-floor or non-`x.y.z` dir
+    /// name is skipped (mise's `22` / `lts` alias dirs), and the fnm layout's
+    /// `installation/` segment is honored.
+    #[test]
+    fn scans_an_install_root_for_the_newest_satisfying_node() {
+        let dir = std::env::temp_dir().join(format!("nub-smol-scan-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let plain = dir.join("plain");
+        let install = |root: &Path, ver: &str, inner: &str| {
+            let bin = node_in_version_dir(&root.join(ver).join(inner));
+            fs::create_dir_all(bin.parent().unwrap()).unwrap();
+            fs::write(&bin, b"#!/bin/sh\n").unwrap();
+            set_executable(&bin).unwrap();
+        };
+        for ver in ["v20.11.0", "v22.15.0", "v24.14.0", "lts", "22"] {
+            install(&plain, ver, "");
+        }
+
+        let target = NodeVersion::new(22, 0, 0);
+        let found = best_node_in(&NodeDir::plain(plain.clone()), &target, "darwin-arm64");
+        assert_eq!(
+            found.map(|(_, v)| v.to_string()).as_deref(),
+            Some("24.14.0"),
+            "the newest install at or above the floor must win"
+        );
+
+        // Nothing satisfies a floor above every install → provisioning territory.
+        let above = NodeVersion::new(26, 0, 0);
+        assert!(
+            best_node_in(&NodeDir::plain(plain), &above, "darwin-arm64").is_none(),
+            "a floor above every install must find nothing rather than a lower Node"
+        );
+
+        // fnm nests the dist under `installation/`; without the segment the same
+        // tree looks empty.
+        let fnm = dir.join("fnm");
+        install(&fnm, "v24.14.0", "installation");
+        let as_fnm = NodeDir {
+            root: fnm.clone(),
+            inner: "installation",
+        };
+        assert!(best_node_in(&as_fnm, &target, "darwin-arm64").is_some());
+        assert!(
+            best_node_in(&NodeDir::plain(fnm), &target, "darwin-arm64").is_none(),
+            "the fnm layout must not resolve without its installation/ segment"
+        );
+
+        // The libc gate runs INSIDE the scan, not just as a standalone predicate: a
+        // shell script where a Linux payload expects an ELF must not be selected and
+        // then fail at spawn. (A darwin triple short-circuits the gate, which is why
+        // the assertions above could not have caught this.)
+        let elf = dir.join("elf");
+        let glibc = node_in_version_dir(&elf.join("24.14.0"));
+        fs::create_dir_all(glibc.parent().unwrap()).unwrap();
+        fs::write(&glibc, elf_with_interp("/lib64/ld-linux-x86-64.so.2")).unwrap();
+        set_executable(&glibc).unwrap();
+        assert!(
+            best_node_in(&NodeDir::plain(elf.clone()), &target, "linux-x64").is_some(),
+            "a glibc Node must be accepted for a glibc target"
+        );
+        assert!(
+            best_node_in(&NodeDir::plain(elf), &target, "linux-x64-musl").is_none(),
+            "a glibc Node must not be selected for a musl target"
+        );
+
+        // A present but non-executable node loses to the next candidate rather than
+        // being chosen and failing at spawn.
+        let stripped = dir.join("stripped");
+        let bin = node_in_version_dir(&stripped.join("24.14.0"));
+        fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        fs::write(&bin, b"#!/bin/sh\n").unwrap();
+        assert!(
+            best_node_in(&NodeDir::plain(stripped), &target, "darwin-arm64").is_none(),
+            "a non-executable bin/node must be skipped"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

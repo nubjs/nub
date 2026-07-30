@@ -423,7 +423,6 @@ mod tests {
             shape: Shape::Smol,
             entry: entry.into(),
             node_version: "24.10.0".into(),
-            node_range: Some(">=20".into()),
             triple: "linux-x64".into(),
             node_sha256: String::new(),
             app_sha256: "aa".into(),
