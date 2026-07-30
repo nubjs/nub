@@ -175,8 +175,8 @@ Embedded files are extracted beside the compiled entry, keeping the layout they 
 
 ```ts
 // src/index.ts, compiled with the command above
-const instructions = readFileSync(join(__dirname, "instructions.md"), "utf8");
-const icons = createReadStream(join(__dirname, "..", "assets", "icons.xml"));
+const instructions = readFileSync(join(import.meta.dirname, "instructions.md"), "utf8");
+const icons = createReadStream(join(import.meta.dirname, "..", "assets", "icons.xml"));
 ```
 
 Because they are real files, every filesystem API works on them — `readFile`, `createReadStream`, `stat`, `readdir`, and a native addon opening the path itself.
@@ -240,7 +240,7 @@ import wasm from "./model.wasm";
 const { instance } = await WebAssembly.instantiate(readFileSync(wasm));
 ```
 
-The path is absolute and computed when the executable runs, so it holds wherever the binary is started from — no joining against `__dirname` first.
+The path is absolute and computed when the executable runs, so it holds wherever the binary is started from — no joining against a base directory first.
 
 Import attributes are accepted and ignored, since the extension already decides. Both of these load the same text:
 
@@ -265,21 +265,21 @@ The specifier is resolved per module, so a helper in a subdirectory names its ow
 Only a literal specifier can be embedded, since the file has to be known while the binary is being built. Anything else is left exactly as written:
 
 ```ts
-new URL("./table.bin", import.meta.url)   // embedded
-new URL(`./${locale}.json`, import.meta.url)   // computed — left alone
-new URL("./cache.db", import.meta.url)    // no such file at build time — left alone
+new URL("./table.bin", import.meta.url)         // embedded
+new URL(`./${locale}.json`, import.meta.url)    // computed — left alone
+new URL("./cache.db", import.meta.url)          // no such file yet — left alone
 ```
 
 The last two are also how a program names a file it *writes*, so neither is an error. Embed the files a computed URL might reach with `--include`, and reach them by a path the entry can see (below).
 
 ## Asset paths resolve from the entry
 
-Compiling bundles every module into one file at the entry's location, so any path a module computes at runtime from `__dirname` or `import.meta.url` resolves against the entry's directory — including in code that lived in a subdirectory beforehand. Write those paths as the entry would see them:
+Compiling bundles every module into one file at the entry's location, so any path a module computes at runtime from `import.meta.dirname` or `import.meta.url` resolves against the entry's directory — including in code that lived in a subdirectory beforehand. Write those paths as the entry would see them:
 
 ```ts
 // Entry src/index.ts, helper src/shapes/lib.ts, asset at assets/icons.xml.
-join(__dirname, "..", "assets", "icons.xml")        // from the entry — works either way
-join(__dirname, "..", "..", "assets", "icons.xml")  // from the helper — breaks once compiled
+join(import.meta.dirname, "..", "assets", "icons.xml")        // from the entry — works either way
+join(import.meta.dirname, "..", "..", "assets", "icons.xml")  // from the helper — breaks once compiled
 ```
 
 The helper's path is right until it is bundled into the entry, one directory up. Computing asset paths in the entry, or from a single exported base directory, keeps both forms working.
