@@ -190,9 +190,10 @@ elif [ -d "$CLT" ]; then
   T0=$(date +%s)
   sudo mkdir -p "$JAIL/Library/Developer"
   sudo rsync -a "$CLT/" "$JAIL$CLT/" 2>/dev/null
-  sudo find "$JAIL$CLT" -type f \( -perm -u+x -o -name '*.dylib' \) -print0 2>/dev/null \
-    | sudo xargs -0 -P 8 -n 30 codesign -f -s - >/dev/null 2>&1
-  T1=$(date +%s); echo "CLT staged+signed in $((T1-T0))s ($(sudo du -sh "$JAIL$CLT" | cut -f1))"
+  # Do NOT re-sign the toolchain either. Runs 6-7: /usr/bin/python3 re-execs into the CLT
+  # tree, and a re-signed copy there is SIGKILLed, which is what made node-gyp read back an
+  # empty sys.executable. Same rule as the system tree — copy, never sign.
+  T1=$(date +%s); echo "CLT staged (unsigned) in $((T1-T0))s ($(sudo du -sh "$JAIL$CLT" | cut -f1))"
   note "CLT stage: $((T1-T0))s"
 else
   echo "NO CommandLineTools at $CLT — criterion (c) cannot run"
