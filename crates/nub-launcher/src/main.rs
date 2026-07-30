@@ -92,8 +92,10 @@ fn run() -> i32 {
 fn launch(view: &PayloadView<'_>) -> Result<ExitStatus> {
     // Resolved ONCE and threaded through: every write this process makes lands
     // under the one directory that was proven writable + exec-capable, and the
-    // probe (a mkdir plus a zero-byte file) is not repeated per payload.
-    let base = cache::resolve()?;
+    // probe (a mkdir plus a zero-byte file) is not repeated per payload. A
+    // candidate already holding this payload's artifacts skips the write half of
+    // that probe — see `cache_is_warm`.
+    let base = cache::resolve(&|dir: &Path| cache_is_warm(view, dir))?;
     let notice = FirstRun::new(view.manifest.install_message.as_deref());
 
     let (node_path, version, origin) = acquire_node(view, &base, &notice)?;
@@ -146,6 +148,12 @@ fn launch(view: &PayloadView<'_>) -> Result<ExitStatus> {
     // foreground handoff + macOS SIGKILL backstop — the same faithful spawn
     // `nub run`'s file path uses. NODE_OPTIONS is inherited untouched (honored).
     spawn::status_forwarding_signals(&mut cmd).map_err(|e| {
+        // Checked first: this failure also presents as a plain OS error about a
+        // path that is right there on disk, and only the length explains it.
+        #[cfg(windows)]
+        if let Some(remedy) = long_path_remedy(&node_path, &e) {
+            return anyhow!(remedy);
+        }
         // A mount-flag query already rejects a `noexec` candidate on Linux and
         // macOS, so reaching here means the denial came from somewhere the flag
         // does not describe — an unsupported host's mount, SELinux, an LSM. The
@@ -157,6 +165,83 @@ fn launch(view: &PayloadView<'_>) -> Result<ExitStatus> {
             anyhow::Error::new(e).context("spawning Node")
         }
     })
+}
+
+/// Classify the Windows path-length failure, which otherwise reports an error
+/// that flatly contradicts the filesystem.
+///
+/// Rust's `std::fs` and Node both prefix `\\?\`, so extraction writes — and asset
+/// reads open — a 267-character `node.exe` without complaint. `CreateProcessW`
+/// does NOT accept that prefix, which leaves this spawn as the single place
+/// MAX_PATH still binds, and it fails with `ERROR_PATH_NOT_FOUND` ("the system
+/// cannot find the path specified") for a file this process just created.
+/// Measured on Windows Server 2022 with `LongPathsEnabled=0`: a 210-character
+/// cache root spawns, 220 does not.
+#[cfg(windows)]
+fn long_path_remedy(node_path: &Path, e: &std::io::Error) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const ERROR_PATH_NOT_FOUND: i32 = 3;
+    const MAX_PATH: usize = 260;
+    // `\compile-node\<version>-<hash>\node.exe`, appended to the cache root.
+    const APPENDED: usize = 47;
+
+    if e.raw_os_error() != Some(ERROR_PATH_NOT_FOUND) {
+        return None;
+    }
+    // The limit counts UTF-16 code units and is applied AFTER normalization — an
+    // 8.3-shortened or junction component expands — so a measured length is a
+    // floor, and the classification takes a margin below the limit. Well under
+    // that margin, ERROR_PATH_NOT_FOUND means what it says and keeps the generic
+    // message.
+    let len = node_path.as_os_str().encode_wide().count();
+    if len + 16 < MAX_PATH {
+        return None;
+    }
+    Some(format!(
+        "the extracted Node's path is {len} characters, at or past Windows' \
+         MAX_PATH limit of {MAX_PATH}, so it cannot be started even though it \
+         exists:\n\
+         \x20   {path}\n\
+         \x20 Any one of these fixes it:\n\
+         \x20   - point NUB_COMPILE_CACHE_DIR at a shorter directory: the launcher \
+         appends {APPENDED} characters below it, so the root itself has a \
+         {budget}-character budget\n\
+         \x20   - build with --smol against a Node already installed on the box, \
+         which runs that Node where it sits instead of extracting one",
+        path = node_path.display(),
+        budget = MAX_PATH - APPENDED,
+    ))
+}
+
+/// Whether `dir` already holds every artifact this run needs, so the run writes
+/// nothing and the cache resolver may admit the directory without proving it is
+/// writable.
+///
+/// The two conditions mirror the early returns in `acquire_embedded_node` and
+/// `ensure_app` — via the same path helpers, so a warm verdict and the extraction
+/// cannot come to name different directories. Both artifacts are published by
+/// renaming a differently-named tmp dir into place, so a half-extracted cache is
+/// invisible to these checks and correctly falls through to the write probe.
+/// `smol` never qualifies: its Node is discovered or PROVISIONED, and
+/// provisioning writes.
+fn cache_is_warm(view: &PayloadView<'_>, dir: &Path) -> bool {
+    let m = &view.manifest;
+    m.shape == Shape::Embed
+        && node_cache_dir(dir, m).join(node_exe_name()).is_file()
+        && app_cache_dir(dir, m).join(&m.entry).is_file()
+}
+
+/// Where this payload's embedded Node extracts to, keyed by content so two
+/// binaries carrying the same Node share one extraction.
+fn node_cache_dir(base: &Path, m: &Manifest) -> PathBuf {
+    base.join("compile-node")
+        .join(format!("{}-{}", m.node_version, short_key(&m.node_sha256)))
+}
+
+/// Where this payload's app files extract to, keyed the same way.
+fn app_cache_dir(base: &Path, m: &Manifest) -> PathBuf {
+    base.join("compile-app").join(short_key(&m.app_sha256))
 }
 
 /// The `__probe` self-check `nub compile` runs on the produced binary at compile
@@ -232,10 +317,7 @@ fn acquire_embedded_node(
     notice: &FirstRun,
 ) -> Result<PathBuf> {
     let m = &view.manifest;
-    let key = short_key(&m.node_sha256);
-    let node_cache = base
-        .join("compile-node")
-        .join(format!("{}-{}", m.node_version, key));
+    let node_cache = node_cache_dir(base, m);
     let node_bin = node_cache.join(node_exe_name());
 
     // Warm: this exact embedded Node already extracted.
@@ -746,8 +828,7 @@ fn smol_mirror_base() -> String {
 /// Extract the bundled app files into `<cache>/compile-app/<app-key>/` (atomic
 /// tmp + rename). A warm run finds the dir present and skips the write.
 fn ensure_app(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
-    let key = short_key(&view.manifest.app_sha256);
-    let app_dir = base.join("compile-app").join(key);
+    let app_dir = app_cache_dir(base, &view.manifest);
     if app_dir.join(&view.manifest.entry).is_file() {
         return Ok(app_dir);
     }

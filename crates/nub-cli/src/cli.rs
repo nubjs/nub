@@ -941,6 +941,13 @@ pub enum Command {
         #[arg(long, value_name = "KEY=VALUE", action = ArgAction::Append)]
         define: Vec<String>,
 
+        /// Replace an expression at build time with a file's contents, repeatable.
+        /// The file holds the JavaScript expression `--define` would take, for a
+        /// value too big for a command line:
+        /// `--define-file MODELS=./models.json`.
+        #[arg(long = "define-file", value_name = "KEY=PATH", action = ArgAction::Append)]
+        define_file: Vec<String>,
+
         /// Embed a file or directory in the executable, byte for byte, repeatable.
         /// Accepts globs. Embedded files are extracted beside the compiled entry,
         /// keeping the layout they had in your source tree, so the app reads them
@@ -2617,6 +2624,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             no_minify,
             sourcemap,
             define,
+            define_file,
             include,
             exclude,
             install_message,
@@ -2639,6 +2647,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             include,
             exclude,
             install_message,
+            define_file,
             bundle: crate::compile::BundleOptions {
                 minify: !no_minify,
                 keep_names: !no_keep_names,

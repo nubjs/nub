@@ -82,9 +82,10 @@ pub fn locate(target: &TargetPlatform) -> Result<Vec<u8>> {
     };
     let path = match find_local(target, &sources)? {
         Some(found) => found,
-        // The fetch verifies before it commits, so a cache entry is already
-        // known-good; re-checking it here costs one read and keeps the guarantee
-        // uniform across sources.
+        // Every source lands at the same `verify_template` below. A cache entry
+        // carries a second check on top of it — `find_local` re-hashes it —
+        // because the fetch's verification runs before the entry is visible and
+        // so cannot speak for what a later crash left behind.
         None => fetch(target, &sources)?,
     };
     let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -133,15 +134,37 @@ fn find_local(target: &TargetPlatform, sources: &Sources) -> Result<Option<PathB
 
     if let Some(root) = &sources.cache_root {
         let cached = cache_path(root, target);
-        if cached.is_file() {
+        // A hit is re-hashed rather than trusted for existing. The fetch's
+        // checksum runs before the entry is visible, so nothing else in the
+        // system would ever notice an entry a crash left truncated — and a short
+        // launcher still carries the header the format gate reads, so it would be
+        // injected into every binary this version compiles. Falling through to
+        // the fetch replaces it; deleting it here would race a concurrent compile
+        // that has it open.
+        if cached.is_file() && cache_entry_is_intact(&cached) {
             return Ok(Some(cached));
         }
     }
     Ok(None)
 }
 
+/// Whether a cache entry still matches the digest recorded beside it. An entry
+/// with no sidecar predates that record and is taken on trust: the cache key is
+/// this binary's exact version, so those exist only across rebuilds of one
+/// version, and forcing a network round trip on them would cost the offline
+/// guarantee the cache exists to give.
+fn cache_entry_is_intact(entry: &Path) -> bool {
+    let Ok(recorded) = fs::read_to_string(sidecar_path(entry)) else {
+        return true;
+    };
+    let Some(expected) = recorded.split_whitespace().next() else {
+        return false;
+    };
+    fs::read(entry).is_ok_and(|bytes| sha256_hex(&bytes).eq_ignore_ascii_case(expected))
+}
+
 /// Download the target's template from this release, verify it, and commit it to
-/// the cache. Returns the cached path.
+/// the cache with its digest recorded beside it. Returns the cached path.
 fn fetch(target: &TargetPlatform, sources: &Sources) -> Result<PathBuf> {
     let url = asset_url(&sources.base_url, target);
     let Some(root) = &sources.cache_root else {
@@ -187,6 +210,21 @@ fn fetch(target: &TargetPlatform, sources: &Sources) -> Result<PathBuf> {
         format!("{url} is not the launcher the release claims to publish there")
     })?;
 
+    // Durability BEFORE visibility. The rename below publishes this entry to
+    // every later compile of this version, and a crash can commit the rename
+    // while the bytes behind it are still short — a truncated launcher that then
+    // passes the format gate forever. Opened for write because Windows'
+    // `FlushFileBuffers` requires that access right.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&staged)
+        .and_then(|f| f.sync_all())
+        .with_context(|| format!("flushing {} to disk", staged.display()))?;
+
+    // The digest lands first so a visible entry is never the only thing present:
+    // an entry with nothing to check itself against is one a hit has to trust.
+    commit_sidecar(dir, &dest, &actual, target)?;
+
     // Losing the commit race is not a failure. Both racers verified the same
     // published bytes, so whichever landed first is the artifact either would
     // have installed. This is not merely tidiness on Windows: `MoveFileEx` takes
@@ -198,7 +236,43 @@ fn fetch(target: &TargetPlatform, sources: &Sources) -> Result<PathBuf> {
                 .context(format!("installing the launcher at {}", dest.display())));
         }
     }
+
+    // The rename itself is only durable once the directory entry is synced.
+    // Best effort: a lost rename costs a refetch, not a bad cache entry. Windows
+    // has no portable equivalent — a directory handle needs
+    // `FILE_FLAG_BACKUP_SEMANTICS`, which `File::open` does not set.
+    #[cfg(unix)]
+    let _ = fs::File::open(dir).and_then(|d| d.sync_all());
+
     Ok(dest)
+}
+
+/// Record `hex` beside the cache entry, in the `sha256sum` format so the check a
+/// hit performs can also be run by hand. Staged and renamed like the entry
+/// itself, so a concurrent compile never reads a half-written digest, and
+/// tolerant of losing that race for the same reason the entry's commit is.
+fn commit_sidecar(dir: &Path, dest: &Path, hex: &str, target: &TargetPlatform) -> Result<()> {
+    let name = asset_name(target);
+    let staged = dir.join(format!("{name}.{}.sha256.part", std::process::id()));
+    let _guard = FileGuard(staged.clone());
+    fs::write(&staged, format!("{hex}  {name}\n"))
+        .with_context(|| format!("writing {}", staged.display()))?;
+
+    let sidecar = sidecar_path(dest);
+    if let Err(e) = fs::rename(&staged, &sidecar) {
+        if !sidecar.is_file() {
+            return Err(anyhow::Error::new(e)
+                .context(format!("recording the digest at {}", sidecar.display())));
+        }
+    }
+    Ok(())
+}
+
+/// Where a cache entry's digest lives.
+fn sidecar_path(entry: &Path) -> PathBuf {
+    let mut p = entry.as_os_str().to_os_string();
+    p.push(".sha256");
+    PathBuf::from(p)
 }
 
 // ---- names, paths, URLs -------------------------------------------------------
@@ -559,6 +633,40 @@ mod tests {
             find_local(&target, &sources).unwrap(),
             Some(path),
             "the cached template must satisfy the next compile without a fetch"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The fetch verifies before the entry is visible, so a hit re-hashing
+    /// against the recorded digest is the only thing standing between a
+    /// crash-truncated entry and every binary this version compiles: the
+    /// truncation leaves the header the format gate reads intact.
+    #[test]
+    fn a_cache_entry_that_no_longer_matches_its_digest_is_not_reused() {
+        let dir = fresh_dir("cache-corrupt");
+        let target = TargetPlatform::parse("linux-x64").unwrap();
+        let body = elf_bytes(ELF_X64);
+        let base = publish(
+            &dir.join("rel"),
+            &asset_name(&target),
+            &body,
+            &sha256_hex(&body),
+        );
+        let cache = dir.join("cache");
+        let sources = sources_at(base, &cache);
+
+        let path = fetch(&target, &sources).expect("the fixture publishes this template");
+        assert!(
+            sidecar_path(&path).is_file(),
+            "the fetch must record a digest"
+        );
+        assert_eq!(find_local(&target, &sources).unwrap(), Some(path.clone()));
+
+        fs::write(&path, &body[..64]).unwrap();
+        assert_eq!(
+            find_local(&target, &sources).unwrap(),
+            None,
+            "a truncated entry must not satisfy a compile"
         );
         let _ = fs::remove_dir_all(&dir);
     }

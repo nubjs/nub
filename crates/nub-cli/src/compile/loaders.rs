@@ -324,6 +324,15 @@ fn loader_name(ty: &ModuleType) -> &'static str {
 /// one payload entry while two different files that merely share a basename
 /// (`icons/logo.png` and `brand/logo.png`) cannot collide.
 ///
+/// The hash suffix is UNCONDITIONAL, and that is what keeps a generated name off
+/// Win32's reserved-device list: a source named `aux.txt` ships as
+/// `aux-4873c02a.txt`, whose stem is no longer `AUX`. `assemble_app`'s payload-name
+/// gate refuses an `--include`d `aux.txt` for a Windows target while the same file
+/// reached through `new URL(…)` or a `file` import compiles and runs — the
+/// asymmetry is safe only because of this construction, so a refactor that makes
+/// the suffix conditional (an unhashed passthrough, a "keep the original name"
+/// mode) reopens the hole with nothing failing at build time.
+///
 /// LOWERCASED, so a generated name can never collide with another one on a
 /// filesystem that folds case. `a/Logo.bin` and `b/logo.bin` otherwise yield two
 /// payload names differing only in case: identical bytes, one file on Windows or
@@ -648,6 +657,23 @@ mod tests {
             "{n} must be a safe single-component name"
         );
         assert!(!n.contains('/') && !n.contains('?'), "{n}");
+    }
+
+    // The hash suffix is what makes a Windows-reserved stem shippable through
+    // this path at all, while the same file named by --include is refused. Pin
+    // it here so a change to the naming cannot open that hole silently.
+    #[test]
+    fn a_reserved_windows_stem_is_neutralized_by_the_hash_suffix() {
+        for src in ["/p/aux.txt", "/p/CON.json", "/p/com1"] {
+            let n = asset_name(Path::new(src), b"x");
+            assert!(
+                nub_core::compile::is_safe_relative_name_for(
+                    nub_core::compile::NameRules::Windows,
+                    &n
+                ),
+                "{src} named {n}, which a Windows target cannot create"
+            );
+        }
     }
 
     // The emitted module is what every `file` import evaluates to, so its two

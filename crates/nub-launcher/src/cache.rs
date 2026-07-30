@@ -10,6 +10,12 @@
 //! the boxes that need one. This module answers "where can this process actually
 //! write and exec" by trying each candidate for real.
 //!
+//! The write probe is skipped for a candidate that already holds this run's
+//! extracted artifacts. Such a run writes nothing, and demanding write access
+//! anyway is precisely what broke the pre-warmed read-only deploy the error text
+//! below recommends. The ownership and `noexec` gates still run either way — the
+//! launcher execs out of this tree whether or not it wrote to it.
+//!
 //! Security posture on the temp candidate: `vercel/pkg` extracted executable
 //! content to a hardcoded, world-shared `/tmp/pkg/*`, which let a local attacker
 //! pre-seed the path and get their code exec'd by someone else's binary
@@ -106,22 +112,36 @@ impl fmt::Debug for CacheError {
 impl std::error::Error for CacheError {}
 
 /// The first candidate this process can actually create, write into, and exec
-/// from. Order: `NUB_COMPILE_CACHE_DIR` → `$XDG_CACHE_HOME/nub` →
-/// `$HOME/.cache/nub` → a per-uid directory under the temp dir.
-pub fn resolve() -> Result<PathBuf, CacheError> {
-    resolve_from(candidates())
+/// from — or, where `warm` reports the candidate already holds everything this
+/// run needs, the first that passes the exec-source gates alone. Order:
+/// `NUB_COMPILE_CACHE_DIR` → `$XDG_CACHE_HOME/nub` → `$HOME/.cache/nub` → a
+/// per-uid directory under the temp dir.
+///
+/// `warm` is the caller's because only it knows the payload: the launcher checks
+/// for the exact content-keyed artifacts its manifest names, so "warm" means
+/// genuinely nothing left to write rather than "the directory is there".
+pub fn resolve(warm: &dyn Fn(&Path) -> bool) -> Result<PathBuf, CacheError> {
+    resolve_from(candidates(), warm)
 }
 
 /// The chain, over an explicit candidate list so it can be driven in a test
 /// without mutating process-global environment variables.
-fn resolve_from(candidates: Vec<Candidate>) -> Result<PathBuf, CacheError> {
+fn resolve_from(
+    candidates: Vec<Candidate>,
+    warm: &dyn Fn(&Path) -> bool,
+) -> Result<PathBuf, CacheError> {
     let mut attempts = Vec::new();
     for cand in candidates {
         let Some(path) = cand.path else {
             attempts.push((cand.label, None, Reject::Unset));
             continue;
         };
-        match probe(&path, cand.private) {
+        let verdict = if warm(&path) {
+            probe_warm(&path, cand.private)
+        } else {
+            probe(&path, cand.private)
+        };
+        match verdict {
             Ok(()) => return Ok(path),
             Err(why) => attempts.push((cand.label, Some(path), why)),
         }
@@ -194,6 +214,19 @@ fn probe(path: &Path, private: bool) -> Result<(), Reject> {
     inspect_existing(path, private)?;
     create(path, private).map_err(classify)?;
     write_probe(path).map_err(classify)?;
+    exec_gate(path)
+}
+
+/// [`probe`] minus the two steps that write. A warm candidate is only being read
+/// from, so requiring write access would reject a correct deployment; everything
+/// that guards the EXEC still applies, because the launcher spawns the Node it
+/// finds here regardless of who put it there.
+fn probe_warm(path: &Path, private: bool) -> Result<(), Reject> {
+    inspect_existing(path, private)?;
+    exec_gate(path)
+}
+
+fn exec_gate(path: &Path) -> Result<(), Reject> {
     if mount_is_noexec(path) {
         return Err(Reject::NoExec);
     }
@@ -469,25 +502,64 @@ mod tests {
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
         let usable = root.join("usable");
 
-        let chosen = resolve_from(vec![
-            Candidate {
-                label: "NUB_COMPILE_CACHE_DIR",
-                path: None,
-                private: false,
-            },
-            Candidate {
-                label: "HOME",
-                path: Some(locked.clone()),
-                private: false,
-            },
-            Candidate {
-                label: "TMPDIR",
-                path: Some(usable.clone()),
-                private: true,
-            },
-        ])
+        let chosen = resolve_from(
+            vec![
+                Candidate {
+                    label: "NUB_COMPILE_CACHE_DIR",
+                    path: None,
+                    private: false,
+                },
+                Candidate {
+                    label: "HOME",
+                    path: Some(locked.clone()),
+                    private: false,
+                },
+                Candidate {
+                    label: "TMPDIR",
+                    path: Some(usable.clone()),
+                    private: true,
+                },
+            ],
+            &|_: &Path| false,
+        )
         .unwrap();
         assert_eq!(chosen, usable);
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The deployment the error text itself recommends — a cache pre-warmed into
+    /// an image layer, then run read-only. The same unwritable directory must be
+    /// accepted when the run needs no writes and refused when it does, so the
+    /// pair is asserted together: only the warm signal differs between them.
+    #[cfg(unix)]
+    #[test]
+    fn a_warm_candidate_is_accepted_without_write_access() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let root = scratch("warm-readonly");
+        let locked = root.join("prewarmed");
+        fs::create_dir_all(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+
+        let resolve_with = |warm: bool| {
+            resolve_from(
+                vec![Candidate {
+                    label: "NUB_COMPILE_CACHE_DIR",
+                    path: Some(locked.clone()),
+                    private: false,
+                }],
+                &|_: &Path| warm,
+            )
+        };
+        assert_eq!(resolve_with(true).unwrap(), locked);
+        assert!(
+            resolve_with(false).is_err(),
+            "a run that still has to extract must prove it can write"
+        );
 
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
         let _ = fs::remove_dir_all(&root);

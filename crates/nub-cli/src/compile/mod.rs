@@ -58,6 +58,10 @@ pub struct CompileOptions {
     /// only customizes the text — there is no spelling that suppresses it, since
     /// the alternative is a multi-second silent hang while Node is unpacked.
     pub install_message: Option<String>,
+    /// `--define-file KEY=PATH`. Folded into [`BundleOptions::define`] before the
+    /// bundle runs, so there is one substitution mechanism rather than two that
+    /// could drift.
+    pub define_file: Vec<String>,
     /// The bundler-flag surface, shared verbatim with `nub build`.
     pub bundle: BundleOptions,
 }
@@ -77,6 +81,12 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     if !entry_path.is_file() {
         bail!("entry file not found: {}", opts.entry);
     }
+
+    // Read here for the same reason the entry is stat'd here: a mistyped path is
+    // one failed open, not a launcher download away. Appended AFTER the argv
+    // defines, so a key given both ways takes the file's value.
+    let from_files = read_define_files(&opts.define_file)?;
+    opts.bundle.define.extend(from_files);
 
     // Resolved AND verified before any real work: a cross-compile whose launcher
     // template is missing, or is not that platform's executable, must fail in the
@@ -333,6 +343,51 @@ fn target_defines(target: &TargetPlatform) -> Vec<(String, String)> {
         ("process.arch".into(), format!("\"{arch}\"")),
         ("process.env.NODE_ENV".into(), "\"production\"".into()),
     ]
+}
+
+/// Turn `--define-file KEY=PATH` into the `KEY=VALUE` strings `--define` already
+/// takes. The two flags are one feature with two value sources, and this is where
+/// they become one: argv caps a value at ARG_MAX, which a real payload — a
+/// multi-megabyte JSON snapshot baked in as a build constant — exceeds outright.
+///
+/// The file holds the value EXACTLY as the command line would: a JavaScript
+/// expression, so a bare string still needs its own quotes and raw JSON is already
+/// an object literal. One trailing line ending is dropped, because every editor
+/// writes one and the argv form has none — a user moving a value between the two
+/// flags must get the same substitution.
+fn read_define_files(raw: &[String]) -> Result<Vec<String>> {
+    let mut out = Vec::with_capacity(raw.len());
+    for item in raw {
+        let (key, path) = item
+            .split_once('=')
+            .filter(|(k, p)| !k.is_empty() && !p.is_empty())
+            .ok_or_else(|| {
+                anyhow!(
+                    "--define-file expects KEY=PATH, got {item:?}\n\
+                     \x20\x20The file holds the value, a JavaScript expression:\n\
+                     \x20\x20--define-file MODELS=./models.json"
+                )
+            })?;
+        let bytes =
+            fs::read(path).with_context(|| format!("reading {path}, the --define-file for {key}"))?;
+        let mut value = String::from_utf8(bytes).map_err(|e| {
+            anyhow!(
+                "{path}, the --define-file for {key}, is not valid UTF-8 (first bad byte at \
+                 offset {}).\n\
+                 \x20\x20A define value is substituted into the bundle as source text. To ship \
+                 binary data, embed it with --include instead.",
+                e.utf8_error().valid_up_to()
+            )
+        })?;
+        if value.ends_with('\n') {
+            value.pop();
+            if value.ends_with('\r') {
+                value.pop();
+            }
+        }
+        out.push(format!("{key}={value}"));
+    }
+    Ok(out)
 }
 
 /// Bundle output + embedded assets, in the payload's write order.
@@ -871,6 +926,7 @@ mod tests {
             include: Vec::new(),
             exclude: Vec::new(),
             install_message: install_message.map(str::to_string),
+            define_file: Vec::new(),
             bundle: BundleOptions {
                 minify: true,
                 keep_names: true,
@@ -908,6 +964,49 @@ mod tests {
             "cross-compiled platform checks must fold against the TARGET, and the \
              values must be quoted so they land as string literals, not identifiers"
         );
+    }
+
+    /// `--define-file` must be indistinguishable from typing the same value as
+    /// `--define`, so the contents pass through as the JS expression they are —
+    /// no quoting, no JSON re-encoding — minus the newline an editor adds.
+    #[test]
+    fn a_define_file_value_is_the_file_text_without_its_trailing_newline() {
+        let dir = fresh_dir("definefile");
+        let json = dir.join("models.json");
+        fs::write(&json, "{\"a\":1}\n").unwrap();
+        assert_eq!(
+            read_define_files(&[format!("MODELS={}", json.display())]).unwrap(),
+            vec!["MODELS={\"a\":1}".to_string()]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bad_define_file_names_the_key_and_the_path() {
+        let dir = fresh_dir("definefile-bad");
+        let msg = |e: anyhow::Error| format!("{e:#}");
+
+        let m = msg(read_define_files(&["MODELS=./nope.json".into()]).unwrap_err());
+        assert!(
+            m.contains("nope.json") && m.contains("MODELS"),
+            "a missing file must name both the path and the key it was for: {m}"
+        );
+
+        let m = msg(read_define_files(&["JUST_A_KEY".into()]).unwrap_err());
+        assert!(
+            m.contains("KEY=PATH"),
+            "a malformed argument must show the expected form: {m}"
+        );
+
+        let binary = dir.join("blob.bin");
+        fs::write(&binary, [0x7b, 0xff, 0x7d]).unwrap();
+        let m = msg(read_define_files(&[format!("BLOB={}", binary.display())]).unwrap_err());
+        assert!(
+            m.contains("UTF-8") && m.contains("--include"),
+            "non-UTF-8 must say why it cannot be a define and point at the flag that ships \
+             bytes: {m}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // The launcher treats `None` in the MANIFEST as "print nothing", and a first
