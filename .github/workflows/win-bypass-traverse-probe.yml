@@ -42,7 +42,7 @@ jobs:
         with:
           node-version: 22
 
-      # The verdict block, driven against four synthetic worlds, must discriminate BEFORE the real
+      # The verdict block, driven against six synthetic worlds, must discriminate BEFORE the real
       # launch runs. A verdict that cannot tell a clean negative from a dead harness would make the
       # rest of this job unreadable, and that failure mode has already cost this effort two runs.
       - name: Verdict self-test (no Windows APIs, no launch)
@@ -98,6 +98,8 @@ jobs:
                    baseline-plain-reads-deep baseline-plain-reads-c-root \
                    baseline-plain-egress-works appcontainer-gate-is-live \
                    appcontainer-positive-control harness-grant-reached-decisive-target \
+                   realpath-defect-reproduces-without-flags \
+                   preserve-symlinks-flags-unblock-the-child \
                    control-ace-absent-denies-deep-read \
                    control-ungranted-sibling-under-profile-denies \
                    control-ungranted-sibling-inside-root-denies; do need "$p"; done

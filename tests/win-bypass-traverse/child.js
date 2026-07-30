@@ -96,6 +96,12 @@ if (cwdBefore) {
 }
 
 // ── the two un-ACE'able roots: expected DENIED, and that is FINE if the deep read passed ──
+// `lstat` and `realpath` on the volume root are singled out because they are what Node's own
+// `realpathSync` does, and bypass-traverse exempts INTERMEDIATE components only — an ancestor
+// opened as a TARGET is still access-checked. This pair is the measured cause of the
+// `EPERM lstat 'C:\'` that kills an unflagged confined `node` before user code exists.
+run('lstat-c-root', () => 'mode=' + fs.lstatSync('C:\\').mode);
+run('realpath-c-root', () => fs.realpathSync('C:\\'));
 run('stat-c-root', () => 'mode=' + fs.statSync('C:\\').mode);
 run('readdir-c-root', () => fs.readdirSync('C:\\').length + ' entries');
 run('stat-c-users', () => 'mode=' + fs.statSync('C:\\Users').mode);

@@ -36,17 +36,27 @@ function LaunchOf([string]$arm) {
   if (-not $cells.ContainsKey($arm)) { return 'MISSING-ARM' }
   return [string]$cells[$arm]['__launch'][0]
 }
+function OpCount([string]$arm) {
+  if (-not $cells.ContainsKey($arm)) { return -1 }
+  if (-not $cells[$arm].ContainsKey('__opcount')) { return -1 }
+  return [int]$cells[$arm]['__opcount'][0]
+}
 
 $script:ProbeOps = @(
   'dacl-grants-ac-sid',
   'read-deep-granted', 'require-deep-granted', 'realpath-deep-granted', 'stat-deep-granted',
   'readdir-deepdir', 'write-into-granted', 'chdir-to-deepdir', 'cwd-after-chdir',
-  'read-relative-after-chdir', 'stat-c-root', 'readdir-c-root', 'stat-c-users', 'readdir-c-users',
+  'read-relative-after-chdir', 'lstat-c-root', 'realpath-c-root',
+  'stat-c-root', 'readdir-c-root', 'stat-c-users', 'readdir-c-users',
   'stat-userprofile', 'readdir-userprofile', 'findup-walk', 'read-ungranted-sibling-inside-root',
   'read-ungranted-sibling-under-profile', 'read-system32-hosts', 'readdir-system32',
   'whoami-groups', 'dns-lookup-registry', 'net-connect-ip', 'net-connect-name',
   'net-connect-loopback')
-$script:ProbeArms = @('plain', 'ac-root-grant', 'ac-leaf-grants', 'ac-data-ungranted', 'ac-cwd-deep')
+$script:ProbeArms = @('plain', 'ac-root-grant', 'ac-leaf-grants', 'ac-data-ungranted', 'ac-cwd-deep',
+  'ac-noflags')
+# `ac-noflags` and `ac-entry-deep` are excluded from the gate check below: the first emits no op
+# lines at all by design (it dies in Node's bootstrap), and the second reports the root cell under
+# a different op name.
 $script:ProbeAcArms = @('ac-root-grant', 'ac-leaf-grants', 'ac-data-ungranted', 'ac-cwd-deep',
   'ac-entry-deep')
 
@@ -101,6 +111,18 @@ function Invoke-Verdict {
   Prop 'appcontainer-positive-control' (((Cell 'ac-leaf-grants' 'read-system32-hosts') -eq 'OK') -and
     ((Cell 'ac-leaf-grants' 'readdir-system32') -eq 'OK')) `
     "System32 carries an ALL APPLICATION PACKAGES ace, so a confined child must still read it: hosts=$(Cell 'ac-leaf-grants' 'read-system32-hosts') readdir=$(Cell 'ac-leaf-grants' 'readdir-system32')"
+
+  # ── THE FLAG DIFFERENTIAL, one variable. An unflagged confined `node` dies in `resolveMainPath`
+  # at `EPERM lstat 'C:\'` because Node's JS realpath opens the volume ROOT as a TARGET, which
+  # bypass-traverse does not cover. `--preserve-symlinks-main --preserve-symlinks` skip that walk.
+  # Both directions are required: the defect must reproduce WITHOUT the flags in this very run
+  # (or the flagged arms prove nothing about the flags), and the table must run WITH them.
+  Prop 'realpath-defect-reproduces-without-flags' `
+    (((Cell 'ac-noflags' 'node-died-realpath-c-root') -eq 'OK') -and ((OpCount 'ac-noflags') -eq 0)) `
+    "no-flag arm must die in Node's realpath walk before any user code: died=$(Cell 'ac-noflags' 'node-died-realpath-c-root') ops=$(OpCount 'ac-noflags') launch=$(LaunchOf 'ac-noflags')"
+  Prop 'preserve-symlinks-flags-unblock-the-child' (((OpCount 'ac-leaf-grants') -gt 10) -and
+    ((Cell 'ac-leaf-grants' 'node-died-realpath-c-root') -eq 'ERR')) `
+    "the SAME grants WITH the flags must reach the operations table: ops=$(OpCount 'ac-leaf-grants') died-in-realpath=$(Cell 'ac-leaf-grants' 'node-died-realpath-c-root')"
 
   # ── CONTROL: the grant physically REACHED the decisive target. The ace is written on an
   # ancestor as an inheritable one and relies on propagation into the already-existing deep file.

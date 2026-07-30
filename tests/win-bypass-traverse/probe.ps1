@@ -434,7 +434,14 @@ function Invoke-Arm {
     [string[]]$GrantRX = @(),
     [string[]]$GrantModify = @(),
     [string]$Cwd,
-    [string]$EntryFile   # $null => the child.js operations table
+    [string]$EntryFile,   # $null => the child.js operations table
+    # RUN 1 FINDING (30506129146): an unflagged confined `node` dies in `resolveMainPath` with
+    # `EPERM lstat 'C:\'` before a single user statement runs — bypass-traverse exempts
+    # INTERMEDIATE path components, but Node's JS `realpathSync` opens the volume root as a
+    # TARGET. These two flags are the seams that skip `toRealPath`, and they are what lets the
+    # operations table run at all. Uniform across EVERY arm (the plain baseline included) so the
+    # arms stay one variable apart; the `ac-noflags` arm withholds them as the differential.
+    [string[]]$NodeFlags = @('--preserve-symlinks-main', '--preserve-symlinks')
   )
   W ''
   W "== arm $Name =="
@@ -474,7 +481,8 @@ function Invoke-Arm {
     $env:BT_ARM = $Name
     $log = Join-Path $logDir "$Name.log"
     $entry = if ($EntryFile) { $EntryFile } else { $jailChild }
-    $cmdline = '"' + $jailNode + '" "' + $entry + '"'
+    $flagPart = if ($NodeFlags.Count) { ' ' + ($NodeFlags -join ' ') } else { '' }
+    $cmdline = '"' + $jailNode + '"' + $flagPart + ' "' + $entry + '"'
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $status = [Bt]::Launch($sid, $jailNode, $cmdline, $Cwd, $log, 120000)
     $sw.Stop()
@@ -489,9 +497,16 @@ function Invoke-Arm {
       W ("    | " + $l)
       if ($l -match '^op:([^=]+)=(OK|ERR)\s*(.*)$') { $arm[$Matches[1]] = @($Matches[2], $Matches[3]) }
     }
-    # Harness-side cells, not child observations — hence the `dacl:` prefix on the detail so a
-    # reader never mistakes them for something the confined process reported.
+    # Harness-side cells, not child observations — hence the `dacl:`/`log:` prefixes on the detail
+    # so a reader never mistakes them for something the confined process reported.
     $arm['dacl-grants-ac-sid'] = @($(if ($deepAce -eq 'none') { 'ERR' } else { 'OK' }), "dacl:$deepAce")
+    # Did the child die in Node's own realpath walk on the volume root, before user code? This is
+    # a property of the LOG, not of an op line — an unflagged confined node emits no op lines at
+    # all, so without this cell that arm is indistinguishable from a launch that never happened.
+    $raw = ($lines -join "`n")
+    $diedRealpath = ($raw -match "EPERM") -and ($raw -match "lstat") -and ($raw -match "realpathSync")
+    $arm['node-died-realpath-c-root'] = @($(if ($diedRealpath) { 'OK' } else { 'ERR' }), 'log:derived')
+    $arm['__opcount'] = @(@($arm.Keys | Where-Object { $_ -notlike '__*' -and $_ -notlike 'dacl-*' -and $_ -ne 'node-died-realpath-c-root' }).Count, '')
     $arm['__launch'] = @($status, '')
     $arm['__lines'] = @($lines.Count, '')
     $cells[$Name] = $arm
@@ -527,6 +542,13 @@ Invoke-Arm -Name 'ac-cwd-deep' -AppContainer $true -GrantRX @($runtimeDir) `
 # 6. `node <deep file>` as the ENTRY POINT — `resolveMainPath`'s realpath runs before user code.
 Invoke-Arm -Name 'ac-entry-deep' -AppContainer $true -GrantRX @($runtimeDir) `
   -GrantModify @($dataDir) -Cwd $runtimeDir -EntryFile $deep
+
+# 7. THE FLAG DIFFERENTIAL. Byte-identical to arm 3 with the two realpath-skipping flags WITHHELD
+#    — one variable. Run 1 (30506129146) measured this shape dying at `EPERM lstat 'C:\'` in
+#    `resolveMainPath` on both images, and this arm keeps that defect a first-class measured cell
+#    rather than a fact recalled from a previous run.
+Invoke-Arm -Name 'ac-noflags' -AppContainer $true -GrantRX @($runtimeDir) `
+  -GrantModify @($dataDir) -Cwd $runtimeDir -NodeFlags @()
 
 # ─────────────────────────────── ACE cost ───────────────────────────────
 # The known hazard: grants are inheritable ACEs written per launch and revoked after, and

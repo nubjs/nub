@@ -3,7 +3,7 @@
 # WHY THIS EXISTS. A verdict block only ever exercised against the world it expects will happily
 # report PASS on a harness that measured nothing; that is precisely how this effort previously
 # produced a negative it could not falsify and a "confirmation" from a broken control. So the
-# verdict is driven against FIVE synthetic worlds and required to give a DIFFERENT answer in each:
+# verdict is driven against SIX synthetic worlds and required to give a DIFFERENT answer in each:
 #
 #   works        bypass-traverse works        => every property PASSes
 #   denied       bypass-traverse fails        => the bypass-traverse properties FAIL, and every
@@ -17,6 +17,9 @@
 #   -landed      the deep file, so reads fail     read-cell IDENTICAL to 'denied', and that is the
 #                                                point: without this control a harness slip is
 #                                                indistinguishable from a real kernel denial.
+#   defect-absent the no-flag arm ran fine     => the flag differential FAILS, so the flags are
+#                                                never credited with fixing something that was
+#                                                not broken in this run.
 #
 # Run: pwsh -File selftest.ps1
 
@@ -24,19 +27,21 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Off
 . (Join-Path $PSScriptRoot 'verdict.ps1')
 
-function Mk([hashtable]$ops, [int]$lines = 40, [string]$launch = 'rc=0 (0x00000000)') {
+function Mk([hashtable]$ops, [int]$lines = 40, [string]$launch = 'rc=0 (0x00000000)',
+            [int]$opcount = 25) {
   $h = @{}
   foreach ($k in $ops.Keys) { $h[$k] = @($ops[$k], 'synthetic') }
   $h['__lines'] = @($lines, '')
   $h['__launch'] = @($launch, '')
+  $h['__opcount'] = @($opcount, '')
   return $h
 }
 
 $deepOps = @('read-deep-granted', 'require-deep-granted', 'realpath-deep-granted',
   'stat-deep-granted', 'readdir-deepdir', 'write-into-granted', 'chdir-to-deepdir',
   'cwd-after-chdir', 'read-relative-after-chdir')
-$rootOps = @('stat-c-root', 'readdir-c-root', 'stat-c-users', 'readdir-c-users',
-  'stat-userprofile', 'readdir-userprofile')
+$rootOps = @('lstat-c-root', 'realpath-c-root', 'stat-c-root', 'readdir-c-root', 'stat-c-users',
+  'readdir-c-users', 'stat-userprofile', 'readdir-userprofile')
 $ungrantedOps = @('read-ungranted-sibling-inside-root', 'read-ungranted-sibling-under-profile')
 $sysOps = @('read-system32-hosts', 'readdir-system32', 'whoami-groups')
 $netOps = @('dns-lookup-registry', 'net-connect-ip', 'net-connect-name', 'net-connect-loopback')
@@ -44,7 +49,9 @@ $entryOps = @('entry-as-deep-file', 'entry-cwd', 'entry-realpath', 'entry-requir
 
 function Ops([string]$deep, [string]$root, [string]$ungranted, [string]$sys, [string]$net,
              [string]$entry, [string]$entryRoot, [string]$dacl = 'OK') {
-  $h = @{ 'findup-walk' = 'OK'; 'dacl-grants-ac-sid' = $dacl }
+  # `node-died-realpath-c-root` is ERR for every arm that REACHED the table — an arm that died in
+  # Node's realpath walk emits no op lines at all and is modelled separately below.
+  $h = @{ 'findup-walk' = 'OK'; 'dacl-grants-ac-sid' = $dacl; 'node-died-realpath-c-root' = 'ERR' }
   foreach ($o in $deepOps) { $h[$o] = $deep }
   foreach ($o in $rootOps) { $h[$o] = $root }
   foreach ($o in $ungrantedOps) { $h[$o] = $ungranted }
@@ -71,15 +78,23 @@ $acGrantNeverLanded = Ops 'ERR' 'ERR' 'ERR' 'OK' 'ERR' 'ERR' 'ERR' 'ERR'
 $allERR = Ops 'ERR' 'ERR' 'ERR' 'ERR' 'ERR' 'ERR' 'ERR'
 # a grant that scopes nothing: even the ungranted paths and the roots read.
 $acInert = Ops 'OK' 'OK' 'OK' 'OK' 'ERR' 'OK' 'OK'
+# THE NO-FLAG ARM: node dies in `resolveMainPath` before user code, so there are NO op lines —
+# only the log-derived cell. Modelled with zero ops on purpose; that is what the flag differential
+# reads, and an arm with zero ops must never be mistaken for one whose reads were denied.
+$acNoFlagsArm = Mk @{ 'node-died-realpath-c-root' = 'OK' } 20 'rc=1 (0x00000001)' 0
+# the no-flag arm in a world where the defect does NOT reproduce (so the differential must fail)
+$acNoFlagsRan = Mk (Ops 'OK' 'ERR' 'ERR' 'OK' 'ERR' 'OK' 'ERR') 40 'rc=0 (0x00000000)' 25
 
 $worlds = @{
   'works' = @{
     plain = Mk $plainOK; 'ac-root-grant' = Mk $acWorks; 'ac-leaf-grants' = Mk $acWorks
     'ac-data-ungranted' = Mk $acNoGrant; 'ac-cwd-deep' = Mk $acWorks; 'ac-entry-deep' = Mk $acWorks
+    'ac-noflags' = $acNoFlagsArm
   }
   'denied' = @{
     plain = Mk $plainOK; 'ac-root-grant' = Mk $acDenied; 'ac-leaf-grants' = Mk $acDenied
     'ac-data-ungranted' = Mk $acNoGrant; 'ac-cwd-deep' = Mk $acDenied; 'ac-entry-deep' = Mk $acDenied
+    'ac-noflags' = $acNoFlagsArm
   }
   'harness-dead' = @{
     plain = Mk $allERR 0 'launch-error CreateProcessW err=2'
@@ -88,16 +103,23 @@ $worlds = @{
     'ac-data-ungranted' = Mk $allERR 0 'launch-error CreateProcessW err=2'
     'ac-cwd-deep' = Mk $allERR 0 'launch-error CreateProcessW err=2'
     'ac-entry-deep' = Mk $allERR 0 'launch-error CreateProcessW err=2'
+    'ac-noflags' = Mk $allERR 0 'launch-error CreateProcessW err=2' 0
   }
   'ace-inert' = @{
     plain = Mk $plainOK; 'ac-root-grant' = Mk $acInert; 'ac-leaf-grants' = Mk $acInert
     'ac-data-ungranted' = Mk $acInert; 'ac-cwd-deep' = Mk $acInert; 'ac-entry-deep' = Mk $acInert
+    'ac-noflags' = $acNoFlagsArm
   }
   'grant-never-landed' = @{
     plain = Mk $plainOK
     'ac-root-grant' = Mk $acGrantNeverLanded; 'ac-leaf-grants' = Mk $acGrantNeverLanded
     'ac-data-ungranted' = Mk $acNoGrant; 'ac-cwd-deep' = Mk $acGrantNeverLanded
-    'ac-entry-deep' = Mk $acGrantNeverLanded
+    'ac-entry-deep' = Mk $acGrantNeverLanded; 'ac-noflags' = $acNoFlagsArm
+  }
+  'defect-absent' = @{
+    plain = Mk $plainOK; 'ac-root-grant' = Mk $acWorks; 'ac-leaf-grants' = Mk $acWorks
+    'ac-data-ungranted' = Mk $acNoGrant; 'ac-cwd-deep' = Mk $acWorks; 'ac-entry-deep' = Mk $acWorks
+    'ac-noflags' = $acNoFlagsRan
   }
 }
 
@@ -113,6 +135,8 @@ $expect = @{
     'bypass-traverse-launch-cwd-deep' = 'PASS'; 'bypass-traverse-child-chdir-deep' = 'PASS'
     'bypass-traverse-node-entry-deep' = 'PASS'
     'harness-grant-reached-decisive-target' = 'PASS'
+    'realpath-defect-reproduces-without-flags' = 'PASS'
+    'preserve-symlinks-flags-unblock-the-child' = 'PASS'
     'control-ace-absent-denies-deep-read' = 'PASS'
     'control-ungranted-sibling-under-profile-denies' = 'PASS'
     'control-ungranted-sibling-inside-root-denies' = 'PASS'
@@ -129,6 +153,10 @@ $expect = @{
     # THE distinguishing cell: the ace DID land on the deep file, so the denial is the kernel's
     # answer and not a harness slip. This is what makes the negative clean.
     'harness-grant-reached-decisive-target' = 'PASS'
+    # The flags still did their job — the child RAN and the kernel denied the read. That is what
+    # separates a real denial from "node never got started".
+    'realpath-defect-reproduces-without-flags' = 'PASS'
+    'preserve-symlinks-flags-unblock-the-child' = 'PASS'
     'control-ace-absent-denies-deep-read' = 'PASS'
     'control-ungranted-sibling-under-profile-denies' = 'PASS'
     'egress-denied-with-zero-capabilities' = 'PASS'
@@ -147,7 +175,16 @@ $expect = @{
     'appcontainer-positive-control' = 'PASS'
     'harness-grant-reached-decisive-target' = 'FAIL'
     'bypass-traverse-deep-read-leaf-grants' = 'FAIL'
+    'preserve-symlinks-flags-unblock-the-child' = 'PASS'
     'control-ace-absent-denies-deep-read' = 'PASS'
+  }
+  'defect-absent' = @{
+    # The no-flag arm ran fine, so the realpath defect did NOT reproduce in this run — which means
+    # the flags cannot be credited with fixing it. Guards against attributing an effect to a
+    # variable when the thing it supposedly fixes was never there.
+    'realpath-defect-reproduces-without-flags' = 'FAIL'
+    'preserve-symlinks-flags-unblock-the-child' = 'PASS'
+    'bypass-traverse-deep-read-leaf-grants' = 'PASS'
   }
   'ace-inert' = @{
     # Every deep read passes, but so does every path that was never granted — so the CONTROLS
@@ -160,7 +197,8 @@ $expect = @{
 }
 
 $bad = 0
-foreach ($name in @('works', 'denied', 'harness-dead', 'ace-inert', 'grant-never-landed')) {
+foreach ($name in @('works', 'denied', 'harness-dead', 'ace-inert', 'grant-never-landed',
+                    'defect-absent')) {
   $script:fails = 0
   $captured = Invoke-Verdict -Cells $worlds[$name] 6>&1
   $got = @{}
@@ -183,7 +221,7 @@ foreach ($name in @('works', 'denied', 'harness-dead', 'ace-inert', 'grant-never
 
 Write-Host ''
 if ($bad -eq 0) {
-  Write-Host "SELFTEST OK - the verdict discriminates in all five worlds"
+  Write-Host "SELFTEST OK - the verdict discriminates in all six worlds"
   exit 0
 }
 Write-Host "SELFTEST FAILED - $bad expectation(s) wrong"
