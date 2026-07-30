@@ -111,7 +111,11 @@ npm/nub-*/*.tgz
 # Kept on disk (and in the Desktop backup) but NOT published to the public repo:
 # roadmap, competitive research, design plans, per-version epics. Agents working
 # from a full local checkout still have them; the public repo does not.
-wiki/
+# `wiki/` is now TRACKED and public — the canonical home for design and research
+# docs the repo ships. The internal corpus (roadmap, per-subcommand plans, and the
+# raw provenance from the lifecycle-script investigation) lives under `internal/`,
+# which is a symlink to an external dir.
+internal
 epics/
 
 # Maintainer-local agent-orientation overlay + its Claude Code loader. Neither
@@ -136,7 +140,7 @@ tests/bench/RESULTS.md
 .fray/
 
 # local-only design corpus (symlink to external dir) — never tracked
-wiki
+internal
 
 # The repo root is npm-only — a root pnpm-lock.yaml (beside a workspace
 # yaml) would mark the root as a workspace for nub and re-trigger the

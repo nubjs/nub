@@ -1,22 +1,14 @@
 ---
 name: cpu-reduction
 description: >-
-  Diagnose and clear CPU/memory/DISK contention on the maintainer's dev host so
-  iteration stays fast. Invoke (via the Skill tool) whenever the machine feels
-  slow, load average is high, swap is filling, disk is filling, a build hangs on
-  a file lock, a benchmark needs a quiet box, or someone suspects "orphaned
-  builds". Two residue families: (1) OLD RUST BUILDS — detached/orphaned
-  `cargo`/`rustc` that outlived their launcher (setsid/nohup, or a TaskStop'd
-  agent's surviving background build) holding target-dir LOCKS and burning cores,
-  plus stale per-worktree `target/` dirs eating tens of GB of disk; (2) orphaned
-  NODE test processes from dead `cargo test`/fixture harnesses, which are the
-  bigger CPU contributor; (3) orphaned SYNTHETIC LOAD GENERATORS — `while :; do
-  :; done` shells a probe spawned to make a contended measurement and never
-  reaped, which drive load into the hundreds. Encodes the
-  measure→identify→preserve→sweep→verify loop, what is safe to kill vs must be
-  kept, and the gotchas (kill silently no-ops, reparenting needs multiple passes,
-  load average lags, `pgrep -f` can silently see nothing). For PREVENTING orphan
-  builds in the first place, see the `rust-build-hygiene` skill.
+  Diagnose and clear CPU, memory, and disk contention on the maintainer's dev
+  host. Invoke when the machine is slow, load or swap is high, disk is filling,
+  a Rust build hangs on a target lock, a benchmark needs a quiet host, stale
+  worktree targets have accumulated, or orphaned build/test processes are
+  suspected. Covers safe worktree-target cleanup, detached Rust builds,
+  orphaned Node tests and synthetic load generators, the preserve list, and the
+  measure-to-verify loop. For preventing orphan builds, use
+  `rust-build-hygiene`.
 metadata:
   internal: true
 ---
@@ -83,20 +75,51 @@ foreground build. Never point two concurrently-building trees at one target dir 
 its lock; that IS the contention). This is the exact hang diagnosed 2026-07-26; the `no-detached-orphan-builds`
 memory + `rust-build-hygiene` skill prevent it.
 
-### 2b. Stale worktree `target/` dirs eating disk
-Each abandoned worktree leaves a private `target/` behind. 2026-07-26: **149 GB across 27 worktrees**
-in `~/.cache/nub/worktrees`, on a data volume 95% full. Prune stale worktrees (the `worktree` skill
-owns their lifecycle):
+### 2b. Worktree-owned Rust targets eating disk
+
+Use the bundled cleaner for disk pressure:
 
 ```sh
-git worktree list                                            # what's live
-du -sh ~/.cache/nub/worktrees/* 2>/dev/null | sort -h | tail  # biggest offenders
-git worktree remove <path> --force && rm -rf <path>-target   # drop a dead one + its target
-git worktree prune                                           # clean the admin records
+# Audit only. This is the default.
+python3 .claude/skills/cpu-reduction/scripts/clean-worktree-targets.py
+
+# Repeat every safety check, then delete eligible build output.
+python3 .claude/skills/cpu-reduction/scripts/clean-worktree-targets.py --apply
 ```
 
-Never delete a target dir of a worktree with a build in flight or uncommitted WIP. Confirm the
-worktree is abandoned (merged/dead branch, no running build) first.
+It deletes no worktree, branch, source file, or shared cache. It covers every worktree-owned target layout observed on this host:
+
+```text
+~/.cache/nub/worktrees/<slug>/target/
+~/.cache/nub/worktrees/<slug>/aube-target/
+~/.cache/nub/worktrees/<slug>/target-linux/
+~/.cache/nub/worktrees/<slug>-target/
+~/.cache/nub/worktrees/<slug>-launcher-target/
+~/.cache/nub/worktrees/<slug>-target-native/
+```
+
+The exact spellings vary. The invariant is either a top-level target-named directory inside a registered worktree or a target-named sibling prefixed by that registered worktree's full basename.
+
+The cleaner protects the entire target set for an owner when `git status --porcelain` reports any staged, unstaged, or untracked work. This is deliberately broader than asking whether the modified files need the artifacts: an uncommitted worktree is active state, so its build output stays intact. It also refuses symlinks, unmatched directories, targets that own the installed `nub-dev` or `nubx-dev` binary, and apply mode while any Rust build process is running. Status and process state are rechecked at the deletion boundary.
+
+Do not remove clean worktree checkouts merely to recover disk. A clean tree may still be an active agent's tree or contain unpushed commits; its build output is regenerable, but the checkout and branch are not interchangeable with cache. Remove a checkout only through the `worktree` skill after separately proving it is abandoned and pushed.
+
+Shared targets are a separate class and stay warm by default:
+
+```text
+~/.cache/nub/shared-target
+~/.cache/nub/shared-target-<content-hash>
+```
+
+They can total hundreds of GiB because content-keyed buckets coexist, but they seed fresh worktrees and may own the installed `nub-dev`/`nubx-dev` binary. Do not include them in a worktree cleanup. Consider pruning shared buckets only after explicit operator approval, after checking live processes and installed symlink targets, and when worktree-local targets do not reclaim enough space.
+
+Measure actual free space before and after. Directory totals are candidate estimates, not the result: APFS clone/shared-block accounting means summed `du` sizes need not equal the `df` delta.
+
+```sh
+df -h /System/Volumes/Data
+```
+
+Measured 2026-07-30: worktree-local targets existed in all the listed layouts. Deleting only targets owned by clean worktrees increased free space from 1 GiB to 193 GiB. Five shared target buckets remained intact, every dirty worktree remained intact, and no worktree checkout or branch needed removal.
 
 ### 2c. Orphaned `rustc` at high CPU
 Rare (Rust builds are noisy but they *finish*), but if `ps` shows a long-`etime` `rustc`/`cc1plus`/

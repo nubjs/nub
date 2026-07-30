@@ -84,7 +84,11 @@ Work in an isolated worktree off `origin/main` (AGENTS.md "Default to a PR flow"
 
 ```bash
 git worktree add /tmp/nub-fix-<n> -b fix-issue-<n> origin/main   # vendor/aube comes along (plain in-tree files)
-cd /tmp/nub-fix-<n> && export CARGO_TARGET_DIR=/tmp/nub-fix-<n>-target
+cd /tmp/nub-fix-<n>
+# Build through the wrapper; never export CARGO_TARGET_DIR yourself — that opts
+# out of the CoW seeding that starts an isolated worktree warm (~14s) instead of
+# cold (~40 min).
+scripts/rust-build.sh build -p nub-cli --profile fast
 ```
 
 Before pushing, run the **pre-push local-verification loop** (AGENTS.md "VERIFY LOCALLY BEFORE PUSHING"): incremental build → the exact CI gates (`cargo clippy --all-targets --all-features -- -D warnings`, `cargo fmt --check`, scoped `cargo test`) → an e2e tmp-fixture run of the specific behavior the issue is about → Docker for anything touching the global cache/config → and promote a durable check into the test suite where reasonable (a regression test for this bug). Get it green locally and push ONCE.

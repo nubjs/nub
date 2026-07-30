@@ -1,6 +1,6 @@
 ---
 name: gcloud-vm
-description: Provision, start, reach, and use Google Cloud VMs for nub — for any real-OS work the local macOS host and Docker can't do (real Linux-kernel enforcement, real Windows/AppContainer/MSVC, a clean multi-GB build box). Invoke whenever you think "I need a Linux box" or "I need a Windows box" — you can START the existing `nub-linux`/`nub-win` instances OR CREATE a fresh one on demand with `gcloud compute instances create`. Encodes the load-bearing gotchas: IPs change on every restart (never trust a hardcoded one), SSH user is `nub` with key `~/.ssh/nub-vm`, a RUNNING box can be a wedged box (read the serial console), size any nub-building Linux box at ≥16 GB, and prefer cross-compiling on the Mac + scp'ing the artifact over building on the VM. Auth expiry needs an interactive `! gcloud auth login` you cannot run yourself.
+description: Provision, start, reach, and use Google Cloud VMs for nub — for any real-OS work the local macOS host and Docker can't do (real Linux-kernel enforcement, real Windows/AppContainer/MSVC, a clean multi-GB build box). Invoke whenever you think "I need a Linux box" or "I need a Windows box" — you can START the existing `nub-linux`/`nub-win` instances OR CREATE a fresh one on demand with `gcloud compute instances create`. Encodes the load-bearing gotchas: IPs change on every restart (never trust a hardcoded one), SSH user is `nub` with key `~/.ssh/nub-vm`, a RUNNING box can be a wedged box (read the serial console), size any nub-building Linux box at ≥16 GB, and prefer cross-compiling on the Mac + scp'ing the artifact over building on the VM. AUTH IS NOT A BLOCKER — `gcloud` USER auth expires constantly (org session-control revokes the refresh token), but a durable SERVICE-ACCOUNT KEY makes every VM op work non-interactively: prefix any command with `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=~/.config/pullfrog/vertex-service-account.json`. Never conclude "the VMs are unavailable" from a `Reauthentication failed. cannot prompt during non-interactive execution` error until you have tried that override.
 ---
 
 # Google Cloud VMs for nub
@@ -39,6 +39,14 @@ gcloud compute instances stop  nub-linux --zone us-central1-a   # when you finis
   ssh -i ~/.ssh/nub-vm -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
       -o ConnectTimeout=15 nub@"$IP" "echo ok"
   ```
+- **A VM can be stopped out from under you MID-SESSION, and it comes back on a DIFFERENT IP
+  (measured 2026-07-30).** This is stronger than "the IP changes on every start", and it breaks the
+  natural reading of that rule — an agent that correctly resolved the IP once, at the top of its run,
+  can still be holding a dead address an hour later, because something else stopped and restarted the
+  box in between. A long-running lane hit exactly this: `nub-linux` disappeared under it and returned
+  as `136.65.151.34`. So **re-resolve the IP on every reconnect, not once per session**, and treat a
+  sudden `Connection refused`/timeout on a previously-working box as "it moved", not "it wedged" —
+  re-read the IP before you go reading the serial console.
 - **Always reachability-guard a VM dispatch** (`ConnectTimeout`, `timeout`), and after a fresh start
   retry with backoff for a few minutes — sshd (Windows especially) isn't up the instant STATUS flips
   RUNNING. Never let a sub-agent hang on a VM: check reachability, act, report, exit.
@@ -82,6 +90,17 @@ gcloud compute instances add-metadata nub-linux-tmp --zone us-central1-a \
   output beats guessing "network problem" every time.
 - **Size ≥16 GB for anything that compiles the nub Rust workspace.** An e2-small (2 GB) cannot build
   it and will OOM-wedge. e2-standard-4 (16 GB) is the proven size.
+- **Write every script you send to `nub-win` as ASCII + CRLF (cost two cycles, 2026-07-30).**
+  PowerShell 5.1 reads a BOM-less script in the ANSI codepage, so a UTF-8 character anywhere in the
+  file — an em-dash in a *comment* is the usual culprit — fails with `The string is missing the
+  terminator`, and the error points at the **last line of the file**, not the offending one. The
+  diagnostic is useless and sends you hunting a quoting bug that does not exist. Keep remote
+  PowerShell ASCII-only, or emit a UTF-8 BOM.
+- **`IsOutputRedirected` is always True over SSH, so the first-run TTY path is UNREACHABLE there.**
+  A `PowerShell` session reached by SSH reports both stdout and stderr redirected, so any
+  `is_terminal()` branch silently takes the non-TTY path and cannot be exercised. Testing real
+  console behavior on Windows needs a ConPTY harness or an interactive RDP session. (On Linux the
+  equivalent is easy — wrap the run in `script(1)` and the TTY branch runs.)
 - **For a nub RUST BUILD, use the `remote-build` skill, not this one.** `scripts/remote-build.ts`
   provisions an ephemeral spot builder from a pre-baked image, cross-compiles
   `aarch64-apple-darwin` on Linux (cargo-zigbuild, no Apple SDK) and pulls the signed binary
