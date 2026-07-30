@@ -4009,14 +4009,26 @@ fn wait_for_watch_reload(
     stderr: &Path,
     mut poke: impl FnMut(),
 ) -> String {
-    // 60s, not the 15s this used to allow. What is being waited on is a real
-    // process restart — nub startup, Node startup, an oxc transform — and a
-    // legitimate pass was measured at 16.85s on a contended host: past the old
-    // budget while doing nothing wrong. That is a timeout too small for the
-    // machine rather than a flake to retry around. No assertion moves; the
-    // restarted child must still report the new values, and a genuine failure
-    // still fails, just later on a wait that normally returns in ~6s.
-    for i in 0..600 {
+    // The pokes are BOUNDED, and that bound is the whole correctness argument.
+    //
+    // `poke` re-writes the very file Node is watching, so each one RESTARTS the
+    // child. Poking on a fixed interval forever therefore livelocks the moment
+    // the child cannot boot and append within one interval: the next poke kills
+    // it before it writes, and the next, and the next. Measured against this
+    // loop by sweeping child boot cost — 900ms boot returns in 2.14s, 1000ms
+    // never returns and burns the entire budget having written one snapshot,
+    // proving the restarted child never appended once. The cliff sits wherever
+    // boot approaches the interval, and it is identical on this branch and its
+    // merge-base, so this is a defect in the harness rather than in nub.
+    //
+    // That livelock is not budget-solvable, which is what an earlier raise of
+    // this limit (15s -> 60s) got wrong: above the cliff no budget succeeds,
+    // and below it the wait returns in 1-2s. Three pokes are far more than the
+    // watcher-registration race needs (it needs the write re-applied at all),
+    // and after them a slow child is simply given time to finish.
+    const MAX_POKES: usize = 3;
+    let mut pokes = 0;
+    for i in 0..300 {
         if let Ok(snapshot) = std::fs::read_to_string(path)
             && snapshot.contains(needle)
         {
@@ -4031,8 +4043,9 @@ fn wait_for_watch_reload(
         }
         // Every ~1s, not every tick: enough to outlast watcher registration
         // without spamming the filesystem the watcher is reading.
-        if i % 10 == 9 {
+        if i % 10 == 9 && pokes < MAX_POKES {
             poke();
+            pokes += 1;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
