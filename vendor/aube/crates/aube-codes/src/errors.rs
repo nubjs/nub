@@ -24,6 +24,7 @@ pub const ERR_AUBE_LOCKFILE_AMBIGUOUS: &str = "ERR_AUBE_LOCKFILE_AMBIGUOUS";
 // ── resolver ─────────────────────────────────────────────────────────
 pub const ERR_AUBE_NO_MATCHING_VERSION: &str = "ERR_AUBE_NO_MATCHING_VERSION";
 pub const ERR_AUBE_NO_MATURE_MATCHING_VERSION: &str = "ERR_AUBE_NO_MATURE_MATCHING_VERSION";
+pub const ERR_AUBE_RELEASE_AGE_MISSING_TIME: &str = "ERR_AUBE_RELEASE_AGE_MISSING_TIME";
 pub const ERR_AUBE_REGISTRY_ERROR: &str = "ERR_AUBE_REGISTRY_ERROR";
 pub const ERR_AUBE_UNKNOWN_CATALOG: &str = "ERR_AUBE_UNKNOWN_CATALOG";
 pub const ERR_AUBE_UNKNOWN_CATALOG_ENTRY: &str = "ERR_AUBE_UNKNOWN_CATALOG_ENTRY";
@@ -47,10 +48,14 @@ pub const ERR_AUBE_OFFLINE: &str = "ERR_AUBE_OFFLINE";
 pub const ERR_AUBE_INVALID_PACKAGE_NAME: &str = "ERR_AUBE_INVALID_PACKAGE_NAME";
 pub const ERR_AUBE_REGISTRY_WRITE_REJECTED: &str = "ERR_AUBE_REGISTRY_WRITE_REJECTED";
 pub const ERR_AUBE_MALICIOUS_PACKAGE: &str = "ERR_AUBE_MALICIOUS_PACKAGE";
+pub const ERR_AUBE_SIMILAR_PACKAGE_NAME: &str = "ERR_AUBE_SIMILAR_PACKAGE_NAME";
 pub const ERR_AUBE_LOW_DOWNLOAD_PACKAGE: &str = "ERR_AUBE_LOW_DOWNLOAD_PACKAGE";
+pub const ERR_AUBE_NEW_PACKAGE_NAME: &str = "ERR_AUBE_NEW_PACKAGE_NAME";
+pub const ERR_AUBE_PACKAGE_AGE_CHECK_FAILED: &str = "ERR_AUBE_PACKAGE_AGE_CHECK_FAILED";
 pub const ERR_AUBE_ADVISORY_CHECK_FAILED: &str = "ERR_AUBE_ADVISORY_CHECK_FAILED";
 pub const ERR_AUBE_SECURITY_SCANNER_FATAL: &str = "ERR_AUBE_SECURITY_SCANNER_FATAL";
 pub const ERR_AUBE_SECURITY_SCANNER_FAILED: &str = "ERR_AUBE_SECURITY_SCANNER_FAILED";
+pub const ERR_AUBE_WEB_LOGIN_RESPONSE_TOO_LARGE: &str = "ERR_AUBE_WEB_LOGIN_RESPONSE_TOO_LARGE";
 
 // ── tarball / store ─────────────────────────────────────────────────
 pub const ERR_AUBE_TARBALL_INTEGRITY: &str = "ERR_AUBE_TARBALL_INTEGRITY";
@@ -94,6 +99,7 @@ pub const ERR_AUBE_RECURSIVE_NOT_SUPPORTED: &str = "ERR_AUBE_RECURSIVE_NOT_SUPPO
 pub const ERR_AUBE_UNKNOWN_COMMAND: &str = "ERR_AUBE_UNKNOWN_COMMAND";
 pub const ERR_AUBE_NPM_ONLY_COMMAND: &str = "ERR_AUBE_NPM_ONLY_COMMAND";
 pub const ERR_AUBE_COMPLETION_FAILED: &str = "ERR_AUBE_COMPLETION_FAILED";
+pub const ERR_AUBE_USAGE_SPEC_WRITE_FAILED: &str = "ERR_AUBE_USAGE_SPEC_WRITE_FAILED";
 pub const ERR_AUBE_REMOVE_PRIOR_INSTALL_DIR: &str = "ERR_AUBE_REMOVE_PRIOR_INSTALL_DIR";
 pub const ERR_AUBE_CONFIG_NESTED_AUBE_KEY: &str = "ERR_AUBE_CONFIG_NESTED_AUBE_KEY";
 pub const ERR_AUBE_NO_BRANDED_CONFIG_FILE: &str = "ERR_AUBE_NO_BRANDED_CONFIG_FILE";
@@ -111,6 +117,7 @@ pub const ERR_AUBE_RUNTIME_EXTRACT_FAILED: &str = "ERR_AUBE_RUNTIME_EXTRACT_FAIL
 #[rustfmt::skip] pub const ERR_AUBE_RUNTIME_MISE_INSTALL_FAILED: &str = "ERR_AUBE_RUNTIME_MISE_INSTALL_FAILED";
 #[rustfmt::skip] pub const ERR_AUBE_RUNTIME_UNSUPPORTED_PLATFORM: &str = "ERR_AUBE_RUNTIME_UNSUPPORTED_PLATFORM";
 pub const ERR_AUBE_RUNTIME_IO: &str = "ERR_AUBE_RUNTIME_IO";
+#[rustfmt::skip] pub const ERR_AUBE_SELF_UPDATE_UNSUPPORTED_PLATFORM: &str = "ERR_AUBE_SELF_UPDATE_UNSUPPORTED_PLATFORM";
 
 // ── misc / safety ──────────────────────────────────────────────────
 pub const ERR_AUBE_INSTALL_CANCELLED: &str = "ERR_AUBE_INSTALL_CANCELLED";
@@ -209,6 +216,12 @@ pub const ALL: &[CodeMeta] = &[
         category: category::RESOLVER,
         description: "A version satisfying the range exists but every candidate was younger than `minimumReleaseAge` and `minimumReleaseAgeStrict=true`.",
         exit_code: Some(21),
+    },
+    CodeMeta {
+        name: ERR_AUBE_RELEASE_AGE_MISSING_TIME,
+        category: category::RESOLVER,
+        description: "The registry served no publish time for any version satisfying the range, so `minimumReleaseAge` could not be evaluated (`minimumReleaseAgeStrict=true`). Distinct from `ERR_AUBE_NO_MATURE_MATCHING_VERSION` so CI tooling can tell a registry serving no `time` metadata from a genuinely too-new release.",
+        exit_code: Some(28),
     },
     CodeMeta {
         name: ERR_AUBE_BLOCKED_EXOTIC_SUBDEP,
@@ -337,6 +350,12 @@ pub const ALL: &[CodeMeta] = &[
         exit_code: None,
     },
     CodeMeta {
+        name: ERR_AUBE_WEB_LOGIN_RESPONSE_TOO_LARGE,
+        category: category::REGISTRY_NETWORK,
+        description: "The web-login token response exceeded the 64 KiB safety limit.",
+        exit_code: None,
+    },
+    CodeMeta {
         name: ERR_AUBE_OFFLINE,
         category: category::REGISTRY_NETWORK,
         description: "Offline mode and the requested resource isn't in the local cache.",
@@ -361,10 +380,28 @@ pub const ALL: &[CodeMeta] = &[
         exit_code: Some(46),
     },
     CodeMeta {
+        name: ERR_AUBE_SIMILAR_PACKAGE_NAME,
+        category: category::SUPPLY_CHAIN,
+        description: "`aube add` refused a package whose name closely resembles a more popular npm package. This protects against typosquatting and slopsquatting.",
+        exit_code: None,
+    },
+    CodeMeta {
         name: ERR_AUBE_LOW_DOWNLOAD_PACKAGE,
         category: category::REGISTRY_NETWORK,
         description: "`aube add` refused a package whose weekly downloads fall below `lowDownloadThreshold` in a non-interactive context (or when stdin is not a TTY). Pass `--allow-low-downloads` to bypass.",
         exit_code: Some(47),
+    },
+    CodeMeta {
+        name: ERR_AUBE_NEW_PACKAGE_NAME,
+        category: category::SUPPLY_CHAIN,
+        description: "`aube add` refused a package name first published within `minimumPackageAge`. This protects against newly registered slopsquatting names.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: ERR_AUBE_PACKAGE_AGE_CHECK_FAILED,
+        category: category::SUPPLY_CHAIN,
+        description: "`aube add` couldn't verify a package name's registry creation time while `minimumPackageAge` was enabled, so the package-age gate failed closed.",
+        exit_code: None,
     },
     CodeMeta {
         name: ERR_AUBE_ADVISORY_CHECK_FAILED,
@@ -527,6 +564,12 @@ pub const ALL: &[CodeMeta] = &[
         exit_code: None,
     },
     CodeMeta {
+        name: ERR_AUBE_USAGE_SPEC_WRITE_FAILED,
+        category: category::ENGINE_CLI,
+        description: "`aube usage` couldn't write the CLI spec to stdout; the output would have been truncated.",
+        exit_code: None,
+    },
+    CodeMeta {
         name: ERR_AUBE_REMOVE_PRIOR_INSTALL_DIR,
         category: category::ENGINE_CLI,
         description: "Couldn't clean up a prior global install dir before re-installing.",
@@ -615,6 +658,12 @@ pub const ALL: &[CodeMeta] = &[
         name: ERR_AUBE_RUNTIME_IO,
         category: category::ENGINE_CLI,
         description: "A filesystem operation in the runtime store failed (lock acquisition, staging, or publishing an install). Not a download failure — the message names the failing path.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: ERR_AUBE_SELF_UPDATE_UNSUPPORTED_PLATFORM,
+        category: category::ENGINE_CLI,
+        description: "`aube self-update` has no published aube release archive for this OS/architecture (e.g. FreeBSD, Intel macOS). Install aube via your system package manager or mise. Distinct from ERR_AUBE_RUNTIME_UNSUPPORTED_PLATFORM, which is about the Node.js download.",
         exit_code: None,
     },
     // Misc / safety

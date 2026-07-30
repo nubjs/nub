@@ -3,6 +3,7 @@
 
 - **Usage**: `aube dist-tag rm [--otp <OTP>] <PACKAGE> <TAG>`
 - **Aliases**: `remove`
+- **Effect**: destructive — may delete or irreversibly overwrite
 
 Remove a dist-tag from a package
 

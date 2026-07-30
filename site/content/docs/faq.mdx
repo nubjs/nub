@@ -8,7 +8,7 @@ description: The short, indexed answers to common questions about Nub — what i
 Nub is an all-in-one toolkit powered by Node.js that modernizes the developer experience in the Node.js ecosystem. Use it to run files, `package.json` scripts, and locally installed CLIs. Use it instead of `node`, `npm run`, and `npx` (or the equivalents in your preferred package manager).
 
 ```console
-$ npm install -g --ignore-scripts=false @nubjs/nub
+$ npm install -g @nubjs/nub
 $ nub index.ts             # run a TypeScript file
 $ nub run dev              # run a package.json script
 $ nubx prisma generate     # run a CLI from node_modules/.bin
@@ -69,7 +69,7 @@ Works. CommonJS, `require()`, dynamic `require()`, `require.cache`, `module.expo
 
 ## What about native (N-API) addons?
 
-Works. Native addons compile against Node's N-API ABI, and Nub is running on a stock Node binary, so addons load exactly as they do on plain Node. (Nub itself ships its `oxc` transpiler as an N-API addon; that path is the same path your `better-sqlite3` or `@napi-rs/canvas` uses.)
+Works. Native addons compile against Node's N-API ABI, and Nub is running on a stock Node binary, so addons load exactly as they do on plain Node. (Nub itself ships its `oxc` transpiler as an N-API addon; that path is the same path your `better-sqlite3` or `@napi-rs/canvas` uses.) Compiling one from source carries one upstream caveat under the default install layout — see [GYP-based native builds](/docs/install/virtual-store#gyp-based-native-builds).
 
 ## Does it support all Node core modules?
 
@@ -86,7 +86,7 @@ On Node older than 18.19, augmented commands emit a tagged error telling you to 
 
 ## Does it work on Linux / macOS / Windows?
 
-Yes — Linux (x64, arm64), macOS (x64, arm64), Windows (x64). Same platforms the underlying Node + `napi-rs` ecosystem already targets. Nub is distributed as prebuilt Rust binaries via `npm install -g --ignore-scripts=false @nubjs/nub`, with platform-specific N-API addons resolved at install time.
+Yes — Linux (x64, arm64), macOS (x64, arm64), Windows (x64). Same platforms the underlying Node + `napi-rs` ecosystem already targets. Nub is distributed as prebuilt Rust binaries via `npm install -g @nubjs/nub`, with platform-specific N-API addons resolved at install time.
 
 ## How do I use it in CI / GitHub Actions?
 
@@ -359,7 +359,7 @@ No. Nub reads `tsconfig.json` the way `tsc` does — `paths`, `baseUrl`, `extend
 ## How do I install Nub?
 
 ```bash
-npm install -g --ignore-scripts=false @nubjs/nub
+npm install -g @nubjs/nub
 ```
 
 That installs the Rust binary (via the usual `@<scope>/<platform-arch>` npm distribution pattern that `swc`, `esbuild`, `oxc`, and `napi-rs`-based tools use) plus the N-API addons for your platform. The resulting `nub` and `nubx` commands are on your `PATH`.
@@ -367,14 +367,14 @@ That installs the Rust binary (via the usual `@<scope>/<platform-arch>` npm dist
 ## How do I upgrade?
 
 ```bash
-npm install -g --ignore-scripts=false @nubjs/nub@latest
+npm install -g @nubjs/nub@latest
 ```
 
 Same as installing — match how you installed: `brew update && brew upgrade nub` for a Homebrew install, otherwise re-run your installer. Nub and Node version independently: Nub resolves the Node your project pins (`.node-version` / `.nvmrc` / `engines.node`) and provisions it if it's missing, falling back to the `node` on your `PATH` only when nothing is pinned. So upgrading Nub does not change your project's Node version, and upgrading Node does not change your Nub version.
 
 ## Is there a curl install script?
 
-Yes. On macOS and Linux, `curl -fsSL https://nubjs.com/install.sh | bash`; on Windows, `powershell -c "irm https://nubjs.com/install.ps1 | iex"`. Both drop a native binary into `~/.nub` and put it on your `PATH`. The scripts verify the release archive against its SHA-256 sidecar before replacing an existing installation. This detects corrupt, truncated, stale-cache, or mismatched assets; it is not an independent authenticity guarantee because the archive and checksum share the same release origin. If you'd rather go through your package manager, `npm install -g --ignore-scripts=false @nubjs/nub` (or `pnpm add -g` / `yarn global add`) does the same thing, and on macOS and Linux `brew install nubjs/tap/nub` works too.
+Yes. On macOS and Linux, `curl -fsSL https://nubjs.com/install.sh | bash`; on Windows, `powershell -c "irm https://nubjs.com/install.ps1 | iex"`. Both drop a native binary into `~/.nub` and put it on your `PATH`. The scripts verify the release archive against its SHA-256 sidecar before replacing an existing installation. This detects corrupt, truncated, stale-cache, or mismatched assets; it is not an independent authenticity guarantee because the archive and checksum share the same release origin. If you'd rather go through your package manager, `npm install -g @nubjs/nub` (or `pnpm add -g` / `yarn global add`) does the same thing, and on macOS and Linux `brew install nubjs/tap/nub` works too.
 
 Two environment variables customize the script, following the same convention as rustup and uv:
 
@@ -406,7 +406,7 @@ iex "& { $(irm https://nubjs.com/install.ps1) } canary"
 Or through npm:
 
 ```bash
-npm install -g --ignore-scripts=false @nubjs/nub@canary
+npm install -g @nubjs/nub@canary
 ```
 
 An existing script install switches channels in place with `nub upgrade --canary`; `nub upgrade --stable` returns to the latest stable release. On a canary build, a plain `nub upgrade` stays on the canary channel. Canary versions are date-stamped — `nub --version` prints something like `v0.5.1-canary.20260724.117`.

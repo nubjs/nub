@@ -8,7 +8,7 @@ const TABS: { id: TabId; label: string; command: string }[] = [
   { id: 'unix', label: 'macOS / Linux', command: 'curl -fsSL https://nubjs.com/install.sh | bash' },
   { id: 'windows', label: 'Windows', command: 'powershell -c "irm https://nubjs.com/install.ps1 | iex"' },
   { id: 'brew', label: 'Homebrew', command: 'brew install nubjs/tap/nub' },
-  { id: 'npm', label: 'npm', command: 'npm install -g --ignore-scripts=false @nubjs/nub' },
+  { id: 'npm', label: 'npm', command: 'npm install -g @nubjs/nub' },
 ];
 
 export function InstallTabs({ className = '' }: { className?: string }) {

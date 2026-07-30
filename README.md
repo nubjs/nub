@@ -71,7 +71,7 @@ nix run github:nubjs/nub
 mise use -g nub
 
 # Or via npm (pnpm / yarn global add work too)
-npm install -g --ignore-scripts=false @nubjs/nub
+npm install -g @nubjs/nub
 ```
 
 For GitHub Actions, use [`nubjs/setup-nub`](https://github.com/nubjs/setup-nub) in place of `actions/setup-node`. It's one-to-one compatible.

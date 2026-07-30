@@ -43,24 +43,29 @@ pub struct ScriptSettings {
     /// system one while project-local binaries still win. `None` when
     /// no runtime switching is active.
     pub node_bin_dir: Option<PathBuf>,
-    /// The resolved node executable, exported as `NODE` (and, unless
-    /// `node_execpath` overrides it, `npm_node_execpath`) for every script.
-    pub node_exe: Option<PathBuf>,
-    /// The *real* Node exported as `npm_node_execpath` when it differs from
-    /// the program driving `NODE` — a wrapping embedder points `NODE` at a
-    /// shim, but node-gyp reads `npm_node_execpath` for Node's install prefix
-    /// and must reach the real binary. `None` ⇒ falls back to `node_exe`,
-    /// where both name one binary. Mirrors `RuntimeContext::node_execpath`,
-    /// which feeds it.
+    /// The node exported as `NODE` (npm parity) — the program a
+    /// script's `$NODE` / bare `node` re-spawns. A wrapper's shim; the
+    /// real binary otherwise.
+    pub node_program: Option<PathBuf>,
+    /// The node exported as `npm_node_execpath` — the *real* binary
+    /// node-gyp reads to find Node's install prefix. Equals
+    /// [`Self::node_program`] unless a wrapper split them apart.
     pub node_execpath: Option<PathBuf>,
+    /// Extra environment an embedder contributes to every script,
+    /// applied last (after `env_clear`) so it survives the jail. Merge
+    /// semantics against aube's own values are resolved upstream; these
+    /// are plain overrides. (`NODE_OPTIONS` folding happens through
+    /// [`Self::node_options`].)
+    pub extra_env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     /// Embedder-supplied environment overlay applied verbatim to every
-    /// lifecycle spawn (`(key, value)` pairs, set last so they win over the
-    /// other `ScriptSettings`-derived keys). Generic by design — aube assigns
-    /// no meaning to the keys; an embedder fills it to route scripts through a
-    /// provisioned/augmented runtime (e.g. nub points `NODE` at its node shim,
-    /// pins `npm_node_execpath`, and injects its preload via `NODE_OPTIONS`)
-    /// without aube growing a runtime-specific field. Default-empty =
-    /// behavior-preserving: a stock aube spawns exactly as before.
+    /// lifecycle spawn (`(key, value)` pairs, set after [`Self::extra_env`]
+    /// so they win over it and over the other `ScriptSettings`-derived keys).
+    /// Generic by design — aube assigns no meaning to the keys; an embedder
+    /// fills it to route scripts through a provisioned/augmented runtime (e.g.
+    /// nub points `NODE` at its node shim, pins `npm_node_execpath`, and
+    /// injects its preload via `NODE_OPTIONS`) without aube growing a
+    /// runtime-specific field. Default-empty = behavior-preserving: a stock
+    /// aube spawns exactly as before.
     pub env_overlay: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     /// Embedder-supplied PATH entries prepended (in order, ahead of the
     /// existing PATH) to every lifecycle spawn. Counterpart to `env_overlay`
@@ -660,14 +665,21 @@ fn apply_script_settings_env(cmd: &mut tokio::process::Command, settings: &Scrip
     if let Some(exe) = aube_exe.as_deref() {
         cmd.env("npm_execpath", exe);
     }
-    // `npm_node_execpath` / `NODE`: the node binary scripts should use
-    // — the switched runtime's node, or the ambient `node` on PATH.
-    // Set here (not at spawn) so it survives the jail's `env_clear`.
-    // A wrapping embedder splits them: `NODE` a shim, `npm_node_execpath` the
-    // real Node node-gyp reads for the prefix. Unset ⇒ both name `node_exe`.
-    if let Some(node_exe) = settings.node_exe.as_deref() {
-        let execpath = settings.node_execpath.as_deref().unwrap_or(node_exe);
-        cmd.env("npm_node_execpath", execpath).env("NODE", node_exe);
+    // `npm_node_execpath` / `NODE`: the node binaries scripts should use
+    // — the switched runtime's node, or the ambient `node` on PATH. `NODE`
+    // is the program a script re-spawns (a wrapper's shim); the execpath
+    // is the *real* binary node-gyp reads for Node's install prefix. They
+    // coincide unless a wrapping embedder split them. Set here (not at
+    // spawn) so they survive the jail's `env_clear`.
+    let node_execpath = settings
+        .node_execpath
+        .as_deref()
+        .or(settings.node_program.as_deref());
+    if let Some(execpath) = node_execpath {
+        cmd.env("npm_node_execpath", execpath);
+    }
+    if let Some(node) = settings.node_program.as_deref().or(node_execpath) {
+        cmd.env("NODE", node);
     }
     // `npm_command`: the top-level PM command (run-script / install / …).
     if let Some(command) = settings.command.as_deref() {
@@ -727,9 +739,17 @@ fn apply_script_settings_env(cmd: &mut tokio::process::Command, settings: &Scrip
         }
         cmd.env("NODE_USE_ENV_PROXY", "1");
     }
-    // Embedder env overlay, applied LAST so it outranks the keys above (an
-    // embedder that, say, pins its own NODE_OPTIONS wins over the
-    // settings-derived one). Generic: aube assigns no meaning to the keys.
+    // Embedder-contributed env, applied last (after `env_clear`, so it
+    // survives the jail) and after every aube-set var, so a wrapping
+    // host has the final say. `NODE_OPTIONS` is not among these — it is
+    // folded into `settings.node_options` upstream to preserve the
+    // user's value.
+    for (key, value) in &settings.extra_env {
+        cmd.env(key, value);
+    }
+    // `env_overlay` is the embedder seam the host populates through
+    // `EngineContext`; it lands after `extra_env` so a host driving both
+    // seams gets one deterministic winner.
     for (key, value) in &settings.env_overlay {
         cmd.env(key, value);
     }
@@ -838,7 +858,9 @@ fn jail_home(package_dir: &Path) -> PathBuf {
         })
         .collect::<String>();
     std::env::temp_dir()
-        .join("aube-jail")
+        // Brand-scoped: the jail root is a real directory under the system temp
+        // dir, so an embedder must not have the engine's brand in it.
+        .join(format!("{}-jail", aube_util::prog()))
         .join(std::process::id().to_string())
         .join(format!("{name}-{hash:016x}"))
 }
@@ -1408,8 +1430,12 @@ fn unshare_one_file(path: &Path, mode: u32) -> std::io::Result<()> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    // `parent` is the caller's own node_modules, and a crashed run leaves this
+    // temp behind (hence the cleanup below), so the leaf is brand-scoped to the
+    // active embedder rather than hardcoded.
     let tmp = parent.join(format!(
-        ".aube-unshare-{}-{}.tmp",
+        ".{}-unshare-{}-{}.tmp",
+        aube_util::prog(),
         std::process::id(),
         file_name
     ));
@@ -1428,20 +1454,51 @@ fn unshare_one_file(path: &Path, mode: u32) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The `.bin` chain Node's own resolution implies for a package's
+/// lifecycle script: the package's own `<modules_dir>/.bin`, then every
+/// enclosing `<modules_dir>/.bin` out to `project_root`. Closest first, so
+/// a nearer copy shadows a farther one — npm/pnpm semantics.
+///
+/// Walking (rather than taking a fixed pair of levels) is load-bearing
+/// under the hoisted layout: a conflicting version nests under whichever
+/// ancestor still had the name free, so the dependency a script reaches
+/// for can sit at ANY level between the package and the root. A package at
+/// `a/<md>/b/<md>/c` whose dependency was placed at `a/<md>/` is invisible
+/// to its own level, its parent's, and the root's alike — the exact 127
+/// this chain exists to prevent.
+///
+/// Under the isolated layout this yields the dep's own
+/// `.aube/<dep_path>/<modules_dir>/.bin` plus the project root and nothing
+/// else, since no other directory on the way up carries the name.
+/// `run_script` appends the project root's `.bin` after these, so the
+/// duplicate entry there is harmless.
+fn dep_bin_chain(package_dir: &Path, project_root: &Path, modules_dir_name: &str) -> Vec<PathBuf> {
+    let mut chain = vec![package_dir.join(modules_dir_name).join(".bin")];
+    let mut cursor = Some(package_dir);
+    while let Some(dir) = cursor {
+        if dir == project_root {
+            break;
+        }
+        if dir.file_name().is_some_and(|n| n == modules_dir_name) {
+            chain.push(dir.join(".bin"));
+        }
+        cursor = dir.parent();
+    }
+    chain
+}
+
 /// Run a lifecycle hook against an installed dependency's package
 /// directory. Mirrors [`run_root_hook`] but spawns inside `package_dir`
 /// (the actual linked package directory, e.g.
 /// `node_modules/.aube/<dep_path>/node_modules/<name>`). The manifest
 /// is the dependency's own `package.json`, *not* the project root's.
 ///
-/// `dep_modules_dir` is the dep's sibling `node_modules/` — i.e.
-/// `package_dir`'s parent for unscoped packages, or `package_dir`'s
-/// grandparent for scoped (`@scope/name`). `<dep_modules_dir>/.bin`
-/// is prepended to `PATH` so the dep's postinstall can spawn tools
-/// declared in its own `dependencies` (the transitive-bin case —
-/// `prebuild-install`, `node-gyp`, `napi-postinstall`). The install
-/// driver writes shims there via `link_dep_bins`; `rebuild` mirrors
-/// the same pass.
+/// Every `<modules_dir>/.bin` from the package's own out to the project
+/// root is prepended to `PATH`, closest first, so the dep's postinstall
+/// can spawn tools declared in its own `dependencies` (the transitive-bin
+/// case — `prebuild-install`, `node-gyp`, `napi-postinstall`). The install
+/// driver writes those shims via `link_dep_bins` (isolated) and
+/// `link_hoisted_placement_bins` (hoisted).
 ///
 /// For the `install` hook specifically, if the manifest leaves both
 /// `install` and `preinstall` empty but the package has a top-level
@@ -1460,7 +1517,6 @@ fn unshare_one_file(path: &Path, mode: u32) -> std::io::Result<()> {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_dep_hook(
     package_dir: &Path,
-    dep_modules_dir: &Path,
     project_root: &Path,
     modules_dir_name: &str,
     manifest: &PackageJson,
@@ -1479,9 +1535,9 @@ pub async fn run_dep_hook(
             _ => return Ok(false),
         },
     };
-    let dep_bin_dir = dep_modules_dir.join(".bin");
-    let mut bin_dirs: Vec<&Path> = Vec::with_capacity(tool_bin_dirs.len() + 1);
-    bin_dirs.push(&dep_bin_dir);
+    let chain = dep_bin_chain(package_dir, project_root, modules_dir_name);
+    let mut bin_dirs: Vec<&Path> = Vec::with_capacity(chain.len() + tool_bin_dirs.len());
+    bin_dirs.extend(chain.iter().map(PathBuf::as_path));
     bin_dirs.extend(tool_bin_dirs.iter().copied());
     run_script(
         package_dir,
@@ -1605,7 +1661,7 @@ mod env_overlay_tests {
     fn node_execpath_overrides_only_npm_node_execpath() {
         let mut cmd = tokio::process::Command::new("node");
         let settings = ScriptSettings {
-            node_exe: Some(PathBuf::from("/wrapper/libexec/node-shim")),
+            node_program: Some(PathBuf::from("/wrapper/libexec/node-shim")),
             node_execpath: Some(PathBuf::from("/real/node/bin/node")),
             ..Default::default()
         };
@@ -1627,10 +1683,10 @@ mod env_overlay_tests {
     /// what every non-wrapping caller sends, so this is the behavior-preserving
     /// path — unchanged from before the split existed.
     #[test]
-    fn unset_node_execpath_falls_back_to_node_exe() {
+    fn unset_node_execpath_falls_back_to_node_program() {
         let mut cmd = tokio::process::Command::new("node");
         let settings = ScriptSettings {
-            node_exe: Some(PathBuf::from("/opt/node/bin/node")),
+            node_program: Some(PathBuf::from("/opt/node/bin/node")),
             ..Default::default()
         };
         apply_script_settings_env(&mut cmd, &settings);
@@ -1639,7 +1695,7 @@ mod env_overlay_tests {
             assert_eq!(
                 env_value(&cmd, key).map(|v| v.to_string_lossy().into_owned()),
                 Some("/opt/node/bin/node".to_string()),
-                "{key} must fall back to node_exe when no split is requested"
+                "{key} must fall back to node_program when no split is requested"
             );
         }
     }
@@ -1652,7 +1708,7 @@ mod env_overlay_tests {
     fn env_overlay_outranks_the_node_execpath_split() {
         let mut cmd = tokio::process::Command::new("node");
         let settings = ScriptSettings {
-            node_exe: Some(PathBuf::from("/settings/node")),
+            node_program: Some(PathBuf::from("/settings/node")),
             node_execpath: Some(PathBuf::from("/settings/execpath")),
             env_overlay: vec![(
                 OsString::from("npm_node_execpath"),
@@ -1867,6 +1923,39 @@ mod jail_tests {
         });
         assert_eq!(env("NO_PROXY"), None);
         assert_eq!(env("NODE_USE_ENV_PROXY"), None);
+    }
+
+    #[test]
+    fn wrapper_node_and_execpath_are_stamped_distinctly() {
+        // A wrapping embedder: `NODE` is the shim (so `$NODE` stays
+        // wrapped) while `npm_node_execpath` is the real binary node-gyp
+        // reads. Embedder `extra_env` lands last.
+        let env = proxy_env(ScriptSettings {
+            node_program: Some(PathBuf::from("/shim/node")),
+            node_execpath: Some(PathBuf::from("/real/node-24.4.1/bin/node")),
+            extra_env: vec![("MYTOOL_WRAPPED".into(), "1".into())],
+            ..Default::default()
+        });
+        assert_eq!(env("NODE").as_deref(), Some("/shim/node"));
+        assert_eq!(
+            env("npm_node_execpath").as_deref(),
+            Some("/real/node-24.4.1/bin/node")
+        );
+        assert_eq!(env("MYTOOL_WRAPPED").as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn node_execpath_falls_back_to_node_program() {
+        // A selector supplies only `node_program`; both vars point at it.
+        let env = proxy_env(ScriptSettings {
+            node_program: Some(PathBuf::from("/opt/node/bin/node")),
+            ..Default::default()
+        });
+        assert_eq!(env("NODE").as_deref(), Some("/opt/node/bin/node"));
+        assert_eq!(
+            env("npm_node_execpath").as_deref(),
+            Some("/opt/node/bin/node")
+        );
     }
 }
 
@@ -2173,5 +2262,76 @@ mod break_cas_hardlinks_tests {
             std::path::Path::new("real.txt")
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod dep_bin_chain_tests {
+    use super::dep_bin_chain;
+    use std::path::{Path, PathBuf};
+
+    /// The depth->=3 shape a two-level approximation misses. Package `c`
+    /// sits at `a/node_modules/b/node_modules/c`; a dependency the hoister
+    /// placed at `a/node_modules/` is reachable from NEITHER `c`'s own
+    /// level, NOR its enclosing `b/node_modules`, NOR the project root, so
+    /// omitting the intermediate ancestor is a live 127 rather than a
+    /// cosmetic gap. Order is load-bearing too: closest first, so a nearer
+    /// copy shadows a farther one.
+    #[test]
+    fn dep_bin_chain_covers_every_intermediate_ancestor_closest_first() {
+        let root = Path::new("/p");
+        let chain = dep_bin_chain(
+            Path::new("/p/node_modules/a/node_modules/b/node_modules/c"),
+            root,
+            "node_modules",
+        );
+        assert_eq!(
+            chain,
+            vec![
+                PathBuf::from("/p/node_modules/a/node_modules/b/node_modules/c/node_modules/.bin"),
+                PathBuf::from("/p/node_modules/a/node_modules/b/node_modules/.bin"),
+                PathBuf::from("/p/node_modules/a/node_modules/.bin"),
+                PathBuf::from("/p/node_modules/.bin"),
+            ],
+            "every enclosing modules dir must appear, closest first"
+        );
+    }
+
+    /// The isolated layout must be unaffected: the virtual-store hop is
+    /// the only intermediate directory carrying the name, so the walk
+    /// reproduces exactly the dep-local `.bin` plus the project root.
+    #[test]
+    fn dep_bin_chain_is_inert_under_the_isolated_layout() {
+        let chain = dep_bin_chain(
+            Path::new("/p/node_modules/.aube/lmdb@3.0.0/node_modules/lmdb"),
+            Path::new("/p"),
+            "node_modules",
+        );
+        assert_eq!(
+            chain,
+            vec![
+                PathBuf::from(
+                    "/p/node_modules/.aube/lmdb@3.0.0/node_modules/lmdb/node_modules/.bin"
+                ),
+                PathBuf::from("/p/node_modules/.aube/lmdb@3.0.0/node_modules/.bin"),
+                PathBuf::from("/p/node_modules/.bin"),
+            ]
+        );
+    }
+
+    /// A custom `modulesDir` renames every level, including the scoped
+    /// case: `@scope/name` adds a directory hop that is NOT named after
+    /// the modules dir, so it must not contribute an entry.
+    #[test]
+    fn dep_bin_chain_honors_a_custom_modules_dir_and_skips_the_scope_hop() {
+        let chain = dep_bin_chain(Path::new("/p/mods/@scope/name"), Path::new("/p"), "mods");
+        assert_eq!(
+            chain,
+            vec![
+                PathBuf::from("/p/mods/@scope/name/mods/.bin"),
+                PathBuf::from("/p/mods/.bin"),
+            ],
+            "the `@scope` directory is not a modules dir and contributes nothing"
+        );
     }
 }

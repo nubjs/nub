@@ -123,6 +123,32 @@ fn help_flag_lists_install_command() {
 }
 
 #[test]
+fn dynamic_completion_keeps_stdout_when_use_stderr_is_configured() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    fs::write(sbx.project.join(".npmrc"), "use-stderr=true\n").unwrap();
+
+    sbx.cmd()
+        .args(["completion", "_", "--complete", "setting"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("auto-install-peers:"));
+}
+
+#[test]
+fn dynamic_completion_rejects_an_invalid_dir() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_manifest(r#"{"dependencies":{"react":"^19"}}"#);
+
+    sbx.cmd()
+        .args(["-C", "missing", "completion", "_", "--complete", "package"])
+        .assert()
+        .success()
+        .stdout("");
+}
+
+#[test]
 fn install_on_manifest_without_deps_creates_state_file() {
     let _guard = e2e_lock();
     let sbx = Sandbox::new();
@@ -284,7 +310,10 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
     // `virtual_store_subdir` (the shared global store, which `file:` deps
     // never enter), never by the `aube_dir_entry_name` that
     // `materialized_pkg_dir` reconstructs.
-    sbx.cmd().args(["approve-builds", "--all"]).assert().success();
+    sbx.cmd()
+        .args(["approve-builds", "--all"])
+        .assert()
+        .success();
     assert!(
         marker_exists_under(&node_modules, "BUILT_527_MARKER"),
         "approve-builds must run a local-source dep's build in the same invocation"

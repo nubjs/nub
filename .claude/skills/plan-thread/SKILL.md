@@ -22,13 +22,13 @@ A plan thread's work IS the thinking. You'd staff it with the human and/or a Pla
 ## How to run a plan thread
 
 1. **Create the thread FIRST** (per fray: the `.fray/<slug>.md` exists before any dispatch), `status: planning`. Write the Goal (the objective + why) and seed `## Open questions` with the real unknowns.
-2. **Work the open questions** — with the human (a plan thread routinely carries human-owned decisions: defaults, product behavior, API/config surface, architecture) and/or by dispatching a Plan/architect agent or a focused research/audit sub-thread to get the facts a decision needs. Ground every design claim in code or an experiment, never memory (the probing-methodology discipline).
+2. **Work the open questions** — with the human (a plan thread routinely carries human-owned decisions: defaults, product behavior, API/config surface, architecture) and/or by dispatching a Plan/architect agent or a focused wiki/research/audit sub-thread to get the facts a decision needs. Ground every design claim in code or an experiment, never memory (the probing-methodology discipline).
 3. **Move each answered question to `## Decisions` the instant it's settled** — a decided thing lives under Decisions, never lingering in Open questions. The thread always reads as current truth (no changelog).
 4. **Lock the design + hand off:** when the approach is settled, record the final design in `## Decisions`, write the implementation handoff in `## Next step` (what an implementer should build), and **flip the status to `planned`** (or dispatch the implementer and go `active`). The implementation thread inherits the locked design.
 
 ## Boundaries with the other profiles
 
-- A plan thread that needs a FACT to decide → spin a research or audit sub-effort, fold the result back, keep deciding. The plan thread owns the decision; the research/audit owns the fact.
+- A plan thread that needs a FACT to decide → spin a research or audit sub-effort, fold the result back, keep deciding. The plan thread owns the decision; the wiki/research/audit owns the fact.
 - A plan thread does NOT land code. The instant code should be written, the design is locked → it becomes a `planned`/implementation thread.
 - Don't let a plan thread become a place to park indefinite "someday" design — if it's not being actively worked toward a lock, it's either `planned` (scoped, awaiting actioning) or should be dismissed.
 

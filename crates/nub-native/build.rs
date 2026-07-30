@@ -1,7 +1,17 @@
 extern crate napi_build;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Cargo's `CARGO_MANIFEST_DIR`, read at RUN time rather than baked in by
+/// `env!`, which would pin this script to the worktree that compiled it.
+/// Full rationale: `crates/nub-cli/build.rs`.
+fn manifest_dir() -> PathBuf {
+    PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR")
+            .expect("cargo always sets CARGO_MANIFEST_DIR for build scripts"),
+    )
+}
 
 fn main() {
     napi_build::setup();
@@ -39,6 +49,9 @@ fn main() {
         );
     }
     println!("cargo:rerun-if-env-changed=NUB_NATIVE_BUILD_ID");
+    // The .git watches above are absolute and per-worktree; without this a
+    // sibling tree reuses this tree's short SHA and mis-keys the transpile cache.
+    println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR");
 }
 
 /// `<short-sha>` or `<short-sha>-dirty`, or `None` on any git failure.
@@ -68,7 +81,7 @@ fn git_dir() -> Option<std::path::PathBuf> {
     if dir.is_absolute() {
         Some(dir.to_path_buf())
     } else {
-        Some(Path::new(env!("CARGO_MANIFEST_DIR")).join(dir))
+        Some(manifest_dir().join(dir))
     }
 }
 
@@ -76,7 +89,7 @@ fn git_dir() -> Option<std::path::PathBuf> {
 fn run_git(args: &[&str]) -> Option<String> {
     let out = Command::new("git")
         .args(args)
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .current_dir(manifest_dir())
         .output()
         .ok()?;
     if !out.status.success() {

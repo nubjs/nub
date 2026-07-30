@@ -2,6 +2,7 @@
 # `aube undeprecate`
 
 - **Usage**: `aube undeprecate [FLAGS] <PACKAGE>`
+- **Effect**: modifies state
 
 Clear an existing deprecation on the registry
 

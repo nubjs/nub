@@ -97,14 +97,30 @@ struct Sources {
     workspace_yaml: Vec<String>,
 }
 
+/// Cargo's `CARGO_MANIFEST_DIR`, read at RUN time rather than baked in by
+/// `env!`. A build-script binary is cached per target dir, so an `env!` path
+/// survives into any other checkout sharing that dir — reading the first
+/// checkout's `settings.toml`, or failing outright once it is gone. Reading the
+/// variable resolves per invocation instead.
+fn manifest_dir() -> PathBuf {
+    PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR")
+            .expect("cargo always sets CARGO_MANIFEST_DIR for build scripts"),
+    )
+}
+
 fn main() {
     // `settings.toml` lives inside this crate so it ships in the
     // published tarball — `cargo publish --verify` runs the build
     // script from `target/package/aube-settings-<ver>/`, which can
-    // only see files under the crate root.
-    let settings_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("settings.toml");
+    // only see files under the crate root. That property comes from
+    // where the file lives, not from how the path is resolved.
+    let settings_path = manifest_dir().join("settings.toml");
 
     println!("cargo:rerun-if-changed={}", settings_path.display());
+    // The path above is absolute, so a shared target dir would otherwise keep a
+    // sibling worktree's generated settings without rerunning this script.
+    println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR");
 
     let raw = fs::read_to_string(&settings_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", settings_path.display()));
@@ -475,7 +491,10 @@ fn default_expr(name: &str, def: &SettingDef, kind: Kind, rust_ty: &str) -> Opti
     // in aube or routed through a crate-specific helper so callers
     // still need to distinguish "not configured" from "configured to
     // this literal value".
-    if matches!(name, "preferFrozenLockfile" | "storeDir" | "nodeVersion") {
+    if matches!(
+        name,
+        "preferFrozenLockfile" | "storeDir" | "cacheDir" | "nodeVersion"
+    ) {
         return None;
     }
     let raw = def.default.trim();

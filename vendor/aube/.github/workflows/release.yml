@@ -80,7 +80,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref != '' && fromJSON(inputs.dry_run || 'false') && inputs.ref || format('refs/tags/{0}', inputs.tag) }}
           submodules: recursive
@@ -105,15 +105,19 @@ jobs:
             exit 1
           fi
           out="crates/aube-resolver/data/primer-top${AUBE_PRIMER_TOP}-v${AUBE_PRIMER_VERSION_CAP}-s${schema}.rkyv.json"
+          popular_out="crates/aube-resolver/data/popular-top100000-v1.json"
           node scripts/generate-primer.mjs \
             --top "$AUBE_PRIMER_TOP" \
             --versions "$AUBE_PRIMER_VERSION_CAP" \
-            --out "$out"
+            --out "$out" \
+            --popular-names-out "$popular_out"
           echo "path=$out" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: metadata-primer
-          path: ${{ steps.primer.outputs.path }}
+          path: |
+            ${{ steps.primer.outputs.path }}
+            crates/aube-resolver/data/popular-top100000-v1.json
 
   # Non-PGO Windows targets (untested PGO toolchain). Built via taiki-e
   # straight from the release profile. `aarch64-unknown-linux-musl` lives
@@ -140,7 +144,7 @@ jobs:
             runner: windows-latest
             build-tool: cargo
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref != '' && fromJSON(inputs.dry_run || 'false') && inputs.ref || format('refs/tags/{0}', inputs.tag) }}
           submodules: recursive
@@ -233,7 +237,7 @@ jobs:
     env:
       TARGET: aarch64-unknown-linux-musl
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref != '' && fromJSON(inputs.dry_run || 'false') && inputs.ref || format('refs/tags/{0}', inputs.tag) }}
           submodules: recursive
@@ -362,7 +366,7 @@ jobs:
             build-tool: cargo
             bolt: false
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref != '' && fromJSON(inputs.dry_run || 'false') && inputs.ref || format('refs/tags/{0}', inputs.tag) }}
           submodules: recursive

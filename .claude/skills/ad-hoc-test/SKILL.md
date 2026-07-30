@@ -2,12 +2,24 @@
 name: ad-hoc-test
 description: >-
   Verify new nub functionality end-to-end by building the dev binary and
-  exercising it against a real throwaway fixture. Invoke (via the Skill tool)
-  after implementing or changing a subcommand/flag/behavior, to confirm the
-  feature ACTUALLY works (not just that tests pass). The loop: create a fixture
-  in a tmp dir, build the dev `nub`, run the subcommand you implemented against
-  the fixture, verify it had the intended effect, then run command variants to
-  probe edge cases. Ad-hoc e2e is a valid verification method on its own; this
+  exercising it against real throwaway fixtures. Invoke (via the Skill tool) in
+  BOTH directions, and the second is the one that gets skipped. (1) CONFIRM —
+  after implementing or changing a subcommand/flag/behavior, check the feature
+  ACTUALLY works, not just that tests pass. (2) FALSIFY — before opening a PR on
+  behavior, and again before calling a review round done, SELF-REVIEW by sweeping
+  many adversarial fixtures for what the change BROKE somewhere you were not
+  looking: boundary abuse, real installed registry packages, monorepo and symlink
+  layouts, the tier x module-format matrix. Green gates plus a working
+  reported-case is NOT that sweep. Reviewers read code and cannot run it, so they
+  systematically miss the silent wrong answer — the resolution that returns a
+  different module with no error — which only a fixture run can catch, by
+  checking WHICH file answered rather than that something did. The loop: create
+  fixtures in a tmp dir, build the dev `nub`, run against them, and diff every
+  result three ways — plain node, a build of your branch's MERGE-BASE, and your
+  build. Use the merge-base, NEVER the shipped release: the release can trail
+  `main` by dozens of unrelated commits, so a difference against it is not
+  attributable to your change and every "pre-existing, not mine" verdict resting
+  on it is unfounded. Ad-hoc e2e is a valid verification method on its own; this
   skill also covers when to promote a durable check into the committed test
   suite. Pairs with the `dev-loop` build skill and AGENTS.md's pre-push loop.
 metadata:
@@ -19,6 +31,34 @@ metadata:
 A green `cargo test` is necessary but not sufficient — it does not prove the *feature works when a user runs it*. The highest-confidence cheap check is to build the dev `nub` and run the actual subcommand against a real fixture on disk. This is a **valid, first-class way to verify new functionality** (it is the implementer's half of the pre-push verification loop). It does not REPLACE the test suite — durable behaviors should also become committed tests — but it is how you confirm a change is real before you trust it.
 
 This is also the highest-yield way to find correctness bugs: a **differential fixture** — one minimal fixture isolating ONE behavior, run against `nub` AND the reference tool it claims parity with (npm/pnpm/yarn/bun/node) on identical input — turns "nub does X" into a verified divergence or match. Always compare against the thing you assert parity with.
+
+---
+
+## Two directions — and the second is the one that gets skipped
+
+**CONFIRM** is the loop below: you changed a behavior, so check it actually works when a user runs it. **FALSIFY** is the sweep: before opening a PR on behavior, and again before calling a review round done, hunt across many fixtures for what your change broke *somewhere you were not looking*. Both are required, and only the first one is instinctive.
+
+- **Confirming is not testing.** Fixtures built to demonstrate a fix all pass, because you chose them to pass. A sweep has to be built to FALSIFY: adversarial shapes, real registry packages, the full tier × module-format matrix, the layouts users actually have. If every fixture you wrote passed on the first run, you tested your intent, not your change.
+- **"The gates are green and the reported case works" is the trap.** It satisfies the letter of the pre-push loop, so no alarm fires.
+- **Review cannot substitute for it.** A reviewer reads code and hypothesizes; they cannot run it, so they systematically miss the SILENT WRONG ANSWER — the resolution that returns a different module with no error, the value that is quietly wrong. Those are reachable only by executing the thing and checking WHICH file answered, not merely that something did. A run of good review findings is not coverage of this bug class.
+- **Schedule the sweep explicitly.** Answering someone else's findings always offers a next one, and your own verification never gets scheduled by default.
+
+The sweep decomposes into prongs that share nothing — adversarial boundary abuse, real installed packages, monorepo and symlink topologies, the tier × entry-kind × import-form matrix — so it parallelises across sub-agents well. Require every claim to carry its command and verbatim output, and verify each load-bearing finding yourself.
+
+## The control decides whether the result means anything
+
+A green result with no control is not evidence. Run each fixture three ways — plain `node`, a build of your branch's **merge-base**, and your build. Three columns settle "is this mine or pre-existing?" where argument settles nothing.
+
+- **The control is the MERGE-BASE, never a shipped release.** `~/.nub/bin/nub` is convenient and wrong: it can trail `main` by dozens of unrelated commits, so a difference against it is not attributable to your change, and every "pre-existing, not mine" verdict resting on it is unfounded. Build the base once and diff against that:
+  ```bash
+  git worktree add /tmp/base $(git merge-base origin/main HEAD)
+  # own CARGO_TARGET_DIR; build the addon before nub-cli
+  ```
+- **Bind the artifact to the change before trusting any run.** The N-API addon and the whole `runtime/` tree are EMBEDDED into the `nub` binary at build time, so a stale binary silently tests the old behavior and a working fix reads as broken. Rebuild in order (addon → `nub-cli`) and confirm from the build log that the crates you changed actually compiled.
+- **Vary exactly one thing.** A control that moves two variables can launder a wrong answer into a verified one. When a control agrees with what you expected, get suspicious rather than relieved.
+- **Cover the TIERS, not just your host Node.** The fast tier (22.15+) and compat tier (18.19–22.14) take different code paths and break differently, so a green run on one modern Node is not a green run.
+- **A behavior fix landed AFTER your sweep un-verifies the sweep.** Narrowing changes feel safe — they only defer more to the reference implementation — but they can withdraw a resolution real code depended on. Re-run at least the highest-value prong against the binary you actually intend to ship.
+- **Read a tester's CAVEATS as closely as its findings.** A sub-agent's limitations section is where a report tells you which of its conclusions are not load-bearing yet.
 
 ---
 

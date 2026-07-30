@@ -165,3 +165,37 @@ fn error_code_reads_structured_diagnostic_code() {
         Some("ERR_AUBE_TEST")
     );
 }
+
+#[test]
+fn facade_discovers_confined_workspace_packages() {
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(
+        workspace.path().join("package.json"),
+        r#"{"workspaces":["{apps,packages}/*"]}"#,
+    )
+    .unwrap();
+    for package in ["apps/web", "packages/lib"] {
+        let directory = workspace.path().join(package);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("package.json"), "{}").unwrap();
+    }
+
+    assert!(aube::embed::is_workspace_project_root(workspace.path()));
+    let packages = aube::embed::discover_workspace_packages(
+        workspace.path(),
+        aube::embed::WorkspaceDiscoveryOptions::confined_to_root(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        packages,
+        vec![
+            workspace.path().join("apps/web").canonicalize().unwrap(),
+            workspace
+                .path()
+                .join("packages/lib")
+                .canonicalize()
+                .unwrap(),
+        ]
+    );
+}

@@ -2,6 +2,7 @@
 # `aube bin`
 
 - **Usage**: `aube bin [-g --global] [-w --workspace-root]`
+- **Effect**: read-only
 
 Print the path to `node_modules/.bin`
 

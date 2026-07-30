@@ -179,3 +179,8 @@ aube completion bash   > /etc/bash_completion.d/aube
 aube completion zsh    > "${fpath[1]}/_aube"
 aube completion fish   > ~/.config/fish/completions/aube.fish
 ```
+
+`aube run <TAB>` and `aubr <TAB>` complete the scripts declared in the
+`package.json` nearest your current directory, with each script's command
+shown as the description. A `-C` earlier on the line isn't taken into
+account — the scripts offered are always the current directory's.

@@ -2,6 +2,7 @@
 # `aube access set`
 
 - **Usage**: `aube access set <SETTING> <PACKAGE>`
+- **Effect**: modifies state
 
 Set package visibility or a publish MFA requirement
 

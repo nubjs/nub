@@ -745,6 +745,107 @@ fn no_collective_hidden_hoist_when_ejected_set_empty_under_gvs() {
 }
 
 #[test]
+fn selected_package_materializes_locally_while_dependencies_keep_using_gvs() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let (store, indices) = setup_store_with_files(dir.path());
+    let graph = make_graph();
+    Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .link_all(&project_dir, &graph, &indices)
+        .unwrap();
+    let initial_foo = project_dir.join("node_modules/.aube/foo@1.0.0");
+    assert!(
+        std::fs::read_link(&initial_foo).is_ok(),
+        "fixture should start with an existing GVS symlink"
+    );
+
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .with_project_local_dep_paths(["foo@1.0.0".to_string()]);
+    linker.link_all(&project_dir, &graph, &indices).unwrap();
+
+    let aube_dir = project_dir.join("node_modules/.aube");
+    let foo = aube_dir.join("foo@1.0.0");
+    let bar = aube_dir.join("bar@2.0.0");
+    assert!(foo.is_dir());
+    assert!(
+        std::fs::read_link(&foo).is_err(),
+        "selected package must be a real project-local directory"
+    );
+    assert!(
+        std::fs::read_link(&bar).is_ok(),
+        "unselected dependency must remain linked to the GVS"
+    );
+    assert_eq!(
+        std::fs::read_to_string(foo.join("node_modules/foo/index.js")).unwrap(),
+        "module.exports = 'foo';"
+    );
+
+    let second = linker.link_all(&project_dir, &graph, &indices).unwrap();
+    assert_eq!(second.packages_linked, 0);
+    assert_eq!(second.packages_cached, 2);
+}
+
+#[test]
+fn workspace_selected_package_materializes_locally_while_dependencies_use_gvs() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(project_dir.join("packages/app")).unwrap();
+
+    let (store, indices) = setup_store_with_files(dir.path());
+    let mut graph = make_graph();
+    graph.importers.insert(
+        "packages/app".to_string(),
+        vec![DirectDep {
+            name: "foo".to_string(),
+            dep_path: "foo@1.0.0".to_string(),
+            dep_type: DepType::Dev,
+            specifier: None,
+        }],
+    );
+    let workspace_dirs = BTreeMap::new();
+    Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .link_workspace(&project_dir, &graph, &indices, &workspace_dirs)
+        .unwrap();
+    let aube_dir = project_dir.join("node_modules/.aube");
+    assert!(std::fs::read_link(aube_dir.join("foo@1.0.0")).is_ok());
+
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .with_project_local_dep_paths(["foo@1.0.0".to_string()]);
+    linker
+        .link_workspace(&project_dir, &graph, &indices, &workspace_dirs)
+        .unwrap();
+
+    let foo = aube_dir.join("foo@1.0.0");
+    let bar = aube_dir.join("bar@2.0.0");
+    assert!(foo.is_dir());
+    assert!(
+        std::fs::read_link(&foo).is_err(),
+        "selected workspace package must be project-local"
+    );
+    assert!(
+        std::fs::read_link(&bar).is_ok(),
+        "unselected workspace dependency must stay in the GVS"
+    );
+    assert!(
+        project_dir
+            .join("packages/app/node_modules/foo/index.js")
+            .exists()
+    );
+
+    let second = linker
+        .link_workspace(&project_dir, &graph, &indices, &workspace_dirs)
+        .unwrap();
+    assert_eq!(second.packages_linked, 0);
+    assert_eq!(second.packages_cached, 2);
+}
+
+#[test]
 fn test_link_file_fresh_reports_missing_cas_shard_and_invalidates_cache() {
     // Reproduces jdx/aube#393: a partially corrupt CAS leaves the
     // cached package index pointing at a missing shard. Materialize
@@ -788,6 +889,56 @@ fn test_link_file_fresh_reports_missing_cas_shard_and_invalidates_cache() {
     assert!(
         !cached_path.exists(),
         "stale index cache must be invalidated on MissingStoreFile"
+    );
+}
+
+#[test]
+fn failed_materialize_leaves_no_entry_to_be_mistaken_for_a_complete_one() {
+    // nubjs/nub#552. Step 1 of the non-GVS link used to materialize straight
+    // into the final `.aube/<dep_path>` with no staging, and the parent-dir
+    // pre-pass creates that directory BEFORE any file is linked. So a failure
+    // partway through left a half-populated entry that every later run's
+    // `if aube_entry.exists() { cached }` gate reported as already linked —
+    // the tree never converged and `rm -rf node_modules` was the only fix.
+    //
+    // Any mid-materialize failure exercises the invariant; a missing CAS shard
+    // is the one that reproduces deterministically. `PackageIndex` iterates in
+    // hash order, so whether the good file links before the bad one is
+    // unspecified — that does not matter, because the directory is created up
+    // front either way.
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let (store, indices) = setup_store_with_files(dir.path());
+    let pkgjson_store_path = indices
+        .get("foo@1.0.0")
+        .unwrap()
+        .get("package.json")
+        .unwrap()
+        .store_path
+        .clone();
+    std::fs::remove_file(&pkgjson_store_path).unwrap();
+
+    // GVS off: the branch whose five call sites wrote directly into the final
+    // entry. GVS-on packages were always staged through the shared store.
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, false);
+    linker
+        .link_all(&project_dir, &make_graph(), &indices)
+        .expect_err("link must fail when a referenced CAS shard is gone");
+
+    let entry = project_dir
+        .join("node_modules/.aube")
+        .join(dep_path_to_filename(
+            "foo@1.0.0",
+            DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH,
+        ));
+    assert!(
+        !entry.exists(),
+        "a failed materialize must leave NO entry behind — {} survived, and the \
+         next install's exists() gate would report this half-written package as \
+         complete",
+        entry.display()
     );
 }
 
@@ -2225,4 +2376,222 @@ fn clonedir_materialize_matches_per_file_byte_for_byte() {
     );
     // Stats parity: the clone counts every index entry as linked.
     assert_eq!(stats.files_linked, index.len());
+}
+
+// nub#566 / nub#576: a POPULATED real directory sitting in a
+// shared-store entry's slot must be replaced by the link, not collide
+// with it. The slot gets that shape whenever a tree materialized
+// per-project (a `CI=1` / project-local-store install, or a package
+// leaving the disk-materialize eject set) is relinked with the shared
+// store on. `classify_entry_state` correctly calls it `Stale`, but the
+// removal that used to run was non-recursive, so it failed silently and
+// the link creation then aborted the whole install with `EEXIST` on
+// Unix / `ERROR_ALREADY_EXISTS` (os 183) on Windows.
+#[test]
+fn gvs_relink_replaces_a_populated_real_dir_in_the_entry_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    let (store, indices) = setup_store_with_files(dir.path());
+    let graph = make_graph();
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true).with_hoist(false);
+
+    linker.link_all(&project_dir, &graph, &indices).unwrap();
+
+    // Rewrite one entry into the per-project shape: a real directory
+    // holding the package, exactly what a GVS-off install leaves behind.
+    let entry = project_dir
+        .join("node_modules/.aube")
+        .join(dep_path_to_filename(
+            "bar@2.0.0",
+            DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH,
+        ));
+    try_remove_entry(&entry);
+    let pkg_dir = entry.join("node_modules/bar");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::write(pkg_dir.join("index.js"), b"stale per-project copy").unwrap();
+    assert!(aube_util::fs::is_real_dir(&entry));
+
+    linker
+        .link_all(&project_dir, &graph, &indices)
+        .expect("relink must reclaim a populated per-project entry, not collide with it");
+
+    assert!(
+        std::fs::read_link(&entry).is_ok(),
+        "entry must end up a link into the shared store"
+    );
+    assert!(entry.join("node_modules/bar/index.js").exists());
+}
+
+// The workspace twin of the test above. `link_all` and `link_workspace`
+// carry near-duplicate step-1 GVS-populate loops, and the fix for
+// nub#566 / nub#576 landed only in `link_all` — so the identical
+// `EntryState::Stale` arm here kept its non-recursive removal and a
+// WORKSPACE wedged permanently on os-183 where a single-package project
+// recovered. Confirmed on a real Windows box against
+// `0.6.0-canary.20260729.129`: same fixture, same perturbation, same
+// command — single package exit 0, workspace exit 1 with
+// `failed to link workspace node_modules`.
+//
+// Reached deliberately rather than naturally: the mode-change wipe in
+// `detect_aube_dir_gvs_mode` normally pre-empts a mixed tree, and that
+// wipe is a DIFFERENT layer. Any other source of one — a partial cache
+// restore, a crash, external tooling — lands straight here.
+#[test]
+fn gvs_workspace_relink_replaces_a_populated_real_dir_in_the_entry_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let root_dir = dir.path().join("workspace");
+    let (store, indices) = setup_store_with_files(dir.path());
+
+    // Two members sharing one dependency, so the entry under test is
+    // reached from more than one importer.
+    let mut graph = make_graph();
+    let foo = graph.importers.get(".").cloned().unwrap_or_default();
+    graph
+        .importers
+        .insert("packages/a".to_string(), foo.clone());
+    graph.importers.insert("packages/b".to_string(), foo);
+
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true).with_hoist(false);
+    linker
+        .link_workspace(&root_dir, &graph, &indices, &BTreeMap::new())
+        .unwrap();
+
+    // Rewrite one shared entry into the per-project shape.
+    let entry = root_dir
+        .join("node_modules/.aube")
+        .join(dep_path_to_filename(
+            "bar@2.0.0",
+            DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH,
+        ));
+    try_remove_entry(&entry);
+    let pkg_dir = entry.join("node_modules/bar");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::write(pkg_dir.join("index.js"), b"stale per-project copy").unwrap();
+    assert!(aube_util::fs::is_real_dir(&entry));
+
+    linker
+        .link_workspace(&root_dir, &graph, &indices, &BTreeMap::new())
+        .expect("workspace relink must reclaim a populated per-project entry, not collide with it");
+
+    assert!(
+        std::fs::read_link(&entry).is_ok(),
+        "entry must end up a link into the shared store"
+    );
+    assert!(entry.join("node_modules/bar/index.js").exists());
+}
+
+// `is_real_dir` exists to tell a plain directory apart from a
+// directory-SHAPED link, so the link case is the whole point — and it is
+// only meaningful against the real primitive: `create_dir_link` writes a
+// Unix symlink on Unix and an NTFS junction on Windows, and a junction
+// reports `is_dir() == true` / `is_symlink() == false`, which is what
+// defeats the obvious file-type test.
+#[test]
+fn is_real_dir_distinguishes_a_plain_dir_from_a_dir_shaped_link() {
+    let tmp = tempfile::tempdir().unwrap();
+    let real = tmp.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let file = tmp.path().join("file");
+    std::fs::write(&file, b"x").unwrap();
+    let link = tmp.path().join("link");
+    sys::create_dir_link(&real, &link).unwrap();
+
+    assert!(aube_util::fs::is_real_dir(&real));
+    assert!(!aube_util::fs::is_real_dir(&link));
+    assert!(!aube_util::fs::is_real_dir(&file));
+    assert!(!aube_util::fs::is_real_dir(&tmp.path().join("missing")));
+}
+
+// `node_modules/<name>` written by an incumbent npm or yarn is a POPULATED
+// REAL directory, and reclaiming that slot is the linker's job — unlike the
+// generic-helper case below, this caller OWNS the entry. On Windows
+// `remove_dir` cannot evict one and the `remove_file` fallback answers os 5,
+// which the retry ladder reads as transient, so `nub install` over an npm
+// tree burned ~10s and then aborted with a bare `Access is denied`.
+// Reproduced on 0.6.0 and canary.
+//
+// NOTE: on Unix this exercises the `cfg(not(windows))` branch, which has
+// always recursed — so it passes with or without the fix here. Its value is
+// the windows-latest leg of `aube-parity`; do not read a local green as
+// evidence the fix works.
+#[test]
+fn reconcile_top_level_link_reclaims_an_incumbent_package_manager_tree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_pkg = tmp.path().join("store/express");
+    std::fs::create_dir_all(&store_pkg).unwrap();
+    std::fs::write(store_pkg.join("index.js"), b"//ours").unwrap();
+
+    // What `npm install` leaves behind: a real directory holding real files.
+    let link_path = tmp.path().join("node_modules/express");
+    std::fs::create_dir_all(link_path.join("lib")).unwrap();
+    std::fs::write(link_path.join("package.json"), b"{}").unwrap();
+
+    assert!(
+        !crate::link::reconcile_top_level_link(&link_path, &store_pkg).unwrap(),
+        "an incumbent tree must be reclaimed, not reported as already correct"
+    );
+    assert!(
+        link_path.symlink_metadata().is_err(),
+        "incumbent tree survived, so the create_dir_link that follows would collide"
+    );
+
+    // The slot is free and the real link lands in it.
+    sys::create_dir_link(&store_pkg, &link_path).unwrap();
+    assert_eq!(
+        std::fs::read(link_path.join("index.js")).unwrap(),
+        b"//ours"
+    );
+}
+
+// A junction is the other shape reaching that removal, and its TARGET must
+// survive being unlinked — the recursion is gated on `is_real_dir` precisely
+// so it cannot follow one.
+#[test]
+fn reconcile_top_level_link_unlinks_a_stale_link_without_touching_its_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let old_target = tmp.path().join("store/old");
+    std::fs::create_dir_all(&old_target).unwrap();
+    std::fs::write(old_target.join("keep.js"), b"keep").unwrap();
+    let new_target = tmp.path().join("store/new");
+    std::fs::create_dir_all(&new_target).unwrap();
+
+    let link_path = tmp.path().join("node_modules/pkg");
+    std::fs::create_dir_all(link_path.parent().unwrap()).unwrap();
+    sys::create_dir_link(&old_target, &link_path).unwrap();
+
+    assert!(!crate::link::reconcile_top_level_link(&link_path, &new_target).unwrap());
+    assert!(link_path.symlink_metadata().is_err(), "link not reclaimed");
+    assert_eq!(
+        std::fs::read(old_target.join("keep.js")).unwrap(),
+        b"keep",
+        "reclaiming the link recursed through it and destroyed the old target"
+    );
+}
+
+// `create_dir_link` is the last writer before the install aborts, so it
+// carries its own clear-and-retry for a leftover link in the slot. The
+// restraint is deliberate and load-bearing: a POPULATED directory is a
+// real conflict a generic helper must not silently destroy, and the
+// caller that owns the slot clears it instead (see the test above).
+#[test]
+fn create_dir_link_reclaims_a_leftover_link_but_not_a_populated_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("target");
+    let other = tmp.path().join("other");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::create_dir(&other).unwrap();
+
+    let slot = tmp.path().join("slot");
+    sys::create_dir_link(&other, &slot).unwrap();
+    sys::create_dir_link(&target, &slot).expect("a stale link in the slot is reclaimed");
+
+    let occupied = tmp.path().join("occupied");
+    std::fs::create_dir_all(occupied.join("node_modules/pkg")).unwrap();
+    assert_eq!(
+        sys::create_dir_link(&target, &occupied)
+            .expect_err("a populated dir must surface, not be wiped")
+            .kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    assert!(occupied.join("node_modules/pkg").exists());
 }

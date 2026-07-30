@@ -178,15 +178,97 @@ An element pushed off-canvas reads out-of-viewport even when the screenshot crop
 
 ---
 
+## Icon-beside-text alignment — measure each glyph's INK; every glyph is off by a different amount
+
+The single most-repeated visual defect: an icon, glyph, emoji, badge, or counter placed next to text and
+left riding high or low. `items-center` centers the glyph's **BOX** on the flex line, but the eye aligns
+**INK**, and those never coincide:
+
+- A **digit has no descender**, so its ink rides HIGH inside the line box.
+- An **SVG's ink** sits wherever its path falls inside its viewBox — a filled octicon's ink is not
+  centered in its 16-unit box, and a lucide stroke glyph's ink is smaller again.
+- An **emoji** is a bitmap with its own metrics that ignore your font size entirely.
+
+So one shared nudge CANNOT fix a cluster. Measure each glyph, correct each glyph. Measured result from a
+real count-badge cluster (11.5px text, 12px icons), as an illustration of how much they diverge:
+
+| glyph | ink height | offset from the digit's ink center | correction |
+| --- | --- | --- | --- |
+| filled octicon | 10.8px | 1.16px low | `translateY(-0.1em)` |
+| lucide stroke glyph | 9.0px | 1.29px low | `translateY(-0.112em)` |
+| emoji | 16.0px | 0.26px — sub-pixel | none; a nudge only blurs the bitmap |
+
+Three rules that generalize:
+
+- **Express the correction in `em`, never `px`,** so it tracks the font size — then PROVE it by doubling
+  the cluster's font size and re-measuring; the residual must stay near zero.
+- **Leave sub-pixel offsets alone.** Below ~0.3px you are under the device grid, and transforming a
+  bitmap emoji by a fraction of a pixel makes it blurrier, not straighter.
+- **Re-measure after correcting.** Never assume the nudge landed; the residual should read ~0.01px.
+
+### The routine
+
+```js
+// Baseline: an empty zero-size inline-block's bottom margin edge IS the baseline of the INLINE context
+// it sits in. THE TRAP: a badge holder is usually inline-FLEX, so a probe appended there becomes a FLEX
+// ITEM and reports the flex line's center — which inflated a real 1.2px error into a plausible 3.5px one
+// and would have shipped a 3px over-correction. Wrap the text node in its OWN inline span, probe INSIDE.
+const baselineOfTextNode = (node) => {
+  const span = document.createElement("span")
+  node.parentNode.insertBefore(span, node); span.appendChild(node)
+  const probe = document.createElement("span")
+  probe.style.cssText = "display:inline-block;width:0;height:0;padding:0;margin:0;border:0"
+  span.appendChild(probe)
+  const baseline = probe.getBoundingClientRect().bottom
+  const cs = getComputedStyle(span)
+  const font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} / ${cs.lineHeight} ${cs.fontFamily}`
+  probe.remove(); span.parentNode.insertBefore(node, span); span.remove()
+  return { baseline, font }
+}
+const inkOfText = (text, font, baseline) => {
+  const c = document.createElement("canvas").getContext("2d"); c.font = font
+  const m = c.measureText(text)
+  return { top: baseline - m.actualBoundingBoxAscent, bottom: baseline + m.actualBoundingBoxDescent }
+}
+// An SVG geometry element's getBoundingClientRect IS its ink box (stroke included). Union EVERY child —
+// a multi-path icon's ink is all of it, not the first path.
+const inkOfSvg = (svg) => {
+  const rects = [...svg.querySelectorAll("path,rect,circle,ellipse,polyline,polygon,line")]
+    .map((g) => g.getBoundingClientRect())
+  return { top: Math.min(...rects.map((r) => r.top)), bottom: Math.max(...rects.map((r) => r.bottom)) }
+}
+// → returns textInkCenter - glyphInkCenter. NEGATIVE = glyph sits BELOW the text and must be LIFTED.
+```
+
+**Sign convention, stated once because reversing it doubles the error:** negative means lift the glyph.
+
+### Distrust a suspiciously large reading
+
+A 3.5px error on an 11.5px font is ~30% — that is not a subtle misalignment, it is a broken instrument.
+Sanity-check every magnitude against what the screenshot actually shows: if the number claims a gross
+error and the picture shows a subtle one, fix the instrument, not the UI. This is the visual instance of
+the repo-wide rule that a dramatic or confirming result is the moment to get suspicious, not relieved.
+
+### Mirror the real product before inventing a treatment
+
+If the thing you are drawing exists in a product the user knows (GitHub, Linear, an existing component),
+drive the real one headless and read its computed values out of the DOM rather than designing from taste.
+One such call settled a badge that had been guessed wrong twice — the real one used a filled octicon (not
+a stroke glyph), monochrome grey matching its neighbour (not state-colored), showing a count (not `#N`).
+The transferable lesson: **color belongs to an item's own state, not to its links.**
+
+---
+
 ## 7-step visual-review checklist
 
 Run this for any change to `site/` or other rendered UI. Steps 3–4 are the non-negotiable additions that a screenshot review cannot do.
 
+0. **You are the first reviewer of your own screenshot.** Capturing evidence is not reviewing evidence. Read the shot back and actively hunt for what is WRONG with it — a glyph riding high, one mark visually heavier than its neighbours, a collision at a narrow width. Capture at a scale where the detail is judgeable; a 40px component inside a 1400px frame cannot be reviewed, and glancing at it counts for nothing. Never hand the user a screenshot you have not personally critiqued — if you would not ship it to a design-conscious colleague without a caveat, fix the caveat instead of writing it.
 1. **Screenshot** — `take_screenshot`, full page + tight crop around the changed element. Note candidate problem elements.
 2. **Console** — `list_console_messages`. A 200 response alongside a thrown error is still a broken page.
 3. **Occlusion pass** — run routine §1 on the changed element AND any neighbors near fixed/sticky/absolute/overlay elements (nav bars, modals, tooltips, dropdowns, sticky headers). `coverage < 1` with a non-ancestor cover → flag it.
 4. **Clip pass** — run routine §2 on the changed element.
-5. **Alignment/spacing pass** — for anything that should align or sit at a fixed gap, run §3. Assert the px deltas; don't eyeball. For labels at **different font-sizes** that must look centered together, run §5 (optical center of mass) — box-center (§3) is the wrong metric there.
+5. **Alignment/spacing pass** — for anything that should align or sit at a fixed gap, run §3. Assert the px deltas; don't eyeball. For labels at **different font-sizes** that must look centered together, run §5 (optical center of mass) — box-center (§3) is the wrong metric there. For any **icon/glyph/emoji sitting beside text**, run the ink measurement above, per glyph, and re-measure the residual — this is the most-repeated visual defect in this repo and box-center is the wrong metric for it too.
 6. **Viewport pass** — confirm the element's box is inside `innerWidth/innerHeight` via §4.
 7. **State the verdict in measurements.** "coverage 1.0, clip: false, left-edge delta 0px" is a clean bill of health. "coverage 0.62, coveredBy: nav.topbar" is a flag. Never a bare "looks great."
 

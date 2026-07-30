@@ -275,20 +275,32 @@ fn merge_child_env(
 /// injecting a var Node already delivers identically would FREEZE it at the `nub
 /// watch` startup value (Node's `--env-file` never overrides an already-present
 /// env var). Inject a key iff nub's `${VAR}` expansion changed it from the raw
-/// value Node's `--env-file` delivers (`raw_env` is the unexpanded `.env*` merge);
-/// every plain var is left to Node's `--env-file` and live-reloads on restart. A
-/// key absent from `raw_env` is injected — that is the explicit `--env-file` case
-/// (`raw_env` is empty there: auto-discovery is suppressed and Node gets no
-/// `--env-file` args, so injection is the only delivery channel). Pure over its
-/// inputs so the selection can be unit-tested without spawning Node.
+/// value Node actually delivers — `forwarded_raw` is the unexpanded merge of the
+/// files that really reach Node as `--env-file` args; every plain var is left to
+/// Node's `--env-file` and live-reloads on restart. A key absent from
+/// `forwarded_raw` is injected, because injection is then its only delivery
+/// channel: that covers the explicit `--env-file` case (auto-discovery is
+/// suppressed) and every source below Node's 20.6.0 `--env-file` floor, where
+/// nothing is forwarded at all. Pure over its inputs so the selection can be
+/// unit-tested without spawning Node.
 fn watch_inject_vars<'a>(
     env_vars: &'a HashMap<String, String>,
-    raw_env: &HashMap<String, String>,
+    forwarded_raw: &HashMap<String, String>,
 ) -> Vec<(&'a String, &'a String)> {
     env_vars
         .iter()
-        .filter(|(k, v)| raw_env.get(*k) != Some(*v))
+        .filter(|(k, v)| forwarded_raw.get(*k) != Some(*v))
         .collect()
+}
+
+/// Node's `--env-file` floor (landed 20.6.0). Below it Node aborts on the
+/// unknown option *before executing anything*, so a watch child handed the flag
+/// dies instantly with no output — every env-file source must fall back to
+/// whole-map injection instead. nub supports Node from 18.19, so this range is
+/// live, not theoretical. Gates the auto-discovered cascade as well as the
+/// explicit flags.
+fn node_accepts_env_file(version: &nub_core::node::version::NodeVersion) -> bool {
+    *version >= nub_core::node::version::NodeVersion::new(20, 6, 0)
 }
 
 /// Whether the watch path forwards the explicit `--env-file` flags to the
@@ -306,8 +318,7 @@ fn should_forward_explicit_env_files(
         return false;
     }
     let needs_if_exists = explicit.iter().any(|(_, if_exists)| *if_exists);
-    *version >= NodeVersion::new(20, 6, 0)
-        && (!needs_if_exists || *version >= NodeVersion::new(22, 9, 0))
+    node_accepts_env_file(version) && (!needs_if_exists || *version >= NodeVersion::new(22, 9, 0))
 }
 
 /// Render a forwarded watch env file (auto-discovered or explicit) for Node's
@@ -430,13 +441,34 @@ fn strip_windows_verbatim_prefix(path: &str) -> String {
     }
 }
 
-/// Exact ambient spellings for the env-file runtime-control denylist. A Unix
-/// process may carry both canonical and mixed-case spellings; Windows collapses
-/// them through its case-insensitive environment.
-fn ambient_denied_env_file_keys() -> Vec<String> {
+/// The keys the watch guard strips from a forwarded env file's values.
+///
+/// The runtime-control denylist is unconditional. `NODE_ENV` joins it only when
+/// the AUTO `.env*` cascade is the live source, which is what keeps `nub watch`
+/// byte-identical to `nub <file>`: `load_env_files` drops a file-set `NODE_ENV`
+/// (#263 — a `.env` pinning it broke `next build`, whose prerender forks
+/// inherited the wrong mode), while the explicit `--env-file` map deliberately
+/// does not. Forwarding the raw files to Node bypasses that load-time drop
+/// entirely, so the watch path has to re-apply it at the process boundary. The
+/// two families never co-occur — an explicit flag suppresses auto-discovery — so
+/// keying the extra drop on which family is live reproduces each one's
+/// direct-runner behavior exactly.
+fn watch_guarded_env_file_keys(auto_cascade: bool) -> Vec<&'static str> {
+    let mut keys = nub_core::workspace::env::denied_env_file_keys().to_vec();
+    if auto_cascade {
+        keys.push("NODE_ENV");
+    }
+    keys
+}
+
+/// Exact ambient spellings of the guarded keys. A Unix process may carry both
+/// canonical and mixed-case spellings; Windows collapses them through its
+/// case-insensitive environment. An ambient value is the user's own and must
+/// survive untouched — only file-derived values are stripped.
+fn ambient_guarded_env_file_keys(guarded: &[&'static str]) -> Vec<String> {
     env::vars_os()
         .filter_map(|(key, _)| key.into_string().ok())
-        .filter(|key| nub_core::workspace::env::is_denied_env_file_key(key))
+        .filter(|key| guarded.iter().any(|g| key.eq_ignore_ascii_case(g)))
         .collect()
 }
 
@@ -444,8 +476,12 @@ fn ambient_denied_env_file_keys() -> Vec<String> {
 /// startup consumers cannot read a value from a raw env file. Unix startup
 /// lookup is exact-case, so a mixed-case ambient key does not cover the canonical
 /// spelling; Windows lookup is case-insensitive.
-fn watch_env_guard_placeholders(ambient_keys: &[String], windows: bool) -> Vec<&'static str> {
-    nub_core::workspace::env::denied_env_file_keys()
+fn watch_env_guard_placeholders(
+    guarded: &[&'static str],
+    ambient_keys: &[String],
+    windows: bool,
+) -> Vec<&'static str> {
+    guarded
         .iter()
         .copied()
         .filter(|denied| {
@@ -5008,12 +5044,15 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         let mut node_args = vec!["--watch".to_string(), "--watch-preserve-output".to_string()];
         node_args.push(file.to_string());
         node_args.extend(args.iter().cloned());
-        let status = std::process::Command::new(node.path.as_str())
-            .args(&node_args)
+        let mut cmd = std::process::Command::new(node.path.as_str());
+        cmd.args(&node_args)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status()?;
+            .stderr(std::process::Stdio::inherit());
+        // Not `.status()` — see the note on the augmented path below. `node --watch`
+        // never exits on its own, so a bare status() leaks the supervisor and its
+        // watched child on leader death.
+        let status = nub_core::node::spawn::status_forwarding_signals(&mut cmd)?;
         return Ok(nub_core::node::spawn::exit_code_from_status(&status));
     }
 
@@ -5051,11 +5090,11 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // the child. This keeps `nub --watch --env-file …` consistent with the direct
     // file runner. `--no-env-file` suppresses BOTH the auto args and the explicit
     // `--env-file` overlay — the watched Node receives no `--env-file` args at all.
-    // Load the `.env*` files ONCE: `raw_env` is the unexpanded merge (the values
-    // Node's `--env-file` args deliver), `auto_env` is the same map expanded. A
-    // single read (rather than `load_env_files` + a second `load_env_files_raw`)
-    // avoids re-parsing every file twice and closes the TOCTOU window where a file
-    // changing between two reads could spuriously inject a plain var.
+    // Load the `.env*` files ONCE: `auto_raw_env` is the unexpanded merge,
+    // `auto_env` is the same map expanded. A single read (rather than
+    // `load_env_files` + a second `load_env_files_raw`) avoids re-parsing every
+    // file twice and closes the TOCTOU window where a file changing between two
+    // reads could spuriously inject a plain var.
     // Forward the explicit `--env-file` files only when the pinned Node accepts
     // every flag flavor present (#479). All-or-nothing: mixing forwarded and
     // injected explicit files would corrupt last-writer-wins precedence (an
@@ -5063,31 +5102,48 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // forwarded later one — Node's `--env-file` never overrides an already-set
     // var). Below the gate, fall back to whole-map injection: values freeze at
     // their startup snapshot (the pre-#479 behavior — degraded, never broken).
+    // The auto cascade needs the SAME floor. It never had one: `--env-file` args
+    // for the discovered `.env*` files were pushed unconditionally, so on Node
+    // 18.19–20.5 every `nub watch` in a project with a `.env` died on `bad
+    // option: --env-file=…` before running a line. Gate it exactly like the
+    // explicit flags (the autos always use the plain `--env-file` spelling, so
+    // only the 20.6.0 floor applies to them).
+    let forward_auto = node_accepts_env_file(&node.version);
     let forward_explicit = should_forward_explicit_env_files(&node.version, explicit_env_files);
-    let raw_env = if env_file_present || no_env_file {
-        if forward_explicit {
-            // The explicit files reach Node as `--env-file` args below, so the
-            // inject loop must skip everything Node delivers identically — hand
-            // it the raw (unexpanded) explicit merge, same as the auto path.
-            ENV_FILE_VARS_RAW.get().cloned().unwrap_or_default()
-        } else {
-            // No `--env-file` args reach Node, so injection is the only delivery
-            // channel — leave `raw_env` empty so the inject loop injects every
-            // var (see `watch_inject_vars`). Under `--no-env-file`
-            // `merge_child_env` returns empty, so nothing is injected.
-            HashMap::new()
-        }
+    // The auto `.env*` cascade, unexpanded. Loaded whenever auto-discovery is
+    // live, INDEPENDENT of forwarding: `auto_env` below needs it as the injection
+    // base even when the files never reach Node.
+    let auto_raw_env = if env_file_present || no_env_file {
+        HashMap::new()
     } else {
         project
             .as_ref()
-            .map(|p| nub_core::workspace::env::load_env_files_raw(&p.root))
+            .map(|p| nub_core::workspace::env::load_env_files_raw_warning(&p.root))
             .unwrap_or_default()
     };
+    // The raw values the watched Node receives through forwarded `--env-file`
+    // args — precisely the set the inject loop must SKIP, since injecting a var
+    // Node already delivers freezes it at the startup value (#207). A family that
+    // is not forwarded contributes nothing here, which makes injection its only
+    // delivery channel and restores the pre-#207 freeze-at-startup behavior:
+    // degraded live-reload, never a dead watcher.
+    let mut forwarded_raw_env = if forward_auto {
+        auto_raw_env.clone()
+    } else {
+        HashMap::new()
+    };
+    if forward_explicit {
+        // The explicit files reach Node as `--env-file` args below, so the inject
+        // loop must skip everything Node delivers identically.
+        if let Some(explicit) = ENV_FILE_VARS_RAW.get() {
+            forwarded_raw_env.extend(explicit.clone());
+        }
+    }
     // Pre-expand the auto base to the same map the direct file runner's
     // `load_env_files` produces. When `--env-file` is present `merge_child_env`
-    // discards this (auto-discovery suppressed), so the empty `raw_env` clone is
-    // fine — only the explicit `--env-file` overlay survives there.
-    let mut auto_env = raw_env.clone();
+    // discards this (auto-discovery suppressed), so the empty map is fine — only
+    // the explicit `--env-file` overlay survives there.
+    let mut auto_env = auto_raw_env;
     nub_core::workspace::env::expand_env_map(&mut auto_env);
     // `merge_child_env` applies the `--env-file` suppression gate and overlays the
     // explicit `--env-file` vars (shell still wins).
@@ -5122,10 +5178,12 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
 
     // Reverse so the highest-priority `.env*` file lands last (Node's
     // last-writer-wins ⇒ nub's first-writer-wins precedence).
-    for path in env_file_paths.iter().rev() {
-        // `cmd` inherits `cwd`; the helper chooses the path form required by the
-        // platform watcher without changing cwd or file precedence.
-        node_args.push(watch_env_file_arg(path, &cwd, cfg!(windows), false)?);
+    if forward_auto {
+        for path in env_file_paths.iter().rev() {
+            // `cmd` inherits `cwd`; the helper chooses the path form required by
+            // the platform watcher without changing cwd or file precedence.
+            node_args.push(watch_env_file_arg(path, &cwd, cfg!(windows), false)?);
+        }
     }
     // Explicit `--env-file` files forward in USER order — no reverse: Node is
     // last-writer-wins and nub's parse across repeated flags is last-wins too,
@@ -5165,7 +5223,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // identity and non-Windows behavior stays byte-for-byte unchanged.
     // Whether ANY env file (auto-discovered or explicit) reaches Node as a raw
     // `--env-file` arg — the trigger for the per-child guard machinery below.
-    let any_env_forwarded = !env_file_paths.is_empty() || forward_explicit;
+    let any_env_forwarded = (forward_auto && !env_file_paths.is_empty()) || forward_explicit;
     #[cfg(windows)]
     if any_env_forwarded {
         cmd.current_dir(windows_long_watch_path(&cwd)?);
@@ -5175,7 +5233,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // delivers identically is left to Node so the long-lived watcher re-reads it
     // from the file on every restart (a changed `.env` value is picked up) instead
     // of freezing at startup.
-    for (k, v) in watch_inject_vars(&env_vars, &raw_env) {
+    for (k, v) in watch_inject_vars(&env_vars, &forwarded_raw_env) {
         cmd.env(k, v);
     }
     // Node receives the forwarded files (auto-discovered + explicit) as raw
@@ -5209,12 +5267,16 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         }
         .node_options_token();
 
-        let ambient_keys = ambient_denied_env_file_keys();
-        for key in watch_env_guard_placeholders(&ambient_keys, cfg!(windows)) {
+        // The auto cascade is the live family exactly when no explicit flag
+        // suppressed it; that decides whether `NODE_ENV` is guarded here (see
+        // `watch_guarded_env_file_keys`).
+        let guarded_keys = watch_guarded_env_file_keys(!env_file_present && !no_env_file);
+        let ambient_keys = ambient_guarded_env_file_keys(&guarded_keys);
+        for key in watch_env_guard_placeholders(&guarded_keys, &ambient_keys, cfg!(windows)) {
             cmd.env(key, "");
         }
         let state = serde_json::json!({
-            "denylist": nub_core::workspace::env::denied_env_file_keys(),
+            "denylist": guarded_keys,
             "ambientKeys": ambient_keys,
             "nodeOptions": &sanitized_node_options,
         });
@@ -5237,7 +5299,19 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         // Strip below-floor version-gated flags just as the direct-spawn sites do.
         cmd.env("NODE_OPTIONS", existing);
     }
-    let status = cmd.status()?;
+    // NOT `cmd.status()`. Every other long-lived spawn in nub goes through a
+    // process-group + reaper path; watch was the sole exception, and it is the one
+    // that matters most: `node --watch` is a supervisor that by design never exits,
+    // and it spawns a watched grandchild of its own. A bare `status()` leaves both
+    // outside nub's group, so when the leader dies (a killed agent session, a test
+    // harness that gives up, a closed terminal) they reparent to launchd and run
+    // forever, each holding an fsevents watch on a source tree. They accumulate
+    // monotonically — 99 such orphans were found on the dev host, the oldest 17h
+    // old, none of them rustc or cargo. `status_forwarding_signals` is the
+    // signal-faithful equivalent of `status()`: own process group, the #480
+    // SIGKILL-on-leader reaper held across the wait, and terminating signals
+    // forwarded to the whole subtree.
+    let status = nub_core::node::spawn::status_forwarding_signals(&mut cmd)?;
 
     // PATH shim cleanup is handled once at the top level (see `run`).
     Ok(nub_core::node::spawn::exit_code_from_status(&status))
@@ -6516,11 +6590,18 @@ fn swap_dir(install_dir: &Path, name: &str, new_src: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Set the executable bit (0o755) on a freshly-installed binary. The release
-/// archive ships the binary at 0o644 — CI's upload/download-artifact round-trip
-/// strips the +x install.sh would otherwise rely on — so the self-owned upgrade
-/// path must re-apply it or the upgraded `nub` is non-executable. Not compiled
-/// on Windows (executability is by extension, not a mode bit).
+/// Make a freshly-downloaded binary runnable: set the executable bit
+/// (0o755), then clear `com.apple.quarantine`.
+///
+/// The release archive ships the binary at 0o644 — CI's
+/// upload/download-artifact round-trip strips the +x install.sh would
+/// otherwise rely on — so the self-owned upgrade path must re-apply it or
+/// the upgraded `nub` is non-executable. Both callers hand this an
+/// archive nub itself downloaded and checksum-verified, and both then run
+/// it (the upgrade swap, and the self-shim's provision-then-exec), so the
+/// quarantine strip belongs on the same seam; see `drop_quarantine`.
+/// Not compiled on Windows (executability is by extension, not a mode
+/// bit, and quarantine is a macOS concept).
 #[cfg(not(windows))]
 fn ensure_bin_executable(path: &Path) -> Result<()> {
     #[cfg(unix)]
@@ -6534,7 +6615,35 @@ fn ensure_bin_executable(path: &Path) -> Result<()> {
             )
         })?;
     }
+    drop_quarantine(path);
     Ok(())
+}
+
+/// Drop `com.apple.quarantine` from a binary nub just downloaded.
+///
+/// Released nub binaries are ad-hoc signed — `codesign` reports
+/// `adhoc, linker-signed` with no Team ID — and macOS kills a quarantined
+/// ad-hoc-signed executable on exec rather than merely warning about it.
+/// `curl` and `tar` run as children of this process, so when nub is invoked
+/// from a terminal that inherited quarantine flags (one embedded in a
+/// Gatekeeper-enabled app), everything they write is stamped: the upgrade
+/// would install a nub that cannot start, and the self-shim would exec one.
+/// Both archives are checksum-verified before use, and the attribute is not
+/// a judgement about them — it reflects only which terminal the upgrade was
+/// run from. See `nub_core::quarantine` for the full rationale.
+///
+/// Best-effort by the resilience contract in `perform_selfowned_upgrade`:
+/// the binary is already swapped and executable, so a failure warns with the
+/// manual fix rather than aborting.
+#[cfg(not(windows))]
+fn drop_quarantine(path: &Path) {
+    if let Err(err) = nub_core::quarantine::clear(path) {
+        eprintln!(
+            "nub: warning: could not clear com.apple.quarantine on {p} ({err}); \
+             if macOS refuses to run it, clear it with: xattr -d com.apple.quarantine {p}",
+            p = path.display()
+        );
+    }
 }
 
 /// Extract a release archive into `dest` by shelling to `tar`, returning whether
@@ -9215,6 +9324,19 @@ mod tests {
         assert!(arg.ends_with("missing.env"), "{arg}");
     }
 
+    /// The floor the auto-discovered cascade shares with the explicit flags.
+    /// Empirically pinned against installed Nodes: 19.3.0 rejects `--env-file`,
+    /// 20.10.0 accepts it — bracketing the documented 20.6.0 landing.
+    #[test]
+    fn auto_env_file_forwarding_gates_on_node_version() {
+        use nub_core::node::version::NodeVersion;
+        assert!(!node_accepts_env_file(&NodeVersion::new(18, 19, 0)));
+        assert!(!node_accepts_env_file(&NodeVersion::new(19, 3, 0)));
+        assert!(!node_accepts_env_file(&NodeVersion::new(20, 5, 0)));
+        assert!(node_accepts_env_file(&NodeVersion::new(20, 6, 0)));
+        assert!(node_accepts_env_file(&NodeVersion::new(26, 0, 0)));
+    }
+
     #[test]
     fn explicit_env_file_forwarding_gates_on_node_version() {
         use nub_core::node::version::NodeVersion;
@@ -9356,22 +9478,41 @@ mod tests {
 
     #[test]
     fn watch_env_guard_placeholders_follow_os_key_semantics() {
+        let guarded = watch_guarded_env_file_keys(false);
         let ambient = vec![
             "NODE_OPTIONS".to_string(),
             "node_extra_ca_certs".to_string(),
         ];
 
-        let unix = watch_env_guard_placeholders(&ambient, false);
+        let unix = watch_env_guard_placeholders(&guarded, &ambient, false);
         assert!(!unix.contains(&"NODE_OPTIONS"));
         assert!(unix.contains(&"NODE_EXTRA_CA_CERTS"));
         assert!(unix.contains(&"NODE_TLS_REJECT_UNAUTHORIZED"));
         assert!(unix.contains(&"NODE_REPL_EXTERNAL_MODULE"));
 
-        let windows = watch_env_guard_placeholders(&ambient, true);
+        let windows = watch_env_guard_placeholders(&guarded, &ambient, true);
         assert!(!windows.contains(&"NODE_OPTIONS"));
         assert!(!windows.contains(&"NODE_EXTRA_CA_CERTS"));
         assert!(windows.contains(&"NODE_TLS_REJECT_UNAUTHORIZED"));
         assert!(windows.contains(&"NODE_REPL_EXTERNAL_MODULE"));
+    }
+
+    /// `NODE_ENV` is guarded only for the auto `.env*` cascade, matching what the
+    /// direct runner does for each family (#263 drops a file-set `NODE_ENV` from
+    /// the cascade; the explicit `--env-file` map keeps it). An ambient value is
+    /// the user's own and never gets a placeholder.
+    #[test]
+    fn node_env_is_guarded_only_for_the_auto_cascade() {
+        assert!(watch_guarded_env_file_keys(true).contains(&"NODE_ENV"));
+        assert!(!watch_guarded_env_file_keys(false).contains(&"NODE_ENV"));
+
+        let guarded = watch_guarded_env_file_keys(true);
+        assert!(watch_env_guard_placeholders(&guarded, &[], false).contains(&"NODE_ENV"));
+        assert!(
+            !watch_env_guard_placeholders(&guarded, &["NODE_ENV".to_string()], false)
+                .contains(&"NODE_ENV"),
+            "an ambient NODE_ENV must pass through untouched"
+        );
     }
 
     #[test]

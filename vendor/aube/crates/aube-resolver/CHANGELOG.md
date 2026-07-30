@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.35.0](https://github.com/jdx/aube/compare/aube-resolver-v1.34.0...aube-resolver-v1.35.0) - 2026-07-28
+
+### Added
+
+- *(add)* block new and lookalike package names ([#1157](https://github.com/jdx/aube/pull/1157))
+- *(trust)* add package publishing checks ([#1144](https://github.com/jdx/aube/pull/1144))
+
+### Other
+
+- refresh benchmarks for v1.34.0 ([#1124](https://github.com/jdx/aube/pull/1124))
+
+## [1.34.0](https://github.com/jdx/aube/compare/aube-resolver-v1.33.1...aube-resolver-v1.34.0) - 2026-07-27
+
+### Fixed
+
+- *(resolver)* never prefer a deprecated version inside a range ([#1136](https://github.com/jdx/aube/pull/1136))
+
+## [1.33.1](https://github.com/jdx/aube/compare/aube-resolver-v1.33.0...aube-resolver-v1.33.1) - 2026-07-25
+
+### Fixed
+
+- *(resolver)* make versioned entries in the trust-exclude defaults work ([#1118](https://github.com/jdx/aube/pull/1118))
+- *(resolver)* exclude @hono/node-server from no-downgrade by default ([#1113](https://github.com/jdx/aube/pull/1113))
+
+## [1.33.0](https://github.com/jdx/aube/compare/aube-resolver-v1.32.0...aube-resolver-v1.33.0) - 2026-07-25
+
+### Fixed
+
+- *(resolver)* explain trust downgrade failures ([#1110](https://github.com/jdx/aube/pull/1110))
+- *(resolver)* exclude @octokit/endpoint from no-downgrade by default ([#1088](https://github.com/jdx/aube/pull/1088))
+
+### Other
+
+- refresh benchmarks for v1.32.0 ([#1080](https://github.com/jdx/aube/pull/1080))
+
 ## [1.32.0](https://github.com/jdx/aube/compare/aube-resolver-v1.31.0...aube-resolver-v1.32.0) - 2026-07-22
 
 ### Other

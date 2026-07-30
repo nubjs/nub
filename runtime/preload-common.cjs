@@ -523,13 +523,13 @@ function makeHooks(core, watchReporting) {
   function loadViaDisk(url, ext) {
     try {
       const path = fileURLToPath(url);
-      if (core.TRANSPILE_EXTS.has(ext) && !core.isNodeModules(url)) {
+      if (core.TRANSPILE_EXTS.has(ext) && !core.isDependency(url)) {
         return core.loadTranspile(url, ext);
       }
       // Plain JS: transpile only when transformable; else fall through to the raw-
       // source path below (which hands CJS back as `source:null` → Node's native
       // CJS loader), byte-identical to a non-intercepted file.
-      if (core.PLAIN_JS_EXTS.has(ext) && !core.isNodeModules(url)) {
+      if (core.PLAIN_JS_EXTS.has(ext) && !core.isDependency(url)) {
         const r = core.maybeTranspilePlainJs(url, ext);
         if (r) return r;
       }
@@ -606,7 +606,7 @@ function makeHooks(core, watchReporting) {
     // handling (and its error) applies. (The TS-parent extensionless resolution in
     // the resolve hook is intended and stays — only this load-time transpile is
     // gated.)
-    if (core.TRANSPILE_EXTS.has(ext) && !core.isNodeModules(url)) {
+    if (core.TRANSPILE_EXTS.has(ext) && !core.isDependency(url)) {
       return core.loadTranspile(url, ext);
     }
     // Project-source plain JS (`.js`/`.mjs`/`.cjs`): transpile ONLY when it carries
@@ -614,7 +614,7 @@ function makeHooks(core, watchReporting) {
     // to Node's native loader (the `nextLoad`/relabel path below) BYTE-FOR-BYTE — it
     // is never intercepted, so native CJS/ESM behavior (the relabel, require.cache,
     // the require-of-ESM-syntax-`.cjs` error) is preserved. node_modules excluded.
-    if (core.PLAIN_JS_EXTS.has(ext) && !core.isNodeModules(url)) {
+    if (core.PLAIN_JS_EXTS.has(ext) && !core.isDependency(url)) {
       const r = core.maybeTranspilePlainJs(url, ext);
       if (r) return r;
     }
@@ -795,6 +795,47 @@ function requireEsmError(filename) {
 // already cover resolution + transpile.
 function installCjsRequireHooks(core, withClassicTranspile) {
   const origResolveFilename = module_._resolveFilename;
+
+  // The classic transpile handlers registered below put `.ts`/`.cts`/`.mts`/`.tsx`/
+  // `.jsx` into `Module._extensions`, and Node's `_findPath` runs `tryExtensions` over
+  // EVERY key of that object during LOAD_AS_FILE — before it ever tries
+  // LOAD_AS_DIRECTORY. Registering them therefore reorders Node's own resolution
+  // INSIDE dependencies: `require("pkg/sub")` picks a dep's unshipped `sub.ts` over the
+  // `sub/index.js` Node loads, and a dep's internal `require("./util")` picks `util.ts`
+  // where Node reports it missing. Both hand back a silently different module.
+  //
+  // Deps are NEVER transpiled — the same invariant the `.js`/`.cjs` handler below
+  // states — and the fast tier already resolves both shapes Node's way, so this keeps
+  // the two tiers in agreement. The check is on Node's ANSWER rather than a guess about
+  // the request, so nothing is re-resolved unless our own keys actually changed the
+  // outcome; the retry then reports whatever Node itself would, error included.
+  //
+  // Every extension nub adds to `Module._extensions` that Node does not have of its
+  // own. `.cjs` belongs here with the TypeScript family: Node registers only `.js`,
+  // `.json` and `.node`, so nub's `.cjs` handler likewise widens LOAD_AS_FILE and
+  // lets `require("dep/x/sub")` find a dependency's `sub.cjs` that plain Node reports
+  // missing. An explicit `require("dep/x/sub.cjs")` is unaffected either way — an
+  // exact path is found by stat, without consulting the extension list at all.
+  const NUB_ADDED_EXTS = [".ts", ".cts", ".mts", ".tsx", ".jsx", ".cjs"];
+  const withoutNubAddedExtensions = (fn) => {
+    const saved = [];
+    for (const ext of NUB_ADDED_EXTS) {
+      if (Object.hasOwn(module_._extensions, ext)) {
+        saved.push([ext, module_._extensions[ext]]);
+        delete module_._extensions[ext];
+      }
+    }
+    try {
+      return fn();
+    } finally {
+      for (const [ext, handler] of saved) module_._extensions[ext] = handler;
+    }
+  };
+  const isDepAddedExtHit = (filename) =>
+    typeof filename === "string" &&
+    NUB_ADDED_EXTS.includes(pathExtname(filename)) &&
+    core.isDependency(pathToFileURL(filename).href);
+
   module_._resolveFilename = function (request, parent, isMain, options) {
     let resolved = null;
     try {
@@ -802,6 +843,19 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       resolved = core.resolveCjsPath(request, parentPath);
     } catch { /* fall through to Node */ }
     if (resolved) {
+      // This pre-check stays at RESOLVE time even though `_resolveFilename` also
+      // answers `require.resolve()`, for which a path lookup is not a load. Below the
+      // Node #60380 fix, `require()` of a transpiled ES module dies inside the
+      // loader-worker translator with an opaque `cjsCache.get(...)` TypeError, and
+      // that happens before any load hook of ours can run — so a load-time refusal
+      // never gets its turn and Node's own crash is what the user sees.
+      //
+      // The cost is that `require.resolve()` of an ESM-syntax TS target throws here
+      // instead of returning the path. Telling the two callers apart is not reliable
+      // across the band this is live on: Node passes 3 arguments from `Module._load`
+      // and 4 from `require.resolve` up to 22.14, but 22.15 and 22.16 pass 4 for both
+      // while still lacking native TS — and the translator crash is present on
+      // exactly those versions. A clean error beats an opaque crash, so this stays.
       if (withClassicTranspile && core.requireTargetIsEsm(resolved, pathExtname(resolved))) {
         throw requireEsmError(resolved);
       }
@@ -828,7 +882,21 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       delete options.conditions;
     }
     try {
-      return origResolveFilename.call(this, request, parent, isMain, options);
+      const byNode = origResolveFilename.call(this, request, parent, isMain, options);
+      if (withClassicTranspile && isDepAddedExtHit(byNode)) {
+        // `_findPath` memoizes into `Module._pathCache` and returns that entry before
+        // it ever consults the extension list, so the retry would be handed the same
+        // TS hit and the removal below would look like a no-op. Drop the memo first.
+        // Purging by VALUE rather than rebuilding the cache key keeps this off Node's
+        // internal key format, which differs across the supported range.
+        for (const key of Object.keys(module_._pathCache)) {
+          if (module_._pathCache[key] === byNode) delete module_._pathCache[key];
+        }
+        return withoutNubAddedExtensions(() =>
+          origResolveFilename.call(this, request, parent, isMain, options),
+        );
+      }
+      return byNode;
     } catch (e) {
       // Under PnP, an in-tree issuer requiring a dep NOT in its manifest makes PnP
       // throw. That is nub's OWN transpile helpers (e.g. `@oxc-project/runtime`),
@@ -856,7 +924,20 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   // decorator guard, and module-format detection are all identical to the fast
   // tier. The path is already a real TS file (Module._resolveFilename ran first).
   // A module-format source can't be _compile'd as CJS — same clean error as above.
+  //
+  // A dependency's TypeScript is never transpiled — the same invariant the `.js`/
+  // `.cjs` handler below states as its case (1). The resolution-side retry keeps
+  // most dep TS from ever reaching here, but an explicit path (`require(
+  // "./node_modules/pkg/inner.ts")`) names the file directly and skips resolution
+  // entirely, so the bail has to live at the load step too. Delegating to the native
+  // `.js` handler rather than throwing is what Node itself does: an extension it has
+  // no handler for falls back to `.js` via `findLongestRegisteredExtension`, so this
+  // reproduces plain Node's own error instead of inventing one nub would have to own.
+  const nativeJs = module_._extensions[".js"];
   const transpileExtension = (mod, filename) => {
+    if (core.isDependency(pathToFileURL(filename).href)) {
+      return nativeJs.call(module_._extensions, mod, filename);
+    }
     const { source, format } = core.loadTranspile(pathToFileURL(filename).href, pathExtname(filename));
     if (format === "module") throw requireEsmError(filename);
     mod._compile(source, filename);
@@ -881,11 +962,11 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   //       native CJS behavior is byte-identical.
   // `.mjs` is ESM-only; Node registers no require.extensions handler for it, so a
   // `require()` of `.mjs` throws ERR_REQUIRE_ESM as before — we don't override it.
-  const nativeJs = module_._extensions[".js"];
+  // (`nativeJs` is captured above, before the TS handlers are registered.)
   for (const ext of [".js", ".cjs"]) {
     const origExtension = module_._extensions[ext] || nativeJs;
     module_._extensions[ext] = (mod, filename) => {
-      if (core.isNodeModules(pathToFileURL(filename).href)) {
+      if (core.isDependency(pathToFileURL(filename).href)) {
         return origExtension.call(module_._extensions, mod, filename); // (1)
       }
       const r = core.maybeTranspilePlainJs(pathToFileURL(filename).href, pathExtname(filename));

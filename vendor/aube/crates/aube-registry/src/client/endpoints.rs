@@ -1,13 +1,95 @@
-use super::body::check_body_cap;
+use super::body::{check_body_cap, read_body_capped};
 use super::cache::packument_full_cache_path;
 use super::{
     AUDIT_BODY_CAP, PACKUMENT_FULL_ACCEPT, RegistryClient, check_dist_tag_status,
     dist_tag_root_url, dist_tag_url, forbidden_with_body, map_dist_tag_error, parse_full_response,
 };
 use crate::Error;
+use serde::Deserialize;
+use std::borrow::Cow;
 use std::path::Path;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageSearchResult {
+    pub name: String,
+    pub version: String,
+    pub description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PackageSearchResponse {
+    #[serde(default)]
+    objects: Vec<PackageSearchObject>,
+}
+
+#[derive(Deserialize)]
+struct PackageSearchObject {
+    package: PackageSearchPackage,
+}
+
+#[derive(Deserialize)]
+struct PackageSearchPackage {
+    name: String,
+    #[serde(default)]
+    version: String,
+    description: Option<String>,
+}
+
 impl RegistryClient {
+    /// Search package names using npm's lightweight `/-/v1/search` endpoint.
+    ///
+    /// Scoped queries use their configured registry and scope-specific auth,
+    /// so private package completion follows the same `.npmrc` routing as
+    /// packument fetches.
+    ///
+    /// This intentionally bypasses the normal metadata retry loop: callers use
+    /// it for interactive completion, where returning no candidates promptly is
+    /// better than delaying the shell while retries back off.
+    pub async fn search_packages(
+        &self,
+        query: &str,
+        limit: usize,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<PackageSearchResult>, Error> {
+        let routing_name = if query.starts_with('@') && !query.contains('/') {
+            Cow::Owned(format!("{query}/"))
+        } else {
+            Cow::Borrowed(query)
+        };
+        let registry_url = self.config.registry_for(&routing_name);
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/-/v1/search",
+            registry_url.trim_end_matches('/')
+        ))
+        .map_err(|error| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, error)))?;
+        url.query_pairs_mut()
+            .append_pair("text", query)
+            .append_pair("size", &limit.clamp(1, 250).to_string());
+        let response = self
+            .authed_for_package(
+                self.http_for_package(registry_url, &routing_name).get(url),
+                registry_url,
+                &routing_name,
+            )
+            .timeout(timeout)
+            .header("Accept", "application/json")
+            .send()
+            .await?
+            .error_for_status()?;
+        let bytes = read_body_capped(response, 2 << 20, "package search").await?;
+        let body: PackageSearchResponse = serde_json::from_slice(&bytes)
+            .map_err(|error| Error::Io(std::io::Error::other(error)))?;
+        Ok(body
+            .objects
+            .into_iter()
+            .map(|entry| PackageSearchResult {
+                name: entry.package.name,
+                version: entry.package.version,
+                description: entry.package.description,
+            })
+            .collect())
+    }
+
     pub async fn fetch_advisories_bulk(
         &self,
         pkg_versions: &std::collections::BTreeMap<String, Vec<String>>,
@@ -266,5 +348,108 @@ impl RegistryClient {
             name
         };
         format!("{registry}/{name}/-/{unscoped}-{version}.tgz")
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn package_search_uses_registry_endpoint_and_parses_descriptions() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/-/v1/search"))
+            .and(query_param("text", "rea"))
+            .and(query_param("size", "5"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "objects": [{
+                    "package": {
+                        "name": "react",
+                        "version": "19.1.0",
+                        "description": "React is a JavaScript library"
+                    }
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::new(&server.uri());
+        let results = client
+            .search_packages("rea", 5, std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            results,
+            vec![PackageSearchResult {
+                name: "react".to_string(),
+                version: "19.1.0".to_string(),
+                description: Some("React is a JavaScript library".to_string()),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_package_search_uses_its_configured_registry() {
+        let default_server = MockServer::start().await;
+        let scoped_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/-/v1/search"))
+            .and(query_param("text", "@acme/tool"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "objects": [{
+                    "package": {"name": "@acme/tool", "version": "2.0.0"}
+                }]
+            })))
+            .expect(1)
+            .mount(&scoped_server)
+            .await;
+
+        let mut config = crate::config::NpmConfig {
+            registry: default_server.uri(),
+            ..Default::default()
+        };
+        config
+            .scoped_registries
+            .insert("@acme".to_string(), scoped_server.uri());
+        let client = RegistryClient::from_config(config);
+        let results = client
+            .search_packages("@acme/tool", 5, std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(results[0].name, "@acme/tool");
+    }
+
+    #[tokio::test]
+    async fn incomplete_scope_search_uses_its_configured_registry() {
+        let default_server = MockServer::start().await;
+        let scoped_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/-/v1/search"))
+            .and(query_param("text", "@acme"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "objects": [{
+                    "package": {"name": "@acme/tool", "version": "2.0.0"}
+                }]
+            })))
+            .expect(1)
+            .mount(&scoped_server)
+            .await;
+
+        let mut config = crate::config::NpmConfig {
+            registry: default_server.uri(),
+            ..Default::default()
+        };
+        config
+            .scoped_registries
+            .insert("@acme".to_string(), scoped_server.uri());
+        let client = RegistryClient::from_config(config);
+        let results = client
+            .search_packages("@acme", 5, std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(results[0].name, "@acme/tool");
     }
 }

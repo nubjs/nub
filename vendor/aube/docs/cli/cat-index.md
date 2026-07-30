@@ -2,6 +2,7 @@
 # `aube cat-index`
 
 - **Usage**: `aube cat-index <PACKAGE>`
+- **Effect**: read-only
 
 Print the cached package index JSON for `<name>@<version>`
 

@@ -128,6 +128,77 @@ pub struct MissingTimeDetails {
     pub version: String,
 }
 
+/// The strongest trust evidence carried by a version published before the
+/// selected release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PriorTrustEvidence {
+    pub version: String,
+    pub evidence: TrustEvidence,
+}
+
+/// Find the strongest trust evidence on a release published before
+/// `picked_version`.
+///
+/// Stable releases ignore evidence from prereleases, matching
+/// [`check_no_downgrade`]. Returns `None` when the selected version has no
+/// publish time or no earlier release carries trust evidence.
+pub fn strongest_prior_evidence(
+    packument: &Packument,
+    picked_version: &str,
+) -> Option<PriorTrustEvidence> {
+    let picked_time = packument.time.get(picked_version)?;
+    let exclude_prereleases = node_semver::Version::parse(picked_version)
+        .map(|v| v.pre_release.is_empty())
+        .unwrap_or(false);
+
+    let mut best: Option<PriorTrustEvidence> = None;
+    for (other_ver, other_meta) in &packument.versions {
+        if other_ver == picked_version {
+            continue;
+        }
+        let Some(other_time) = packument.time.get(other_ver) else {
+            continue;
+        };
+        if other_time.as_str() >= picked_time.as_str() {
+            continue;
+        }
+        if exclude_prereleases
+            && let Ok(parsed) = node_semver::Version::parse(other_ver)
+            && !parsed.pre_release.is_empty()
+        {
+            continue;
+        }
+        let Some(evidence) = evidence_for(other_meta) else {
+            continue;
+        };
+        match best {
+            None => {
+                best = Some(PriorTrustEvidence {
+                    version: other_ver.clone(),
+                    evidence,
+                });
+            }
+            Some(ref current) if evidence.rank() > current.evidence.rank() => {
+                best = Some(PriorTrustEvidence {
+                    version: other_ver.clone(),
+                    evidence,
+                });
+            }
+            _ => {}
+        }
+        if matches!(
+            best,
+            Some(PriorTrustEvidence {
+                evidence: TrustEvidence::StagedPublish,
+                ..
+            })
+        ) {
+            break;
+        }
+    }
+    best
+}
+
 /// Run the trust-downgrade check. Returns `Ok(())` when the picked
 /// version is acceptable (excluded, missing-evidence-everywhere, older
 /// than `ignore_after_minutes`, or carrying evidence at least as strong
@@ -182,59 +253,19 @@ pub fn check_no_downgrade(
         return Ok(());
     }
 
-    // pnpm v10.24.0+: when the picked version is a stable release,
-    // ignore prior prerelease evidence — a trusted alpha shouldn't
-    // block a stable that omits attestation.
-    let exclude_prereleases = picked_parsed
-        .as_ref()
-        .map(|v| v.pre_release.is_empty())
-        .unwrap_or(false);
-
-    let mut best: Option<(TrustEvidence, &str)> = None;
-    for (other_ver, other_meta) in &packument.versions {
-        if other_ver == picked_version {
-            continue;
-        }
-        let Some(other_time) = packument.time.get(other_ver) else {
-            continue;
-        };
-        if other_time.as_str() >= picked_time.as_str() {
-            continue;
-        }
-        if exclude_prereleases
-            && let Ok(parsed) = node_semver::Version::parse(other_ver)
-            && !parsed.pre_release.is_empty()
-        {
-            continue;
-        }
-        let Some(evidence) = evidence_for(other_meta) else {
-            continue;
-        };
-        match best {
-            None => best = Some((evidence, other_ver.as_str())),
-            Some((cur, _)) if evidence.rank() > cur.rank() => {
-                best = Some((evidence, other_ver.as_str()));
-            }
-            _ => {}
-        }
-        if matches!(best, Some((TrustEvidence::StagedPublish, _))) {
-            break;
-        }
-    }
-
-    let Some((prior_evidence, prior_version)) = best else {
+    let Some(prior) = strongest_prior_evidence(packument, picked_version) else {
         return Ok(());
     };
 
     let current = evidence_for(picked_meta);
     let current_rank = current.map_or(0, TrustEvidence::rank);
-    if current_rank < prior_evidence.rank() {
+    if current_rank < prior.evidence.rank() {
         return Err(TrustCheckError::Downgrade(TrustDowngradeDetails {
             name: packument.name.clone(),
             picked_version: picked_version.to_string(),
             current_evidence: current,
-            prior_evidence,
-            prior_version: prior_version.to_string(),
+            prior_evidence: prior.evidence,
+            prior_version: prior.version,
         }));
     }
     Ok(())
@@ -252,6 +283,15 @@ fn cutoff_iso8601(minutes_ago: u64) -> Option<String> {
 /// the name) or `<name>@<semver-range>[ || <semver-range>]…` (no name
 /// globs combined with versions).
 pub const DEFAULT_TRUST_POLICY_EXCLUDES: &[&str] = &[
+    // @octokit maintains several major-version lines in parallel and backports
+    // fixes to older lines without provenance attestation. A backport (e.g.
+    // @octokit/endpoint@9.0.6) is published after an attested newer major
+    // (10.1.0), so the no-downgrade check flags the legitimate older release.
+    "@octokit/endpoint",
+    // @hono/node-server@1.19.15 (2026-07-24) was hand-published without
+    // attestation after the trusted 2.0.10 release (2026-07-15). Trusted
+    // publishing resumed with 1.19.17, so keep the exception version-scoped.
+    "@hono/node-server@1.19.15",
     "chokidar",
     "eslint-config-prettier",
     "eslint-import-resolver-typescript",
@@ -290,7 +330,18 @@ pub struct TrustExcludeRules {
 
 impl Default for TrustExcludeRules {
     fn default() -> Self {
-        Self::from_name_excludes(DEFAULT_TRUST_POLICY_EXCLUDES)
+        // Parse the entries rather than assuming each is a bare name, so a
+        // future `name@range` default actually works. The previous
+        // `from_name_excludes` hardcoded `version_ranges: None`, which would
+        // have compiled such an entry into a name matcher for the literal
+        // string `"name@range"` — silently matching nothing and dropping the
+        // exemption rather than erroring. Every current entry is a bare name,
+        // for which this is behavior-identical. The list is a compile-time
+        // constant, so a malformed entry is an authoring bug;
+        // `default_excludes_known_provenance_churn_packages` asserts each one
+        // parses.
+        Self::parse(DEFAULT_TRUST_POLICY_EXCLUDES)
+            .expect("DEFAULT_TRUST_POLICY_EXCLUDES must be valid exclude patterns")
     }
 }
 
@@ -348,15 +399,11 @@ impl TrustExcludeRules {
         self.rules.len()
     }
 
-    fn from_name_excludes(names: &[&str]) -> Self {
-        Self {
-            rules: names
-                .iter()
-                .map(|name| TrustExcludeRule {
-                    name_matcher: NameMatcher::compile(name),
-                    version_ranges: None,
-                })
-                .collect(),
+    /// Return whether this policy excludes `name@version`.
+    pub fn excludes(&self, name: &str, version: &str) -> bool {
+        match node_semver::Version::parse(version) {
+            Ok(version) => self.matches(name, &version),
+            Err(_) => self.matches_name_only(name),
         }
     }
 
@@ -448,18 +495,23 @@ impl TrustExcludeRules {
     }
 }
 
-fn parse_one(pattern: &str) -> Result<TrustExcludeRule, TrustExcludeParseError> {
-    let scoped = pattern.starts_with('@');
-    let at_index = if scoped {
-        pattern[1..].find('@').map(|i| i + 1)
-    } else {
-        pattern.find('@')
+/// Split `<name>[@<versions>]` on the separator that isn't a scope marker,
+/// so a scoped name's leading `@` isn't mistaken for a version selector.
+fn split_name_and_versions(pattern: &str) -> (&str, Option<&str>) {
+    let at_index = match pattern.strip_prefix('@') {
+        // Scoped name: the leading `@` is the scope marker, so the version
+        // separator is the next `@`, offset back past the one we stripped.
+        Some(rest) => rest.find('@').map(|i| i + 1),
+        None => pattern.find('@'),
     };
-
-    let (name_part, versions_part) = match at_index {
+    match at_index {
         Some(i) => (&pattern[..i], Some(&pattern[i + 1..])),
         None => (pattern, None),
-    };
+    }
+}
+
+fn parse_one(pattern: &str) -> Result<TrustExcludeRule, TrustExcludeParseError> {
+    let (name_part, versions_part) = split_name_and_versions(pattern);
 
     let version_ranges = match versions_part {
         None => None,
@@ -1218,13 +1270,65 @@ mod tests {
     #[test]
     fn default_excludes_known_provenance_churn_packages() {
         let r = TrustExcludeRules::default();
+        // Every entry parses into exactly one rule — a malformed default
+        // would otherwise silently drop protection or panic at first use.
+        assert_eq!(r.len(), DEFAULT_TRUST_POLICY_EXCLUDES.len());
         for package in DEFAULT_TRUST_POLICY_EXCLUDES {
+            let (name, versions) = split_name_and_versions(package);
+            // Bare-name entries exempt every version. Version-scoped entries
+            // deliberately do not, so they get their own targeted tests.
+            if versions.is_some() {
+                continue;
+            }
             assert!(
-                r.matches(package, &node_semver::Version::parse("1.0.0").unwrap()),
-                "{package} should be globally excluded"
+                r.matches(name, &node_semver::Version::parse("1.0.0").unwrap()),
+                "{name} should be globally excluded"
             );
         }
         assert!(!r.matches("left-pad", &node_semver::Version::parse("1.0.0").unwrap()));
+    }
+
+    #[test]
+    fn default_excludes_scoped_octokit_endpoint_backport() {
+        // Regression: @octokit backports fixes to older major lines without
+        // provenance, so a legitimate older release (e.g. 9.0.6) published
+        // after an attested newer major (10.1.0) tripped no-downgrade. The
+        // scoped name must match every version, and the leading `@` must not
+        // be misparsed as a version separator.
+        let r = TrustExcludeRules::default();
+        assert!(r.matches(
+            "@octokit/endpoint",
+            &node_semver::Version::parse("9.0.6").unwrap()
+        ));
+        assert!(r.matches(
+            "@octokit/endpoint",
+            &node_semver::Version::parse("10.1.0").unwrap()
+        ));
+        assert!(!r.matches(
+            "@octokit/core",
+            &node_semver::Version::parse("9.0.6").unwrap()
+        ));
+    }
+
+    #[test]
+    fn default_excludes_scoped_hono_node_server_backport() {
+        // Regression: 1.19.15 was published without provenance after the
+        // attested 2.0.10 release. Trusted publishing resumed with 1.19.17,
+        // so the default must not disable protection for future releases.
+        let r = TrustExcludeRules::default();
+        assert!(r.matches(
+            "@hono/node-server",
+            &node_semver::Version::parse("1.19.15").unwrap()
+        ));
+        assert!(!r.matches(
+            "@hono/node-server",
+            &node_semver::Version::parse("1.19.17").unwrap()
+        ));
+        assert!(!r.matches(
+            "@hono/node-server",
+            &node_semver::Version::parse("2.0.10").unwrap()
+        ));
+        assert!(!r.matches("hono", &node_semver::Version::parse("1.19.15").unwrap()));
     }
 
     #[test]

@@ -169,14 +169,25 @@ Version selectors are npm-style semver ranges.
 Default: `no-downgrade`. Set `trustPolicy: off` to disable, or use
 `trustPolicyExclude` for per-package opt-outs.
 
+aube also ships a small built-in exclude list for well-known packages whose
+maintainers legitimately publish provenance-inconsistent releases (e.g.
+maintaining multiple major-version lines and backporting to older ones without
+attestation), so common installs don't fail on a known-benign downgrade. Your
+own `trustPolicyExclude` entries are added on top of these defaults.
+
+See [Trust policy downgrades](/trust-policy-exceptions) for an investigation
+checklist, guidance for reporting packaging failures upstream, and the
+dynamically generated list of built-in exceptions.
+
 Settings: [`trustPolicy`](/settings/#setting-trustpolicy),
 [`trustPolicyExclude`](/settings/#setting-trustpolicyexclude),
 [`trustPolicyIgnoreAfter`](/settings/#setting-trustpolicyignoreafter).
 
 ## Minimum release age
 
-Wait a configurable period before installing newly published versions. Catches
-typo-squat and dependency-confusion attacks that get unpublished within hours.
+Wait a configurable period before installing newly published versions. This
+24-hour release quarantine is intentionally separate from the longer
+package-name quarantine used for slopsquatting protection.
 
 ```yaml
 minimumReleaseAge: 4320  # 3 days
@@ -202,7 +213,7 @@ already pin. Plain reinstalls (where the lockfile was authoritative) skip
 the live API for latency; two opt-in local backends cover that path — see
 [Install-time OSV check](#install-time-osv-check) below.
 
-Two signals, with different response levels:
+Four signals, with different response levels:
 
 **Known-malicious advisories.** aube batch-queries [OSV](https://osv.dev) for
 `MAL-*` advisories on every name about to be added. A hit fails the install
@@ -211,6 +222,21 @@ the OSV API can't be reached, the default (`advisoryCheck: on`) warns and
 continues; `advisoryCheck: required` upgrades that to a fail-closed
 `ERR_AUBE_ADVISORY_CHECK_FAILED` so CI can tell a network outage from a
 confirmed-malicious advisory.
+
+**Similar package name.** aube compares requested names with a monthly
+snapshot of the 100,000 most-downloaded npm packages before contacting the
+registry. The comparison is namespace-aware: unscoped packages are compared
+only with unscoped packages, names within the same scope are compared by
+basename, and names in different scopes are compared in full. This catches
+lookalikes such as `lodahs` → `lodash`, `@babel/parserr` → `@babel/parser`,
+and `@type/node` → `@types/node` without treating an intentional scoped fork
+as an unscoped-package impersonation.
+
+Interactive sessions show a “did you mean?” prompt. Non-interactive sessions
+fail with `ERR_AUBE_SIMILAR_PACKAGE_NAME`. The popularity corpus contains
+names only, is compressed into release binaries, and is generated from the
+continuously updated ecosyste.ms npm registry index rather than an
+infrequently published npm data package.
 
 **Low download count.** A typosquat or impersonation has approximately zero
 installs on day one regardless of how cleverly it's named, so a
@@ -227,17 +253,35 @@ aube add supabase-javascript
 
 In non-interactive contexts the prompt becomes a hard refusal with
 `ERR_AUBE_LOW_DOWNLOAD_PACKAGE` unless `--allow-low-downloads` is passed.
+Packages already present in the active lockfile are trusted for this
+download-count check, regardless of which supported lockfile format the
+project uses. Lockfile membership does not bypass the OSV check.
 
-**Private packages skip both gates automatically.** Any package routed
+**New package name.** Before adding a direct dependency, aube reads npm's
+`time.created` timestamp and challenges names registered within
+`minimumPackageAge` (30 days by default). Interactive sessions require
+confirmation; non-interactive sessions fail with
+`ERR_AUBE_NEW_PACKAGE_NAME`. Packages already present in the active lockfile
+and names matched by `allowedUnpopularPackages` are trusted.
+Missing or unavailable creation-time metadata fails closed with
+`ERR_AUBE_PACKAGE_AGE_CHECK_FAILED`.
+`--allow-low-downloads` bypasses all three reputation challenges after the
+package has been verified out of band.
+
+```yaml
+minimumPackageAge: 43200 # 30 days
+```
+
+**Private packages skip all four gates automatically.** Any package routed
 through a non-`registry.npmjs.org` registry — whether by a scoped
 override (`@myorg:registry=https://npm.internal.example/`) or by
 replacing the default `registry=` URL outright — is exempted from
-the OSV check and the downloads gate, because npmjs has no signal on
+the OSV check and the reputation gates, because npmjs has no signal on
 it. Workspace deps and git/local specs are also skipped.
 
 For names that *do* route through public npmjs but are known-internal
 (e.g. you publish a low-traffic helper under your own brand), list
-them in `allowedUnpopularPackages` to skip the downloads gate alone:
+them in `allowedUnpopularPackages` to skip all three reputation gates:
 
 ```yaml
 advisoryCheck: on            # default; fail open on network error

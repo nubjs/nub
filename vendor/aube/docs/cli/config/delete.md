@@ -3,6 +3,7 @@
 
 - **Usage**: `aube config delete [--local] [--location <LOCATION>] <KEY>`
 - **Aliases**: `rm`, `remove`, `unset`
+- **Effect**: destructive — may delete or irreversibly overwrite
 
 Delete a key from aube config or the selected `.npmrc` file
 

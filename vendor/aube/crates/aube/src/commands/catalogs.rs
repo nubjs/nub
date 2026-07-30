@@ -231,6 +231,119 @@ pub(crate) struct CatalogUpsert {
     pub range: String,
 }
 
+/// One existing catalog entry that `aube update --latest` should replace.
+#[derive(Debug, Clone)]
+pub(crate) struct CatalogUpdate {
+    pub catalog: String,
+    pub package: String,
+    pub range: String,
+}
+
+/// Replace existing catalog entries after update resolution succeeds.
+///
+/// Unlike [`upsert_catalog_entries`], this never creates a new entry: the
+/// manifest's `catalog:` reference was resolved from an existing catalog, so
+/// a missing write target means the source changed underneath the update and
+/// should fail instead of silently creating a shadowing entry.
+pub(crate) fn update_catalog_entries(
+    source: &super::CatalogSource,
+    entries: &[CatalogUpdate],
+) -> miette::Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    match source {
+        super::CatalogSource::WorkspaceYaml(workspace_path) => {
+            update_workspace_yaml_catalog_entries(workspace_path, entries)
+        }
+        super::CatalogSource::PackageJson { path, namespace } => {
+            update_manifest_catalog_entries(path, namespace, entries)
+        }
+    }
+}
+
+fn update_workspace_yaml_catalog_entries(
+    workspace_path: &Path,
+    entries: &[CatalogUpdate],
+) -> miette::Result<()> {
+    aube_manifest::workspace::edit_workspace_yaml(workspace_path, |root| {
+        for entry in entries {
+            let CatalogUpdate {
+                catalog,
+                package,
+                range,
+            } = entry;
+            let map = if catalog == "default" {
+                workspace_yaml_submap(root, "catalog", workspace_path)?
+            } else {
+                let catalogs = workspace_yaml_submap(root, "catalogs", workspace_path)?;
+                workspace_yaml_submap(catalogs, catalog.as_str(), workspace_path)?
+            };
+            let key = yaml_serde::Value::String(package.clone());
+            let Some(value) = map.get_mut(&key) else {
+                return Err(aube_manifest::Error::YamlParse(
+                    workspace_path.to_path_buf(),
+                    format!("catalog `{catalog}` has no entry for `{package}`"),
+                ));
+            };
+            *value = yaml_serde::Value::String(range.clone());
+        }
+        Ok(())
+    })
+    .map_err(miette::Report::new)
+    .wrap_err_with(|| format!("failed to write {} after update", workspace_path.display()))?;
+    Ok(())
+}
+
+fn update_manifest_catalog_entries(
+    manifest_path: &Path,
+    namespace: &str,
+    entries: &[CatalogUpdate],
+) -> miette::Result<()> {
+    super::update_manifest_json_object(manifest_path, |root| {
+        let config = root
+            .get_mut(namespace)
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| {
+                miette::miette!(
+                    code = aube_codes::errors::ERR_AUBE_MANIFEST_PARSE,
+                    "`{namespace}` must be an object"
+                )
+            })?;
+        for entry in entries {
+            let entries = if entry.catalog == "default" {
+                config
+                    .get_mut("catalog")
+                    .and_then(serde_json::Value::as_object_mut)
+            } else {
+                config
+                    .get_mut("catalogs")
+                    .and_then(serde_json::Value::as_object_mut)
+                    .and_then(|catalogs| catalogs.get_mut(&entry.catalog))
+                    .and_then(serde_json::Value::as_object_mut)
+            }
+            .ok_or_else(|| {
+                miette::miette!(
+                    code = aube_codes::errors::ERR_AUBE_MANIFEST_PARSE,
+                    "catalog `{}` must be an object",
+                    entry.catalog
+                )
+            })?;
+            let value = entries.get_mut(&entry.package).ok_or_else(|| {
+                miette::miette!(
+                    code = aube_codes::errors::ERR_AUBE_UNKNOWN_CATALOG_ENTRY,
+                    "catalog `{}` has no entry for `{}`",
+                    entry.catalog,
+                    entry.package
+                )
+            })?;
+            *value = serde_json::Value::String(entry.range.clone());
+        }
+        Ok(())
+    })
+    .wrap_err_with(|| format!("failed to write {} after update", manifest_path.display()))
+}
+
 /// Upsert a batch of catalog entries into the workspace yaml. Existing
 /// entries are NEVER overwritten — pnpm's `--save-catalog` treats the
 /// catalog as the source of truth and lets the caller fall back to the
@@ -331,7 +444,10 @@ pub(crate) fn resolve_catalog_write_target(cwd: &Path) -> miette::Result<Catalog
     // key. Reject up front so the pre-flight fails before any manifest
     // mutation rather than half-way through.
     let manifest = crate::commands::load_manifest(&manifest_path)?;
-    if matches!(manifest.workspaces, Some(aube_manifest::Workspaces::String(_))) {
+    if matches!(
+        manifest.workspaces,
+        Some(aube_manifest::Workspaces::String(_))
+    ) {
         return Err(miette::miette!(
             "cannot save to a catalog: package.json#workspaces is a bare string; \
              convert it to an array or object form to hold a `workspaces.catalog`"
@@ -740,7 +856,10 @@ catalog:
     #[test]
     fn manifest_upsert_adds_default_catalog_preserving_packages() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_pkg(dir.path(), r#"{"name":"root","workspaces":{"packages":["apps/*"]}}"#);
+        let path = write_pkg(
+            dir.path(),
+            r#"{"name":"root","workspaces":{"packages":["apps/*"]}}"#,
+        );
         upsert_catalog_entries_in_manifest(&path, &[upsert("default", "@types/node", "^26.1.0")])
             .unwrap();
         let v: serde_json::Value =
@@ -785,6 +904,9 @@ catalog:
             .unwrap();
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(v["workspaces"]["catalogs"]["types"]["@types/node"], "^26.1.0");
+        assert_eq!(
+            v["workspaces"]["catalogs"]["types"]["@types/node"],
+            "^26.1.0"
+        );
     }
 }

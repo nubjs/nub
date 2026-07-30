@@ -11,7 +11,29 @@ pub enum PickResult<'a> {
     /// Strict mode (or any caller treating the cutoff as a hard wall):
     /// at least one version satisfied the range, but all of them were
     /// filtered out by the cutoff.
-    AgeGated,
+    AgeGated(AgeGateCause),
+}
+
+/// Why every satisfying version failed the cutoff. The two cases are the
+/// same refusal for opposite reasons and have disjoint remedies — one is
+/// fixed by waiting or widening the window, the other by getting publish
+/// times out of the registry — so the caller reports them under separate
+/// error codes rather than one "blocked by age gate".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgeGateCause {
+    /// At least one candidate carried a publish time later than the cutoff.
+    TooNew,
+    /// No candidate's age could be established at all (#581): the packument
+    /// dated none of them, and its `modified` timestamp did not vouch for
+    /// the document either.
+    Undeterminable,
+}
+
+/// A version's standing against the cutoff that applies to it.
+pub(crate) enum AgeVerdict {
+    Clears,
+    TooNew,
+    Undeterminable,
 }
 
 #[cfg(test)]
@@ -78,15 +100,94 @@ pub fn pick_version_for_add<'a>(
     )
 }
 
+/// Does `ver` clear `effective`, the publish-age cutoff that applies to it?
+/// `None` means no wall is in effect, so everything clears.
+///
+/// A known publish time is always compared. When one is missing, the packument's
+/// `modified` timestamp is tried first as an UPPER BOUND on every version's
+/// publish time: `modified <= cutoff` proves the whole document predates the
+/// wall, so every version in it is mature. That is what keeps abbreviated
+/// (corgi) metadata usable without a full-packument fetch for the dormant
+/// majority of a dependency tree.
+///
+/// When even that cannot settle it, the age is UNDETERMINABLE and `strict`
+/// decides:
+///
+/// - **`strict`** — block. A gate is only as strong as the metadata feeding it,
+///   and an unprovable age must not be a silent bypass (#581). nub pins
+///   `minimumReleaseAgeStrict` on, so this is nub's posture.
+/// - **lenient** — stay eligible, preserving upstream aube's default: lenient
+///   mode already means "fall back rather than fail", and gating it here would
+///   change standalone aube's out-of-box behavior rather than the embedder's.
+///
+/// A hole in an otherwise-populated `time` map is treated as undeterminable
+/// too — anomalous, and not evidence of maturity.
+///
+/// Shared with the vulnerability re-pick (`resolve::vulnerable`), which passes
+/// `strict` to mean "provably mature" for its first-choice tier.
+pub(crate) fn version_clears_cutoff(
+    packument: &Packument,
+    ver: &str,
+    effective: Option<&str>,
+    strict: bool,
+) -> bool {
+    matches!(
+        classify_version_age(packument, ver, effective, strict),
+        AgeVerdict::Clears
+    )
+}
+
+/// [`version_clears_cutoff`] with the rejection reason kept. Callers that only
+/// need the yes/no answer go through the predicate; [`pick_version`] uses this
+/// so the error it raises can name which of the two refusals happened.
+pub(crate) fn classify_version_age(
+    packument: &Packument,
+    ver: &str,
+    effective: Option<&str>,
+    strict: bool,
+) -> AgeVerdict {
+    let Some(c) = effective else {
+        return AgeVerdict::Clears;
+    };
+    match packument.time.get(ver) {
+        Some(t) => {
+            if t.as_str() <= c {
+                AgeVerdict::Clears
+            } else {
+                AgeVerdict::TooNew
+            }
+        }
+        // npm's FULL `time` map always carries the `created`/`modified`
+        // bookkeeping keys beside the version keys, so a raw `is_empty()` would
+        // misread a mirror serving only those as "populated, with holes" and
+        // gate every version. Key on any non-bookkeeping entry instead.
+        None => {
+            let has_version_times = packument
+                .time
+                .keys()
+                .any(|k| k != "created" && k != "modified");
+            let modified_proves_maturity =
+                !has_version_times && packument.modified.as_deref().is_some_and(|m| m <= c);
+            if modified_proves_maturity || !strict {
+                AgeVerdict::Clears
+            } else {
+                AgeVerdict::Undeterminable
+            }
+        }
+    }
+}
+
 /// Pick the best version from a packument that satisfies the given range.
 ///
 /// `pick_lowest` flips the scan order — used by
 /// `resolution-mode=time-based` for direct deps. `cutoff` filters out
 /// versions whose registry publish time is later than the cutoff
 /// (lexicographic compare on ISO-8601 UTC strings, which sort
-/// correctly). When the packument has no `time` entry for a version
-/// (e.g. abbreviated corgi payload in `Highest` mode), the cutoff is
-/// ignored and the version stays eligible.
+/// correctly). When the packument carries no `time` entry for a version,
+/// the packument's `modified` timestamp can still prove the whole
+/// document mature; failing that the age is undeterminable, and `strict`
+/// decides whether it blocks (#581) or stays eligible. See
+/// [`version_clears_cutoff`].
 ///
 /// `strict` controls fallback when the cutoff filters out every
 /// satisfying version: with `strict=true` we return `None` and the
@@ -109,6 +210,9 @@ pub fn pick_version_for_add<'a>(
 /// still clear `exempt_cutoff` (the time-based resolution cutoff). Pass
 /// `None` to fully bypass the cutoff for exempt versions (no time-based
 /// wall in effect).
+///
+/// Deprecated versions stay eligible but never win over a
+/// non-deprecated one in the same range — see [`outranks`].
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pick_version<'a>(
@@ -163,28 +267,23 @@ pub(crate) fn pick_version<'a>(
         }
     };
 
-    // Does `ver` clear `effective` (the cutoff that applies to it)?
-    // `None` => no wall, keep the version. Missing time => keep it: we'd
-    // rather risk a slightly newer transitive than fail to resolve the
-    // range entirely.
-    let passes_effective_cutoff = |ver: &str, effective: Option<&str>| -> bool {
-        let Some(c) = effective else { return true };
-        match packument.time.get(ver) {
-            Some(t) => t.as_str() <= c,
-            None => true,
-        }
+    let passes_effective_cutoff = |ver: &str, effective: Option<&str>| {
+        version_clears_cutoff(packument, ver, effective, strict)
     };
 
     // A version's effective cutoff: exempt versions answer to the
     // time-based wall (`exempt_cutoff`) only; everyone else answers to
     // the merged `cutoff`.
-    let passes_cutoff = |ver: &str, parsed: Option<&node_semver::Version>| -> bool {
+    let classify_cutoff = |ver: &str, parsed: Option<&node_semver::Version>| -> AgeVerdict {
         let effective = if is_age_exempt(ver, parsed) {
             exempt_cutoff
         } else {
             cutoff
         };
-        passes_effective_cutoff(ver, effective)
+        classify_version_age(packument, ver, effective, strict)
+    };
+    let passes_cutoff = |ver: &str, parsed: Option<&node_semver::Version>| -> bool {
+        matches!(classify_cutoff(ver, parsed), AgeVerdict::Clears)
     };
 
     // Prefer locked version if it satisfies and clears the cutoff.
@@ -217,8 +316,11 @@ pub(crate) fn pick_version<'a>(
 
     // Track whether *any* version satisfied the range — if so but
     // every one was rejected by the cutoff, the failure is age-gate
-    // related, not a real "no match in range".
-    let mut had_satisfying_but_age_gated = false;
+    // related, not a real "no match in range". A provably-too-new
+    // candidate outranks an undateable one: waiting or widening the
+    // window is a real remedy for the former, so the diagnostic must not
+    // hide it behind the latter.
+    let mut gated_cause: Option<AgeGateCause> = None;
 
     let mut best: Option<(node_semver::Version, &'a aube_registry::VersionMetadata)> = None;
     let mut fallback_lowest: Option<(node_semver::Version, &'a aube_registry::VersionMetadata)> =
@@ -237,20 +339,21 @@ pub(crate) fn pick_version<'a>(
         // `exempt_cutoff` are eligible (a no-op `None` when time-based
         // mode is off).
         if passes_effective_cutoff(ver_str, exempt_cutoff)
-            && fallback_lowest.as_ref().is_none_or(|(cur, _)| v < *cur)
+            && outranks(&v, meta, fallback_lowest.as_ref(), true)
         {
             fallback_lowest = Some((v.clone(), meta));
         }
 
-        if passes_cutoff(ver_str, Some(&v)) {
-            let replace = best
-                .as_ref()
-                .is_none_or(|(cur, _)| if pick_lowest { v < *cur } else { v > *cur });
-            if replace {
-                best = Some((v, meta));
+        match classify_cutoff(ver_str, Some(&v)) {
+            AgeVerdict::Clears => {
+                if outranks(&v, meta, best.as_ref(), pick_lowest) {
+                    best = Some((v, meta));
+                }
             }
-        } else {
-            had_satisfying_but_age_gated = true;
+            AgeVerdict::TooNew => gated_cause = Some(AgeGateCause::TooNew),
+            AgeVerdict::Undeterminable => {
+                gated_cause.get_or_insert(AgeGateCause::Undeterminable);
+            }
         }
     }
 
@@ -262,16 +365,16 @@ pub(crate) fn pick_version<'a>(
     // failures so the caller can surface a meaningful error instead of
     // pretending the range itself was wrong.
     if strict || cutoff.is_none() {
-        return if had_satisfying_but_age_gated {
-            PickResult::AgeGated
-        } else {
-            PickResult::NoMatch
+        return match gated_cause {
+            Some(cause) => PickResult::AgeGated(cause),
+            None => PickResult::NoMatch,
         };
     }
 
     // Lenient fallback: pnpm's `pickPackageFromMetaUsingTime` bypasses
     // the minimumReleaseAge gate and picks the *lowest* satisfying
-    // version — the candidate already cleared the time-based wall above.
+    // version (lowest non-deprecated, per `outranks`) — the candidate
+    // already cleared the time-based wall above.
     if let Some((_, meta)) = fallback_lowest {
         return PickResult::Found(meta);
     }
@@ -279,11 +382,45 @@ pub(crate) fn pick_version<'a>(
     // time-based wall excluded every satisfying version. Report the age
     // gate in the latter case so the caller surfaces a meaningful error
     // rather than a bogus "no matching version".
-    if had_satisfying_but_age_gated {
-        PickResult::AgeGated
-    } else {
-        PickResult::NoMatch
+    match gated_cause {
+        Some(cause) => PickResult::AgeGated(cause),
+        None => PickResult::NoMatch,
     }
+}
+
+/// Does the candidate `(v, meta)` beat the incumbent pick?
+///
+/// A non-deprecated version outranks a deprecated one whatever their
+/// order; between two versions of equal deprecation status `lowest`
+/// decides the direction. This is pnpm's `pickVersionByVersionRange`
+/// rule — when the highest match carries a `deprecated` message it
+/// re-runs the range match over the non-deprecated versions and only
+/// keeps the deprecated pick when the range admits nothing else —
+/// expressed as a comparison so every scan in this crate gets it from
+/// one place. Real case: `codemirror@6.65.7` is an accidentally
+/// mis-tagged republish of `5.65.7`, so it sorts above every genuine
+/// 6.x and a plain highest-satisfying scan hands it to anyone whose
+/// range reaches past `dist-tags.latest`.
+///
+/// pnpm applies the rule on its highest-version path only; aube applies
+/// it in both directions on purpose. A deprecated floor is no safer
+/// than a non-deprecated one, so `resolution-mode=time-based` has
+/// nothing to gain from pinning a version the publisher withdrew.
+#[inline]
+pub(crate) fn outranks(
+    v: &node_semver::Version,
+    meta: &aube_registry::VersionMetadata,
+    incumbent: Option<&(node_semver::Version, &aube_registry::VersionMetadata)>,
+    lowest: bool,
+) -> bool {
+    let Some((cur_v, cur_meta)) = incumbent else {
+        return true;
+    };
+    let live = meta.deprecated.is_none();
+    if live != cur_meta.deprecated.is_none() {
+        return live;
+    }
+    if lowest { v < cur_v } else { v > cur_v }
 }
 
 /// True when `range_str` is a dist-tag reference (`latest`, `next`, a

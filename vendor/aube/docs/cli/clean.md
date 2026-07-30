@@ -2,6 +2,7 @@
 # `aube clean`
 
 - **Usage**: `aube clean [-l --lockfile]`
+- **Effect**: modifies state
 
 Remove `node_modules` across every workspace project.
 

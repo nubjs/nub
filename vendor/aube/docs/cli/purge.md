@@ -2,6 +2,7 @@
 # `aube purge`
 
 - **Usage**: `aube purge [-l --lockfile]`
+- **Effect**: modifies state
 
 Alias for `clean` — remove `node_modules` across every workspace project.
 

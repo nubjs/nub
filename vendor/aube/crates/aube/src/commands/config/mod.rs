@@ -119,8 +119,8 @@ pub(crate) use aube_config::{
     load_user_entries as load_user_aube_config_entries,
 };
 pub(crate) use get_cmd::GetArgs;
-pub use set_cmd::set_project_scalar_to_workspace_yaml;
 pub(crate) use set_cmd::SetArgs;
+pub use set_cmd::set_project_scalar_to_workspace_yaml;
 
 impl Location {
     pub(super) fn path(self) -> miette::Result<PathBuf> {
@@ -304,6 +304,27 @@ pub(super) fn setting_for_key(key: &str) -> Option<&'static settings_meta::Setti
                 || meta.cli_flags.iter().any(|candidate| candidate == &key)
         })
     })
+}
+
+/// True when an entry read from `.npmrc` is a source install actually
+/// consumes for that setting. Unknown keys remain visible so free-form
+/// config still round-trips through `config get`; known settings are only
+/// surfaced when their metadata declares the matching `.npmrc` alias.
+///
+/// Gated to match its only caller, `read_single`. Embedders that build with
+/// `default-features = false` drop `config-tui` and would otherwise trip
+/// `dead_code`; the default build is unaffected.
+#[cfg(any(feature = "config-tui", test))]
+fn npmrc_entry_is_supported(key: &str) -> bool {
+    // `allow-builds` was auto-generated from the old `allowBuilds` metadata,
+    // so keep that historical spelling hidden after removing the unsupported
+    // `.npmrc` source. Do not normalize arbitrary keys here: unknown
+    // free-form entries must continue to round-trip.
+    if key == "allow-builds" {
+        return false;
+    }
+    setting_for_key(key)
+        .is_none_or(|meta| meta.npmrc_keys.iter().any(|candidate| candidate == &key))
 }
 
 pub(super) fn setting_default_value(meta: &settings_meta::SettingMeta) -> Option<String> {
@@ -502,7 +523,11 @@ pub(super) fn read_single(path: &std::path::Path) -> miette::Result<Vec<(String,
         return Ok(Vec::new());
     }
     let edit = NpmrcEdit::load(path)?;
-    Ok(edit.entries())
+    Ok(edit
+        .entries()
+        .into_iter()
+        .filter(|(key, _)| npmrc_entry_is_supported(key))
+        .collect())
 }
 
 #[cfg(test)]
@@ -705,6 +730,16 @@ mod tests {
         let aliases = resolve_aliases("autoInstallPeers");
         assert!(aliases.iter().any(|a| a == "auto-install-peers"));
         assert!(aliases.iter().any(|a| a == "autoInstallPeers"));
+    }
+
+    #[test]
+    fn npmrc_entries_only_surface_declared_sources() {
+        assert!(!npmrc_entry_is_supported("allowBuilds"));
+        assert!(!npmrc_entry_is_supported("allow-builds"));
+        assert!(npmrc_entry_is_supported("autoInstallPeers"));
+        assert!(npmrc_entry_is_supported("auto-install-peers"));
+        assert!(npmrc_entry_is_supported("some-experimental-flag"));
+        assert!(npmrc_entry_is_supported("hoistworkspacepackages"));
     }
 
     #[test]

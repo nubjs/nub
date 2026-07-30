@@ -2,6 +2,7 @@
 # `aube activate`
 
 - **Usage**: `aube activate <SHELL>`
+- **Effect**: modifies state
 
 Emit shell activation code for runtime tool shims
 

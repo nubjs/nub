@@ -39,7 +39,13 @@ pub(super) async fn run(
     // `args.packages` list. The Bun-style `securityScanner` is
     // NOT called here: it runs post-resolve from `install::run`
     // against the full resolved graph.
-    supply_chain::run_cli_name_gates(&root, &args.packages, args.allow_low_downloads).await?;
+    supply_chain::run_cli_name_gates(
+        &root,
+        &args.packages,
+        args.allow_low_downloads,
+        crate::commands::add_supply_chain::LowDownloadPrompt::Terminal,
+    )
+    .await?;
 
     let mut snapshots = Vec::new();
     let lockfile_path = no_save::lockfile_path_for_project(&root)?;

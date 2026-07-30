@@ -14,6 +14,7 @@ mod compile;
 mod config;
 mod dynamic_phantom;
 mod init;
+mod install_engine;
 mod nubx_consent;
 mod phantom_scan;
 mod pm_engine;
@@ -27,6 +28,18 @@ use anyhow::Result;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> Result<()> {
+    // Embedder identity FIRST, before any other line of nub runs. Every
+    // brand-scoped path the engine derives — cache root, data root, config
+    // home — flows from `aube_util::embedder()`, which falls back to the
+    // *aube* profile whenever the OnceLock is unset. Registering only inside
+    // `engine_brand_preflight` left that fallback live on every non-PM path,
+    // so `nub run` wrote the engine's node-gyp shim to `<cache>/aube/...` and
+    // exported that path to scripts as `npm_config_node_gyp`. Registering here
+    // makes the fallback structurally unreachable in the nub binary rather
+    // than fixing one call site at a time; preflight still re-registers
+    // (set-once, idempotent) so pm_engine stays self-contained under test.
+    pm_engine::identity::register();
+
     // Engine-aware subscriber: surfaces the embedded engine's warning
     // channel (brand-rewritten) by default; RUST_LOG still owns the
     // filter when set. See pm_engine::log.

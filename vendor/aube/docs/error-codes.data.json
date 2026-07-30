@@ -61,6 +61,12 @@
       "exit_code": 21
     },
     {
+      "name": "ERR_AUBE_RELEASE_AGE_MISSING_TIME",
+      "category": "Resolver",
+      "description": "The registry served no publish time for any version satisfying the range, so `minimumReleaseAge` could not be evaluated (`minimumReleaseAgeStrict=true`). Distinct from `ERR_AUBE_NO_MATURE_MATCHING_VERSION` so CI tooling can tell a registry serving no `time` metadata from a genuinely too-new release.",
+      "exit_code": 28
+    },
+    {
       "name": "ERR_AUBE_BLOCKED_EXOTIC_SUBDEP",
       "category": "Resolver",
       "description": "Transitive dep used a `git:` / `file:` / `tarball` specifier and `blockExoticSubdeps=true`.",
@@ -181,6 +187,12 @@
       "exit_code": null
     },
     {
+      "name": "ERR_AUBE_WEB_LOGIN_RESPONSE_TOO_LARGE",
+      "category": "Registry / network",
+      "description": "The web-login token response exceeded the 64 KiB safety limit.",
+      "exit_code": null
+    },
+    {
       "name": "ERR_AUBE_OFFLINE",
       "category": "Registry / network",
       "description": "Offline mode and the requested resource isn't in the local cache.",
@@ -205,10 +217,28 @@
       "exit_code": 46
     },
     {
+      "name": "ERR_AUBE_SIMILAR_PACKAGE_NAME",
+      "category": "Supply chain (add-time)",
+      "description": "`aube add` refused a package whose name closely resembles a more popular npm package. This protects against typosquatting and slopsquatting.",
+      "exit_code": null
+    },
+    {
       "name": "ERR_AUBE_LOW_DOWNLOAD_PACKAGE",
       "category": "Registry / network",
       "description": "`aube add` refused a package whose weekly downloads fall below `lowDownloadThreshold` in a non-interactive context (or when stdin is not a TTY). Pass `--allow-low-downloads` to bypass.",
       "exit_code": 47
+    },
+    {
+      "name": "ERR_AUBE_NEW_PACKAGE_NAME",
+      "category": "Supply chain (add-time)",
+      "description": "`aube add` refused a package name first published within `minimumPackageAge`. This protects against newly registered slopsquatting names.",
+      "exit_code": null
+    },
+    {
+      "name": "ERR_AUBE_PACKAGE_AGE_CHECK_FAILED",
+      "category": "Supply chain (add-time)",
+      "description": "`aube add` couldn't verify a package name's registry creation time while `minimumPackageAge` was enabled, so the package-age gate failed closed.",
+      "exit_code": null
     },
     {
       "name": "ERR_AUBE_ADVISORY_CHECK_FAILED",
@@ -367,6 +397,12 @@
       "exit_code": null
     },
     {
+      "name": "ERR_AUBE_USAGE_SPEC_WRITE_FAILED",
+      "category": "Engine / CLI",
+      "description": "`aube usage` couldn't write the CLI spec to stdout; the output would have been truncated.",
+      "exit_code": null
+    },
+    {
       "name": "ERR_AUBE_REMOVE_PRIOR_INSTALL_DIR",
       "category": "Engine / CLI",
       "description": "Couldn't clean up a prior global install dir before re-installing.",
@@ -454,6 +490,12 @@
       "name": "ERR_AUBE_RUNTIME_IO",
       "category": "Engine / CLI",
       "description": "A filesystem operation in the runtime store failed (lock acquisition, staging, or publishing an install). Not a download failure — the message names the failing path.",
+      "exit_code": null
+    },
+    {
+      "name": "ERR_AUBE_SELF_UPDATE_UNSUPPORTED_PLATFORM",
+      "category": "Engine / CLI",
+      "description": "`aube self-update` has no published aube release archive for this OS/architecture (e.g. FreeBSD, Intel macOS). Install aube via your system package manager or mise. Distinct from ERR_AUBE_RUNTIME_UNSUPPORTED_PLATFORM, which is about the Node.js download.",
       "exit_code": null
     },
     {
@@ -642,6 +684,18 @@
       "name": "WARN_AUBE_GVS_MODE_CHANGED",
       "category": "Install lifecycle",
       "description": "Switching between gvs-on and gvs-off; removing `node_modules` and reinstalling from scratch.",
+      "exit_code": null
+    },
+    {
+      "name": "WARN_AUBE_GVS_CROSS_VOLUME",
+      "category": "Install lifecycle",
+      "description": "`cacheDir` (global virtual store) and `storeDir` are on different volumes, so linking falls back to per-file copy.",
+      "exit_code": null
+    },
+    {
+      "name": "WARN_AUBE_QUARANTINE_STRIP_FAILED",
+      "category": "Install lifecycle",
+      "description": "macOS only: `com.apple.quarantine` could not be removed from a materialized native binary, so Gatekeeper may refuse to load or run it.",
       "exit_code": null
     },
     {
@@ -879,6 +933,12 @@
       "exit_code": null
     },
     {
+      "name": "WARN_AUBE_SKIPPED_OPTIONAL_NO_MATCHING_VERSION",
+      "category": "Resolver",
+      "description": "No version of an optional dep matched its range, so the dep was skipped instead of failing the install.",
+      "exit_code": null
+    },
+    {
       "name": "WARN_AUBE_EXOTIC_SUBDEP_SKIPPED",
       "category": "Resolver",
       "description": "An optional or peer dep used an exotic specifier and was skipped under `blockExoticSubdeps=true`.",
@@ -951,9 +1011,21 @@
       "exit_code": null
     },
     {
+      "name": "WARN_AUBE_SIMILAR_PACKAGE_NAME",
+      "category": "Supply chain (add-time)",
+      "description": "`aube add` flagged a package whose name closely resembles a top-100,000 npm package. Interactive sessions prompt for confirmation; non-interactive contexts fail with `ERR_AUBE_SIMILAR_PACKAGE_NAME` unless explicitly allowed.",
+      "exit_code": null
+    },
+    {
       "name": "WARN_AUBE_LOW_DOWNLOAD_PACKAGE",
       "category": "Supply chain (add-time)",
       "description": "`aube add` flagged a package whose weekly downloads fall below `lowDownloadThreshold`. Interactive sessions prompt for confirmation; non-interactive contexts fail with `ERR_AUBE_LOW_DOWNLOAD_PACKAGE` unless `--allow-low-downloads` is passed.",
+      "exit_code": null
+    },
+    {
+      "name": "WARN_AUBE_NEW_PACKAGE_NAME",
+      "category": "Supply chain (add-time)",
+      "description": "`aube add` flagged a package name first published within `minimumPackageAge`. Interactive sessions prompt for confirmation; non-interactive contexts fail with `ERR_AUBE_NEW_PACKAGE_NAME` unless explicitly allowed.",
       "exit_code": null
     },
     {

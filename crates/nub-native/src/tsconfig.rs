@@ -751,7 +751,7 @@ fn resolve_conditional(target: &Value, conditions: &[&str]) -> Option<String> {
 /// `findUp` for a relative *path* (not just a filename): walk up from `start`
 /// joining `rel`, returning the first existing hit (get-tsconfig calls `O` with a
 /// `node_modules/<pkg>` relative path).
-fn find_up_dir(start: &str, rel: &str) -> Option<String> {
+pub(crate) fn find_up_dir(start: &str, rel: &str) -> Option<String> {
     let mut dir = PathBuf::from(start);
     loop {
         let candidate = dir.join(rel);

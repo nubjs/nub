@@ -148,6 +148,14 @@ NUB_VERIFY_DEPS_BEFORE_RUN=off nub run build
 
 Nub does not install on your behalf here — `install` is accepted as a value but behaves like `warn`, since Nub won't reshape a tree another package manager set up. Run `nub install` when you see the warning. The check also applies to `nub <file>`, `nub exec`, and `nubx`, and is skipped in [`--node` / compat mode](#--node) and inside an already-running script (so a script that spawns `node` doesn't re-check).
 
+The one exception is a tree Nub installed for a different Node major than the one about to run it. Native addons are compiled against a specific Node ABI, so switching Node — bumping `.nvmrc` or `engines.node`, or moving between installed versions — leaves them unloadable, and the run would otherwise die with a raw `ERR_DLOPEN_FAILED … NODE_MODULE_VERSION` from deep inside a dependency. Nub records which engine built the tree, notices the mismatch, and reinstalls once before the run:
+
+```
+nub: dependencies were installed for Node 22, this run uses Node 26. Reinstalling — native addons are built per Node major.
+```
+
+Because Nub keeps a build per engine in its store, the reinstall is a fast re-link once you have run under that Node before; only an engine it has never built for pays a real rebuild. This repair is scoped to trees Nub itself installed and to an engine change — every other kind of staleness still only warns — and `off` disables it along with the rest of the check.
+
 ## Undeclared dependencies
 
 Nub also flags a *phantom* dependency — a package your own source imports but never declares, that resolves today only because some dependency-of-a-dependency hoisted it into `node_modules`. It works under a flat npm or Yarn install and breaks the moment the tree is installed isolated, so Nub names the file and the fix before that happens:

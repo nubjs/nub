@@ -6,7 +6,7 @@ description: Nub is an all-in-one Rust toolkit for Node.js. Run TypeScript files
 Nub is an all-in-one toolkit for Node.js, written in Rust. One binary runs your TypeScript files and scripts, installs your dependencies, and provisions Node itself — replacing `node`, `npm`/`pnpm`, `npx`, and `nvm` without adopting a new runtime.
 
 ```bash
-npm install -g --ignore-scripts=false @nubjs/nub
+npm install -g @nubjs/nub
 nub index.ts             # run a TypeScript file
 nub install              # install dependencies (pnpm-compatible)
 nub run dev              # run a package.json script
@@ -40,7 +40,7 @@ There is no new runtime to adopt and no lock-in: every augmentation rides on Nod
 ## Install
 
 ```bash
-npm install -g --ignore-scripts=false @nubjs/nub
+npm install -g @nubjs/nub
 ```
 
 Both `pnpm add -g @nubjs/nub` and `yarn global add @nubjs/nub` work equivalently. That installs the Rust binary plus the platform-specific N-API addons, and puts `nub` and `nubx` on your `PATH`. On macOS and Linux, Homebrew works too:
@@ -67,6 +67,16 @@ In CI, swap `actions/setup-node` for the [setup-nub action](/docs/deployment/git
 - - uses: actions/setup-node@v4
 + - uses: nubjs/setup-nub@v0
 ```
+
+### Canary builds
+
+Every code commit to `main` publishes a canary build for all platforms, versioned `<version>-canary.<date>.<n>`:
+
+```bash
+npm install -g @nubjs/nub@canary
+```
+
+The same binaries are attached to the rolling [canary release](https://github.com/nubjs/nub/releases/tag/canary) on GitHub. Canary tracks the newest commit and passes build and smoke checks only — expect rough edges, and pin back to `@nubjs/nub@latest` to return to the stable channel.
 
 ## Package management
 

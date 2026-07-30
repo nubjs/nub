@@ -3,6 +3,7 @@
 
 - **Usage**: `aube config list [FLAGS]`
 - **Aliases**: `ls`
+- **Effect**: read-only
 
 Print every key/value from aube config and selected `.npmrc` file(s)
 

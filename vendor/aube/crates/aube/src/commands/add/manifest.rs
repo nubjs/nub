@@ -323,9 +323,18 @@ pub(super) async fn update_manifest_for_add(
             // lives in `packuments-full-v1` while an ungated one lives
             // in the corgi cache — an offline retry must not fail on a
             // package that's on disk in the other format. The full
-            // payload is a superset of corgi, and corgi's missing
-            // `time` map keeps its versions cutoff-eligible in
-            // `pick_version`, so either format picks correctly.
+            // payload is a superset of corgi, so that direction always
+            // picks correctly.
+            //
+            // The corgi direction is WEAKER than it once was. A missing
+            // `time` map no longer keeps versions cutoff-eligible —
+            // #581 made an undeterminable publish age fail closed — so an
+            // offline add falling back to a corgi-cached packument
+            // resolves only what the document's `modified` timestamp
+            // proves mature, and otherwise reports the age gate instead
+            // of silently installing. Intended: an offline fallback must
+            // not be a way around the gate. But it does mean this
+            // fallback can now fail where it previously succeeded.
             let packument = match primary {
                 Ok(packument) => Ok(packument),
                 Err(primary_err) if offline => {
@@ -454,7 +463,7 @@ pub(super) async fn update_manifest_for_add(
                 minimum_release_age.as_ref(),
             ) {
                 aube_resolver::PickResult::Found(meta) => Some(meta.version.clone()),
-                aube_resolver::PickResult::NoMatch | aube_resolver::PickResult::AgeGated => None,
+                aube_resolver::PickResult::NoMatch | aube_resolver::PickResult::AgeGated(_) => None,
             }
         };
         let resolved_version = match aube_resolver::pick_version_for_add(
@@ -464,7 +473,29 @@ pub(super) async fn update_manifest_for_add(
             minimum_release_age.as_ref(),
         ) {
             aube_resolver::PickResult::Found(meta) => meta.version.clone(),
-            aube_resolver::PickResult::AgeGated => {
+            // An age the registry gave us no way to check is a different
+            // refusal from a release that is genuinely too new (#581), and
+            // `minimumReleaseAgeStrict=false` is not offered for it: loosening
+            // strictness would take the newest matching version with no age
+            // evidence at all. Mirrors the resolver's split so `add` and a
+            // full install report the same failure the same way.
+            aube_resolver::PickResult::AgeGated(aube_resolver::AgeGateCause::Undeterminable) => {
+                return Err(miette!(
+                    code = aube_codes::errors::ERR_AUBE_RELEASE_AGE_MISSING_TIME,
+                    help = format!(
+                        "the minimumReleaseAge window is checked against the registry's `time` \
+                         metadata, which omits these versions — no window would admit them\n\
+                         to proceed: unset `registry-supports-time-field` if it is on (it \
+                         suppresses the full-packument fetch that carries `time`), check the \
+                         registry config in .npmrc, add `{}` to `minimumReleaseAgeExclude`, or \
+                         set `minimumReleaseAge=0` to turn the window off for this project",
+                        spec.name
+                    ),
+                    "cannot check the publish age of {}@{effective_range} — the registry served no publish time for any matching version",
+                    spec.name,
+                ));
+            }
+            aube_resolver::PickResult::AgeGated(aube_resolver::AgeGateCause::TooNew) => {
                 // Only reachable in strict mode today (the lenient pick
                 // falls back instead), but derive the label anyway so a
                 // future lenient AgeGated path can't print a lie.
@@ -652,7 +683,9 @@ pub(super) async fn update_manifest_for_add(
     let catalog_target = if catalog_upserts.is_empty() {
         None
     } else {
-        Some(crate::commands::catalogs::resolve_catalog_write_target(cwd)?)
+        Some(crate::commands::catalogs::resolve_catalog_write_target(
+            cwd,
+        )?)
     };
 
     // Write the updated package.json. Under `--no-save` callers still

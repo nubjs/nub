@@ -2,6 +2,7 @@
 # `aube init`
 
 - **Usage**: `aube init [FLAGS]`
+- **Effect**: modifies state
 
 Create a `package.json` in the current directory
 

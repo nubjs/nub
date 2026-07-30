@@ -2,6 +2,7 @@
 # `aube dist-tag ls`
 
 - **Usage**: `aube dist-tag ls [PACKAGE]`
+- **Effect**: read-only
 
 List every dist-tag for a package.
 

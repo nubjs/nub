@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
-include = ["src/**/*.rs", "src/**/*.mjs", "build.rs"]
+include = ["src/**/*.rs", "src/**/*.mjs", "assets/**", "build.rs"]
 
 # The command layer is a library so it can be embedded (construct
 # `commands::install::InstallOptions`, call `commands::install::run`)
@@ -58,7 +58,7 @@ clap = { workspace = true }
 # (usage.jdx.dev KDL) command; the embeddable lib no longer carries it. Cargo
 # can't scope a dependency to bin-only within a crate that also has a lib, so
 # it stays here.
-clap_usage = "2"
+clap_usage = "4"
 strum = { workspace = true }
 clx = { workspace = true }
 console = "0.16"

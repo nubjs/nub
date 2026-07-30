@@ -112,7 +112,7 @@ function __getBuiltin(id) {
 // Builtin bindings + the native addon, populated by __ensureBuiltins(). They stay
 // `let` (not `const`) because on the floor they are filled on first hook use rather
 // than at module eval — see the lazy-vs-eager note above.
-let createRequire, __require, module, readFileSync, writeFileSync, mkdirSync, statSync;
+let createRequire, __require, module, readFileSync, writeFileSync, mkdirSync, statSync, realpathSync;
 let fileURLToPath, pathToFileURL, join, dirname;
 // Nub's N-API addon — the in-process TS/JSX transpiler (`transform`,
 // `transformCached`, `detectModuleInfo`), the tsconfig reader + additive
@@ -138,7 +138,7 @@ function __ensureBuiltins() {
   ({ createRequire } = __getBuiltin("node:module"));
   __require = createRequire(import.meta.url);
   module = __getBuiltin("node:module");
-  ({ readFileSync, writeFileSync, mkdirSync, statSync } = __getBuiltin("node:fs"));
+  ({ readFileSync, writeFileSync, mkdirSync, statSync, realpathSync } = __getBuiltin("node:fs"));
   ({ fileURLToPath, pathToFileURL } = __getBuiltin("node:url"));
   ({ join, dirname } = __getBuiltin("node:path"));
   for (const rel of ["./addons/nub-native.node", "../runtime/addons/nub-native.node"]) {
@@ -266,6 +266,28 @@ export function isNodeModules(url) {
   return url.includes("/node_modules/") || url.includes("\\node_modules\\");
 }
 
+// "Is this really a dependency?" — the ONE definition every gate that decides how a
+// file LOADS uses, so the resolve step and each load step cannot disagree about the
+// same file. (Watch-mode config reporting still uses the plain check: it asks which
+// files to watch, not how they load.)
+//
+// A `/node_modules/` segment normally settles it: Node realpaths a resolved module,
+// so the path we are handed IS the real one. Under `--preserve-symlinks` it does not
+// — a workspace package symlinked into node_modules keeps that segment while its
+// files genuinely live in the project, and calling it a dependency would refuse the
+// TypeScript that is its build output. The stat therefore happens only under the
+// flag, and only for paths that already look like a dependency; the default path
+// stays the pure substring test it always was.
+export function isDependency(url) {
+  if (!isNodeModules(url)) return false;
+  if (!PRESERVE_SYMLINKS) return true;
+  try {
+    return isNodeModules(pathToFileURL(realpathSync(fileURLToPath(url))).href);
+  } catch {
+    return true; // unreadable: trust the literal path
+  }
+}
+
 export function fileExists(filePath) {
   const s = statSync(filePath, { throwIfNoEntry: false });
   return s !== undefined && s.isFile();
@@ -293,10 +315,21 @@ export function barePkg(specifier) {
 // nub is forbidden. The `node:`/`data:`/builtin guards, the nub-internal-graph
 // bypass, vendored packages, and the clobber map all stay in JS and run BEFORE the
 // native resolver (see resolveSpec / resolveCjsPath).
+// Node's `--preserve-symlinks` decides whether a resolved module is keyed by its
+// real path or the path it was reached through, and the native resolver has to hand
+// back whichever one Node itself would — otherwise a symlinked workspace package
+// reached two ways instantiates twice. The flag arrives by argv OR `NODE_OPTIONS`,
+// and only one of those shows up in `execArgv`, so both are checked. The word
+// boundary matters: `--preserve-symlinks-main` is a DIFFERENT flag that governs only
+// the entry point.
+const PRESERVE_SYMLINKS =
+  process.execArgv.includes("--preserve-symlinks") ||
+  /(^|\s)--preserve-symlinks(\s|$)/.test(process.env.NODE_OPTIONS || "");
+
 function resolveTs(specifier, parentPath) {
   if (!nubNative) return null;
   try {
-    return nubNative.resolveTs(specifier, parentPath || "");
+    return nubNative.resolveTs(specifier, parentPath || "", PRESERVE_SYMLINKS);
   } catch {
     return null;
   }
@@ -398,7 +431,7 @@ export function resolveSpec(specifier, parentURL) {
   }
 
   // 3. Package clobbering.
-  if (CLOBBER_MAP.has(bare) && !isNodeModules(parentURL || "")) {
+  if (CLOBBER_MAP.has(bare) && !isDependency(parentURL || "")) {
     return { url: `data:text/javascript,${encodeURIComponent(CLOBBER_MAP.get(bare)())}`, shortCircuit: true };
   }
 

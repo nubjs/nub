@@ -35,6 +35,43 @@ teardown() {
 	assert_output "true"
 }
 
+@test "config inspection ignores allowBuilds from .npmrc" {
+	cat >"$HOME/.npmrc" <<-'NPMRC'
+		allowBuilds={"esbuild":true}
+		allow-builds={"sharp":true}
+	NPMRC
+
+	run aube config get allowBuilds
+	assert_success
+	assert_output "undefined"
+
+	run aube config get allow-builds
+	assert_success
+	assert_output "undefined"
+
+	run aube config list --location user
+	assert_success
+	refute_output --partial "allowBuilds"
+	refute_output --partial "allow-builds"
+
+	run aube config explain allowBuilds
+	assert_success
+	refute_output --partial ".npmrc keys"
+	assert_output --partial "Workspace YAML keys: allowBuilds"
+}
+
+@test "config inspection preserves unknown keys that resemble known settings" {
+	echo "hoistworkspacepackages=legacy" >"$HOME/.npmrc"
+
+	run aube config get hoistworkspacepackages
+	assert_success
+	assert_output "legacy"
+
+	run aube config list --location user
+	assert_success
+	assert_line "hoistworkspacepackages=legacy"
+}
+
 @test "config get and list prefer user config.toml over user .npmrc" {
 	# Aube's own user config wins over ~/.npmrc so values aube wrote
 	# via `aube config set` are authoritative — they are not silently
