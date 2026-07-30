@@ -477,8 +477,13 @@ Fact 'ambient-on-path-resolved-from' $facts['ambient-on-path-resolved-from']
 
 # 8. ⭐ THE HYBRID: the AMBIENT MSI node.exe as interpreter (PATH order is the only variable vs arm 7)
 #    with a nub-owned npm tree. A pass here means the ~88 MiB binary does not need copying.
+# The CONTROL runs on jail-bin's node so the arm still reports its gate cells; only the TOOL names the
+# ambient binary. Run 30517334191 is why: with the control ALSO on the ambient interpreter the whole
+# child was refused, so the arm reported MISSING-OP for `stat-c-root` and dragged the gate controls red
+# — a control-list defect, not a mechanism one. `plain-hybrid` (which is unconfined and CAN run the
+# ambient binary) is what proves the interpreter identity.
 $null = Invoke-JbArm -Name 'ac-hybrid-npm-direct' -AppContainer $true -PathValue $pathJailBin `
-  -Tool $hybridNpm -Interp $ambientNode
+  -Tool $hybridNpm
 
 # 9. The zero-per-launch-cost shape: the standing AAP ace only, per-run package sid WITHHELD.
 $null = Invoke-JbArm -Name 'ac-aap-only' -AppContainer $true -PathValue $pathJailBin -Tool $directNpm -SkipJailBinAce
