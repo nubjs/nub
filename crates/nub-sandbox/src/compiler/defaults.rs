@@ -659,7 +659,10 @@ pub fn build_jail_stdio_preload_js() -> String {
     strip_js_comments(WINDOWS_STDIO_SHIM)
 }
 
-/// The `--import` term that delivers the stdio shim, encoded as the jail delivers it.
+/// The `--import` term that delivers the stdio shim, encoded as the jail delivers it. Built off
+/// Windows too, so the encoding and the env-block budget are gated on every platform's `cargo test`
+/// rather than only where the stamp is used.
+#[cfg(any(windows, test))]
 fn stdio_shim_import_term() -> String {
     format!(
         "--import data:text/javascript,{}",
@@ -696,6 +699,7 @@ pub fn windows_build_jail_node_options() -> String {
 /// Percent-encode everything outside the RFC 3986 unreserved set. Deliberately maximal:
 /// `NODE_OPTIONS` is split on whitespace and re-parsed by Node's own option reader, so an
 /// under-encoded payload does not corrupt a URL, it silently truncates the preload.
+#[cfg(any(windows, test))]
 fn percent_encode_strict(src: &str) -> String {
     let mut out = String::with_capacity(src.len() * 3);
     for byte in src.bytes() {
