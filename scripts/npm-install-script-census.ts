@@ -784,7 +784,13 @@ const main = async (): Promise<void> => {
   const weekly = await stageWeekly(plausible, "weekly");
   if (STAGE === "weekly") return;
 
+  // UNMEASURED IS NOT BELOW-THRESHOLD. A plausible candidate whose lookup never
+  // resolved has no weekly figure, and treating that absence as 0 would drop it
+  // from the census as though it had been measured and found small. Those names
+  // are tracked and reported so the census's own coverage is visible: a run that
+  // silently omits 99 of a 2,500-package band is not a census, it is a sample.
   const above = plausible.filter((n) => (weekly.get(n) ?? 0) >= THRESHOLD);
+  const unmeasured = plausible.filter((n) => !weekly.has(n));
   const seedBelow = [...seeds].filter((n) => (weekly.get(n) ?? 0) < THRESHOLD);
   console.error(`[gate] ${above.length} packages at or above ${THRESHOLD.toLocaleString()} weekly downloads`);
 
@@ -1050,6 +1056,14 @@ const main = async (): Promise<void> => {
           : gateBreaches.length === 0
             ? "no excluded package in the sample reached the threshold"
             : "BREACH — the gate dropped real threshold members; widen the margin and re-run",
+    },
+    coverage: {
+      plausible_candidates: plausible.length,
+      weekly_measured: plausible.length - unmeasured.length,
+      weekly_unmeasured: unmeasured.length,
+      coverage_pct: `${(((plausible.length - unmeasured.length) / plausible.length) * 100).toFixed(2)}%`,
+      unmeasured_sample: unmeasured.slice(0, 40),
+      note: "an unmeasured candidate is ABSENT from census-packages.ndjson — it is not counted as below-threshold. Re-run to resolve; failed lookups are deliberately left uncached.",
     },
     unverified: {
       manifest_status_counts: pkgRows.reduce<Record<string, number>>((acc, r) => {
