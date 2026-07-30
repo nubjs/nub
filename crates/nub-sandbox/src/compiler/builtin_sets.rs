@@ -557,9 +557,6 @@ mod tests {
                 "binaries.prisma.sh",
                 "download.cypress.io",
                 "cdn.cypress.io",
-                "github.com",
-                "release-assets.githubusercontent.com",
-                "objects.githubusercontent.com",
             ],
             "the generated $downloads set diverged from the hand-written one it replaced"
         );
@@ -587,22 +584,19 @@ mod tests {
     #[test]
     fn no_write_capable_or_multi_tenant_host_leaked_into_downloads() {
         // The set is meant to grow by PR as more install-time downloaders are covered.
-        // The shape such a PR must never add is a MULTI-TENANT namespace — one an attacker
-        // can rent under the same hostname and read back.
-        //
-        // WRITE-CAPABILITY alone no longer bans a host. `github.com` and the release-asset
-        // hosts are admitted: the host list is not the identity gate, and a package must ALSO
-        // carry its own entry to reach the network at all, so a hostname that cannot separate
-        // a fetch from a push is not the boundary doing the work. Withholding them broke 17 of
-        // 21 network-denied corpus packages. `api.github.com` and `codeload.github.com` stay
-        // banned as unneeded, and `raw.githubusercontent.com` stays banned as attacker-rentable.
+        // These are the shapes such a PR must never add: a host the confined script can
+        // upload to, and a namespace an attacker can rent under the same hostname and read
+        // back. The GitHub-release and object-store families are UNSOLVED here on purpose —
+        // they need pre-download brokering, not an allowlist entry.
         for banned in [
             "storage.googleapis.com",
             "*.googleapis.com",
             "*.amazonaws.com",
             "*.blob.core.windows.net",
+            "github.com",
             "api.github.com",
             "codeload.github.com",
+            "objects.githubusercontent.com",
             "raw.githubusercontent.com",
             "*.github.io",
             "registry.npmjs.org",
