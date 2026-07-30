@@ -2054,6 +2054,7 @@ try {{
         "cdgranted",
         "cwdafter",
         "cdungranted",
+        "cdungrantedlist",
         "list",
         "glob",
         "read",
@@ -2145,6 +2146,10 @@ try {{
         let f = Fixture::new("sh");
         println!("  fact:shell-fixture-root={}", f.root.display());
         println!("  fact:probe-elevated={}", probe_elevated());
+        println!(
+            "  fact:shell-fixture-has-space={}",
+            f.root.to_string_lossy().contains(' ')
+        );
 
         // Battery targets, all inside the granted work dir except `f.sibling`.
         let sub = f.work.join("sub");
@@ -2197,13 +2202,19 @@ try {{
                 name: "cmd",
                 exe: cmd_exe.clone(),
                 script: f.work.join("probe.cmd"),
-                // Production's own shape: `cmd.exe /d /s /c "<one command string>"`.
+                // `/d /s /c` is production's shape, but the tail is passed as SEPARATE
+                // UNQUOTED args: `std::process::Command` escapes an embedded quote, so a
+                // pre-quoted single-string tail reached cmd as a literal `\"…\"` and every
+                // cell came back absent — including UNCONFINED, which is what caught it. Sound
+                // only while the fixture path has no space; `shell-fixture-has-space` reports
+                // that rather than leaving it implied.
                 invoke: |script, out| {
                     vec![
                         "/d".into(),
                         "/s".into(),
                         "/c".into(),
-                        format!("\"{}\" \"{}\"", script.display(), out.display()),
+                        script.display().to_string(),
+                        out.display().to_string(),
                     ]
                 },
             });
@@ -2445,11 +2456,23 @@ fs.writeFileSync({marker}, "sentinel=" + String(globalThis.__nubJailStdioShim) +
                         diffs.join(" | ")
                     }
                 );
+                // `complete` is load-bearing here, not decoration: run 30531385502 reported
+                // `0 diverging cell(s)` for cmd when BOTH arms were empty, because the harness
+                // had mis-quoted the invocation. An empty transcript must never read as
+                // agreement.
                 report(
                     fails,
                     &format!("shell-{}-{arm}-matches-unconfined", plan.name),
-                    diffs.is_empty(),
-                    &format!("{} diverging cell(s)", diffs.len()),
+                    complete && diffs.is_empty(),
+                    &format!(
+                        "{} diverging cell(s){}",
+                        diffs.len(),
+                        if complete {
+                            ""
+                        } else {
+                            " — VACUOUS: the unconfined reference never completed"
+                        }
+                    ),
                 );
             }
             // `cd` into an UNGRANTED directory is the one cell whose CORRECT confined answer
@@ -2582,6 +2605,10 @@ fs.writeFileSync({marker}, "sentinel=" + String(globalThis.__nubJailStdioShim) +
              cd /d \"{sib}\"\r\n\
              set \"RC=%errorlevel%\"\r\n\
              if \"%RC%\"==\"0\" (>>\"%OUT%\" echo cdungranted=OK-BAD) else (>>\"%OUT%\" echo cdungranted=FAIL)\r\n\
+             (call )\r\n\
+             dir /b \"{sib}\" > \"%SC%cul.tmp\" 2>&1\r\n\
+             set \"RC=%errorlevel%\"\r\n\
+             if \"%RC%\"==\"0\" (>>\"%OUT%\" echo cdungrantedlist=READABLE) else (>>\"%OUT%\" echo cdungrantedlist=FAIL)\r\n\
              cd /d \"{w}\"\r\n\
              (call )\r\n\
              dir /b \"{g}\" > \"%SC%ls.tmp\" 2>&1\r\n\
@@ -2663,15 +2690,17 @@ fs.writeFileSync({marker}, "sentinel=" + String(globalThis.__nubJailStdioShim) +
             r#"param([string]$Out)
 $ErrorActionPreference = 'Continue'
 function L([string]$s) {{ [System.IO.File]::AppendAllText($Out, $s + "`r`n") }}
+function T([string]$k) {{ $e = $Error[0]; $m = ''; if ($e) {{ $m = ' ' + $e.Exception.GetType().Name + ':' + (($e.Exception.Message -replace '[\r\n]+',' ') -replace '=','~') }}; L ($k + '=THREW' + $m.Substring(0, [Math]::Min(160, $m.Length))) }}
 $SC = [System.IO.Path]::GetDirectoryName($Out)
 L 'alive=1'
-try {{ L ('cwd=' + (Get-Location).Path) }} catch {{ L 'cwd=THREW' }}
+try {{ L ('cwd=' + (Get-Location).Path) }} catch {{ T 'cwd' }}
 foreach ($pair in @(,@('existdir','{w}')) + @(,@('existdirslash','{w}\')) + @(,@('existfile','{w}\granted.txt')) + @(,@('existwin','{winroot}')) + @(,@('existpf','{progfiles}'))) {{
-  try {{ L ($pair[0] + '=' + $(if (Test-Path -LiteralPath $pair[1]) {{'yes'}} else {{'no'}})) }} catch {{ L ($pair[0] + '=THREW') }}
+  try {{ L ($pair[0] + '=' + $(if (Test-Path -LiteralPath $pair[1]) {{'yes'}} else {{'no'}})) }} catch {{ T $pair[0] }}
 }}
 try {{ Set-Location -LiteralPath '{s}' -ErrorAction Stop; L 'cdgranted=OK' }} catch {{ L 'cdgranted=FAIL' }}
-try {{ L ('cwdafter=' + (Get-Location).Path) }} catch {{ L 'cwdafter=THREW' }}
+try {{ L ('cwdafter=' + (Get-Location).Path) }} catch {{ T 'cwdafter' }}
 try {{ Set-Location -LiteralPath '{sib}' -ErrorAction Stop; L 'cdungranted=OK-BAD' }} catch {{ L 'cdungranted=FAIL' }}
+try {{ L ('cdungrantedlist=' + @(Get-ChildItem -LiteralPath '{sib}' -ErrorAction Stop).Count) }} catch {{ L 'cdungrantedlist=FAIL' }}
 try {{ Set-Location -LiteralPath '{w}' -ErrorAction Stop }} catch {{ }}
 try {{ foreach ($e in @(Get-ChildItem -LiteralPath '{g}' -ErrorAction Stop)) {{ L ('listitem=' + $e.Name) }} }} catch {{ L 'listitem=FAIL' }}
 try {{ foreach ($e in @(Get-ChildItem -Path '{g}\*.txt' -ErrorAction Stop)) {{ L ('globitem=' + $e.Name) }} }} catch {{ L 'globitem=FAIL' }}
@@ -2679,15 +2708,15 @@ try {{ L ('read=' + ((Get-Content -LiteralPath '{w}\granted.txt' -Raw -ErrorActi
 try {{ Set-Content -LiteralPath ([System.IO.Path]::Combine($SC,'ps-wr.tmp')) -Value 'wrote-ok' -ErrorAction Stop
        L ('write=' + ((Get-Content -LiteralPath ([System.IO.Path]::Combine($SC,'ps-wr.tmp')) -Raw -ErrorAction Stop).Trim())) }} catch {{ L 'write=FAIL' }}
 try {{ $cn = @(Get-Command node -CommandType Application -ErrorAction Stop)[0]; L ('whereexe=' + [System.IO.Path]::GetFileName($cn.Source)) }} catch {{ L 'whereexe=FAIL' }}
-try {{ $v = @(& node --version 2>&1); if ($LASTEXITCODE -eq 0 -and $v.Count -gt 0) {{ L ('pathspawn=' + [string]$v[0]) }} else {{ L ('pathspawn=FAIL last=[' + [string]$LASTEXITCODE + '] out=[' + ([string]::Join(' ', $v)) + ']') }} }} catch {{ L 'pathspawn=THREW' }}
+try {{ $v = @(& node --version 2>&1); if ($LASTEXITCODE -eq 0 -and $v.Count -gt 0) {{ L ('pathspawn=' + [string]$v[0]) }} else {{ L ('pathspawn=FAIL last=[' + [string]$LASTEXITCODE + '] out=[' + ([string]::Join(' ', $v)) + ']') }} }} catch {{ T 'pathspawn' }}
 try {{ [System.IO.File]::AppendAllText('\\.\NUL', 'nulltest'); L 'nullredir=OK' }} catch {{ L 'nullredir=FAIL' }}
 try {{ $tk = [System.IO.Path]::Combine($SC,'token'); if (Test-Path -LiteralPath $tk) {{ Remove-Item -LiteralPath $tk -Force }} }} catch {{ }}
 try {{ $null = @(& node '{w}\spawned.js' $tk 2>&1)
        if ($LASTEXITCODE -ne 0) {{ L ('nestedspawn=FAIL last=[' + [string]$LASTEXITCODE + ']') }}
        elseif (Test-Path -LiteralPath $tk) {{ L ('nestedspawn=' + (([System.IO.File]::ReadAllText($tk)).Trim())) }}
-       else {{ L 'nestedspawn=NO-TOKEN' }} }} catch {{ L 'nestedspawn=THREW' }}
-try {{ $o = @(& '{c}' /d /s /c ('"' + '{w}\shim.cmd' + '"') 2>&1); if ($LASTEXITCODE -eq 0 -and $o.Count -gt 0) {{ L ('cmdshim=' + ([string]$o[0]).Trim()) }} else {{ L ('cmdshim=FAIL last=[' + [string]$LASTEXITCODE + ']') }} }} catch {{ L 'cmdshim=THREW' }}
-try {{ $null = @(& '{c}' /d /s /c 'exit /b 3' 2>&1); L ('exitprop=' + $(if ($LASTEXITCODE -eq 3) {{'OK'}} else {{'FAIL last=[' + [string]$LASTEXITCODE + ']'}})) }} catch {{ L 'exitprop=THREW' }}
+       else {{ L 'nestedspawn=NO-TOKEN' }} }} catch {{ T 'nestedspawn' }}
+try {{ $o = @(& '{c}' /d /s /c ('"' + '{w}\shim.cmd' + '"') 2>&1); if ($LASTEXITCODE -eq 0 -and $o.Count -gt 0) {{ L ('cmdshim=' + ([string]$o[0]).Trim()) }} else {{ L ('cmdshim=FAIL last=[' + [string]$LASTEXITCODE + ']') }} }} catch {{ T 'cmdshim' }}
+try {{ $null = @(& '{c}' /d /s /c 'exit /b 3' 2>&1); L ('exitprop=' + $(if ($LASTEXITCODE -eq 3) {{'OK'}} else {{'FAIL last=[' + [string]$LASTEXITCODE + ']'}})) }} catch {{ T 'exitprop' }}
 L 'done=1'
 "#
         )
@@ -2701,7 +2730,7 @@ L 'done=1'
         let sib = fwd(&f.sibling);
         let g = fwd(globdir);
         let s = fwd(sub);
-        let c = fwd(cmd_exe);
+        let cwin = cmd_exe.display().to_string();
         // The system paths are substituted from Rust rather than read out of `$SystemRoot`,
         // whose value is BACKSLASHED — busybox reads a backslash as an escape, so an env-var
         // spelling would make `[ -d ]` report absent for a reason that is not the jail.
@@ -2726,23 +2755,25 @@ if [ -d "{w}/" ]; then p existdirslash=yes; else p existdirslash=no; fi
 if [ -f "{w}/granted.txt" ]; then p existfile=yes; else p existfile=no; fi
 if [ -d "{winroot}" ]; then p existwin=yes; else p existwin=no; fi
 if [ -d "{progfiles}" ]; then p existpf=yes; else p existpf=no; fi
-if cd "{s}" 2>/dev/null; then p cdgranted=OK; else p cdgranted=FAIL; fi
+E="$SC/err.log"
+if cd "{s}" 2>>"$E"; then p cdgranted=OK; else p cdgranted=FAIL; fi
 p "cwdafter=$(pwd)"
-if cd "{sib}" 2>/dev/null; then p cdungranted=OK-BAD; else p cdungranted=FAIL; fi
-cd "{w}" 2>/dev/null
-if ls -1 "{g}" > "$SC/ls.tmp" 2>/dev/null; then while read -r n; do p "listitem=$n"; done < "$SC/ls.tmp"; else p listitem=FAIL; fi
+if cd "{sib}" 2>>"$E"; then p cdungranted=OK-BAD; else p cdungranted=FAIL; fi
+if ls -1 . > "$SC/cul.tmp" 2>>"$E"; then p "cdungrantedlist=$(wc -l < "$SC/cul.tmp" | tr -d ' ')"; else p cdungrantedlist=FAIL; fi
+cd "{w}" 2>>"$E"
+if ls -1 "{g}" > "$SC/ls.tmp" 2>>"$E"; then while read -r n; do p "listitem=$n"; done < "$SC/ls.tmp"; else p listitem=FAIL; fi
 for x in "{g}"/*.txt; do if [ -e "$x" ]; then p "globitem=$(basename "$x")"; else p globitem=FAIL; fi; done
-if cat "{w}/granted.txt" > "$SC/rd.tmp" 2>/dev/null; then p "read=$(cat "$SC/rd.tmp")"; else p read=FAIL; fi
-if printf 'wrote-ok\n' > "$SC/wr.tmp" 2>/dev/null; then p "write=$(cat "$SC/wr.tmp")"; else p write=FAIL; fi
-if wexe=$(command -v node 2>/dev/null); then p "whereexe=$(basename "$wexe")"; else p whereexe=FAIL; fi
-if node --version > "$SC/nv.tmp" 2>/dev/null; then p "pathspawn=$(cat "$SC/nv.tmp")"; else p pathspawn=FAIL; fi
-if printf 'nulltest\n' > /dev/null 2>/dev/null; then p nullredir=OK; else p nullredir=FAIL; fi
+if cat "{w}/granted.txt" > "$SC/rd.tmp" 2>>"$E"; then p "read=$(cat "$SC/rd.tmp")"; else p read=FAIL; fi
+if printf 'wrote-ok\n' > "$SC/wr.tmp" 2>>"$E"; then p "write=$(cat "$SC/wr.tmp")"; else p write=FAIL; fi
+if wexe=$(command -v node 2>>"$E"); then p "whereexe=$(basename "$wexe")"; else p whereexe=FAIL; fi
+if node --version > "$SC/nv.tmp" 2>>"$E"; then p "pathspawn=$(cat "$SC/nv.tmp")"; else p pathspawn=FAIL; fi
+if printf 'nulltest\n' > /dev/null 2>>"$E"; then p nullredir=OK; else p nullredir=FAIL; fi
 rm -f "$SC/token"
 if node "{w}/spawned.js" "$SC/token" > "$SC/sp.tmp" 2>&1; then
   if [ -f "$SC/token" ]; then p "nestedspawn=$(cat "$SC/token")"; else p nestedspawn=NO-TOKEN; fi
 else p "nestedspawn=FAIL rc=$?"; fi
-if "{c}" /d /s /c "\"{shim_win}\"" > "$SC/sh.tmp" 2>&1; then p "cmdshim=$(head -n 1 "$SC/sh.tmp" | tr -d '\r')"; else p cmdshim=FAIL; fi
-"{c}" /d /s /c "exit /b 3" > /dev/null 2>&1
+if "{cwin}" /d /s /c "{shim_win}" > "$SC/sh.tmp" 2>&1; then p "cmdshim=$(head -n 1 "$SC/sh.tmp" | tr -d '\r')"; else p cmdshim=FAIL; fi
+"{cwin}" /d /s /c "exit /b 3" > "$SC/ep.tmp" 2>&1
 rc=$?
 if [ "$rc" = 3 ]; then p exitprop=OK; else p "exitprop=FAIL rc=$rc"; fi
 p done=1
@@ -2784,11 +2815,8 @@ p done=1
             "/d".to_string(),
             "/s".to_string(),
             "/c".to_string(),
-            format!(
-                "\"{}\" \"{}\"",
-                f.work.join("direct.cmd").display(),
-                out.display()
-            ),
+            f.work.join("direct.cmd").display().to_string(),
+            out.display().to_string(),
         ];
         breadcrumb("shell_direct_launch");
         flush();
