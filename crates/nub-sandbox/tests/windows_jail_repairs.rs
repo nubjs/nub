@@ -2602,13 +2602,22 @@ try {{
         // SAME policy the shells run under. Without this the shell arms could be measuring a
         // launch whose `NODE_OPTIONS` never took effect.
         let shim_marker = f.work.join("shimlive.txt");
+        // `-e`, NOT a script FILE. Run 30536525468 had this gate as a `.js` entry point and it
+        // FAILED de-elevated for the very reason the shell cells exist to measure: `node <abs
+        // file>` dies in `resolveMainPath` when `C:\` is unreachable, so the gate was
+        // unsatisfiable by construction in the arm that needed it most. `-e` reaches a require
+        // with no main module, which is the only shape that isolates "did the preload arrive"
+        // from "can an entry point resolve" — and `--import` still runs ahead of the eval, so the
+        // sentinel is a real test of the preload.
         let shim_body = format!(
-            r#"
-const fs = require("node:fs");
+            "-e:{}",
+            format!(
+                r#"const fs = require("node:fs");
 fs.writeFileSync({marker}, "sentinel=" + String(globalThis.__nubJailStdioShim) +
-  " nodeopts=" + String(process.env.NODE_OPTIONS || "").length);
-"#,
-            marker = js_literal(&shim_marker),
+  " nodeopts=" + String(process.env.NODE_OPTIONS || "").length);"#,
+                marker = js_literal(&shim_marker),
+            )
+            .replace('\n', " ")
         );
         // The STAGED node, not the ambient one: the policy grants only user-owned paths, so a
         // gate that launched `C:\hostedtoolcache\…\node.exe` measured its own ACCESS_DENIED
