@@ -173,7 +173,7 @@ The installer is optional. Keep running `npm`, `pnpm`, `yarn`, or `bun` exactly 
 
 ### Resolution versus layout
 
-What the tables above guarantee is **resolution**: which version a range resolves to, and which file a specifier resolves to. Nub mirrors the incumbent on both, and respects the lockfile it finds. It does not guarantee **layout** — how the resolved packages are arranged on disk. Layout is Nub's own axis, defaulting to [the virtual store](/docs/install/virtual-store) and configured through [`nub.jsonc`](/docs/config#installlinker) or the neutral `.npmrc` keys. No lockfile format records a layout, so the round-trip holds either way.
+What the tables above guarantee is **resolution**: which version a range resolves to, and which file a specifier resolves to. Nub mirrors the incumbent on both, and respects the lockfile it finds. What they do not cover is **layout** — how those resolved packages get linked into `node_modules`. Nub takes that setting only from [`nub.jsonc`](/docs/config#installlinker) or the neutral `.npmrc` keys, never from another manager's config, and defaults to [the virtual store](/docs/install/virtual-store). No lockfile format records how `node_modules` was arranged, so the round-trip holds either way.
 
 So a layout setting in another manager's config file has no effect, whatever it asks for:
 

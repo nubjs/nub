@@ -392,9 +392,9 @@ Nub rejects pnpm's `"install"` and `"prompt"` values, which it does not implemen
 
 ## `install`
 
-The install block configures Nub's package manager. Its fields sit on two axes, and the two are scoped differently.
+The install block configures Nub's package manager. Its fields fall into two groups, scoped differently.
 
-| axis | fields | applies |
+| what it controls | fields | applies |
 | --- | --- | --- |
 | layout | `linker`, `publicHoist` | every project, whatever lockfile is present |
 | resolution | `minimumReleaseAge`, `minimumReleaseAgeExclude` | only when Nub is the project's package manager |

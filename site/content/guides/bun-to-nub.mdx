@@ -37,7 +37,7 @@ bun remove <pkg>              # → nub remove <pkg>
 bunx <pkg>                    # → nubx <pkg>     (always fetch: nub dlx <pkg>)
 ```
 
-Nub is **lockfile-compatible** with what your project already uses — it round-trips npm, pnpm, and bun lockfiles and reads yarn's — so you do not have to convert your lockfile to adopt Nub. The CLI grammar is pnpm's, but the lockfile axis is multi-PM. If you want Nub to own resolution as a Nub-identity project (consuming only neutral, cross-tool config), drop the bun-branded `bunfig.toml` and let Nub write a neutral `.npmrc`; if you keep an incumbent PM, Nub mirrors that PM faithfully.
+Nub is **lockfile-compatible** with what your project already uses — it round-trips npm, pnpm, and bun lockfiles and reads yarn's — so you do not have to convert your lockfile to adopt Nub. The CLI grammar is pnpm's, but lockfile support is not limited to pnpm's format. If you want Nub to own resolution as a Nub-identity project (consuming only neutral, cross-tool config), drop the bun-branded `bunfig.toml` and let Nub write a neutral `.npmrc`; if you keep an incumbent PM, Nub mirrors that PM faithfully.
 
 One real difference from Bun: Nub follows pnpm's dependency model, which does **not** auto-install peer dependencies. Packages that worked under Bun because Bun silently installed their peers will surface as missing — add the peers explicitly to your `package.json`. This is the single most common post-migration install surprise.
 

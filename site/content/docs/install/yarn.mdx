@@ -50,7 +50,7 @@ Both formats are read:
     // ── Lockfiles ─────────────────────────────────────────────────────
     { feature: <><code>yarn.lock</code></>, status: 'partial', note: 'Read-only; writes refused.' },
     // ── Linking / install behavior ────────────────────────────────────
-    { feature: <code>nodeLinker</code>, status: 'no', note: 'Layout is Nub\'s own axis; pnp is refused outright.' },
+    { feature: <code>nodeLinker</code>, status: 'no', note: 'Set the linker in nub.jsonc or .npmrc instead; pnp is refused outright.' },
     { feature: <code>supportedArchitectures</code>, status: 'yes', note: 'Filters optional/platform deps for the declared os/cpu/libc.' },
     { feature: <>mTLS client cert/key</>, status: 'yes', note: 'File-path (httpsCertFilePath / httpsKeyFilePath) and per-host networkSettings forms.' },
     { feature: <code>npmAlwaysAuth</code>, status: 'yes', note: 'Attaches credentials to cross-origin tarball requests too.' },
@@ -136,7 +136,7 @@ Discovery mirrors classic Yarn: the global `~/.yarnrc` plus any project `.yarnrc
 
 ## Node linkers
 
-Yarn's `nodeLinker` does not select the layout Nub installs. Nub's compatibility guarantee covers version resolution, module resolution, and the lockfile — not how `node_modules` is arranged, which is Nub's own axis. A Yarn project gets Nub's [virtual store](/docs/install/virtual-store) by default and picks another layout the same way every other project does, through `nub.jsonc` or `.npmrc`:
+Yarn's `nodeLinker` does not select the layout Nub installs. Nub's compatibility guarantee covers version resolution, module resolution, and the lockfile — not how packages get linked into `node_modules`, which is set only in [`nub.jsonc`](/docs/config#installlinker) or the neutral `.npmrc` keys. A Yarn project gets Nub's [virtual store](/docs/install/virtual-store) by default and picks another layout the way every other project does:
 
 ```ini
 # .npmrc — flat, npm-style node_modules

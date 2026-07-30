@@ -57,6 +57,17 @@ impl Source {
             Source::Default => "default".to_string(),
         }
     }
+
+    /// Whether the reader themselves put this value on a surface nub still
+    /// reads for layout. `Default` is not one — it means nothing in the project
+    /// asked, which is exactly the state a dropped branded layout setting
+    /// explains.
+    fn is_authored_layout_surface(&self) -> bool {
+        matches!(
+            self,
+            Source::Env(_) | Source::ProjectConfig(_) | Source::Npmrc
+        )
+    }
 }
 
 /// The readable settings tiers for one project root, loaded once per install.
@@ -78,6 +89,9 @@ pub(super) struct SourceIndex {
     /// because the layout row must answer that question and only `load` has the
     /// project root.
     declared_packages: Vec<String>,
+    /// Whether a branded config file this project's incumbent owns asks for a
+    /// `node_modules` layout — a request nub no longer honors from there.
+    branded_layout_ignored: bool,
 }
 
 impl SourceIndex {
@@ -104,14 +118,31 @@ impl SourceIndex {
                 )
             })
             .collect();
+        // The same walk as `workspace_yaml`, filter inverted: that field holds
+        // the settings the YAML still supplies, this one asks whether the
+        // layout axis threw any away.
+        let yaml_layout_dropped = aube_settings::all().iter().any(|meta| {
+            aube_settings::workspace_yaml_suppressed(meta)
+                && meta
+                    .workspace_yaml_keys
+                    .iter()
+                    .any(|key| aube_settings::workspace_yaml_value(&raw, key).is_some())
+        });
+        let context = aube_util::engine_context();
         Self {
             env: aube_settings::values::capture_env(),
-            project_config: aube_util::engine_context().project_config_settings,
             workspace_yaml,
             project_npmrc: npmrc.project,
             user_npmrc: npmrc.user,
             embedder_defaults: aube_settings::embedder_defaults().to_vec(),
             declared_packages: declared_packages(cwd),
+            branded_layout_ignored: branded_layout_ignored(
+                cwd,
+                yaml_layout_dropped,
+                context.read_yarn_config,
+                context.read_bun_config,
+            ),
+            project_config: context.project_config_settings,
         }
     }
 
@@ -162,6 +193,28 @@ impl SourceIndex {
             .find(|(k, _)| k == setting)
             .map(|(_, value)| (value.clone(), Some(Source::Default)))
     }
+}
+
+/// Whether a branded config file nub reads for this project asks for a
+/// `node_modules` layout — yarn's `.yarnrc.yml nodeLinker`, bun's
+/// `bunfig.toml [install].linker`, or a layout key in `pnpm-workspace.yaml`.
+/// Layout is nub's own axis, so every one of these is dropped, and the install
+/// header is the only place that drop can surface.
+///
+/// Each source is gated on the posture that decides whether nub opens that file
+/// AT ALL: `pnpm-workspace.yaml` through `load_raw`, which already honors it,
+/// and yarn's and bun's passed in by the caller. A `bunfig.toml` sitting in an
+/// npm project is read for nothing, so its `linker` is not the layout axis's
+/// doing and pointing at `nub.jsonc` would misattribute why it went unused.
+fn branded_layout_ignored(
+    cwd: &Path,
+    in_workspace_yaml: bool,
+    read_yarn: bool,
+    read_bun: bool,
+) -> bool {
+    in_workspace_yaml
+        || (read_yarn && super::yarnrc_node_linker(cwd).is_some())
+        || (read_bun && super::bun_config::declares_install_linker(cwd))
 }
 
 /// Every package name declared by the root manifest and by each workspace
@@ -400,13 +453,32 @@ fn gvs_incompatible_package(index: &SourceIndex) -> bool {
         })
 }
 
+/// What the layout row says in place of provenance when the project asked for a
+/// layout in a file nub no longer takes one from. Deliberately not a warning:
+/// the reader's config is still valid for everything else in it, and the whole
+/// remedy is the name of the file that would work.
+const LAYOUT_POINTER: &str = "configurable via nub.jsonc";
+
 pub(super) fn resolved_rows(index: &SourceIndex) -> Vec<Row> {
     let mut rows = Vec::new();
 
     // Always present, even when everything is default: the layout is the one
     // fact that governs how the tree on disk is shaped.
+    //
+    // The pointer displaces provenance only where provenance is nub's own
+    // default or nothing at all. A layout the reader wrote into `nub.jsonc`,
+    // `.npmrc`, or the environment already has a live surface, so naming that
+    // surface answers the question they actually have and the advice would be
+    // noise on top of it.
     let (layout, layout_source) = layout_row(index);
-    rows.push(Row::new("layout", vec![layout], layout_source));
+    let authored = layout_source
+        .as_ref()
+        .is_some_and(Source::is_authored_layout_surface);
+    let mut row = Row::new("linker", vec![layout], layout_source);
+    if index.branded_layout_ignored && !authored {
+        row.note = Some(format!("({LAYOUT_POINTER})"));
+    }
+    rows.push(row);
 
     // Both pattern lists answer "where can an undeclared import find this", so
     // they share a row. The patterns ARE the answer — an enumerated package list
@@ -647,10 +719,10 @@ mod tests {
     #[test]
     fn default_install_renders_one_line() {
         let rendered = plain(&render_block(
-            &[row("layout", &["isolated"], Some(Source::Default))],
+            &[row("linker", &["isolated"], Some(Source::Default))],
             80,
         ));
-        assert_eq!(rendered, "  layout  isolated (default)\n");
+        assert_eq!(rendered, "  linker  isolated (default)\n");
     }
 
     /// Labels share one column and values start at a single hanging indent, so
@@ -660,7 +732,7 @@ mod tests {
         let rendered = plain(&render_block(
             &[
                 row(
-                    "layout",
+                    "linker",
                     &["isolated"],
                     Some(Source::ProjectConfig("install.linker")),
                 ),
@@ -679,7 +751,7 @@ mod tests {
         ));
         assert_eq!(
             rendered,
-            "  layout      isolated (nub.jsonc install.linker)\n\
+            "  linker      isolated (nub.jsonc install.linker)\n\
              \x20 hoisting    @types/*, *eslint* (nub.jsonc install.publicHoist)\n\
              \x20 resolution  auto-install-peers, strict-peer-dependencies (.npmrc)\n"
         );
@@ -769,6 +841,7 @@ mod tests {
             user_npmrc: Vec::new(),
             embedder_defaults: Vec::new(),
             declared_packages: Vec::new(),
+            branded_layout_ignored: false,
         };
         assert_eq!(
             layout_row(&shared),
@@ -849,6 +922,7 @@ mod tests {
                 ),
             ],
             declared_packages: vec!["next".to_string(), "debug".to_string()],
+            branded_layout_ignored: false,
         };
         if !aube_util::env::is_ci() {
             assert_eq!(layout_row(&index), ("isolated".to_string(), None));
@@ -895,6 +969,7 @@ mod tests {
             user_npmrc: Vec::new(),
             embedder_defaults: Vec::new(),
             declared_packages: Vec::new(),
+            branded_layout_ignored: false,
         };
         let rows = resolved_rows(&index);
         let hoisting = rows.iter().find(|row| row.label == "hoisting").unwrap();
@@ -914,6 +989,128 @@ mod tests {
         let rows = resolved_rows(&narrowed);
         let hoisting = rows.iter().find(|row| row.label == "hoisting").unwrap();
         assert_eq!(hoisting.values, vec!["@types/*"]);
+    }
+
+    /// A project that wrote its layout into another tool's config file gets one
+    /// pointer at the file that would work — and only where nothing it wrote on
+    /// a surface nub still reads supplied the layout, since naming that surface
+    /// is the more useful answer.
+    #[test]
+    fn a_dropped_branded_layout_points_at_nub_jsonc() {
+        let dropped = SourceIndex {
+            env: Vec::new(),
+            project_config: Vec::new(),
+            workspace_yaml: Vec::new(),
+            project_npmrc: Vec::new(),
+            user_npmrc: Vec::new(),
+            embedder_defaults: Vec::new(),
+            declared_packages: Vec::new(),
+            branded_layout_ignored: true,
+        };
+        let note = |index: &SourceIndex| {
+            resolved_rows(index)
+                .into_iter()
+                .find(|row| row.label == "linker")
+                .unwrap()
+                .note
+        };
+        assert_eq!(
+            note(&dropped).as_deref(),
+            Some("(configurable via nub.jsonc)")
+        );
+
+        let quiet = SourceIndex {
+            branded_layout_ignored: false,
+            ..dropped
+        };
+        assert_eq!(
+            note(&quiet),
+            None,
+            "a project carrying no such setting keeps the row it has always had"
+        );
+
+        let via_nub_jsonc = SourceIndex {
+            project_config: vec![("nodeLinker".to_string(), "hoisted".to_string())],
+            branded_layout_ignored: true,
+            ..quiet
+        };
+        assert_eq!(
+            note(&via_nub_jsonc).as_deref(),
+            Some("(nub.jsonc install.linker)"),
+            "already configured through nub.jsonc — provenance, not advice"
+        );
+
+        let via_npmrc = SourceIndex {
+            project_config: Vec::new(),
+            project_npmrc: vec![("node-linker".to_string(), "hoisted".to_string())],
+            ..via_nub_jsonc
+        };
+        assert_eq!(note(&via_npmrc).as_deref(), Some("(.npmrc)"));
+    }
+
+    /// The three branded files layout was taken back from, each detected in the
+    /// shape its own tool writes, and each gated on the posture that decides
+    /// whether nub reads that file at all.
+    #[test]
+    fn each_branded_layout_source_is_detected() {
+        let _guard = crate::pm_engine::ENGINE_GLOBAL_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let restore = aube_util::engine_context();
+        aube_util::update_engine_context(|c| {
+            c.read_branded_pnpm_config = true;
+            c.read_layout_from_workspace_yaml = false;
+            c.read_yarn_config = true;
+            c.read_bun_config = true;
+        });
+
+        let project = |files: &[(&str, &str)]| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("package.json"),
+                r#"{"name":"app","version":"1.0.0"}"#,
+            )
+            .unwrap();
+            for (name, body) in files {
+                std::fs::write(dir.path().join(name), body).unwrap();
+            }
+            dir
+        };
+        let detected =
+            |dir: &tempfile::TempDir| SourceIndex::load(dir.path()).branded_layout_ignored;
+
+        assert!(detected(&project(&[(
+            "pnpm-workspace.yaml",
+            "nodeLinker: hoisted\n"
+        )])));
+        assert!(detected(&project(&[(
+            ".yarnrc.yml",
+            "nodeLinker: node-modules\n"
+        )])));
+        assert!(detected(&project(&[(
+            "bunfig.toml",
+            "[install]\nlinker = \"hoisted\"\n"
+        )])));
+
+        assert!(
+            !detected(&project(&[])),
+            "a project with none of these files must print the row it always has"
+        );
+        assert!(
+            !detected(&project(&[(
+                "pnpm-workspace.yaml",
+                "autoInstallPeers: false\n"
+            )])),
+            "the probe keys on a layout setting, not on the file's presence"
+        );
+
+        // The gate: a file nub never opens went unread for its own reason, and
+        // blaming the layout axis for it would send the reader to the wrong fix.
+        let bun_only = project(&[("bunfig.toml", "[install]\nlinker = \"hoisted\"\n")]);
+        aube_util::update_engine_context(|c| c.read_bun_config = false);
+        assert!(!detected(&bun_only));
+
+        aube_util::set_engine_context(restore);
     }
 
     /// Nothing materialized prints nothing: materialization is routine, and a
@@ -980,6 +1177,7 @@ mod tests {
             user_npmrc: Vec::new(),
             embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
             declared_packages: Vec::new(),
+            branded_layout_ignored: false,
         };
         assert_eq!(
             index.resolve("nodeLinker"),
@@ -1031,6 +1229,7 @@ mod tests {
             user_npmrc: Vec::new(),
             embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
             declared_packages: Vec::new(),
+            branded_layout_ignored: false,
         };
         assert_eq!(
             index.resolve("nodeLinker"),
@@ -1050,6 +1249,7 @@ mod tests {
             user_npmrc: vec![("strict-peer-dependencies".to_string(), "true".to_string())],
             embedder_defaults: Vec::new(),
             declared_packages: Vec::new(),
+            branded_layout_ignored: false,
         };
         let rows = resolved_rows(&index);
         let resolution = rows.iter().find(|row| row.label == "resolution").unwrap();

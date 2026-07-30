@@ -39,13 +39,25 @@ fn global_bunfig_path() -> Option<PathBuf> {
 }
 
 fn load_bunfig_file(path: &Path) -> Vec<(String, String)> {
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    let Ok(parsed) = raw.parse::<Value>() else {
-        return Vec::new();
-    };
-    entries_from_bunfig(&parsed)
+    parse_bunfig_file(path)
+        .map(|parsed| entries_from_bunfig(&parsed))
+        .unwrap_or_default()
+}
+
+fn parse_bunfig_file(path: &Path) -> Option<Value> {
+    std::fs::read_to_string(path).ok()?.parse::<Value>().ok()
+}
+
+/// Whether the project's `bunfig.toml` directs `node_modules` layout.
+/// `entries_from_bunfig` deliberately never maps `[install].linker`, so the
+/// install header asks this to point at `nub.jsonc` instead of dropping the key
+/// in silence.
+pub(crate) fn declares_install_linker(project_root: &Path) -> bool {
+    parse_bunfig_file(&project_root.join("bunfig.toml")).is_some_and(|root| {
+        root.get("install")
+            .and_then(Value::as_table)
+            .is_some_and(|install| install.contains_key("linker"))
+    })
 }
 
 fn entries_from_bunfig(root: &Value) -> Vec<(String, String)> {
