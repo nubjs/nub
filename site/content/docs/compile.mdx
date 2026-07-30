@@ -277,6 +277,8 @@ const mod = await import("./plugins/csv.js");  // bundled
 
 There is no flag to ship an unresolved import anyway. Deferring the failure would only move the same crash to the machine you ship to, where it is far harder to diagnose.
 
+When the offending import is inside a dependency you cannot edit, take the whole package out of the bundle with [`--external`](#--external) instead. Its source is never read, so its unanalyzable imports never enter the build — at the cost of that package having to exist on the machine you ship to.
+
 A `require()` the bundler cannot rewrite fails the same way. The usual source is a package whose `main` is a UMD build: the factory takes `require` as a parameter, so the calls inside are ordinary function calls that survive into the bundle and resolve against the extracted app directory at runtime.
 
 ```console
@@ -349,6 +351,37 @@ Add `exports` conditions to resolution. They join the defaults (`default`, `node
 ```bash
 nub compile app.ts --conditions production --conditions custom
 ```
+
+### `--external`
+
+Leave a package out of the bundle and resolve it when the executable runs. Repeatable, and each entry covers the package's subpaths:
+
+```bash
+nub compile app.ts --external better-sqlite3 --external prettier
+```
+
+Two cases justify it:
+
+- A package carrying a native `.node` addon, which cannot be bundled at all.
+- A dependency whose own dynamic imports are unanalyzable and whose source you cannot change.
+
+Bundle everything else.
+
+An externalized package must be installed on the machine that runs the binary — the executable is no longer self-contained, and that is the trade. Resolution starts at the directory the binary is started in and walks up from there, exactly as Node would resolve it for a script sitting in that directory. A package that isn't there fails at startup, naming it:
+
+```console
+$ ./app
+Error: Cannot find prettier.
+
+  This executable was compiled with --external prettier, so prettier is not
+  part of it — it is resolved when the executable runs, from the directory
+  it is started in.
+
+  Started in: /srv/app
+  Install prettier there, or run this from a directory that already has it.
+```
+
+Externals need Node 22.15 or newer, since the executable redirects them with a resolve hook added in that release. The build fails when the version it resolves is older, whether that came from `--target` or the project's pin.
 
 ### `--tsconfig`
 

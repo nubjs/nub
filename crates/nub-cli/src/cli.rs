@@ -946,6 +946,12 @@ pub enum Command {
         #[arg(long, value_name = "NAME", action = ArgAction::Append, help_heading = COMPILE_ADVANCED)]
         conditions: Vec<String>,
 
+        /// Leave a package out of the bundle and resolve it at run time from the
+        /// directory the binary is run in, repeatable. Covers the package and
+        /// its subpaths. The package must be installed on the target machine.
+        #[arg(long, value_name = "PKG", action = ArgAction::Append, help_heading = COMPILE_ADVANCED)]
+        external: Vec<String>,
+
         /// Use this tsconfig.json instead of the one discovered from the entry.
         #[arg(long, value_name = "PATH", help_heading = COMPILE_ADVANCED)]
         tsconfig: Option<String>,
@@ -2570,6 +2576,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             ignore_annotations,
             alias,
             conditions,
+            external,
             tsconfig,
             sourcemap_exclude_sources,
         }) => crate::compile::run(crate::compile::CompileOptions {
@@ -2597,6 +2604,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 ignore_annotations,
                 alias,
                 conditions,
+                external,
                 tsconfig: tsconfig.map(PathBuf::from),
             },
         }),

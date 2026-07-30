@@ -30,6 +30,7 @@ use sha2::{Digest, Sha256};
 
 mod assets;
 pub mod bundle;
+mod external;
 mod inject;
 
 pub use bundle::{BundleOptions, SourcemapMode};
@@ -98,10 +99,22 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     //    branch dead-code-eliminates for the machine the artifact will run on,
     //    not the one it was built on.
     opts.bundle.auto_define = target_defines(&target);
+    opts.bundle
+        .auto_define
+        .extend(external::entry_defines(&opts.bundle.external));
     eprintln!("Bundling {} …", opts.entry);
     let bundled = bundle::bundle(&entry_abs, &opts.bundle)?;
-    let entry_name = layout.bundle_path(&bundled.entry);
-    let app_files = assemble_app(&bundled, &layout)?;
+    let mut entry_name = layout.bundle_path(&bundled.entry);
+    let mut app_files = assemble_app(&bundled, &layout)?;
+    if !opts.bundle.external.is_empty() {
+        let shim = external::shim(&app_files, &entry_name, &opts.bundle.external)?;
+        entry_name = shim.entry;
+        app_files.extend(shim.files);
+        eprintln!(
+            "External (must be installed where the binary runs): {}",
+            opts.bundle.external.join(", ")
+        );
+    }
     let app_sha = sha256_of_app(&app_files);
     if !layout.assets.is_empty() {
         eprintln!("Embedding {} file(s) …", layout.assets.len());
@@ -125,6 +138,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         // carried into the artifact, so the raw spec is echoed here for the
         // compiling user and goes no further.
         let floor = version_management::pin_floor(&pin, &cache_root)?;
+        external::check_node_support(&floor, &source, &opts.bundle.external)?;
         eprintln!(
             "Using Node.js {} (resolved from {source}; satisfied at runtime)",
             non_exact_spec(&pin, &raw).unwrap_or_else(|| floor.to_string())
@@ -138,6 +152,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         let (os, arch, musl) = dist_platform(&target);
         let exact =
             version_management::resolve_pin_for_platform(&pin, os, arch, musl, &cache_root)?;
+        external::check_node_support(&exact, &source, &opts.bundle.external)?;
         let (blob, sha) = build_node_blob(&exact, &target, &cache_root, &source)?;
         (exact, blob, sha)
     };
@@ -802,6 +817,7 @@ mod tests {
                 ignore_annotations: false,
                 alias: Vec::new(),
                 conditions: Vec::new(),
+                external: Vec::new(),
                 tsconfig: None,
             },
         }
