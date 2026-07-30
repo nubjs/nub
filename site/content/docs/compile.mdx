@@ -296,6 +296,70 @@ module.exports.config = () => join(__dirname, "config.json");
 That path resolves beside the entry rather than inside the package. Reading it gives `ENOENT` unless [`--include`](#--include) embeds the file — an error the code can catch, rather than the crash it used to be.
 
 An ES module is left alone. Node gives ESM no `__dirname`, so code that throws `ReferenceError` under `node` throws the same error in the compiled binary.
+## Native addons
+
+Importing a package with a native addon works, and the `.node` file ships inside the executable:
+
+```ts
+import { getCurrentProcessPriority } from "@napi-rs/nice";
+
+console.log(getCurrentProcessPriority());
+```
+
+The addon is written out beside the compiled entry and loaded from there, so the platform's dynamic loader gets a real file at a real path — the same thing it gets from `node_modules`. Nothing needs to be installed where the binary runs.
+
+Most addons ship one package per platform and pick between them at load time. Compiling replaces `process.platform` and `process.arch` with the target's values, so that choice is settled while the binary is built and only the target's addon is embedded:
+
+```js
+// a generated loader, as the build sees it
+if (process.platform === "darwin" && process.arch === "arm64") {
+  return require("@napi-rs/nice-darwin-arm64");
+}
+```
+
+Addons are named as they are embedded:
+
+```console
+$ nub compile app.ts
+Bundling app.ts …
+Native addons: nice.darwin-arm64.node
+Compiled app — embed shape, Node 26.5.0, darwin-arm64, 31.9 MB
+```
+
+### Cross-compiling
+
+An addon is machine code for one platform, so `--platform` needs that platform's copy installed. The build fails when what it resolves does not match:
+
+```console
+$ nub compile app.ts --platform linux-x64
+Bundling app.ts …
+Error: the bundler failed:
+  app.ts:1:19
+    Could not load node_modules/local-addon/addon.node (imported by app.ts) - plugin `nub:native-addons` threw an error.
+
+this native addon is built for macOS, but the binary targets linux-x64: node_modules/local-addon/addon.node
+  A native addon is machine code for one platform, and a compiled binary loads it
+  from a real file at run time — there is no later step that could translate it.
+  Install this dependency for the target (its platform package) and compile again,
+  or drop --platform to build for this machine.
+```
+
+Installing the target's platform package is enough to fix it. Package managers skip a dependency whose `os` or `cpu` does not match the machine installing it, so a cross-compile usually has to ask for that package by name.
+
+### Addons the build cannot find
+
+The addon has to be reachable by following static requires. A specifier written inline is followed; one that reaches the require through a variable is not, and neither is a path assembled at runtime:
+
+```js
+require(`pkg-${process.platform}`)             // followed
+
+const name = `pkg-${process.platform}`;
+require(name);                                 // not followed
+
+require("bindings")("better_sqlite3.node")     // searches the disk when it runs
+```
+
+Nothing is embedded for the last two, and the require fails when the executable runs. Compile those packages with `--external` instead, which leaves them to be resolved on the machine that runs the binary.
 
 ## `--install-message`
 
@@ -471,8 +535,8 @@ nub compile app.ts --external better-sqlite3 --external prettier
 
 Two cases justify it:
 
-- A package carrying a native `.node` addon, which cannot be bundled at all.
 - A dependency whose own dynamic imports are unanalyzable and whose source you cannot change.
+- A native addon whose path is only known at runtime, which the build cannot find and embed (see [Native addons](#native-addons)).
 
 Bundle everything else.
 

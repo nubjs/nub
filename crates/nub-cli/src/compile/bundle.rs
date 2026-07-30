@@ -60,7 +60,7 @@ use rolldown_utils::indexmap::FxIndexMap;
 use rolldown_utils::url::clean_url;
 use sha2::{Digest, Sha256};
 
-use super::loaders;
+use super::{loaders, native};
 
 /// Where the source map goes. `Linked` and `External` both emit a real `.map`;
 /// they differ only in whether the bundle references it — which for a compiled
@@ -117,6 +117,15 @@ pub struct BundleOptions {
     /// `EXT=TYPE` from `--loader`, applied over nub's defaults. See
     /// [`crate::compile::loaders`].
     pub loaders: Vec<String>,
+    /// The platform a `.node` addon must be loadable on, which turns native-addon
+    /// embedding ON. Compile-driven, like [`Self::auto_define`].
+    ///
+    /// `None` leaves `.node` to Rolldown, which is the right answer for a
+    /// `nub build` that emits into a real project: the addon is already beside its
+    /// `node_modules` there, so embedding a copy would only duplicate it. Only a
+    /// self-contained artifact — running from a cache dir with no `node_modules`
+    /// in sight — needs the file carried along.
+    pub native_target: Option<nub_core::compile::TargetPlatform>,
 }
 
 /// One emitted file: a chunk, or a source map that travels with it.
@@ -145,6 +154,8 @@ pub struct BundleResult {
     /// empties still counts. The over-approximation can only ship a hook nothing
     /// uses; it can never omit one something needs.
     pub dynamic_import_sites: usize,
+    /// File names of the `.node` addons embedded, for the compile summary.
+    pub native_addons: Vec<String>,
 }
 
 pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
@@ -236,17 +247,30 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
         files: Arc::clone(&files_plugin),
         workers: Mutex::new(BTreeSet::new()),
     });
-    // `CjsPathGlobals` runs LAST so the scanners ahead of it see the module as its
-    // author wrote it. Rolldown feeds each transform the previous one's output, so
-    // every hook's spans are self-consistent either way — what running last buys is
-    // that `DynamicImportScan` reports the line:column the USER can find, and never
-    // has to reason about the synthetic `require` this splices in.
-    let plugins: Vec<SharedPluginable> = vec![
+    // Sharing `collected` is what makes an addon reached twice ship once, and
+    // gives `.node` the same content-hashed flat naming as every other asset.
+    let native_plugin = opts.native_target.map(|target| {
+        Arc::new(native::NativeAddons::new(
+            target,
+            Arc::clone(&collected),
+            loader_plan.claims_extension("node"),
+        ))
+    });
+    // `CjsPathGlobals` runs LAST among the transforms that rewrite user source, so the
+    // scanners ahead of it see the module as its author wrote it. `NativeAddons` is
+    // pushed after it but cannot disturb that: its transform is gated on the source
+    // containing `createRequire`, which `CjsPathGlobals` never emits (it splices
+    // `__dirname`/`__filename` from the virtual `\0nub-path-globals` module), and its
+    // rewrite blanks bytes in place without moving any position.
+    let mut plugins: Vec<SharedPluginable> = vec![
         Arc::clone(&scan) as SharedPluginable,
         Arc::clone(&files_plugin) as SharedPluginable,
         Arc::clone(&new_urls) as SharedPluginable,
         Arc::new(CjsPathGlobals) as SharedPluginable,
     ];
+    if let Some(plugin) = &native_plugin {
+        plugins.push(Arc::clone(plugin) as SharedPluginable);
+    }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -268,8 +292,15 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
     // improve that from the hook — Rolldown replaces a plugin error with its own
     // `UNLOADABLE_DEPENDENCY`. So the hint is attached here, to the failure the
     // user actually sees.
+    // A rejected native addon is the same shape and needs the same treatment:
+    // Rolldown reports only "plugin `nub:native-addons` threw an error", which
+    // names neither the platform mismatch nor what to do about it (measured
+    // 2026-07-30 — the message really is dropped, not merely reformatted).
     let output = output.map_err(|e| {
-        let hints = files_plugin.case_hints();
+        let mut hints = files_plugin.case_hints();
+        if let Some(plugin) = &native_plugin {
+            hints.extend(plugin.rejections());
+        }
         if hints.is_empty() {
             e
         } else {
@@ -369,12 +400,19 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
 
     reject_nested_chunks(&files, &assets)?;
 
+    // Read AFTER `retain_referenced`, so the summary names what the payload
+    // actually carries rather than every addon the load hook happened to see.
+    let native_addons = native_plugin
+        .map(|n| n.survivors(&assets.iter().map(|a| a.name.as_str()).collect()))
+        .unwrap_or_default();
+
     Ok(BundleResult {
         entry,
         files,
         detached_maps,
         assets,
         dynamic_import_sites,
+        native_addons,
     })
 }
 
@@ -1811,6 +1849,7 @@ mod tests {
             allow_dynamic_import: false,
             tsconfig: None,
             loaders: Vec::new(),
+            native_target: None,
         }
     }
 
