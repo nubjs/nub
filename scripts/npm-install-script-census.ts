@@ -403,7 +403,15 @@ const ECO_ERROR_BANDS: Array<[number, number]> = [
   [90, 134.5],
   [Infinity, 134.5],
 ];
-const ECO_ERROR_MARGIN = 3;
+// The margin is 5, not 3, because the control caught the band table being wrong.
+// A gate-control sample of the 200 excluded entries closest to passing found ONE
+// breach in 181 resolved (0.6%): oci-datalabelingservice, 101,583 weekly against
+// an eco figure of 42,744 monthly — a ~9.1x error on an entry synced THAT DAY,
+// which exceeds the 3.1x maximum the <1d band was built from. So the band maxima
+// underestimate the tail even at zero staleness, and a 3x margin missed this
+// package by 0.6%. Raising the margin to 5 covers the observed case with room;
+// the residual leak is still nonzero and is reported rather than assumed away.
+const ECO_ERROR_MARGIN = 5;
 
 const ecoErrorBound = (syncedAt: string | null, now: number): number => {
   if (!syncedAt) return ECO_ERROR_BANDS[ECO_ERROR_BANDS.length - 1][1] * ECO_ERROR_MARGIN;
