@@ -1230,13 +1230,29 @@ mod win {
         // What is invariant is the DEPENDENCE — the ambient install is usable exactly when nub
         // could grant it — and stating it that way makes the elevated arm carry information
         // instead of being the same measurement twice.
+        // `source_publishes` is the second disjunct and it is not hypothetical: run 30544198501
+        // read this FALSE in the elevated arm and TRUE in the de-elevated one, on the same machine,
+        // for reasons not yet established (the elevated arm's own grant on that path is the
+        // suspect, but its teardown revokes a DIFFERENT sid than the one this matches, so the
+        // mechanism is UNEXPLAINED and is not asserted here). Whatever the cause, an install the OS
+        // already publishes is readable without nub granting anything, so the law has to admit it —
+        // and both inputs are read BEFORE the arm runs.
+        let readable_without_a_grant = write_dac || source_publishes;
         r.record(
             "interp-ambient-install-is-usable-only-where-nub-can-write-its-dacl",
-            ambient_ok == write_dac,
+            ambient_ok == readable_without_a_grant,
             &format!(
-                "(write_dac {write_dac}, lifecycle ok {ambient_ok}; rc {ambient_rc}; log {})",
+                "(write_dac {write_dac}, already-published {source_publishes}, lifecycle ok \
+                 {ambient_ok}; rc {ambient_rc}; log {})",
                 one_line(&ambient_log)
             ),
+        );
+        // Re-read at the END, so a run where an arm CHANGED the ambient install's
+        // AppContainer-readability is visible rather than inferred. This is the reading the next
+        // probe of that question starts from.
+        println!(
+            "  fact:interp-source-publishes-aap-after={}",
+            nub_sandbox::windows_leaf_grant_redundant(&source_root)
         );
         // …and the fix is that the staged copy does NOT depend on it. This is the property the
         // whole change exists for, so it is gated in both arms and the de-elevated one is the
@@ -1392,19 +1408,23 @@ mod win {
     fn lifecycle_arm(f: &Fixture, tag: &str, exe: &Path, root: &Path) -> (i32, String) {
         let marker = f.package.join(format!("lc-{tag}.log"));
         let script = f.package.join(format!("lc-{tag}.cmd"));
-        let entry = f.package.join(format!("lc-{tag}.js"));
+        // `node -e`, NOT `node <file>`. An ENTRY FILE goes through `resolveMainPath`, which
+        // realpath's every prefix of the path starting at the volume root, and de-elevated that
+        // dies `EPERM: operation not permitted, lstat 'C:\'` — the still-open
+        // ancestor-reachability repair, which is orthogonal to the interpreter and was masking it
+        // in BOTH arms identically (run 30544198501, rc 12 with the stack frame to prove it).
+        // `-e` reaches the same reads with no main-path resolution: the run before showed
+        // `node -p` unaffected while `node <file>` died, which is the documented shape.
+        //
         // Reaching the distribution's BUNDLED npm tree is the exact cell an un-ACE'd install fails
-        // on, and requiring a file out of it is the cheapest honest way to ask for it.
-        std::fs::write(
-            &entry,
-            format!(
-                "console.log(process.execPath);\n\
-                 console.log('abi=' + process.versions.modules);\n\
-                 console.log('npm=' + require({}).version);\n",
-                js_string(&root.join("node_modules/npm/package.json"))
-            ),
-        )
-        .expect("write the arm's entry file");
+        // on, and requiring a file out of it is the cheapest honest way to ask for it. Only single
+        // quotes appear inside, because cmd gives the whole `-e` program to `"`.
+        let program = format!(
+            "console.log(process.execPath);\
+             console.log('abi='+process.versions.modules);\
+             console.log('npm='+require({}).version)",
+            js_string(&root.join("node_modules/npm/package.json"))
+        );
         // Every path INSIDE the script is CWD-RELATIVE, and that is not tidiness. An absolute open
         // from inside the jail walks the whole ancestor chain as targets, and making that chain
         // reachable without elevation is a SEPARATE, still-open repair — an absolute script path
@@ -1429,11 +1449,11 @@ mod win {
                  node -p \"process.version\" >> \"{m}\" 2>&1\r\n\
                  if errorlevel 1 exit /b 11\r\n\
                  echo STEP-BARE-NODE-RESOLVED-AND-RAN>> \"{m}\"\r\n\
-                 node \"{e}\" >> \"{m}\" 2>&1\r\n\
+                 node -e \"{e}\" >> \"{m}\" 2>&1\r\n\
                  if errorlevel 1 exit /b 12\r\n\
                  echo LIFECYCLE-OK>> \"{m}\"\r\n",
                 m = leaf(&marker),
-                e = leaf(&entry)
+                e = program
             ),
         )
         .expect("write the arm's script");
@@ -1517,10 +1537,14 @@ mod win {
             .into_owned()
     }
 
-    /// A Windows path as a JS string literal — backslashes doubled, so the emitted `require()`
-    /// argument is the path rather than a run of escape sequences.
+    /// A Windows path as a SINGLE-QUOTED JS string literal, backslashes doubled.
+    ///
+    /// Single quotes are not a style choice: the whole `-e` program is one cmd argument delimited by
+    /// `"`, so a double-quoted JS literal inside it would terminate that argument and hand cmd a
+    /// path as a second token. Doubling the separators is what keeps `C:\Program Files` a path
+    /// rather than a run of escape sequences.
     fn js_string(p: &Path) -> String {
-        format!("\"{}\"", p.to_string_lossy().replace('\\', "\\\\"))
+        format!("'{}'", p.to_string_lossy().replace('\\', "\\\\"))
     }
 
     fn abi_of(log: &str) -> Option<&str> {
