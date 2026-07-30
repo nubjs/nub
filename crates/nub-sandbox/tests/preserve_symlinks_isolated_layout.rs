@@ -102,7 +102,7 @@ fn build_isolated_fixture(root: &Path) {
     // The shape a dep's own lifecycle script has: a file inside the store cell, requiring the
     // cell's private `bar`.
     write(
-        &foo_cell.join("build.js"),
+        &foo_dir.join("build.js"),
         "try{console.log('bar@'+require('bar').v);}\
          catch(e){console.log('threw:'+e.code);}\n",
     );
