@@ -1,0 +1,172 @@
+name: build-jail-corpus-3os
+
+# BRANCH-SCOPED PROBE — no pull request required. The `push` trigger is what fires
+# this; `workflow_dispatch` stays listed for the day it graduates to the default
+# branch, but is inert until the file lands there.
+#
+# A GitHub-hosted runner is disposable by construction, which is the property this
+# probe needs: arm A0 runs dependency lifecycle scripts UNCONFINED, which is not
+# something to do on a development machine.
+#
+# THE SHAPE. One build per OS, uploaded once; every shard job downloads it. The
+# alternative — build inside each shard job — pays a cold Rust build 7 times per
+# platform and makes the shard matrix's wall clock a build measurement. Sharding at
+# all is what keeps a job under the point where a cancellation would discard its
+# logs entirely, which is the one failure that costs a whole platform's result.
+on:
+  push:
+    branches: [probe/corpus-3os]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      # Windows gives the main thread a 1 MB stack against Linux's 8 MB, and the
+      # unoptimized `fast` profile overflows it inside `nub install` before any
+      # lifecycle script runs (0xC00000FD, STATUS_STACK_OVERFLOW). That is a
+      # separate defect; linking with a Linux-sized stack lets this probe measure
+      # the jail rather than a debug-build frame-size artifact.
+      RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-C link-arg=/STACK:8388608' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: corpus-3os-${{ matrix.os }}
+      - name: Build the dev binary
+        run: cargo build -p nub-cli --profile fast
+      - name: Stage the binary
+        shell: bash
+        run: |
+          mkdir -p stage
+          cp target/fast/nub stage/nub 2>/dev/null || cp target/fast/nub.exe stage/nub.exe
+          ls -l stage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nub-${{ matrix.os }}
+          path: stage
+          retention-days: 7
+
+  corpus:
+    needs: build
+    strategy:
+      fail-fast: false
+      # A ceiling on how much of the shared runner pool this one probe may hold.
+      max-parallel: 9
+      matrix:
+        os: [macos-14, ubuntu-latest, windows-latest]
+        # Deliberately pilot-only on the first pass. The harness had never run on
+        # Windows, and a broken driver there would otherwise discard 16 jobs' worth
+        # of runner time to find out. Widened to the default shards once all three
+        # platforms return a confirmed arm effect.
+        shard: [pilot]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          name: nub-${{ matrix.os }}
+          path: stage
+
+      - name: Locate the binary
+        id: prov
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f stage/nub.exe ]; then BIN="$PWD/stage/nub.exe"; else BIN="$PWD/stage/nub"; fi
+          chmod +x "$BIN"
+          echo "bin=$BIN" >> "$GITHUB_OUTPUT"
+          {
+            echo "commit=$(git rev-parse HEAD)"
+            echo "sha256=$(sha256sum "$BIN" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$BIN" | awk '{print $1}')"
+            echo "version=$("$BIN" --version 2>&1 | head -1)"
+            echo "node=$(node --version)"
+            echo "host=$(uname -srm)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # A0 IS THE DENOMINATOR and runs first. Without it a package that never
+      # reaches its real path scores as "works under the jail", which is worthless
+      # and wrong in the reassuring direction.
+      - name: 'Both arms, one shard'
+        working-directory: tests/build-jail-corpus
+        shell: bash
+        env:
+          NUB_BIN: ${{ steps.prov.outputs.bin }}
+          NUB_EXPECT_GIT_SHA: ${{ github.sha }}
+          OUTROOT: ${{ runner.temp }}/build-jail-corpus
+        run: |
+          case "$(uname -s)" in
+            Darwin)              export STUDY_PATH="/usr/bin:/bin:/usr/sbin:/sbin" ;;
+            Linux)               export STUDY_PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" ;;
+            MINGW*|MSYS*|CYGWIN*) export STUDY_PATH="/c/Windows/system32:/c/Windows:/c/Windows/System32/Wbem" ;;
+          esac
+          chmod +x run-shard.sh
+          FAILED=""
+          for ARM in A0 PROD; do
+            START=$(date +%s)
+            rc=0
+            ./run-shard.sh "${{ matrix.shard }}" "shard-${{ matrix.shard }}.tsv" "$ARM" || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              echo "${{ matrix.shard }}/$ARM ok $(( $(date +%s) - START ))s" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              echo "${{ matrix.shard }}/$ARM INADMISSIBLE (rc=$rc)" | tee -a "$GITHUB_STEP_SUMMARY"
+              FAILED="$FAILED ${{ matrix.shard }}/$ARM(rc=$rc)"
+            fi
+          done
+          echo "INADMISSIBLE_ARMS:${FAILED:-none}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Validity-gated verdict table
+        if: always()
+        working-directory: tests/build-jail-corpus
+        shell: bash
+        env:
+          OUTROOT: ${{ runner.temp }}/build-jail-corpus
+        run: |
+          {
+            echo '```'
+            node aggregate.mjs "$OUTROOT" || true
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # The heavy trees are dropped; only the derived JSON and the failure lines are
+      # kept, so the artifact stays small enough to be worth downloading.
+      - name: Collect evidence
+        if: always()
+        working-directory: tests/build-jail-corpus
+        shell: bash
+        env:
+          OUTROOT: ${{ runner.temp }}/build-jail-corpus
+        run: |
+          mkdir -p evidence
+          for d in "$OUTROOT"/*/; do
+            n=$(basename "$d")
+            mkdir -p "evidence/$n"
+            cp "$d"/report.json "$d"/verdicts.json "$d"/delta.json "evidence/$n/" 2>/dev/null || true
+            grep -iE 'EPERM|EACCES|EROFS|Cannot find module|not permitted|Access is denied|arm_effect|optout_warnings|node_gyp_identity|FATAL' \
+              "$d"/run.log > "evidence/$n/failures.txt" 2>/dev/null || true
+            tail -c 4000000 "$d"/run.log > "evidence/$n/run.log" 2>/dev/null || true
+          done
+          cp "$OUTROOT/../verdict-table.json" evidence/ 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: corpus-${{ matrix.os }}-${{ matrix.shard }}
+          path: tests/build-jail-corpus/evidence
+          retention-days: 7
