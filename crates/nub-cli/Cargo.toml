@@ -34,6 +34,11 @@ prefetch-github-hosts = []
 # project-file read grant for the corpus study's project-grant arm. OFF by default,
 # compile-time for the same reason as the feature above. Rationale: nub-sandbox/src/arm.rs.
 build-jail-project-grant-arm = ["nub-sandbox/build-jail-project-grant-arm"]
+# DEVELOPMENT-ONLY, forwarded to nub-sandbox: lets a run load the build-jail catalog from a
+# path instead of the baked-in copy, so a corpus iteration is an edit and a re-run rather
+# than a rebuild. OFF by default, compile-time for the same reason as the features above.
+# Rationale: nub-sandbox/src/catalog_override.rs.
+build-jail-catalog-override = ["nub-sandbox/build-jail-catalog-override"]
 
 [dependencies]
 nub-core = { path = "../nub-core" }

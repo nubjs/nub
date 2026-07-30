@@ -1331,7 +1331,10 @@ fn host_allowed(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|u| {
         u.scheme() == "https"
             && u.host_str().is_some_and(|h| {
-                nub_sandbox::DOWNLOAD_HOSTS.contains(&h) || extra_prefetch_hosts().contains(&h)
+                // Through the accessor, not the `const`: prefetch must admit exactly what the
+                // jail's egress allowlist admits, so a dev catalog override has to move both
+                // together or a promoted host would be fetchable by one and not the other.
+                nub_sandbox::download_hosts().contains(&h) || extra_prefetch_hosts().contains(&h)
             })
     })
 }

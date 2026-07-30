@@ -231,6 +231,13 @@ windows-sandbox-probe = []
 # drop-only and carries no path channel, so it can never widen the allowlist. Rationale:
 # src/arm.rs module doc.
 build-jail-project-grant-arm = []
+# DEVELOPMENT-ONLY. Lets a run load the build-jail catalog from a path at startup instead of
+# the copy build.rs bakes in, so a corpus iteration is an edit and a re-run rather than a full
+# Rust rebuild. Compile-time and off by default for the same reason as the arm above: an env
+# var alone would be one stray export away from a user pointing the jail at an attacker's
+# file. Without this feature the catalog PARSER is not compiled into the crate at all — the
+# dev path is absent, not merely inert. Rationale: src/catalog_override.rs module doc.
+build-jail-catalog-override = []
 
 [[test]]
 name = "windows_account_enforcement"

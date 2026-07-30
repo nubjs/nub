@@ -210,6 +210,34 @@ is exactly what the next reviewer needs.
 Entries are ordered by when they were added, not alphabetically. Order is meaningful for
 `networkHosts` — rule expansion follows list order — so append rather than insert.
 
+## Iterating without a rebuild (development only)
+
+This file is codegen'd into the binary, so every edit normally costs a full Rust rebuild —
+which dominates a corpus loop that installs hundreds of packages, watches one fail, adds its
+grant, and re-runs. A development-only seam removes the rebuild from that loop:
+
+```sh
+cargo build -p nub-cli --profile fast --features build-jail-catalog-override
+NUB_BUILD_JAIL_CATALOG=/path/to/build-jail-catalog.json nub install
+```
+
+The loaded catalog **replaces** the compiled one outright — all three derived tables
+(`$downloads` hosts, `packageGrants`, per-package egress), never a merge, so the file on disk
+means exactly what it says.
+
+Four properties are worth knowing before you rely on it:
+
+- **It exists in no shipped build.** Without the `build-jail-catalog-override` cargo feature
+  the catalog parser is not compiled into the crate at all, and setting the variable is a hard
+  startup **refusal** rather than a silent no-op — so a run can never iterate against a catalog
+  the binary is quietly ignoring.
+- **It runs this file's validations.** The override and `build.rs` share one parser, so an
+  override cannot introduce a shape the build would have rejected.
+- **Any failure falls back to the compiled catalog, and says so on stderr.** A missing file,
+  bad JSON, or a validation rejection costs one banner, not the run.
+- **An active override announces itself** (`build-jail catalog OVERRIDDEN from …`), which is
+  the line a harness greps to prove which catalog it actually measured.
+
 ## Known gaps
 
 Things the current schema cannot express. Each is unbuilt because no shipped entry has

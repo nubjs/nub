@@ -80,6 +80,20 @@ fn main() -> Result<()> {
         Err(refusal) => anyhow::bail!(refusal),
     }
 
+    // Latch the development-only catalog override, on the same terms and for the same
+    // reason as the arm above: before any command, so before any dependency script exists.
+    // A set variable this binary cannot honour ABORTS; a catalog that fails to load falls
+    // back to the compiled-in copy and SAYS SO, so a run always knows which catalog it
+    // measured. `nub_sandbox::catalog_override` module doc.
+    match nub_sandbox::catalog_override::init_from_env() {
+        Ok(decision) => {
+            if let Some(banner) = decision.banner() {
+                eprintln!("{banner}");
+            }
+        }
+        Err(refusal) => anyhow::bail!(refusal),
+    }
+
     let exit_code = cli::run(sandbox_runtime)?;
     std::process::exit(exit_code);
 }

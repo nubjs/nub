@@ -94,6 +94,13 @@
 
 pub mod arm;
 pub mod backend;
+// The catalog PARSER is compiled into the crate only for the dev-only override; `build.rs`
+// pulls the same file in with `#[path]` and always runs it. A shipped build therefore
+// contains no catalog-parsing code at all — the strongest form of "the dev path is absent,
+// not merely inert". See `catalog_override`.
+#[cfg(feature = "build-jail-catalog-override")]
+pub mod catalog;
+pub mod catalog_override;
 pub mod compiler;
 pub mod conformance;
 pub mod matcher;
@@ -147,7 +154,7 @@ pub use compiler::{
     CommandRunner, CompileCtx, CompileError, CompileWarning, DOWNLOAD_HOSTS,
     PACKAGE_NETWORK_ALLOWED, ScopeCapabilities, build_jail_net_allowed, build_jail_node_options,
     build_jail_stdio_preload_js, compile, compile_build_jail, compile_with_warnings,
-    net_gate_node_options, realpath_shim_node_options,
+    download_hosts, net_gate_node_options, package_network_allowed, realpath_shim_node_options,
 };
 #[cfg(windows)]
 pub use compiler::{

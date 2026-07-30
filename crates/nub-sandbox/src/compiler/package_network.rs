@@ -42,7 +42,14 @@ include!(concat!(env!("OUT_DIR"), "/package_network.rs"));
 /// The lookup is EXACT on the resolver-assigned name, which is what stops a dependency from
 /// renaming itself into an entry.
 pub fn build_jail_net_allowed(package_name: Option<&str>) -> bool {
-    package_name.is_some_and(|name| PACKAGE_NETWORK_ALLOWED.binary_search(&name).is_ok())
+    package_name.is_some_and(|name| package_network_allowed().binary_search(&name).is_ok())
+}
+
+/// The egress set in force: [`PACKAGE_NETWORK_ALLOWED`], unless the dev-only catalog override
+/// replaced it. Sorted either way — the shared parser sorts, which is what keeps the
+/// `binary_search` above correct for an override too.
+pub fn package_network_allowed() -> &'static [&'static str] {
+    crate::catalog_override::package_network_allowed().unwrap_or(PACKAGE_NETWORK_ALLOWED)
 }
 
 #[cfg(test)]

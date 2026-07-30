@@ -204,12 +204,47 @@ pub fn grant_curated_package(
     package_name: Option<&str>,
 ) {
     grant_from_table(
-        CURATED_GRANTS,
+        curated_table(),
         policy,
         project_root,
         package_dir,
         package_name,
     );
+}
+
+/// The grant table in force: [`CURATED_GRANTS`], unless the dev-only catalog override
+/// replaced it. The override arrives as owned data, so it is converted into the same
+/// `&'static` shape the generated table has and leaked once — which is what lets every
+/// signature below stay identical between a shipped build and a dev one.
+fn curated_table() -> &'static [(&'static str, CuratedGrant)] {
+    #[cfg(feature = "build-jail-catalog-override")]
+    if let Some(grants) = crate::catalog_override::package_grants() {
+        use std::sync::OnceLock;
+        static TABLE: OnceLock<Vec<(&'static str, CuratedGrant)>> = OnceLock::new();
+        return TABLE.get_or_init(|| {
+            grants
+                .iter()
+                .map(|g| {
+                    let strs = |v: &'static [String]| -> &'static [&'static str] {
+                        Vec::leak(v.iter().map(String::as_str).collect())
+                    };
+                    (
+                        g.package.as_str(),
+                        CuratedGrant {
+                            sibling_dirs: strs(&g.sibling_dirs),
+                            project_reads: strs(&g.project_reads),
+                            project_writes: match &g.project_writes {
+                                None => ProjectWrites::None,
+                                Some(field) => ProjectWrites::ManifestField(strs(field)),
+                            },
+                            project_cwd: g.project_cwd,
+                        },
+                    )
+                })
+                .collect()
+        });
+    }
+    CURATED_GRANTS
 }
 
 /// The table is a parameter so the equivalence test can drive the SAME rule-building code

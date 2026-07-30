@@ -31,13 +31,17 @@ pub use defaults::{
     windows_build_jail_node_options, windows_native_realpath_shim_node_options,
     windows_realpath_node_options,
 };
-pub use package_network::{PACKAGE_NETWORK_ALLOWED, build_jail_net_allowed};
+pub use package_network::{
+    PACKAGE_NETWORK_ALLOWED, build_jail_net_allowed, package_network_allowed,
+};
 pub use preset::compile_build_jail;
 pub use resolve::{CommandRunner, ShellRunner};
 
 /// The `$downloads` host set, re-exported for the EMBEDDER's out-of-jail prefetch alone,
 /// which derives its fetch allowlist FROM this array rather than restating it.
-pub use builtin_sets::DOWNLOAD_HOSTS;
+/// [`download_hosts`] is the accessor every consumer should read — it honours the dev-only
+/// catalog override; the `const` is the compiled floor behind it.
+pub use builtin_sets::{DOWNLOAD_HOSTS, download_hosts};
 
 /// The secret-file deny floor, re-exported for the Linux backend ALONE — it recognizes
 /// the floor positionally and by membership, and must read the same arrays
