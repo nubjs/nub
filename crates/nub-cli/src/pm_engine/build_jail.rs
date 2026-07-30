@@ -157,13 +157,32 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // becoming an ambient code-injection channel into every lifecycle script. Gated on
         // the interpreter supporting `--import` (20.6+) because an unrecognised option in
         // `NODE_OPTIONS` aborts Node at startup — that would turn a missing repair into a
-        // broken install. An interpreter that cannot be asked gets no stamp, and with it no
+        // broken install. An interpreter that cannot be asked gets no stamp, and so neither
         // shim: the same piped-spawn hang as before, never a worse failure.
+        //
+        // The gate reads the SAME identity the curated filesystem table is keyed by — aube's
+        // installer-resolved `registry_name()`, which a dependency cannot rename itself into.
+        //
+        // THE THIRD TERM is the realpath repair. The backend's ancestor repair
+        // (`ancestor_chain` / `harvest_capability_sids`) is best-effort — a refused ACE write is
+        // skipped and a path naming no harvestable capability yields nothing to request — so this
+        // preload is what keeps module resolution working when it did not land, and is inert when
+        // it did. Its roots are the anchors the jail actually grants, which is what scopes the
+        // tolerance rule; the interpreter is among them so a `require()` of npm's own modules out
+        // of the Node install tree resolves too.
         #[cfg(windows)]
         if super::build_prefetch::node_version(&ambient, &probe).is_some_and(supports_import) {
+            let mut realpath_roots = vec![spawn.project_root.clone(), spawn.package_dir.clone()];
+            realpath_roots.extend(interpreter.iter().cloned());
+            let realpath = nub_sandbox::realpath_shim_node_options(&realpath_roots);
             ambient.insert(
                 "NODE_OPTIONS".to_string(),
-                nub_sandbox::windows_build_jail_node_options(),
+                format!(
+                    "{} {realpath}",
+                    nub_sandbox::windows_build_jail_node_options(spawn.package_name.as_deref())
+                )
+                .trim_end()
+                .to_string(),
             );
         } else {
             ambient.remove("NODE_OPTIONS");

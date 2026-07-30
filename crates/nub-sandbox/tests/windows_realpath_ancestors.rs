@@ -37,9 +37,19 @@
 //! monkey-patchable on purpose (`internal/modules/helpers.js`: "Import all of `fs` so that it
 //! can be monkey-patched"). It is REFUTED: `fs.realpathSync.native` is refused under this jail
 //! too, `EPERM ... realpath` on a file the jail GRANTED and Node reads successfully in the
-//! same run. `GetFinalPathNameByHandleW` needs more than the leaf handle the jail allows, so
-//! both realpath implementations are unavailable and only NOT CALLING one is left — which is
-//! `--preserve-symlinks`. That is measured here and it WORKS, but it is NOT shipped: under
+//! same run. The refusal is in libuv's OPEN, not in the name query: `fs__realpath` opens with
+//! `dwShareMode=0`, so an open that succeeded would return ERROR_SHARING_VIOLATION (libuv
+//! `EBUSY`) while another handle holds the file, and it is `EPERM` either way — measured with
+//! that differential in run 30513204884, which also re-checked a path whose whole ancestor chain
+//! bar `C:\` is AAP-granted. `GetFinalPathNameByHandleW` is therefore never reached, and its
+//! SMB-scoped per-component caveat is not what closes this route.
+//!
+//! Both implementations being unavailable leaves either NOT CALLING one — `--preserve-symlinks`
+//! — or SUPPLYING one. The second is what ships: a JS walk that tolerates a refused `lstat`
+//! only on a strict ancestor of a granted root, ported from Microsoft's fix for the same failure
+//! under IIS (`realpath_shim_node_options`, measured by `realpath_shim_semantics` and by the
+//! `ac-shim` arm of `tests/win-bypass-traverse/`).
+//! `--preserve-symlinks` is measured here and it WORKS, but it is NOT shipped: under
 //! nub's default `Isolated` linker it silently binds the wrong package version rather than
 //! failing (`preserve_symlinks_isolated_layout`), which is worse than the loud failure it
 //! replaces. So the `lifecycle` arm stamps NODE_OPTIONS itself, as a hypothetical the product
