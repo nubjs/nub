@@ -407,6 +407,55 @@ mod tests {
         });
     }
 
+    /// A config the user narrowed stays narrowed. The write installs a NEW
+    /// inode, so the mode has to be carried across deliberately — and it is
+    /// carried on the temp file, before the rename, so there is no moment when
+    /// the committed file is readable more widely than the one it replaced.
+    ///
+    /// Without this, dropping the mode from the write is invisible: every other
+    /// test passes while each `nub config set` quietly republishes a private
+    /// file at the process umask.
+    #[cfg(unix)]
+    #[test]
+    fn set_keeps_a_narrowed_file_narrow() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Running as root defeats the premise — the kernel ignores the mode
+        // bits entirely, so the assertion would be measuring nothing. AGENTS.md
+        // routes config work through `docker run --rm`, which is root by
+        // default, so this is reachable rather than hypothetical.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
+        with_config_home(|home| {
+            let path = home.join("nub").join("nub.jsonc");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "{\n  \"dlx\": { \"consent\": \"prompt\" }\n}\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+            set_implicit_dlx(ImplicitDlx::Never).unwrap();
+
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "a 600 config must not come back {mode:o} after a set"
+            );
+            assert_eq!(implicit_dlx(), ImplicitDlx::Never, "and the write landed");
+        });
+
+        // A file nub creates itself has no prior mode to carry, and inventing a
+        // narrower one would be its own surprise — so it takes the platform
+        // default like any other new file.
+        with_config_home(|home| {
+            let path = home.join("nub").join("nub.jsonc");
+            set_implicit_dlx(ImplicitDlx::Never).unwrap();
+            assert!(path.is_file(), "the setter created the file");
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_ne!(mode, 0, "a brand-new file is left at the platform default");
+        });
+    }
+
     #[test]
     fn set_preserves_comments_trailing_commas_and_unrelated_keys() {
         with_config_home(|home| {
