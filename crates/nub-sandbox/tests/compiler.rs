@@ -752,31 +752,57 @@ fn build_jail_interposition_gates_egress_on_package_identity() {
     // Neither resolves to a narrower grant than the other: per-host permissioning is not a
     // capability here.
     //
-    // THE SPELLING IS PLATFORM-SPECIFIC and the assertion follows it, because that divergence is
-    // load-bearing rather than incidental (see `preset::build_jail_net`). Windows compiles to
-    // coarse-allow because its only unprivileged egress lever is the `internetClient` capability,
-    // which the backend grants on exactly `!net.enforce`; everywhere else the axis keeps enforcing
-    // and names the `$downloads` hosts. What must hold in BOTH spellings is the same product
-    // fact — a catalogued package can reach the network — so that is what is asserted, once per
-    // spelling, rather than a single shape that would be wrong on one platform.
+    // THE GRANT IS COARSE ON EVERY PLATFORM, and the host list is gone. Per-host was withdrawn
+    // because only macOS could enforce it — Linux needs a netns it cannot require, Windows'
+    // loopback exemption is admin-only — so gating the platform most developers use meant an
+    // incomplete list erroring for them alone. The product fact is therefore asserted in BOTH
+    // directions: a catalogued package reaches a `$downloads` host AND a host that was never on
+    // any list. The second is the behaviour change, and asserting only the first would keep
+    // passing if per-host enforcement came back.
+    //
+    // The SPELLING still diverges, and that is load-bearing rather than incidental (see
+    // `preset::build_jail_net`). macOS and Windows compile to coarse-allow: it is the only
+    // spelling that reaches the AppContainer `internetClient` capability, which the backend grants
+    // on exactly `!net.enforce`. Linux keeps `enforce` with a catch-all naming no host, because
+    // `build_seccomp` hangs the whole socket-family ceiling and the io_uring block on that flag —
+    // relaxing it to grant egress would also re-permit AF_UNIX, AF_VSOCK and AF_PACKET.
     for admitted in ["canvas", "node-libcurl"] {
         let p = compile_for(Some(admitted));
-        if cfg!(windows) {
+        let hosts = nub_sandbox::matcher::HostMatcher::new(&p.net);
+        assert!(
+            hosts.admits("nodejs.org"),
+            "{admitted} is catalogued, so it reaches the network"
+        );
+        assert!(
+            hosts.admits("evil.test"),
+            "{admitted}: the grant is COARSE — a host no list ever carried is admitted too. \
+             Per-host enforcement was dropped deliberately; do not restore it here"
+        );
+        // NO PER-HOST RULE, in either spelling. A concrete hostname in a build-jail policy would
+        // be a gate two of three backends cannot honour, so the only shapes permitted here are no
+        // rule at all (coarse-allow) or a single catch-all.
+        for rule in &p.net.rules {
+            match &rule.target {
+                nub_sandbox::policy::NetTarget::Host(h) => assert_eq!(
+                    h, "*",
+                    "{admitted}: the build jail must emit no per-host rule, found `{h}`"
+                ),
+                other => {
+                    panic!("{admitted}: unexpected non-host build-jail net target: {other:?}")
+                }
+            }
+        }
+        if cfg!(target_os = "linux") {
             assert!(
-                !p.net.enforce,
-                "{admitted}: Windows grants egress by not enforcing the axis, which is what \
-                 hands the AppContainer its internetClient capability"
+                p.net.enforce,
+                "{admitted}: Linux keeps enforcing so the socket-family ceiling and the \
+                 io_uring block stay in place; only AF_INET/AF_INET6 are lifted"
             );
         } else {
-            assert!(p.net.enforce, "{admitted}: the net axis still enforces");
-            let hosts = nub_sandbox::matcher::HostMatcher::new(&p.net);
             assert!(
-                hosts.admits("nodejs.org"),
-                "{admitted} is catalogued, so the compiled axis admits a $downloads host"
-            );
-            assert!(
-                !hosts.admits("evil.test"),
-                "{admitted}: the compiled axis still names only the curated set"
+                !p.net.enforce,
+                "{admitted}: coarse-allow is what hands Windows' AppContainer its \
+                 internetClient capability, and what keeps macOS from starting a proxy"
             );
         }
     }

@@ -570,14 +570,15 @@ fn socks5_without_userpass_auth_is_refused() {
     );
 }
 
-// ── the build jail's curated egress set ─────────────────────────────────────────
+// ── the build jail's package-identity egress gate ───────────────────────────────
 
 /// The net axis of the real build-jail policy — compiled through the production entry so
 /// this exercises what a dependency lifecycle spawn actually gets, not a hand-built
 /// stand-in that could drift from it.
 ///
-/// `package` is the identity the gate turns on: the catalog decides whether the spawn gets
-/// the `$downloads` set or nothing, so a caller wanting the admitted policy has to name an
+/// `package` is the identity the gate turns on, and it is the ONLY thing it turns on: the
+/// catalog decides whether the spawn gets coarse egress or none at all. There is no host
+/// dimension left to vary, so a caller wanting the admitted policy just has to name an
 /// admitted package.
 fn build_jail_net(package: Option<&str>) -> NetPolicy {
     let root = tempfile::tempdir().unwrap();
@@ -601,73 +602,80 @@ fn build_jail_net(package: Option<&str>) -> NetPolicy {
 }
 
 #[test]
-fn build_jail_gate_admits_the_download_set_and_refuses_everything_else() {
-    // The decider IS the proxy's gate (it consults this seam for both the CONNECT
-    // authority and the SNI), so asserting on it covers both gates without needing the
-    // listed hosts to be reachable from wherever the suite runs.
-    // `canvas` is catalogued, so this is the ADMITTED arm. The uncatalogued arm is the
-    // differential at the bottom of this test.
+fn build_jail_egress_turns_only_on_package_identity_and_admits_any_host() {
+    // The decider IS the proxy's gate (it consults this seam for both the CONNECT authority and
+    // the SNI), so asserting on it covers both gates without needing any host to be reachable
+    // from wherever the suite runs. It is also the seam that would show a per-host gate coming
+    // back, which is why the coarse contract is pinned here rather than only at the compiler.
+    //
+    // `canvas` is catalogued, so this is the ADMITTED arm — and its grant is COARSE. Per-host was
+    // withdrawn because only macOS could enforce it (Linux has no netns to route a child through,
+    // Windows' loopback exemption is admin-only), so a list that gated the platform most
+    // developers use meant an incomplete list erroring for them alone.
     let decider = StaticDecider::new(build_jail_net(Some("canvas")));
     let decide = |h: &str| decider.decide(&Host::Name(h.to_string()));
 
-    // Windows cannot enforce a per-host policy at all, so its jail keeps the deny-all.
-    if !cfg!(windows) {
-        for listed in ["nodejs.org", "binaries.prisma.sh", "cdn.cypress.io"] {
-            assert_eq!(
-                decide(listed),
-                Decision::Allow,
-                "`{listed}` is an install-time artifact host and must pass the gate"
-            );
-        }
-    }
-    for refused in [
-        // A recorded REFUSAL, not an omission — the gate is what makes it real. It is here
-        // because no package NEEDS it: the one requester's analytics beacon is
-        // fire-and-forget with an error handler attached, so denial breaks nothing. Five
-        // hosts have left this list across v2 and v3 (`registry.npmjs.org`,
-        // `api.github.com`, `storage.googleapis.com`, then `www.googleapis.com` and
-        // `saucelabs.com`), each admitted with a declared residual rather than dropped
-        // quietly, because a broken package is a worse outcome than a named exposure.
+    for admitted in [
+        // Hosts the withdrawn `$downloads` list carried: still reachable, as they always were.
+        "nodejs.org",
+        "binaries.prisma.sh",
+        "cdn.cypress.io",
+        // Hosts it did NOT carry — this is the behaviour change, stated plainly. The first was a
+        // recorded refusal and the second an attacker-chosen label under a listed host; both are
+        // now admitted for a catalogued package, because the host dimension no longer gates.
+        // The catalog's per-package `hosts` arrays are retained as PROVENANCE for exactly this
+        // reason: a changing list is a detection signal in a PR diff, not a runtime gate.
         "www.google-analytics.com",
-        // Wildcard-free: an attacker-chosen label under a LISTED host is still refused,
-        // which is what keeps a secret out of a DNS query.
         "leak.cdn.cypress.io",
         "evil.test",
     ] {
         assert_eq!(
-            decide(refused),
-            Decision::Deny,
-            "`{refused}` must not pass the build jail's gate"
+            decide(admitted),
+            Decision::Allow,
+            "`{admitted}`: a catalogued package's grant is coarse, so every host passes. \
+             A Deny here means per-host enforcement was restored"
         );
     }
 
-    // THE IDENTITY DIFFERENTIAL, at the same seam. `left-pad` carries no catalog entry, so the
-    // hosts admitted above are refused for it. This is the pair that shows the gate turns on the
-    // PACKAGE rather than the host — without it, every assertion above would read identically
-    // under the global egress set this replaced.
+    // THE IDENTITY DIFFERENTIAL, at the same seam, and the whole defense now that hosts do not
+    // gate. `left-pad` carries no catalog entry — the Shai-Hulud shape — so it reaches nothing,
+    // including the hosts admitted above. Without this pair the assertions above would read
+    // identically under a policy that simply stopped confining anything.
     let unvetted = StaticDecider::new(build_jail_net(Some("left-pad")));
-    for listed in ["nodejs.org", "binaries.prisma.sh", "cdn.cypress.io"] {
+    for refused in [
+        "nodejs.org",
+        "binaries.prisma.sh",
+        "cdn.cypress.io",
+        "evil.test",
+    ] {
         assert_eq!(
-            unvetted.decide(&Host::Name(listed.to_string())),
+            unvetted.decide(&Host::Name(refused.to_string())),
             Decision::Deny,
-            "`{listed}` is an admitted host, but an uncatalogued package must not reach it"
+            "`{refused}`: an uncatalogued package must reach nothing at all"
         );
     }
 }
 
 #[test]
-fn build_jail_proxy_refuses_a_tunnel_to_an_unlisted_upstream() {
-    // End-to-end through a real proxy carrying the real policy: the CONNECT is refused
-    // before any tunnel exists. The second half is the one-variable control — the same
-    // client, the same upstream, a policy that admits it — so the refusal above is the
-    // policy's doing and not a probe that never connects.
+fn an_uncatalogued_build_jail_policy_refuses_every_tunnel() {
+    // End-to-end through a real proxy carrying the real policy: the CONNECT is refused before any
+    // tunnel exists. The second half is the one-variable control — the same client, the same
+    // upstream, a policy that admits it — so the refusal above is the policy's doing and not a
+    // probe that never connects.
+    //
+    // The policy under test is the UNCATALOGUED one, and that is the change from the per-host
+    // posture this test used to assert. A catalogued package's grant is now coarse, so it admits
+    // every upstream and has no refusal left to demonstrate — and in production no proxy is
+    // started for a build-jail policy at all (coarse `net: true` derives `ProxyMode::Disabled`).
+    // What survives, and what this pins, is that a deny-all axis refuses everything when fed
+    // through the real proxy the `nub sandbox` path still runs.
     let upstream = echo_server();
     let target = format!("127.0.0.1:{}", upstream.port());
 
-    let jailed = start(build_jail_net(Some("canvas")));
+    let jailed = start(build_jail_net(Some("left-pad")));
     assert!(
         http_connect(jailed.port(), &target, jailed.token()).is_err(),
-        "an upstream outside $downloads must not be tunneled"
+        "an uncatalogued package's deny-all axis must not tunnel to any upstream"
     );
 
     // The control admits the SNI as well as the target: the proxy gates both, and only
