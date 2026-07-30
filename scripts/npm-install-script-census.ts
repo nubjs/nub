@@ -245,40 +245,69 @@ type RankRow = { name: string; monthly: number; latest: string | null };
 
 const ECO = "https://packages.ecosyste.ms/api/v1/registries/npmjs.org/packages";
 
+// Each ecosyste.ms page is ~1.3 MB gzipped but ~16 MB decompressed — the records
+// carry full repo metadata this census never reads. So pages are DISTILLED to
+// three fields before caching (6 KB, not 16 MB: caching raw projected to 6.5 GB)
+// and fetched in parallel WAVES rather than serially, since the serial loop spent
+// its time parsing and rewriting 16 MB per page rather than on the network. The
+// wave shape preserves the adaptive stop: fetch `CONCURRENCY` pages at once, then
+// halt once a wave crosses the floor.
+const fetchRankPage = async (page: number): Promise<RankRow[] | null> => {
+  const key = `page-${String(page).padStart(4, "0")}`;
+  const cached = readCache("rank", key) as RankRow[] | undefined;
+  if (Array.isArray(cached)) return cached;
+  const r = await getJSON(`${ECO}?sort=downloads&order=desc&per_page=100&page=${page}`);
+  if (!r.ok) return null;
+  const list = r.body as Array<Record<string, unknown>>;
+  if (!Array.isArray(list)) return null;
+  const rows: RankRow[] = list.map((p) => ({
+    name: String(p.name),
+    monthly: Number(p.downloads ?? 0),
+    latest: (p.latest_release_number as string | null) ?? null,
+  }));
+  writeCache("rank", key, rows);
+  return rows;
+};
+
 const stageRank = async (): Promise<RankRow[]> => {
   console.error(`[rank] ecosyste.ms downloads-desc sweep; stop below ${ECO_FLOOR.toLocaleString()} monthly`);
   const rows: RankRow[] = [];
   let prev = Infinity;
   let sortViolations = 0;
-  let page = 0;
   let lastFetched = 0;
-  for (page = 1; page <= MAX_PAGES; page++) {
-    lastFetched = page;
-    const key = `page-${String(page).padStart(4, "0")}`;
-    let body = readCache("rank", key);
-    if (body === undefined) {
-      const r = await getJSON(`${ECO}?sort=downloads&order=desc&per_page=100&page=${page}`);
-      if (!r.ok) {
-        console.error(`\n[rank] page ${page} failed (${r.status}); stopping sweep`);
+  let failed = 0;
+  for (let base = 1; base <= MAX_PAGES; base += CONCURRENCY) {
+    const wave = [];
+    for (let p = base; p < base + CONCURRENCY && p <= MAX_PAGES; p++) wave.push(p);
+    const pages = await pmap(wave, CONCURRENCY, fetchRankPage);
+    let stop = false;
+    for (let i = 0; i < pages.length; i++) {
+      const list = pages[i];
+      if (list === null) {
+        console.error(`\n[rank] page ${wave[i]} failed; stopping sweep`);
+        failed++;
+        stop = true;
         break;
       }
-      body = r.body;
-      writeCache("rank", key, body);
+      if (list.length === 0) {
+        stop = true;
+        break;
+      }
+      lastFetched = wave[i];
+      for (const p of list) {
+        // Monotonicity check on the source's own sort — the one control that
+        // catches a paginating API silently reordering underneath us.
+        if (p.monthly > prev) sortViolations++;
+        prev = p.monthly;
+        rows.push(p);
+      }
+      if (prev < ECO_FLOOR) stop = true;
     }
-    const list = body as Array<Record<string, unknown>>;
-    if (!Array.isArray(list) || list.length === 0) break;
-    for (const p of list) {
-      const monthly = Number(p.downloads ?? 0);
-      // Monotonicity check on the source's own sort — the one control that
-      // catches a paginating API silently reordering underneath us.
-      if (monthly > prev) sortViolations++;
-      prev = monthly;
-      rows.push({ name: String(p.name), monthly, latest: (p.latest_release_number as string | null) ?? null });
-    }
-    bar("rank pages", page, MAX_PAGES);
-    if (prev < ECO_FLOOR) break;
+    bar("rank pages", lastFetched, MAX_PAGES);
+    if (stop) break;
   }
   process.stderr.write("\n");
+  if (failed > 0) failures.push({ url: "ecosyste.ms rank sweep", status: `${failed} page(s) failed` });
   console.error(`[rank] ${rows.length} packages over ${lastFetched} pages; sort violations: ${sortViolations}`);
   writeFileSync(join(OUT, "ranking.ndjson"), rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
   writeCache("meta", "rank-stats", { packages: rows.length, pages: lastFetched, sortViolations, floorMonthly: prev });
