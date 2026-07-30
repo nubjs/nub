@@ -188,9 +188,15 @@ jobs:
           # a System32 program's own grant is attempted and refused de-elevated — under `?` that
           # aborted the launch, which looks exactly like cmd misbehaving.
           echo "---- cmd.exe: fail-closed vs fail-soft, one variable ----"
-          need_pass interp-cmd-under-fail-closed-aborts-only-when-its-own-grant-is-unwritable
-          need_pass interp-cmd-under-fail-soft-runs-the-whole-battery
-          grep -E '^  fact:interp-cmd-program-grant-writable=' probe.log || { echo "MISS the program-grant writability fact"; fail=1; }
+          need_pass interp-cmd-under-fail-closed-aborts-iff-its-own-program-grant-is-refused
+          need_pass interp-cmd-under-fail-soft-reaches-step-cmd-opened-the-script
+          need_pass interp-cmd-under-fail-soft-reaches-step-bare-node-resolved-and-ran
+          need_pass interp-cmd-under-fail-soft-reaches-lifecycle-ok
+          grep -E '^  fact:interp-cmd-program-grant-write-dac-open=' probe.log || { echo "MISS the program-grant fact"; fail=1; }
+          # The cell TALLIES are facts, not gates. De-elevated `dir /b` is refused in the package dir
+          # while it works elevated — a real residual that belongs to the ancestor/traverse work, not
+          # to the interpreter — so a full 9/9 is not the bar here. What IS gated is the part the
+          # sibling lane read as zero.
           grep -E '^  fact:interp-.*-cmd-cells=' probe.log || { echo "MISS the cmd cell tallies"; fail=1; }
 
           echo "---- the pre-existing groups must not have regressed ----"

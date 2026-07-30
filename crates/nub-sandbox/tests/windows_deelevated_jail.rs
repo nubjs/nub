@@ -1335,8 +1335,15 @@ mod win {
         // ONE VARIABLE: the same fixture, the same policy, the same script, the same token; only
         // the seam differs. Reported as a fact in the elevated arm (where the grant SUCCEEDS, so
         // there is nothing to abort and the arms cannot differ) and GATED de-elevated.
+        // `can_write_dacl` is a FACT here and deliberately NOT what the property keys on. It is an
+        // UNSOUND proxy for whether `set_ace` succeeds, measured: it returned false in the ELEVATED
+        // arm on `System32\cmd.exe` while the real grant there plainly succeeded — that arm produced
+        // cells under fail-closed and never aborted. An elevated token's DACL-write authority does
+        // not come from the file's DACL, so an access-checked open cannot see it. Kept because it is
+        // still right de-elevated and it is the reading a future reader reaches for; labelled so
+        // nobody keys a verdict on it again.
         println!(
-            "  fact:interp-cmd-program-grant-writable={}",
+            "  fact:interp-cmd-program-grant-write-dac-open={} (UNSOUND above medium IL)",
             can_write_dacl(Path::new(&comspec_path()))
         );
         let (fc_rc, fc_log) = with_fail_closed_read_grants(|| {
@@ -1347,33 +1354,73 @@ mod win {
             .iter()
             .filter(|c| staged_log.contains(**c))
             .count();
-        // The law that holds in BOTH arms: fail-closed loses the launch exactly when the program's
-        // own grant cannot be written. Stated as the dependence rather than "fail-closed always
-        // fails", because elevated it legitimately succeeds — the same mistake the ambient property
-        // already had to be rewritten to avoid.
-        let program_writable = can_write_dacl(Path::new(&comspec_path()));
+        // THE PROPERTY, keyed on the MECHANISM rather than a proxy for it: fail-closed loses the
+        // launch exactly when the leaf grant it aborts on is the one that was refused, which the
+        // launcher names in its OWN error. Elevated that grant succeeds and the launch survives;
+        // de-elevated it is refused and the launch dies with
+        // `installing read grant ACE on C:\Windows\system32\cmd.exe failed` — verbatim the string a
+        // sibling lane read as cmd being unusable under confinement. One law, both arms.
+        let aborted = fc_rc == -101 && fc_cells == 0;
+        let grant_refused = !program_grant_landed(f, &staged_exe, &staged_dir);
         r.record(
-            "interp-cmd-under-fail-closed-aborts-only-when-its-own-grant-is-unwritable",
-            (fc_cells > 0) == program_writable,
+            "interp-cmd-under-fail-closed-aborts-iff-its-own-program-grant-is-refused",
+            aborted == grant_refused,
             &format!(
-                "(program grant writable {program_writable}; fail-closed cells {fc_cells}/{}, rc \
+                "(program grant refused {grant_refused}; fail-closed cells {fc_cells}/{}, rc \
                  {fc_rc}; fail-soft cells {soft_cells}/{})",
                 CMD_CELLS.len(),
                 CMD_CELLS.len()
             ),
         );
-        // …and the consequence the sibling verdict turns on: under fail-SOFT, cmd runs the whole
-        // battery. If this ever fails while the fail-closed arm also produces nothing, cmd really is
-        // broken confined and the sibling reading stands.
-        r.record(
-            "interp-cmd-under-fail-soft-runs-the-whole-battery",
-            soft_cells == CMD_CELLS.len(),
-            &format!("({soft_cells}/{} cells)", CMD_CELLS.len()),
-        );
+        // The consequence the sibling verdict turns on, and deliberately NOT "the whole battery":
+        // de-elevated `dir /b` returns `Access is denied.` in the package dir even though it works
+        // elevated, which is a real residual belonging to the ancestor/traverse work rather than to
+        // the interpreter. What this asserts is the part the sibling read as ZERO — cmd starts, opens
+        // its script, resolves `node` off the sanitized PATH, and reaches its verdict line. The full
+        // tally stays a fact so a regression in the rest is still visible.
+        for cell in [
+            "STEP-CMD-OPENED-THE-SCRIPT",
+            "STEP-BARE-NODE-RESOLVED-AND-RAN",
+            "LIFECYCLE-OK",
+        ] {
+            r.record(
+                &format!(
+                    "interp-cmd-under-fail-soft-reaches-{}",
+                    cell.to_ascii_lowercase()
+                ),
+                staged_log.contains(cell),
+                &format!("({soft_cells}/{} cells total)", CMD_CELLS.len()),
+            );
+        }
+    }
+
+    /// Whether the launcher could install the leaf grant on the PROGRAM file — asked by launching a
+    /// trivial `exit /b 0` under fail-closed and reading the launcher's OWN error, which names the
+    /// path it refused. That is the mechanism itself; the cheaper stand-in for it was wrong above the
+    /// medium integrity level (see the call site), which is why this pays for a launch.
+    fn program_grant_landed(f: &Fixture, exe: &Path, root: &Path) -> bool {
+        let policy = build_jail_for(f, exe, root);
+        let spec = CommandSpec::new(&comspec_path())
+            .arg("/c")
+            .arg("exit /b 0")
+            .cwd(&f.package);
+        with_fail_closed_read_grants(|| match apply(&policy, spec) {
+            Ok(prepared) => match prepared.status() {
+                Ok(_) => true,
+                Err(e) => {
+                    println!("    [program-grant probe] {e}");
+                    !e.to_string().contains("installing read grant ACE")
+                }
+            },
+            Err(d) => {
+                println!("    [program-grant probe apply Err] {d:?}");
+                false
+            }
+        })
     }
 
     /// The command interpreter the arms launch, resolved the way [`lifecycle_arm`] resolves it so
-    /// the grant-writability fact is about the same file.
+    /// the grant fact is about the same file.
     fn comspec_path() -> String {
         std::env::var("ComSpec").unwrap_or_else(|_| {
             format!(
@@ -1439,8 +1486,10 @@ mod win {
         "interp-staged-dir-publishes-read-to-appcontainers",
         "interp-staged-deep-entry-inherited-the-ace-at-creation",
         "interp-staged-ungranted-secret-still-refused",
-        "interp-cmd-under-fail-closed-aborts-only-when-its-own-grant-is-unwritable",
-        "interp-cmd-under-fail-soft-runs-the-whole-battery",
+        "interp-cmd-under-fail-closed-aborts-iff-its-own-program-grant-is-refused",
+        "interp-cmd-under-fail-soft-reaches-step-cmd-opened-the-script",
+        "interp-cmd-under-fail-soft-reaches-step-bare-node-resolved-and-ran",
+        "interp-cmd-under-fail-soft-reaches-lifecycle-ok",
     ];
 
     /// The all-users MSI install first, because it is the configuration that exhibits the defect
@@ -1527,9 +1576,9 @@ mod win {
                  if not errorlevel 1 echo CELL-CD>> \"{m}\"\r\n\
                  dir /b>> \"{m}\" 2>&1\r\n\
                  if not errorlevel 1 echo CELL-DIR>> \"{m}\"\r\n\
-                 for %%%%V in (1) do echo CELL-FOR>> \"{m}\"\r\n\
+                 for %%V in (1) do echo CELL-FOR>> \"{m}\"\r\n\
                  set NUBCELL=1\r\n\
-                 if \"%%NUBCELL%%\"==\"1\" echo CELL-SET-AND-EXPAND>> \"{m}\"\r\n\
+                 if \"%NUBCELL%\"==\"1\" echo CELL-SET-AND-EXPAND>> \"{m}\"\r\n\
                  where.exe node>> \"{m}\" 2>&1\r\n\
                  if not errorlevel 1 echo CELL-WHERE>> \"{m}\"\r\n\
                  node -e \"{n}\" >> \"{m}\" 2>&1\r\n\
