@@ -66,11 +66,12 @@ jobs:
       max-parallel: 9
       matrix:
         os: [macos-14, ubuntu-latest, windows-latest]
-        # Deliberately pilot-only on the first pass. The harness had never run on
-        # Windows, and a broken driver there would otherwise discard 16 jobs' worth
-        # of runner time to find out. Widened to the default shards once all three
-        # platforms return a confirmed arm effect.
-        shard: [pilot]
+        # The first pass was deliberately pilot-only, because the harness had never
+        # run on Windows and a broken driver there would have discarded 16 jobs'
+        # worth of runner time to discover it. macOS and Linux returned a confirmed
+        # arm effect on that pass and Windows failed for one located reason, so the
+        # matrix widens now. The pilot stays in it as the harness's own control.
+        shard: [pilot, default1, default2, default3, default4, default5, default6, default7]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
@@ -131,6 +132,12 @@ jobs:
             fi
           done
           echo "INADMISSIBLE_ARMS:${FAILED:-none}" | tee -a "$GITHUB_STEP_SUMMARY"
+          # THE EXIT IS THE POINT, and its absence is how the first pass reported a green
+          # Windows job on two rc=7 aborts that measured nothing. Collecting the failure
+          # into a variable and then ending the step on a successful `echo` leaves the
+          # step's status reading the echo. A run that produced no admissible data must
+          # turn its job red; the later steps still run under `if: always()`.
+          [ -z "$FAILED" ] || exit 1
 
       - name: Validity-gated verdict table
         if: always()

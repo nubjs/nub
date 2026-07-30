@@ -223,8 +223,16 @@ case ":$STUDY_PATH:" in
   *":$NODE_DIR:"*) ;;
   *) STUDY_PATH="$NODE_DIR:$STUDY_PATH" ;;
 esac
-JAILED_NODE="$(env -i PATH="$STUDY_PATH" ${WIN_ENV[@]+"${WIN_ENV[@]}"} bash -c 'command -v node' || true)"
-JAILED_NODE_V="$(env -i PATH="$STUDY_PATH" ${WIN_ENV[@]+"${WIN_ENV[@]}"} bash -c 'node --version' 2>&1 || true)"
+# `$BASH`, NEVER a bare `bash`. This probe deliberately runs on a SCRUBBED PATH, and the
+# scrubbed PATH is exactly where the wrong shell lives: `C:\Windows\system32` contains
+# `bash.exe`, which is the WSL LAUNCHER. The probe therefore asked WSL for a Node and got
+# `Windows Subsystem for Linux has no installed distributions`, which it reported as an
+# unusable Node and aborted on — while the real Node was fine and every other part of the
+# Windows run was healthy. Spelling the interpreter as the absolute path of the shell
+# already running removes the lookup, and removes it on every platform rather than
+# special-casing the one where it happened to bite.
+JAILED_NODE="$(env -i PATH="$STUDY_PATH" ${WIN_ENV[@]+"${WIN_ENV[@]}"} "$BASH" -c 'command -v node' || true)"
+JAILED_NODE_V="$(env -i PATH="$STUDY_PATH" ${WIN_ENV[@]+"${WIN_ENV[@]}"} "$BASH" -c 'node --version' 2>&1 || true)"
 echo "study_path_node=$JAILED_NODE ($JAILED_NODE_V)" >> "$LOG"
 case "$JAILED_NODE_V" in
   v*) ;;
@@ -276,7 +284,7 @@ fi
 # "node-gyp never ran" (the NORMAL case — these packages resolve a prebuild or
 # node-gyp-build and never compile) with "we do not know which one ran". Those are
 # different facts and only the second invalidates a verdict, so record all three.
-GYP_ON_PATH=$(env -i PATH="$STUDY_PATH" ${WIN_ENV[@]+"${WIN_ENV[@]}"} bash -c 'command -v node-gyp' 2>/dev/null || true)
+GYP_ON_PATH=$(env -i PATH="$STUDY_PATH" ${WIN_ENV[@]+"${WIN_ENV[@]}"} "$BASH" -c 'command -v node-gyp' 2>/dev/null || true)
 GYP_ON_PATH_VER="-"
 [ -n "$GYP_ON_PATH" ] && GYP_ON_PATH_VER=$(env -i PATH="$STUDY_PATH" ${WIN_ENV[@]+"${WIN_ENV[@]}"} "$GYP_ON_PATH" --version 2>/dev/null | head -1)
 GYP_RAN=$(grep -oE "gyp info using node-gyp@[0-9.]+" "$LOG" | sed 's/.*node-gyp@//' | sort -u | tr '\n' ',')
