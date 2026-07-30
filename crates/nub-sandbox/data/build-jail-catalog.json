@@ -248,6 +248,7 @@
   "cldr-data": {
     "network": true,
     "hosts": [
+      "codeload.github.com",
       "github.com"
     ]
   },
@@ -436,6 +437,13 @@
       "nodejs.org"
     ]
   },
+  "hugo-bin": {
+    "network": true,
+    "hosts": [
+      "github.com",
+      "release-assets.githubusercontent.com"
+    ]
+  },
   "hummus": {
     "network": true,
     "hosts": [
@@ -548,7 +556,8 @@
   "mbt": {
     "network": true,
     "hosts": [
-      "github.com"
+      "github.com",
+      "release-assets.githubusercontent.com"
     ]
   },
   "microtime": {
@@ -737,6 +746,13 @@
   "pre-push": {
     "project": "readwrite"
   },
+  "protoc-gen-grpc-web": {
+    "network": true,
+    "hosts": [
+      "github.com",
+      "release-assets.githubusercontent.com"
+    ]
+  },
   "puppeteer": {
     "network": true,
     "hosts": [
@@ -846,6 +862,13 @@
     "network": true,
     "hosts": [
       "nodejs.org"
+    ]
+  },
+  "tree-sitter-cli": {
+    "network": true,
+    "hosts": [
+      "github.com",
+      "release-assets.githubusercontent.com"
     ]
   },
   "tree-sitter-json": {

@@ -1674,7 +1674,10 @@ mod tests {
         } else {
             assert!(!host_allowed(asset));
             for hop in hops {
-                assert!(!host_allowed(hop), "hop admitted without the feature: {hop}");
+                assert!(
+                    !host_allowed(hop),
+                    "hop admitted without the feature: {hop}"
+                );
             }
         }
         // Repo-CONTENT hosts are not part of THIS widening — see `GITHUB_PREFETCH_HOSTS`.
