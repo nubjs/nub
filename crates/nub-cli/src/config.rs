@@ -228,8 +228,11 @@ pub(crate) fn set_json_path(
 /// The rename installs a NEW inode carrying the temp file's default permissions,
 /// so a config the user had narrowed — `600` on a file they consider private —
 /// would silently come back `644`. Widening someone's permissions is not ours to
-/// do as a side effect of setting a key. A brand-new file keeps the default;
-/// there is no prior mode to restore, and inventing a narrower one would be its
+/// do as a side effect of setting a key. The mode rides along on the temp file
+/// so it lands in the same atomic step as the content: re-applying it after the
+/// rename would instead publish a briefly-widened file, and leave it widened for
+/// good if we were killed in that window. A brand-new file keeps the default;
+/// there is no prior mode to carry, and inventing a narrower one would be its
 /// own surprise.
 ///
 /// The BOM is the same concern one layer up: the reader strips it so the parser
@@ -244,13 +247,7 @@ fn write_preserving_mode(path: &Path, text: &str) -> std::io::Result<()> {
         true => [crate::jsonc::UTF8_BOM, text.as_bytes()].concat(),
         false => text.as_bytes().to_vec(),
     };
-    aube_util::fs_atomic::atomic_write(path, &bytes)?;
-    if let Some(mode) = prior {
-        // Best effort: the bytes are already committed, and failing the whole
-        // write because the mode could not be restored would be the worse trade.
-        let _ = std::fs::set_permissions(path, mode);
-    }
-    Ok(())
+    aube_util::fs_atomic::atomic_write_with_permissions(path, &bytes, prior)
 }
 
 /// Remove the key at `segments`, preserving the rest of the file. An absent
