@@ -576,11 +576,15 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
 /// a non-inherited traverse ACE, written wherever the user holds `WRITE_DAC`, which is
 /// `%USERPROFILE%` and below (`ancestor_chain` in `backend/windows.rs`). `C:\` and `C:\Users`
 /// stay UNREPAIRED — measured refused across three images including a genuine workstation.
-/// The second prong, requesting the capability SIDs those two roots already carry
-/// (`harvest_capability_sids`), is code that never takes effect: `CreateProcessW` refuses the
-/// pair with ERROR_INVALID_PARAMETER and the launch drops it (`CAPABILITY_FALLBACKS`). Raw
-/// capability SIDs are indeed requestable unprivileged — `internetClient` is — but not these,
-/// so do not read the privilege point as making those two roots reachable.
+/// A second prong once requested the capability SIDs those two roots already carry; it never
+/// took effect (`NtCreateLowBoxToken` refuses the `S-1-15-3-65536-…` AppSilo RID class, and the
+/// launch fell back on every attempt in both principals) and has been DELETED. Raw capability
+/// SIDs are indeed requestable unprivileged — `internetClient` is — but not these, so do not
+/// read the privilege point as making those two roots reachable.
+///
+/// WHICH MEANS A REALPATH WALK STILL DIES ON ITS FIRST COMPONENT de-elevated, whatever the ACE
+/// half repaired further down. That is why this preload exists, and why it tolerates a refused
+/// STRICT ANCESTOR of a granted root rather than any refused component.
 ///
 /// WHY NOT REDIRECT REALPATH AT ITS NATIVE TWIN. That was the first candidate, and it is
 /// REFUTED by measurement: `fs.realpathSync.native` is refused under this jail too, with
@@ -797,10 +801,65 @@ const REALPATH_ROOTS_PLACEHOLDER: &str = "__NUB_REALPATH_ROOTS_JSON__";
 ///
 /// An empty `roots` yields an empty string: with nothing to scope the tolerance to, the shim
 /// would be inert anyway, and stamping an inert preload only widens the `NODE_OPTIONS` surface.
+///
+/// EVERY ROOT IS STAMPED IN BOTH SPELLINGS ON WINDOWS — see [`with_alternate_spellings`]. The
+/// shim's tolerance rule is a string prefix test, so a root and a walked component that name the
+/// same directory in different spellings do not match, and the tolerance silently never fires.
+/// Each root, plus its canonical filesystem spelling where that differs — Windows only.
+///
+/// WHY THIS IS NOT COSMETIC, measured. The shim decides whether to tolerate a refused component
+/// by testing whether it is a strict path-boundary PREFIX of a root, over lowercased
+/// `path.resolve` output. That is a STRING test, so two spellings of one directory do not match,
+/// and Windows hands a process both: `%TEMP%` arrives 8.3-SHORT (`C:\Users\RUNNER~1\…`) while the
+/// working directory and a junction's `readlink` target arrive LONG (`C:\Users\runneradmin\…`).
+/// Whichever spelling the roots carry, the walk meets the other one and the tolerance never
+/// fires — a silent, spelling-dependent failure rather than a loud one.
+///
+/// Measured both directions on one fixture, de-elevated, realpath preload stamped, run
+/// 30569197328: SHORT-form roots lose the bare-specifier-through-a-junction cell on
+/// `EPERM … lstat 'C:\Users\runneradmin'`; LONG-form roots lose that cell AND the absolute-entry
+/// cell AND npm's own entry, all on `EPERM … lstat 'C:\Users\RUNNER~1'`. Same fixture, same
+/// jail, opposite spellings, both thrown from `lstatOrTolerate`.
+///
+/// The `\\?\` verbatim prefix is a THIRD spelling of the same problem, already handled inside the
+/// shim (`stripLongPrefix`) after it measured as `native-longpath-granted=ERR`. This is the same
+/// bug class one level out, fixed where the roots are chosen rather than where they are compared,
+/// so the shim keeps one comparison rule instead of accreting per-spelling special cases.
+///
+/// Adding a spelling cannot widen the jail: the tolerance only ever asserts that a component the
+/// OS refused to interrogate is a plain directory, and both spellings name the same directory.
+/// Non-Windows is returned untouched — 8.3 aliasing is a Windows fact, and canonicalizing on a
+/// POSIX host would resolve symlinks and quietly change which paths the rule covers.
+fn with_alternate_spellings(roots: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    #[cfg(not(windows))]
+    {
+        roots.to_vec()
+    }
+    #[cfg(windows)]
+    {
+        let mut out: Vec<std::path::PathBuf> = Vec::with_capacity(roots.len() * 2);
+        for root in roots {
+            if !out.contains(root) {
+                out.push(root.clone());
+            }
+            // A root under a not-yet-created directory is the COMMON case for a build, and bare
+            // `canonicalize` errs on it — keeping only the as-built spelling, so a walk that meets
+            // the other spelling of an existing ancestor still refuses. Resolve the longest
+            // existing prefix and re-apply the tail lexically instead; the same shape Bazel uses.
+            let canonical = crate::matcher::path::canonicalize_including_nonexistent(root);
+            if !out.contains(&canonical) {
+                out.push(canonical);
+            }
+        }
+        out
+    }
+}
+
 pub fn realpath_shim_node_options(roots: &[std::path::PathBuf]) -> String {
     if roots.is_empty() {
         return String::new();
     }
+    let roots = with_alternate_spellings(roots);
     let json = serde_json::to_string(
         &roots
             .iter()

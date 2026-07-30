@@ -164,8 +164,7 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // installer-resolved `registry_name()`, which a dependency cannot rename itself into.
         //
         // THE THIRD TERM is the realpath repair. The backend's ancestor repair
-        // (`ancestor_chain` / `harvest_capability_sids`) is best-effort — a refused ACE write is
-        // skipped and a path naming no harvestable capability yields nothing to request — so this
+        // (`ancestor_chain`) is best-effort — a refused ACE write is skipped — so this
         // preload is what keeps module resolution working when it did not land, and is inert when
         // it did. Its roots are the anchors the jail actually grants, which is what scopes the
         // tolerance rule; the interpreter is among them so a `require()` of npm's own modules out

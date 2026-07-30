@@ -124,10 +124,7 @@ mod windows;
 pub use windows::windows_publish_appcontainer_read;
 #[cfg(target_os = "windows")]
 #[doc(hidden)]
-pub use windows::{
-    windows_ancestor_capability_sids, windows_capability_fallbacks, windows_leaf_grant_redundant,
-    windows_object_traverse_ace,
-};
+pub use windows::{windows_leaf_grant_redundant, windows_object_traverse_ace};
 
 // Publishing a nub-owned, AppContainer-readable copy of a tool tree the jail must RUN — the
 // escape from writing an ACE where a standard user cannot. Same cfg as `windows`: the copy half is

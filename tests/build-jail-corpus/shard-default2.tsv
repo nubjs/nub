@@ -1,0 +1,51 @@
+core-js	3.49.0	telemetry-nag	
+core-js-pure	3.49.0	telemetry-nag	
+@firebase/util	1.15.1	self-configuring	
+ssh2	1.17.0	native-build-prebuilt	
+@prisma/client	6.19.3	codegen	
+re2	1.26.1	binary-downloader	
+unix-dgram	2.0.7	native-build-prebuilt	
+vue-demi	0.14.10	self-configuring	vue-dep
+@aws-amplify/cli	14.5.1	binary-downloader	
+bcrypt	6.0.0	self-configuring	
+@sematext/gc-stats	1.5.9	native-build-prebuilt	
+@nx-dotnet/core	3.0.2	binary-downloader	nx-json
+@bazel/concatjs	5.8.1	self-configuring	
+cmark-gfm	0.9.0	native-build-prebuilt	
+@railway/cli	5.30.1	binary-downloader	
+@bazel/terser	5.8.1	self-configuring	
+drivelist	12.0.2	native-build-prebuilt	
+azure-functions-core-tools	4.12.1	binary-downloader	
+@ffmpeg-installer/darwin-x64	4.1.0	self-configuring	
+fs-xattr	0.4.0	native-build-prebuilt	
+dotnet-2.0.0	1.4.4	binary-downloader	
+@ffprobe-installer/linux-arm	5.2.0	self-configuring	
+hiredis	0.5.0	native-build-prebuilt	
+ffmpeg-static	5.3.0	binary-downloader	
+@intlify/vue-router-bridge	1.1.0	self-configuring	vue-dep
+java	0.18.0	native-build-prebuilt	
+ibm_db	4.0.1	binary-downloader	
+@notarize/qlc-cli	4.2.0	self-configuring	
+lz4	0.6.5	native-build-prebuilt	
+phantomjs	2.1.7	binary-downloader	
+@sentry/capacitor	4.2.0	self-configuring	
+mongodb-crypt-library-dummy	1.0.2	native-build-prebuilt	
+redis-memory-server	0.17.0	binary-downloader	
+backport	12.0.4	self-configuring	
+node-libcurl	5.1.2	native-build-prebuilt	
+workerd	1.20260728.1	binary-downloader	
+cordova.plugins.diagnostic	7.3.1	self-configuring	
+oniguruma	7.2.3	native-build-prebuilt	
+exifreader	4.41.3	self-configuring	
+pprof	5.0.0	native-build-prebuilt	
+gentype	4.5.0	self-configuring	
+spellchecker	3.7.1	native-build-prebuilt	
+lightningcss-cli	1.33.0	self-configuring	
+wdeasync	0.1.120	native-build-prebuilt	
+ngx-popperjs	17.0.1	self-configuring	
+pngout-bin	6.0.1	self-configuring	
+spectron	19.0.0	self-configuring	
+tree-sitter-json	0.24.8	self-configuring	
+vue-inbrowser-compiler-demi	4.71.1	self-configuring	vue-dep
+union	0.6.0	self-configuring	
+prisma	6.19.3	codegen	

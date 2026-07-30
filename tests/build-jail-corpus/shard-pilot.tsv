@@ -1,0 +1,9 @@
+core-js	3.49.0	telemetry-nag
+bufferutil	4.0.8	self-configuring
+keytar	7.9.0	native-build-prebuilt
+esbuild	0.28.1	binary-downloader
+@sentry/cli	3.6.2	binary-downloader
+lefthook	2.1.10	hook-installer	git-repo,lefthook-config
+@prisma/client	6.19.3	codegen	prisma-schema
+prisma	6.19.3	codegen	prisma-schema
+msw	2.15.0	codegen	msw-manifest

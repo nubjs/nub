@@ -836,26 +836,6 @@ pub(super) fn resolve_program(
     None
 }
 
-// ── ancestor-repair diagnostics ─────────────────────────────────────────────────
-//
-// The ancestor repair's coverage is a property of the MACHINE — which capability SIDs its
-// system roots happen to carry, and whether the kernel accepts them — so it cannot be asserted
-// from source. These two are what the branch-scoped Windows probe reports.
-
-/// The capability SIDs, in SDDL form, that a launch granting `paths` would request.
-#[cfg(target_os = "windows")]
-#[doc(hidden)]
-pub fn windows_ancestor_capability_sids(paths: &[std::path::PathBuf]) -> Vec<String> {
-    launch::capability_sids_sddl(paths)
-}
-
-/// How many launches in this process started only after dropping those capabilities.
-#[cfg(target_os = "windows")]
-#[doc(hidden)]
-pub fn windows_capability_fallbacks() -> u64 {
-    launch::CAPABILITY_FALLBACKS.load(std::sync::atomic::Ordering::Relaxed)
-}
-
 /// Place (`grant`) or remove the ancestor repair's non-inherited traverse ace on `dir` for
 /// `sddl`, so the probe can TIME the real writer against its own copy of the propagating one —
 /// same trustee, same path, same run. Nothing else attributes a cost difference to the primitive
@@ -973,11 +953,6 @@ pub(super) mod launch {
     // one still requires that object's own grant, and paired with NO_INHERITANCE the reach
     // stops at the directory object.
     const TRAVERSE_MASK: u32 = 0x0010_00a1;
-    // SECURITY_APP_PACKAGE_AUTHORITY (`S-1-15-…`) and the capability sub-authority
-    // (`S-1-15-3-…`); together they identify a capability SID by structure, which is the only
-    // way to recognise one — `LookupAccountSid` returns ERROR_NONE_MAPPED for them.
-    const APP_PACKAGE_AUTHORITY: [u8; 6] = [0, 0, 0, 0, 0, 15];
-    const CAPABILITY_SUB_AUTHORITY: u32 = 3;
     // The well-known internetClient capability SID.
     const INTERNET_CLIENT_SID: &str = "S-1-15-3-1";
     // ALL APPLICATION PACKAGES. Any right for this SID invalidates the default-deny
@@ -987,12 +962,6 @@ pub(super) mod launch {
     /// Monotonic per-process counter so concurrent launches never collide on the
     /// AppContainer profile name (combined with pid + a time nonce).
     static LAUNCH_CTR: AtomicU64 = AtomicU64::new(0);
-
-    /// How many launches had to drop their harvested capabilities to start. Read by the
-    /// branch-scoped Windows probe, which runs `apply` IN-PROCESS: without it a repaired arm
-    /// that quietly fell back is indistinguishable from one where the capabilities were
-    /// accepted and simply did not help, and those call for opposite next moves.
-    pub(super) static CAPABILITY_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 
     /// Serializes the per-path DACL read-modify-write in [`set_ace`]. Concurrent launches
     /// can grant/revoke on a SHARED leaf (two runs granting a common toolchain/program
@@ -1257,82 +1226,6 @@ pub(super) mod launch {
         out
     }
 
-    /// The capability SIDs (`S-1-15-3-…`) named by an ALLOW ace on any of `paths`, as owned
-    /// SID bytes, deduped. Requesting one is what lets the child open a system ancestor whose
-    /// DACL nub cannot write — see the call site for why both mechanisms are needed.
-    ///
-    /// Honest about its reach: a capability is a machine-wide key, so holding one also opens
-    /// every OTHER object whose DACL grants it. The set is bounded to what already sits on
-    /// this launch's own ancestor chain, which in practice is the two Windows puts on `C:\`
-    /// and `C:\Users`, and it is the coarse half of a deliberately best-effort jail.
-    fn harvest_capability_sids(paths: &[PathBuf]) -> Vec<Vec<u8>> {
-        let mut out: Vec<Vec<u8>> = Vec::new();
-        for path in paths {
-            let wpath = to_wide_path(path);
-            let mut dacl: *mut ACL = std::ptr::null_mut();
-            let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-            let rc = unsafe {
-                GetNamedSecurityInfoW(
-                    wpath.as_ptr(),
-                    SE_FILE_OBJECT,
-                    DACL_SECURITY_INFORMATION,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    &mut dacl,
-                    std::ptr::null_mut(),
-                    &mut sd,
-                )
-            };
-            if rc != 0 {
-                continue;
-            }
-            let _sd = LocalFreeGuard(sd);
-            if dacl.is_null() {
-                continue;
-            }
-            for sid in allow_ace_capability_sids(dacl) {
-                if !out.contains(&sid) {
-                    out.push(sid);
-                }
-            }
-        }
-        out
-    }
-
-    /// The capability-SID trustees of `dacl`'s ALLOW aces. Split from the DACL read so the
-    /// pointer walk stays in one place.
-    fn allow_ace_capability_sids(dacl: *const ACL) -> Vec<Vec<u8>> {
-        use windows_sys::Win32::Security::{ACCESS_ALLOWED_ACE, ACE_HEADER, GetAce, SID};
-        const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
-        let mut out = Vec::new();
-        // SAFETY: AceCount bounds the GetAce index; an allow ace begins with an ACE_HEADER
-        // and its SidStart is a self-relative SID whose length GetLengthSid reports.
-        unsafe {
-            for i in 0..(*dacl).AceCount as u32 {
-                let mut ace: *mut std::ffi::c_void = std::ptr::null_mut();
-                if GetAce(dacl, i, &mut ace) == 0 {
-                    continue;
-                }
-                if (*ace.cast::<ACE_HEADER>()).AceType != ACCESS_ALLOWED_ACE_TYPE {
-                    continue;
-                }
-                let sid: PSID = std::ptr::addr_of!((*ace.cast::<ACCESS_ALLOWED_ACE>()).SidStart)
-                    .cast_mut()
-                    .cast();
-                let raw = sid.cast::<SID>();
-                if (*raw).IdentifierAuthority.Value != APP_PACKAGE_AUTHORITY
-                    || (*raw).SubAuthorityCount < 2
-                    || (*raw).SubAuthority[0] != CAPABILITY_SUB_AUTHORITY
-                {
-                    continue;
-                }
-                let len = GetLengthSid(sid) as usize;
-                out.push(std::slice::from_raw_parts(sid.cast::<u8>(), len).to_vec());
-            }
-        }
-        out
-    }
-
     /// Add or remove an ace on `path` WITHOUT re-propagating inheritance into its subtree.
     ///
     /// This is the whole reason the ancestor repair does not go through [`set_ace`].
@@ -1350,7 +1243,7 @@ pub(super) mod launch {
     /// propagation before they return, so swapping the named writer for the handle-based one
     /// narrowed nothing: run 30493913027's watchdog pinned the remaining stall to the FIRST
     /// launch that writes these aces, and the only WRITE in that window is this function
-    /// (`verify_clean_root` and `harvest_capability_sids` merely read DACLs). The chain includes
+    /// (`verify_clean_root` merely reads DACLs). The chain includes
     /// `%TEMP%`, which on a CI runner is enormous, so the walk took minutes and varied run to
     /// run. `SetKernelObjectSecurity` goes straight to `NtSetSecurityObject`: it writes the
     /// object's own descriptor and there is no propagation pass to skip. Measured on
@@ -1461,34 +1354,6 @@ pub(super) mod launch {
             }
         }
         Ok(())
-    }
-
-    /// The capability SIDs on `paths`' DACLs in SDDL form, for the branch-scoped Windows probe
-    /// to report as facts. Which SIDs a machine actually offers on its ancestor chain is the
-    /// input the repair's coverage depends on, and it is not derivable from anywhere else.
-    #[doc(hidden)]
-    pub(super) fn capability_sids_sddl(paths: &[PathBuf]) -> Vec<String> {
-        use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
-        harvest_capability_sids(paths)
-            .iter()
-            .map(|bytes| {
-                let mut out: *mut u16 = std::ptr::null_mut();
-                // SAFETY: `bytes` holds a whole self-relative SID; the buffer is LocalFree'd.
-                let ok = unsafe {
-                    ConvertSidToStringSidW(bytes.as_ptr() as PSID, std::ptr::from_mut(&mut out))
-                };
-                if ok == 0 {
-                    return "<unconvertible>".to_string();
-                }
-                let _free = LocalFreeGuard(out.cast());
-                let mut len = 0usize;
-                // SAFETY: ConvertSidToStringSidW returns a NUL-terminated wide string.
-                while unsafe { *out.add(len) } != 0 {
-                    len += 1;
-                }
-                String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(out, len) })
-            })
-            .collect()
     }
 
     /// Whether any ace for `sid` in `dacl` is inheritable — i.e. whether the grant reaches
@@ -1796,23 +1661,12 @@ pub(super) mod launch {
             //    directory OBJECT and nothing under it (so an ancestor grant never becomes a
             //    subtree read), and it costs no DACL propagation, which is what keeps this
             //    affordable per lifecycle spawn. THIS is the half that holds unprivileged.
-            //  - Where it cannot, it REQUESTS the capability Windows already granted there:
-            //    `C:\` carries `(A;;0x1000a1;;;S-1-15-3-65536-…)` — a capability SID with the
-            //    same traverse+read-attributes mask, non-inherited, on the exact path the error
-            //    names; `C:\Users` carries a different one. They are HARVESTED off the DACLs
-            //    rather than hardcoded: the set differs per path and per Windows build, and
-            //    neither SID resolves through `LookupAccountSid` (`ERROR_NONE_MAPPED`), so no
-            //    name is available to derive them from.
-            //    ⚠️ AND THE KERNEL REFUSES THEM. `CreateProcessW` returns
-            //    ERROR_INVALID_PARAMETER for this SID pair, so the launch below DROPS the
-            //    harvested set and retries without it (see the fail-soft retry at the
-            //    `CAPABILITY_FALLBACKS` counter). The privilege framing was never the problem
-            //    — requesting a raw capability SID is indeed unprivileged, as `internetClient`
-            //    shows — but that does not make THESE requestable, and this comment previously
-            //    read as if the capability half covered `C:\`/`C:\Users`. It does not: for a
-            //    standard user those two roots stay UNREPAIRED, and what the chain gets is the
-            //    ACE half from `%USERPROFILE%` down. Read `windows_capability_fallbacks()` in
-            //    a probe before assuming otherwise.
+            //  - Where it cannot — `C:\` is owned by TrustedInstaller and `C:\Users` by SYSTEM,
+            //    and neither grants a standard group `WRITE_DAC` — NOTHING repairs those two
+            //    roots. A second mechanism was tried and is DEAD: the capability SIDs Windows
+            //    already places on them are `S-1-15-3-65536-…`, and the kernel refuses that
+            //    AppSilo RID class outright (`0xc000000d` from `NtCreateLowBoxToken`), measured
+            //    in BOTH principals. See `wiki/design/build-jail-windows.md`.
             //
             // Both are best-effort by design. This jail is defence in depth, not a watertight
             // boundary; a package that cannot start is a worse outcome than a residual, and
@@ -1833,11 +1687,9 @@ pub(super) mod launch {
                     _aces.objects.push(dir.clone());
                 }
             }
-            let harvested: Vec<Vec<u8>> = harvest_capability_sids(&ancestors);
 
-            // 3. Capabilities: internetClient iff egress allowed, plus every capability
-            //    harvested above. Ordering matters only in that `harvested`'s backing
-            //    allocations must outlive `sec_caps` — they are borrowed, not copied.
+            // 3. Capabilities: internetClient iff egress allowed, and nothing else. The
+            //    ancestor chain contributes none — see the DEAD note in 2b.
             let mut cap_sid_owned: Option<CapSid> = None;
             let mut caps: Vec<SID_AND_ATTRIBUTES> = Vec::new();
             if self.allow_internet {
@@ -1847,12 +1699,6 @@ pub(super) mod launch {
                     Attributes: SE_GROUP_ENABLED,
                 });
                 cap_sid_owned = Some(cs);
-            }
-            for sid in &harvested {
-                caps.push(SID_AND_ATTRIBUTES {
-                    Sid: sid.as_ptr() as PSID,
-                    Attributes: SE_GROUP_ENABLED,
-                });
             }
             let mut sec_caps = SECURITY_CAPABILITIES {
                 AppContainerSid: ac_sid,
@@ -1877,13 +1723,11 @@ pub(super) mod launch {
             let inherit_handles = inheritable_std_handles();
             let n_attrs = 1 + u32::from(!inherit_handles.is_empty());
             let mut attr = ProcThreadAttrList::new(n_attrs)?;
-            // The attribute list stores this POINTER rather than a copy, which is what makes
-            // the capability retry below possible at all — and why the write there is done
-            // THROUGH the pointer: to the compiler it is a dead store.
-            let caps_slot: *mut SECURITY_CAPABILITIES = std::ptr::from_mut(&mut sec_caps);
+            // The attribute list stores a POINTER to `sec_caps` rather than a copy, so it must
+            // stay live until CreateProcessW returns.
             attr.update(
                 PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
-                caps_slot.cast(),
+                std::ptr::from_mut(&mut sec_caps).cast(),
                 std::mem::size_of::<SECURITY_CAPABILITIES>(),
             )?;
             if !inherit_handles.is_empty() {
@@ -1935,37 +1779,11 @@ pub(super) mod launch {
                     &mut pi,
                 )
             };
-            let mut ok = launch();
-            // FAIL SOFT ON THE HARVESTED CAPABILITIES, and only on those. They are a WIDENING
-            // taken from whatever a given Windows put on the ancestor chain, so the kernel is
-            // entitled to reject a form nub cannot anticipate — measured: a `S-1-15-3-65536-…`
-            // pair off `C:\` and `C:\Users` returns ERROR_INVALID_PARAMETER here. Refusing to
-            // launch over that would trade a package that starts with one unreachable ancestor
-            // for a package that does not start at all, which is the wrong direction for a jail
-            // that is defence in depth. The attribute list stores a POINTER to `sec_caps`, so
-            // clearing the count in place is what the retry reads.
-            if ok == 0 && !harvested.is_empty() {
-                let dropped = io::Error::last_os_error();
-                // SAFETY: `caps_slot` points at `sec_caps`, which is still live, and the
-                // attribute list reads it at CreateProcessW time.
-                unsafe {
-                    (*caps_slot).Capabilities = if cap_sid_owned.is_some() {
-                        caps.as_mut_ptr()
-                    } else {
-                        std::ptr::null_mut()
-                    };
-                    (*caps_slot).CapabilityCount = u32::from(cap_sid_owned.is_some());
-                }
-                ok = launch();
-                if ok != 0 {
-                    CAPABILITY_FALLBACKS.fetch_add(1, Ordering::Relaxed);
-                    let _ = dropped;
-                }
-            }
+            let ok = launch();
             if ok == 0 {
                 return Err(io::Error::last_os_error());
             }
-            let _ = (cap_sid_owned, &harvested); // both back `sec_caps` — held alive until here
+            let _ = cap_sid_owned; // backs `sec_caps` — held alive until here
 
             // 7. Assign to the job while the child is still SUSPENDED, and only resume
             //    once it is contained — so a child that spawns a descendant can never do

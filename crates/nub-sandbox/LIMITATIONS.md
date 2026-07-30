@@ -506,22 +506,19 @@ OPENABLE under an ORDINARY `%TEMP%`/profile tree with no `C:\`-owned store (VM-v
 - **Traverse-bypass does not make an ancestor openable as a TARGET, and Node opens every one.**
   `realpathSync` walks a path prefix by prefix from the volume root, so an absolute `require()`
   died on `EPERM: lstat 'C:\'` while the granted leaf itself read fine. The backend reaches the
-  chain two ways, neither needing elevation: a NON-INHERITED traverse + read-attributes ACE
-  where the unprivileged user can write one (their own profile and below), and the capability
-  SIDs Windows already placed on `C:\` and `C:\Users` where they cannot, harvested off those
-  DACLs and requested in `SECURITY_CAPABILITIES`. Non-inherited is the load-bearing word: the
+  chain one way, needing no elevation: a NON-INHERITED traverse + read-attributes ACE where the
+  unprivileged user can write one, which is their own profile and below. `C:\` and `C:\Users`
+  are NOT repairable by anyone unprivileged, so a realpath walk still dies on its FIRST
+  component — see the bullet below. Non-inherited is the load-bearing word: the
   ACE governs the directory object alone, so an ancestor never becomes a subtree read, and
   there is no DACL propagation to pay for per spawn. Both halves are best-effort — a refused
   ACE write is skipped, never fatal.
-- **What the capability half costs, and that it is INERT on Windows 11 26100.** A capability is
-  a machine-wide key: holding one also opens every other object whose DACL grants it, bounded
-  here to what already sits on this launch's own ancestor chain. In practice it buys nothing
-  yet — `CreateProcessW` returns `ERROR_INVALID_PARAMETER` for the `S-1-15-3-65536-…` form that
-  `C:\` and `C:\Users` actually carry, so the launch drops the capabilities and retries (counted
-  by `windows_capability_fallbacks`). Measured, every ancestor was still reachable, but only
-  because the runner was ELEVATED and could write the DACLs on `C:\` and `C:\Users` directly.
-  A standard non-elevated user can write neither, so the reachability of those two roots off an
-  elevated machine remains an open question.
+- **The capability half is GONE — the kernel refuses the SID class outright.** A second
+  mechanism used to sit alongside the ACE: harvest the `S-1-15-3-65536-…` capability SIDs
+  Windows already places on `C:\` and `C:\Users` and request them in `SECURITY_CAPABILITIES`.
+  `NtCreateLowBoxToken` refuses that AppSilo RID class (`0xc000000d`) while a `65537` sibling is
+  accepted, so it is a deliberate kernel block, and every launch fell back — measured in BOTH
+  the elevated and de-elevated principals. It never once widened a launch and has been removed.
 - **The ancestor ACE write is affordable now: 630 µs on the runner's own `%TEMP%`, where it used
   to stall for minutes.** Any DACL write through `Set*SecurityInfo` runs advapi32's inheritance
   propagation over the object's existing subtree before returning, and `%TEMP%` is on the chain,

@@ -130,6 +130,62 @@ The old writer blows up **~1,444×** with tree size; the new one is flat. The re
 
 **What would change the verdict.** Nothing. It is strictly cheaper than both predecessors at identical effect.
 
+## Is the ancestor repair necessary at all — the ACE half is INERT unprivileged; DELETION RECOMMENDED, not taken
+
+**The question, and it was a deletion question.** The ancestor repair is the least elegant mechanism in the Windows backend, and the defect it was built for acquired a second, cheaper fix: [the realpath preload](#nodes-realpath-walk-opens-every-ancestor-as-a-target--open-and-it-is-blocker-1) ships a userland walk that tolerates a refused component when it is a strict ancestor of a granted root — and it covers `C:\`, which no ACE can. So: given the preload, does removing the repair change anything?
+
+**Why nobody had answered it.** Every previous matrix varied the repair with NO preload, or stamped the preload only in the repaired arm. The cell that decides deletion — repair-**OFF** *with* the preload, beside repair-**ON** with the same preload, one fixture, one run — had never been run.
+
+**Measured** — run 30571090527, `win-deelevated-jail-probe`, branch `sandbox/win-ancestor-necessity`. Both principals, the realpath term stamped in every arm that claims to measure the shipping configuration, `NUB_SANDBOX_WIN_NO_ANCESTOR_REPAIR` the only variable between the two compared arms. Group `ancestor_necessity` in `tests/windows_deelevated_jail.rs`. Cells: an absolute entry point whose body `require()`s an absolute path; a **bare specifier through a store-cell junction** (nub's default `Isolated` shape); the distribution's own `npm-cli.js` as an absolute entry; and seven non-Node cells — `cmd /c dir /b`, `cmd /c cd`, `where.exe node`, `powershell`, `git --version`, `git rev-parse`, `python -c`.
+
+| | control<br>no preload, no repair | repair ON<br>+ preload | repair OFF<br>+ preload |
+| --- | --- | --- | --- |
+| **DE-ELEVATED** — IL 8192, no admin authority | | | |
+| absolute entry → absolute `require()` | `EPERM lstat 'C:\'` | OK | OK |
+| bare specifier through a junction | `EPERM lstat 'C:\'` | OK | OK |
+| `npm-cli.js` as an absolute entry | `EPERM lstat 'C:\'` | `-4048` | `-4048` |
+| the seven non-Node cells | — | 7 cells | **byte-identical, 7/7** |
+| **ELEVATED** — IL 12288, admin authority | | | |
+| absolute entry → absolute `require()` | `EPERM lstat 'C:\'` | OK | OK |
+| bare specifier through a junction | `EPERM lstat 'C:\'` | OK | OK |
+| `npm-cli.js` as an absolute entry | `EPERM lstat 'C:\'` | **OK** (`10.9.8`) | **`-4048`** |
+| `cmd /c dir /b` | — | **OK** (listing) | **`Access is denied.`** |
+| `where.exe node` | — | **OK** (resolves) | **`Could not find files`** |
+
+**THE VERDICT. De-elevated — the principal the build jail is specified for — the ancestor repair changes NOTHING.** Every Node outcome is identical and the non-Node transcript is byte-identical across all seven cells. Elevated, three cells still depend on it: `where.exe`'s PATH search, `cmd`'s working-directory enumeration, and npm's own deep entry point — all ancestor opens as TARGETS above the profile, which only an elevated token can re-ACE.
+
+**So the mechanism is deletable for every unprivileged user, and its entire remaining value is making an ELEVATED run behave better than an unprivileged one.** That is an argument for removing it, not keeping it: those three operations already fail for every normal user, and the repair's only effect is to hide that on CI. **The deletion is NOT taken here** — whether an elevated run may keep a widening an unprivileged one cannot is a posture call, and taking it would change behaviour other lanes currently observe green. What would go: `ancestor_chain`, `set_ace_on_object`, `TRAVERSE_MASK`, the `AceGuard.objects` teardown revoke, `windows_object_traverse_ace` and its re-exports, the `NUB_SANDBOX_WIN_NO_ANCESTOR_REPAIR` seam, and the `ace_cost` / `ancestor_repair` groups in `windows_jail_repairs.rs`.
+
+**WHAT ACTUALLY MADE IT INERT, and it was a defect in the preload, not a property of the jail.** Until run 30571090527 the repair still looked load-bearing de-elevated, on the bare-specifier cell. The cause, once the `data:` frame was stripped from the confined child's stderr: the shim threw `EPERM … lstat 'C:\Users\runneradmin'` from `lstatOrTolerate` — refusing to tolerate a component that IS a strict ancestor of a granted root. **The tolerance rule is a lowercased string prefix test, and Windows hands one process two spellings of the same directory:** `%TEMP%` arrives 8.3-SHORT (`C:\Users\RUNNER~1\…`) while the working directory and a junction's `readlink` target arrive LONG (`C:\Users\runneradmin\…`). Whichever spelling the roots carried, the walk met the other one.
+
+Measured in both directions on one fixture (run 30569197328), which is what made it a finding rather than a guess:
+
+| roots stamped as | absolute entry | bare through junction | `npm-cli.js` | thrown on |
+| --- | --- | --- | --- | --- |
+| SHORT only (`%TEMP%`-derived) | OK | **REFUSED** | `-4048` | `lstat 'C:\Users\runneradmin'` |
+| LONG only (canonicalized) | **REFUSED** | **REFUSED** | **REFUSED** | `lstat 'C:\Users\RUNNER~1'` |
+| **BOTH** (the fix) | OK | OK | `-4048` | — |
+
+`realpath_shim_node_options` now stamps every root in both spellings (`with_alternate_spellings`). Adding a spelling cannot widen the jail — the tolerance only ever asserts that a component the OS refused to interrogate is a plain directory, and both spellings name the same directory. The `\\?\` verbatim prefix is a THIRD spelling of this same bug, already special-cased inside the shim (`stripLongPrefix`) after it measured as `native-longpath-granted=ERR`; the fix is applied where roots are chosen so the comparison keeps one rule instead of accreting per-spelling cases. **That fix is sound and it is asymmetric** — it produces a spelling PAIR only when the root arrives short, and it is one entry in a wider survey of what canonical form is available and where it can be computed: see [canonicalizing a path before matching it against the granted roots](#canonicalizing-a-path-before-matching-it-against-the-granted-roots).
+
+**THE CONTROL FOR THAT FIX, gated in the same run.** An arm carrying a SINGLE spelling must still lose cells, or the expansion is not what changed the outcome: `anc-control-single-spelling-roots-still-lose-a-cell` = PASS, `(false, false, false)` against the fixed arm's `(true, true, false)`.
+
+**Gated, so the arms are admissible.** Two rounds of Windows conclusions were retracted for being measured on launches reproducing none of nub's repairs, so every arm reports the shims' own `globalThis` sentinels from inside the confined child: `true` in both preload arms, `false` in the control. The control reproduces the defect verbatim — `EPERM: operation not permitted, lstat 'C:\'` at `realpathSync` ← `toRealPath`. And `--preserve-symlinks-main`, which rides the same term, is ruled out as the thing doing the work: `realpath_unavailable_resolution.rs` already measures it alone leaving every `require()` dying `EPERM`.
+
+**Two near-misses worth recording, because each would have produced a WRONG published answer.**
+
+- **A cell that failed in the CONTROL too.** The first run reported the junction cell failing in all six arm-instances, which reads as a clean deletion verdict. No junction had ever been created: the `mklink` command line went through `Command::arg` — Rust's quoting, applied on the way to a shell that does not parse it that way — and its output was discarded. *Failing in the control is the tell that a cell is measuring its own fixture.* Fixed with `raw_arg` plus printing the result.
+- **An unreadable error.** A stack thrown inside a `data:` preload puts ~15 kB of base64 ahead of the message, so the 240-character log excerpt was pure payload and the cause was invisible for two runs. The excerpt now drops `data:` frames before truncating — that one change is what turned "the shim threw" into the spelling defect above.
+
+**Corroborating fact, and a live demonstration of a known-unsound proxy.** `can_write_dacl` reports **0 of 13** sampled ancestors writable in BOTH principals, including `C:\`, `C:\Users` and `%USERPROFILE%`. It is wrong in both — the repair demonstrably lands in each. Same unsoundness above medium IL already recorded under [fail-soft leaf grants](#fail-soft-leaf-grants--adopted), now observed at medium IL too. **Key on the differential, never on the proxy.**
+
+**Still open, and it is the reason the elevated column is not empty.** `npm-cli.js` fails `-4048` (`UV_EPERM`) de-elevated in every preloaded arm, with an EMPTY stderr. This section previously read that shape as "not a realpath refusal, therefore a missing grant in npm's own startup" — **that reading is REFUTED, and no grant closes it**: it is `lstat 'C:\'` again, on the one resolver the preload does not reach. Cause, evidence and consequence are one section down, under [the realpath shim does not reach Node's ESM resolver](#the-realpath-shim-does-not-reach-nodes-esm-resolver--open-and-it-is-blocker-3). Because that defect is real for every unprivileged user and the ancestor repair merely hides it on an elevated runner, it does not weaken the deletion case above — it is the clearest instance of it.
+
+**The capability half went unconditionally** — see [harvesting the AppSilo capability SID](#harvesting-the-appsilo-capability-sid-that-c-already-carries--dead-mechanism).
+
+**One assumption this group refuted in passing.** The full production `NODE_OPTIONS` stamp is **56,010 characters** and the whole environment block **56,790** — 1.73× the 32,767 this record repeatedly calls a hard `CreateProcessW` ceiling — and it LAUNCHES, with the confined child reporting all three preload sentinels (`realpath`, `stdio`, `net-gate`) true, in both principals, across four runs. The ceiling does not bind for a `CREATE_UNICODE_ENVIRONMENT` block. `stdio_shim_payload_fits_the_env_block` and the prose around it are calibrated against a limit that was never measured. (What is established is that 56,790 works; a real cap above that is untested.)
+
+
 ## Fail-soft leaf grants — ADOPTED
 
 **What it is.** A refused **read** grant is skipped rather than fatal: `grant_leaf_ace` returns `io::Result<bool>` and the call site's `.map_err(…)?` became a `match` (`windows.rs:1762-1780`), with the drop-only seam `NUB_SANDBOX_WIN_FAIL_CLOSED_READ_GRANTS` restoring the old behaviour so a probe can measure both directions in one run. **Write** grants stay fatal — every one is Nub's own tmp or the package dir being built. Commit `d016eeefc6`.
@@ -242,9 +298,9 @@ A developer desktop behaves identically to the server images, so this is **not**
 
 **Cross-checked against Chromium.** `app_container_base.cc:317-348` exposes only `FromNamedCapability` (name → `S-1-15-3-1024-…`), `FromKnownCapability` (well-known small subauthorities), and raw `AddCapabilitySddl`. **It never harvests an existing ACE's SID and requests it** — consistent with the kernel refusal. And `AddCapabilitySddl` is `ConvertStringSidToSid` into this same array, so raw SDDL buys nothing extra.
 
-**Live code, and it is inert by measurement.** `harvest_capability_sids` and its `CreateProcessW` retry are still in `windows.rs`; the retry records the measured `ERROR_INVALID_PARAMETER` and drops the harvested set, so the widening never fires and always falls back. Confirmed again in a de-elevated run: `capability-fallbacks=1` in **both** principals, so the capability half is inert regardless of privilege — it is not a privilege story at all.
+**THE CODE IS GONE (2026-07-30).** It was retained for a while as live-but-inert: `harvest_capability_sids` ran on every launch, `CreateProcessW` refused, and a fail-soft retry dropped the set and launched again — `capability-fallbacks=1` in **both** principals, so the half was inert regardless of privilege and never once widened a launch. Inert code that runs on every lifecycle spawn is pure cost, and a mechanism that cannot succeed cannot be load-bearing for anything, so it was deleted rather than kept as a hedge: `harvest_capability_sids`, `allow_ace_capability_sids`, `capability_sids_sddl`, the `CAPABILITY_FALLBACKS` counter, the `windows_ancestor_capability_sids` / `windows_capability_fallbacks` diagnostics and their re-exports, the capability-array append, and the second `CreateProcessW` attempt the drop existed for. The launch is now a single call. Commit `40e7e85c30`.
 
-**Two code comments that asserted the opposite are now corrected** (2026-07-30): the `2b. THE ANCESTOR CHAIN` comment in `backend/windows.rs`, which described the capability half as the working unprivileged answer for `C:\`/`C:\Users`, and `compiler/defaults.rs`'s "WHAT SHIPS INSTEAD" paragraph, which called the capability "reachable unprivileged". Both now state the measurement, name the ACE half from `%USERPROFILE%` down as the only unprivileged route, and point at the fail-soft retry (`CAPABILITY_FALLBACKS`). The `windows.rs` half was authored on `sandbox/win-deelev-shell` at `9703ecdf37` and reused verbatim.
+**Two code comments that asserted the opposite were corrected first** (2026-07-30), and are now moot for `windows.rs`: the `2b. THE ANCESTOR CHAIN` comment described the capability half as the working unprivileged answer for `C:\`/`C:\Users`, and `compiler/defaults.rs`'s "WHAT SHIPS INSTEAD" paragraph called the capability "reachable unprivileged". `windows.rs` now states plainly that nothing repairs those two roots. The `windows.rs` half was authored on `sandbox/win-deelev-shell` at `9703ecdf37` and reused verbatim.
 
 **What would change the verdict.** A Windows kernel that stops special-casing the AppSilo RID — which would weaken Win32 App Isolation, so do not expect it.
 
@@ -456,6 +512,125 @@ Chromium's `app_container_unittest.cc:231-244` asserts the result keeps the base
 
 ---
 
+# Canonicalizing a path before matching it against the granted roots
+
+Windows hands one process several spellings of the same directory, and the realpath preload's tolerance rule decides whether a refused component is a strict ancestor of a granted root by comparing strings. Four spelling defects have now been fixed one at a time — 8.3 short vs long, an `execPath` compared by spelling rather than identity, a `\\?\` prefix special-cased at the comparison, and the trailing-dot form below. This section is the survey that stops the fifth being fixed the same way: what canonical form is available, where it can be computed, and what containment check to run against it.
+
+**The governing fact, and it sets the bar for everything that follows: the tolerance rule is not the security boundary.** It never grants access. It asserts only that a component the OS refused to interrogate is a plain directory, so the userland walk can continue; the open that follows is still checked by the kernel against the LowBox token. A tolerance decision that is wrong in the permissive direction produces a walk that continues to an open that is then denied — never a widened jail. A tolerance decision that is wrong in the restrictive direction produces `EPERM` on a path the jail granted, which is the failure mode every one of the four defects actually took. **So the bar here is compatibility, not soundness**, and a cheap lexical rule is the right instrument. The same reasoning inverts for a deny list, where a missed spelling IS a bypass — Chromium's sandbox builds a long-to-short name map of the loaded modules so a blocklisted DLL that is loaded under its 8.3 alias is still unloaded in the child (`sandbox/policy/win/sandbox_win.cc`, `GetShortNameModules` and `BlocklistAddOneDll`).
+
+## Lexical normalization in the child, filesystem canonicalization in the launcher — ADOPTED as the model
+
+**What it is.** The split BuildXL uses, which is the closest production analogue to this jail: a Detours-based filesystem filter that decides an allow/deny policy for every path operation of every build process on Windows.
+
+Its in-process enforcement path canonicalizes with `GetFullPathNameW` and nothing else (`Public/Src/Sandbox/Windows/DetoursServices/CanonicalizedPath.cpp` in `microsoft/BuildXL`), whose own header states the contract: *"Immutable, typed, and canonical path string. The represented path is absolute, free of .. and . traversals, redundant path separators, etc."* That is a purely lexical transform. It opens no handle, touches no filesystem, expands no 8.3 name, resolves no symlink, and works identically on a path that does not exist. That same call is what `Path.GetFullPath` wraps, and Microsoft's own enumeration of what normalization does — identify the path, apply the current directory, canonicalize separators, evaluate `.` and `..`, trim trailing periods and spaces — contains no step that reads the disk.
+
+Handle-based canonicalization exists in BuildXL but lives entirely on the engine side, out of the hot path, and carries a warning against using it on a whole path: *"We cannot call GetFinalPathNameByHandle on the whole path because that function resolves junctions to their target paths"* (`Public/Src/Utilities/Native/IO/Windows/FileSystem.Win.cs`). Bazel records the cost directly: *"GetFinalPathNameByHandleW is slow so avoid calling it if we can"* (`src/main/cpp/util/file_windows.cc`).
+
+**Why it transfers.** Nub's preload runs inside the jail, where no filesystem canonicalizer is reachable at all (the two sections below). The launcher runs outside it, unconfined, and already builds the root set. Canonicalization belongs there; the child gets a lexical rule.
+
+## The `GetFinalPathNameByHandleW` route inside the jail — DEAD (mechanism)
+
+**What it would buy.** A single canonical form. It is the one Windows API that returns a fully resolved path, and it is what both `fs.realpathSync.native` and Rust's `std::fs::canonicalize` are built on — libuv opens the target with zero desired access and `FILE_FLAG_BACKUP_SEMANTICS`, then calls it with `VOLUME_NAME_DOS` and strips the `\\?\` prefix (`deps/uv/src/win/fs.c`, `fs__realpath_handle`).
+
+**Measured refutation** — run 30460192608, already on record under [redirecting realpath at its native twin](#redirecting-realpath-at-its-native-twin--dead-mechanism): the call is refused under this jail on a file the jail GRANTED and Node reads successfully in the same script. Two further disqualifications hold even where it is not refused. It requires a HANDLE, so it cannot answer for a path that does not exist yet — the common case for a build. And Microsoft documents an ancestor-permission failure of its own over SMB: *"the function splits the path into its components and tries to query for the normalized name of each of those components in turn. If the user lacks access permission to any one of those components, then the function call fails with ERROR_ACCESS_DENIED."*
+
+**What would change the verdict.** A Windows/Node combination where the call succeeds on a leaf handle under an AppContainer. That is the same condition already tracked on the native-twin section, and one probe arm re-tests it.
+
+## The `GetLongPathNameW` route inside the jail — DEAD (mechanism)
+
+**What it would buy.** The narrower fix — expand 8.3 components without resolving symlinks, so a store-cell junction is left intact.
+
+**Why it cannot run inside the jail, from the API contract rather than a measurement.** Microsoft states the requirement up front: *"To use this function, the caller must have the following permissions on the specified path and parent directories: List Folder, Read Data, Read Attributes."* Those are precisely the ancestor permissions the jail withholds, and the same page names the resulting failure: *"It is possible to have access to a file or directory but not have access to some of the parent directories of that file or directory. As a result, GetLongPathName may fail when it is unable to query the parent directory of a path component to determine the long name for that component."* Expanding a short name means reading the parent directory, so the API fails in exactly the situation the preload exists to repair.
+
+**And it fails on a path that does not exist:** *"If the function fails for any other reason, such as if the file does not exist, the return value is zero."* Bazel carries the same limitation as an open TODO on its own wrapper — *"update GetLongPath so it succeeds even if the path does not (fully) exist"* (`src/main/native/windows/file.h`).
+
+**One correctness note worth keeping even though the API is unusable here.** The tilde is a heuristic, not a guarantee: *"do not assume that you can skip calling GetLongPathName if the path does not contain a tilde (~) character."* Any future short-name detector built on `~` is a cheap filter, not a decision.
+
+## Component-wise containment instead of a string prefix test — ADOPTED as the rule to keep
+
+**The question this settles.** Whether the tolerance rule carries the classic sibling-prefix bug, where an allowlisted `C:\foo` also matches `C:\foobar`.
+
+**It does not.** The predicate requires a path boundary after the shared prefix — `isSep(r[c.length]) || isSep(c[c.length - 1])` — and that check is load-bearing rather than decorative. Measured by running the predicate verbatim out of `windows_realpath_shim.js` against an adversarial table:
+
+| roots | candidate | result | |
+| --- | --- | --- | --- |
+| `C:\foobar\pkg` | `C:\foo` | `false` | sibling prefix, correctly rejected |
+| `C:\foo\pkg` | `C:\foo` | `true` | true ancestor |
+| `C:\foo\pkg` | `C:\` | `true` | volume root |
+| `C:\foo\pkg` | `C:\foo\pkg` | `false` | strict ancestor only |
+| `C:\foo\pkg` | `C:\foo\pkg\sub` | `false` | descendant |
+| `C:\foo\pkg` | `C:/foo` | `true` | forward slashes |
+| `C:\foo\pkg` | `c:\FOO` | `true` | case |
+| `C:\foo\pkg` | `C:\foo\.\` | `true` | dot segment and trailing separator |
+| `C:\foo\pkg` | `\\?\C:\foo` | `true` | verbatim candidate |
+| `\\?\C:\foo\pkg` | `C:\foo` | `true` | verbatim root |
+| `\\srv\share\pkg` | `\\srv\share` | `true` | UNC |
+| `\\?\UNC\srv\share\pkg` | `\\srv\share` | `true` | verbatim UNC root |
+
+**Prior art nonetheless decomposes into components rather than comparing strings, and the reason is worth carrying.** BuildXL's allowlist is a trie of path components searched one component at a time (`PolicySearch.cpp`), and its subtree test walks both paths element by element, tolerating duplicate separators and either separator flavor (`IsPathWithinTree` in `StringOperations.cpp`). The boundary condition then cannot be got wrong, because there is no boundary to check — the comparison never sees a partial component. The string form here is equivalent given the boundary check, and it is cheaper than splitting on every probe; the recommendation is to keep it, with the boundary check documented as the thing that makes it equivalent so nobody removes it as redundant.
+
+## Stamping every root in both Windows spellings — ADOPTED, and asymmetric
+
+**What it is.** The shipped fix, on record above under [the ancestor-repair verdict](#is-the-ancestor-repair-necessary-at-all--the-ace-half-is-inert-unprivileged-deletion-recommended-not-taken): `with_alternate_spellings` emits each root as built, plus `std::fs::canonicalize` of it where that succeeds.
+
+**It should stay, and it is not sufficient.** Rust's `canonicalize` on Windows is `CreateFileW` with zero access rights and `FILE_FLAG_BACKUP_SEMANTICS`, then `GetFinalPathNameByHandleW(VOLUME_NAME_DOS)` (`library/std/src/sys/pal/windows/fs.rs`). It always returns the LONG form. So a root that arrives SHORT yields the pair `{short, long}` and the walk matches whichever spelling it meets — the measured case, where the project root is `%TEMP%`-derived on a GitHub runner. A root that arrives LONG canonicalizes to itself and yields one spelling, and a walk that meets the SHORT form of that same ancestor still fails. That is not hypothetical: it is the arm gated as `anc-control-single-spelling-roots-still-lose-a-cell`, which must keep failing for the fix's own control to hold.
+
+Three further properties bound what the current call can do. It resolves symlinks and junctions, so a root that IS a junction is replaced by its target rather than paired with it. It requires the root to exist, and silently keeps only the as-built spelling when it does not. And it runs on the launcher's view of the filesystem, which is correct here only because the launcher and the child see the same volume.
+
+## Canonicalizing the roots through nub's existing non-existent-path canonicalizer — RECOMMENDED
+
+**The replacement, and nub already ships it.** The path matcher carries `canonicalize_including_nonexistent` (`crates/nub-sandbox/src/matcher/path.rs`), which resolves the longest existing prefix through the OS — collapsing symlinks, firmlinks and Windows 8.3 names — and then re-applies the remaining components with `.` and `..` collapsed lexically. It is the same walk-up-to-an-existing-prefix technique Bazel uses when short-name expansion fails on a path about to be created: *"walk up in the path until we find a prefix that exists and can be shortened, or is a root directory. Save the non-existent tail in wsuffix, we'll add it back later"* (`src/main/cpp/util/path_windows.cc`).
+
+**The change is to route `with_alternate_spellings` through it instead of bare `canonicalize`, and to keep emitting the as-built spelling beside the canonical one.** That closes the non-existent-root case and makes the canonical member of the pair well-defined for every input, without touching the child's comparison rule. It does not close the remaining direction — a root that arrives long while the walk meets the short spelling of the same ancestor — because the only API that would generate the short member is the one rejected immediately below. That direction is closed by owning the environment instead.
+
+**What is deliberately NOT recommended: a short-form spelling generated with `GetShortPathNameW`.** It fails when 8.3 generation is disabled on the volume, which Bazel documents as *"common in containers"* with the upstream reports to match, so it would produce a root set whose contents depend on volume configuration.
+
+## Owning the child's `TEMP` so the short spelling never enters — OPEN, and it is the root cause
+
+**Where nub's short spelling actually comes from.** The Windows environment floor passes the ambient `TEMP` and `TMP` through verbatim (`OS_ESSENTIAL_ENV` in `crates/nub-sandbox/src/compiler/defaults.rs`, which keeps *"the ambient's actual cased key + real value"*). On a GitHub-hosted Windows runner that value is 8.3-short, so the short spelling enters the confined child through nub's own floor, and any root derived from it is short while the working directory and a junction's `readlink` target are long. It reaches the policy on a second path too: the `$tmp` substitution symbol is `std::env::temp_dir()` (`build_jail.rs`), which reads the same ambient value, so the write anchor carries whatever spelling the environment happened to hold.
+
+**BuildXL closes this at the source rather than reconciling it downstream.** Its build parameters carry `TEMP` and `TMP` on a `DisallowedTempVariables` list annotated *"these environment variables should not be read from config, since they refer to temporary directories that we reserve the right to redirect"*, and the pip environment overrides both to a build-owned `RestrictedTemp` on top of a nine-name inherited allowlist (`Public/Src/Engine/ProcessPipExecutor/PipEnvironment.cs`). A confined process never sees the user's temp directory, in any spelling.
+
+**Why this is the right shape for nub too.** The jail already confines writes to *"a private per-run tmp"* (`build_jail.rs` module doc) and already overwrites `NODE_OPTIONS` unconditionally on the same grounds — that leaving an ambient value in place turns an allowlisted name into an injection channel. Pointing `TEMP` and `TMP` at a nub-owned directory removes the only spelling nub does not choose, which is a smaller and more durable surface than reconciling spellings at the comparison. It is filed OPEN rather than adopted because it changes what lifecycle scripts see, and packages that write to the user's temp directory and expect it to persist would notice.
+
+**What would change the verdict.** Evidence that a real package depends on inheriting the ambient temp directory. None is on record.
+
+## Suppressing short-name discovery inside the child — REJECTED (design)
+
+**What BuildXL does.** It hides short names from the confined process outright. The `FindFirstFile` family is detoured and the alternate name zeroed, with the rationale stated in the source: *"We want to hide short file names, since they are not deterministic, not always present, and we don't canonicalize them for enforcement"* (`DetouredFunctions.cpp`, `ScrubShortFileName`). A dedicated test asserts no surviving path contains a tilde.
+
+**Why it does not transfer.** It needs a Detours-style API interception layer, which nub does not have and will not acquire — the augmenter posture restricts mechanism to Node's own extension surfaces. It also addresses discovery, and nub's short spelling is inherited through the environment before the process starts, so interception would not have caught the measured case.
+
+**The transferable half is the design position, and it is adopted above:** decide one spelling, and stop the others from entering the child, rather than teaching the comparison about each one as it appears.
+
+## Disabling 8.3 generation on the volume — DEAD (privilege)
+
+**What it would buy.** The whole problem, removed. BuildXL's short-name test says so directly in its header: *"These tests should pass trivially if the test volume has short name generation disabled."*
+
+**Why it is disqualified.** The build jail must be totally unprivileged with no setup command. Changing `NtfsDisable8dot3NameCreation` or running `fsutil 8dot3name set` is machine-wide or per-volume administrative configuration, and it is not retroactive — new names stop being generated, existing ones remain, so it does not fix a machine that already has them. Stripping the existing ones is destructive, and Microsoft's own warning is unambiguous: *"Permanently removing 8dot3 file names and not modifying registry keys that point to the 8dot3 file names may lead to unexpected application failures, including the inability to uninstall an application."*
+
+**Worth knowing as an environment variable rather than a lever.** A volume with generation disabled has no short spellings at all, so a probe run there cannot reproduce the class. Any future 8.3 test must assert that the fixture actually has a short name before trusting a green result.
+
+## Cost, and what the prior art caches — the current rule is already cheap enough
+
+**What the rule costs today.** The tolerance predicate runs only on the refusal path, and only for the handful of components above every grant. The walk itself does the ordinary work: one `lstat` per component, memoised through Node's own `realpathCacheKey` cache, which the shim reads back by symbol description precisely to keep that memoisation. The root set is normalized once at install time, not per probe. There is no filesystem access in the comparison and no allocation beyond the normalized candidate.
+
+**So the recommended changes add nothing to the hot path.** Every one of them lands in the launcher, on a root set of three or four entries, once per confined spawn.
+
+**The one caching idea from prior art that nub does not have, recorded in case the shape changes.** BuildXL keeps a `ResolvedPathCache` keyed case-insensitively over normalized paths, caching the reparse-point resolution — the part that costs I/O — and takes the lock with `try_to_lock` so a contended probe degrades to redoing the work rather than blocking: *"Using the cache is best effort, as this is faster than waiting on locks."* Bazel's equivalent is to make normalization a property of the interned path object rather than of each comparison, and to gate the expensive step behind a scan for a tilde and then a cheap 8.3 regex before any filesystem call (`WindowsOsPathPolicy.java`). Neither is worth building for a per-component `lstat` walk over a few ancestors; both are the right answer if the tolerance rule ever moves to a per-operation interception layer.
+
+## Residual spelling divergences — OPEN, and every one fails closed
+
+**Two spellings the rule does not reconcile, and one it deliberately does not chase.** Measured on the predicate as shipped, and recorded so the next one is recognised as a member of this class rather than a new bug.
+
+A trailing dot or trailing space is a fourth spelling. Windows normalization trims both — *"if the path doesn't end in a separator, all trailing periods and spaces (U+0020) are removed"* — while Node's `path.win32.resolve` preserves them, so `C:\foo.` does not match a root of `C:\foo` and the tolerance does not fire. The direction is `EPERM` on a path that should have been tolerated, never a widening. It has not been observed, and the components it could affect are the ones above every grant, where a trailing dot is not a shape that occurs.
+
+Relative segments inside a verbatim path resolve differently in Node than in Windows. Microsoft states that the `\\?\` prefix *"turns off automatic expansion of the path string"* and therefore *"allows the use of `..` and `.` in the path names"*, which makes them literal component names. Node collapses them anyway: `path.win32.resolve` turns `\\?\C:\foo\..\bar` into `\\?\C:\bar`. So a verbatim candidate carrying `..` is compared as a path the OS would not open. The consequence is bounded to the same tolerate-or-throw decision. It is worth naming the general class anyway: where a lexical canonicalizer IS the security check, this divergence is a documented bypass, because the NT object manager treats `..` as an ordinary object name while `GetFullPathNameW` collapses it, so a containment check and the subsequent open can disagree about which file is named. That is not the situation here, and keeping it that way is why the boundary is the token and not the string.
+
+**Case folding is a third candidate and is left alone deliberately.** BuildXL folds to UPPERCASE with a stated reason — *"It converts to uppercase rather than lowercase because it preserves certain characters which cannot be round-trip converted between locales"* — alongside an admission that no user-mode fold reproduces the filesystem's behavior: *"there is no way to accurately model the case insensitive behavior of the file system."* Chromium narrows the problem instead and folds ASCII only. The shim folds to lowercase. Measured against the shipped predicate, the boundary arithmetic survives every length-changing and context-sensitive fold tried, because the same fold applies to both sides of the comparison and the boundary check requires a separator where the candidate ends. No change recommended, and no evidence either fold is wrong here.
+
+---
+
 # Standing defects and blockers
 
 ## Node's realpath walk opens every ancestor as a target — OPEN, and it is blocker 1
@@ -506,9 +681,11 @@ Chromium's `app_container_unittest.cc:231-244` asserts the result keeps the base
 
 **So the only configuration that WORKS is disqualified, and the only configuration that is not disqualified does not WORK.**
 
-### Repairing the ancestor chain so realpath succeeds — DEAD (privilege)
+### Repairing the ancestor chain so realpath succeeds — DEAD (privilege) as a FULL fix, and superseded
 
-Covered above under [writing traverse ACEs](#writing-traverse-aces-on-the-ancestor-chain--dead-privilege) and [harvesting the AppSilo SID](#harvesting-the-appsilo-capability-sid-that-c-already-carries--dead-mechanism). Both prongs of the two-mechanism repair are closed: the ACE write needs `WRITE_DAC` nobody has above the profile, and the capability request is kernel-refused.
+As a complete answer to this blocker it is closed: the ACE write needs `WRITE_DAC` nobody has on `C:\` or `C:\Users` (see [writing traverse ACEs](#writing-traverse-aces-on-the-ancestor-chain--dead-privilege)), and the capability request is kernel-refused (see [harvesting the AppSilo SID](#harvesting-the-appsilo-capability-sid-that-c-already-carries--dead-mechanism)) and has since been deleted. **What actually closes the realpath walk is the preload**, which tolerates a refused strict ancestor of a granted root and therefore covers `C:\` too — measured, both principals.
+
+**The ACE half is now INERT for an unprivileged principal** — measured, every cell identical with it disabled — and survives only on three ELEVATED-only cells. See [is the ancestor repair necessary at all](#is-the-ancestor-repair-necessary-at-all--the-ace-half-is-inert-unprivileged-deletion-recommended-not-taken) for the differential and the deletion recommendation.
 
 ## Piped `child_process` stdio hangs indefinitely — OPEN, and it is blocker 2
 
@@ -527,6 +704,35 @@ Covered above under [writing traverse ACEs](#writing-traverse-aces-on-the-ancest
 **One hypothesis refuted along the way, worth not re-forming.** The stall is **not** the `NODE_OPTIONS` payload size: `env-block-chars=27428` is under the 32767 ceiling and the hang reproduces with an 11-character `NODE_OPTIONS`.
 
 **What would close it.** Either libuv learning to spell the AppContainer's private pipe namespace, or the stdio shim verified in-jail.
+
+## The realpath shim does not reach Node's ESM resolver — OPEN, and it is blocker 3
+
+**The defect.** Node's ESM resolver binds `realpathSync` by DESTRUCTURING it out of `fs` when `internal/modules/esm/resolve.js` is first required, and that happens before any `--import` preload evaluates. The realpath shim replaces the property `fs.realpathSync`. The CJS resolver reads that property at CALL time (`toRealPath` in `internal/modules/helpers.js`), so it picks the shim up; the ESM resolver holds the ORIGINAL and calls it forever. So every `import()` under the jail dies `EPERM … lstat 'C:\'` — the blocker-1 defect, on the one resolver the blocker-1 repair does not cover.
+
+**Node's own source, per version.** `lib/internal/modules/esm/resolve.js` — `const { realpathSync } = require('fs')` at v18.19.0:27, v20.19.0:27, v22.15.0:28, v22.23.1:28, v23.11.0:28 and v25.9.0:28; `const fs = require('fs')` with `fs.realpathSync(...)` at v24.17.0:28 and on current `main`. **It is destructured across the whole support band except v24 and the current line, and it flip-flopped, so a version check is not a fix.**
+
+**Measured, and the sequence is what proves the mechanism** — run 30574281568, `win-deelevated-jail-probe`, branch `sandbox/win-npm-grant`, Node 22 on `windows-latest`.
+
+| arm | outcome |
+| --- | --- |
+| `npm-cli.js --version`, de-elevated | `-4048`, **empty stdout and stderr** |
+| the same, driving `Npm.load()` from `-e` so the rejection is caught | `LOAD-ERR code=EPERM errno=-4048 syscall=lstat path=C:\` |
+| its stack | `realpathSync (node:fs:2749)` ← `finalizeResolution (node:internal/modules/esm/resolve:280)` ← `moduleResolve` ← `defaultResolve` ← `ModuleLoader.import` |
+| the same cells, elevated with the ancestor repair on | `10.9.8`, `LOAD-OK` |
+
+The frame is `realpathSync (node:fs:2749)`, NOT the shim's `Object.sync (<preload>)` — which is the direct evidence that the resolver is calling the unshimmed function. In the same run, an in-child refusal tracer recorded the CJS side reaching `lstatOrTolerate` in the preload and TOLERATING `C:\` and `C:\Users`, so both behaviours are observed side by side in one process.
+
+**Why the failure is silent, which is why it read as a missing grant for two rounds.** `Display.load` opens with `await Promise.all([import('chalk'), import('supports-color')])` and only afterwards calls `log.resume()` / `output.flush()`. npm buffers every log and output event until then, and `getExitCodeFromError` (`lib/utils/error-message.js`) takes the process status from `err.errno` — so an fs refusal anywhere before that line exits `-4048` having printed nothing at all. The empty transcript is npm's buffering, not evidence about the cause.
+
+**`--require` WOULD close it, and cannot be used.** Measured on Node 22.23.1 with one fixture and one variable — the same `fs.realpathSync` replacement delivered two ways, then `import('chalk')`: via `--require`, the ESM resolver calls the replacement (5 hits, the whole chalk graph); via `--import`, 0 hits. So `--require` runs before the destructure and `--import` after. But `--require` takes a specifier the CJS resolver must resolve, and `Module._findPath` realpaths any non-main resolution — under this jail that is `lstat 'C:\'` before the shim exists. The `data:` channel the shim ships on exists precisely because `defaultResolve` short-circuits `data:` without touching the filesystem, and `--require` has no such spelling. Chicken-and-egg, not an oversight.
+
+**No grant closes it.** The refused object is `C:\`. Every route to making it openable as a target is already recorded DEAD on privilege or mechanism — see [making `C:\` and `C:\Users` readable](#making-c-and-cusers-readable--six-attempts-all-dead). This is a defect in nub's own repair, not a gap in the grant catalog.
+
+**What a fix would have to look like, and why it is not taken here.** The one remaining public seam is `module.registerHooks()` — a synchronous `resolve` hook that catches the refusal from `nextResolve` and re-resolves through the CJS resolver, which realpaths via the shim. A forced-fallback prototype resolved chalk 5 (ESM-only, `"exports": {".": "./source/index.js"}`), its `#ansi-styles` / `#supports-color` internal-imports subpaths and its relative specifiers correctly on v22.23.1. Two things stop it being a drop-in: `registerHooks` lands in **v22.15.0**, so the compat tier (20.6–22.14) stays uncovered, and the same prototype hit `Maximum call stack size exceeded` on v24.17.0 and v26.5.0. It changes module resolution semantics inside a security boundary, on a tier-banded API, with a measured per-version divergence — a design call, not a repair to slip in alongside a deletion.
+
+**Consequence for the ancestor repair.** This is the whole of the elevated column in [is the ancestor repair necessary at all](#is-the-ancestor-repair-necessary-at-all--the-ace-half-is-inert-unprivileged-deletion-recommended-not-taken): elevated, the traverse ACE makes `lstat 'C:\'` succeed, so the ESM resolver never notices it is unshimmed and npm starts. Every unprivileged user hits the defect anyway. The repair is not fixing anything — it is hiding this from CI, which is the argument for removing it, not for keeping it.
+
+**What would change the verdict.** Any of: Node adopting the namespace read on every supported line (it is already there on `main`); a `--require`-equivalent that needs no filesystem resolution; or a decided `registerHooks` design with the v24 re-entrancy understood.
 
 ## A per-file deny ACE is inert against its own child — DEAD (mechanism), and it is a design constraint
 
@@ -624,5 +830,8 @@ Surfacing these is part of this document's job.
 
 ## Changelog
 
+- 2026-07-30 — **REVERSAL:** npm's `-4048` was recorded as a missing grant in npm's own startup; it is not, and no grant closes it. It is `EPERM lstat 'C:\'` raised by Node's ESM resolver, which destructures `realpathSync` out of `fs` before any `--import` preload evaluates and therefore never sees the realpath shim — new section, [blocker 3](#the-realpath-shim-does-not-reach-nodes-esm-resolver--open-and-it-is-blocker-3), with the per-version source survey, the `--require`-beats-`--import` differential, and why npm reports nothing. The probe grew two durable diagnostics that produced it: an in-child refusal tracer and a bisect that drives `Npm.load()` directly so the rejection is caught rather than buffered. The ancestor repair's ACE half is therefore NOT deleted — elevated it still resolves this cell, which is the mask the deletion argument is about.
+- 2026-07-30 — Added the path-canonicalization survey, after four spelling defects had been fixed one at a time. Establishes that no filesystem canonicalizer is reachable inside the jail — `GetFinalPathNameByHandleW` is measured refused, and `GetLongPathNameW` requires the ancestor permissions the jail withholds and fails on a path that does not exist — so canonicalization belongs in the launcher and the child keeps a lexical rule, which is the split BuildXL's Detours sandbox uses. Records that the tolerance rule carries NO sibling-prefix boundary bug (measured against the shipped predicate), that the both-spellings fix is asymmetric and should route through the non-existent-path canonicalizer nub already ships, and that the root cause of the 8.3 case is the environment floor passing the ambient temp directory through verbatim.
+- 2026-07-30 — Ran the arm every previous matrix left out: repair-OFF **with** the realpath preload, beside repair-ON, both principals. Deleted the ancestor repair's capability half (kernel-refused, never once widened a launch). Found and fixed the reason the ACE half still looked load-bearing — the preload's roots and the walked components arrive in different Windows spellings (8.3 short vs long), so its tolerance rule silently never fired; roots are now stamped in both. With that fixed the ACE half is INERT de-elevated and deletion is recommended but not taken. Also refuted the 32,767 `CreateProcessW` environment-block ceiling: a 56,790-character block launches with every preload active.
 - 2026-07-30 — Moved into tracked `research/design/` so code comments can link here, and scrubbed of pointers into untracked documents. Recorded four newly settled approaches, all ADOPTED: the nub-owned staged interpreter copy, `SetKernelObjectSecurity` as the ancestor-ACE writer, fail-soft leaf grants, and bundled busybox as the Windows lifecycle shell. Corrected the capability-SID comments in `backend/windows.rs` and `compiler/defaults.rs`, which described the AppSilo capability as reachable unprivileged; both now state the measured kernel refusal.
 - 2026-07-29 — Initial consolidation.
