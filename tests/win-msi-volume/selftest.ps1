@@ -88,6 +88,7 @@ function New-MsiFacts {
     'deelev-progfiles-write' = 'ERR UnauthorizedAccessException'
     'deelev-disable-artifact' = 'disable-variant pf-write=OK'
     'deelev-delete-privs' = 'SeChangeNotifyPrivilege:on'
+    'deelev-progfiles-landed' = 'none'
   }
 }
 

@@ -376,6 +376,15 @@ foreach ($variant in @('disable', 'delete')) {
     $facts["deelev-$variant-pf"] = $res['pf']
   } catch { Fact "deelev/$variant/impersonation-error" "$_" }
   finally { $h.Dispose() }
+  # THE READ-BACK, from OUTSIDE the impersonation. Every other arm here proves its grant physically
+  # landed; run 2's version of this one inferred success from the absence of an exception and was
+  # wrong. What the write REPORTED and what the descriptor SAYS are now separate cells.
+  $landed = Get-AceRightsFor $progFiles $probeSid
+  $facts["deelev-$variant-landed"] = $landed
+  Fact "deelev/$variant/ace-actually-on-disk-after-write" $landed
+  if (($facts["deelev-$variant-pf"] -eq 'OK') -and ($landed -eq 'none')) {
+    Fact "deelev/$variant/DISAGREEMENT" 'the write reported OK but no ace is present — trust the descriptor, not the return'
+  }
   # If the impersonated write DID land on Program Files, undo it before the next variant — the probe
   # must not leave the machine more permissive than it found it, and variant 2 must start clean.
   if ($facts["deelev-$variant-pf"] -eq 'OK') {
@@ -391,7 +400,9 @@ foreach ($variant in @('disable', 'delete')) {
 # authority. `disable` is retained beside it as the visible counter-example.
 $facts['deelev-admin'] = $facts['deelev-delete-admin']
 $facts['deelev-own-profile-write'] = $facts['deelev-delete-own']
+# The verdict reads the DESCRIPTOR, not the reported status: "refused" means no ace is on disk.
 $facts['deelev-progfiles-write'] = $facts['deelev-delete-pf']
+$facts['deelev-progfiles-landed'] = $facts['deelev-delete-landed']
 $facts['deelev-disable-artifact'] = "disable-variant pf-write=$($facts['deelev-disable-pf']) (privileges DISABLED not deleted, so this variant retains the authority)"
 Fact 'deelev/artifact-note' $facts['deelev-disable-artifact']
 

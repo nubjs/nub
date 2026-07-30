@@ -512,8 +512,13 @@ Add-Type -TypeDefinition $acJailSrc -Language CSharp -ErrorAction Stop
 # ── ACE plumbing, identical in shape to `tests/win-bypass-traverse/probe.ps1` ──
 # Inheritable so an already-existing subtree picks the grant up; every write lands on a directory
 # the invoking user owns or created, which needs no privilege.
+# `-ErrorAction Stop` ON EVERY Get-Acl/Set-Acl IS LOAD-BEARING, and run 2 is why. The probes run with
+# `$ErrorActionPreference = 'Continue'`, under which a REFUSED `Set-Acl` is a non-terminating error:
+# it prints, the function returns normally, and a caller's `try/catch` records success. That is exactly
+# how the impersonated unprivileged-repair arm reported that it had rewritten
+# `C:\Program Files\nodejs` while (per the residue check) leaving no ace behind at all.
 function Grant-AcAce([string]$path, [string]$sid, [string]$rights) {
-  $acl = Get-Acl -LiteralPath $path
+  $acl = Get-Acl -LiteralPath $path -ErrorAction Stop
   $trustee = New-Object System.Security.Principal.SecurityIdentifier($sid)
   $inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
              [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
@@ -522,14 +527,14 @@ function Grant-AcAce([string]$path, [string]$sid, [string]$rights) {
     [System.Security.AccessControl.PropagationFlags]::None,
     [System.Security.AccessControl.AccessControlType]::Allow)
   $acl.AddAccessRule($rule)
-  Set-Acl -LiteralPath $path -AclObject $acl
+  Set-Acl -LiteralPath $path -AclObject $acl -ErrorAction Stop
 }
 
 function Revoke-AcAce([string]$path, [string]$sid) {
-  $acl = Get-Acl -LiteralPath $path
+  $acl = Get-Acl -LiteralPath $path -ErrorAction Stop
   $trustee = New-Object System.Security.Principal.SecurityIdentifier($sid)
   $null = $acl.PurgeAccessRules($trustee)
-  Set-Acl -LiteralPath $path -AclObject $acl
+  Set-Acl -LiteralPath $path -AclObject $acl -ErrorAction Stop
 }
 
 # The mandatory per-arm read-back: did the inheritable ACE physically REACH the decisive target?

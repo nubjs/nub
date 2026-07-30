@@ -140,8 +140,8 @@ function Invoke-MsiVerdict {
   # a false positive in run 1 and the counter-example is worth keeping on screen.
   Fact 'deelev-disable-variant-artifact' (F 'deelev-disable-artifact')
   Fact 'deelev-delete-variant-privileges' (F 'deelev-delete-privs')
-  Prop 'unprivileged-repair-of-program-files-is-refused' ((F 'deelev-progfiles-write') -ne 'OK') `
-    "PASS means nub cannot fix this on the user's behalf without elevation. Measured on the privilege-DELETED token, not the merely-disabled one: $(F 'deelev-progfiles-write') owner=$(F 'msi-owner')"
+  Prop 'unprivileged-repair-of-program-files-is-refused' ((F 'deelev-progfiles-landed') -eq 'none') `
+    "PASS means nub cannot fix this on the user's behalf without elevation. Measured on the privilege-DELETED token, and read off the DESCRIPTOR rather than off the write's return value: ace-on-disk=$(F 'deelev-progfiles-landed') write-reported=$(F 'deelev-progfiles-write') owner=$(F 'msi-owner')"
 
   return $script:fails
 }
