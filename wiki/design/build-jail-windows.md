@@ -130,43 +130,60 @@ The old writer blows up **~1,444×** with tree size; the new one is flat. The re
 
 **What would change the verdict.** Nothing. It is strictly cheaper than both predecessors at identical effect.
 
-## Is the ancestor repair necessary at all — ADOPTED, and the ACE half is LOAD-BEARING unprivileged
+## Is the ancestor repair necessary at all — the ACE half is INERT unprivileged; DELETION RECOMMENDED, not taken
 
-**The question, and it was a deletion question.** The ancestor repair is the least elegant mechanism in the Windows backend, and the defect it was built for has since acquired a second, cheaper fix: [the realpath preload](#nodes-realpath-walk-opens-every-ancestor-as-a-target--open-and-it-is-blocker-1) ships a userland walk that tolerates a refused component when it is a strict ancestor of a granted root, and it covers `C:\` — which no ACE can. So: given the preload, does removing the repair change anything?
+**The question, and it was a deletion question.** The ancestor repair is the least elegant mechanism in the Windows backend, and the defect it was built for acquired a second, cheaper fix: [the realpath preload](#nodes-realpath-walk-opens-every-ancestor-as-a-target--open-and-it-is-blocker-1) ships a userland walk that tolerates a refused component when it is a strict ancestor of a granted root — and it covers `C:\`, which no ACE can. So: given the preload, does removing the repair change anything?
 
 **Why nobody had answered it.** Every previous matrix varied the repair with NO preload, or stamped the preload only in the repaired arm. The cell that decides deletion — repair-**OFF** *with* the preload, beside repair-**ON** with the same preload, one fixture, one run — had never been run.
 
-**Measured** — runs 30568304451 and 30568739579, `win-deelevated-jail-probe`, branch `sandbox/win-ancestor-necessity`, both principals, `NUB_SANDBOX_WIN_NO_ANCESTOR_REPAIR` the only variable between the two compared arms. Group `ancestor_necessity` in `tests/windows_deelevated_jail.rs`.
+**Measured** — run 30571090527, `win-deelevated-jail-probe`, branch `sandbox/win-ancestor-necessity`. Both principals, the realpath term stamped in every arm that claims to measure the shipping configuration, `NUB_SANDBOX_WIN_NO_ANCESTOR_REPAIR` the only variable between the two compared arms. Group `ancestor_necessity` in `tests/windows_deelevated_jail.rs`. Cells: an absolute entry point whose body `require()`s an absolute path; a **bare specifier through a store-cell junction** (nub's default `Isolated` shape); the distribution's own `npm-cli.js` as an absolute entry; and seven non-Node cells — `cmd /c dir /b`, `cmd /c cd`, `where.exe node`, `powershell`, `git --version`, `git rev-parse`, `python -c`.
 
-| cell | control<br>no preload, no repair | repair ON<br>+ preload | repair OFF<br>+ preload |
+| | control<br>no preload, no repair | repair ON<br>+ preload | repair OFF<br>+ preload |
 | --- | --- | --- | --- |
 | **DE-ELEVATED** — IL 8192, no admin authority | | | |
-| absolute entry → absolute `require()` | `EPERM lstat 'C:\'` | OK | **OK** |
-| **bare specifier through a store-cell junction** | `EPERM lstat 'C:\'` | **OK** | **REFUSED** |
+| absolute entry → absolute `require()` | `EPERM lstat 'C:\'` | OK | OK |
+| bare specifier through a junction | `EPERM lstat 'C:\'` | OK | OK |
 | `npm-cli.js` as an absolute entry | `EPERM lstat 'C:\'` | `-4048` | `-4048` |
-| `cmd /c dir /b` · `cmd /c cd` · `where.exe node` · `powershell` · `git --version` · `git rev-parse` · `python -c` | — | 7 cells | byte-identical, 7/7 |
+| the seven non-Node cells | — | 7 cells | **byte-identical, 7/7** |
 | **ELEVATED** — IL 12288, admin authority | | | |
 | absolute entry → absolute `require()` | `EPERM lstat 'C:\'` | OK | OK |
-| bare specifier through a junction | `EPERM lstat 'C:\'` | **OK** | **REFUSED** |
+| bare specifier through a junction | `EPERM lstat 'C:\'` | OK | OK |
 | `npm-cli.js` as an absolute entry | `EPERM lstat 'C:\'` | **OK** (`10.9.8`) | **`-4048`** |
 | `cmd /c dir /b` | — | **OK** (listing) | **`Access is denied.`** |
 | `where.exe node` | — | **OK** (resolves) | **`Could not find files`** |
 
-**THE VERDICT: KEEP THE ACE HALF.** The one cell that settles it is the bare specifier resolved through a **store-cell junction**, and it is not an edge case — it is nub's default `NodeLinker::Isolated` layout, the shape *every* dependency in a real install is reached through. With the preload stamped and the repair disabled it is REFUSED, de-elevated and elevated alike, and the refusal comes from inside the realpath shim's own walk: the shim declines to fake a component that is not a strict ancestor of a granted root, which is exactly the scoping that keeps it from being `--preserve-symlinks`. The repair is what makes that component openable. Elevated, three further cells depend on it — `where.exe`'s PATH search, `cmd`'s working-directory enumeration, and npm's own deep entry point — all ancestor opens as TARGETS above the profile, which only an elevated token can re-ACE.
+**THE VERDICT. De-elevated — the principal the build jail is specified for — the ancestor repair changes NOTHING.** Every Node outcome is identical and the non-Node transcript is byte-identical across all seven cells. Elevated, three cells still depend on it: `where.exe`'s PATH search, `cmd`'s working-directory enumeration, and npm's own deep entry point — all ancestor opens as TARGETS above the profile, which only an elevated token can re-ACE.
 
-**The absolute-`require()` half of the original justification IS now covered by the preload**, in both principals. That is a real narrowing of what the repair is for: it is no longer the answer to the realpath blocker, it is the answer to one resolution shape the preload deliberately refuses to fake.
+**So the mechanism is deletable for every unprivileged user, and its entire remaining value is making an ELEVATED run behave better than an unprivileged one.** That is an argument for removing it, not keeping it: those three operations already fail for every normal user, and the repair's only effect is to hide that on CI. **The deletion is NOT taken here** — whether an elevated run may keep a widening an unprivileged one cannot is a posture call, and taking it would change behaviour other lanes currently observe green. What would go: `ancestor_chain`, `set_ace_on_object`, `TRAVERSE_MASK`, the `AceGuard.objects` teardown revoke, `windows_object_traverse_ace` and its re-exports, the `NUB_SANDBOX_WIN_NO_ANCESTOR_REPAIR` seam, and the `ace_cost` / `ancestor_repair` groups in `windows_jail_repairs.rs`.
 
-**A near-miss worth recording, because it would have produced the opposite answer.** The first run of this group reported the junction cell failing in ALL SIX arm-instances, which reads as "the repair changes nothing" and would have been published as a clean deletion verdict. It was a harness defect: the `mklink` command line was built through `Command::arg` — Rust's quoting, applied on the way to a shell that does not parse it that way — and its output was discarded, so no junction was ever created. **Failing in the CONTROL is what exposed it**: a cell that cannot even reproduce the defect is measuring its own fixture. The fix is `raw_arg` plus printing the result. A second defect compounded it — a stack thrown inside a `data:` preload puts ~15 kB of base64 ahead of the message, so the 240-character log excerpt was pure payload and the cause was unreadable.
+**WHAT ACTUALLY MADE IT INERT, and it was a defect in the preload, not a property of the jail.** Until run 30571090527 the repair still looked load-bearing de-elevated, on the bare-specifier cell. The cause, once the `data:` frame was stripped from the confined child's stderr: the shim threw `EPERM … lstat 'C:\Users\runneradmin'` from `lstatOrTolerate` — refusing to tolerate a component that IS a strict ancestor of a granted root. **The tolerance rule is a lowercased string prefix test, and Windows hands one process two spellings of the same directory:** `%TEMP%` arrives 8.3-SHORT (`C:\Users\RUNNER~1\…`) while the working directory and a junction's `readlink` target arrive LONG (`C:\Users\runneradmin\…`). Whichever spelling the roots carried, the walk met the other one.
 
-**Corroborating fact, and a live demonstration of a known-unsound proxy.** `can_write_dacl` reports **0 of 13** sampled ancestors writable in BOTH principals — including `C:\`, `C:\Users` and `%USERPROFILE%`. It is wrong in both: the repair demonstrably lands in each. That is the same unsoundness above medium IL already recorded under [fail-soft leaf grants](#fail-soft-leaf-grants--adopted), now observed at medium IL as well. **Key on the differential, never on the proxy** — a verdict built on this reading would have been backwards.
+Measured in both directions on one fixture (run 30569197328), which is what made it a finding rather than a guess:
 
-**Gated, so the arms are admissible.** Two rounds of Windows conclusions were retracted for being measured on launches reproducing none of nub's repairs, so every arm reports the shims' own `globalThis` sentinels from inside the confined child: `true` in both preload arms, `false` in the control. The control reproduces the defect verbatim — `EPERM: operation not permitted, lstat 'C:\'` at `realpathSync` ← `toRealPath`. And the flag is ruled out as the thing doing the work: `realpath_unavailable_resolution.rs` already measures `--preserve-symlinks-main` alone leaving every `require()` dying `EPERM`.
+| roots stamped as | absolute entry | bare through junction | `npm-cli.js` | thrown on |
+| --- | --- | --- | --- | --- |
+| SHORT only (`%TEMP%`-derived) | OK | **REFUSED** | `-4048` | `lstat 'C:\Users\runneradmin'` |
+| LONG only (canonicalized) | **REFUSED** | **REFUSED** | **REFUSED** | `lstat 'C:\Users\RUNNER~1'` |
+| **BOTH** (the fix) | OK | OK | `-4048` | — |
 
-**What would change the verdict.** Identifying the exact component the junction walk is refused on and GRANTING it, so the shim's tolerance rule never has to reach for it. Then the repair is inert in both principals and the whole mechanism — `ancestor_chain`, `set_ace_on_object`, `TRAVERSE_MASK`, the `AceGuard.objects` teardown revoke, `windows_object_traverse_ace`, and the `ace_cost` / `ancestor_repair` probe groups — deletes. That component is **NOT YET ESTABLISHED**; the probe now prints the shim's thrown message with the `data:` frame stripped, which is the reading that names it.
+`realpath_shim_node_options` now stamps every root in both spellings (`with_alternate_spellings`). Adding a spelling cannot widen the jail — the tolerance only ever asserts that a component the OS refused to interrogate is a plain directory, and both spellings name the same directory. The `\\?\` verbatim prefix is a THIRD spelling of this same bug, already special-cased inside the shim (`stripLongPrefix`) after it measured as `native-longpath-granted=ERR`; the fix is applied where roots are chosen so the comparison keeps one rule instead of accreting per-spelling cases.
 
-**The capability half went unconditionally** — see [harvesting the AppSilo capability SID](#harvesting-the-appsilo-capability-sid-that-c-already-carries--dead-mechanism). It cannot succeed, so it cannot be load-bearing for anything.
+**THE CONTROL FOR THAT FIX, gated in the same run.** An arm carrying a SINGLE spelling must still lose cells, or the expansion is not what changed the outcome: `anc-control-single-spelling-roots-still-lose-a-cell` = PASS, `(false, false, false)` against the fixed arm's `(true, true, false)`.
 
-**One fact this group established in passing, and it refutes a standing assumption.** The full production `NODE_OPTIONS` stamp is **55,610 characters** and the whole environment block **56,790** — well past the 32,767 this record repeatedly calls a hard `CreateProcessW` ceiling — and it LAUNCHES: the confined child reports all three preload sentinels (`realpath`, `stdio`, `net-gate`) true, in both principals. So the ceiling does not bind for a `CREATE_UNICODE_ENVIRONMENT` block. The `stdio_shim_payload_fits_the_env_block` budget test and the prose around it are calibrated against a limit that was not measured here.
+**Gated, so the arms are admissible.** Two rounds of Windows conclusions were retracted for being measured on launches reproducing none of nub's repairs, so every arm reports the shims' own `globalThis` sentinels from inside the confined child: `true` in both preload arms, `false` in the control. The control reproduces the defect verbatim — `EPERM: operation not permitted, lstat 'C:\'` at `realpathSync` ← `toRealPath`. And `--preserve-symlinks-main`, which rides the same term, is ruled out as the thing doing the work: `realpath_unavailable_resolution.rs` already measures it alone leaving every `require()` dying `EPERM`.
+
+**Two near-misses worth recording, because each would have produced a WRONG published answer.**
+
+- **A cell that failed in the CONTROL too.** The first run reported the junction cell failing in all six arm-instances, which reads as a clean deletion verdict. No junction had ever been created: the `mklink` command line went through `Command::arg` — Rust's quoting, applied on the way to a shell that does not parse it that way — and its output was discarded. *Failing in the control is the tell that a cell is measuring its own fixture.* Fixed with `raw_arg` plus printing the result.
+- **An unreadable error.** A stack thrown inside a `data:` preload puts ~15 kB of base64 ahead of the message, so the 240-character log excerpt was pure payload and the cause was invisible for two runs. The excerpt now drops `data:` frames before truncating — that one change is what turned "the shim threw" into the spelling defect above.
+
+**Corroborating fact, and a live demonstration of a known-unsound proxy.** `can_write_dacl` reports **0 of 13** sampled ancestors writable in BOTH principals, including `C:\`, `C:\Users` and `%USERPROFILE%`. It is wrong in both — the repair demonstrably lands in each. Same unsoundness above medium IL already recorded under [fail-soft leaf grants](#fail-soft-leaf-grants--adopted), now observed at medium IL too. **Key on the differential, never on the proxy.**
+
+**Still open, and it is the reason the elevated column is not empty.** `npm-cli.js` fails `-4048` (`UV_EPERM`) de-elevated in every preloaded arm, with an EMPTY stderr — so it is not a realpath refusal and the shim cannot help it. It is a missing grant somewhere in npm's own startup. Granting it is what would also close the elevated `where.exe` / `dir` cells and leave the repair inert in both principals.
+
+**The capability half went unconditionally** — see [harvesting the AppSilo capability SID](#harvesting-the-appsilo-capability-sid-that-c-already-carries--dead-mechanism).
+
+**One assumption this group refuted in passing.** The full production `NODE_OPTIONS` stamp is **56,010 characters** and the whole environment block **56,790** — 1.73× the 32,767 this record repeatedly calls a hard `CreateProcessW` ceiling — and it LAUNCHES, with the confined child reporting all three preload sentinels (`realpath`, `stdio`, `net-gate`) true, in both principals, across four runs. The ceiling does not bind for a `CREATE_UNICODE_ENVIRONMENT` block. `stdio_shim_payload_fits_the_env_block` and the prose around it are calibrated against a limit that was never measured. (What is established is that 56,790 works; a real cap above that is untested.)
 
 
 ## Fail-soft leaf grants — ADOPTED
@@ -549,7 +566,7 @@ Chromium's `app_container_unittest.cc:231-244` asserts the result keeps the base
 
 As a complete answer to this blocker it is closed: the ACE write needs `WRITE_DAC` nobody has on `C:\` or `C:\Users` (see [writing traverse ACEs](#writing-traverse-aces-on-the-ancestor-chain--dead-privilege)), and the capability request is kernel-refused (see [harvesting the AppSilo SID](#harvesting-the-appsilo-capability-sid-that-c-already-carries--dead-mechanism)) and has since been deleted. **What actually closes the realpath walk is the preload**, which tolerates a refused strict ancestor of a granted root and therefore covers `C:\` too — measured, both principals.
 
-**The ACE half nonetheless survives, for a DIFFERENT reason than the one it was built for.** It is what makes a bare specifier through a store-cell junction resolve — the shape nub's default `Isolated` linker produces for every dependency — which the preload deliberately refuses to fake. See [is the ancestor repair necessary at all](#is-the-ancestor-repair-necessary-at-all--adopted-and-the-ace-half-is-load-bearing-unprivileged) for the differential.
+**The ACE half is now INERT for an unprivileged principal** — measured, every cell identical with it disabled — and survives only on three ELEVATED-only cells. See [is the ancestor repair necessary at all](#is-the-ancestor-repair-necessary-at-all--the-ace-half-is-inert-unprivileged-deletion-recommended-not-taken) for the differential and the deletion recommendation.
 
 ## Piped `child_process` stdio hangs indefinitely — OPEN, and it is blocker 2
 
@@ -665,5 +682,6 @@ Surfacing these is part of this document's job.
 
 ## Changelog
 
+- 2026-07-30 — Ran the arm every previous matrix left out: repair-OFF **with** the realpath preload, beside repair-ON, both principals. Deleted the ancestor repair's capability half (kernel-refused, never once widened a launch). Found and fixed the reason the ACE half still looked load-bearing — the preload's roots and the walked components arrive in different Windows spellings (8.3 short vs long), so its tolerance rule silently never fired; roots are now stamped in both. With that fixed the ACE half is INERT de-elevated and deletion is recommended but not taken. Also refuted the 32,767 `CreateProcessW` environment-block ceiling: a 56,790-character block launches with every preload active.
 - 2026-07-30 — Moved into tracked `research/design/` so code comments can link here, and scrubbed of pointers into untracked documents. Recorded four newly settled approaches, all ADOPTED: the nub-owned staged interpreter copy, `SetKernelObjectSecurity` as the ancestor-ACE writer, fail-soft leaf grants, and bundled busybox as the Windows lifecycle shell. Corrected the capability-SID comments in `backend/windows.rs` and `compiler/defaults.rs`, which described the AppSilo capability as reachable unprivileged; both now state the measured kernel refusal.
 - 2026-07-29 — Initial consolidation.
