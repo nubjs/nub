@@ -108,7 +108,8 @@ sub "6.1 bisect: does the kill survive a MINIMAL jail? (isolates the tree from t
 # does not, the fault is something the rsync brought in, not the reroot itself.
 MIN=/tmp/minjail
 sudo rm -rf "$MIN"; sudo mkdir -p "$MIN"/{bin,usr/lib,System/Library/dyld,dev}
-sudo cp /bin/echo "$MIN/bin/echo"; sudo codesign -f -s - "$MIN/bin/echo" 2>&1
+# Plain copy, deliberately unsigned-by-us: re-signing is the thing that gets killed.
+sudo cp /bin/echo "$MIN/bin/echo"
 sudo cp -p /usr/lib/dyld "$MIN/usr/lib/dyld"
 sudo cp -p "$CS"/dyld_shared_cache_arm64e* "$MIN/System/Library/dyld/" 2>/dev/null
 sudo mkdir -p "$MIN/System/Volumes/Preboot/Cryptexes/OS/System/Library"
@@ -140,9 +141,18 @@ NV=v24.18.0
 run curl -fsSL -o "$W/node.tar.xz" "https://nodejs.org/dist/$NV/node-$NV-darwin-arm64.tar.xz"
 sudo mkdir -p "$JAIL/opt/node"
 run sudo tar xJf "$W/node.tar.xz" -C "$JAIL/opt/node" --strip-components=1
-run sudo codesign -f -s - "$JAIL/opt/node/bin/node"
-run sudo chroot "$JAIL" /opt/node/bin/node -e 'console.log("node in jail:", process.version)'
-note "node in jail: rc=$?"
+# Official Node is arm64 (not arm64e) and ships hardened-runtime + a Node Foundation
+# identity, so BOTH variants are worth a cell: as-shipped tests whether hardened runtime is
+# tolerated, re-signed tests whether stripping it is safe for a non-Apple binary.
+sudo cp -p "$JAIL/opt/node/bin/node" "$JAIL/opt/node/bin/node_resigned"
+run sudo codesign -f -s - "$JAIL/opt/node/bin/node_resigned"
+run file "$JAIL/opt/node/bin/node"
+run sudo chroot "$JAIL" /opt/node/bin/node -e 'console.log("node as-shipped in jail:", process.version)'
+NODE_ASIS=$?
+run sudo chroot "$JAIL" /opt/node/bin/node_resigned -e 'console.log("node re-signed in jail:", process.version)'
+note "node in jail: as-shipped rc=$NODE_ASIS re-signed rc=$?"
+# Everything downstream needs a working node; prefer whichever variant ran.
+[ "$NODE_ASIS" -ne 0 ] && sudo cp -p "$JAIL/opt/node/bin/node_resigned" "$JAIL/opt/node/bin/node"
 
 hdr "8 CRITERION (a) — realpath / ancestor walk, the whole point of rerooting"
 run sudo chroot "$JAIL" /opt/node/bin/node -e '
