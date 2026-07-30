@@ -1,0 +1,33 @@
+# Branch-scoped macOS probe (see .claude/skills/ci-adhoc-test) — NO PR needed.
+# Answers whether macOS permits a genuinely rerooted filesystem (chroot) with SIP ENABLED,
+# which decides whether the build jail can stop being a path allowlist. Needs sudo, a devfs
+# mount and a multi-GB jail, so it must run on an ephemeral runner, never the dev host.
+name: macos-chroot-probe
+on:
+  push:
+    branches: [macos-chroot-probe]
+    paths:
+      - 'tests/macos-chroot-probe/**'
+      - '.github/workflows/macos-chroot-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: chroot / AMFI gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # Only labels guaranteed to exist — an unknown label queues until timeout rather
+        # than failing fast, which would burn the whole 45-minute budget on nothing.
+        os: [macos-latest]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - name: Probe
+        run: bash tests/macos-chroot-probe/probe.sh 2>&1
