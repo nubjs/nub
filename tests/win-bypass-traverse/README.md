@@ -11,7 +11,7 @@ nub's Windows build jail has two candidate unprivileged mechanisms, and this dec
 | mechanism | filesystem reads | egress lever |
 | --- | --- | --- |
 | restricted token + low integrity | work everywhere, no ACE written anywhere | **none unprivileged** — the network tier has to be a userland preload allowlist |
-| AppContainer (LowBox) | need a per-path ACE, and `C:\` / `C:\Users` cannot be ACE'd unprivileged | **coarse deny for free** — withhold the `internetClient` capability |
+| AppContainer (LowBox) | need a per-path ACE — and `C:\` / `C:\Users` cannot be ACE'd unprivileged, which was assumed fatal and [is not](results.md) | **coarse deny for free** — withhold the `internetClient` capability |
 
 The AppContainer route was believed dead because every prior measurement found `C:\` and `C:\Users` DENIED. Those measurements used `AccessCheck`, which evaluates **one** descriptor. A LowBox token retains `SeChangeNotifyPrivilege` enabled, and that privilege makes the object manager skip the access check on every **intermediate** path component — so a DENIED row on `C:\` establishes only that `lstat` / `readdir` / `chdir` **on `C:\` itself** fails, not that a deep open **through** it fails. `AccessCheck` cannot model bypass-traverse by construction. Only a real launch can.
 
@@ -53,7 +53,18 @@ Any pre-existing `S-1-15-*` ACE reaching the test tree would make the ace-absent
 
 ## `selftest.ps1` — the verdict is itself tested
 
-The verdict block lives in `verdict.ps1` so `selftest.ps1` can drive it with **synthetic** cells across four worlds and require a different answer from each: bypass-traverse works (all pass), bypass-traverse fails (the decisive properties fail, every control still passes — what a *clean negative* must look like), the harness is dead (the baseline properties fail, so a broken harness can never be reported as a clean negative), and the grant is inert (the controls fail, so a grant that scopes nothing can never be reported as a pass). It needs no Windows APIs and runs anywhere:
+The verdict block lives in `verdict.ps1` so `selftest.ps1` can drive it with **synthetic** cells across six worlds and require a different answer from each:
+
+| world | what it models | required answer |
+| --- | --- | --- |
+| `works` | bypass-traverse works | every property passes |
+| `denied` | bypass-traverse fails | the decisive properties fail, every control still passes — what a *clean negative* must look like |
+| `harness-dead` | every arm fails, `plain` included | the baseline properties fail, so a broken harness can never be reported as a clean negative |
+| `ace-inert` | everything passes everywhere | the controls fail, so a grant that scopes nothing can never be reported as a pass |
+| `grant-never-landed` | the ACE never propagated into the deep file | the grant-reached control fails. Read-cell for read-cell identical to `denied`, which is the point — without that control a harness slip is indistinguishable from a real kernel denial |
+| `defect-absent` | the no-flag arm ran fine | the flag differential fails, so the flags are never credited with fixing something that was not broken |
+
+It needs no Windows APIs and runs anywhere:
 
 ```
 pwsh -NoLogo -NonInteractive -File tests/win-bypass-traverse/selftest.ps1
