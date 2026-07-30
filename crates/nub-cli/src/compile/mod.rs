@@ -408,7 +408,11 @@ fn reject_colliding_names(
     let mut seen: std::collections::HashMap<String, &str> =
         std::collections::HashMap::with_capacity(files.len());
     for (name, _) in files {
-        let key = if folds { name.to_lowercase() } else { name.clone() };
+        let key = if folds {
+            name.to_lowercase()
+        } else {
+            name.clone()
+        };
         let Some(prev) = seen.insert(key, name.as_str()) else {
             continue;
         };

@@ -492,9 +492,8 @@ impl Plugin for NewUrlAssets {
             };
             let mut named = Vec::with_capacity(edits.len());
             for edit in edits {
-                let bytes = std::fs::read(&edit.source).map_err(|e| {
-                    anyhow!("reading {} for new URL(): {e}", edit.source.display())
-                })?;
+                let bytes = std::fs::read(&edit.source)
+                    .map_err(|e| anyhow!("reading {} for new URL(): {e}", edit.source.display()))?;
                 let name = self.collected.add(&edit.source, bytes)?;
                 named.push((edit, name));
             }
@@ -646,9 +645,9 @@ fn binds_url(program: &Program<'_>) -> bool {
     use oxc_ast::ast::{BindingPattern, Statement};
 
     program.body.iter().any(|stmt| match stmt {
-        Statement::VariableDeclaration(d) => d.declarations.iter().any(|decl| {
-            matches!(&decl.id, BindingPattern::BindingIdentifier(id) if id.name == "URL")
-        }),
+        Statement::VariableDeclaration(d) => d.declarations.iter().any(
+            |decl| matches!(&decl.id, BindingPattern::BindingIdentifier(id) if id.name == "URL"),
+        ),
         Statement::ClassDeclaration(c) => c.id.as_ref().is_some_and(|id| id.name == "URL"),
         Statement::FunctionDeclaration(f) => f.id.as_ref().is_some_and(|id| id.name == "URL"),
         _ => false,
@@ -1617,8 +1616,7 @@ mod tests {
     fn fixture_dir(tag: &str) -> PathBuf {
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let seq = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("nub-{tag}-{}-{seq}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nub-{tag}-{}-{seq}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

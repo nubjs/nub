@@ -469,7 +469,10 @@ mod tests {
     // depending on which loader family the value named.
     #[test]
     fn a_multi_dot_extension_is_claimed_the_way_rolldown_matches_it() {
-        let p = FilePlugin::new(&plan(&[".tar.gz=file".into()]).expect("valid"), Arc::default());
+        let p = FilePlugin::new(
+            &plan(&[".tar.gz=file".into()]).expect("valid"),
+            Arc::default(),
+        );
         assert!(p.claims("/proj/bundle.tar.gz"));
         assert!(!p.claims("/proj/notes.gz"), "only .tar.gz was mapped");
     }
