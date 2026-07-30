@@ -40,16 +40,18 @@ pub(crate) fn configure_script_settings(
         .or_else(|| https_proxy.clone());
     let no_proxy = aube_settings::resolved::no_proxy(ctx).and_then(non_empty_string);
     // Source the embedder-owned overlay from the engine context: an embedder
-    // (e.g. nub) populates `env_overlay` / `path_prepends` on the context, and
-    // this settings pass copies them into `ScriptSettings` for the spawn path
-    // to apply. Reading from the context (not a prior `ScriptSettings`
-    // snapshot) means this pass can't wipe them no matter when it runs. The
-    // `.npmrc`/workspace-derived fields above are the only ones this function
-    // owns. Default-empty on the context ⇒ behavior-preserving.
+    // (e.g. nub) populates `env_overlay` / `path_prepends` /
+    // `default_script_shell` on the context, and this settings pass copies them
+    // into `ScriptSettings` for the spawn path to apply. Reading from the
+    // context (not a prior `ScriptSettings` snapshot) means this pass can't
+    // wipe them no matter when it runs. The `.npmrc`/workspace-derived fields
+    // above are the only ones this function owns. Default-empty on the context
+    // ⇒ behavior-preserving.
     let overlay = aube_util::engine_context();
     aube_scripts::set_script_settings(aube_scripts::ScriptSettings {
         node_options,
         script_shell,
+        default_shell: overlay.default_script_shell,
         unsafe_perm,
         shell_emulator,
         node_bin_dir: runtime.as_ref().and_then(|r| r.bin_dir.clone()),

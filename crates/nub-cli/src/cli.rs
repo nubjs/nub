@@ -3797,8 +3797,11 @@ enum StreamMode {
     Prefixed,
 }
 
-/// Resolve the bundled busybox-w32 POSIX-`sh` sidecar that backs `nub run` script
-/// bodies on Windows. The win32 package lays `busybox.exe` beside `nub.exe` in the
+/// Resolve the bundled busybox-w32 POSIX-`sh` sidecar that backs every script
+/// body nub runs on Windows — `nub run` here, and dependency lifecycle scripts
+/// through the engine-context default `pm_engine` installs
+/// (`apply_lifecycle_script_shell`). The win32 package lays `busybox.exe`
+/// beside `nub.exe` in the
 /// package's `bin/` dir, so it resolves relative to the running executable
 /// (canonicalized, matching `current_nub_binary`). `__NUB_BUSYBOX_EXE` overrides
 /// the location — an internal test/CI seam that lets the Rust suite and the
@@ -3808,7 +3811,7 @@ enum StreamMode {
 /// fallback — that would resurrect the non-POSIX script semantics busybox replaces.
 /// Only reached on Windows (the `cfg!(windows)` default arm); cross-platform std so
 /// it compiles everywhere.
-fn resolve_bundled_busybox() -> Result<String> {
+pub(crate) fn resolve_bundled_busybox() -> Result<String> {
     let to_utf8 = |p: PathBuf| -> Result<String> {
         p.to_str()
             .map(str::to_string)
@@ -3913,6 +3916,9 @@ fn build_script_command(
     // can confine it (an in-process interpreter could do neither). This replaces
     // the former implicit `cmd.exe` default. busybox is a multi-call binary, so
     // its `sh` applet name precedes `-c`; every other shell here takes plain `-c`.
+    // The engine's dependency-lifecycle spawn resolves the same sidecar the same
+    // way (`pm_engine::apply_lifecycle_script_shell`), so one POSIX script body
+    // behaves identically whether `nub run` or a `postinstall` runs it.
     let custom_shell = script_shell_override
         .map(str::to_string)
         .or_else(|| nub_core::workspace::scripts::script_shell(&project.root));
