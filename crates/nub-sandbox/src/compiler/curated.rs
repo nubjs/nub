@@ -250,7 +250,9 @@ fn grant_from_table(
 
     if let Some(own) = enclosing_node_modules(package_dir) {
         for dir in grant.sibling_dirs {
-            push_rw(&mut rules, &own.join(dir));
+            let path = own.join(dir);
+            materialize_sibling(&path);
+            push_rw(&mut rules, &path);
         }
     }
     if grant.project_cwd {
@@ -276,6 +278,52 @@ fn grant_from_table(
     }
     policy.fs.rules.entries.extend(rules);
 }
+
+/// Create a sibling-dir grant's target if it is absent, so LINUX can attach a rule to it.
+///
+/// WHY A SIDE EFFECT IN POLICY COMPILATION. Landlock's `landlock_add_rule` takes an
+/// `O_PATH` descriptor, so a rule for a path that does not exist cannot be attached at all —
+/// `linux_landlock::add_rule` returns `Ok(false)` and the grant silently evaporates. Every
+/// `sibling_dirs` entry names precisely a directory the package is about to CREATE
+/// (`.prisma`, `@types`), so on Linux the grant was being dropped in exactly the case it
+/// exists for. Measured on a 6.17 kernel, Landlock ABI 7: with `.prisma` absent the
+/// `mkdir` was denied identically with and WITHOUT the grant; with it present the same
+/// grant made it writable. That is the whole of the `@prisma/client`-on-Linux defect.
+///
+/// The alternative fix is not available. On Linux the right to create an entry
+/// (`LANDLOCK_ACCESS_FS_MAKE_DIR`) lives on the PARENT, and the parent here is the
+/// package's own enclosing `node_modules` — which this module deliberately never grants,
+/// because it holds `.bin` (run UNCONFINED by later tooling) and the virtual store (every
+/// dependency's source before it executes). Granting the parent to create one child would
+/// hand over both.
+///
+/// WHY THIS IS NOT A WIDENING. The subtree is already granted read-write by the rule on the
+/// next line; materializing it adds no access, it only makes the access attachable. An
+/// empty owner-only directory is also what the package would have created a moment later.
+/// Precedent for the side effect is `preset::private_home_dir`, which creates the jail home
+/// during the same compile for the same reason.
+///
+/// Failure is ignored on purpose: a read-only or already-occupied parent means the package
+/// fails exactly as it would with no exception, which is the conservative direction. macOS
+/// and Windows never needed this — Seatbelt matches path PATTERNS and Windows resolves
+/// ancestors itself — so the call is inert there beyond one `create_dir_all`.
+fn materialize_sibling(path: &Path) {
+    if path.exists() {
+        return;
+    }
+    if std::fs::create_dir_all(path).is_ok() {
+        restrict_to_owner(path);
+    }
+}
+
+#[cfg(unix)]
+fn restrict_to_owner(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+}
+
+#[cfg(not(unix))]
+fn restrict_to_owner(_path: &Path) {}
 
 fn lookup(table: &[(&str, CuratedGrant)], name: &str) -> Option<CuratedGrant> {
     table
