@@ -96,6 +96,34 @@ Inheritance means new files pick the ACE up at creation, so the recursive pass o
 
 **A piped spawn hangs.** `child_process.spawnSync` with piped stdio never returns under the AppContainer. In run 2 it swallowed every operation after it and timed the arm out; moving it after the completion marker recovered the table, and in run 3 it is absent from every confined arm while the unconfined arm returns normally. Every npm lifecycle script spawns piped children, and an indefinite hang is a worse failure mode than a refusal.
 
+## The piped-spawn hang: two different defects, read out of libuv's source
+
+The hang and the `stdio: 'ignore'` refusal have been carried as one `ERROR_ACCESS_DENIED` story. They are not the same defect, and the distinction decides whether the `\Device\Null` candidate can be the hang's cause at all. From `deps/uv/src/win/process-stdio.c` (libuv 1.52.1):
+
+`uv__create_nul_handle` — the only `CreateFileW(L"NUL", …)` in libuv's spawn path — is called from exactly one place, the `UV_IGNORE` branch of `uv__stdio_create`, and only for fds 0–2. `UV_CREATE_PIPE` takes a different branch entirely, `uv__create_stdio_pipe_pair`, which never touches the device.
+
+So the shapes fail in unrelated places:
+
+| stdio shape | object touched | failure |
+| --- | --- | --- |
+| `'ignore'` | `\Device\Null`, opened fresh **in the spawning process** | clean `EPERM` — measured, run `30473523088` |
+| `'pipe'` | the global NPFS namespace, via `uv__pipe_server` | **spins forever** |
+| `'inherit'` | neither — the parent's already-open handles are passed down | works |
+| `[0, fd, fd]` | neither — a real file descriptor | works |
+
+The spin is in `uv__pipe_server` (`deps/uv/src/win/pipe.c`), which names the pipe `\\?\pipe\uv\<ptr>-<pid>` — the **global** namespace — and then:
+
+```c
+if (err != ERROR_PIPE_BUSY && err != ERROR_ACCESS_DENIED) goto error;
+random++;
+```
+
+A permission denial is indistinguishable from a name collision to that loop, so it increments and retries with no bound, inside `uv_spawn`, before any timer arms. Node's own `timeout` option therefore cannot break it. Run `30473523088` measured the shape directly: `HUNG killed_after_ms=15059 cpu_ms=14906` — **cpu ≈ wall, so a busy spin, not a block.**
+
+That run also isolated the gate to the **namespace** rather than to any flag: eleven `CreateNamedPipeW` cells differing only in `dwOpenMode`/`dwPipeMode` were all `ERROR_ACCESS_DENIED` under the jail, and adding **only** `LOCAL\` to the name produced `CREATED` — including `\\.\pipe\LOCAL\uv\…`, libuv's own shape.
+
+**Consequence for the `\Device\Null` candidate:** it is predicted to fix `stdio: 'ignore'` and *not* the hang, because the piped path never opens the device. The `obj-*` arms assert those separately rather than as one "the repair works" cell, and the selftest's `obj-nul-fixes-the-hang-too` world exists so a broader-than-predicted effect would be loud rather than absorbed.
+
 ## What this does not establish
 
 - **Which mechanism performs the traverse skip.** `crates/nub-sandbox/src/backend/windows.rs` credits `SeChangeNotifyPrivilege` and `FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL` on the volume device. Both predict this observable and this probe cannot separate them.
