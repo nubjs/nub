@@ -180,7 +180,52 @@ const writeCache = (stage: string, key: string, value: unknown): void => {
 
 let fetchCount = 0;
 let retryCount = 0;
+let throttleCount = 0;
 const failures: Array<{ url: string; status: number | string }> = [];
+
+// ADAPTIVE PER-HOST PACING. api.npmjs.org 429s hard at concurrency 10 — measured
+// directly: three consecutive bulk requests all returned `HTTP/2 429` with
+// `retry-after: 0`, which says "slow down" without saying how much. A fixed
+// concurrency cap cannot answer that, because the sustainable rate differs per
+// host (ecosyste.ms served 83 pages/min happily while npm was refusing) and
+// varies over time. So each host carries its own inter-request spacing that
+// MULTIPLICATIVELY BACKS OFF on a 429 and decays back down on sustained success —
+// AIMD, the same shape as TCP congestion control. The gate is a per-host "next
+// allowed time" cursor, so it composes with pmap's concurrency window rather than
+// replacing it: N workers stay in flight but their requests are spaced.
+const paceDelay = new Map<string, number>();
+const paceNext = new Map<string, number>();
+const paceOk = new Map<string, number>();
+const PACE_MAX = 3000;
+
+const pace = async (host: string): Promise<void> => {
+  const delay = paceDelay.get(host) ?? 0;
+  if (delay === 0) return;
+  const now = Date.now();
+  const at = Math.max(now, paceNext.get(host) ?? 0);
+  paceNext.set(host, at + delay);
+  if (at > now) await new Promise((r) => setTimeout(r, at - now));
+};
+
+const paceThrottled = (host: string): void => {
+  throttleCount++;
+  paceOk.set(host, 0);
+  paceDelay.set(host, Math.min(PACE_MAX, Math.max(120, (paceDelay.get(host) ?? 0) * 2)));
+};
+
+const paceSucceeded = (host: string): void => {
+  const delay = paceDelay.get(host) ?? 0;
+  if (delay === 0) return;
+  const ok = (paceOk.get(host) ?? 0) + 1;
+  // Decay only after a run of clean responses, so one lucky reply cannot undo a
+  // backoff the host actually asked for.
+  if (ok < 40) {
+    paceOk.set(host, ok);
+    return;
+  }
+  paceOk.set(host, 0);
+  paceDelay.set(host, delay < 130 ? 0 : delay * 0.8);
+};
 
 // Retry only transient shapes (429, 5xx, network). A 404 is DATA — an unpublished
 // or renamed package — so it returns immediately rather than burning six retries.
@@ -188,16 +233,22 @@ const getJSON = async (
   url: string,
   headers: Record<string, string> = {},
 ): Promise<{ ok: true; body: unknown } | { ok: false; status: number | string }> => {
-  for (let attempt = 0; attempt < 6; attempt++) {
+  const host = new URL(url).host;
+  for (let attempt = 0; attempt < 8; attempt++) {
     if (attempt > 0) {
       retryCount++;
       await new Promise((r) => setTimeout(r, Math.min(30_000, 400 * 2 ** attempt) + Math.random() * 500));
     }
     try {
+      await pace(host);
       fetchCount++;
       const res = await fetch(url, { headers: { "User-Agent": UA, ...headers } });
-      if (res.ok) return { ok: true, body: await res.json() };
+      if (res.ok) {
+        paceSucceeded(host);
+        return { ok: true, body: await res.json() };
+      }
       if (res.status === 404) return { ok: false, status: 404 };
+      if (res.status === 429) paceThrottled(host);
       if (res.status !== 429 && res.status < 500) {
         failures.push({ url, status: res.status });
         return { ok: false, status: res.status };
@@ -689,6 +740,8 @@ const main = async (): Promise<void> => {
       rank_sweep: readCache("meta", "rank-stats") ?? {},
       requests: fetchCount,
       retries: retryCount,
+      throttle_429s: throttleCount,
+      final_host_pacing_ms: Object.fromEntries(paceDelay),
       fetch_failures: failures.length,
       fetch_failure_sample: failures.slice(0, 40),
     },
