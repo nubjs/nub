@@ -48,10 +48,6 @@ struct Jail {
 }
 
 impl Jail {
-    fn policy(&self) -> nub_sandbox::policy::SandboxPolicy {
-        self.policy_for(None)
-    }
-
     /// `package_name` is the installer-resolved identity the egress catalog is keyed on, so it
     /// is the ONLY variable between the two arms of the egress test below.
     fn policy_for(&self, package_name: Option<&str>) -> nub_sandbox::policy::SandboxPolicy {
