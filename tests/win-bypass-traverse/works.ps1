@@ -413,7 +413,7 @@ $cells = @{}   # $cells[<battery>][<arm>] = @{ rc; lines; ms }
 function Invoke-Battery {
   param(
     [string]$Battery,
-    [string]$Arm,            # 'plain' | 'ac' | 'ac-lpac' | 'ac-pygrant'
+    [string]$Arm,            # 'plain' | 'ac' | 'ac-ancestors' | 'ac-croot' | 'ac-pygrant'
     [string]$Exe,
     [string]$Cmdline,
     [bool]$AppContainer,
@@ -510,7 +510,6 @@ $batteries = @(
   @('cmdspawn', $cmdExe,      "${q}$cmdExe${q} /d /s /c ${q}${q}$workDir\batspawn.cmd${q}${q}", 25000),
   @('ps',       $psExe,       "${q}$psExe${q} -NoLogo -NonInteractive -NoProfile -ExecutionPolicy Bypass -File ${q}$workDir\bat.ps1${q}", 40000),
   @('psspawn',  $psExe,       "${q}$psExe${q} -NoLogo -NonInteractive -NoProfile -ExecutionPolicy Bypass -File ${q}$workDir\batspawn.ps1${q}", 40000),
-  @('pwsh',     $pwshExe,     "${q}$pwshExe${q} -NoLogo -NonInteractive -NoProfile -File ${q}$workDir\bat.ps1${q}", 40000),
   # busybox gets RELATIVE script names: the launch cwd is `$workDir`, and a bare name avoids any
   # question about how busybox-w32's ash parses a drive-letter path as `$0`.
   @('sh',       $jailBusybox, "${q}$jailBusybox${q} sh bat.sh", 20000),
@@ -534,12 +533,12 @@ W ''
 W '== APPCONTAINER arms (ordinary LowBox, zero capabilities; C:\ and C:\Users untouched) =='
 foreach ($b in $batteries) { Invoke-Battery -Battery $b[0] -Arm 'ac' -Exe $b[1] -Cmdline $b[2] -AppContainer $true -TimeoutMs $b[3] }
 
-W ''
-W '== LPAC arms (ONE variable off `ac`: ALL_APPLICATION_PACKAGES_POLICY = OPT_OUT) =='
-foreach ($b in @('cmd', 'ps', 'sh')) {
-  $m = $batteries | Where-Object { $_[0] -eq $b } | Select-Object -First 1
-  if ($m) { Invoke-Battery -Battery $m[0] -Arm 'ac-lpac' -Exe $m[1] -Cmdline $m[2] -AppContainer $true -Lpac $true -TimeoutMs $m[3] }
-}
+# LPAC IS SETTLED AND NO LONGER MEASURED. Run 30518533077 killed it on both images: cmd.exe
+# produced 0 bytes rc=1, powershell.exe died "Cannot open registry key SOFTWARE\Microsoft\PowerShell.
+# Access is denied.", busybox died "WSAStartup failed, error 18". An LPAC stops honouring the
+# ALL APPLICATION PACKAGES aces that blanket System32, so nothing starts. Recorded as a rejected
+# mechanism; the arm is gone rather than kept red, and the launcher keeps its `LaunchEx` LPAC support
+# so re-measuring is one argument away.
 
 # ── THE ATTRIBUTION THAT DECIDES THE PRODUCT QUESTION.
 # Run 1 measured a confined `cmd.exe` failing `cd` into a GRANTED directory, reporting a granted
@@ -556,7 +555,7 @@ foreach ($b in @('cmd', 'ps', 'sh')) {
 # Non-inheritable throughout, and revoked in `finally`; the primary arms above never touch either.
 W ''
 W '== ANCESTOR-GRANT arms (unprivileged: the chain nub owns) =='
-foreach ($b in @('cmd', 'ps', 'sh')) {
+foreach ($b in @('cmd')) {
   $m = $batteries | Where-Object { $_[0] -eq $b } | Select-Object -First 1
   if ($m) {
     Invoke-Battery -Battery $m[0] -Arm 'ac-ancestors' -Exe $m[1] -Cmdline $m[2] -AppContainer $true `
@@ -566,7 +565,7 @@ foreach ($b in @('cmd', 'ps', 'sh')) {
 
 W ''
 W '== C-ROOT arms (PRIVILEGED: adds Microsoft`s prepare-system-drive shape on C:\ + C:\Users) =='
-foreach ($b in @('cmd', 'ps', 'sh')) {
+foreach ($b in @('cmd')) {
   $m = $batteries | Where-Object { $_[0] -eq $b } | Select-Object -First 1
   if ($m) {
     Invoke-Battery -Battery $m[0] -Arm 'ac-croot' -Exe $m[1] -Cmdline $m[2] -AppContainer $true `
@@ -673,7 +672,7 @@ function ShowDiff([string]$b, [string]$arm) {
 
 W ''
 W '== the diff table (0 = the confined log is byte-identical to the unconfined log) =='
-$armsToDiff = @('ac', 'ac-ancestors', 'ac-croot', 'ac-lpac', 'ac-pygrant')
+$armsToDiff = @('ac', 'ac-ancestors', 'ac-croot', 'ac-pygrant')
 W ("  {0,-12} {1,-8} {2}" -f 'battery', 'plain-n', (($armsToDiff | ForEach-Object { '{0,-16}' -f $_ }) -join ''))
 foreach ($b in (@($batteries | ForEach-Object { $_[0] }) + @('py'))) {
   if (-not $cells.ContainsKey($b)) { continue }
@@ -722,7 +721,7 @@ Prop 'appcontainer-positive-control' ($acCmd -match 'op:exist-system32=yes') `
 
 # ── THE QUESTION. One property per shell: confined behaviour must be INDISTINGUISHABLE from
 # unconfined. A FAIL here is the answer, not a broken run — read the diff block above it.
-foreach ($b in @('cmd', 'cmdspawn', 'ps', 'psspawn', 'pwsh', 'sh', 'shspawn')) {
+foreach ($b in @('cmd', 'cmdspawn', 'ps', 'psspawn', 'sh', 'shspawn')) {
   if (-not $cells.ContainsKey($b) -or -not $cells[$b].ContainsKey('ac')) { continue }
   $d = DiffCount $b 'plain' 'ac'
   Prop "confined-$b-behaves-identically" ($d -eq 0) `
@@ -767,12 +766,6 @@ Prop 'ms-claim-api-refusal-is-token-not-host' `
   ((-not ($plainPs -match 'dotnet-getaccesscontrol-croot=ERR')) -and (-not ($plainPs -match 'dotnet-getfileattributes-croot=ERR'))) `
   "and the unconfined child must succeed at both, or the refusal is about the host rather than the LowBox token"
 
-# ── LPAC. Stated as a FACT, not a property: an LPAC that breaks tools is a finding about LPAC and
-# tells us nothing is wrong with the ordinary-AppContainer route the build jail actually uses.
-foreach ($b in @('cmd', 'ps', 'sh')) {
-  if (-not $cells.ContainsKey($b) -or -not $cells[$b].ContainsKey('ac-lpac')) { continue }
-  Fact "lpac[$b]" "rc=$($cells[$b]['ac-lpac'].rc) lines=$($cells[$b]['ac-lpac'].lines.Count) diff-vs-plain=$(DiffCount $b 'plain' 'ac-lpac') diff-vs-ac=$(DiffCount $b 'ac' 'ac-lpac')"
-}
 
 # ── PYTHON.
 if ($cells.ContainsKey('py')) {

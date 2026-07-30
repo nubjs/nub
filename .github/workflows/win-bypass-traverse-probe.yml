@@ -29,6 +29,84 @@ permissions:
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────────────────────
+  # THE REMAINING BLOCKER: node-gyp shells `powershell.exe` for Visual-Studio detection
+  # (`lib/find-visualstudio.js`, three distinct commands), a confined PowerShell cannot spawn an
+  # external program at all (`works.ps1`), and node-gyp is on the path for 121 of the 344 corpus
+  # packages. Also settles what python's grant COSTS — 3.7s+0.7s per launch is not shippable, so four
+  # cheaper shapes are timed against an empty-directory O(1) control.
+  gyp:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Probe — node-gyp VS detection under the jail, and the python grant cost
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          pwsh -NoLogo -NonInteractive -File tests/win-bypass-traverse/gyp.ps1 *>&1 |
+            Tee-Object -FilePath gyp.log
+          exit 0
+
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          fail=0
+          need() {
+            if grep -qF "prop:$1=PASS" gyp.log 2>/dev/null; then echo "OK   $1"
+            elif grep -qF "prop:$1=FAIL" gyp.log 2>/dev/null; then echo "FAIL $1"; fail=1
+            else echo "MISS $1  (property absent — the probe did not reach it)"; fail=1; fi
+          }
+          [ -s gyp.log ] || { echo "MISS the probe produced no output at all"; exit 1; }
+          grep -qF 'GYP PROBE END' gyp.log || { echo "MISS the probe did not run to completion"; fail=1; }
+
+          echo "── controls (a red one invalidates every row below) ──"
+          for p in baseline-addtype-works-unconfined baseline-node-spawns-ps-unconfined \
+                   baseline-gyp-configure-unconfined; do need "$p"; done
+
+          echo
+          echo "── does the from-source native-build chain survive the jail? ──"
+          for p in vs-detection-addtype-works-confined node-can-spawn-powershell-confined \
+                   node-piped-spawn-does-not-hang-confined gyp-configure-works-confined; do need "$p"; done
+
+          echo
+          echo "── python: is a cheaper grant also a working grant? ──"
+          for p in python-narrow-grant-runs-python python-root-grant-runs-python; do need "$p"; done
+
+          echo
+          echo "── the toolchain's existing AppContainer rights (a grant nub can SKIP is free) ──"
+          grep -E '^  fact:(node-dir-aap|python-dir-aap|gyp-lib-aap|programfiles-aap|grant-skipped)' gyp.log || echo "(none)"
+          echo "── grant cost ──"
+          grep -E '^  fact:(cost/|grant-ms)' gyp.log || echo "(none)"
+
+          echo
+          echo "── result ──"
+          if [ "$fail" -ne 0 ]; then
+            echo "at least one property did not hold — read the verbatim child output above"
+            exit 1
+          fi
+          echo "the from-source chain works confined, and a cheap python grant works"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: win-appcontainer-gyp-${{ matrix.os }}
+          path: |
+            gyp.log
+            gyp-logs/
+          if-no-files-found: warn
+
+  # ─────────────────────────────────────────────────────────────────────────────────────────────
   # THE THIRD QUESTION: `tools.ps1` asked "does the tool START", and `cmd.exe`, `powershell.exe`,
   # `pwsh.exe` and busybox `sh` all came back green off `echo` — against Microsoft's own host-prep
   # doc, which names those same shells as failing inside an AppContainer without a one-time
