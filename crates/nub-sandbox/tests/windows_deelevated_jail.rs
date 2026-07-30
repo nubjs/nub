@@ -1531,7 +1531,7 @@ mod win {
         "anc-node-bare-through-junction-works-preloaded-with-repair-off",
         "anc-node-npm-cli-entry-works-preloaded-with-repair-off",
         "anc-repair-changes-no-node-cell-under-the-preload",
-        "anc-longform-roots-recover-what-the-repair-off-arm-lost",
+        "anc-control-single-spelling-roots-still-lose-a-cell",
         "anc-nonnode-tools-identical-with-repair-off",
     ];
 
@@ -1548,7 +1548,11 @@ mod win {
         ])
     }
 
-    /// The same term with every root spelled the way the FILESYSTEM spells it.
+    /// The same term with every root spelled the way the FILESYSTEM spells it — which, now that
+    /// `realpath_shim_node_options` stamps BOTH spellings, makes this the arm that carries only
+    /// ONE. It is therefore the CONTROL for that fix rather than a candidate treatment: a
+    /// canonical root canonicalizes to itself, so the expansion adds nothing here and the walk
+    /// still meets the 8.3 spelling it cannot match.
     ///
     /// WHY THIS ARM EXISTS. The shim's tolerance rule is a string prefix test over lowercased
     /// `path.resolve` output, so it only fires when the refused component and the root share a
@@ -2006,12 +2010,11 @@ mod win {
             without_ancestor_repair(|| node_cells(f, &unpreloaded, "ctl", exe, &dir, &npm_cli));
         println!("  fact:anc-control={}", control.detail());
 
-        // ── ARM 4: repair OFF, preload ON, roots spelled the way the FILESYSTEM spells them.
-        //    One variable against ARM 2. If the cells ARM 2 lost come back here, the ancestor
-        //    repair is not load-bearing — it is covering for the shim's roots being unmatchable,
-        //    and the fix is to canonicalize them where they are stamped rather than to keep an
-        //    ACE loop that only works because it makes the refusal not happen.
-        println!("── anc arm: repair OFF + preload with LONG-FORM roots ──");
+        // ── ARM 4: repair OFF, preload ON, roots carrying a SINGLE spelling. THE CONTROL for
+        //    the both-spellings fix: without an arm where the defect still reproduces, ARM 2
+        //    coming back green would be measuring nothing. Canonical roots canonicalize to
+        //    themselves, so this arm is genuinely un-expanded while ARM 2 is expanded.
+        println!("── anc arm: repair OFF + preload, SINGLE-SPELLING roots (control) ──");
         let long_policy = build_jail_with_env(
             f,
             exe,
@@ -2081,15 +2084,14 @@ mod win {
             ),
         );
 
-        // THE FOLLOW-THROUGH. `anc-repair-changes-no-node-cell-under-the-preload` says whether the
-        // repair matters; this says WHY. If long-form roots recover what repair-OFF lost, the
-        // repair's remaining justification is a string-comparison defect in the shim, and the
-        // mechanism becomes deletable behind a one-line canonicalization at the stamp site.
+        // THE CONTROL FOR THE FIX. A root set carrying one spelling must STILL lose cells; if it
+        // did not, the both-spellings expansion would not be what changed ARM 2's outcome and the
+        // verdict above would rest on nothing.
         r.record(
-            "anc-longform-roots-recover-what-the-repair-off-arm-lost",
-            long_roots.outcomes() == on.outcomes(),
+            "anc-control-single-spelling-roots-still-lose-a-cell",
+            long_roots.outcomes() != on.outcomes(),
             &format!(
-                "(repair-ON {:?} vs repair-OFF short-form {:?} vs repair-OFF LONG-form {:?})",
+                "(repair-ON {:?} vs repair-OFF both-spellings {:?} vs repair-OFF single-spelling {:?})",
                 on.outcomes(),
                 off.outcomes(),
                 long_roots.outcomes()

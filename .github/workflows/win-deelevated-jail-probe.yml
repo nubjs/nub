@@ -100,7 +100,8 @@ jobs:
           echo "---- ancestor-necessity: gates (these bind) ----"
           for p in anc-gate-preload-installs-the-realpath-shim \
                    anc-gate-no-preload-leaves-the-shim-absent \
-                   anc-control-absolute-require-fails-unpreloaded-unrepaired; do
+                   anc-control-absolute-require-fails-unpreloaded-unrepaired \
+                   anc-control-single-spelling-roots-still-lose-a-cell; do
             if grep -qF "prop:$p=PASS" probe.log; then
               echo "PASS $p"
             elif grep -qF "prop:$p=FAIL" probe.log; then
@@ -116,7 +117,6 @@ jobs:
                    anc-node-bare-through-junction-works-preloaded-with-repair-off \
                    anc-node-npm-cli-entry-works-preloaded-with-repair-off \
                    anc-repair-changes-no-node-cell-under-the-preload \
-                   anc-longform-roots-recover-what-the-repair-off-arm-lost \
                    anc-nonnode-tools-identical-with-repair-off \
                    anc-production-stamp-reaches-node; do
             grep -q "prop:$p=" probe.log || { echo "MISS $p (never measured)"; fail=1; }

@@ -801,10 +801,68 @@ const REALPATH_ROOTS_PLACEHOLDER: &str = "__NUB_REALPATH_ROOTS_JSON__";
 ///
 /// An empty `roots` yields an empty string: with nothing to scope the tolerance to, the shim
 /// would be inert anyway, and stamping an inert preload only widens the `NODE_OPTIONS` surface.
+///
+/// EVERY ROOT IS STAMPED IN BOTH SPELLINGS ON WINDOWS — see [`with_alternate_spellings`]. The
+/// shim's tolerance rule is a string prefix test, so a root and a walked component that name the
+/// same directory in different spellings do not match, and the tolerance silently never fires.
+/// Each root, plus its canonical filesystem spelling where that differs — Windows only.
+///
+/// WHY THIS IS NOT COSMETIC, measured. The shim decides whether to tolerate a refused component
+/// by testing whether it is a strict path-boundary PREFIX of a root, over lowercased
+/// `path.resolve` output. That is a STRING test, so two spellings of one directory do not match,
+/// and Windows hands a process both: `%TEMP%` arrives 8.3-SHORT (`C:\Users\RUNNER~1\…`) while the
+/// working directory and a junction's `readlink` target arrive LONG (`C:\Users\runneradmin\…`).
+/// Whichever spelling the roots carry, the walk meets the other one and the tolerance never
+/// fires — a silent, spelling-dependent failure rather than a loud one.
+///
+/// Measured both directions on one fixture, de-elevated, realpath preload stamped, run
+/// 30569197328: SHORT-form roots lose the bare-specifier-through-a-junction cell on
+/// `EPERM … lstat 'C:\Users\runneradmin'`; LONG-form roots lose that cell AND the absolute-entry
+/// cell AND npm's own entry, all on `EPERM … lstat 'C:\Users\RUNNER~1'`. Same fixture, same
+/// jail, opposite spellings, both thrown from `lstatOrTolerate`.
+///
+/// The `\\?\` verbatim prefix is a THIRD spelling of the same problem, already handled inside the
+/// shim (`stripLongPrefix`) after it measured as `native-longpath-granted=ERR`. This is the same
+/// bug class one level out, fixed where the roots are chosen rather than where they are compared,
+/// so the shim keeps one comparison rule instead of accreting per-spelling special cases.
+///
+/// Adding a spelling cannot widen the jail: the tolerance only ever asserts that a component the
+/// OS refused to interrogate is a plain directory, and both spellings name the same directory.
+/// Non-Windows is returned untouched — 8.3 aliasing is a Windows fact, and canonicalizing on a
+/// POSIX host would resolve symlinks and quietly change which paths the rule covers.
+fn with_alternate_spellings(roots: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    #[cfg(not(windows))]
+    {
+        roots.to_vec()
+    }
+    #[cfg(windows)]
+    {
+        let mut out: Vec<std::path::PathBuf> = Vec::with_capacity(roots.len() * 2);
+        for root in roots {
+            if !out.contains(root) {
+                out.push(root.clone());
+            }
+            // A root that does not exist yet has no canonical spelling; the original stands.
+            let Ok(canonical) = std::fs::canonicalize(root) else {
+                continue;
+            };
+            let canonical = match canonical.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+                Some(rest) if !rest.starts_with("UNC\\") => std::path::PathBuf::from(rest),
+                _ => canonical,
+            };
+            if !out.contains(&canonical) {
+                out.push(canonical);
+            }
+        }
+        out
+    }
+}
+
 pub fn realpath_shim_node_options(roots: &[std::path::PathBuf]) -> String {
     if roots.is_empty() {
         return String::new();
     }
+    let roots = with_alternate_spellings(roots);
     let json = serde_json::to_string(
         &roots
             .iter()
