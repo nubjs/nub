@@ -5716,8 +5716,10 @@ enum StreamMode {
 /// relocates `nub.exe`. Must match `SHELL_SUBDIR` in `npm/nub/bin/launch.js`.
 const NUB_SHELL_SUBDIR: &str = "nub-sh";
 
-/// Resolve the bundled busybox-w32 POSIX-`sh` sidecar that backs `nub run` script
-/// bodies on Windows. `__NUB_BUSYBOX_EXE` overrides the location — an internal
+/// Resolve the bundled busybox-w32 POSIX-`sh` sidecar that backs every script body
+/// nub runs on Windows — `nub run` here, and dependency lifecycle scripts through the
+/// engine-context default `pm_engine` installs (`apply_lifecycle_script_shell`).
+/// `__NUB_BUSYBOX_EXE` overrides the location — an internal
 /// test/CI seam that lets the Rust suite and the branch-scoped Windows probe supply a
 /// busybox without the release-packaging step; it is NOT a documented user knob
 /// (`--script-shell` is the user-facing override).
@@ -5789,7 +5791,7 @@ fn lowercase_env_prologue(command: &std::process::Command) -> String {
         .collect()
 }
 
-fn resolve_bundled_busybox() -> Result<String> {
+pub(crate) fn resolve_bundled_busybox() -> Result<String> {
     let to_utf8 = |p: PathBuf| -> Result<String> {
         p.to_str()
             .map(str::to_string)
@@ -5933,6 +5935,9 @@ fn build_script_command(
     // can confine it (an in-process interpreter could do neither). This replaces
     // the former implicit `cmd.exe` default. busybox is a multi-call binary, so
     // its `sh` applet name precedes `-c`; every other shell here takes plain `-c`.
+    // The engine's dependency-lifecycle spawn resolves the same sidecar the same
+    // way (`pm_engine::apply_lifecycle_script_shell`), so one POSIX script body
+    // behaves identically whether `nub run` or a `postinstall` runs it.
     let custom_shell = script_shell_override
         .map(str::to_string)
         .or_else(|| nub_core::workspace::scripts::script_shell(&project.root));
