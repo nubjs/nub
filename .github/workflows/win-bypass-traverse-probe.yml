@@ -29,6 +29,106 @@ permissions:
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────────────────────
+  # THE THIRD QUESTION: `tools.ps1` asked "does the tool START", and `cmd.exe`, `powershell.exe`,
+  # `pwsh.exe` and busybox `sh` all came back green off `echo` — against Microsoft's own host-prep
+  # doc, which names those same shells as failing inside an AppContainer without a one-time
+  # host-wide ace on `C:\` (disqualifying for nub, which must work unprivileged). "Starts" and
+  # "works" are different claims, and the dangerous gap between them is a shell that answers a
+  # filesystem question WRONGLY and exits 0. `works.ps1` therefore runs an operation battery per
+  # shell and diffs the confined child's whole log against the unconfined child's, adds an LPAC arm
+  # (the one launch-shape difference that could account for Microsoft's list), and settles python's
+  # `STATUS_DLL_NOT_FOUND` with a grant differential.
+  works:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Probe — does a tool that starts confined actually do its job?
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          pwsh -NoLogo -NonInteractive -File tests/win-bypass-traverse/works.ps1 *>&1 |
+            Tee-Object -FilePath works.log
+          exit 0
+
+      - name: Per-arm child logs verbatim
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path works-logs) {
+            Get-ChildItem works-logs | ForEach-Object {
+              Write-Host "───── $($_.Name) ─────"
+              Get-Content $_.FullName | ForEach-Object { Write-Host "  $_" }
+            }
+          } else { Write-Host "no works-logs directory — no arm produced a child log" }
+
+      # Read off the LOG, never off a step's exit status, so a probe that never reached a property
+      # cannot be mistaken for one that passed it.
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          fail=0
+          need() {
+            if grep -qF "prop:$1=PASS" works.log 2>/dev/null; then echo "OK   $1"
+            elif grep -qF "prop:$1=FAIL" works.log 2>/dev/null; then echo "FAIL $1"; fail=1
+            else echo "MISS $1  (property absent — the probe did not reach it)"; fail=1; fi
+          }
+          [ -s works.log ] || { echo "MISS the probe produced no output at all"; exit 1; }
+          grep -qF 'WORKS PROBE END' works.log || { echo "MISS the probe did not run to completion"; fail=1; }
+
+          echo "── controls (a red one invalidates every row below) ──"
+          for p in no-preexisting-appcontainer-ace baseline-every-plain-battery-produced-output \
+                   appcontainer-gate-is-live appcontainer-positive-control \
+                   ms-claim-api-refusal-reproduces ms-claim-api-refusal-is-token-not-host; do need "$p"; done
+
+          echo
+          echo "── does each shell BEHAVE identically confined? ──"
+          for p in confined-cmd-behaves-identically confined-cmdspawn-behaves-identically \
+                   confined-ps-behaves-identically confined-psspawn-behaves-identically \
+                   confined-pwsh-behaves-identically confined-sh-behaves-identically \
+                   confined-shspawn-behaves-identically; do need "$p"; done
+
+          echo
+          echo "── python ──"
+          for p in python-fails-without-a-grant python-works-with-one-install-dir-grant; do need "$p"; done
+
+          echo
+          echo "── the diff table ──"
+          sed -n '/== the diff table/,/== verdict ==/p' works.log || true
+          echo "── Microsoft's named APIs, and LPAC ──"
+          grep -E '^  fact:(ms-claim|lpac|py/)' works.log || echo "(none emitted)"
+
+          echo
+          echo "── result ──"
+          # A red job here is a real ANSWER, not a broken harness: a shell that starts and then
+          # misbehaves is exactly what this probe exists to surface. Read the diff blocks.
+          if [ "$fail" -ne 0 ]; then
+            echo "at least one property did not hold — read the diff blocks above"
+            exit 1
+          fi
+          echo "every battery is byte-identical confined; python works with one install-dir grant"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: win-appcontainer-works-${{ matrix.os }}
+          path: |
+            works.log
+            works-logs/
+          if-no-files-found: warn
+
+  # ─────────────────────────────────────────────────────────────────────────────────────────────
   # THE SECOND QUESTION, and the one that decides whether fixing Node is enough: `probe.ps1` below
   # settled that a confined `node` dies in its own realpath walk on `C:\`. Microsoft's `mxc`
   # host-prep doc names `cmd.exe`, `powershell.exe` and `pwsh.exe` with the SAME habit — and
@@ -40,6 +140,11 @@ jobs:
   # controls, and its per-arm timeouts make it the longer job — sharing a timeout budget would let
   # one truncate the other's table.
   tools:
+    # ALREADY ANSWERED (run 30514473789 / 30507134879, both recorded in `results.md`). Held off the
+    # `push` trigger so iterating on `works` costs ONE 8-platform-hour job instead of three — the
+    # runner pool is shared. `workflow_dispatch` is inert on a non-default branch, so this is an
+    # off switch; flip it to a plain `if: always()` to re-measure.
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     strategy:
       fail-fast: false
       matrix:
@@ -127,6 +232,11 @@ jobs:
           if-no-files-found: warn
 
   probe:
+    # ALREADY ANSWERED (run 30514473789 / 30507134879, both recorded in `results.md`). Held off the
+    # `push` trigger so iterating on `works` costs ONE 8-platform-hour job instead of three — the
+    # runner pool is shared. `workflow_dispatch` is inert on a non-default branch, so this is an
+    # off switch; flip it to a plain `if: always()` to re-measure.
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     strategy:
       fail-fast: false
       matrix:

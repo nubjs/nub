@@ -87,6 +87,15 @@ public static class Bt
     const uint STARTF_USESTDHANDLES = 0x00000100;
     // ProcThreadAttributeSecurityCapabilities(9) | PROC_THREAD_ATTRIBUTE_INPUT(0x20000).
     static readonly IntPtr PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES = new IntPtr(0x00020009);
+    // ProcThreadAttributeAllApplicationPackagesPolicy(15) | PROC_THREAD_ATTRIBUTE_INPUT(0x20000).
+    // Setting it to OPT_OUT is what makes a LowBox an LPAC: the token stops honouring the
+    // `ALL APPLICATION PACKAGES` aces that blanket System32 and most of Program Files, so access
+    // must come from a capability instead. Microsoft's `mxc` exposes this as a per-run flag
+    // defaulting to FALSE (`sdk/node/src/types.ts:157`), which is why an ordinary AppContainer and
+    // an LPAC are both live hypotheses for the host-prep disagreement and must be measured, not
+    // argued.
+    static readonly IntPtr PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY = new IntPtr(0x0002000F);
+    const uint PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT = 1;
     const uint WAIT_TIMEOUT = 0x00000102;
 
     public static string CreateProfile(string name)
@@ -128,9 +137,18 @@ public static class Bt
     public static string Launch(string acSidStr, string exe, string cmdline, string cwd,
         string logPath, uint timeoutMs)
     {
+        return LaunchEx(acSidStr, exe, cmdline, cwd, logPath, timeoutMs, false);
+    }
+
+    /// As `Launch`, plus the LPAC opt-out attribute when `lpac` is set. Separate entry point so
+    /// the two existing probes keep the byte-identical six-argument call they were measured with.
+    public static string LaunchEx(string acSidStr, string exe, string cmdline, string cwd,
+        string logPath, uint timeoutMs, bool lpac)
+    {
         IntPtr acSid = IntPtr.Zero;
         IntPtr attrList = IntPtr.Zero;
         IntPtr capsBuf = IntPtr.Zero;
+        IntPtr lpacBuf = IntPtr.Zero;
         IntPtr hOut = new IntPtr(-1), hIn = new IntPtr(-1);
         try
         {
@@ -165,10 +183,11 @@ public static class Bt
                 if (!ConvertStringSidToSidW(acSidStr, out acSid))
                     return "launch-error ConvertStringSidToSid err=" + Marshal.GetLastWin32Error();
 
+                int attrCount = lpac ? 2 : 1;
                 IntPtr size = IntPtr.Zero;
-                InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+                InitializeProcThreadAttributeList(IntPtr.Zero, attrCount, 0, ref size);
                 attrList = Marshal.AllocHGlobal(size);
-                if (!InitializeProcThreadAttributeList(attrList, 1, 0, ref size))
+                if (!InitializeProcThreadAttributeList(attrList, attrCount, 0, ref size))
                     return "launch-error InitializeProcThreadAttributeList err=" + Marshal.GetLastWin32Error();
 
                 SECURITY_CAPABILITIES caps = new SECURITY_CAPABILITIES();
@@ -182,6 +201,15 @@ public static class Bt
                     PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, capsBuf,
                     new IntPtr(Marshal.SizeOf(typeof(SECURITY_CAPABILITIES))), IntPtr.Zero, IntPtr.Zero);
                 if (!upd) return "launch-error UpdateProcThreadAttribute err=" + Marshal.GetLastWin32Error();
+                if (lpac)
+                {
+                    lpacBuf = Marshal.AllocHGlobal(sizeof(uint));
+                    Marshal.WriteInt32(lpacBuf, (int)PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT);
+                    if (!UpdateProcThreadAttribute(attrList, 0,
+                            PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY, lpacBuf,
+                            new IntPtr(sizeof(uint)), IntPtr.Zero, IntPtr.Zero))
+                        return "launch-error UpdateProcThreadAttribute(LPAC) err=" + Marshal.GetLastWin32Error();
+                }
                 si.lpAttributeList = attrList;
                 flags |= EXTENDED_STARTUPINFO_PRESENT;
             }
@@ -216,6 +244,7 @@ public static class Bt
             if (hIn != new IntPtr(-1)) CloseHandle(hIn);
             if (attrList != IntPtr.Zero) { DeleteProcThreadAttributeList(attrList); Marshal.FreeHGlobal(attrList); }
             if (capsBuf != IntPtr.Zero) Marshal.FreeHGlobal(capsBuf);
+            if (lpacBuf != IntPtr.Zero) Marshal.FreeHGlobal(lpacBuf);
             if (acSid != IntPtr.Zero) LocalFree(acSid);
         }
     }
