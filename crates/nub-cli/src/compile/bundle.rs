@@ -2557,6 +2557,9 @@ mod tests {
                 start: source.find('`').unwrap(),
                 end: source.rfind('`').unwrap() + 1,
                 source: PathBuf::from("/p/one\n.json"),
+                // A data asset, not a worker entry — the splice preserves line
+                // structure identically either way, which is what this asserts.
+                worker: false,
             },
             "one-a1b2c3d4.json".to_string(),
         )];
