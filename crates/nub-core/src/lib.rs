@@ -9,6 +9,7 @@ pub mod config_cache;
 pub mod node;
 pub mod pm;
 pub mod pnp;
+pub mod quarantine;
 pub mod version_management;
 pub mod workspace;
 

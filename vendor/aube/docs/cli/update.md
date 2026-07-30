@@ -2,6 +2,7 @@
 # `aube update`
 
 - **Usage**: `aube update [FLAGS] [PACKAGES]…`
+- **Effect**: modifies state
 
 Update dependencies
 

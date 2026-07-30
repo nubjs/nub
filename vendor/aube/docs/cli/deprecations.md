@@ -2,6 +2,7 @@
 # `aube deprecations`
 
 - **Usage**: `aube deprecations [FLAGS]`
+- **Effect**: read-only
 
 Report deprecated packages in the resolved dependency graph
 

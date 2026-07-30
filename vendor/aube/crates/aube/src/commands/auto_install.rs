@@ -3,6 +3,19 @@ use miette::miette;
 use super::install;
 
 pub(crate) async fn ensure_installed(no_install: bool) -> miette::Result<()> {
+    ensure_installed_in(no_install, None).await
+}
+
+/// [`ensure_installed`] anchored at an explicit `base_dir` instead of the
+/// process cwd — the in-process embedding entry points (`embed::run` /
+/// `embed::exec`) resolve their project from a caller-supplied directory,
+/// so the freshness check and any auto-install must target that tree, not
+/// wherever the host process happens to be. `None` reproduces the CLI
+/// behavior (anchor at the process cwd).
+pub(crate) async fn ensure_installed_in(
+    no_install: bool,
+    base_dir: Option<&std::path::Path>,
+) -> miette::Result<()> {
     if no_install {
         return Ok(());
     }
@@ -20,7 +33,10 @@ pub(crate) async fn ensure_installed(no_install: bool) -> miette::Result<()> {
         return Ok(());
     }
 
-    let initial_cwd = crate::dirs::cwd()?;
+    let initial_cwd = match base_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => crate::dirs::cwd()?,
+    };
     // Prefer the workspace root as the freshness anchor. A monorepo
     // install writes its state files at the workspace root —
     // subpackages get symlinked `node_modules/` with no state file of
@@ -83,6 +99,9 @@ pub(crate) async fn ensure_installed(no_install: bool) -> miette::Result<()> {
     let mode = super::chained_frozen_mode(install::FrozenMode::Prefer);
     let mut opts = install::InstallOptions::with_mode(mode);
     opts.strict_no_lockfile = matches!(g, Some(install::FrozenOverride::Frozen));
+    // Anchor the auto-install at the resolved tree, not the process cwd,
+    // so an embedding host installs the project it asked to run.
+    opts.project_dir = Some(cwd);
     install::run(opts).await?;
 
     Ok(())

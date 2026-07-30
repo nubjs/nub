@@ -3,6 +3,7 @@
 
 - **Usage**: `aube link [-g --global] [PACKAGE]`
 - **Aliases**: `ln`
+- **Effect**: modifies state
 
 Link a local package globally, or into the current project
 

@@ -2,6 +2,7 @@
 # `aube query`
 
 - **Usage**: `aube query [FLAGS] <SELECTOR>`
+- **Effect**: read-only
 
 Query packages in the resolved dependency graph
 

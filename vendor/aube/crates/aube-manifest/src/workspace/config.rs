@@ -55,6 +55,31 @@ pub struct JailBuildPermission {
     pub network: bool,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceUpdateConfig {
+    #[serde(default)]
+    pub ignore_deps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceAuditConfig {
+    #[serde(default)]
+    pub level: Option<String>,
+    #[serde(default)]
+    pub ignore: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyWorkspaceAuditConfig {
+    #[serde(default)]
+    pub ignore_ghsas: Vec<String>,
+    #[serde(default)]
+    pub ignore_cves: Vec<String>,
+}
+
 /// Configuration from `pnpm-workspace.yaml`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,16 +119,15 @@ pub struct WorkspaceConfig {
 
     /// Package names whose presence in any importer forces
     /// per-project materialization (disabling the global virtual
-    /// store for that install). Defaults to the common bundler /
-    /// framework direct-devDeps whose module resolvers follow
-    /// symlinks then walk up (Next.js's Turbopack, Vite, Rollup,
-    /// Webpack, Parcel, Nuxt, VitePress) — the global virtual store
-    /// makes `.aube/<pkg>` an absolute symlink that escapes the
-    /// project's filesystem root, which those resolvers can't walk
-    /// back from. Add more names as you discover tools with the same
-    /// restriction; set to `[]` to disable the heuristic. Declared
-    /// here so `settings.toml`'s workspaceYaml source stays in sync
-    /// with the actual deserialize surface.
+    /// store for that install). Defaults to tools with concrete
+    /// realpath/walk-up failures (Next.js, Nuxt, and Parcel). Vite
+    /// 8.1+ reads the `.modules.yaml` compatibility metadata aube
+    /// writes; older Vite dependency paths are materialized locally
+    /// and receive the same allow-list lookup as a backport. Add more
+    /// names as you discover tools with the same restriction; set to
+    /// `[]` to disable the heuristic. Declared here so
+    /// `settings.toml`'s workspaceYaml source stays in sync with the
+    /// actual deserialize surface.
     #[serde(default)]
     pub disable_global_virtual_store_for_packages: Option<Vec<String>>,
 
@@ -180,6 +204,14 @@ pub struct WorkspaceConfig {
     /// Path to the content-addressable store.
     #[serde(default)]
     pub store_dir: Option<String>,
+
+    /// Path to the global virtual store — the shared tree of
+    /// materialized packages every project symlinks into. Defaults to
+    /// `<cacheDir>/virtual-store`; set it to keep the virtual store on
+    /// the same volume as `storeDir` without moving the rest of the
+    /// cache.
+    #[serde(default)]
+    pub global_virtual_store_dir: Option<String>,
 
     // -- Lockfile Settings --
     /// Whether to use a lockfile (default: true).
@@ -299,6 +331,22 @@ pub struct WorkspaceConfig {
     /// Update-time policy knobs.
     #[serde(default)]
     pub update_config: Option<UpdateConfig>,
+
+    /// Canonical pnpm 11.16+ update policy.
+    #[serde(default)]
+    pub update: Option<WorkspaceUpdateConfig>,
+
+    /// Canonical pnpm 11.16+ audit policy.
+    #[serde(default)]
+    pub audit: Option<WorkspaceAuditConfig>,
+
+    /// Deprecated audit policy, retained for pnpm 11 compatibility.
+    #[serde(default)]
+    pub audit_config: Option<LegacyWorkspaceAuditConfig>,
+
+    /// Deprecated audit severity, retained for pnpm 11 compatibility.
+    #[serde(default)]
+    pub audit_level: Option<String>,
 
     /// Node.js download mirror map (pnpm parity), keyed by channel:
     /// `release` is used for runtime downloads; `rc`/`nightly` are
@@ -534,6 +582,12 @@ pub struct WorkspaceConfig {
     #[serde(default)]
     pub minimum_release_age: Option<u64>,
 
+    /// Minimum age in minutes that a public npm package name must
+    /// have before `aube add` accepts it without confirmation.
+    /// Default: 43200 (30 days).
+    #[serde(default)]
+    pub minimum_package_age: Option<u64>,
+
     /// Package names exempt from `minimum_release_age`.
     #[serde(default)]
     pub minimum_release_age_exclude: Option<Vec<String>>,
@@ -543,6 +597,14 @@ pub struct WorkspaceConfig {
     /// to the lowest satisfying version that ignores the cutoff).
     #[serde(default)]
     pub minimum_release_age_strict: Option<bool>,
+
+    /// Whether the configured registry returns per-version `time:` data in
+    /// its abbreviated (corgi) packument, letting the resolver skip the
+    /// extra full-packument fetch when a publish-age cutoff is active.
+    /// pnpm reads this from `pnpm-workspace.yaml` only, so the yaml is the
+    /// source that matters for mirroring a pnpm incumbent.
+    #[serde(default)]
+    pub registry_supports_time_field: Option<bool>,
 
     /// OSV `MAL-*` advisory check policy for `aube add`. One of
     /// `"on"` (default, fail open on fetch error), `"required"` (fail
@@ -710,6 +772,19 @@ fn typed_cache_insert(project_dir: &Path, value: WorkspaceConfig) {
     let cache = TYPED_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     if let Ok(mut map) = cache.lock() {
         map.insert(project_dir.to_path_buf(), value);
+    }
+}
+
+pub(super) fn invalidate_cache(project_dir: &Path) {
+    if let Some(cache) = TYPED_CACHE.get()
+        && let Ok(mut cache) = cache.lock()
+    {
+        cache.remove(project_dir);
+    }
+    if let Some(cache) = RAW_CACHE.get()
+        && let Ok(mut cache) = cache.lock()
+    {
+        cache.remove(project_dir);
     }
 }
 

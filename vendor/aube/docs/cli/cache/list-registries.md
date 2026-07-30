@@ -2,6 +2,7 @@
 # `aube cache list-registries`
 
 - **Usage**: `aube cache list-registries`
+- **Effect**: read-only
 
 List configured registries from the project + user `.npmrc`.
 

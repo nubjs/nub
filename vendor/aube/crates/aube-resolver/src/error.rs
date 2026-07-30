@@ -13,6 +13,11 @@ pub enum Error {
         .0.name, .0.range, .0.minutes
     )]
     AgeGate(Box<AgeGateDetails>),
+    #[error(
+        "cannot check the publish age of {}@{} — the registry served no publish time for any matching version",
+        .0.name, .0.range
+    )]
+    ReleaseAgeMissingTime(Box<UndatedDetails>),
     #[error("registry error for {0}: {1}")]
     Registry(String, String),
     #[error(
@@ -82,10 +87,29 @@ pub struct AgeGateDetails {
     pub minutes: u64,
     pub importer: String,
     pub ancestors: Vec<(String, String)>,
-    /// Version strings that satisfied the range but were blocked by
-    /// the age gate, sorted newest-first. Empty when the cutoff was
-    /// tighter than every published version.
+    /// Version strings that satisfied the range, carried a publish time,
+    /// and were blocked for being newer than the cutoff — sorted
+    /// newest-first. Undated versions are excluded: they were blocked for
+    /// a different reason and listing them here would claim evidence the
+    /// registry never served.
     pub gated: Vec<String>,
+}
+
+/// Context for `ReleaseAgeMissingTime`: the gate could not be evaluated at
+/// all because the registry dated none of the candidates (#581). A separate
+/// error from `AgeGate` because the remedies are disjoint — no window would
+/// ever have admitted these versions, so the ordinary "loosen
+/// `minimumReleaseAge`" advice is wrong here.
+#[derive(Debug)]
+pub struct UndatedDetails {
+    pub name: String,
+    pub range: String,
+    pub importer: String,
+    pub ancestors: Vec<(String, String)>,
+    /// Range-satisfying versions the packument carries no publish time for,
+    /// sorted newest-first. Shown so the reader can see the range itself
+    /// matched.
+    pub undated: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -120,6 +144,7 @@ impl miette::Diagnostic for Error {
         Some(Box::new(match self {
             Self::NoMatch(_) => ERR_AUBE_NO_MATCHING_VERSION,
             Self::AgeGate(_) => ERR_AUBE_NO_MATURE_MATCHING_VERSION,
+            Self::ReleaseAgeMissingTime(_) => ERR_AUBE_RELEASE_AGE_MISSING_TIME,
             Self::Registry(_, _) => ERR_AUBE_REGISTRY_ERROR,
             Self::UnknownCatalog(_) => ERR_AUBE_UNKNOWN_CATALOG,
             Self::UnknownCatalogEntry(_) => ERR_AUBE_UNKNOWN_CATALOG_ENTRY,
@@ -134,6 +159,7 @@ impl miette::Diagnostic for Error {
         match self {
             Self::NoMatch(d) => Some(Box::new(format_no_match_help(d))),
             Self::AgeGate(d) => Some(Box::new(format_age_gate_help(d))),
+            Self::ReleaseAgeMissingTime(d) => Some(Box::new(format_undated_help(d))),
             Self::Registry(name, msg) => Some(Box::new(format_registry_help(name, msg))),
             Self::UnknownCatalog(d) => Some(Box::new(format_unknown_catalog_help(d))),
             Self::UnknownCatalogEntry(d) => Some(Box::new(format_unknown_catalog_entry_help(d))),
@@ -147,10 +173,29 @@ impl miette::Diagnostic for Error {
 
 fn format_trust_downgrade_help(d: &TrustDowngradeDetails) -> String {
     format!(
-        "a trust downgrade may indicate a supply-chain incident — the publisher's previous releases carried {evidence} but {name}@{ver} does not.\n\
-         to bypass: pin a version that retains evidence, set `trustPolicy = off` in .npmrc / pnpm-workspace.yaml, \
-         or add `{name}` (or `{name}@{ver}`) to `trustPolicyExclude`.",
-        evidence = d.prior_evidence.label(),
+        "this is a supply-chain trust failure, not an ordinary version-resolution error. \
+         An earlier release carried {prior_evidence}, but {name}@{ver} carries {current_evidence}.\n\
+         \n\
+         This can signal a compromised publisher or tampered release. It can also be benign \
+         release-process drift: a maintainer manually published, backported outside the trusted \
+         workflow, skipped provenance for convenience, or used a registry that stripped metadata.\n\
+         \n\
+         Before bypassing:\n\
+         1. Inspect the package's npm release, source tag/commit, publisher identity, and tarball; \
+         compare the metadata with npmjs.org, and confirm the change is expected and nothing \
+         appears tampered with.\n\
+         2. Report inconsistent evidence to the relevant upstream owner. Package-release drift \
+         belongs with the maintainer; metadata present on npmjs.org but missing from a proxy or \
+         mirror belongs with that registry operator.\n\
+         3. Only after review, pin a version that retains evidence or add the narrow \
+         `{name}@{ver}` exception to `trustPolicyExclude`. A bare `{name}` exempts every version; \
+         `trustPolicy = off` disables this protection for the entire install.\n\
+         \n\
+         Details and known built-in exceptions: https://aube.jdx.dev/trust-policy-exceptions",
+        prior_evidence = d.prior_evidence.label(),
+        current_evidence = d
+            .current_evidence
+            .map_or("no trust evidence", |e| e.label()),
         name = d.name,
         ver = d.picked_version,
     )
@@ -231,38 +276,64 @@ fn resolve_dist_tag_range(packument: &Packument, range_str: &str) -> String {
     }
 }
 
+/// Range-satisfying versions, newest-first, partitioned by whether the
+/// packument dates them. `pick_version` has already decided which of the two
+/// age failures happened; this recovers the version lists for the message.
+/// Recomputed from the packument rather than threaded out of the pick because
+/// both age-gate paths are uncommon and the recompute is dwarfed by resolution.
+///
+/// Mirrors `pick_version`'s dist-tag handling: a `task.range` that is a tag
+/// name (`"latest"`, `"next"`) resolves to its concrete version before
+/// parsing. Without it the semver parse fails silently and the diagnostic
+/// drops its version list entirely.
+fn satisfying_versions(task: &ResolveTask, packument: &Packument) -> (Vec<String>, Vec<String>) {
+    let effective = resolve_dist_tag_range(packument, &task.range);
+    let Ok(range) = node_semver::Range::parse(&effective) else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut matching: Vec<(node_semver::Version, String)> = Vec::new();
+    for ver in packument.versions.keys() {
+        let Ok(v) = node_semver::Version::parse(ver) else {
+            continue;
+        };
+        if v.satisfies(&range) {
+            matching.push((v, ver.clone()));
+        }
+    }
+    matching.sort_by(|a, b| b.0.cmp(&a.0));
+    matching
+        .into_iter()
+        .map(|(_, s)| s)
+        .partition(|ver| packument.time.contains_key(ver))
+}
+
 pub(crate) fn build_age_gate(
     task: &ResolveTask,
     packument: &Packument,
     minutes: u64,
 ) -> AgeGateDetails {
-    // Mirror `pick_version`'s dist-tag handling: if `task.range` is a
-    // tag name (e.g. `"latest"`, `"next"`), resolve it to the concrete
-    // version string before parsing. Without this the semver parse
-    // fails silently and the help text drops the "blocked by age gate"
-    // line entirely, losing the most useful diagnostic.
-    let effective = resolve_dist_tag_range(packument, &task.range);
-    let range = node_semver::Range::parse(&effective).ok();
-    let mut gated: Vec<(node_semver::Version, String)> = Vec::new();
-    if let Some(r) = range {
-        for ver in packument.versions.keys() {
-            let Ok(v) = node_semver::Version::parse(ver) else {
-                continue;
-            };
-            if !v.satisfies(&r) {
-                continue;
-            }
-            gated.push((v, ver.clone()));
-        }
-    }
-    gated.sort_by(|a, b| b.0.cmp(&a.0));
+    let (dated, _) = satisfying_versions(task, packument);
     AgeGateDetails {
         name: task.name.clone(),
         range: task.range.clone(),
         minutes,
         importer: task.importer.clone(),
         ancestors: task.ancestors.to_vec(),
-        gated: gated.into_iter().map(|(_, s)| s).collect(),
+        gated: dated,
+    }
+}
+
+pub(crate) fn build_release_age_missing_time(
+    task: &ResolveTask,
+    packument: &Packument,
+) -> UndatedDetails {
+    let (_, undated) = satisfying_versions(task, packument);
+    UndatedDetails {
+        name: task.name.clone(),
+        range: task.range.clone(),
+        importer: task.importer.clone(),
+        ancestors: task.ancestors.to_vec(),
+        undated,
     }
 }
 
@@ -318,6 +389,41 @@ fn format_age_gate_help(d: &AgeGateDetails) -> String {
     s.push_str("to bypass: loosen `minimumReleaseAge` in .npmrc, set `minimumReleaseAgeStrict=false` to fall back to the lowest satisfying version, or add `");
     s.push_str(&d.name);
     s.push_str("` to `minimumReleaseAgeExclude`");
+    s
+}
+
+/// Deliberately omits `minimumReleaseAgeStrict=false`. Loosening strictness
+/// here does not produce a mature pick — it produces the newest matching
+/// version with no age evidence at all, which is the silent bypass #581
+/// closed. The remedies offered are the ones that leave the gate meaningful.
+fn format_undated_help(d: &UndatedDetails) -> String {
+    let mut s = String::new();
+    push_importer(&mut s, &d.importer);
+    push_chain(&mut s, &d.ancestors, &d.name);
+    if !d.undated.is_empty() {
+        s.push_str(&format!(
+            "undated matching versions: {}\n",
+            d.undated
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    s.push_str(
+        "the minimumReleaseAge window is checked against the registry's `time` metadata, which \
+         omits these versions — no window would admit them\n",
+    );
+    s.push_str(
+        "to proceed: unset `registry-supports-time-field` if it is on (it suppresses the \
+         full-packument fetch that carries `time`), check the registry config in .npmrc, add `",
+    );
+    s.push_str(&d.name);
+    s.push_str(
+        "` to `minimumReleaseAgeExclude`, or set `minimumReleaseAge=0` to turn the window off \
+         for this project",
+    );
     s
 }
 
@@ -496,5 +602,31 @@ pub(crate) fn classify_registry_error(msg: &str) -> RegistryErrorKind {
         RegistryErrorKind::ResolverBug
     } else {
         RegistryErrorKind::Generic
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trust::TrustEvidence;
+
+    #[test]
+    fn trust_downgrade_help_prioritizes_investigation_and_upstream_reporting() {
+        let help = format_trust_downgrade_help(&TrustDowngradeDetails {
+            name: "@scope/pkg".into(),
+            picked_version: "2.0.0".into(),
+            current_evidence: None,
+            prior_evidence: TrustEvidence::TrustedPublisher,
+            prior_version: "1.9.0".into(),
+        });
+
+        assert!(help.contains("not an ordinary version-resolution error"));
+        assert!(help.contains("carries no trust evidence"));
+        assert!(help.contains("confirm the change is expected and nothing appears tampered with"));
+        assert!(help.contains("Report inconsistent evidence to the relevant upstream owner"));
+        assert!(help.contains("belongs with that registry operator"));
+        assert!(help.contains("`@scope/pkg@2.0.0` exception"));
+        assert!(help.contains("A bare `@scope/pkg` exempts every version"));
+        assert!(help.contains("https://aube.jdx.dev/trust-policy-exceptions"));
     }
 }

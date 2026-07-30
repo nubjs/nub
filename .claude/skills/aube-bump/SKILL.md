@@ -168,8 +168,22 @@ cargo check --workspace --all-targets --message-format short   # iterate until e
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 REAL_HOME="$HOME"; mkdir -p /tmp/clean-aube-home
 env HOME=/tmp/clean-aube-home RUSTUP_HOME="$REAL_HOME/.rustup" CARGO_HOME="$REAL_HOME/.cargo" \
-  cargo test --workspace --lib          # registry/config tests read ~/.npmrc
+  cargo test --workspace                # registry/config tests read ~/.npmrc
 ```
+
+**`--workspace` with NO `--lib` — that is what CI runs** (`aube-parity.yml`, `working-directory:
+vendor/aube`, `run: cargo test --workspace`). `--lib` runs only the in-crate unit tests and SKIPS
+`crates/*/tests/**` entirely, so the fork-discipline integration tests — the ones that pin
+default-preservation, exactly what a bump is most likely to break — never execute. The v1.35 bump
+shipped a green `--lib` run and CI still failed on
+`aube-settings/tests/gvs_disable_list_embedder_default.rs`, whose pinned copy of aube's built-in GVS
+list had gone stale against the new upstream baseline.
+
+**Run aube's suite from inside `vendor/aube` (or the venue), never via `--manifest-path` from the nub
+root.** Cargo reads `.cargo/config.toml` from the INVOCATION directory, and aube's own config sets
+`RUST_TEST_THREADS = "1"` because `aube-util`'s `concurrency` and `http::ticket_cache` tests mutate
+process env and are not thread-safe. Invoking from the nub root silently drops that and those tests
+flake — which reads exactly like a regression your merge caused.
 
 For each error ask: **is this symbol nub delta or upstream?** Then apply the doctrine. Never paper
 over with `.unwrap()`/`.expect()` or by deleting a capability.
@@ -245,12 +259,18 @@ applies. Reverting was correct. Let the tests arbitrate; don't defend a graft.
 Grep after every bump — if one vanished, a resolution was wrong:
 
 ```sh
-grep -rn "workspace_markers\|lockfile_basename\|EmbedderProfile\|read_branded_pnpm_config\|env_prefix\|cache_namespace\|engine_context\|env_overlay\|path_prepends\|runtime_node\|cold_path" vendor/aube/crates
+grep -rn "workspace_markers\|lockfile_basename\|virtual_store_subdir\|branded_env_alias_enabled\|read_branded_pnpm_config\|env_prefix\|cache_namespace\|engine_context\|env_overlay\|path_prepends\|runtime_node\|cold_path" vendor/aube/crates
 ```
 
 - **Embedder profile plumbing** — `env_prefix`, `cache_namespace`, `lockfile_basename`,
-  `workspace_markers`, `read_branded_pnpm_config` gating. Holds the brand + config boundary. Largely
-  upstreamed, so it usually converges rather than conflicts.
+  `workspace_markers`, `virtual_store_subdir`, `read_branded_pnpm_config` gating. Holds the brand +
+  config boundary. Largely upstreamed, so it usually converges rather than conflicts. The profile type
+  is `Embedder` (`aube-util/src/identity.rs`), reached via `aube_util::embedder()`.
+  `virtual_store_subdir` earns its place in the grep: the v1.35 bump auto-merged two upstream call sites
+  that hardcoded `aube_store::VIRTUAL_STORE_SUBDIR` (`"virtual-store"`) over nub's profile-named leaf,
+  with **no conflict markers** — it would have shipped silently. `branded_env_alias_enabled`
+  (`aube-util/src/env.rs`) is the single switch gating every `AUBE_*` alias in `settings.toml`, so each
+  bump's new branded settings inherit the boundary from it alone.
 - **Linker** — GVS, collective hidden tree as the sole phantom mechanism, per-package
   force-materialization (`diskMaterializePackages`), workspace-spanning hoisted planning, memoized
   clonedir probes, whole-dir `clonefile` on macOS, direct-exec of native bins.

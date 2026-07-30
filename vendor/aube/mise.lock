@@ -39,38 +39,6 @@ checksum = "sha256:6e7241b51e6817ea6a047693d8e6fed13b31819c9a0dd6c5a726e1592d22f
 url = "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_windows_amd64.zip"
 provenance = "github-attestations"
 
-[[tools.cargo-binstall]]
-version = "1.18.1"
-backend = "aqua:cargo-bins/cargo-binstall"
-
-[tools.cargo-binstall."platforms.linux-arm64"]
-checksum = "sha256:c55962a0115f9716b709216de7f8bdd59d6ba8738779e60b051b4593f677717a"
-url = "https://github.com/cargo-bins/cargo-binstall/releases/download/v1.18.1/cargo-binstall-aarch64-unknown-linux-musl.tgz"
-
-[tools.cargo-binstall."platforms.linux-arm64-musl"]
-checksum = "sha256:c55962a0115f9716b709216de7f8bdd59d6ba8738779e60b051b4593f677717a"
-url = "https://github.com/cargo-bins/cargo-binstall/releases/download/v1.18.1/cargo-binstall-aarch64-unknown-linux-musl.tgz"
-
-[tools.cargo-binstall."platforms.linux-x64"]
-checksum = "sha256:cf2a4b54494ea8555d6349685e9a301efc1051d9fba6308c76914b2486f8700f"
-url = "https://github.com/cargo-bins/cargo-binstall/releases/download/v1.18.1/cargo-binstall-x86_64-unknown-linux-musl.tgz"
-
-[tools.cargo-binstall."platforms.linux-x64-musl"]
-checksum = "sha256:cf2a4b54494ea8555d6349685e9a301efc1051d9fba6308c76914b2486f8700f"
-url = "https://github.com/cargo-bins/cargo-binstall/releases/download/v1.18.1/cargo-binstall-x86_64-unknown-linux-musl.tgz"
-
-[tools.cargo-binstall."platforms.macos-arm64"]
-checksum = "sha256:955abf167994c90f3547e233edace4c0f794465dd4aa408249b38999aa5ca3cf"
-url = "https://github.com/cargo-bins/cargo-binstall/releases/download/v1.18.1/cargo-binstall-aarch64-apple-darwin.zip"
-
-[tools.cargo-binstall."platforms.macos-x64"]
-checksum = "sha256:e06370bec7143668653bb7c09d0b8b689fc703dd4fa58ec5847c4b571d8a490d"
-url = "https://github.com/cargo-bins/cargo-binstall/releases/download/v1.18.1/cargo-binstall-x86_64-apple-darwin.zip"
-
-[tools.cargo-binstall."platforms.windows-x64"]
-checksum = "sha256:89706aa5215c164d8d091597a470fee72308ac87e8553af395ea77db844a888c"
-url = "https://github.com/cargo-bins/cargo-binstall/releases/download/v1.18.1/cargo-binstall-x86_64-pc-windows-msvc.zip"
-
 [[tools.communique]]
 version = "1.2.3"
 backend = "github:jdx/communique"
@@ -178,6 +146,46 @@ url_api = "https://api.github.com/repos/foresterre/cargo-msrv/releases/assets/38
 checksum = "sha256:e437443331865218763d44089680f4d36547353e8c3c8b394c24859203e6cd05"
 url = "https://github.com/foresterre/cargo-msrv/releases/download/v0.19.3/cargo-msrv-x86_64-pc-windows-msvc-v0.19.3.zip"
 url_api = "https://api.github.com/repos/foresterre/cargo-msrv/releases/assets/380851496"
+
+[[tools."github:jdx/tak"]]
+version = "0.0.4"
+backend = "github:jdx/tak"
+
+[tools."github:jdx/tak"."platforms.linux-arm64"]
+checksum = "sha256:76361a7d8820c9b955b7393d960e5e3744816d020904bd142ca9103cc70616d5"
+url = "https://github.com/jdx/tak/releases/download/v0.0.4/tak-aarch64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/jdx/tak/releases/assets/490853625"
+provenance = "github-attestations"
+
+[tools."github:jdx/tak"."platforms.linux-arm64-musl"]
+checksum = "sha256:8a171779ea86d82c327dc407f8330d98da593751982c718bed3d5aca2c2bb958"
+url = "https://github.com/jdx/tak/releases/download/v0.0.4/tak-aarch64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/jdx/tak/releases/assets/490853627"
+provenance = "github-attestations"
+
+[tools."github:jdx/tak"."platforms.linux-x64"]
+checksum = "sha256:4d5a6c20c4c088f9771f5ba3f138b9e336a53a37b6d59b1dda1d4291294ed4db"
+url = "https://github.com/jdx/tak/releases/download/v0.0.4/tak-x86_64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/jdx/tak/releases/assets/490853634"
+provenance = "github-attestations"
+
+[tools."github:jdx/tak"."platforms.linux-x64-musl"]
+checksum = "sha256:c2bc482ff5010b084e50ad9d6435ca988a743b8303519a38a3801cf1f82ae8b1"
+url = "https://github.com/jdx/tak/releases/download/v0.0.4/tak-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/jdx/tak/releases/assets/490853633"
+provenance = "github-attestations"
+
+[tools."github:jdx/tak"."platforms.macos-arm64"]
+checksum = "sha256:3bf2c09c461ed4db66f58e9d6ce31400e9d57cfe8132c104ca56313b881bd300"
+url = "https://github.com/jdx/tak/releases/download/v0.0.4/tak-aarch64-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/jdx/tak/releases/assets/490853626"
+provenance = "github-attestations"
+
+[tools."github:jdx/tak"."platforms.windows-x64"]
+checksum = "sha256:e6669edcde51625a637a7d3f90b26f3737ca113f8188f6e0f6872b421f51e49e"
+url = "https://github.com/jdx/tak/releases/download/v0.0.4/tak-x86_64-pc-windows-msvc.zip"
+url_api = "https://api.github.com/repos/jdx/tak/releases/assets/490853632"
+provenance = "github-attestations"
 
 [[tools.hk]]
 version = "1.44.3"
@@ -403,33 +411,40 @@ checksum = "sha256:60cd368533d0ad73fa86d93d5bbf95ef40587245ce684ed138c1b31557b5f
 url = "https://github.com/mvdan/sh/releases/download/v3.13.1/shfmt_v3.13.1_windows_amd64.exe"
 
 [[tools.usage]]
-version = "3.2.0"
+version = "4.0.0"
 backend = "aqua:jdx/usage"
 
 [tools.usage."platforms.linux-arm64"]
-checksum = "sha256:9cc22814763948582a31b054e6aa3adfc7a820a3cafb82b317dd4a8931277c0f"
-url = "https://github.com/jdx/usage/releases/download/v3.2.0/usage-aarch64-unknown-linux-musl.tar.gz"
+checksum = "sha256:bb9556ad822852f1824d9fb6e4d4063d3bf2639929ec4b74750c1f419c2ef733"
+url = "https://github.com/jdx/usage/releases/download/v4.0.0/usage-aarch64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/jdx/usage/releases/assets/489800370"
 
 [tools.usage."platforms.linux-arm64-musl"]
-checksum = "sha256:9cc22814763948582a31b054e6aa3adfc7a820a3cafb82b317dd4a8931277c0f"
-url = "https://github.com/jdx/usage/releases/download/v3.2.0/usage-aarch64-unknown-linux-musl.tar.gz"
+checksum = "sha256:bb9556ad822852f1824d9fb6e4d4063d3bf2639929ec4b74750c1f419c2ef733"
+url = "https://github.com/jdx/usage/releases/download/v4.0.0/usage-aarch64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/jdx/usage/releases/assets/489800370"
 
 [tools.usage."platforms.linux-x64"]
-checksum = "sha256:7f48ee228ae95b07c193ec61def326575682b37032473c5af4b3b93a114aec81"
-url = "https://github.com/jdx/usage/releases/download/v3.2.0/usage-x86_64-unknown-linux-musl.tar.gz"
+checksum = "sha256:3ce4d8d30f27db44f0aa2fe8bd351229e36e8d38b09060b0cadb7e02be57c69e"
+url = "https://github.com/jdx/usage/releases/download/v4.0.0/usage-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/jdx/usage/releases/assets/489800150"
 
 [tools.usage."platforms.linux-x64-musl"]
-checksum = "sha256:7f48ee228ae95b07c193ec61def326575682b37032473c5af4b3b93a114aec81"
-url = "https://github.com/jdx/usage/releases/download/v3.2.0/usage-x86_64-unknown-linux-musl.tar.gz"
+checksum = "sha256:3ce4d8d30f27db44f0aa2fe8bd351229e36e8d38b09060b0cadb7e02be57c69e"
+url = "https://github.com/jdx/usage/releases/download/v4.0.0/usage-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/jdx/usage/releases/assets/489800150"
 
 [tools.usage."platforms.macos-arm64"]
-checksum = "sha256:f0a566bc05fc485b23a339abddbaef04225e7730574dbb603fdc021e084d26f9"
-url = "https://github.com/jdx/usage/releases/download/v3.2.0/usage-universal-apple-darwin.tar.gz"
+checksum = "sha256:b86b3b96590c40156977906758b92238fab506edcbdc5331f9efb034207e2ab4"
+url = "https://github.com/jdx/usage/releases/download/v4.0.0/usage-universal-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/jdx/usage/releases/assets/489800167"
 
 [tools.usage."platforms.macos-x64"]
-checksum = "sha256:f0a566bc05fc485b23a339abddbaef04225e7730574dbb603fdc021e084d26f9"
-url = "https://github.com/jdx/usage/releases/download/v3.2.0/usage-universal-apple-darwin.tar.gz"
+checksum = "sha256:b86b3b96590c40156977906758b92238fab506edcbdc5331f9efb034207e2ab4"
+url = "https://github.com/jdx/usage/releases/download/v4.0.0/usage-universal-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/jdx/usage/releases/assets/489800167"
 
 [tools.usage."platforms.windows-x64"]
-checksum = "sha256:9aba23a5d549695cfb5f034849e143205ccf972e5b5d42c24acd32e084d7a165"
-url = "https://github.com/jdx/usage/releases/download/v3.2.0/usage-x86_64-pc-windows-msvc.zip"
+checksum = "sha256:91a241e3abf4925855814ae8cab3e6e826736b9cfaddc55a12cf4c3fe03d0dc7"
+url = "https://github.com/jdx/usage/releases/download/v4.0.0/usage-x86_64-pc-windows-msvc.zip"
+url_api = "https://api.github.com/repos/jdx/usage/releases/assets/489801502"

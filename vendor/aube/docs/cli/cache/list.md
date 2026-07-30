@@ -2,6 +2,7 @@
 # `aube cache list`
 
 - **Usage**: `aube cache list [PATTERNS]…`
+- **Effect**: read-only
 
 List the available packages in the metadata cache.
 

@@ -2,6 +2,7 @@
 # `aube prune`
 
 - **Usage**: `aube prune [-P --prod] [--no-optional]`
+- **Effect**: modifies state
 
 Remove extraneous packages from project `node_modules`.
 

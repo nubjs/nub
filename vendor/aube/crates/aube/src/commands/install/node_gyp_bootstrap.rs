@@ -19,17 +19,26 @@
 //! script that can actually reach the ambient `PATH` — see
 //! [`ScriptReach`].
 //!
-//! The install is performed by recursively invoking the current aube
-//! binary with `install --ignore-scripts` inside a freshly-written
-//! `package.json` that pins node-gyp. The outer project's `.npmrc`
-//! (if any) is copied into the tool dir as its own project-level
-//! `.npmrc` so private-registry URLs and auth tokens configured by
-//! monorepo / enterprise setups flow through to the recursive
-//! install — the subprocess's cwd is the tool dir, which would
-//! otherwise only pick up `~/.npmrc`. An `xx::fslock` lock keyed
-//! off the tool dir serializes concurrent bootstraps across
-//! processes; the [`tool_tree_usable`] fast path short-circuits every
-//! subsequent invocation.
+//! The install runs in-process against a freshly-written
+//! `package.json` that pins node-gyp, via
+//! [`super::run_with_project_lock`] with `ignore_scripts` set. It
+//! deliberately does *not* shell out to the aube binary: an embedder
+//! links this crate into its own executable, so
+//! `std::env::current_exe` would name the host program and the
+//! recursive `install --ignore-scripts --silent` would be parsed as
+//! host arguments.
+//!
+//! The outer project's `.npmrc` (if any) is copied into the tool dir
+//! as its own project-level `.npmrc` so private-registry URLs and
+//! auth tokens configured by monorepo / enterprise setups flow
+//! through to the bootstrap install, which resolves against the tool
+//! dir and would otherwise only pick up `~/.npmrc`.
+//!
+//! The tool dir is its own single-package project (stub workspace
+//! yaml), so its project lock is keyed off the tool dir and both
+//! serializes concurrent bootstraps across processes and stays
+//! disjoint from the outer install's lock. The [`tool_tree_usable`]
+//! fast path short-circuits every subsequent invocation.
 use miette::{IntoDiagnostic, WrapErr, miette};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -166,21 +175,51 @@ pub async fn ensure_cached(project_dir: &Path) -> miette::Result<PathBuf> {
     if tool_tree_usable(&tool_dir, &bin_dir) {
         return Ok(bin_dir);
     }
-    let lock_key = root.join(format!("{BUCKET}.lock"));
     let tool_dir_blocking = tool_dir.clone();
-    let bin_dir_blocking = bin_dir.clone();
     let project_npmrc = project_dir.join(".npmrc");
     tokio::task::spawn_blocking(move || {
-        bootstrap_blocking(
-            &lock_key,
-            &tool_dir_blocking,
-            &bin_dir_blocking,
-            &project_npmrc,
-        )
+        write_bootstrap_project(&tool_dir_blocking, &project_npmrc)
     })
     .await
     .into_diagnostic()
     .wrap_err("node-gyp bootstrap task panicked")??;
+
+    // The tool dir is its own single-package project (see the stub workspace
+    // yaml written above), so this lock is keyed on `tool_dir` and cannot
+    // contend with the outer install's lock on the real project.
+    let lock = crate::commands::take_project_lock(&tool_dir)?;
+    // Re-check under the lock: another process may have raced us between the
+    // check above and acquisition.
+    if tool_tree_usable(&tool_dir, &bin_dir) {
+        return Ok(bin_dir);
+    }
+
+    tracing::info!("bootstrapping node-gyp {SPEC} into {}", tool_dir.display());
+    let mut opts = super::InstallOptions::with_mode(super::FrozenMode::Prefer);
+    // Equivalent of the `install --ignore-scripts --silent` this used to shell
+    // out for. node-gyp's own dependency tree needs no build scripts, and
+    // running them here would recurse straight back into this bootstrap.
+    opts.ignore_scripts = true;
+    opts.control = super::InstallControl::silent();
+    super::run_with_project_lock(opts, &lock)
+        .await
+        .wrap_err_with(|| {
+            format!(
+                "failed to bootstrap node-gyp {SPEC} into {} — \
+                 pre-populate it or run `{}` once while online",
+                tool_dir.display(),
+                aube_util::cmd("install")
+            )
+        })?;
+
+    if !tool_tree_usable(&tool_dir, &bin_dir) {
+        return Err(miette!(
+            "node-gyp bootstrap into {} reported success but left no usable tree \
+             (missing shim in {}, or an unresolvable {PKG} require root)",
+            tool_dir.display(),
+            bin_dir.display()
+        ));
+    }
     Ok(bin_dir)
 }
 
@@ -308,37 +347,28 @@ if not defined AUBE_REAL_NODE_GYP exit /b 1
     Ok(())
 }
 
-fn bootstrap_blocking(
-    lock_key: &Path,
-    tool_dir: &Path,
-    bin_dir: &Path,
-    project_npmrc: &Path,
-) -> miette::Result<()> {
+/// Materialize the synthetic single-package project that the bootstrap
+/// install runs against. Writes are atomic and idempotent, so racing
+/// processes converge on the same content; serialization is the caller's
+/// project lock on `tool_dir`.
+fn write_bootstrap_project(tool_dir: &Path, project_npmrc: &Path) -> miette::Result<()> {
     std::fs::create_dir_all(tool_dir).into_diagnostic()?;
-    let _lock = xx::fslock::FSLock::new(lock_key)
-        .with_callback(|_| {
-            tracing::info!("waiting for another aube process to finish bootstrapping node-gyp");
-        })
-        .lock()
-        .map_err(|e| miette!("failed to acquire node-gyp bootstrap lock: {e}"))?;
-    // Re-check under the lock: another process may have raced us.
-    if tool_tree_usable(tool_dir, bin_dir) {
-        return Ok(());
-    }
+    // The scratch manifest lands in the embedder's own cache tree, so even its
+    // `name` follows the active brand rather than hardcoding the engine's.
     let manifest = format!(
-        r#"{{"name":"aube-tool-node-gyp","private":true,"dependencies":{{"node-gyp":"{SPEC}"}}}}"#
+        r#"{{"name":"{tool}-tool-node-gyp","private":true,"dependencies":{{"node-gyp":"{SPEC}"}}}}"#,
+        tool = aube_util::prog()
     );
     aube_util::fs_atomic::atomic_write(&tool_dir.join("package.json"), manifest.as_bytes())
         .into_diagnostic()?;
-    // Pin the recursive `aube install` invocation below to `tool_dir`
-    // so its workspace-root walk-up stops here instead of escaping
-    // upward. `tool_dir` lives under `$XDG_CACHE_HOME/aube/tools/` —
+    // Pin the bootstrap install to `tool_dir` so its workspace-root
+    // walk-up stops here instead of escaping upward. `tool_dir` lives under `$XDG_CACHE_HOME/aube/tools/` —
     // i.e. inside the user's HOME and inside any test temp dir set
     // via `HOME=$TEST_TEMP_DIR`. Without this stub yaml,
     // `find_workspace_root` would walk past `$XDG_CACHE_HOME`,
     // discover the outer project's `pnpm-workspace.yaml`, and run
-    // the recursive install against the *outer* tree — deadlocking
-    // on the outer process's project lock. Any `pnpm-workspace.yaml`
+    // the bootstrap install against the *outer* tree — taking, and
+    // deadlocking on, the project lock the outer install already holds. Any `pnpm-workspace.yaml`
     // is a hard boundary, so the empty stub hits the first marker
     // check at the start of the walk, returns `tool_dir`, and the
     // install runs as a single-package install (`workspace_packages`
@@ -352,9 +382,8 @@ fn bootstrap_blocking(
     aube_util::fs_atomic::atomic_write(&tool_dir.join(marker), b"").into_diagnostic()?;
     // Forward the outer project's `.npmrc` so private registries and
     // auth tokens configured at project scope carry through to the
-    // recursive install. The subprocess's cwd is `tool_dir`, so
-    // without this copy its `.npmrc` walk would only ever see
-    // `~/.npmrc`. Overwrite on every bootstrap so a user updating
+    // bootstrap install. It resolves against `tool_dir`, so without
+    // this copy its `.npmrc` walk would only ever see `~/.npmrc`. Overwrite on every bootstrap so a user updating
     // their project `.npmrc` between runs picks up fresh config;
     // delete the stale copy if the project no longer has one.
     let tool_npmrc = tool_dir.join(".npmrc");
@@ -369,37 +398,6 @@ fn bootstrap_blocking(
             })?;
     } else if tool_npmrc.exists() {
         let _ = std::fs::remove_file(&tool_npmrc);
-    }
-    let exe = std::env::current_exe()
-        .into_diagnostic()
-        .wrap_err("could not locate current aube executable for node-gyp bootstrap")?;
-    tracing::info!("bootstrapping node-gyp {SPEC} into {}", tool_dir.display());
-    let status = std::process::Command::new(&exe)
-        .args(["install", "--ignore-scripts", "--silent"])
-        .current_dir(tool_dir)
-        .status()
-        .into_diagnostic()
-        .wrap_err(format!(
-            "failed to spawn recursive {} for node-gyp bootstrap",
-            aube_util::cmd("install")
-        ))?;
-    if !status.success() {
-        return Err(miette!(
-            "recursive {} failed while bootstrapping node-gyp (exit {}) — \
-             pre-populate {} or run `{}` once while online",
-            aube_util::cmd("install"),
-            aube_scripts::exit_code_from_status(status),
-            tool_dir.display(),
-            aube_util::cmd("install")
-        ));
-    }
-    if !tool_tree_usable(tool_dir, bin_dir) {
-        return Err(miette!(
-            "node-gyp bootstrap completed but left no usable tree under {} \
-             (missing shim in {}, or an unresolvable {PKG} require root)",
-            tool_dir.display(),
-            bin_dir.display()
-        ));
     }
     Ok(())
 }

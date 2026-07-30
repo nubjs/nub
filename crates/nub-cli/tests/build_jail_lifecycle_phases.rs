@@ -148,7 +148,6 @@ fn preinstall_install_and_postinstall_all_reach_the_build_jail() {
         let ran = rt
             .block_on(aube_scripts::run_dep_hook(
                 &package_dir,
-                &dep_modules_dir,
                 project.path(),
                 "node_modules",
                 &manifest,

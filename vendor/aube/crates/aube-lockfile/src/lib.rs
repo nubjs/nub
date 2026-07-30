@@ -605,6 +605,31 @@ impl LockedPackage {
         format!("{}@{}", self.name, self.version)
     }
 
+    /// Resolve a patch entry for this package from a `name@version`-keyed
+    /// map, returning the matched key alongside the value.
+    ///
+    /// Tries the alias-qualified [`Self::spec_key`] first, then falls
+    /// back to the registry identity (`registry_name()@version`).
+    /// `patchedDependencies` are declared against the *real* package
+    /// name, so an npm-aliased entry (`"odd-alias": "npm:is-odd@3.0.1"`)
+    /// carries `name = "odd-alias"` while the patch is keyed
+    /// `is-odd@3.0.1`; the fallback is what lets the patch reach the
+    /// aliased install. Mirrors pnpm, which resolves patches on the
+    /// resolved manifest name and keeps no separate alias node.
+    pub fn lookup_patch<'a, V>(&self, map: &'a BTreeMap<String, V>) -> Option<(String, &'a V)> {
+        let spec_key = self.spec_key();
+        if let Some(value) = map.get(&spec_key) {
+            return Some((spec_key, value));
+        }
+        let registry_key = format!("{}@{}", self.registry_name(), self.version);
+        if registry_key != spec_key
+            && let Some(value) = map.get(&registry_key)
+        {
+            return Some((registry_key, value));
+        }
+        None
+    }
+
     /// Exact approval key for non-registry package sources.
     ///
     /// Name-wide build approvals are only trustworthy for packages
@@ -698,6 +723,61 @@ mod locked_package_tests {
         pkg.registry_git_hosted = true;
 
         assert_eq!(pkg.source_approval_key(), None);
+    }
+
+    #[test]
+    fn lookup_patch_matches_plain_spec_key() {
+        let pkg = pkg();
+        let map = BTreeMap::from([("pkg@1.0.0".to_string(), "patch".to_string())]);
+        assert_eq!(
+            pkg.lookup_patch(&map),
+            Some(("pkg@1.0.0".to_string(), &"patch".to_string()))
+        );
+    }
+
+    #[test]
+    fn lookup_patch_falls_back_to_registry_name_for_alias() {
+        // `"odd-alias": "npm:is-odd@3.0.1"` records name = alias,
+        // alias_of = registry name. The patch is declared against the
+        // registry identity, so the aliased entry must resolve it via
+        // the fallback (this is the discussion #1082 bug).
+        let mut pkg = pkg();
+        pkg.name = "odd-alias".to_string();
+        pkg.version = "3.0.1".to_string();
+        pkg.alias_of = Some("is-odd".to_string());
+
+        let map = BTreeMap::from([("is-odd@3.0.1".to_string(), "patch".to_string())]);
+        assert_eq!(
+            pkg.lookup_patch(&map),
+            Some(("is-odd@3.0.1".to_string(), &"patch".to_string()))
+        );
+    }
+
+    #[test]
+    fn lookup_patch_prefers_alias_qualified_key_over_registry_key() {
+        // A patch declared against the alias identity wins over one
+        // declared against the registry identity — spec_key is tried
+        // first.
+        let mut pkg = pkg();
+        pkg.name = "odd-alias".to_string();
+        pkg.version = "3.0.1".to_string();
+        pkg.alias_of = Some("is-odd".to_string());
+
+        let map = BTreeMap::from([
+            ("odd-alias@3.0.1".to_string(), "alias-patch".to_string()),
+            ("is-odd@3.0.1".to_string(), "registry-patch".to_string()),
+        ]);
+        assert_eq!(
+            pkg.lookup_patch(&map),
+            Some(("odd-alias@3.0.1".to_string(), &"alias-patch".to_string()))
+        );
+    }
+
+    #[test]
+    fn lookup_patch_returns_none_when_unpatched() {
+        let pkg = pkg();
+        let map = BTreeMap::from([("other@2.0.0".to_string(), "patch".to_string())]);
+        assert_eq!(pkg.lookup_patch(&map), None);
     }
 
     #[test]

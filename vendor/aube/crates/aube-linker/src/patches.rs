@@ -103,8 +103,13 @@ pub(crate) fn wipe_changed_patched_entries(
         return;
     }
     for (dep_path, pkg) in &graph.packages {
-        let key = pkg.spec_key();
-        if affected.contains(&key) {
+        // Patch fingerprints are keyed by the declared selector (the
+        // registry identity), so an npm-aliased entry must match on
+        // `registry_name()@version` as well as its alias-qualified
+        // `spec_key()`. Mirrors `LockedPackage::lookup_patch`.
+        let spec_key = pkg.spec_key();
+        let registry_key = format!("{}@{}", pkg.registry_name(), pkg.version);
+        if affected.contains(&spec_key) || affected.contains(&registry_key) {
             let entry = aube_dir.join(dep_path_to_filename(dep_path, max_length));
             let _ = std::fs::remove_dir_all(entry);
         }

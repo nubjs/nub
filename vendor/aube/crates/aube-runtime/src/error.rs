@@ -43,6 +43,15 @@ pub enum Error {
     )]
     UnsupportedPlatform { platform: String },
 
+    /// The self-updater has no aube release archive to fetch for this
+    /// host. Distinct from [`Error::UnsupportedPlatform`] (which is
+    /// about the *Node.js* download): this is about aube's own binary,
+    /// so the message names aube — not Node.
+    #[error(
+        "no aube release build is published for {platform}; install aube via mise or your system package manager"
+    )]
+    NoReleaseBuild { platform: String },
+
     #[error("offline mode is active and {what} is not cached")]
     Offline { what: String },
 
@@ -65,6 +74,7 @@ impl Error {
             Error::ExtractFailed { .. } => errors::ERR_AUBE_RUNTIME_EXTRACT_FAILED,
             Error::MiseInstallFailed { .. } => errors::ERR_AUBE_RUNTIME_MISE_INSTALL_FAILED,
             Error::UnsupportedPlatform { .. } => errors::ERR_AUBE_RUNTIME_UNSUPPORTED_PLATFORM,
+            Error::NoReleaseBuild { .. } => errors::ERR_AUBE_SELF_UPDATE_UNSUPPORTED_PLATFORM,
             Error::Offline { .. } => errors::ERR_AUBE_OFFLINE,
             // Generic exit code (no EXIT_TABLE entry) — a lock or
             // rename failure is not a download failure, and the

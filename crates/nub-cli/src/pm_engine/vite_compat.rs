@@ -234,9 +234,17 @@ pub(crate) fn vite_lt_8_1(version: &str) -> bool {
 /// embedder-namespaced to `~/.cache/nub/pm`). This is the realpath prefix of
 /// every store-resident served module, so it is the value Vite must allow. The
 /// leaf name comes from the active embedder (`store` under nub), matching what
-/// `aube_store::Store::virtual_store_dir` writes, so the two never drift. The
-/// embedder profile is registered by the time install runs, so
-/// `aube_store::dirs::cache_dir()` resolves the nub namespace.
+/// `aube_store::Store::virtual_store_dir` writes. The embedder profile is
+/// registered by the time install runs, so `aube_store::dirs::cache_dir()`
+/// resolves the nub namespace.
+///
+/// Only the DEFAULT location is reproduced here. aube v1.35.0 added the
+/// `globalVirtualStoreDir` / `cacheDir` settings, which relocate the real store
+/// at runtime; the resolver for those (`commands::settings_context::
+/// global_virtual_store_dir`) is `pub(crate)` to the aube crate, so nub cannot
+/// consult it without widening that surface. A project that sets either setting
+/// therefore gets a `.modules.yaml` naming the default path rather than the
+/// relocated one, and Vite would not be told to allow the real store.
 fn global_virtual_store_dir() -> Option<PathBuf> {
     aube_store::dirs::cache_dir().map(|c| c.join(aube_util::embedder().virtual_store_subdir))
 }

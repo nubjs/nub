@@ -2,6 +2,7 @@
 # `aube dist-tag add`
 
 - **Usage**: `aube dist-tag add [--otp <OTP>] <SPEC> [TAG]`
+- **Effect**: modifies state
 
 Add or update a dist-tag on a package.
 

@@ -2,12 +2,24 @@
 name: ad-hoc-test
 description: >-
   Verify new nub functionality end-to-end by building the dev binary and
-  exercising it against a real throwaway fixture. Invoke (via the Skill tool)
-  after implementing or changing a subcommand/flag/behavior, to confirm the
-  feature ACTUALLY works (not just that tests pass). The loop: create a fixture
-  in a tmp dir, build the dev `nub`, run the subcommand you implemented against
-  the fixture, verify it had the intended effect, then run command variants to
-  probe edge cases. Ad-hoc e2e is a valid verification method on its own; this
+  exercising it against real throwaway fixtures. Invoke (via the Skill tool) in
+  BOTH directions, and the second is the one that gets skipped. (1) CONFIRM —
+  after implementing or changing a subcommand/flag/behavior, check the feature
+  ACTUALLY works, not just that tests pass. (2) FALSIFY — before opening a PR on
+  behavior, and again before calling a review round done, SELF-REVIEW by sweeping
+  many adversarial fixtures for what the change BROKE somewhere you were not
+  looking: boundary abuse, real installed registry packages, monorepo and symlink
+  layouts, the tier x module-format matrix. Green gates plus a working
+  reported-case is NOT that sweep. Reviewers read code and cannot run it, so they
+  systematically miss the silent wrong answer — the resolution that returns a
+  different module with no error — which only a fixture run can catch, by
+  checking WHICH file answered rather than that something did. The loop: create
+  fixtures in a tmp dir, build the dev `nub`, run against them, and diff every
+  result three ways — plain node, a build of your branch's MERGE-BASE, and your
+  build. Use the merge-base, NEVER the shipped release: the release can trail
+  `main` by dozens of unrelated commits, so a difference against it is not
+  attributable to your change and every "pre-existing, not mine" verdict resting
+  on it is unfounded. Ad-hoc e2e is a valid verification method on its own; this
   skill also covers when to promote a durable check into the committed test
   suite. Pairs with the `dev-loop` build skill and AGENTS.md's pre-push loop.
 metadata:

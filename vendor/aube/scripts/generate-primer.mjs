@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process'
-import { mkdir, readFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 
 const args = new Map()
@@ -21,6 +21,10 @@ const versions = versionsArg === 'all' ? Infinity : Number(versionsArg)
 const out = resolve(args.get('out') ?? `crates/aube-resolver/data/primer-top${top}.json`)
 const namesFile = args.get('names')
 const namesUrl = args.get('names-url') ?? 'https://raw.githubusercontent.com/jdx/aube-primer-packages/main/data/packages.json'
+const popularNamesOut = args.get('popular-names-out')
+const popularNamesUrl =
+  args.get('popular-names-url') ??
+  'https://raw.githubusercontent.com/jdx/aube-primer-packages/main/data/popular.json'
 
 if (!Number.isInteger(top) || top < 1) throw new Error('--top must be a positive integer')
 if (versions !== Infinity && (!Number.isInteger(versions) || versions < 1)) {
@@ -31,6 +35,14 @@ const names = namesFile
   ? parseNames(await readFile(namesFile, 'utf8'), namesFile)
   : await fetchPopularNames(namesUrl)
 if (!Array.isArray(names)) throw new Error('package-name source must be a JSON array')
+if (popularNamesOut) {
+  const popularNames = await fetchPopularNames(popularNamesUrl)
+  if (popularNames.length !== 100000) {
+    throw new Error(`popular-name source must contain exactly 100000 names, found ${popularNames.length}`)
+  }
+  await mkdir(dirname(resolve(popularNamesOut)), { recursive: true })
+  await writeFile(resolve(popularNamesOut), `${JSON.stringify(popularNames)}\n`)
+}
 
 const primer = {}
 for (const [index, name] of names.slice(0, top).entries()) {
@@ -42,7 +54,7 @@ for (const [index, name] of names.slice(0, top).entries()) {
 await mkdir(dirname(out), { recursive: true })
 const raw = Buffer.from(`${JSON.stringify(primer)}\n`)
 if (out.endsWith('.json')) {
-  await import('node:fs/promises').then(({ writeFile }) => writeFile(out, raw))
+  await writeFile(out, raw)
 } else {
   const zstd = spawnSync('zstd', ['-q', '-19', '-f', '-o', out], { input: raw, stdio: ['pipe', 'inherit', 'inherit'] })
   if (zstd.status !== 0) throw new Error('zstd compression failed')

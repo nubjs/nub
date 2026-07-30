@@ -45,12 +45,13 @@ pub struct AddToProjectOptions {
     pub osv_transitive_check: bool,
     /// Invocation-scoped output and cancellation controls for embedders.
     pub control: install::InstallControl,
-    /// Directory containing the `node` executable an embedding host wants
-    /// lifecycle scripts to run on (see
-    /// [`crate::commands::install::InstallOptions::embedder_node_bin_dir`]).
-    /// `None` keeps aube's own runtime resolution. Matches the
-    /// `node_bin_dir` field on [`crate::embed::InstallOptions`].
-    pub node_bin_dir: Option<std::path::PathBuf>,
+    /// How an embedding host wants Node invoked for lifecycle scripts (see
+    /// [`crate::commands::install::InstallOptions::embedder_runtime`]).
+    /// `None` falls back to the process-wide
+    /// [`crate::runtime::set_embedder_runtime`], else aube's own runtime
+    /// resolution. Matches the `runtime` field on
+    /// [`crate::embed::InstallOptions`].
+    pub runtime: Option<crate::runtime::EmbedderRuntime>,
 }
 
 /// Resolve, save, and install packages in an explicitly selected project.
@@ -94,7 +95,15 @@ pub async fn add_to_project(
             _ = mutation_control.cancelled() => mutation_control.check_cancelled(),
             result = async {
                 if !options.offline {
-                    supply_chain::run_cli_name_gates(project_dir, packages, false).await?;
+                    supply_chain::run_cli_name_gates(
+                        lock.project_dir(),
+                        packages,
+                        false,
+                        crate::commands::add_supply_chain::LowDownloadPrompt::Host(
+                            options.control.clone(),
+                        ),
+                    )
+                    .await?;
                 }
                 update_manifest_for_add(
                     project_dir,
@@ -133,7 +142,7 @@ pub async fn add_to_project(
                 options.dangerously_allow_all_builds,
             );
             install_options.control = options.control;
-            install_options.embedder_node_bin_dir = options.node_bin_dir;
+            install_options.embedder_runtime = options.runtime;
             if options.offline {
                 install_options.network_mode = aube_registry::NetworkMode::Offline;
             }
@@ -221,17 +230,16 @@ pub struct AddArgs {
         value_parser = parse_allow_build_value,
     )]
     pub allow_build: Vec<String>,
-    /// Bypass the [`lowDownloadThreshold`] confirm prompt / refusal for
-    /// this invocation.
+    /// Bypass the similar-name, new-name, and [`lowDownloadThreshold`]
+    /// confirm prompts / refusals for this invocation.
     ///
     /// `aube add` looks up each candidate's weekly download count and
     /// prompts (interactive) or fails (CI) when the count is below
-    /// [`lowDownloadThreshold`]. The flag is intended for the cases
-    /// where you've already verified the package out-of-band — adding
-    /// a brand-new niche tool, a fresh fork, an internal scratch
-    /// package — and don't want the prompt to interrupt scripted
-    /// workflows. Does not affect the OSV malicious-package check,
-    /// which remains a hard block.
+    /// [`lowDownloadThreshold`], resembles a top-100,000 npm package,
+    /// or is newer than [`minimumPackageAge`]. The flag is intended
+    /// for cases where you've already verified the package out-of-band.
+    /// It does not affect the OSV malicious-package check, which remains
+    /// a hard block.
     #[arg(long)]
     pub allow_low_downloads: bool,
     /// Allow every dependency's lifecycle scripts to run.
@@ -549,7 +557,13 @@ pub async fn run(
     // full resolved graph (matching Bun's contract), with
     // concrete versions + transitives the OSV/downloads probes
     // wouldn't see at this stage.
-    supply_chain::run_cli_name_gates(&cwd, packages, allow_low_downloads).await?;
+    supply_chain::run_cli_name_gates(
+        &cwd,
+        packages,
+        allow_low_downloads,
+        crate::commands::add_supply_chain::LowDownloadPrompt::Terminal,
+    )
+    .await?;
 
     update_manifest_for_add(
         &cwd,

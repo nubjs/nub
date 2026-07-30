@@ -2,6 +2,7 @@
 # `aube login`
 
 - **Usage**: `aube login [FLAGS]`
+- **Effect**: modifies state
 
 Store a registry auth token in the user's ~/.npmrc
 

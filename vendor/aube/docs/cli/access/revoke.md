@@ -2,6 +2,7 @@
 # `aube access revoke`
 
 - **Usage**: `aube access revoke <TEAM> <PACKAGE>`
+- **Effect**: destructive — may delete or irreversibly overwrite
 
 Revoke a team's access to a package
 

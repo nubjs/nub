@@ -9,7 +9,12 @@ pub(crate) fn configure_script_settings(
     ctx: &aube_settings::ResolveCtx<'_>,
     command: Option<&str>,
 ) {
-    let node_options = aube_settings::resolved::node_options(ctx).and_then(non_empty_string);
+    // Fold an embedder's `NODE_OPTIONS` contribution over the resolved
+    // `nodeOptions` setting (append by default, so a wrapper's `--import`
+    // preload adds to the user's value rather than replacing it).
+    let node_options = crate::runtime::merge_node_options(
+        aube_settings::resolved::node_options(ctx).and_then(non_empty_string),
+    );
     let script_shell = aube_settings::resolved::script_shell(ctx)
         .and_then(|s| non_empty_string(s).map(Into::into));
     let unsafe_perm = aube_settings::resolved::unsafe_perm(ctx);
@@ -18,9 +23,10 @@ pub(crate) fn configure_script_settings(
     // this for lifecycle scripts to see the pinned node — the install
     // driver resolves the runtime early, then configures script
     // settings. When no context exists (or no switching is active)
-    // `node_bin_dir` stays `None` (PATH untouched); `node_exe` still
-    // falls back to the ambient `node` on PATH so `npm_node_execpath` /
-    // `NODE` are populated for lifecycle scripts the way pnpm/npm do.
+    // `node_bin_dir` stays `None` (PATH untouched); `node_program` /
+    // `node_execpath` still fall back to the ambient `node` on PATH so
+    // `NODE` / `npm_node_execpath` are populated for lifecycle scripts
+    // the way pnpm/npm do.
     let runtime = crate::runtime::current();
     // Resolve the proxy the same way the registry client does, so a
     // dependency's install script honors it too. `httpProxy` inherits
@@ -47,13 +53,17 @@ pub(crate) fn configure_script_settings(
         unsafe_perm,
         shell_emulator,
         node_bin_dir: runtime.as_ref().and_then(|r| r.bin_dir.clone()),
-        node_exe: runtime
+        node_program: runtime
             .as_ref()
-            .and_then(|r| r.node_bin.clone())
+            .and_then(|r| r.node_program.clone())
             .or_else(aube_runtime::node_on_path),
-        // No ambient fallback: `None` means "same binary as `node_exe`", which
-        // already carries one. Only a wrapping embedder sets this.
-        node_execpath: runtime.as_ref().and_then(|r| r.node_execpath.clone()),
+        // Falls back to `node_program`: an embedder that wraps the runtime
+        // without naming a separate real binary means "the same one".
+        node_execpath: runtime
+            .as_ref()
+            .and_then(|r| r.node_execpath.clone().or_else(|| r.node_program.clone()))
+            .or_else(aube_runtime::node_on_path),
+        extra_env: crate::runtime::embedder_extra_env(),
         env_overlay: overlay.env_overlay,
         path_prepends: overlay.path_prepends,
         command: command.map(str::to_string),

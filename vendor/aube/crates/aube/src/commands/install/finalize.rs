@@ -8,7 +8,7 @@ use super::side_effects_cache::{
 use super::summary::{print_direct_dependency_summary, should_print_human_install_summary};
 use super::sweep::sweep_orphaned_aube_entries;
 use super::workspace::importer_project_dir;
-use super::{InstallPhaseTimings, delta, unreviewed_builds};
+use super::{InstallPhaseTimings, delta, gvs, unreviewed_builds};
 use crate::state;
 use miette::{Context, IntoDiagnostic, miette};
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,6 +32,7 @@ pub(super) struct FinalizePhaseInput<'a> {
     pub(super) jail_policy: &'a JailBuildPolicy,
     pub(super) stats: &'a aube_linker::LinkStats,
     pub(super) node_linker: aube_linker::NodeLinker,
+    pub(super) planned_gvs: bool,
     pub(super) virtual_store_only: bool,
     pub(super) current_leaf_hashes: Option<BTreeMap<String, String>>,
     pub(super) current_subtree_hashes: Option<BTreeMap<String, String>>,
@@ -103,6 +104,14 @@ fn lifecycle_delta_filter(
     if virtual_store_only {
         return None;
     }
+    // The filter's premise is "content hash unchanged ⇒ this package still has
+    // whatever its build left behind". That premise is upheld on the linker
+    // side: the hoisted pass reuses a placement whenever the driver can prove
+    // the fingerprint is unchanged AND the previous link completed (see
+    // `reusable_hoisted_dep_paths`), and anything it cannot prove gets wiped
+    // and refilled — which also moves that package's fingerprint, so it lands
+    // in `selected` here and is rebuilt. The two halves have to stay in step;
+    // loosening either one silently deletes build output (nubjs/nub#610).
     let prior_policy_hash = state::read_state_dep_build_policy_hash(cwd)?;
     if prior_policy_hash != dep_build_policy_hash {
         tracing::debug!("delta: dep build policy changed; running full eligible build scan");
@@ -184,6 +193,7 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         jail_policy,
         stats,
         node_linker,
+        planned_gvs,
         virtual_store_only,
         current_leaf_hashes,
         current_subtree_hashes,
@@ -221,7 +231,34 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
     // block and the branded line as redundant twins.
     let install_is_noop = stats.packages_linked == 0 && stats.top_level_linked == 0;
     if let Some(p) = prog_ref {
-        p.finish(!install_is_noop);
+        let tty_behavior = if install_is_noop {
+            crate::progress::TtyFinishBehavior::Clear
+        } else {
+            crate::progress::TtyFinishBehavior::Preserve
+        };
+        p.finish(!install_is_noop, tty_behavior);
+    }
+
+    if !virtual_store_only {
+        let virtual_store_dir = if planned_gvs && node_linker == aube_linker::NodeLinker::Isolated {
+            store.virtual_store_dir()
+        } else {
+            aube_dir.to_path_buf()
+        };
+        gvs::write_modules_metadata(cwd, graph_for_link, modules_dir_name, &virtual_store_dir)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("failed to write {modules_dir_name}/.modules.yaml"))?;
+        if planned_gvs && node_linker == aube_linker::NodeLinker::Isolated {
+            gvs::patch_legacy_vite_copies(
+                aube_dir,
+                graph_for_link,
+                virtual_store_dir_max_length,
+                &store.virtual_store_dir(),
+                modules_dir_name,
+            )
+            .into_diagnostic()
+            .wrap_err("failed to backport Vite global virtual store support")?;
+        }
     }
 
     if !ignore_scripts && strict_dep_builds_setting && !virtual_store_only {
@@ -566,6 +603,13 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         .wrap_err("failed to write install state")?;
         phase_timings.record("state", phase_start.elapsed());
     }
+
+    // The tree now matches the state just written, so the next hoisted
+    // install may reuse placements. Deliberately after the state write: if
+    // that failed we bailed above and the sentinel stays, which costs a
+    // wipe-and-refill next time rather than trusting a tree we cannot
+    // describe.
+    state::clear_link_in_progress(cwd);
 
     // 8a. Sweep orphaned `.aube/<dep_path>` entries older than
     //     `modulesCacheMaxAge`. The "in use" set is built from the

@@ -2,6 +2,7 @@
 # `aube cache prune`
 
 - **Usage**: `aube cache prune [--age-days <AGE_DAYS>] [--dry-run]`
+- **Effect**: modifies state
 
 Remove stale extracted primer files from the metadata cache
 

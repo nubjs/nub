@@ -4018,6 +4018,55 @@ fn finish_watch_probe(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+/// Wait for a RESTART to produce `needle`, re-applying `poke` as it polls.
+///
+/// Node's `--watch` supervisor builds its watch set asynchronously, and an
+/// `--env-file` is consumed before user code runs — so the first snapshot
+/// proves the child STARTED, not that the env file is being watched yet. A
+/// single write can land in that gap, be missed entirely, and then nothing
+/// ever restarts: the wait burns its full budget and the test fails having
+/// only ever seen the startup snapshot. Measured at 7 failures / 200 runs on
+/// `bac8e7be4d` before this.
+///
+/// Re-applying the same write closes the race without weakening anything —
+/// the restarted child must still report the new values to satisfy the
+/// caller's assertions. Only the reload waits need this; a wait for the
+/// FIRST snapshot has no such race and uses `wait_for_watch_snapshot`.
+fn wait_for_watch_reload(
+    path: &Path,
+    needle: &str,
+    child: &mut std::process::Child,
+    stderr: &Path,
+    mut poke: impl FnMut(),
+) -> String {
+    for i in 0..150 {
+        if let Ok(snapshot) = std::fs::read_to_string(path)
+            && snapshot.contains(needle)
+        {
+            return snapshot;
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            finish_watch_probe(child);
+            panic!(
+                "watch probe exited {status} before writing {needle:?}; stderr: {:?}",
+                std::fs::read_to_string(stderr).ok()
+            );
+        }
+        // Every ~1s, not every tick: enough to outlast watcher registration
+        // without spamming the filesystem the watcher is reading.
+        if i % 10 == 9 {
+            poke();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    finish_watch_probe(child);
+    panic!(
+        "watch probe never reloaded to {needle:?}; last snapshot: {:?}; stderr: {:?}",
+        std::fs::read_to_string(path).ok(),
+        std::fs::read_to_string(stderr).ok()
+    );
+}
+
 fn wait_for_watch_snapshot(
     path: &Path,
     needle: &str,
@@ -4043,54 +4092,6 @@ fn wait_for_watch_snapshot(
     panic!(
         "watch probe never wrote {needle:?}; last snapshot: {:?}; stderr: {:?}",
         std::fs::read_to_string(path).ok(),
-        std::fs::read_to_string(stderr).ok()
-    );
-}
-
-/// Write `content` to a file `nub --watch` is watching, then wait for the
-/// resulting restart to produce `needle`, re-delivering the write if it doesn't.
-///
-/// Node's own watch supervisor (`internal/watch_mode/files_watcher.js`) only
-/// arms an `fs.watch` on a file after the running child's `watch:require`/
-/// `watch:import` IPC message reaches it — a real round trip after spawn, not
-/// an instant side effect of it. A write landing before that round trip
-/// completes fires a change event with nobody listening, so it is dropped, not
-/// merely delayed. Under CPU contention that window can outlast a single
-/// write, so this redelivers the same content on a fixed cadence until the
-/// child observes it. That hardens the STIMULUS only — every returned
-/// snapshot still comes from a real restart and is checked in full by the
-/// caller, so a duplicate restart from an extra redelivery is harmless.
-fn write_watched_file_and_wait_for_snapshot(
-    target: &Path,
-    content: &str,
-    snapshots: &Path,
-    needle: &str,
-    child: &mut std::process::Child,
-    stderr: &Path,
-) -> String {
-    std::fs::write(target, content).unwrap();
-    for attempt in 0..150 {
-        if attempt > 0 && attempt % 10 == 0 {
-            std::fs::write(target, content).unwrap();
-        }
-        if let Ok(snapshot) = std::fs::read_to_string(snapshots)
-            && snapshot.contains(needle)
-        {
-            return snapshot;
-        }
-        if let Ok(Some(status)) = child.try_wait() {
-            finish_watch_probe(child);
-            panic!(
-                "watch probe exited {status} before writing {needle:?}; stderr: {:?}",
-                std::fs::read_to_string(stderr).ok()
-            );
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    finish_watch_probe(child);
-    panic!(
-        "watch probe never wrote {needle:?} despite repeated redelivery; last snapshot: {:?}; stderr: {:?}",
-        std::fs::read_to_string(snapshots).ok(),
         std::fs::read_to_string(stderr).ok()
     );
 }
@@ -4380,17 +4381,21 @@ fn watch_filters_late_runtime_control_env_keys_but_reloads_ordinary_vars() {
         "first child: {first}"
     );
 
-    let snapshots_text = write_watched_file_and_wait_for_snapshot(
-        &dir.join(".env"),
-        "NODE_OPTIONS=--require ./attacker.cjs\n\
+    let env_file = dir.join(".env");
+    let reloaded_env = "NODE_OPTIONS=--require ./attacker.cjs\n\
          NODE_TLS_REJECT_UNAUTHORIZED=0\n\
          NODE_EXTRA_CA_CERTS=/definitely/not/a/ca.pem\n\
          node_repl_external_module=./attacker.cjs\n\
-         ORDINARY=two\n",
+         ORDINARY=two\n";
+    std::fs::write(&env_file, reloaded_env).unwrap();
+    let snapshots_text = wait_for_watch_reload(
         &snapshots,
         r#""ordinary":"two""#,
         &mut child,
         &stderr,
+        || {
+            let _ = std::fs::write(&env_file, reloaded_env);
+        },
     );
     finish_watch_probe(&mut child);
 
@@ -4454,13 +4459,17 @@ fn watch_reloads_explicit_env_file_across_restarts() {
 
     // Changed values AND keys added after startup must both reach the
     // restarted child (the #479 failure froze the startup snapshot).
-    let reloaded = write_watched_file_and_wait_for_snapshot(
-        &dir.join("custom.env"),
-        "ORDINARY=two\nADDED=three\n",
+    let env_file = dir.join("custom.env");
+    let reloaded_env = "ORDINARY=two\nADDED=three\n";
+    std::fs::write(&env_file, reloaded_env).unwrap();
+    let reloaded = wait_for_watch_reload(
         &snapshots,
         r#""ordinary":"two""#,
         &mut child,
         &stderr,
+        || {
+            let _ = std::fs::write(&env_file, reloaded_env);
+        },
     );
     finish_watch_probe(&mut child);
 

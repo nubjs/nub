@@ -2,6 +2,7 @@
 # `aube access ls`
 
 - **Usage**: `aube access ls [ENTITIES]…`
+- **Effect**: read-only
 
 Alias for `list packages`
 

@@ -197,18 +197,7 @@ fn is_link_or_junction(path: &Path) -> bool {
         // half-created or permission-restricted entry.
         return true;
     };
-    if md.file_type().is_symlink() {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-        if md.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return true;
-        }
-    }
-    false
+    super::is_link_or_junction_metadata(&md)
 }
 
 /// Inspect one package's `package.json` and check that each declared

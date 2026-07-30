@@ -142,6 +142,109 @@ EOF
 	assert_success
 }
 
+_setup_catalog_update_workspace() {
+	mkdir -p packages/a packages/b
+	cat >package.json <<'EOF'
+{"name":"catalog-update-root","private":true}
+EOF
+	cat >aube-workspace.yaml <<'EOF'
+packages:
+  - packages/*
+catalog:
+  # keep this comment
+  is-odd: 0.1.2
+EOF
+	for pkg in a b; do
+		cat >"packages/$pkg/package.json" <<EOF
+{"name":"$pkg","private":true,"dependencies":{"is-odd":"catalog:"}}
+EOF
+	done
+}
+
+@test "aube update -r --latest updates a shared catalog entry" {
+	_setup_catalog_update_workspace
+
+	run aube update -r --latest is-odd --lockfile-only
+	assert_success
+
+	run grep 'is-odd: 3.0.1' aube-workspace.yaml
+	assert_success
+	run grep '# keep this comment' aube-workspace.yaml
+	assert_success
+	run grep -A4 '^catalogs:' aube-lock.yaml
+	assert_output --partial 'specifier: 3.0.1'
+	assert_output --partial 'version: 3.0.1'
+	for pkg in a b; do
+		run grep '"is-odd":"catalog:"' "packages/$pkg/package.json"
+		assert_success
+	done
+}
+
+@test "aube update -r --latest --no-save leaves the catalog range unchanged" {
+	_setup_catalog_update_workspace
+
+	run aube update -r --latest is-odd --lockfile-only --no-save
+	assert_success
+
+	run grep 'is-odd: 0.1.2' aube-workspace.yaml
+	assert_success
+	run grep -A4 '^catalogs:' aube-lock.yaml
+	assert_output --partial 'specifier: 0.1.2'
+	assert_output --partial 'version: 3.0.1'
+}
+
+@test "aube update -r --latest updates a named catalog and preserves its prefix" {
+	mkdir -p packages/a
+	cat >package.json <<'EOF'
+{"name":"catalog-update-root","private":true}
+EOF
+	cat >aube-workspace.yaml <<'EOF'
+packages:
+  - packages/*
+catalogs:
+  legacy:
+    is-odd: ^0.1.2
+EOF
+	cat >packages/a/package.json <<'EOF'
+{"name":"a","private":true,"dependencies":{"is-odd":"catalog:legacy"}}
+EOF
+
+	run aube update -r --latest is-odd --lockfile-only
+	assert_success
+
+	run grep 'is-odd: \^3.0.1' aube-workspace.yaml
+	assert_success
+	run grep '"is-odd":"catalog:legacy"' packages/a/package.json
+	assert_success
+}
+
+@test "aube update -r --latest updates a package.json catalog source" {
+	mkdir -p packages/a
+	cat >package.json <<'EOF'
+{
+  "name": "catalog-update-root",
+  "private": true,
+  "workspaces": {
+    "packages": ["packages/*"],
+    "catalog": {
+      "is-odd": "0.1.2"
+    }
+  }
+}
+EOF
+	cat >packages/a/package.json <<'EOF'
+{"name":"a","private":true,"dependencies":{"is-odd":"catalog:"}}
+EOF
+
+	run aube update -r --latest is-odd --lockfile-only
+	assert_success
+
+	run grep '"is-odd": "3.0.1"' package.json
+	assert_success
+	run grep '"is-odd":"catalog:"' packages/a/package.json
+	assert_success
+}
+
 @test "aube update: updateConfig.ignoreDependencies skips all-deps updates" {
 	_setup_outdated_project
 	cat >package.json <<'EOF'
@@ -187,7 +290,36 @@ EOF
 
 	run aube update is-odd
 	assert_failure
-	assert_output --partial "ignored by updateConfig.ignoreDependencies"
+	assert_output --partial "ignored by update.ignoreDeps"
+}
+
+@test "aube update: workspace update.ignoreDeps takes precedence" {
+	_setup_outdated_project
+	run aube add is-even@0.1.0
+	assert_success
+	node -e '
+		const fs = require("fs");
+		const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+		pkg.dependencies["is-even"] = ">=0.1.0";
+		fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+	'
+	cat >pnpm-workspace.yaml <<'EOF'
+packages:
+  - "."
+update:
+  ignoreDeps:
+    - is-odd
+updateConfig:
+  ignoreDependencies:
+    - is-even
+EOF
+
+	run aube update
+	assert_success
+	run grep 'is-odd@0.1.2' aube-lock.yaml
+	assert_success
+	run grep 'is-even@1.0.0' aube-lock.yaml
+	assert_success
 }
 
 @test "aube update: reports already latest when nothing to update" {

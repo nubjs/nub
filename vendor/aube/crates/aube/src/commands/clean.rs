@@ -6,7 +6,9 @@
 //!   invoked as `aube purge`) script, delegate to `aube run <name>` and
 //!   do nothing else. User scripts always win.
 //! - Otherwise, walk the workspace (root + every package matched by
-//!   `pnpm-workspace.yaml`) and delete each project's `node_modules/`.
+//!   `pnpm-workspace.yaml`) and delete installed packages plus aube-owned
+//!   hidden entries from each project's `node_modules/`. Third-party hidden
+//!   entries such as `.vite/` are preserved.
 //! - With `--lockfile` / `-l`, also remove the root lockfiles:
 //!   `aube-lock.yaml`, `pnpm-lock.yaml`, `package-lock.json`,
 //!   `npm-shrinkwrap.json`, `yarn.lock`, and `bun.lock`. Workspace
@@ -17,6 +19,7 @@
 //! tree" command.
 
 use clap::Args;
+use miette::{Context, IntoDiagnostic};
 
 #[derive(Debug, Args)]
 pub struct CleanArgs {
@@ -45,6 +48,22 @@ fn lockfile_names() -> Vec<&'static str> {
     ];
     names.extend_from_slice(aube_util::embedder().lockfile_legacy_basenames);
     names
+}
+
+fn is_managed_modules_entry(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    let Some(hidden_name) = name.strip_prefix('.') else {
+        return true;
+    };
+
+    let embedder_name = aube_util::embedder().name;
+    hidden_name == "bin"
+        || hidden_name == "modules.yaml"
+        || hidden_name == "pnpm"
+        || hidden_name == "pnpm-workspace-state-v1.json"
+        || hidden_name
+            .strip_prefix(embedder_name)
+            .is_some_and(|suffix| matches!(suffix, "" | "-state" | "-applied-patches.json"))
 }
 
 pub async fn run(args: CleanArgs) -> miette::Result<Option<i32>> {
@@ -119,13 +138,46 @@ async fn run_as(invoked_as: &str, args: CleanArgs) -> miette::Result<Option<i32>
     let modules_dir_name = super::resolve_modules_dir_name_for_cwd(&cwd);
     for proj in &projects {
         let nm = proj.join(&modules_dir_name);
-        // `symlink_metadata` so a `node_modules -> somewhere` symlink
-        // gets removed as a link (not followed into its target).
-        if nm.symlink_metadata().is_ok() {
+        let metadata = match nm.symlink_metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error)
+                    .into_diagnostic()
+                    .wrap_err_with(|| format!("failed to inspect {}", nm.display()));
+            }
+        };
+
+        // A non-directory or directory link is wholly install-managed.
+        // Remove the entry itself without traversing a symlink/junction target.
+        if !metadata.is_dir() || super::is_link_or_junction_metadata(&metadata) {
             eprintln!("Removing {}", nm.display());
             super::remove_existing(&nm)?;
             removed_nm += 1;
+            continue;
         }
+
+        let mut managed_entries = Vec::new();
+        for entry in std::fs::read_dir(&nm)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("failed to read {}", nm.display()))?
+        {
+            let entry = entry
+                .into_diagnostic()
+                .wrap_err_with(|| format!("failed to read an entry in {}", nm.display()))?;
+            if is_managed_modules_entry(&entry.file_name()) {
+                managed_entries.push(entry.path());
+            }
+        }
+        if managed_entries.is_empty() {
+            continue;
+        }
+
+        eprintln!("Removing {}", nm.display());
+        for entry in managed_entries {
+            super::remove_existing(&entry)?;
+        }
+        removed_nm += 1;
     }
 
     if args.lockfile {

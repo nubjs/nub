@@ -199,6 +199,48 @@ assert_npm_lock_captures_cross_platform_optionals() {
 	assert_success
 }
 
+@test "filtered add preserves foreign optionals with supportedArchitectures" {
+	mkdir -p packages/app
+	cat >package.json <<-'JSON'
+		{
+		  "name": "supported-arch-filter-root",
+		  "version": "0.0.0",
+		  "private": true
+		}
+	JSON
+	cat >packages/app/package.json <<-'JSON'
+		{
+		  "name": "app",
+		  "version": "0.0.0",
+		  "private": true,
+		  "optionalDependencies": {
+		    "aube-test-optional-win32": "1.0.0"
+		  }
+		}
+	JSON
+	cat >pnpm-workspace.yaml <<-'YAML'
+		packages:
+		  - packages/*
+		supportedArchitectures:
+		  os: [current, linux]
+		  cpu: [current, x64]
+		  libc: [current, glibc]
+	YAML
+	: >pnpm-lock.yaml
+
+	run aube install --no-frozen-lockfile
+	assert_success
+	run grep -F 'aube-test-optional-win32@1.0.0:' pnpm-lock.yaml
+	assert_success
+	assert_not_exists node_modules/.aube/aube-test-optional-win32@1.0.0
+
+	run aube --filter app add is-positive@1.0.0
+	assert_success
+	run grep -F 'aube-test-optional-win32@1.0.0:' pnpm-lock.yaml
+	assert_success
+	assert_not_exists node_modules/.aube/aube-test-optional-win32@1.0.0
+}
+
 @test "aube-lock.yaml records optional natives for exotic arches (full pnpm parity)" {
 	# aube-lock.yaml records EVERY optional-dep variant a package declares,
 	# matching pnpm and bun — both write all natives (linux-ppc64, freebsd,

@@ -23,6 +23,7 @@ impl Linker {
             virtual_store: store.virtual_store_dir(),
             store: store.clone(),
             use_global_virtual_store,
+            project_local_dep_paths: rustc_hash::FxHashSet::default(),
             strategy,
             patches: Patches::new(),
             hashes: None,
@@ -43,8 +44,9 @@ impl Linker {
             aube_dir_override: None,
             no_integrity_read_keys: std::collections::BTreeMap::new(),
             link_progress: None,
-            disk_materialize: Vec::new(),
+            disk_materialize: std::collections::HashSet::new(),
             nested_optional_deps: std::collections::BTreeMap::new(),
+            reusable_hoisted: std::collections::HashSet::new(),
         }
     }
 
@@ -71,13 +73,27 @@ impl Linker {
         self.nested_optional_deps.get(importer_name)
     }
 
+    /// Vouch that these dep paths are already correctly and completely placed
+    /// on disk, letting the hoisted pass skip its wipe-and-refill for them.
+    ///
+    /// The caller owns this judgement (see the field docs on [`Linker`]): it
+    /// has to combine an unchanged content fingerprint with proof that the
+    /// last link ran to completion. Vouching for a dep path whose tree is
+    /// actually partial would leave that package permanently broken, so the
+    /// driver errs toward not vouching. Standalone aube never calls this, so
+    /// the set stays empty and the hoisted pass is unchanged.
+    pub fn with_reusable_hoisted(mut self, dep_paths: std::collections::HashSet<String>) -> Self {
+        self.reusable_hoisted = dep_paths;
+        self
+    }
+
     /// Force a set of packages to materialize as real project-local directories
     /// even under the global virtual store (see the field docs on [`Linker`]).
     /// Entries are matched as package-name patterns against each graph package.
     /// Standalone aube and
     /// every test omit this → the set is empty and the GVS pass is unchanged.
     pub fn with_disk_materialize(mut self, names: &[String]) -> Self {
-        self.disk_materialize = names.to_vec();
+        self.disk_materialize = names.iter().cloned().collect();
         self
     }
 
@@ -225,6 +241,19 @@ impl Linker {
     /// anything that lands outside its declared filesystem root.
     pub fn with_use_global_virtual_store(mut self, enabled: bool) -> Self {
         self.use_global_virtual_store = enabled;
+        self
+    }
+
+    /// Materialize selected dep paths into the project-local virtual
+    /// store while all other packages continue to use the GVS.
+    ///
+    /// Callers use this for package-specific compatibility transforms
+    /// that must never mutate a shared store entry.
+    pub fn with_project_local_dep_paths(
+        mut self,
+        dep_paths: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.project_local_dep_paths = dep_paths.into_iter().collect();
         self
     }
 

@@ -2,6 +2,7 @@
 # `aube publish`
 
 - **Usage**: `aube publish [FLAGS]`
+- **Effect**: modifies state
 
 Publish the current package to the registry
 
