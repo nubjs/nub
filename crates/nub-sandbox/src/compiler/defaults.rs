@@ -678,13 +678,13 @@ const WINDOWS_STDIO_SHIM: &str = include_str!("../backend/windows_stdio_shim.js"
 
 /// Drop whole-line comments and indentation before the payload is encoded.
 ///
-/// THIS IS A HARD BUDGET, NOT A TIDY-UP. A `CreateProcessW` environment block is capped at 32767
-/// CHARACTERS *in total*, and percent-encoding costs three characters for every byte outside the
-/// unreserved set — so the shim's own prose is charged at roughly 3x and the source, shipped raw,
-/// does not fit in the block AT ALL, let alone alongside `PATH` and the `npm_config_*` family.
-/// Stripping is what lets the file stay densely commented (which is where its provenance lives)
-/// while the delivered payload stays affordable. `stdio_shim_payload_fits_the_env_block` pins the
-/// margin so an innocent-looking edit cannot quietly break every jailed launch.
+/// THIS IS A BUDGET, NOT A TIDY-UP. The stamp is by far the largest thing in the child's
+/// environment block, and how much block a `CreateProcessW` child will accept is not a number we
+/// have a documented ceiling for (see `stamped_node_options_fits_the_env_block` — the widely-cited
+/// 32767 belongs to other API paths, not to `lpEnvironment`). Stripping is what lets the file stay
+/// densely commented (which is where its provenance lives) while the delivered payload stays
+/// affordable, and that test pins the margin so an innocent-looking edit cannot quietly push the
+/// stamp past anything we have measured to launch.
 ///
 /// WHOLE LINES ONLY, deliberately: a partial-line stripper would have to know whether `//` sits
 /// inside a string, a regex or a template literal. Trimming and dropping entire lines is correct
@@ -701,14 +701,6 @@ fn strip_js_comments(src: &str) -> String {
 /// The JS actually delivered to a confined Node.
 pub fn build_jail_stdio_preload_js() -> String {
     strip_js_comments(WINDOWS_STDIO_SHIM)
-}
-
-/// The `--import` term that delivers the stdio shim, encoded as the jail delivers it. Built off
-/// Windows too, so the encoding and the env-block budget are gated on every platform's `cargo test`
-/// rather than only where the stamp is used.
-#[cfg(any(windows, test))]
-fn stdio_shim_import_term() -> String {
-    data_url_import(&strip_js_comments(WINDOWS_STDIO_SHIM))
 }
 
 /// The `NODE_OPTIONS` the Windows build jail STAMPS over any ambient value, delivering the
@@ -1354,23 +1346,55 @@ mod tests {
         );
     }
 
-    /// A `CreateProcessW` environment block is capped at 32767 CHARACTERS IN TOTAL, and this one
-    /// value is the largest thing in it by an order of magnitude. Left unstripped the shim does not
-    /// fit at all (measured: 56215 characters, ~1.7x the whole block), and every jailed launch on
-    /// Windows would fail for a reason that looks nothing like its cause.
+    /// The stamp is the largest thing in a jailed child's environment block by an order of
+    /// magnitude, so a runaway payload is worth catching — but the ceiling is EMPIRICAL, not a
+    /// documented API limit. This test previously asserted 26000 against "a `CreateProcessW`
+    /// environment block is capped at 32767 characters in total"; that premise is REFUTED. The
+    /// 32767 figure attaches to `lpCommandLine` and to `SetEnvironmentVariable`'s per-variable
+    /// maximum, not to the `lpEnvironment` block nub passes straight through under
+    /// `CREATE_UNICODE_ENVIRONMENT`. Measured: the full production stamp launched confined inside a
+    /// 56790-character block (~1.73x the supposed cap) with the CHILD reporting all three preload
+    /// sentinels — `__nubJailRealpathShim`, `__nubJailStdioShim`, `__nubJailNetGate` — true off its
+    /// own `globalThis`, reproduced across both principals in runs 30568739579, 30568304451 and
+    /// 30569197328. HONEST RESIDUAL: what that establishes is that 56790 STARTS, not that no cap
+    /// exists above it.
     ///
-    /// The ceiling here is what remains for `PATH` and the `npm_config_*` family that a real
-    /// install also has to carry, so it is deliberately well below 32767 rather than at it. If a
-    /// future edit trips this, shrink the payload — do not raise the number without re-measuring a
-    /// real install's block on Windows.
+    /// MEASURE THE WHOLE STAMP. Production carries three `--import` terms — `build_jail_node_options`
+    /// composes stdio + net gate, then `build_jail.rs` appends the realpath term — and this test
+    /// used to size the stdio term ALONE, which is why an earlier shrink of one term read as
+    /// sufficient and was not. The realpath term EMBEDS the granted roots, so its size is
+    /// deployment-dependent; the roots below are deep and multi-root on purpose, because shallow
+    /// ones understate a real jail.
+    ///
+    /// THE NUMBER. Set below the largest block MEASURED to launch, so a stamp that passes is
+    /// smaller than a block that provably started — and that block carried `PATH` and the
+    /// `npm_config_*` family alongside it, which is the room the remaining margin represents. The
+    /// margin is deliberately thin — the stamp as composed here is ~55.6k, so roughly 0.9k of
+    /// growth is available. If a future edit trips this, shrink the payload first: unlike the stdio
+    /// shim, the net-gate and realpath shims still ship their comments unstripped, and stripping
+    /// them reclaims thousands. Do not raise the number without re-measuring a real jailed launch
+    /// on Windows.
     #[test]
-    fn stdio_shim_payload_fits_the_env_block() {
-        const BUDGET: usize = 26_000;
-        let stamped = stdio_shim_import_term();
+    fn stamped_node_options_fits_the_env_block() {
+        const BUDGET: usize = 56_500;
+        let roots: Vec<std::path::PathBuf> = [
+            r"C:\Users\runneradmin\AppData\Local\nub\store\v1\registry.npmjs.org\esbuild\0.21.5\node_modules\esbuild",
+            r"C:\Users\runneradmin\work\monorepo\packages\web-app\node_modules\.pnpm\esbuild@0.21.5\node_modules\esbuild",
+            r"C:\Users\RUNNER~1\AppData\Local\Temp\nub-build-jail-scratch-8f3c1a2b",
+        ]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+        let stamped = format!(
+            "{} {}",
+            build_jail_node_options(Some("esbuild")),
+            realpath_shim_node_options(&roots)
+        );
         assert!(
             stamped.len() <= BUDGET,
-            "the stamped NODE_OPTIONS is {} chars, over the {BUDGET} budget; a CreateProcessW \
-             env block holds 32767 in total and must still fit PATH and npm_config_*",
+            "the stamped NODE_OPTIONS is {} chars, over the {BUDGET} budget; the largest env \
+             block measured to launch a confined child is 56790 chars and must still fit PATH \
+             and npm_config_*",
             stamped.len()
         );
         // Stripping must remove PROSE and nothing else: an identifier from the shim's tail proves

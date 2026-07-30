@@ -87,6 +87,12 @@ function install(roots) {
   // component inside the tree stays a loud error instead of a silently faked directory.
   const ancestorOfARoot = (p) => {
     const c = norm(p);
+    // The trailing boundary clause is NOT redundant with `startsWith`: it is what keeps the match
+    // on a path COMPONENT boundary, so `C:\foo` is not tolerated as an ancestor of a root
+    // `C:\foobar\pkg`. Delete it and the tolerance fakes a directory for any sibling sharing a
+    // name prefix with a grant — widening the rule past what the jail actually granted. Both
+    // disjuncts are needed (a root spelled `C:\` ends in the separator itself); measured correct
+    // against 16 adversarial shapes.
     return normRoots.some(
       (r) =>
         r.length > c.length &&

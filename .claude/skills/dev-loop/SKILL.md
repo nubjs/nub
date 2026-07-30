@@ -124,6 +124,16 @@ cargo test -p <crate>        # scoped to what you changed; DEFAULT profile, as C
 
 Keep `--profile fast` on clippy. It is what CI's check and clippy jobs run, and it puts the gates in the same artifact universe as the `--profile fast` dev loop above — without it, gating drives a second full dependency build under `dev` and your first pre-push after a day of iterating pays a cold build for nothing. `cargo test` deliberately stays on the default profile, matching CI's test jobs, which reuse the debug addon and binary by path.
 
+**The gates above do NOT cover `vendor/aube` — check that workspace separately.** A dependent's `--all-targets` builds only its own test targets, so a path dependency's `#[cfg(test)]` targets never compile as part of the nub workspace; every gate here can be green while the aube crates do not build. For any change touching `vendor/aube` — **which includes every merge from `main`, since main routinely carries aube changes** — also run:
+
+```bash
+cd vendor/aube && CARGO_TARGET_DIR=<its own dir> cargo check --workspace --all-targets
+```
+
+This has already cost real time twice. A main-into-sandbox merge passed every nub-side gate while `vendor/aube` was broken (main had added four `ResolveCtx` initializers omitting a tier the branch adds), found only by running the aube check by hand; the same gap let `crates/nub-sandbox/tests/windows_deelevated_jail.rs` land not compiling at all, after a merge gave `compile_build_jail` a `package_name` parameter and updated one of its two call sites.
+
+**After merging anything that touches `crates/nub-native`, rebuild the addon** — `make addon-fast`. A worktree that inherited a prebuilt `runtime/addons/nub-native.node` and then merged a change to the addon's signature produces failures that read exactly like a regression in your own work.
+
 **The two heavy gates now belong on a remote builder.** `cargo clippy --all-targets --all-features` and a full `cargo test` are the most expensive steps here, and with many worktrees building concurrently they are what saturates the host. Run them off-box — `nub scripts/remote-build.ts --job clippy` / `--job test` (the `remote-build` skill) — for a few cents each, with the byte-identical CI invocation. The `--profile fast` inner loop above stays local; remote does not win there. For a macOS BINARY, `nub scripts/mac-build.ts` builds natively on a real macOS runner and pulls the signed artifact back.
 
 Then run the full [pre-push local verification loop in AGENTS.md](../../../AGENTS.md) (incremental build → exact CI gates → e2e tmp-fixture run → Docker for global-cache/config behavior → promote durable checks into the suite). For the e2e probe loop specifically, use the `ad-hoc-test` skill. Get it green locally and push ONCE — fix-after-fix pushes saturate the shared CI runner pool.

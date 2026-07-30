@@ -1146,8 +1146,17 @@ fn python_reads(probe_stdout: &str) -> Option<PythonToolchain> {
     })
 }
 
+/// The matcher's canonicalizer, NOT `std::fs::canonicalize`. On Windows the latter is
+/// `GetFinalPathNameByHandleW(VOLUME_NAME_DOS)`, which always returns the `\\?\` verbatim
+/// form — a spelling nothing downstream expects. Everything derived here is consumed as a
+/// PLAIN path: `npm_config_python` is parsed by node-gyp and the tools it spawns, the read
+/// grants are slash-normalized by the compiler where the `?` would re-read as a glob
+/// metachar and get the grant DROPPED, and [`ProbeScope`] compares it against raw
+/// (never-verbatim) candidate spellings. `canonicalize_including_nonexistent` strips the
+/// prefix (see its doc for the volume-GUID case it deliberately leaves alone) and resolves
+/// a path whose tail does not exist yet instead of returning it untouched.
 fn canonical(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    nub_sandbox::matcher::path::canonicalize_including_nonexistent(path)
 }
 
 /// Whether a derived path may become a read grant at all.
@@ -1155,10 +1164,10 @@ fn canonical(path: &Path) -> PathBuf {
 /// Refused: anything at or one level below the filesystem root (`sys.prefix` is `/usr` for
 /// a distro Python, which every backend's system floor already covers), the user's HOME or
 /// an ancestor of it (a version manager installed as `~/x -> ~/opt/x` would otherwise hand
-/// a hop grant on the whole home directory), and any path still carrying `..`/`.` —
-/// `canonical` falls back to its input for a path that does not exist, so a traversal
-/// would survive the component count and only collapse later, inside the policy compiler,
-/// landing on `/`.
+/// a hop grant on the whole home directory), and any path still carrying `..`/`.`. That
+/// last one is belt-and-braces since `canonical` collapses a traversal even through a
+/// non-existent tail, and it stays because the cost of a surviving `..` is a grant that
+/// collapses later, inside the policy compiler, landing on `/`.
 fn grantable(path: &Path) -> bool {
     use std::path::Component;
     if !path.is_absolute() || path.components().count() <= 2 {

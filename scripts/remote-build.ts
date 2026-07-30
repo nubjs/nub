@@ -3,7 +3,7 @@
 // the maintainer's Mac, and (for a darwin build) pull the signed arm64 binary back.
 //
 // Runs under BOTH plain Node (type-stripping) and nub:
-//   node scripts/remote-build.ts --job build
+//   node scripts/remote-build.ts --job test
 //   nub  scripts/remote-build.ts --job clippy
 //
 // Erasable TypeScript only (no enums/namespaces/parameter-properties) so plain
@@ -380,7 +380,7 @@ function syncSource(source: string, ip: string) {
 //   - Without `node` on PATH, aube-resolver/build.rs emits "shipping empty primer" and
 //     produces a SILENTLY DEGRADED binary. The golden image installs Node for this reason;
 //     this check fails loudly if a caller points at a hand-rolled box that lacks it.
-const PREPARE = `set -euo pipefail
+const PREPARE_BASE = `set -euo pipefail
 # sshd runs \`bash -s\` NON-interactively, so it reads neither /etc/profile nor (thanks to
 # Ubuntu's early \`case $- in *i*) ;; *) return\`) ~/.bashrc. rustup's PATH line therefore
 # never applies and every cargo call would die with 127. Source it explicitly, exactly as
@@ -390,12 +390,7 @@ const PREPARE = `set -euo pipefail
 # \`rm -rf ~/src\`, so a target dir INSIDE ~/src would be destroyed with it and every
 # builder would pay a full cold compile despite the image claiming otherwise.
 export CARGO_TARGET_DIR="$HOME/.cargo-shared-target"
-# The \`command -v node\` check below only catches a MISSING node. aube-resolver/build.rs has
-# two further silent-degrade branches (generate-primer.mjs fails to spawn, or exits non-zero)
-# that emit a cargo:warning and ship an EMPTY primer — a binary that falls back to network
-# packument fetches, exit code 0, invisible to artifact verification. release.yml:476 sets
-# this same var so build.rs fails loud instead.
-export AUBE_REQUIRE_PRIMER=1
+@PRIMER_GUARD@
 cd ~/src
 command -v node >/dev/null || { echo "remote-build: node missing on builder (would silently degrade the primer)" >&2; exit 3; }
 mkdir -p runtime/addons
@@ -403,12 +398,33 @@ mkdir -p runtime/addons
 [ -d node_modules ] || npm install --no-audit --no-fund --loglevel=error
 `;
 
+// Jobs whose output is a binary someone could end up running. Empty today — this tool is
+// gates only; macOS artifacts come from scripts/mac-build.ts and releases from release.yml —
+// but the primer guard below keys off it, so adding an artifact job here re-arms the
+// protection rather than quietly shipping a degraded binary.
+const ARTIFACT_JOBS = new Set<string>();
+
+// AUBE_REQUIRE_PRIMER protects a SHIPPED artifact, and only that. The `command -v node`
+// check above catches only a MISSING node; aube-resolver/build.rs has two further
+// silent-degrade branches (generate-primer.mjs fails to spawn, or exits non-zero) that emit
+// a cargo:warning and ship an EMPTY primer — a binary that falls back to network packument
+// fetches, exit code 0, invisible to artifact verification. release.yml sets it for that.
+//
+// A GATE must NOT set it, and setting it broke every gate: the primer data is gitignored
+// (vendor/aube/.gitignore, `popular-top*.json`) while the rsync allowlist comes from
+// `git ls-files`, so the file can never reach a builder — and the flag turns that into a
+// hard build.rs failure. clippy/test ship nothing, so a degraded primer cannot reach a user.
+export function prepare(job: string) {
+  const guard = ARTIFACT_JOBS.has(job) ? "export AUBE_REQUIRE_PRIMER=1\n" : "";
+  return PREPARE_BASE.replace("@PRIMER_GUARD@\n", guard);
+}
+
 export function jobScript(job: string, profile: string) {
   // Mirror .github/workflows/ci.yml EXACTLY. The root clippy does NOT cover nub-native —
   // it is its own workspace (panic=unwind cdylib), `exclude`d from the root — so a
   // root-only run goes green on code CI then rejects. The brand lint is a cheap grep.
   if (job === "clippy") {
-    return `${PREPARE}cargo clippy --all-targets --all-features -- -D warnings
+    return `${prepare(job)}cargo clippy --all-targets --all-features -- -D warnings
 (cd crates/nub-native && cargo clippy --all-features -- -D warnings)
 tests/brand-lint/check-env-reads.sh`;
   }
@@ -416,7 +432,7 @@ tests/brand-lint/check-env-reads.sh`;
   // loader tests dlopen it — an 11-byte placeholder makes them fail on a malformed library
   // rather than skip. Build it here for the same reason.
   if (job === "test") {
-    return `${PREPARE}(cd crates/nub-native && cargo build)
+    return `${prepare(job)}(cd crates/nub-native && cargo build)
 cp "$CARGO_TARGET_DIR/debug/libnub_native.so" runtime/addons/nub-native.node
 cargo test`;
   }
@@ -621,7 +637,7 @@ echo '. "$HOME/.cargo/env"' >> ~/.bashrc
     // builder starts with the expensive dependency graph already compiled.
     syncSource(source, ip);
     // CARGO_TARGET_DIR must live OUTSIDE ~/src, which this step deletes at the end — that
-    // is the entire point of warming it — and must match PREPARE's, or builders silently
+    // is the entire point of warming it — and must match PREPARE_BASE's, or builders silently
     // start cold against an image that advertises warm artifacts.
     const warm = `set -euxo pipefail
 . "$HOME/.cargo/env"

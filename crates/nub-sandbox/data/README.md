@@ -30,7 +30,15 @@ A PR that widens an existing entry needs its own measurement.
 ## `networkHosts` — the egress allowlist
 
 The hosts a confined lifecycle script may reach. Also exposed to policy authors as the
-`$downloads` token.
+`$downloads` token, and used as the allowlist for nub's own out-of-jail prefetch.
+
+**It is the second of two gates, and adding a host here does not on its own unblock a
+package.** A script must clear both: the per-package boolean in
+`src/compiler/package_network.rs` — derived from `fetchedBy` below and from
+`packageNetwork.full`, and denying every package the catalog does not name — and then this
+host list, enforced by the proxy on the CONNECT authority and the SNI. Windows clears neither,
+keeping the deny-all, because its backend refuses a per-host policy outright. So a package
+that fetches an admitted host still reaches nothing until some entry names it.
 
 ```json
 {
@@ -47,7 +55,7 @@ The hosts a confined lifecycle script may reach. Also exposed to policy authors 
 | --- | --- |
 | `host` | An exact hostname. Wildcards are rejected — see below. |
 | `artifact` | What is downloaded from it. |
-| `fetchedBy` | The package(s) that fetch it. |
+| `fetchedBy` | The package(s) that fetch it. Load-bearing, not a note: this is one of the two sources of the per-package egress set, so naming a package here grants it the network. |
 | `evidence` | How this was learned. One of `measured`, `vendor-documented`, `source-read`. |
 | `observed` | What was actually seen. State the limits of the observation too. |
 | `platform` | Where it was observed, or `any` for a platform-independent mechanism. |
@@ -56,11 +64,22 @@ The hosts a confined lifecycle script may reach. Also exposed to policy authors 
 by hand afterwards (`playwright install`) is not an install-time fetch and does not earn an
 entry.
 
-**The threat model is bytes LEAVING the machine.** A host is disqualified if it accepts a
-write — a forge API, a registry publish route, a container blob push, a telemetry endpoint
-whose POST body is the product — or if it is a multi-tenant object store where an attacker
-can rent a namespace under the same hostname and read back what a confined script sent
-there.
+**The threat model is bytes LEAVING the machine.** A host that accepts a write — a forge API,
+a registry publish route, a container blob push, a telemetry endpoint whose POST body is the
+product — or a multi-tenant object store where an attacker can rent a namespace under the same
+hostname and read back what a confined script sent there, is a worse host than one that only
+serves, and the set is kept as small as the evidence allows for that reason.
+
+**But a write-capable host is not automatically disqualified, and `github.com` is the worked
+case.** It serves release assets and `git-receive-pack` on the same hostname, and it was
+refused on exactly that overlap until 2026-07-30. What changed is which control is doing the
+work: the defense is the package entry, so the only script that can reach any of these hosts
+is one a pull request already ratified for network use. Refusing the largest artifact host on
+the internet — 17 of 21 network denials in the three-OS corpus baseline — narrowed what a
+*reviewed* package could do while doing nothing about an unreviewed one, which is the actual
+threat. Weigh a write-capable host against the packages it breaks; do not treat the label as
+the end of the argument. A pure exfiltration sink with no measured install-time demand behind
+it is still a refusal, because there the trade has nothing on the other side.
 
 Serving attacker-authored bytes *into* the jail is **not** disqualifying. Every host here
 delivers third-party binaries by definition; that exposure is inherent in running the
@@ -75,10 +94,11 @@ confined script the label positions, and a lookup of `<secret>.cdn.example.com` 
 through the resolver without a single byte of payload being sent.
 
 This list is deliberately **not** merged with the broader `$trusted` set used by nub's agent
-sandbox. That set is a read-only browsing surface and keeps some write-capable hosts on
-credential-scoping grounds. This jail confines attacker-authored dependency code and
-inherits none of those exceptions — `registry.npmjs.org` is absent precisely because
-`npm publish` is a write to the host that serves the read.
+sandbox. That set is a read-only browsing surface for an agent the user is driving; this one
+is the artifact surface for attacker-authored dependency code, and the two populations have no
+reason to coincide. Membership here is earned by a measured install-time fetch and nothing
+else — `registry.npmjs.org` is absent because no lifecycle script has been measured to need
+it, not because it is categorically barred.
 
 ## `packageGrants` — per-package filesystem carve-outs
 
@@ -169,23 +189,26 @@ Documentation only. Nothing in this object is compiled into any allowlist.
 It records hosts that a real install was measured to need and that were **not** admitted, so
 you can see the bar before opening a PR. A build-time check keeps it disjoint from
 `networkHosts`, so an entry cannot be quietly promoted while its rejection rationale stays
-behind.
+behind. A promotion therefore *removes* the entry; where it went and why is recorded in the
+object's `comment` and on the new `networkHosts` entry, so the decision stays legible.
 
 Entries carry the same `evidence` / `observed` / `platform` provenance as `networkHosts`,
 plus `requester` (the package that fetched it) and `observedUrl` (the URL actually seen).
 They are held to that bar deliberately: a refusal is the *input to a later promotion
 decision*, and an unevidenced one is worse than no entry at all, because it reads as a
-settled verdict while carrying nothing a reviewer can re-check. `observedUrl` is also the
-field a path-scoped grant would have to be written against.
-
-The recorded entries cover four shapes, and only three are disqualifications:
+settled verdict while carrying nothing a reviewer can re-check.
 
 | host | reason | why |
 | --- | --- | --- |
-| `github.com` | `write-capable` | Carries an authenticated write on the same hostname. The one a path-scoped grant would fix — see below. |
 | `storage.googleapis.com` | `multi-tenant` | An attacker can rent a bucket under the same hostname and read back what a confined script sends there. |
 | `package.cli.amplify.aws` | `not-blocking` | The fetch fails and the install still exits 0. A soft fetch that degrades does not earn an entry. |
 | `workers.cloudflare.com` | `undecided` | No disqualification established — a single-tenant vendor binary path. Recorded as an evidenced candidate; admitting it is a maintainer call. |
+
+`github.com` was here until 2026-07-30, refused as `write-capable`. It is the record's one
+promotion so far and the shape to copy: the entry did not become wrong because new evidence
+arrived about the host, but because the objection it rested on — that a host grant cannot
+separate the release-asset fetch from `git-receive-pack` — stopped being the question once
+package identity, not host granularity, was the control.
 
 `undecided` is a real and useful value, not a placeholder. A measured host with no
 established disqualification should be recorded as a candidate rather than silently dropped
@@ -253,32 +276,23 @@ needed it yet; adding a field ahead of a real case would be guessing at its shap
   `@prisma/client` 7.0.0 dropped its postinstall entirely, so its grant is dead weight on 7
   — harmless, since an unused grant confers nothing on a script that never runs, but not
   expressible.
-- **Path-scoped hosts — the highest-value gap, and the one with a concrete argument behind
-  it.** The schema records no URL prefix, because DNS-level gating cannot enforce a path.
-  Adding one depends on proxy work rather than on a catalog change, and it is worth doing
-  rather than a nice-to-have. The reason is `github.com`.
+- **Path-scoped hosts — a gap on purpose. Do not build it.** The schema records no URL
+  prefix, and this entry used to argue it was the highest-value thing to add: `github.com`
+  serves `git-receive-pack` on the same hostname as its release assets, a host grant cannot
+  tell a fetch from a push, and a prefix limited to `/*/*/releases/download/` would.
 
-  `github.com` is not refused because downloading a release tarball from it is dangerous.
-  It is refused because the **same hostname** serves `git-receive-pack` — an authenticated
-  **write** — and CI environments routinely hand lifecycle scripts a token with push
-  rights. A host-level grant cannot tell the two apart, so admitting `github.com` today
-  would open a push path, not just a fetch path. That is a categorically different exposure
-  from serving bytes into the jail, and it is why the host-level answer has to be "no".
+  That argument is retired. The defense is **package identity, not host or path
+  granularity**: no catalog entry means no network, and an entry means the network the review
+  ratified. Path-scoping would refine what an already-vetted package may do, which is the
+  cheaper half of the problem, and the effort it demands is real: terminating TLS for those
+  hosts, and re-checking every redirect against the prefix, since a release download 302s to
+  `release-assets.githubusercontent.com`, whose asset paths are opaque signed GUIDs.
+  `github.com` was promoted on those grounds rather than waiting for it.
 
-  A path-scoped grant limited to `/*/*/releases/download/` **separates them**: the release
-  asset path is a plain GET surface, and `git-receive-pack` lives at a different path
-  entirely. The same mechanism applies to `storage.googleapis.com`, whose observed prefixes
-  (`/tensorflow/`, `/chrome-for-testing-public/`) are stable and single-tenant even though
-  the hostname is not.
-
-  So path scoping is not a refinement of the existing allowlist — it converts a
-  permanently-refused host into an admissible one, and by count `github.com` and the object
-  stores are the largest group of currently-refused hosts. Both requirements it implies are
-  real: the proxy must gate on the request path, not only the CONNECT authority and SNI,
-  which for HTTPS means terminating TLS for those hosts; and redirects must be re-checked
-  against the prefix, since a release download 302s to a different host
-  (`release-assets.githubusercontent.com`) whose asset paths are opaque signed GUIDs. That
-  second half is unsolved and is the reason this is proxy work rather than a schema edit.
+  What follows for a reviewer: judge a host on whether an install-time fetch was measured and
+  on what refusing it costs, not on whether some path under it accepts a write. A refusal
+  still holds where nothing needs the host, and where it is an exfiltration sink with no
+  measured demand behind it — but not on the theory that a finer grain is coming.
 
 ## Remote updates: designed, not built
 

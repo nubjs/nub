@@ -390,7 +390,8 @@ fn push_read_path(out: &mut Vec<FsRule>, path: &Path, origin: FsOrigin) {
 /// The build-jail baseline surface. Tight, default-deny read — the dependency tree and
 /// nub's own toolchain cache ([`grant_build_jail_dependency_reads`], front-inserted after
 /// this folds) plus the OS backends' minimal-root closure — with WRITE confined to a
-/// private per-run tmp and, via [`compile_build_jail`], the script's own package dir.
+/// per-run tmp (private everywhere but Windows, which takes the shared tmp; see the `$tmp`
+/// comment below) and, via [`compile_build_jail`], the script's own package dir.
 /// Egress curated down to the install-time artifact hosts (see [`build_jail_net`]).
 ///
 /// `package_dir` is the per-spawn WRITE grant. It stays LAST so its read-write access
@@ -403,6 +404,20 @@ fn build_jail_surface(package_dir: Option<&Path>, private_home: Option<&Path>) -
     let mut fs = serde_json::Map::new();
     // `$tmp` sets the private per-run tmp MODE (TmpMode::Private) — a writable scratch,
     // shared host tmp hidden. It emits no ordinary fs rule.
+    //
+    // WINDOWS takes the SHARED tmp instead, spelled as the key's ABSENCE (`Shared` is the
+    // default and the sentinel deliberately cannot name it). It is not a concession: the
+    // AppContainer backend cannot enforce `Private` at all, so asking for it only ever
+    // produced a standing `tmp-private` lost axis plus a per-run scratch dir the confined
+    // launch path never points the child at. The child is not left without scratch — the
+    // OS redirects an AppContainer's TEMP into its own
+    // `…\AppData\Local\Packages\<profile>\AC` profile, writable by construction (measured).
+    // Free by construction, which is the load-bearing part: a tmp MODE emits no fs rule, so
+    // no inheritable ACE and no DACL propagation. Granting the literal `%TEMP%` PATH instead
+    // would cost a full inheritable-ACE tree walk over an enormous directory on every
+    // lifecycle spawn (`set_ace` propagates; ~1000 ms on a populated tree vs 3 ms on an
+    // empty one) — that is why the widening is a mode change and not a path grant.
+    #[cfg(not(windows))]
     fs.insert("$tmp".to_string(), json!("rw"));
     if let Some(dir) = private_home {
         // This package's own HOME (see `private_home_dir`), read-write.
