@@ -1,0 +1,156 @@
+# Branch-scoped ad-hoc probe, NO pull request required (`.claude/skills/ci-adhoc-test/SKILL.md`).
+#
+# THE QUESTION. MECHANISM-FACTS §5j measured a dissociation on a stock MSI-installed Node: an
+# AppContainer child CAN exec `C:\Program Files\nodejs\node.exe` — `CreateProcessW` opens the image in
+# the CALLER's context — but cannot read one byte of that tree afterwards, so the bundled `npm` dies
+# `Cannot find module`. That tree cannot be ACE'd unprivileged (protected, owner SYSTEM, no
+# `S-1-15-2-*` at all), and `discovery.rs:367`'s PATH fast path means the ambient MSI Node IS what the
+# jail would launch for a typical user.
+#
+# THE MECHANISM UNDER TEST. A nub-OWNED directory under nub's own cache — a path the user owns, so nub
+# can ACE it with no privilege — holding the executables a jailed lifecycle script may invoke, with the
+# child's `PATH` REWRITTEN to point only there. §5h's probe already copies `node.exe` into a granted
+# dir (`tests/win-bypass-traverse/probe.ps1:360`), which is precisely why no prior arm ever hit §5j's
+# defect; this turns that accident into the design and measures it.
+#
+# CI IS THE ONLY VENUE. An AppContainer cannot launch over OpenSSH — sshd lands in services session 0,
+# which has no window station a LowBox token can attach to, and every launch returns 0xC0000142
+# (§5e). The standing `nub-win` VM cannot answer this.
+#
+# NO RUST BUILD: PowerShell plus the C# P/Invoke launcher in `tests/win-msi-volume/acjail.ps1`, which
+# mirrors `crates/nub-sandbox/src/backend/windows.rs`'s `run()`. Minutes, not the 35+ a cold Windows
+# cargo cache costs. The launcher gained ONE additive thing for this probe — a sanitized environment
+# block — behind a new overload, so every pre-existing arm's launch is byte-identical to before.
+#
+# BOTH IMAGES, `fail-fast: false`. `windows-latest` is a SERVER image and `windows-11-arm` a CLIENT
+# one, and default ACLs are image-dependent — the axis this whole question lives on.
+name: win-jail-bin-probe
+
+on:
+  push:
+    branches: [sandbox/win-jail-bin]
+  workflow_dispatch: # inert until this file reaches the default branch; `push` is what fires it
+
+permissions:
+  contents: read
+
+jobs:
+  # The verdict must be shown to discriminate BEFORE any runner minute goes on a launch. Five
+  # synthetic worlds, including one where every decisive cell is green but the negative control is
+  # green too — the shape a verdict without attribution waves through, and the exact bug §5k's run 1
+  # shipped. Cheap and Windows-API-free, so it runs on Linux and gates everything else.
+  verdict-selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verdict self-test (5 synthetic worlds, no launch)
+        shell: pwsh
+        run: pwsh -NoLogo -NonInteractive -File tests/win-msi-volume/jailbin-selftest.ps1
+
+  jail-bin:
+    needs: verdict-selftest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Probe — nub-owned jail-bin + sanitized PATH under a real AppContainer
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          pwsh -NoLogo -NonInteractive -File tests/win-msi-volume/jail-bin.ps1 *>&1 |
+            Tee-Object -FilePath jb-probe.log
+          exit 0
+
+      - name: Child logs verbatim
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path jb-logs) {
+            Get-ChildItem jb-logs | ForEach-Object {
+              Write-Host "----- $($_.Name) -----"
+              Get-Content $_.FullName | ForEach-Object { Write-Host "  $_" }
+            }
+          } else { Write-Host "no jb-logs directory - no arm produced a child log" }
+
+      # The verdict is read off the LOG, never off a step's exit status: a property whose `prop:` line
+      # is ABSENT fails here, so a probe that never ran cannot be mistaken for one that passed.
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          fail=0
+          need() {
+            if grep -qF "prop:$1=PASS" jb-probe.log 2>/dev/null; then echo "OK   $1"
+            elif grep -qF "prop:$1=FAIL" jb-probe.log 2>/dev/null; then echo "FAIL $1"; fail=1
+            else echo "MISS $1  (property absent - the probe did not reach it)"; fail=1; fi
+          }
+          [ -s jb-probe.log ] || { echo "MISS the probe produced no output at all"; exit 1; }
+          grep -qF 'PROBE END' jb-probe.log || { echo "MISS the probe did not run to completion"; fail=1; }
+
+          echo "-- privilege context (a result without it settles nothing) --"
+          grep -E '^  fact:(admin|token-owner|integrity-level|privileges-held|session-id|os|arch|msi-installed|msiexec-exit) ' jb-probe.log || true
+
+          echo "-- controls: a red one invalidates every other row --"
+          for p in jb-control-plain-jailbin-npm-runs jb-control-plain-ambient-npm-runs \
+                   jb-control-cmd-runs-under-appcontainer \
+                   jb-control-appcontainer-gate-is-live jb-control-appcontainer-gate-is-passable \
+                   jb-control-child-saw-the-sanitized-path \
+                   jb-control-ungranted-canary-exists jb-control-grant-still-scopes \
+                   jb-control-hybrid-command-line-works-unconfined \
+                   jb-control-unconfined-hybrid-really-ran-the-ambient-interpreter \
+                   jb-control-aap-only-arm-really-withheld-the-per-run-sid \
+                   jb-control-ungranted-arm-really-had-no-ace \
+                   jb-control-hardlink-was-actually-created \
+                   jb-control-deelevated-principal-really-lacks-admin \
+                   jb-probe-left-no-appcontainer-ace-on-program-files; do need "$p"; done
+
+          # INVERTED READING on these two: PASS means the thing they name is BROKEN, which is the
+          # premise the mechanism exists to fix and the negative that makes a green arm attributable.
+          echo "-- attribution: the failures that must still be present in THIS run --"
+          for p in jb-attribution-ambient-msi-npm-still-fails-confined \
+                   jb-ambient-install-dir-is-not-path-resolvable \
+                   jb-attribution-ungranted-jailbin-is-denied; do need "$p"; done
+
+          echo "-- the decisive cells --"
+          for p in jb-node-resolves-and-runs-from-jailbin \
+                   jb-npm-tree-is-readable-from-jailbin \
+                   jb-confined-caller-cannot-exec-the-ambient-interpreter \
+                   jb-stable-app-package-sid-grant-suffices \
+                   jb-a-shim-without-the-prefix-probe-works \
+                   jb-real-lifecycle-script-runs \
+                   jb-absent-tool-fails-as-a-resolution-error \
+                   jb-inheritance-at-creation-covered-the-deep-file \
+                   jb-populate-and-grant-need-no-admin; do need "$p"; done
+
+          # INVERTED: PASS means hard-linking is DISQUALIFIED as a populate strategy.
+          echo "-- the hardlink hazard --"
+          need jb-hardlink-ace-leaks-to-the-original-path
+
+          echo "-- cost (the numbers the design decision rests on) --"
+          grep -E '^  fact:(cost/|populate-|grant-on-|inherited-ace-)' jb-probe.log || true
+
+          echo "-- stock npm.cmd vs a nub-authored shim (the pipe question) --"
+          grep -E '^  fact:(stock-npm-cmd-confined|nub-authored-npm-shim-confined|absent-tool-failure-shape|ambient-on-path-) ' jb-probe.log || true
+
+          echo
+          # A red job means "at least one property did not hold", NOT a verdict on the mechanism: the
+          # inverted properties make a clean, fully-controlled negative exit non-zero too.
+          # Read the table, not the badge.
+          if [ "$fail" -ne 0 ]; then echo "at least one property did not hold - read the table above"; exit 1; fi
+          echo "every property held"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: win-jail-bin-${{ matrix.os }}
+          path: |
+            jb-probe.log
+            jb-logs/
+          if-no-files-found: warn

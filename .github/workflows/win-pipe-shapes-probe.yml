@@ -1,0 +1,118 @@
+# Branch-scoped ad-hoc probe: WHICH named-pipe shapes can an AppContainer child create?
+# No pull request required (.claude/skills/ci-adhoc-test/SKILL.md). CI is the only venue —
+# AppContainer cannot be launched over SSH (session 0 has no window station, so every launch
+# returns 0xC0000142), which also rules out the standing nub-win VM.
+#
+# THE QUESTION. Two measurements from the same jail disagree: a direct `CreateNamedPipeW`
+# under `\\.\pipe\` is refused, while std's `Stdio::piped()` — also a named pipe under that
+# prefix — succeeds. Until the field separating them is named, neither can be used, and it
+# decides whether Node's piped `child_process` spawn (which hangs, because libuv retries
+# ERROR_ACCESS_DENIED forever) can be made to work under the jail at all.
+#
+# THE CONTROLS. Every cell also runs UNCONFINED and must succeed there, and an anonymous
+# `CreatePipe` must succeed in EVERY arm. A cell nobody can create says nothing about the
+# jail, and an arm where even an anonymous pipe fails is broken rather than restrictive.
+#
+# THE HANG IS BOUNDED EXTERNALLY. The node arms spawn Node from the confined child and kill
+# it on a deadline, sampling CPU time first — three sibling lanes have had a harness wedge
+# rather than fail on exactly this. `piped` runs last so a killed arm cannot discard the
+# matrix, and every step is `if: always()` so a red step cannot hide the verdicts.
+name: win-pipe-shapes-probe
+
+on:
+  push:
+    branches: [sandbox/win-pipe-blocker]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      # Matches the sibling probes: crt-static makes the self-reexec probe child
+      # self-contained, so it starts cleanly under the LowBox token.
+      RUSTFLAGS: "-C target-feature=+crt-static"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Interpreter baseline
+        if: always()
+        shell: bash
+        run: |
+          which node
+          node -p "process.execPath"
+          node -p "process.versions.node"
+          node -p "process.versions.uv"
+
+      - name: Probe — AppContainer named-pipe shape matrix
+        if: always()
+        timeout-minutes: 40
+        shell: bash
+        run: |
+          rc=0
+          cargo test -p nub-sandbox --test windows_pipe_shapes > probe.log 2>&1 || rc=$?
+          echo "probe exit=$rc"
+          cat probe.log
+
+      # The verdict is read off the log, never off a step's exit status: a property whose
+      # `prop:` line is ABSENT must fail here, so a probe that never ran cannot be mistaken
+      # for one that passed.
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          fail=0
+          need() {
+            if grep -qF "$1" probe.log 2>/dev/null; then
+              echo "OK   $1"
+            else
+              echo "MISS $1"
+              fail=1
+            fi
+          }
+          [ -s probe.log ] || { echo "MISS the probe produced no output at all"; fail=1; }
+          need "PROBE windows pipe shapes under AppContainer"
+          need "fact:sddl[\\\\.\\pipe\\]="
+          # The liveness control for each arm, and the cell-validity control.
+          for a in jail-net-deny jail-net-open jail-loose unconfined; do
+            need "prop:anon-pipe-$a=PASS"
+          done
+          for c in libuv-exact-outbound libuv-exact-inbound libuv-plus-reject-remote \
+                   libuv-flags-flat-name rust-exact rust-minus-reject-remote \
+                   rust-minus-overlapped reject-remote-only original-anchor \
+                   original-anchor-local-ns libuv-flags-local-ns libuv-uvdir-local-ns; do
+            need "prop:$c-creatable-unconfined=PASS"
+            for a in jail-net-deny jail-net-open unconfined; do
+              grep -q "prop:$c-$a-measured=PASS" probe.log || { echo "MISS $c not measured in arm $a"; fail=1; }
+            done
+          done
+          # The loose arm carries only the two cells that decide the question — a broad grant
+          # is applied as inheritable ACEs per launch, so running all twelve there cost more
+          # than the whole step budget.
+          for c in libuv-exact-inbound original-anchor-local-ns; do
+            grep -q "prop:$c-jail-loose-measured=PASS" probe.log || { echo "MISS $c not measured in arm jail-loose"; fail=1; }
+          done
+          for n in tight-inherit tight-fdfile tight-ignore tight-shimmed tight-piped loose-piped; do
+            grep -q "prop:node-$n-measured=PASS" probe.log || { echo "MISS node arm $n never reported"; fail=1; }
+          done
+          echo "---- the matrix ----"
+          grep -E '^  (fact|diag):' probe.log || true
+          echo "---- properties ----"
+          grep -E '^  prop:' probe.log || true
+          exit $fail
+
+      - name: Upload probe log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-pipe-shapes-probe
+          path: probe.log
+          if-no-files-found: warn

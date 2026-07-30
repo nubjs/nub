@@ -1,0 +1,234 @@
+# Branch-scoped ad-hoc probe, NO pull request required (`.claude/skills/ci-adhoc-test/SKILL.md`).
+#
+# TWO measurements, each of which can independently invalidate nub's Windows AppContainer build jail,
+# and neither of which any prior run covers. They are separate jobs because they are separate
+# questions and one failing must not hide the other's table.
+#
+#   msi-node-acl      Can an AppContainer child EXEC `node.exe` on a stock MSI-installed Node?
+#                     `nodejs/node#63590` says the MSI writes a PROTECTED DACL on
+#                     `C:\Program Files\nodejs` with no `S-1-15-2-*` sid, which would make the whole
+#                     route dead for that user regardless of everything MECHANISM-FACTS §5h measured.
+#                     §5h could not see it: its probe COPIES `node.exe` into a granted dir first.
+#
+#   volume-traverse   Does the bypass-traverse skip hold OFF the local `C:` volume — a mounted VHD, a
+#                     `subst` drive, an SMB path? §5h measured it only on local `C:` NTFS and left
+#                     the mechanism unresolved between `SeChangeNotifyPrivilege` and
+#                     `FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL`; the volume-flag reading predicts
+#                     traverse WOULD be enforced on a device lacking the flag. This job also deletes
+#                     the privilege from the launching token, which separates the two mechanisms
+#                     directly.
+#
+# CI IS THE ONLY VENUE. An AppContainer cannot launch over OpenSSH — sshd lands in services session
+# 0, which has no window station a LowBox token can attach to, and every launch returns 0xC0000142
+# (MECHANISM-FACTS §5e). The standing `nub-win` VM therefore cannot answer either question.
+#
+# NO RUST BUILD: PowerShell plus a C# P/Invoke launcher mirroring
+# `crates/nub-sandbox/src/backend/windows.rs`'s `run()`. Minutes, not the 35+ a cold Windows cargo
+# cache costs.
+#
+# BOTH IMAGES, `fail-fast: false`, because a single-image answer to a kernel-physics question is a
+# guess about the other one. `windows-latest` is a SERVER image and `windows-11-arm` a CLIENT one, and
+# default ACLs are image-dependent — which is exactly the axis question 1 is about.
+name: win-msi-volume-probe
+
+on:
+  push:
+    branches: [sandbox/win-msi-acl-volumes]
+  workflow_dispatch: # inert until this file reaches the default branch; `push` is what fires it
+
+permissions:
+  contents: read
+
+jobs:
+  # The verdicts must be shown to discriminate BEFORE any runner minute goes on a launch. Cheap, no
+  # Windows APIs, so it also runs on Linux — and a red verdict-selftest means every table below is
+  # unreadable, so it gates nothing else running.
+  verdict-selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verdict self-test (synthetic worlds, no launch)
+        shell: pwsh
+        run: pwsh -NoLogo -NonInteractive -File tests/win-msi-volume/selftest.ps1
+
+  msi-node-acl:
+    needs: verdict-selftest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # DELIBERATE: setup-node UNZIPS a tarball into `C:\hostedtoolcache\…` rather than running the
+      # MSI, so it provisions the very configuration that could have hidden this defect. The probe
+      # surveys that tree's DACL and execs it as its own arm, which is how "CI differs from a real
+      # user" becomes a measured cell instead of a hypothesis.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Probe — MSI node DACL and AppContainer exec
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          pwsh -NoLogo -NonInteractive -File tests/win-msi-volume/msi-node-acl.ps1 *>&1 |
+            Tee-Object -FilePath msi-probe.log
+          exit 0
+
+      - name: Child logs verbatim
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path msi-logs) {
+            Get-ChildItem msi-logs | ForEach-Object {
+              Write-Host "----- $($_.Name) -----"
+              Get-Content $_.FullName | ForEach-Object { Write-Host "  $_" }
+            }
+          } else { Write-Host "no msi-logs directory - no arm produced a child log" }
+
+      # The verdict is read off the LOG, never off a step's exit status: a property whose `prop:` line
+      # is ABSENT fails here, so a probe that never ran cannot be mistaken for one that passed.
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          fail=0
+          need() {
+            if grep -qF "prop:$1=PASS" msi-probe.log 2>/dev/null; then echo "OK   $1"
+            elif grep -qF "prop:$1=FAIL" msi-probe.log 2>/dev/null; then echo "FAIL $1"; fail=1
+            else echo "MISS $1  (property absent - the probe did not reach it)"; fail=1; fi
+          }
+          [ -s msi-probe.log ] || { echo "MISS the probe produced no output at all"; exit 1; }
+          grep -qF 'PROBE END' msi-probe.log || { echo "MISS the probe did not run to completion"; fail=1; }
+
+          echo "-- privilege context (a result without it settles nothing) --"
+          grep -E '^  fact:(admin|session-id|os|arch|msiexec-exit|msi-installed) ' msi-probe.log || true
+
+          echo "-- controls (a red one invalidates every other row) --"
+          for p in msi-baseline-plain-execs-progfiles-node msi-appcontainer-gate-is-live \
+                   msi-appcontainer-positive-control \
+                   msi-control-sibling-under-program-files-has-the-ace \
+                   msi-exec-is-restored-by-adding-the-ace \
+                   unprivileged-repair-control-own-profile-write-succeeds \
+                   probe-left-no-appcontainer-ace-on-program-files; do need "$p"; done
+
+          echo "-- the DACL the MSI writes --"
+          for p in msi-install-dir-lacks-all-application-packages \
+                   msi-install-dir-lacks-all-restricted-application-packages \
+                   msi-install-dir-dacl-is-protected; do need "$p"; done
+
+          # INVERTED READING on these: PASS means the route is BROKEN for an MSI-installed Node.
+          # The properties are named for the claims they measure, not for the outcome anyone wanted.
+          echo "-- the decisive cells (PASS here = the jail cannot use the user's node) --"
+          for p in msi-node-cannot-be-executed-by-an-appcontainer \
+                   msi-tree-cannot-be-read-by-an-appcontainer \
+                   nub-provisioned-node-shape-execs-under-appcontainer \
+                   ci-provisioned-node-and-msi-node-disagree-on-exec \
+                   unprivileged-repair-of-program-files-is-refused; do need "$p"; done
+
+          echo
+          # A red job means "at least one property did not hold", NOT a verdict on the route: the
+          # inverted properties above make a clean, fully-controlled negative exit non-zero too.
+          # Read the table, not the badge.
+          if [ "$fail" -ne 0 ]; then echo "at least one property did not hold - read the table above"; exit 1; fi
+          echo "every property held"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: win-msi-node-acl-${{ matrix.os }}
+          path: |
+            msi-probe.log
+            msi-logs/
+          if-no-files-found: warn
+
+  volume-traverse:
+    needs: verdict-selftest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Probe — bypass-traverse across volumes
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          pwsh -NoLogo -NonInteractive -File tests/win-msi-volume/volume-traverse.ps1 *>&1 |
+            Tee-Object -FilePath vol-probe.log
+          exit 0
+
+      - name: Child logs verbatim
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path vol-logs) {
+            Get-ChildItem vol-logs | ForEach-Object {
+              Write-Host "----- $($_.Name) -----"
+              Get-Content $_.FullName | ForEach-Object { Write-Host "  $_" }
+            }
+          } else { Write-Host "no vol-logs directory - no arm produced a child log" }
+
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          fail=0
+          need() {
+            if grep -qF "prop:$1=PASS" vol-probe.log 2>/dev/null; then echo "OK   $1"
+            elif grep -qF "prop:$1=FAIL" vol-probe.log 2>/dev/null; then echo "FAIL $1"; fail=1
+            else echo "MISS $1  (property absent - the probe did not reach it)"; fail=1; fi
+          }
+          [ -s vol-probe.log ] || { echo "MISS the probe produced no output at all"; exit 1; }
+          grep -qF 'PROBE END' vol-probe.log || { echo "MISS the probe did not run to completion"; fail=1; }
+
+          echo "-- privilege context and the device flag, read rather than assumed --"
+          grep -E '^  fact:(admin|session-id|os|arch|sdk-const|traverse-bit|volchar/|traverse-flag-varies)' vol-probe.log || true
+
+          echo "-- the anchor: §5h's known-good case, re-measured in THIS run --"
+          for p in anchor-local-c-deep-read-still-works anchor-local-c-gate-is-live \
+                   anchor-local-c-positive-control; do need "$p"; done
+
+          echo "-- per-volume controls (a red reachability control makes its treatment row unreadable) --"
+          for v in local-c vhd subst unc; do
+            for p in "$v-was-actually-tested" "$v-plain-baseline-reads-deep" \
+                     "$v-reachable-when-whole-chain-granted" "$v-grant-reached-the-deep-target" \
+                     "$v-ungranted-sibling-denied"; do need "$p"; done
+          done
+
+          echo "-- the treatment cells: does the traverse skip hold on each volume? --"
+          for v in local-c vhd subst unc; do need "$v-bypass-traverse-holds"; done
+
+          echo "-- the mechanism differential (PASS on the last = the PRIVILEGE is the mechanism) --"
+          for p in cn-control-restricted-launch-path-works \
+                   cn-control-kept-token-really-holds-the-privilege \
+                   cn-control-deleted-token-really-lacks-the-privilege \
+                   device-flag-varies-across-the-volumes-measured \
+                   deleting-changenotify-breaks-the-deep-read; do need "$p"; done
+
+          echo
+          # Same reading as the sibling job: several properties are named for the claim, not the
+          # hoped-for outcome, so a fully-controlled informative run can still exit non-zero.
+          if [ "$fail" -ne 0 ]; then echo "at least one property did not hold - read the table above"; exit 1; fi
+          echo "every property held"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: win-volume-traverse-${{ matrix.os }}
+          path: |
+            vol-probe.log
+            vol-logs/
+          if-no-files-found: warn

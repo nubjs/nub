@@ -525,12 +525,17 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
     }
     #[cfg(windows)]
     {
-        // `NODE_OPTIONS` is deliberately NOT admitted. It was, briefly, to carry a Windows
-        // realpath repair nub stamped — safe only because that stamp OVERWROTE any ambient
-        // value first. The stamp is gone (see `windows_realpath_node_options`), so admitting
-        // the key would now let an AMBIENT `NODE_OPTIONS` through, and it carries `--import`:
-        // an arbitrary-code channel into every dependency's lifecycle script. If a future
-        // repair reinstates the stamp, this entry comes back WITH it, never before.
+        // WINDOWS ONLY, and safe ONLY because the jail STAMPS it: `build_jail.rs` writes
+        // nub's own value into `ambient` before this scrub runs, so an ambient user value is
+        // already overwritten and can never ride this entry in. `NODE_OPTIONS` carries
+        // `--import`, so admitting an ambient one would hand a dependency's lifecycle script
+        // an arbitrary-code channel. The entry and the stamp move together, in both
+        // directions: this was removed once when the stamp was withdrawn, and comes back with
+        // the stdio shim (`windows_build_jail_node_options`). No other platform stamps it, and
+        // none may admit it.
+        if key.eq_ignore_ascii_case("NODE_OPTIONS") {
+            return true;
+        }
         BUILD_JAIL_EXTRA_EXACT
             .iter()
             .any(|e| e.eq_ignore_ascii_case(key))
@@ -546,8 +551,9 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
     }
 }
 
-/// The `NODE_OPTIONS` the Windows build jail stamps, repairing Node's module resolution
-/// under the AppContainer without loosening a single grant.
+/// The `NODE_OPTIONS` route to the Windows realpath defect. NOT SHIPPED — retained as the
+/// measured record of a repair that works and is still the wrong one, and as the string the
+/// branch-scoped probe keeps measuring.
 ///
 /// THE DEFECT. Node's JS `realpathSync` walks a path component by component and, on Windows,
 /// `lstat`s the VOLUME ROOT first. The jail grants leaf-only and leans on traverse-bypass
@@ -555,9 +561,13 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
 /// INTERMEDIATE components of a single open — it does not make an ancestor openable as a
 /// TARGET. So every `require()` of an absolute path dies on `EPERM: lstat 'C:\'`.
 ///
-/// WHY NOT AN ANCESTOR ACE. Writing one needs `WRITE_DAC`, and `C:\` and `C:\Users` are
-/// Administrators-owned; a standard user cannot. A jail that needs elevation cannot be
-/// default-on, so that repair is disqualified rather than merely awkward.
+/// WHAT SHIPS INSTEAD — the ancestor chain, made openable. The backend now reaches it without
+/// elevation from both ends: a non-inherited traverse ACE where the unprivileged user can
+/// write one, and the capability SIDs Windows already granted on `C:\` and `C:\Users` where
+/// they cannot (`ancestor_chain` / `harvest_capability_sids` in `backend/windows.rs`). The
+/// earlier reading of the de-elevated `WRITE_DAC` measurement — that a refusal on `C:\` ruled
+/// the whole route out — was too strong: it rules out WRITING there, not reaching it, and the
+/// capability ACE `C:\` already carries is reachable unprivileged.
 ///
 /// WHY NOT REDIRECT REALPATH AT ITS NATIVE TWIN. That was the first candidate, and it is
 /// REFUTED by measurement: `fs.realpathSync.native` is refused under this jail too, with
@@ -588,22 +598,21 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
 /// ```
 ///
 /// A lifecycle script that builds against the wrong dependency version and exits 0 is worse
-/// than one that cannot start. The jail's current loud failure is the better of the two, so
-/// this stays unwired. (`preserve_symlinks_isolated_layout` is the standing regression test.)
+/// than one that cannot start, so this stays unwired even now that a working repair exists
+/// beside it. (`preserve_symlinks_isolated_layout` is the standing regression test; if it ever
+/// stops reproducing, this becomes available again and the test says so.)
 ///
-/// WHAT SURVIVES, for whoever takes this next:
-///  - Scope the flag to HOISTED installs only, detected at policy-compile time. Safe, but it
-///    leaves the default layout with no working jail, so it does not deliver default-on.
-///  - A `module.registerHooks()` resolve hook that resolves symlinks itself with `readlink`
-///    on granted leaves, never walking to the volume root. Unproven and real work, but it is
-///    the mechanism nub is architecturally built on, and preload delivery already works
-///    (`node-shim-executed=PASS` proves a `data:` `--import` evaluates inside the jail).
-///  - The dedicated-account backend, which has no LowBox check at all — at the cost of a
-///    one-time elevated setup, forfeiting default-on for Windows.
-///
-/// Note that blocker 2 constrains this independently: a piped `child_process` spawn under the
-/// jail HANGS, and every `node-gyp` configure pipes, so native builds stay blocked on Windows
-/// regardless of which route above is taken.
+/// AND THE OBVIOUS SALVAGE IS CLOSED TOO — do not re-derive it. The wrong-version hazard above is
+/// attributable to `--preserve-symlinks` ALONE (`preserve_symlinks_isolated_layout` measures
+/// main-only leaving the same fixture correct), so `--preserve-symlinks-main` by itself looks like
+/// a repair that dodges the disqualification. It is not, because it does not repair enough:
+/// `Module._findPath` realpaths every NON-main resolution unless `--preserve-symlinks` is set, so
+/// main-only clears `resolveMainPath` and then every `require()` dies `EPERM` anyway. There is no
+/// cache to lean on — `toRealPath` memoises only what a SUCCESSFUL walk populated, and under this
+/// jail none succeeds. `realpath_unavailable_resolution` measures both halves (entry point runs,
+/// requires fail) against a process where realpath is refused exactly as the AppContainer refuses
+/// it. So the flag pair is the only configuration that WORKS and it is disqualified, while the one
+/// configuration that is not disqualified does not work.
 #[cfg(windows)]
 pub fn windows_realpath_node_options() -> String {
     "--preserve-symlinks-main --preserve-symlinks".to_string()
@@ -628,6 +637,57 @@ pub fn windows_native_realpath_shim_node_options() -> String {
         .replace(' ', "%20")
         .replace('"', "%22");
     format!("--preserve-symlinks-main --import data:text/javascript,{shim}")
+}
+
+/// The JS the Windows build jail preloads into every confined Node. Kept as a FILE rather
+/// than a Rust string so it stays readable, greppable and lintable; the delivery encoding is
+/// [`windows_build_jail_node_options`]'s job.
+#[cfg(windows)]
+const WINDOWS_STDIO_SHIM: &str = include_str!("../backend/windows_stdio_shim.js");
+
+/// The `NODE_OPTIONS` the Windows build jail STAMPS over any ambient value, delivering the
+/// `child_process` stdio shim ([`WINDOWS_STDIO_SHIM`]).
+///
+/// WHY A STAMP AND NOT A GRANT. The blocker is the OBJECT NAMESPACE, not a permission: under
+/// one policy and one grant set, `\\.\pipe\LOCAL\…` was CREATED while `\\.\pipe\…` was
+/// REFUSED (run 30473523088). Global NPFS is closed to a LowBox token, the AppContainer's
+/// private namespace is open, and libuv spells only the former. No filesystem rule reaches
+/// `\Device\NamedPipe` — a maximally loose policy still hung — so there is nothing to grant.
+///
+/// WHY IT MUST OVERWRITE. `NODE_OPTIONS` carries `--import`. Admitting the key to the
+/// lifecycle env allowlist ([`build_jail_env_allowed`]) is only sound because this value
+/// replaces whatever the user's environment held; the two are wired together deliberately and
+/// must be removed together if either goes.
+///
+/// `data:` is load-bearing twice over: `defaultResolve` short-circuits on that protocol before
+/// touching the filesystem, so the preload needs no grant of its own and cannot be tampered
+/// with by the package it confines.
+///
+/// REQUIRES `--import`, i.e. Node 20.6+. The caller gates on the interpreter's version rather
+/// than stamping blind — an unknown flag in `NODE_OPTIONS` aborts Node at startup, which would
+/// turn a missing repair into a broken install.
+#[cfg(windows)]
+pub fn windows_build_jail_node_options() -> String {
+    format!(
+        "--import data:text/javascript,{}",
+        percent_encode_strict(WINDOWS_STDIO_SHIM)
+    )
+}
+
+/// Percent-encode everything outside the RFC 3986 unreserved set. Deliberately maximal:
+/// `NODE_OPTIONS` is split on whitespace and re-parsed by Node's own option reader, so an
+/// under-encoded payload does not corrupt a URL, it silently truncates the preload.
+#[cfg(windows)]
+fn percent_encode_strict(src: &str) -> String {
+    let mut out = String::with_capacity(src.len() * 3);
+    for byte in src.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 /// The build-jail ENV posture (D1): a DEFAULT-DENY allowlist over the effective child
@@ -898,6 +958,26 @@ mod tests {
             cache: PathBuf::from("/testhome/.cache"),
             project: PathBuf::from("/proj"),
         }
+    }
+
+    /// `NODE_OPTIONS` is whitespace-separated, so an under-encoded payload does not produce a
+    /// malformed URL that Node rejects — it produces a TRUNCATED preload that silently loads
+    /// half a shim, or an option fragment Node aborts on. Both are quiet, so the encoding is
+    /// asserted rather than eyeballed.
+    #[cfg(windows)]
+    #[test]
+    fn the_stamped_node_options_is_a_single_whitespace_free_token() {
+        let stamped = windows_build_jail_node_options();
+        let (flag, url) = stamped.split_once(' ').expect("flag then payload");
+        assert_eq!(flag, "--import");
+        assert!(
+            !url.chars().any(char::is_whitespace),
+            "the data: URL must survive NODE_OPTIONS' whitespace split: {url}"
+        );
+        assert!(url.starts_with("data:text/javascript,"));
+        // The whole payload must arrive, not merely its opening — an identifier from the
+        // shim's tail is what makes a truncation visible.
+        assert!(url.contains(&percent_encode_strict("writableScratchDir")));
     }
 
     #[test]

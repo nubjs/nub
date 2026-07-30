@@ -1023,6 +1023,10 @@ mod win {
         // actually clears the jail for default-on.
         production_jail(&mut r, &f);
 
+        // (7) …and with the REAL interpreter rather than the probe binary, which is the one
+        // variable (6) cannot vary and the one that carried the showstopper.
+        interpreter_group(&mut r, &f);
+
         println!(
             "ARM done elevated={} failures={}",
             u8::from(elevated),
@@ -1142,6 +1146,596 @@ mod win {
             egress == 5 || egress == 6,
             &format!("(child exit {egress}; 5/6 = denied)"),
         );
+    }
+
+    // ── the interpreter group: can a lifecycle script run at all? ─────────────────
+
+    /// THE SHOWSTOPPER THIS GROUP EXISTS FOR. `production_jail` above grants the PROBE BINARY as
+    /// the interpreter — a file in the fixture, which nub owns — so it has always passed and could
+    /// never have seen the real defect. A real install grants the user's own Node, and for a
+    /// standard user with an all-users install that is a path nub cannot write an ACE on
+    /// (`%ProgramFiles%\nodejs`, `C:\hostedtoolcache`) AND, independently, an image a confined
+    /// caller cannot open. Either one makes the jail unable to start a single lifecycle script.
+    ///
+    /// So this runs the SAME lifecycle script twice under the SAME real `compile_build_jail`
+    /// policy, with ONE variable: whether the interpreter is the ambient install or a nub-owned
+    /// copy of it. The ambient arm is the CONTROL — without an arm where the defect still
+    /// reproduces, a green staged arm is measuring nothing.
+    ///
+    /// It calls the same engine entry the product does
+    /// (`windows_jail_bin::stage_appcontainer_readable_copy`) rather than re-implementing the
+    /// staging, because a probe that re-implements the mechanism measures the probe.
+    fn interpreter_group(r: &mut Report, f: &Fixture) {
+        let Some(source_exe) = ambient_node() else {
+            for prop in INTERPRETER_PROPS {
+                r.record(
+                    prop,
+                    false,
+                    "(no ambient node.exe found — nothing measured)",
+                );
+            }
+            return;
+        };
+        let source_root = source_exe
+            .parent()
+            .expect("node.exe has a parent")
+            .to_path_buf();
+        println!("  fact:interp-source={}", source_exe.display());
+        // Whether the SOURCE install already publishes read to AppContainers is the fact that
+        // decides whether this machine can exhibit the defect at all: on one that does (43 of the
+        // 44 `C:\Program Files` children do — `nodejs` is the outlier), the ambient arm passes for
+        // a reason that has nothing to do with nub, and the differential is VOID rather than green.
+        let source_publishes = nub_sandbox::windows_leaf_grant_redundant(&source_root);
+        println!("  fact:interp-source-publishes-aap={source_publishes}");
+
+        // THE PROXIMATE CAUSE, asked directly and WITHOUT MUTATING ANYTHING. `set_ace` needs
+        // `WRITE_DAC` on its target, so whether nub can grant the ambient interpreter at all is a
+        // property of this token against that DACL — and opening the file for `WRITE_DAC` asks
+        // exactly that. Writing a real ace to find out would leave a lasting widening on the
+        // user's own Node install, which is not a probe's business.
+        let write_dac = can_write_dacl(&source_exe);
+        println!("  fact:interp-source-write-dac={write_dac}");
+
+        let (ambient_rc, ambient_log) = lifecycle_arm(f, "ambient", &source_exe, &source_root);
+
+        // Staged under the fixture's own cache home, which is where `compile_build_jail`'s `$cache`
+        // anchor points — the same relationship the product's `<cache>/jail-bin/<key>` has, without
+        // touching the real user cache.
+        let staged_dir = f.home.join("cache").join("nub").join("pm").join("jail-bin");
+        let began = Instant::now();
+        let staged = nub_sandbox::backend::windows_jail_bin::stage_appcontainer_readable_copy(
+            &source_root,
+            &staged_dir,
+        );
+        let staged_exe = staged_dir.join("node.exe");
+        println!(
+            "  fact:interp-stage-ms={} result={staged:?}",
+            began.elapsed().as_millis()
+        );
+        // THE ZERO-PRIVILEGE CLAIM, and it is only a claim in the de-elevated arm — which is
+        // exactly why it lives in this differential rather than in a Windows unit test.
+        r.record(
+            "interp-staging-needs-no-write-dac-anywhere-privileged",
+            staged.is_ok() && staged_exe.is_file(),
+            &format!("({staged:?}; node.exe present {})", staged_exe.is_file()),
+        );
+
+        let (staged_rc, staged_log) = lifecycle_arm(f, "staged", &staged_exe, &staged_dir);
+        let ambient_ok = ambient_rc == 0 && ambient_log.contains("LIFECYCLE-OK");
+        let staged_ok = staged_rc == 0 && staged_log.contains("LIFECYCLE-OK");
+
+        // THE LAW, stated so it holds in BOTH arms rather than being an expectation that
+        // contradicts itself across them. An earlier draft demanded the ambient arm FAIL in both,
+        // which is wrong and would have been a self-inflicted red: an ELEVATED nub holds
+        // `WRITE_DAC` on `%ProgramFiles%`, writes the ace, and the ambient interpreter works.
+        // What is invariant is the DEPENDENCE — the ambient install is usable exactly when nub
+        // could grant it — and stating it that way makes the elevated arm carry information
+        // instead of being the same measurement twice.
+        // `source_publishes` is the second disjunct and it is not hypothetical: run 30544198501
+        // read this FALSE in the elevated arm and TRUE in the de-elevated one, on the same machine,
+        // for reasons not yet established (the elevated arm's own grant on that path is the
+        // suspect, but its teardown revokes a DIFFERENT sid than the one this matches, so the
+        // mechanism is UNEXPLAINED and is not asserted here). Whatever the cause, an install the OS
+        // already publishes is readable without nub granting anything, so the law has to admit it —
+        // and both inputs are read BEFORE the arm runs.
+        let readable_without_a_grant = write_dac || source_publishes;
+        r.record(
+            "interp-ambient-install-is-usable-only-where-nub-can-write-its-dacl",
+            ambient_ok == readable_without_a_grant,
+            &format!(
+                "(write_dac {write_dac}, already-published {source_publishes}, lifecycle ok \
+                 {ambient_ok}; rc {ambient_rc}; log {})",
+                one_line(&ambient_log)
+            ),
+        );
+        // Re-read at the END, so a run where an arm CHANGED the ambient install's
+        // AppContainer-readability is visible rather than inferred. This is the reading the next
+        // probe of that question starts from.
+        println!(
+            "  fact:interp-source-publishes-aap-after={}",
+            nub_sandbox::windows_leaf_grant_redundant(&source_root)
+        );
+        // …and the fix is that the staged copy does NOT depend on it. This is the property the
+        // whole change exists for, so it is gated in both arms and the de-elevated one is the
+        // meaningful half.
+        r.record(
+            "interp-staged-copy-runs-a-lifecycle-script-without-write-dac",
+            staged_ok,
+            &format!("(rc {staged_rc}; log {})", one_line(&staged_log)),
+        );
+        // ATTRIBUTION, and it is what stops the staged arm passing for the wrong reason. A refused
+        // read grant is now SKIPPED rather than fatal, so a launch can succeed while the child
+        // quietly ran the ambient interpreter off some other PATH entry — which would look
+        // identical here. The child reports its own `process.execPath`, so it cannot.
+        //
+        // Compared as PATHS, not strings. The first draft compared spellings and failed on a run
+        // where the fix worked, because a `/`-containing `join` literal and Windows's own `\`
+        // spelling name the same file — a control that varied more than the thing under test.
+        r.record(
+            "interp-staged-child-execpath-is-the-nub-owned-copy",
+            staged_log.lines().any(|l| same_file(l.trim(), &staged_exe)),
+            &format!(
+                "(expected {}; log {})",
+                staged_exe.display(),
+                one_line(&staged_log)
+            ),
+        );
+        // THE ABI CONSTRAINT, measured rather than asserted: `prebuild-install` and
+        // `node-gyp-build` both default the prebuild they fetch to `process.versions.modules` of
+        // the RUNNING Node, so a staged interpreter reporting a different one would silently make
+        // every package in that family download an unloadable binary. Both arms report it, so this
+        // compares the copy against its own source rather than against a tabulated expectation —
+        // and it can only be answered where BOTH arms produced a reading.
+        let (source_abi, copy_abi) = (abi_of(&ambient_log), abi_of(&staged_log));
+        r.record(
+            "interp-staged-abi-matches-the-source",
+            copy_abi.is_some() && copy_abi == source_abi,
+            &format!("(source {source_abi:?}, staged {copy_abi:?})"),
+        );
+        // The cost claim: a published tree is what the backend's own leaf grant SKIPS on, so a
+        // lifecycle spawn writes no DACL across the ~2,400-entry tree. Asserted on a DEEP entry
+        // too, which is the half that proves the ace was written BEFORE the copy — an entry
+        // several levels down carries it only by inheritance at creation.
+        r.record(
+            "interp-staged-dir-publishes-read-to-appcontainers",
+            nub_sandbox::windows_leaf_grant_redundant(&staged_dir),
+            "(an inheritable ALL APPLICATION PACKAGES ace ⇒ the per-spawn leaf grant skips)",
+        );
+        let deep = staged_dir.join("node_modules").join("npm").join("bin");
+        r.record(
+            "interp-staged-deep-entry-inherited-the-ace-at-creation",
+            deep.is_dir() && nub_sandbox::windows_leaf_grant_redundant(&deep),
+            &format!("({} exists {})", deep.display(), deep.is_dir()),
+        );
+        // Confinement survives it: the jail is not merely startable, it still withholds what it
+        // never granted.
+        let policy = build_jail_for(f, &staged_exe, &staged_dir);
+        let denied = code(
+            &policy,
+            f,
+            &f.package,
+            &["__sbxchild__", "read", &f.secret.to_string_lossy()],
+        );
+        r.record(
+            "interp-staged-ungranted-secret-still-refused",
+            denied == 5 || denied == 9,
+            &format!("(child exit {denied}; 5/9 = denied)"),
+        );
+
+        // ── the fail-closed differential ──────────────────────────────────────────────
+        //
+        // A sibling lane measured `cmd.exe` de-elevated as 19-of-19 cells ABSENT — exit 1 at
+        // 100 ms, empty transcript, `Access is denied.` — and read it as cmd being unusable under
+        // confinement, which would make a different lifecycle shell necessary rather than merely
+        // better. This arm settles it, because the leaf-read-grant loop is the ONE thing that
+        // changed and it is exactly the suspect: `resolve_program` auto-grants the program FILE, so
+        // launching `%SystemRoot%\System32\cmd.exe` attempts an ACE on it, and de-elevated a
+        // standard user holds no `WRITE_DAC` there. Under `?` that aborted the launch — which
+        // produces precisely that shape and is indistinguishable from cmd misbehaving.
+        //
+        // ONE VARIABLE: the same fixture, the same policy, the same script, the same token; only
+        // the seam differs. Reported as a fact in the elevated arm (where the grant SUCCEEDS, so
+        // there is nothing to abort and the arms cannot differ) and GATED de-elevated.
+        // `can_write_dacl` is a FACT here and deliberately NOT what the property keys on. It is an
+        // UNSOUND proxy for whether `set_ace` succeeds, measured: it returned false in the ELEVATED
+        // arm on `System32\cmd.exe` while the real grant there plainly succeeded — that arm produced
+        // cells under fail-closed and never aborted. An elevated token's DACL-write authority does
+        // not come from the file's DACL, so an access-checked open cannot see it. Kept because it is
+        // still right de-elevated and it is the reading a future reader reaches for; labelled so
+        // nobody keys a verdict on it again.
+        println!(
+            "  fact:interp-cmd-program-grant-write-dac-open={} (UNSOUND above medium IL)",
+            can_write_dacl(Path::new(&comspec_path()))
+        );
+        let (fc_rc, fc_log) = with_fail_closed_read_grants(|| {
+            lifecycle_arm(f, "staged-failclosed", &staged_exe, &staged_dir)
+        });
+        let fc_cells = CMD_CELLS.iter().filter(|c| fc_log.contains(**c)).count();
+        let soft_cells = CMD_CELLS
+            .iter()
+            .filter(|c| staged_log.contains(**c))
+            .count();
+        // THE PROPERTY, keyed on the MECHANISM rather than a proxy for it: fail-closed loses the
+        // launch exactly when the leaf grant it aborts on is the one that was refused, which the
+        // launcher names in its OWN error. Elevated that grant succeeds and the launch survives;
+        // de-elevated it is refused and the launch dies with
+        // `installing read grant ACE on C:\Windows\system32\cmd.exe failed` — verbatim the string a
+        // sibling lane read as cmd being unusable under confinement. One law, both arms.
+        let aborted = fc_rc == -101 && fc_cells == 0;
+        let grant_refused = !program_grant_landed(f, &staged_exe, &staged_dir);
+        r.record(
+            "interp-cmd-under-fail-closed-aborts-iff-its-own-program-grant-is-refused",
+            aborted == grant_refused,
+            &format!(
+                "(program grant refused {grant_refused}; fail-closed cells {fc_cells}/{}, rc \
+                 {fc_rc}; fail-soft cells {soft_cells}/{})",
+                CMD_CELLS.len(),
+                CMD_CELLS.len()
+            ),
+        );
+        // The consequence the sibling verdict turns on, and deliberately NOT "the whole battery":
+        // de-elevated `dir /b` returns `Access is denied.` in the package dir even though it works
+        // elevated, which is a real residual belonging to the ancestor/traverse work rather than to
+        // the interpreter. What this asserts is the part the sibling read as ZERO — cmd starts, opens
+        // its script, resolves `node` off the sanitized PATH, and reaches its verdict line. The full
+        // tally stays a fact so a regression in the rest is still visible.
+        for cell in [
+            "STEP-CMD-OPENED-THE-SCRIPT",
+            "STEP-BARE-NODE-RESOLVED-AND-RAN",
+            "LIFECYCLE-OK",
+        ] {
+            r.record(
+                &format!(
+                    "interp-cmd-under-fail-soft-reaches-{}",
+                    cell.to_ascii_lowercase()
+                ),
+                staged_log.contains(cell),
+                &format!("({soft_cells}/{} cells total)", CMD_CELLS.len()),
+            );
+        }
+    }
+
+    /// Whether the launcher could install the leaf grant on the PROGRAM file — asked by launching a
+    /// trivial `exit /b 0` under fail-closed and reading the launcher's OWN error, which names the
+    /// path it refused. That is the mechanism itself; the cheaper stand-in for it was wrong above the
+    /// medium integrity level (see the call site), which is why this pays for a launch.
+    fn program_grant_landed(f: &Fixture, exe: &Path, root: &Path) -> bool {
+        let policy = build_jail_for(f, exe, root);
+        let spec = CommandSpec::new(&comspec_path())
+            .arg("/c")
+            .arg("exit /b 0")
+            .cwd(&f.package);
+        with_fail_closed_read_grants(|| match apply(&policy, spec) {
+            Ok(prepared) => match prepared.status() {
+                Ok(_) => true,
+                Err(e) => {
+                    println!("    [program-grant probe] {e}");
+                    !e.to_string().contains("installing read grant ACE")
+                }
+            },
+            Err(d) => {
+                println!("    [program-grant probe apply Err] {d:?}");
+                false
+            }
+        })
+    }
+
+    /// The command interpreter the arms launch, resolved the way [`lifecycle_arm`] resolves it so
+    /// the grant fact is about the same file.
+    fn comspec_path() -> String {
+        std::env::var("ComSpec").unwrap_or_else(|_| {
+            format!(
+                "{}\\System32\\cmd.exe",
+                std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into())
+            )
+        })
+    }
+
+    /// Whether THIS token may rewrite `path`'s DACL — the one permission [`set_ace`] needs, asked
+    /// by opening for it rather than by writing an ace and observing the result. Non-mutating on
+    /// purpose: the elevated arm WOULD succeed, and it would leave a lasting AppContainer widening
+    /// on the user's own Node install.
+    fn can_write_dacl(path: &Path) -> bool {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+        const WRITE_DAC: u32 = 0x0004_0000;
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: an OPEN_EXISTING open for one access right on a NUL-terminated wide path; the
+        // handle is closed on the success path and nothing is written through it.
+        unsafe {
+            let h = CreateFileW(
+                wide.as_ptr(),
+                WRITE_DAC,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            );
+            if h == INVALID_HANDLE_VALUE || h.is_null() {
+                return false;
+            }
+            CloseHandle(h);
+            true
+        }
+    }
+
+    /// Whether a path the CHILD printed names the same file as one nub built. Windows accepts both
+    /// separators, so two spellings of one path are equal as paths and unequal as strings — and a
+    /// string compare here silently inverted a control (see the call site).
+    fn same_file(reported: &str, expected: &Path) -> bool {
+        let norm = |p: &str| p.replace('/', "\\").to_ascii_lowercase();
+        !reported.is_empty() && norm(reported) == norm(&expected.to_string_lossy())
+    }
+
+    /// Every property [`interpreter_group`] reports, so a machine with no Node still emits a
+    /// verdict for each rather than leaving the table looking complete with rows missing.
+    const INTERPRETER_PROPS: &[&str] = &[
+        "interp-staging-needs-no-write-dac-anywhere-privileged",
+        "interp-ambient-install-is-usable-only-where-nub-can-write-its-dacl",
+        "interp-staged-copy-runs-a-lifecycle-script-without-write-dac",
+        "interp-staged-child-execpath-is-the-nub-owned-copy",
+        "interp-staged-abi-matches-the-source",
+        "interp-staged-dir-publishes-read-to-appcontainers",
+        "interp-staged-deep-entry-inherited-the-ace-at-creation",
+        "interp-staged-ungranted-secret-still-refused",
+        "interp-cmd-under-fail-closed-aborts-iff-its-own-program-grant-is-refused",
+        "interp-cmd-under-fail-soft-reaches-step-cmd-opened-the-script",
+        "interp-cmd-under-fail-soft-reaches-step-bare-node-resolved-and-ran",
+        "interp-cmd-under-fail-soft-reaches-lifecycle-ok",
+    ];
+
+    /// The all-users MSI install first, because it is the configuration that exhibits the defect
+    /// and the one a real user has; the runner's unzipped `hostedtoolcache` Node otherwise, which
+    /// carries no AppContainer ace either. Whichever it found is reported, so a run that measured
+    /// an already-readable Node is legible rather than silently reassuring.
+    fn ambient_node() -> Option<PathBuf> {
+        let msi = PathBuf::from(std::env::var("ProgramFiles").unwrap_or_default())
+            .join("nodejs/node.exe");
+        if msi.is_file() {
+            return Some(msi);
+        }
+        std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+            .map(|d| d.join("node.exe"))
+            .find(|c| c.is_file())
+    }
+
+    /// One arm: the real production policy for `exe`, running a real `.cmd` lifecycle script
+    /// through `cmd.exe` — which is how aube spawns one, and the shape that makes the child's own
+    /// `node` a NESTED spawn from inside the AppContainer rather than one nub performs itself.
+    ///
+    /// The script deliberately contains NO PIPE. A piped `child_process` spawn under an
+    /// AppContainer hangs in libuv's named-pipe retry, which is a SEPARATE defect with a separate
+    /// repair (the `NODE_OPTIONS` stdio shim) — including one here would make a hang
+    /// indistinguishable from an interpreter that could not be read.
+    fn lifecycle_arm(f: &Fixture, tag: &str, exe: &Path, root: &Path) -> (i32, String) {
+        let marker = f.package.join(format!("lc-{tag}.log"));
+        let script = f.package.join(format!("lc-{tag}.cmd"));
+        // `node -e`, NOT `node <file>`. An ENTRY FILE goes through `resolveMainPath`, which
+        // realpath's every prefix of the path starting at the volume root, and de-elevated that
+        // dies `EPERM: operation not permitted, lstat 'C:\'` — the still-open
+        // ancestor-reachability repair, which is orthogonal to the interpreter and was masking it
+        // in BOTH arms identically (run 30544198501, rc 12 with the stack frame to prove it).
+        // `-e` reaches the same reads with no main-path resolution: the run before showed
+        // `node -p` unaffected while `node <file>` died, which is the documented shape.
+        //
+        // Reaching the distribution's BUNDLED npm tree is the exact cell an un-ACE'd install fails
+        // on, and requiring a file out of it is the cheapest honest way to ask for it. Only single
+        // quotes appear inside, because cmd gives the whole `-e` program to `"`.
+        let identity = "console.log(process.execPath);console.log('abi='+process.versions.modules)";
+        // READING THE BUNDLED npm TREE IS RECORDED, NOT GATED, and that is a scoping decision with
+        // a measurement behind it. It is the cell §5j found failing, so it belongs here — but a CJS
+        // `require` of an ABSOLUTE path realpath's every prefix from the volume root
+        // (`Module._findPath` → `toRealPath`), which de-elevated dies `EPERM … lstat 'C:\'` in BOTH
+        // interpreter arms identically (run 30544794220). That is the ancestor-reachability repair,
+        // not the interpreter, and gating on it would make this group red for someone else's open
+        // work while reporting nothing about its own subject. So it runs LAST, after the verdict
+        // line, and its outcome is a fact.
+        let npm_read = format!(
+            "console.log('npm='+require({}).version)",
+            js_string(&root.join("node_modules/npm/package.json"))
+        );
+        // Every path INSIDE the script is CWD-RELATIVE, and that is not tidiness. An absolute open
+        // from inside the jail walks the whole ancestor chain as targets, and making that chain
+        // reachable without elevation is a SEPARATE, still-open repair — an absolute script path
+        // made the de-elevated arm fail with cmd's `Access is denied.` before either interpreter
+        // was reached, i.e. it measured the ancestor blocker instead of the interpreter. A relative
+        // open resolves against the inherited cwd handle and does not.
+        //
+        // `node` is BARE, not absolute: a PATH search is itself a directory probe, and a confined
+        // child is refused on an un-ACE'd install tree — which surfaces as `'node' is not
+        // recognized`, a different and earlier failure than a refused image open. Both are the
+        // defect; naming the interpreter absolutely would have measured only the second.
+        std::fs::write(
+            &script,
+            format!(
+                // BREADCRUMB PER STAGE, so a failure is attributable to one of them instead of
+                // arriving as a bare exit code. An earlier run produced `rc 1` with an EMPTY log
+                // and nothing distinguished "cmd could not open the script" from "`node` was
+                // unresolvable" from "the require was refused" — three causes with three different
+                // fixes.
+                "@echo off\r\n\
+                 echo STEP-CMD-OPENED-THE-SCRIPT> \"{m}\"\r\n\
+                 node -p \"process.version\" >> \"{m}\" 2>&1\r\n\
+                 if errorlevel 1 exit /b 11\r\n\
+                 echo STEP-BARE-NODE-RESOLVED-AND-RAN>> \"{m}\"\r\n\
+                 node -e \"{i}\" >> \"{m}\" 2>&1\r\n\
+                 if errorlevel 1 exit /b 12\r\n\
+                 echo LIFECYCLE-OK>> \"{m}\"\r\n\
+                 if exist \"{m}\" echo CELL-IF-EXIST>> \"{m}\"\r\n\
+                 cd>> \"{m}\" 2>&1\r\n\
+                 if not errorlevel 1 echo CELL-CD>> \"{m}\"\r\n\
+                 dir /b>> \"{m}\" 2>&1\r\n\
+                 if not errorlevel 1 echo CELL-DIR>> \"{m}\"\r\n\
+                 for %%V in (1) do echo CELL-FOR>> \"{m}\"\r\n\
+                 set NUBCELL=1\r\n\
+                 if \"%NUBCELL%\"==\"1\" echo CELL-SET-AND-EXPAND>> \"{m}\"\r\n\
+                 where.exe node>> \"{m}\" 2>&1\r\n\
+                 if not errorlevel 1 echo CELL-WHERE>> \"{m}\"\r\n\
+                 node -e \"{n}\" >> \"{m}\" 2>&1\r\n\
+                 if errorlevel 1 echo NPM-TREE-READ-FAILED>> \"{m}\"\r\n",
+                m = leaf(&marker),
+                i = identity,
+                n = npm_read
+            ),
+        )
+        .expect("write the arm's script");
+
+        let policy = build_jail_for(f, exe, root);
+        let comspec = comspec_path();
+        let spec = CommandSpec::new(&comspec)
+            .arg("/c")
+            .arg(leaf(&script))
+            .cwd(&f.package);
+        let rc = match apply(&policy, spec) {
+            Ok(p) => match p.status() {
+                Ok(s) => s.code().unwrap_or(-1),
+                Err(e) => {
+                    println!("    [{tag} status Err] {e} os={:?}", e.raw_os_error());
+                    -101
+                }
+            },
+            Err(d) => {
+                println!("    [{tag} apply Err] {d:?}");
+                -100
+            }
+        };
+        let log = std::fs::read_to_string(&marker).unwrap_or_default();
+        let cells: Vec<&str> = CMD_CELLS
+            .iter()
+            .copied()
+            .filter(|c| log.contains(c))
+            .collect();
+        println!(
+            "  fact:interp-{tag}-cmd-cells={}/{} [{}]",
+            cells.len(),
+            CMD_CELLS.len(),
+            cells.join(" ")
+        );
+        println!(
+            "  fact:interp-{tag}-npm-tree-read={}",
+            if log.contains("npm=") { "ok" } else { "failed" }
+        );
+        println!("    arm:{tag} rc={rc}");
+        if log.is_empty() {
+            // Nothing ran, so the grant list is the only remaining evidence about why.
+            for rule in &policy.fs.rules.entries {
+                println!("      {tag}# grant {:?} {:?}", rule.access, rule.matcher);
+            }
+        }
+        for line in log.lines() {
+            println!("      {tag}| {line}");
+        }
+        (rc, log)
+    }
+
+    /// The REAL production policy — `compile_build_jail`, the entry aube's lifecycle hook drives —
+    /// with the interpreter and its distribution's global package tree as the only variables. The
+    /// env mirrors what the embedder constructs: both interpreter spellings named, and `PATH`
+    /// carrying the distribution plus the OS floor.
+    fn build_jail_for(f: &Fixture, exe: &Path, root: &Path) -> SandboxPolicy {
+        let system32 = format!(
+            "{}\\System32",
+            std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into())
+        );
+        let mut ambient: BTreeMap<String, String> = std::env::vars().collect();
+        ambient.insert("PATH".to_string(), format!("{};{system32}", root.display()));
+        ambient.insert(
+            "npm_node_execpath".to_string(),
+            exe.to_string_lossy().into_owned(),
+        );
+        ambient.insert("NODE".to_string(), exe.to_string_lossy().into_owned());
+        let homes = nub_sandbox::Homes {
+            home: f.home.clone(),
+            tmp: std::env::temp_dir(),
+            cache: f.home.join("cache"),
+            project: f.project.clone(),
+        };
+        nub_sandbox::compile_build_jail(
+            homes,
+            &f.package,
+            vec![exe.to_path_buf()],
+            vec![root.join("node_modules")],
+            ambient,
+        )
+        .expect("compile_build_jail")
+    }
+
+    /// A path's file name, for the cwd-relative spellings the script uses. Panics on a path with
+    /// no final component, which is a probe bug rather than a measurement.
+    fn leaf(p: &Path) -> String {
+        p.file_name()
+            .expect("an arm file has a name")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// The cmd-interpreter behaviours the script body exercises beyond "a script ran": the
+    /// builtins and the PATH search a real postinstall depends on. Named so a partial result is a
+    /// list rather than a count — which is the difference between "cmd is broken confined" and "one
+    /// builtin is".
+    const CMD_CELLS: &[&str] = &[
+        "STEP-CMD-OPENED-THE-SCRIPT",
+        "STEP-BARE-NODE-RESOLVED-AND-RAN",
+        "LIFECYCLE-OK",
+        "CELL-IF-EXIST",
+        "CELL-CD",
+        "CELL-DIR",
+        "CELL-FOR",
+        "CELL-SET-AND-EXPAND",
+        "CELL-WHERE",
+    ];
+
+    /// Run `body` with the leaf-read-grant loop restored to its FAIL-CLOSED behaviour, so one arm
+    /// of the same run carries the code a sibling lane measured `cmd.exe` under. Mirrors
+    /// `windows_jail_repairs`'s `without_ancestor_repair`.
+    fn with_fail_closed_read_grants<T>(body: impl FnOnce() -> T) -> T {
+        const KEY: &str = "NUB_SANDBOX_WIN_FAIL_CLOSED_READ_GRANTS";
+        // SAFETY: the arm is single-threaded at this point (every launch in this group is
+        // sequential), and the variable is removed before returning on both paths.
+        unsafe { std::env::set_var(KEY, "1") };
+        let out = body();
+        unsafe { std::env::remove_var(KEY) };
+        out
+    }
+
+    /// A Windows path as a SINGLE-QUOTED JS string literal, backslashes doubled.
+    ///
+    /// Single quotes are not a style choice: the whole `-e` program is one cmd argument delimited by
+    /// `"`, so a double-quoted JS literal inside it would terminate that argument and hand cmd a
+    /// path as a second token. Doubling the separators is what keeps `C:\Program Files` a path
+    /// rather than a run of escape sequences.
+    fn js_string(p: &Path) -> String {
+        format!("'{}'", p.to_string_lossy().replace('\\', "\\\\"))
+    }
+
+    fn abi_of(log: &str) -> Option<&str> {
+        log.lines().find_map(|l| l.trim().strip_prefix("abi="))
+    }
+
+    /// A child log flattened onto the single `prop:` line, so a verdict carries its own evidence
+    /// without the reader having to correlate it against the interleaved arm output.
+    fn one_line(log: &str) -> String {
+        let flat: Vec<&str> = log
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        let joined = flat.join(" / ");
+        match joined.char_indices().nth(240) {
+            Some((cut, _)) => format!("{}…", &joined[..cut]),
+            None => joined,
+        }
     }
 
     // ── the differential driver ───────────────────────────────────────────────────
@@ -1338,29 +1932,29 @@ mod win {
         println!("\n── DIFFERENTIAL ────────────────────────────────────────────");
         println!("de-elevation route: {route}");
         println!(
-            "{:<28} {:>10} {:>14}",
+            "{:<58} {:>10} {:>14}",
             "token state", "elevated", "de-elevated"
         );
         println!(
-            "{:<28} {:>10} {:>14}",
+            "{:<58} {:>10} {:>14}",
             "admin authority (SCM)",
             elev_arm.map_or("n/a", |a| if a.admin { "YES" } else { "NO" }),
             if deelev.admin { "YES" } else { "NO" }
         );
         println!(
-            "{:<28} {:>10} {:>14}",
+            "{:<58} {:>10} {:>14}",
             "integrity level",
             elev_arm.map_or("n/a".to_string(), |a| a.il.to_string()),
             deelev.il
         );
         println!(
-            "{:<28} {:>10} {:>14}",
+            "{:<58} {:>10} {:>14}",
             "TokenIsElevated flag (stale)",
             elev_arm.map_or("n/a", |a| if a.elevated { "1" } else { "0" }),
             if deelev.elevated { "1" } else { "0" }
         );
         println!(
-            "{:<28} {:>10} {:>14}",
+            "{:<58} {:>10} {:>14}",
             "property", "elevated", "de-elevated"
         );
         for (name, ok) in &deelev.props {
@@ -1369,7 +1963,7 @@ mod win {
                 .map(|(_, v)| if *v { "PASS" } else { "FAIL" })
                 .unwrap_or("n/a");
             println!(
-                "{name:<28} {e:>10} {:>14}",
+                "{name:<58} {e:>10} {:>14}",
                 if *ok { "PASS" } else { "FAIL" }
             );
             if !ok {

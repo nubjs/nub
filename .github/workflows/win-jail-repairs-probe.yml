@@ -1,0 +1,212 @@
+# Branch-scoped ad-hoc probe: do the two Windows jail repairs work end to end, and does
+# confinement survive them? No pull request required (.claude/skills/ci-adhoc-test/SKILL.md).
+# CI is the only venue — AppContainer cannot be launched over SSH (session 0 has no window
+# station, so every launch returns 0xC0000142), which also rules out the standing nub-win VM.
+#
+# WHAT IS MEASURED. Repair 1 makes every ancestor of a granted path reachable, so an absolute
+# `require()` no longer dies on `EPERM: lstat 'C:\'` — by writing a non-inherited traverse ACE
+# where the user can, and requesting the capability SIDs already on those DACLs where it
+# cannot. Repair 2 stamps a NODE_OPTIONS preload that rewrites piped stdio into scratch files,
+# so a confined `child_process` spawn returns instead of spinning in libuv's retry loop.
+#
+# THE CONTROLS. `NUB_SANDBOX_WIN_NO_ANCESTOR_REPAIR` disables repair 1 for one arm of the same
+# run, on the same fixture, so the repaired arm has something to differ from; the unshimmed
+# piped spawn is the matching control for repair 2 and is the only 15-second arm. A repair that
+# opened the jail would be a regression, so the canary and the ancestor-sibling refusals are
+# asserted as PASS below alongside the liveness controls.
+#
+# The icacls dump is a FACT, not a gate: it names the capability SIDs on `C:\` and `C:\Users`
+# that the backend harvests, which is what makes the ancestors reachable without elevation.
+#
+# THE COST GROUP. Repair 1's ace is written per lifecycle SPAWN, and the propagating writer it
+# used to go through wedged a 20-minute step and stalled three runs of this probe. It now writes
+# through `SetKernelObjectSecurity`. `ace-cost-named-writer-scales-with-tree` is that group's
+# control — a run where the propagating writer did NOT slow down on the populated tree measured
+# nothing, so it is gated as a PASS alongside the kernel cells rather than reported as a fact.
+name: win-jail-repairs-probe
+
+on:
+  push:
+    # Path-filtered so a change to a SIBLING probe does not spend ~25 minutes of Windows runner
+    # on this one. Shared capacity: every push here costs the full matrix.
+    branches: [sandbox/win-jail-caps, sandbox/win-ace-kernel]
+    paths:
+      - 'crates/nub-sandbox/**'
+      - '.github/workflows/win-jail-repairs-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      # Matches the sibling probes: crt-static makes the self-reexec probe child
+      # self-contained, so it starts cleanly under the LowBox token.
+      RUSTFLAGS: "-C target-feature=+crt-static"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Interpreter baseline
+        if: always()
+        shell: bash
+        run: |
+          which node
+          node -p "process.execPath"
+          node -p "process.versions.node"
+
+      - name: Ancestor DACLs
+        if: always()
+        shell: bash
+        run: |
+          icacls 'C:\' || true
+          icacls 'C:\Users' || true
+
+      # Separate from the run so a compile error reads as a compile error rather than as a
+      # probe that measured nothing.
+      - name: Build the probe
+        if: always()
+        shell: bash
+        run: cargo test -p nub-sandbox --test windows_jail_repairs --no-run
+
+      - name: Probe — jail repairs, both directions
+        if: always()
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          rc=0
+          timeout -k 30 1200 cargo test -p nub-sandbox --test windows_jail_repairs > probe.log 2>&1 || rc=$?
+          echo "probe exit=$rc"
+          cat probe.log
+
+      # The verdict is read off the log, never off a step's exit status: a property whose
+      # `prop:` line is ABSENT fails here too, so a probe that never reached an arm cannot be
+      # mistaken for one that passed.
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          fail=0
+          need() {
+            if grep -qF "$1" probe.log 2>/dev/null; then
+              echo "OK   $1"
+            else
+              echo "MISS $1"
+              fail=1
+            fi
+          }
+          need_pass() {
+            if grep -qF "prop:$1=PASS" probe.log 2>/dev/null; then
+              echo "PASS $1"
+            elif grep -qF "prop:$1=FAIL" probe.log 2>/dev/null; then
+              echo "FAIL $1"
+              fail=1
+            else
+              echo "MISS $1 (never measured)"
+              fail=1
+            fi
+          }
+          [ -s probe.log ] || { echo "MISS the probe produced no output at all"; fail=1; }
+          need "PROBE windows jail repairs under AppContainer"
+          need "  fact:node-exe="
+          need "  fact:fixture-root="
+
+          echo "---- controls (a green run is meaningless without these) ----"
+          for p in repair-off-lstat-c-root-refused \
+                   repair-off-node-absolute-require-fails \
+                   repair-on-ungranted-read-refused \
+                   work-write-permitted-repair-off \
+                   work-write-permitted-repair-on \
+                   work-write-permitted-shimmed \
+                   work-write-permitted-unshimmed; do
+            need_pass "$p"
+          done
+
+          # MEASUREMENTS, NOT REQUIREMENTS. A FAIL here is the finding — these ask how much
+          # breaks in the shipping configuration, so gating on PASS would turn the answer into a
+          # red build. Only ABSENCE is an error: a shape that was never measured tells us nothing.
+          echo "---- blast radius: which shapes survive with the repair OFF ----"
+          grep -E 'fact:lowbox-sechangenotify=' probe.log || { echo "MISS the token privilege fact"; fail=1; }
+          for arm in plain; do
+          for p in shape-$arm-eval-only-completes-unrepaired \
+                   shape-$arm-eval-builtin-only-completes-unrepaired \
+                   shape-$arm-eval-then-absolute-require-completes-unrepaired \
+                   shape-$arm-eval-then-relative-require-completes-unrepaired \
+                   shape-$arm-eval-then-bare-require-through-junction-completes-unrepaired \
+                   shape-$arm-entry-file-completes-unrepaired; do
+            grep -q "prop:$p=" probe.log || { echo "MISS $p (never measured)"; fail=1; }
+            grep -E "prop:$p=" probe.log || true
+          done
+          done
+
+          echo "---- what the ancestor ace costs (the SetKernelObjectSecurity claim) ----"
+          # The named-writer cell is the control: if the propagating writer did NOT slow down on
+          # the populated tree, the walk never reproduced here and the kernel numbers are noise.
+          for p in ace-cost-named-writer-scales-with-tree \
+                   ace-cost-kernel-writer-flat-in-tree-size \
+                   ace-cost-kernel-beats-named-on-populated-tree \
+                   ace-cost-real-temp-under-a-second \
+                   ace-lands-with-exact-traverse-mask \
+                   ace-carries-no-inheritance-flags \
+                   ace-absent-on-child-directory \
+                   ace-revoke-removes-it \
+                   ace-preserves-dacl-control-bits; do
+            need_pass "$p"
+          done
+          need "  fact:ace-cost-us "
+
+          echo "---- the already-AppContainer-readable skip ----"
+          for p in aap-skip-declines-a-protected-fixture-root \
+                   aap-skip-sees-the-seeded-grant \
+                   aap-skip-child-still-reads-the-tool \
+                   aap-skip-leaves-the-preexisting-ace-alone; do
+            need_pass "$p"
+          done
+          # Whether the machine's own %ProgramFiles% publishes read to AppContainers is a FACT,
+          # not a gate: the skip is an optimisation and a machine without it simply pays.
+          grep -E 'fact:aap-readable-' probe.log || { echo "MISS the AAP-readability facts"; fail=1; }
+
+          echo "---- ancestor reachability ----"
+          for p in repair-on-lstat-c-root-permitted \
+                   repair-on-lstat-chain-permitted \
+                   repair-on-node-absolute-require-resolves \
+                   repair-on-lifecycle-script-body-completed; do
+            need_pass "$p"
+          done
+
+          echo "---- confinement survives the repair ----"
+          for p in repair-on-ancestor-sibling-read-refused \
+                   repair-on-ancestor-sibling-listing-refused; do
+            need_pass "$p"
+          done
+
+          echo "---- stdio shim ----"
+          for p in shim-execfile-async-returns \
+                   shim-execfilesync-returns \
+                   shim-spawnsync-returns \
+                   shim-spawn-stream-returns \
+                   shim-fork-fails-fast \
+                   unshimmed-piped-hangs; do
+            need_pass "$p"
+          done
+
+          echo "---- the facts ----"
+          grep -E '^  (fact|diag):' probe.log || true
+          echo "---- properties ----"
+          grep -E '^  prop:' probe.log || true
+          exit $fail
+
+      - name: Upload probe log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-jail-repairs-probe
+          path: probe.log
+          if-no-files-found: warn

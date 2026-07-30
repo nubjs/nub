@@ -133,7 +133,10 @@ features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization"
   # The de-elevation probe's administrative-authority oracle: OpenSCManagerW for
   # SC_MANAGER_CREATE_SERVICE succeeds only for an administrator and mutates nothing, which
   # is what lets the paired arms be gated on an access check rather than a token flag.
-  "Win32_System_Services"]
+  "Win32_System_Services",
+  # `NtCreateLowBoxToken` is resolved by name from ntdll: it is the only way to build a LowBox
+  # token from a chosen BASE token, which is the composed-token experiment's whole mechanism.
+  "Win32_System_LibraryLoader"]
 
 # The Windows enforcement probe self-reexecs as the AppContainer child, so it owns
 # `main` (dispatch on argv) rather than the libtest harness. windows-latest CI only; a
@@ -195,6 +198,23 @@ harness = false
 # parent side also impersonates a de-elevated token to ask what DACLs a standard user owns.
 [[test]]
 name = "windows_realpath_ancestors"
+harness = false
+
+# Self-reexecs as the jailed probe child to create one named pipe per cell, and to run Node
+# under an EXTERNAL bound — libuv's retry loop cannot be broken from inside the process.
+[[test]]
+name = "windows_pipe_shapes"
+harness = false
+
+# The acceptance measurement for both jail repairs (ancestor reachability + the child_process
+# stdio shim), with the unrepaired control arm in the same run. Self-reexecs as the jailed
+# child, which runs Node under an external bound.
+[[test]]
+name = "windows_restricted_token"
+harness = false
+
+[[test]]
+name = "windows_jail_repairs"
 harness = false
 
 # OPT-IN ONLY. This probe is not a unit test: on an unprovisioned machine it exits non-zero

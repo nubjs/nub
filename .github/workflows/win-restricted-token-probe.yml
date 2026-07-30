@@ -1,0 +1,90 @@
+# Branch-scoped ad-hoc probe: would a RESTRICTED TOKEN at low integrity read what an AppContainer
+# cannot? No pull request required (.claude/skills/ci-adhoc-test/SKILL.md).
+#
+# THE QUESTION IS ARCHITECTURAL, not a workaround. The AppContainer's read failures are
+# DISCRETIONARY — a fresh profile sid is in no DACL, and the two roots above the user profile cannot
+# be ACE'd unprivileged. A restricted token keeps the user's own sid, so existing DACLs apply, and
+# integrity confines writes instead. This job asks the OS whether that is true, via AccessCheck.
+#
+# AccessCheck rather than a launch: it answers the DACL-plus-integrity question without needing
+# CreateProcessAsUser, a window-station ACE, or a working loader init — none of which bear on
+# whether the access would be granted. The baseline arm is what keeps that honest.
+#
+# Cheap by construction (no AppContainer launch, no Node), so it is affordable to iterate on.
+name: win-restricted-token-probe
+
+on:
+  push:
+    branches: [sandbox/win-jail-caps]
+    paths:
+      - 'crates/nub-sandbox/tests/windows_restricted_token.rs'
+      - '.github/workflows/win-restricted-token-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: "-C target-feature=+crt-static"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the probe
+        if: always()
+        shell: bash
+        run: cargo test -p nub-sandbox --test windows_restricted_token --no-run
+
+      - name: Probe — restricted token vs AppContainer
+        if: always()
+        shell: bash
+        run: |
+          rc=0
+          timeout -k 30 600 cargo test -p nub-sandbox --test windows_restricted_token \
+            > probe.log 2>&1 || rc=$?
+          echo "probe exit=$rc"
+          cat probe.log
+
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          fail=0
+          [ -s probe.log ] || { echo "MISS no output at all"; fail=1; }
+          grep -q "PROBE end" probe.log || { echo "MISS the probe did not run to completion"; fail=1; }
+          # Controls only. Every `fact:` row is a measurement, and a DENIED there is the finding.
+          echo "---- controls ----"
+          for p in lowbox-gate-is-modelled \
+                   package-sid-derived \
+                   token-built-lowbox-on-own-base \
+                   token-built-lowbox-on-restricted-base-low-il \
+                   token-built-baseline-own-token \
+                   token-built-restricted-medium-il \
+                   token-built-restricted-low-il \
+                   baseline-reads-c-root \
+                   baseline-reads-c-users \
+                   baseline-reads-fixture-leaf; do
+            if grep -qF "prop:$p=PASS" probe.log; then echo "PASS $p";
+            elif grep -qF "prop:$p=FAIL" probe.log; then echo "FAIL $p"; fail=1;
+            else echo "MISS $p (never measured)"; fail=1; fi
+          done
+          echo "---- the table ----"
+          grep -E '^  fact:' probe.log || true
+          exit $fail
+
+      - name: Upload probe log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-restricted-token-probe-${{ matrix.image }}
+          path: probe.log
+          if-no-files-found: warn

@@ -1,0 +1,221 @@
+# Branch-scoped ad-hoc probe: can the Windows build jail start a lifecycle script for a STANDARD
+# USER whose Node is an all-users MSI install? No pull request required
+# (.claude/skills/ci-adhoc-test/SKILL.md). CI is the only venue — AppContainer cannot be launched
+# over SSH (session 0 has no window station, so every launch returns 0xC0000142), which also rules
+# out the standing nub-win VM.
+#
+# WHAT IS MEASURED. A leaf read grant is an ACE, which needs WRITE_DAC on the target; the stock
+# Node MSI installs to %ProgramFiles%\nodejs, where a standard user does not hold it. And even
+# where nub can write it, CreateProcessW opens the image in the CALLER's context, so once the
+# caller is itself in the AppContainer the un-ACE'd image is refused anyway. The fix is that the
+# interpreter is a nub-owned COPY of the same distribution, published AppContainer-readable by
+# granting the EMPTY directory and letting the copy inherit. This runs the same lifecycle script
+# against both interpreters, under the same real compile_build_jail policy, on both an ELEVATED and
+# a DE-ELEVATED token.
+#
+# THE MSI STEP IS THE POINT, and it needs admin — which is not a finding about nub, because a user
+# installs Node with the same consent. What matters is the DACL the installer leaves behind, and
+# that the de-elevated arm afterwards holds no authority to change it. Without this step the probe
+# would measure the runner image's unzipped hostedtoolcache Node, which is a different tree with a
+# different (also un-ACE'd) DACL — usable, but not the configuration a real user has.
+#
+# THE CONTROLS. `interp-ambient-install-is-usable-only-where-nub-can-write-its-dacl` is the one the
+# whole run rests on, and it is stated as a DEPENDENCE rather than a failure because that is what
+# holds in both arms: an elevated nub does hold WRITE_DAC on %ProgramFiles% and the ambient
+# interpreter then works, so demanding the ambient arm fail everywhere would be a self-inflicted red
+# that measured nothing. `interp-staged-child-execpath-is-the-nub-owned-copy` is the attribution
+# control — a refused read grant is now SKIPPED rather than fatal, so a launch can succeed while the
+# child quietly ran the ambient interpreter, and only the child's own execPath tells those apart.
+# `fact:interp-source-publishes-aap` decides whether the run could exhibit the defect at all: on an
+# install that already publishes read to AppContainers the ambient arm passes for a reason that has
+# nothing to do with nub.
+#
+# CROSS-ARM CONTAMINATION, recorded because it bit run 30542604419: the ELEVATED arm's ambient
+# lifecycle spawn rewrites %ProgramFiles%\nodejs's DACL to add its per-run grant, and the
+# AppContainer-readability read-back went false → TRUE across the two arms even though the per-run
+# ace is revoked. So `fact:interp-source-publishes-aap` is only trustworthy in the arm that ran
+# FIRST, and the WRITE_DAC fact — a property of the token, which no earlier arm can change in the
+# permissive direction — is what the gated property keys on instead.
+name: win-jail-interp-probe
+
+on:
+  push:
+    branches: [sandbox/win-jail-interp]
+    paths:
+      - 'crates/nub-sandbox/**'
+      - 'crates/nub-cli/src/pm_engine/jail_bin.rs'
+      - '.github/workflows/win-jail-interp-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      # Matches the sibling probes: crt-static makes the self-reexec probe child self-contained, so
+      # it starts cleanly under the LowBox token.
+      RUSTFLAGS: "-C target-feature=+crt-static"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Runner baseline
+        shell: powershell
+        run: |
+          $id=[System.Security.Principal.WindowsIdentity]::GetCurrent()
+          $admin=(New-Object System.Security.Principal.WindowsPrincipal($id)).IsInRole([System.Security.Principal.WindowsBuiltinRole]::Administrator)
+          Write-Host "BASELINE user=$($id.Name) IsElevated=$admin os=$([System.Environment]::OSVersion.VersionString)"
+
+      # The configuration under test. Recipe lifted from tests/win-msi-volume/msi-node-acl.ps1: the
+      # dist index picks the VERSION and a HEAD request decides whether the artifact exists, because
+      # index.json never lists win-arm64-msi for any release even where the .msi is served.
+      # `pwsh` (PowerShell 7), NOT `powershell` (5.1): under 5.1 every `Invoke-WebRequest -Method
+      # Head` against nodejs.org threw, the version loop found nothing, and the step died on
+      # `no LTS release serves a x64 .msi` having never reached msiexec. tests/win-msi-volume runs
+      # the identical recipe under pwsh, where it works.
+      - name: Install a stock Node MSI to %ProgramFiles%\nodejs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+          $idx = Invoke-RestMethod -Uri 'https://nodejs.org/dist/index.json' -TimeoutSec 60
+          $ver = $null
+          foreach ($r in @($idx | Where-Object { $_.lts })) {
+            $v = $r.version.TrimStart('v')
+            try {
+              if ((Invoke-WebRequest -Uri "https://nodejs.org/dist/v$v/node-v$v-$arch.msi" -Method Head -TimeoutSec 30).StatusCode -eq 200) { $ver = $v; break }
+            } catch { }
+          }
+          if (-not $ver) { throw "no LTS release serves a $arch .msi" }
+          $msi = Join-Path $env:TEMP "node-$ver-$arch.msi"
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v$ver/node-v$ver-$arch.msi" -OutFile $msi -TimeoutSec 300
+          $p = Start-Process -FilePath msiexec.exe -Wait -PassThru -ArgumentList @('/i', "`"$msi`"", '/qn', '/norestart')
+          Write-Host "msiexec-exit=$($p.ExitCode) version=$ver"
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "msiexec failed" }
+          $node = Join-Path $env:ProgramFiles 'nodejs\node.exe'
+          if (-not (Test-Path -LiteralPath $node)) { throw "no node.exe at $node" }
+          Write-Host "installed=$node"
+
+      # THE FACT THE WHOLE PROBE RESTS ON. If this DACL already grants ALL APPLICATION PACKAGES,
+      # the ambient arm cannot fail and the differential is void — so it is dumped rather than
+      # assumed, and the harness reports its own read of it as `fact:interp-source-publishes-aap`.
+      - name: The DACL the MSI left behind
+        if: always()
+        shell: powershell
+        run: |
+          icacls "$env:ProgramFiles\nodejs"
+          icacls "$env:ProgramFiles\nodejs\node.exe"
+
+      # Separate from the run so a compile error reads as a compile error rather than as a probe
+      # that measured nothing.
+      - name: Build the probe
+        shell: bash
+        run: cargo test -p nub-sandbox --test windows_deelevated_jail --no-run
+
+      - name: Probe — paired elevated / de-elevated, ambient vs nub-owned interpreter
+        if: always()
+        timeout-minutes: 25
+        shell: bash
+        run: |
+          rc=0
+          timeout -k 30 1200 cargo test -p nub-sandbox --test windows_deelevated_jail > probe.log 2>&1 || rc=$?
+          echo "probe exit=$rc"
+          cat probe.log
+
+      # The verdict is read off the LOG, never off a step's exit status: a property whose `prop:`
+      # line is ABSENT fails here too, so a probe that never reached an arm cannot be mistaken for
+      # one that passed.
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          fail=0
+          need() {
+            if grep -qF "$1" probe.log 2>/dev/null; then echo "OK   $1"
+            else echo "MISS $1"; fail=1; fi
+          }
+          need_pass() {
+            if grep -qF "prop:$1=PASS" probe.log 2>/dev/null; then echo "PASS $1"
+            elif grep -qF "prop:$1=FAIL" probe.log 2>/dev/null; then echo "FAIL $1"; fail=1
+            else echo "MISS $1 (never measured)"; fail=1; fi
+          }
+          [ -s probe.log ] || { echo "MISS the probe produced no output at all"; exit 1; }
+
+          echo "---- both arms ran, and arm B was really de-elevated ----"
+          need 'ARM elevated=1'
+          grep -q 'ARM .*admin=1' probe.log || { echo "MISS no arm held administrative authority — the arms did not differ"; fail=1; }
+          grep -q 'ARM .*admin=0' probe.log || { echo "MISS the DE-ELEVATED arm never reported"; fail=1; }
+          need 'DEELEV route='
+
+          echo "---- the interpreter the run actually measured ----"
+          grep -E '^  fact:interp-' probe.log || { echo "MISS the interpreter facts"; fail=1; }
+          grep -qE '^  fact:interp-source=.*[Pp]rogram [Ff]iles' probe.log || { echo "MISS the probe did not measure the MSI install"; fail=1; }
+          # THE DIFFERENTIAL IS ONLY REAL IF THE TWO ARMS DIFFERED ON THE PERMISSION UNDER TEST.
+          # Both readings must appear across the run: an elevated arm that holds WRITE_DAC on the
+          # ambient install, and a de-elevated one that does not.
+          grep -q '^  fact:interp-source-write-dac=true'  probe.log || { echo "MISS no arm held WRITE_DAC on the ambient install"; fail=1; }
+          grep -q '^  fact:interp-source-write-dac=false' probe.log || { echo "MISS no arm LACKED WRITE_DAC — the arms did not differ on the permission under test"; fail=1; }
+
+          echo "---- the differential ----"
+          need_pass interp-ambient-install-is-usable-only-where-nub-can-write-its-dacl
+          need_pass interp-staged-copy-runs-a-lifecycle-script-without-write-dac
+          need_pass interp-staged-child-execpath-is-the-nub-owned-copy
+          need_pass interp-staging-needs-no-write-dac-anywhere-privileged
+          need_pass interp-staged-abi-matches-the-source
+
+          echo "---- the cost claim: no per-spawn DACL write over the tree ----"
+          need_pass interp-staged-dir-publishes-read-to-appcontainers
+          need_pass interp-staged-deep-entry-inherited-the-ace-at-creation
+
+          echo "---- confinement survives it ----"
+          need_pass interp-staged-ungranted-secret-still-refused
+
+          # RECORDED, NOT GATED. Reading the distribution's bundled npm tree is the cell 5j found
+          # failing, but a CJS require of an absolute path realpath's from the volume root and dies
+          # de-elevated on the still-open ancestor repair — in BOTH interpreter arms identically, so
+          # gating on it would report someone else's open work as this group's failure. Absence is
+          # still an error: a fact that was never measured tells us nothing.
+          echo "---- the bundled npm tree (a fact: it rides the ancestor repair, not this one) ----"
+          grep -E '^  fact:interp-(ambient|staged)-npm-tree-read=' probe.log || { echo "MISS the npm-tree facts"; fail=1; }
+
+          # SETTLES A SIBLING LANE'S VERDICT that cmd.exe cannot run confined de-elevated. One
+          # variable: the leaf-read-grant loop's fail-closed-vs-fail-soft behaviour, same fixture,
+          # same policy, same script, same token. `resolve_program` auto-grants the program FILE, so
+          # a System32 program's own grant is attempted and refused de-elevated — under `?` that
+          # aborted the launch, which looks exactly like cmd misbehaving.
+          echo "---- cmd.exe: fail-closed vs fail-soft, one variable ----"
+          need_pass interp-cmd-under-fail-closed-aborts-iff-its-own-program-grant-is-refused
+          need_pass interp-cmd-under-fail-soft-reaches-step-cmd-opened-the-script
+          need_pass interp-cmd-under-fail-soft-reaches-step-bare-node-resolved-and-ran
+          need_pass interp-cmd-under-fail-soft-reaches-lifecycle-ok
+          grep -E '^  fact:interp-cmd-program-grant-write-dac-open=' probe.log || { echo "MISS the program-grant fact"; fail=1; }
+          # The cell TALLIES are facts, not gates. De-elevated `dir /b` is refused in the package dir
+          # while it works elevated — a real residual that belongs to the ancestor/traverse work, not
+          # to the interpreter — so a full 9/9 is not the bar here. What IS gated is the part the
+          # sibling lane read as zero.
+          grep -E '^  fact:interp-.*-cmd-cells=' probe.log || { echo "MISS the cmd cell tallies"; fail=1; }
+
+          echo "---- the pre-existing groups must not have regressed ----"
+          for p in profile-create-and-launch acl-grant-allow acl-grant-deny teardown \
+                   job-reap egress-deny production-jail-launch production-jail-egress; do
+            need_pass "$p"
+          done
+
+          need 'WINDOWS BUILD JAIL HOLDS WITH NO ELEVATION'
+          echo "---- every fact ----"
+          grep -E '^  fact:' probe.log || true
+          echo "---- every property ----"
+          grep -E '^  prop:' probe.log || true
+          exit $fail
+
+      - name: Upload probe log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-jail-interp-probe
+          path: probe.log
+          if-no-files-found: warn

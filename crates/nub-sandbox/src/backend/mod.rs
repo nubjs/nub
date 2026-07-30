@@ -120,6 +120,20 @@ pub fn earliest_bootstrap() -> std::io::Result<RuntimeCapability> {
 // without a Windows machine (the FFI launcher itself stays `#[cfg(windows)]`).
 #[cfg(any(target_os = "windows", test))]
 mod windows;
+#[cfg(target_os = "windows")]
+pub use windows::windows_publish_appcontainer_read;
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub use windows::{
+    windows_ancestor_capability_sids, windows_capability_fallbacks, windows_leaf_grant_redundant,
+    windows_object_traverse_ace,
+};
+
+// Publishing a nub-owned, AppContainer-readable copy of a tool tree the jail must RUN — the
+// escape from writing an ACE where a standard user cannot. Same cfg as `windows`: the copy half is
+// ordinary fs work and is tested on the dev host, only the ace needs Windows.
+#[cfg(any(target_os = "windows", test))]
+pub mod windows_jail_bin;
 
 // The Windows dedicated-account + WFP backend (agent-sandbox). Same cfg as `windows` so its
 // OS-agnostic plan derivation and mode-selection are unit-tested on the macOS dev host.

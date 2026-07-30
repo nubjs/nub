@@ -836,6 +836,77 @@ pub(super) fn resolve_program(
     None
 }
 
+// ── ancestor-repair diagnostics ─────────────────────────────────────────────────
+//
+// The ancestor repair's coverage is a property of the MACHINE — which capability SIDs its
+// system roots happen to carry, and whether the kernel accepts them — so it cannot be asserted
+// from source. These two are what the branch-scoped Windows probe reports.
+
+/// The capability SIDs, in SDDL form, that a launch granting `paths` would request.
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub fn windows_ancestor_capability_sids(paths: &[std::path::PathBuf]) -> Vec<String> {
+    launch::capability_sids_sddl(paths)
+}
+
+/// How many launches in this process started only after dropping those capabilities.
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub fn windows_capability_fallbacks() -> u64 {
+    launch::CAPABILITY_FALLBACKS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Place (`grant`) or remove the ancestor repair's non-inherited traverse ace on `dir` for
+/// `sddl`, so the probe can TIME the real writer against its own copy of the propagating one —
+/// same trustee, same path, same run. Nothing else attributes a cost difference to the primitive
+/// rather than to the machine, and the cost is the entire claim.
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub fn windows_object_traverse_ace(
+    dir: &std::path::Path,
+    sddl: &str,
+    grant: bool,
+) -> std::io::Result<()> {
+    launch::object_traverse_ace(dir, sddl, grant)
+}
+
+/// Whether `dir` already publishes read+execute to every AppContainer inheritably, i.e. whether
+/// a leaf read grant on it is a no-op. Which paths do is a property of the MACHINE's default
+/// ACLs, so the probe reports it rather than asserting it.
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub fn windows_leaf_grant_redundant(dir: &std::path::Path) -> bool {
+    launch::leaf_read_grant_redundant(dir)
+}
+
+/// Publish `dir` to every AppContainer as read+execute, inheritably — the ONE grant an embedder
+/// writes AHEAD of a launch rather than per-run, and the reason a nub-owned interpreter copy costs
+/// nothing at spawn time.
+///
+/// CALL THIS ON AN EMPTY DIRECTORY, THEN POPULATE IT. The ace is inheritable, so children pick it
+/// up AT CREATION and there is no propagation pass; writing the same ace over an already-populated
+/// tree is a walk, and the two are not close (measured on `windows-latest`: 24 ms on an empty
+/// directory against 426 ms re-granting a 2,435-entry Node distribution — run 30517506683). The
+/// per-launch saving is the same number again: an inheritable AAP ace is exactly what
+/// [`windows_leaf_grant_redundant`] looks for, so the backend's own leaf grant on this directory
+/// SKIPS, and a per-run package sid — which would have to be written every spawn — is never needed.
+///
+/// The trustee is the STABLE `ALL APPLICATION PACKAGES` rather than a per-run profile sid, and that
+/// is sound because a zero-capability LowBox token reads through it (measured — it is why System32
+/// is readable at all). What it costs is that the directory becomes readable to every AppContainer
+/// on the machine, so an embedder may only publish a tree whose contents are already public: the
+/// intended one is a copy of the user's own Node distribution, which is public bytes from
+/// nodejs.org.
+///
+/// Needs no elevation on any path a user owns, which is the whole point — it is the escape from
+/// writing a DACL somewhere a standard user cannot (`%ProgramFiles%\nodejs`, `C:\hostedtoolcache`),
+/// measured as `PrivilegeNotHeldException` there and as a clean write plus read-back under a
+/// restricted token on nub's own directory.
+#[cfg(target_os = "windows")]
+pub fn windows_publish_appcontainer_read(dir: &std::path::Path) -> std::io::Result<()> {
+    launch::publish_appcontainer_read(dir)
+}
+
 // ── the FFI launcher ────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
@@ -845,7 +916,7 @@ pub(super) mod launch {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::AsRawHandle;
     use std::os::windows::process::ExitStatusExt;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::ExitStatus;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, MutexGuard};
@@ -895,6 +966,18 @@ pub(super) mod launch {
     const NO_INHERITANCE: u32 = 0x0;
     // SE_GROUP_ENABLED — a capability SID in SECURITY_CAPABILITIES must be enabled.
     const SE_GROUP_ENABLED: u32 = 0x4;
+    // SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | FILE_LIST_DIRECTORY — byte-identical
+    // to the mask Windows itself puts on `C:\` for its capability SID, so the two halves of the
+    // ancestor repair grant the same thing and a path's reachability does not depend on which
+    // half covered it. It admits ENUMERATING an ancestor (names only); reading anything under
+    // one still requires that object's own grant, and paired with NO_INHERITANCE the reach
+    // stops at the directory object.
+    const TRAVERSE_MASK: u32 = 0x0010_00a1;
+    // SECURITY_APP_PACKAGE_AUTHORITY (`S-1-15-…`) and the capability sub-authority
+    // (`S-1-15-3-…`); together they identify a capability SID by structure, which is the only
+    // way to recognise one — `LookupAccountSid` returns ERROR_NONE_MAPPED for them.
+    const APP_PACKAGE_AUTHORITY: [u8; 6] = [0, 0, 0, 0, 0, 15];
+    const CAPABILITY_SUB_AUTHORITY: u32 = 3;
     // The well-known internetClient capability SID.
     const INTERNET_CLIENT_SID: &str = "S-1-15-3-1";
     // ALL APPLICATION PACKAGES. Any right for this SID invalidates the default-deny
@@ -904,6 +987,12 @@ pub(super) mod launch {
     /// Monotonic per-process counter so concurrent launches never collide on the
     /// AppContainer profile name (combined with pid + a time nonce).
     static LAUNCH_CTR: AtomicU64 = AtomicU64::new(0);
+
+    /// How many launches had to drop their harvested capabilities to start. Read by the
+    /// branch-scoped Windows probe, which runs `apply` IN-PROCESS: without it a repaired arm
+    /// that quietly fell back is indistinguishable from one where the capabilities were
+    /// accepted and simply did not help, and those call for opposite next moves.
+    pub(super) static CAPABILITY_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 
     /// Serializes the per-path DACL read-modify-write in [`set_ace`]. Concurrent launches
     /// can grant/revoke on a SHARED leaf (two runs granting a common toolchain/program
@@ -999,6 +1088,407 @@ pub(super) mod launch {
         }
 
         Ok(())
+    }
+
+    /// The FILE-object form of the generic rights the leaf grants are expressed in. Windows
+    /// applies this mapping itself when it evaluates an ace, and an effective-rights query
+    /// reports the RESULT — so a comparison against a generic mask has to map first or every
+    /// answer comes back "not granted". Bits that are already specific (`DELETE`) pass through.
+    fn file_specific_rights(generic: u32) -> u32 {
+        const FILE_GENERIC_READ: u32 = 0x0012_0089;
+        const FILE_GENERIC_WRITE: u32 = 0x0012_0116;
+        const FILE_GENERIC_EXECUTE: u32 = 0x0012_00a0;
+        let mut out = generic & !(GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE);
+        if generic & GENERIC_READ != 0 {
+            out |= FILE_GENERIC_READ;
+        }
+        if generic & GENERIC_WRITE != 0 {
+            out |= FILE_GENERIC_WRITE;
+        }
+        if generic & GENERIC_EXECUTE != 0 {
+            out |= FILE_GENERIC_EXECUTE;
+        }
+        out
+    }
+
+    /// Whether `path` ALREADY grants every right in `access` to AppContainers generally, through
+    /// an INHERITABLE ace — i.e. whether the ace [`grant_leaf_ace`] is about to write would
+    /// change nothing.
+    ///
+    /// This is worth a DACL read because the WRITE is the expensive half. An inheritable grant
+    /// legitimately propagates through the subtree, and a populated toolchain tree makes that
+    /// cost real: measured on windows-latest, granting the runner's `hostedtoolcache` python took
+    /// ~1000 ms against 3 ms on an empty directory, and a re-grant with the ace already present
+    /// cost the same as a fresh one — the signature of a tree walk, not a descriptor write.
+    /// Narrowing the grant is not an alternative: `Lib\` at 6,412 entries IS the tree, and a
+    /// narrow grant fails `0xc0000135 STATUS_DLL_NOT_FOUND` because `python3.dll`,
+    /// `python312.dll` and `vcruntime140*.dll` sit in the install ROOT beside the exe.
+    ///
+    /// It applies broadly, not just to python: `%ProgramFiles%` carries
+    /// `ALL APPLICATION PACKAGES: ReadAndExecute` inheritably on both Windows images (43 of the
+    /// 44 `C:\Program Files` children; `nodejs` is the known outlier), so an all-users python,
+    /// node, or Visual Studio install needs no grant at all. Only per-user layouts pay, which is
+    /// why `hostedtoolcache` — carrying none — is the one that measured.
+    ///
+    /// INHERITABLE is required rather than incidental: the ace being skipped covers the whole
+    /// subtree, so a this-directory-only AAP ace does not substitute for it. Same distinction
+    /// `verify_clean_root` draws above, for the same reason. Any failure to read the DACL answers
+    /// "no" and the grant is written — the skip is an optimisation and must never be the reason a
+    /// package cannot start.
+    ///
+    /// No conflict with `verify_clean_root`'s refusal to launch under an AAP-readable root: that
+    /// governs the working root's own chain, this governs granted paths OUTSIDE it. A toolchain
+    /// the OS already publishes to every AppContainer is not access nub is adding.
+    fn already_granted_to_appcontainers(path: &Path, access: u32) -> bool {
+        let sid_text = to_wide(ALL_APPLICATION_PACKAGES_SID);
+        let mut aap_sid: PSID = std::ptr::null_mut();
+        if unsafe { ConvertStringSidToSidW(sid_text.as_ptr(), &mut aap_sid) } == 0 {
+            return false;
+        }
+        let _sid = LocalFreeGuard(aap_sid.cast());
+
+        let wpath = to_wide_path(path);
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let rc = unsafe {
+            GetNamedSecurityInfoW(
+                wpath.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut sd,
+            )
+        };
+        if rc != 0 {
+            return false;
+        }
+        let _sd = LocalFreeGuard(sd);
+        if dacl.is_null() || !has_inheritable_ace(dacl, aap_sid) {
+            return false;
+        }
+
+        let trustee = TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_USER,
+            ptstrName: aap_sid.cast(),
+        };
+        let mut rights = 0u32;
+        if unsafe { GetEffectiveRightsFromAclW(dacl, &trustee, &mut rights) } != 0 {
+            return false;
+        }
+        let needed = file_specific_rights(access);
+        rights & needed == needed
+    }
+
+    /// Install one leaf allow-ace, reporting whether an ace was actually written.
+    ///
+    /// The return value is the ONLY thing the teardown list is driven from, which is what keeps
+    /// grant and revoke symmetric BY CONSTRUCTION: a skipped path is never recorded, so the
+    /// teardown cannot strip an ace this launch did not create. Two independent conditionals
+    /// would make that a coincidence instead of a property — and stripping
+    /// `ALL APPLICATION PACKAGES` off `%ProgramFiles%\nodejs` would be a lasting change to the
+    /// user's own machine.
+    fn grant_leaf_ace(path: &Path, sid: PSID, access: u32) -> io::Result<bool> {
+        if already_granted_to_appcontainers(path, access) {
+            return Ok(false);
+        }
+        set_ace(path, sid, access, GRANT_ACCESS, true).map(|()| true)
+    }
+
+    /// See [`super::windows_object_traverse_ace`].
+    #[doc(hidden)]
+    pub(super) fn object_traverse_ace(dir: &Path, sddl: &str, grant: bool) -> io::Result<()> {
+        let sid = CapSid::new(sddl)?;
+        let mode = if grant { GRANT_ACCESS } else { REVOKE_ACCESS };
+        set_ace_on_object(dir, sid.0, TRAVERSE_MASK, mode)
+    }
+
+    /// See [`super::windows_leaf_grant_redundant`].
+    #[doc(hidden)]
+    pub(super) fn leaf_read_grant_redundant(dir: &Path) -> bool {
+        already_granted_to_appcontainers(dir, GENERIC_READ | GENERIC_EXECUTE)
+    }
+
+    /// See [`super::windows_publish_appcontainer_read`].
+    #[doc(hidden)]
+    pub(super) fn publish_appcontainer_read(dir: &Path) -> io::Result<()> {
+        let sid = CapSid::new(ALL_APPLICATION_PACKAGES_SID)?;
+        set_ace(
+            dir,
+            sid.0,
+            GENERIC_READ | GENERIC_EXECUTE,
+            GRANT_ACCESS,
+            true,
+        )
+    }
+
+    /// Each granted path's STRICT ancestors, deduped and ordered shallowest-first. These are
+    /// the directories Node's `realpathSync` opens as targets on its way to a granted leaf. A
+    /// grant that is itself an ancestor of another grant is included, and simply takes the
+    /// traverse ACE alongside its own inheritable one.
+    fn ancestor_chain(launch: &AppContainerLaunch) -> Vec<PathBuf> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        let leaves: Vec<&Path> = launch
+            .read_grants
+            .iter()
+            .chain(launch.write_grants.iter())
+            .chain(launch.cwd.iter())
+            .map(PathBuf::as_path)
+            .chain(std::iter::once(Path::new(&launch.program)))
+            .collect();
+        for leaf in leaves {
+            let mut chain: Vec<&Path> = leaf.ancestors().skip(1).collect();
+            chain.reverse();
+            for dir in chain {
+                if dir.as_os_str().is_empty() {
+                    continue;
+                }
+                if seen.insert(dir.to_path_buf()) {
+                    out.push(dir.to_path_buf());
+                }
+            }
+        }
+        out
+    }
+
+    /// The capability SIDs (`S-1-15-3-…`) named by an ALLOW ace on any of `paths`, as owned
+    /// SID bytes, deduped. Requesting one is what lets the child open a system ancestor whose
+    /// DACL nub cannot write — see the call site for why both mechanisms are needed.
+    ///
+    /// Honest about its reach: a capability is a machine-wide key, so holding one also opens
+    /// every OTHER object whose DACL grants it. The set is bounded to what already sits on
+    /// this launch's own ancestor chain, which in practice is the two Windows puts on `C:\`
+    /// and `C:\Users`, and it is the coarse half of a deliberately best-effort jail.
+    fn harvest_capability_sids(paths: &[PathBuf]) -> Vec<Vec<u8>> {
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        for path in paths {
+            let wpath = to_wide_path(path);
+            let mut dacl: *mut ACL = std::ptr::null_mut();
+            let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+            let rc = unsafe {
+                GetNamedSecurityInfoW(
+                    wpath.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut dacl,
+                    std::ptr::null_mut(),
+                    &mut sd,
+                )
+            };
+            if rc != 0 {
+                continue;
+            }
+            let _sd = LocalFreeGuard(sd);
+            if dacl.is_null() {
+                continue;
+            }
+            for sid in allow_ace_capability_sids(dacl) {
+                if !out.contains(&sid) {
+                    out.push(sid);
+                }
+            }
+        }
+        out
+    }
+
+    /// The capability-SID trustees of `dacl`'s ALLOW aces. Split from the DACL read so the
+    /// pointer walk stays in one place.
+    fn allow_ace_capability_sids(dacl: *const ACL) -> Vec<Vec<u8>> {
+        use windows_sys::Win32::Security::{ACCESS_ALLOWED_ACE, ACE_HEADER, GetAce, SID};
+        const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+        let mut out = Vec::new();
+        // SAFETY: AceCount bounds the GetAce index; an allow ace begins with an ACE_HEADER
+        // and its SidStart is a self-relative SID whose length GetLengthSid reports.
+        unsafe {
+            for i in 0..(*dacl).AceCount as u32 {
+                let mut ace: *mut std::ffi::c_void = std::ptr::null_mut();
+                if GetAce(dacl, i, &mut ace) == 0 {
+                    continue;
+                }
+                if (*ace.cast::<ACE_HEADER>()).AceType != ACCESS_ALLOWED_ACE_TYPE {
+                    continue;
+                }
+                let sid: PSID = std::ptr::addr_of!((*ace.cast::<ACCESS_ALLOWED_ACE>()).SidStart)
+                    .cast_mut()
+                    .cast();
+                let raw = sid.cast::<SID>();
+                if (*raw).IdentifierAuthority.Value != APP_PACKAGE_AUTHORITY
+                    || (*raw).SubAuthorityCount < 2
+                    || (*raw).SubAuthority[0] != CAPABILITY_SUB_AUTHORITY
+                {
+                    continue;
+                }
+                let len = GetLengthSid(sid) as usize;
+                out.push(std::slice::from_raw_parts(sid.cast::<u8>(), len).to_vec());
+            }
+        }
+        out
+    }
+
+    /// Add or remove an ace on `path` WITHOUT re-propagating inheritance into its subtree.
+    ///
+    /// This is the whole reason the ancestor repair does not go through [`set_ace`].
+    /// `SetNamedSecurityInfoW` re-applies the object's inheritable aces to every DESCENDANT
+    /// whenever the DACL is rewritten — a full recursive walk, regardless of whether the ace
+    /// being added inherits. On an ancestor like the user profile or a tool cache that is
+    /// minutes of I/O per launch, and it wedged a 20-minute CI step. The handle-based
+    /// `SetSecurityInfo` writes the object's own DACL and stops there, which is exactly the
+    /// scope a non-inherited traverse grant wants.
+    ///
+    /// `FILE_FLAG_BACKUP_SEMANTICS` is what lets `CreateFileW` open a DIRECTORY at all.
+    ///
+    /// `SetSecurityInfo` WAS NOT ENOUGH EITHER, and that is why the writer below is the kernel
+    /// one. Both `Set*SecurityInfo` entry points run advapi32's user-mode inheritance
+    /// propagation before they return, so swapping the named writer for the handle-based one
+    /// narrowed nothing: run 30493913027's watchdog pinned the remaining stall to the FIRST
+    /// launch that writes these aces, and the only WRITE in that window is this function
+    /// (`verify_clean_root` and `harvest_capability_sids` merely read DACLs). The chain includes
+    /// `%TEMP%`, which on a CI runner is enormous, so the walk took minutes and varied run to
+    /// run. `SetKernelObjectSecurity` goes straight to `NtSetSecurityObject`: it writes the
+    /// object's own descriptor and there is no propagation pass to skip. Measured on
+    /// windows-latest, the `ace-cost` group of `tests/windows_jail_repairs.rs`, same trustee and
+    /// same path in the same run — see that group's own comment for the numbers.
+    ///
+    /// The price is that it wants a whole SECURITY_DESCRIPTOR rather than a bare ACL, hence the
+    /// hand-built one below. `SetEntriesInAclW` still does the MERGE — it only assembles an ACL
+    /// in memory and propagates nothing; the cost was never there.
+    ///
+    /// SE_DACL_AUTO_INHERITED and SE_DACL_PROTECTED are carried across DELIBERATELY. A
+    /// hand-built descriptor starts with a zero control word, and writing that back would clear
+    /// both bits on a directory nub does not own — changing how the user's own ACL edits later
+    /// propagate through their profile or temp dir. This repair is only ever allowed to add and
+    /// remove one traverse ace.
+    fn set_ace_on_object(path: &Path, sid: PSID, access: u32, mode: i32) -> io::Result<()> {
+        use windows_sys::Win32::Security::Authorization::GetSecurityInfo;
+        use windows_sys::Win32::Security::{
+            InitializeSecurityDescriptor, SE_DACL_AUTO_INHERITED, SECURITY_DESCRIPTOR,
+            SetKernelObjectSecurity, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+        const READ_CONTROL: u32 = 0x0002_0000;
+        const WRITE_DAC: u32 = 0x0004_0000;
+        const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+        const CARRIED_CONTROL: u16 = SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED;
+
+        let _lock: MutexGuard<'_, ()> = ACL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let wpath = to_wide_path(path);
+        // SAFETY: `wpath` is a NUL-terminated wide path; `HandleGuard` closes the handle.
+        let handle = unsafe {
+            CreateFileW(
+                wpath.as_ptr(),
+                READ_CONTROL | WRITE_DAC,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let _handle = HandleGuard(handle);
+
+        let mut old_dacl: *mut ACL = std::ptr::null_mut();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let rc = unsafe {
+            GetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut old_dacl,
+                std::ptr::null_mut(),
+                &mut sd,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::from_raw_os_error(rc as i32));
+        }
+        let _sd = LocalFreeGuard(sd);
+
+        let mut control = 0u16;
+        let mut revision = 0u32;
+        if unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut revision) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let mut ea: EXPLICIT_ACCESS_W = unsafe { std::mem::zeroed() };
+        ea.grfAccessPermissions = access;
+        ea.grfAccessMode = mode;
+        ea.grfInheritance = NO_INHERITANCE;
+        ea.Trustee = TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_USER,
+            ptstrName: sid.cast(),
+        };
+        // Merges into the aces already there, INHERITED_ACE flags intact, so the descriptor
+        // written below differs from the one read above by exactly this one ace.
+        let mut new_dacl: *mut ACL = std::ptr::null_mut();
+        let rc = unsafe { SetEntriesInAclW(1, &ea, old_dacl, &mut new_dacl) };
+        if rc != 0 {
+            return Err(io::Error::from_raw_os_error(rc as i32));
+        }
+        let _new = LocalFreeGuard(new_dacl.cast());
+
+        let mut fresh: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+        let psd: PSECURITY_DESCRIPTOR = std::ptr::from_mut(&mut fresh).cast();
+        // SAFETY: `fresh` is a stack SECURITY_DESCRIPTOR that does not move; `new_dacl` outlives
+        // the write (`_new` drops after it). The absolute form is what SetKernelObjectSecurity
+        // documents for this pattern.
+        unsafe {
+            if InitializeSecurityDescriptor(psd, SECURITY_DESCRIPTOR_REVISION) == 0
+                || SetSecurityDescriptorDacl(psd, 1, new_dacl, 0) == 0
+                || SetSecurityDescriptorControl(psd, CARRIED_CONTROL, control & CARRIED_CONTROL)
+                    == 0
+                || SetKernelObjectSecurity(handle, DACL_SECURITY_INFORMATION, psd) == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    /// The capability SIDs on `paths`' DACLs in SDDL form, for the branch-scoped Windows probe
+    /// to report as facts. Which SIDs a machine actually offers on its ancestor chain is the
+    /// input the repair's coverage depends on, and it is not derivable from anywhere else.
+    #[doc(hidden)]
+    pub(super) fn capability_sids_sddl(paths: &[PathBuf]) -> Vec<String> {
+        use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+        harvest_capability_sids(paths)
+            .iter()
+            .map(|bytes| {
+                let mut out: *mut u16 = std::ptr::null_mut();
+                // SAFETY: `bytes` holds a whole self-relative SID; the buffer is LocalFree'd.
+                let ok = unsafe {
+                    ConvertSidToStringSidW(bytes.as_ptr() as PSID, std::ptr::from_mut(&mut out))
+                };
+                if ok == 0 {
+                    return "<unconvertible>".to_string();
+                }
+                let _free = LocalFreeGuard(out.cast());
+                let mut len = 0usize;
+                // SAFETY: ConvertSidToStringSidW returns a NUL-terminated wide string.
+                while unsafe { *out.add(len) } != 0 {
+                    len += 1;
+                }
+                String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(out, len) })
+            })
+            .collect()
     }
 
     /// Whether any ace for `sid` in `dacl` is inheritable — i.e. whether the grant reaches
@@ -1220,60 +1710,125 @@ pub(super) mod launch {
 
             // 2. Grant the leaf allow-ACEs; `_aces` revokes them on drop (declared before
             //    the job ⇒ revoked after the tree is reaped, before profile delete). Leaf
-            //    read/write grants are INHERITABLE (cover the subtree). NO ancestor
-            //    traverse grants: a LowBox token bypasses traverse checking on a standard
-            //    NTFS volume (the TRAVERSE MODEL note above), so the leaf ACL alone gates
-            //    access — no WRITE_DAC on a shared ancestor, no C:\-owned store. A
-            //    REVOKE_ACCESS teardown on the unique SID removes exactly our ACEs from
-            //    every path, whatever the access mask.
+            //    read/write grants are INHERITABLE (cover the subtree). Ancestors are
+            //    handled separately, in step 2b. A REVOKE_ACCESS teardown on the unique SID
+            //    removes exactly our ACEs from every path, whatever the access mask.
+            //
+            //    Both kinds run through ONE loop so the teardown list is populated from a
+            //    single decision — see [`grant_leaf_ace`], which may report that the path
+            //    already grants AppContainers what we were about to add.
             let mut _aces = AceGuard {
                 paths: Vec::new(),
+                objects: Vec::new(),
                 sid: sid_copy,
             };
-            for dir in &self.read_grants {
-                set_ace(
-                    dir,
-                    ac_sid,
-                    GENERIC_READ | GENERIC_EXECUTE,
-                    GRANT_ACCESS,
-                    true,
-                )
-                .map_err(|error| {
-                    io::Error::new(
-                        error.kind(),
-                        format!(
-                            "sandbox: installing read grant ACE on {} failed: {error}",
-                            dir.display()
-                        ),
+            let leaves = self
+                .read_grants
+                .iter()
+                .map(|d| ("read", d, GENERIC_READ | GENERIC_EXECUTE))
+                .chain(self.write_grants.iter().map(|d| {
+                    (
+                        "write",
+                        d,
+                        GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE,
                     )
-                })?;
-                if !_aces.paths.contains(dir) {
-                    _aces.paths.push(dir.clone());
-                }
-            }
-            for dir in &self.write_grants {
-                set_ace(
-                    dir,
-                    ac_sid,
-                    GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE,
-                    GRANT_ACCESS,
-                    true,
-                )
-                .map_err(|error| {
-                    io::Error::new(
-                        error.kind(),
-                        format!(
-                            "sandbox: installing write grant ACE on {} failed: {error}",
-                            dir.display()
-                        ),
-                    )
-                })?;
-                if !_aces.paths.contains(dir) {
+                }));
+            //    A REFUSED **READ** GRANT IS SKIPPED, NOT FATAL — same reasoning as the
+            //    ancestor chain in 2b, which the read grants share a failure mode with.
+            //    Writing a DACL needs `WRITE_DAC`, and a read grant may legitimately name a
+            //    path the user does not hold it on: a toolchain outside their profile
+            //    (`C:\hostedtoolcache`, an all-users Python) is granted read, and taking `?`
+            //    there aborted EVERY lifecycle script on the machine over one unreachable
+            //    toolchain — the loudest possible failure for the mildest cause. Skipping
+            //    cannot open the jail: a grant is a REDUCTION from the unconfined lifecycle
+            //    spawn's complete access, so a grant not installed leaves the child with
+            //    LESS, and the worst outcome is one package failing to find one tool. The
+            //    interpreter no longer relies on this — nub stages a copy it owns (see
+            //    `pm_engine::jail_bin`) — which is what makes it a genuine safety net rather
+            //    than the mechanism.
+            //
+            //    WRITE grants stay FATAL. Every one of them is nub's own private tmp or the
+            //    package directory being built, both under the user's own tree, so a refusal
+            //    there is not a reachable configuration — it is a broken assumption, and
+            //    continuing would launch a build that silently cannot write its output.
+            // THE SEAM, and it exists for one reason: the fail-closed behaviour this replaced is
+            // the prime suspect for a sibling lane's finding that `cmd.exe` cannot run confined at
+            // all de-elevated. `resolve_program` auto-grants the program FILE (above), so a
+            // System32 program's own leaf grant is attempted, and de-elevated it is refused — which
+            // under `?` aborted the launch and is indistinguishable from cmd misbehaving. Without an
+            // arm that restores the old behaviour on the same fixture, neither reading can be told
+            // from the other. It can only ever make the jail STRICTER, so it is not a lever
+            // anything can be widened with.
+            let fail_closed = std::env::var_os("NUB_SANDBOX_WIN_FAIL_CLOSED_READ_GRANTS").is_some();
+            for (kind, dir, access) in leaves {
+                let installed = match grant_leaf_ace(dir, ac_sid, access) {
+                    Ok(installed) => installed,
+                    Err(_) if kind == "read" && !fail_closed => continue,
+                    Err(error) => {
+                        return Err(io::Error::new(
+                            error.kind(),
+                            format!(
+                                "sandbox: installing {kind} grant ACE on {} failed: {error}",
+                                dir.display()
+                            ),
+                        ));
+                    }
+                };
+                if installed && !_aces.paths.contains(dir) {
                     _aces.paths.push(dir.clone());
                 }
             }
 
-            // 3. Capabilities: internetClient iff egress allowed.
+            // 2b. THE ANCESTOR CHAIN, which the leaf grants alone do not cover.
+            //
+            // Traverse-bypass exempts INTERMEDIATE components of one open; it does not make
+            // an ancestor openable as a TARGET, and Node's `realpathSync` opens every prefix
+            // of a path in turn — starting at the volume root. Measured, that is where an
+            // absolute `require()` dies: `EPERM: lstat 'C:\'`, with `C:\Users` and the user
+            // profile refused right behind it (run 30464397422).
+            //
+            // Two mechanisms, because ONE cannot cover the chain without elevation. Writing
+            // an ACE needs `WRITE_DAC`, which a standard user holds on their own profile and
+            // below but not on `C:\` or `C:\Users` (measured de-elevated, same run). So:
+            //
+            //  - Where nub CAN write, it writes a NON-INHERITED ACE carrying exactly
+            //    traverse + read-attributes. Non-inherited is not a detail: it grants the
+            //    directory OBJECT and nothing under it (so an ancestor grant never becomes a
+            //    subtree read), and it costs no DACL propagation, which is what keeps this
+            //    affordable per lifecycle spawn.
+            //  - Where it cannot, it REQUESTS the capability Windows already granted there.
+            //    `C:\` carries `(A;;0x1000a1;;;S-1-15-3-65536-…)` — a capability SID with the
+            //    same traverse+read-attributes mask, non-inherited, on the exact path the
+            //    error names; `C:\Users` carries a different one. Requesting a raw capability
+            //    SID is unprivileged and nub already does it for `internetClient`. They are
+            //    HARVESTED off the DACLs rather than hardcoded: the set differs per path and
+            //    per Windows build, and neither SID resolves through `LookupAccountSid`
+            //    (`ERROR_NONE_MAPPED`), so a name is not available to derive them from.
+            //
+            // Both are best-effort by design. This jail is defence in depth, not a watertight
+            // boundary; a package that cannot start is a worse outcome than a residual, and
+            // every grant here is a REDUCTION from the unconfined lifecycle spawn's complete
+            // access. A refused ACE write is therefore skipped, not fatal.
+            //
+            // The seam exists so the branch-scoped Windows probe can measure BOTH directions
+            // in ONE run: without an arm where the defect still reproduces, a green repaired
+            // arm is measuring nothing. It can only ever REMOVE grants, so it is not a lever
+            // anything can be widened with.
+            let ancestors = if std::env::var_os("NUB_SANDBOX_WIN_NO_ANCESTOR_REPAIR").is_some() {
+                Vec::new()
+            } else {
+                ancestor_chain(&self)
+            };
+            for dir in &ancestors {
+                if set_ace_on_object(dir, ac_sid, TRAVERSE_MASK, GRANT_ACCESS).is_ok() {
+                    _aces.objects.push(dir.clone());
+                }
+            }
+            let harvested: Vec<Vec<u8>> = harvest_capability_sids(&ancestors);
+
+            // 3. Capabilities: internetClient iff egress allowed, plus every capability
+            //    harvested above. Ordering matters only in that `harvested`'s backing
+            //    allocations must outlive `sec_caps` — they are borrowed, not copied.
             let mut cap_sid_owned: Option<CapSid> = None;
             let mut caps: Vec<SID_AND_ATTRIBUTES> = Vec::new();
             if self.allow_internet {
@@ -1283,6 +1838,12 @@ pub(super) mod launch {
                     Attributes: SE_GROUP_ENABLED,
                 });
                 cap_sid_owned = Some(cs);
+            }
+            for sid in &harvested {
+                caps.push(SID_AND_ATTRIBUTES {
+                    Sid: sid.as_ptr() as PSID,
+                    Attributes: SE_GROUP_ENABLED,
+                });
             }
             let mut sec_caps = SECURITY_CAPABILITIES {
                 AppContainerSid: ac_sid,
@@ -1307,9 +1868,13 @@ pub(super) mod launch {
             let inherit_handles = inheritable_std_handles();
             let n_attrs = 1 + u32::from(!inherit_handles.is_empty());
             let mut attr = ProcThreadAttrList::new(n_attrs)?;
+            // The attribute list stores this POINTER rather than a copy, which is what makes
+            // the capability retry below possible at all — and why the write there is done
+            // THROUGH the pointer: to the compiler it is a dead store.
+            let caps_slot: *mut SECURITY_CAPABILITIES = std::ptr::from_mut(&mut sec_caps);
             attr.update(
                 PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
-                std::ptr::from_mut(&mut sec_caps).cast(),
+                caps_slot.cast(),
                 std::mem::size_of::<SECURITY_CAPABILITIES>(),
             )?;
             if !inherit_handles.is_empty() {
@@ -1342,7 +1907,7 @@ pub(super) mod launch {
 
             // SAFETY: cmdline/env_block/cwd_wide/attr/sec_caps/caps all outlive this
             // call; lpCommandLine is a writable UTF-16 buffer as CreateProcessW requires.
-            let ok = unsafe {
+            let mut launch = || unsafe {
                 CreateProcessW(
                     std::ptr::null(),
                     cmdline.as_mut_ptr(),
@@ -1361,10 +1926,37 @@ pub(super) mod launch {
                     &mut pi,
                 )
             };
+            let mut ok = launch();
+            // FAIL SOFT ON THE HARVESTED CAPABILITIES, and only on those. They are a WIDENING
+            // taken from whatever a given Windows put on the ancestor chain, so the kernel is
+            // entitled to reject a form nub cannot anticipate — measured: a `S-1-15-3-65536-…`
+            // pair off `C:\` and `C:\Users` returns ERROR_INVALID_PARAMETER here. Refusing to
+            // launch over that would trade a package that starts with one unreachable ancestor
+            // for a package that does not start at all, which is the wrong direction for a jail
+            // that is defence in depth. The attribute list stores a POINTER to `sec_caps`, so
+            // clearing the count in place is what the retry reads.
+            if ok == 0 && !harvested.is_empty() {
+                let dropped = io::Error::last_os_error();
+                // SAFETY: `caps_slot` points at `sec_caps`, which is still live, and the
+                // attribute list reads it at CreateProcessW time.
+                unsafe {
+                    (*caps_slot).Capabilities = if cap_sid_owned.is_some() {
+                        caps.as_mut_ptr()
+                    } else {
+                        std::ptr::null_mut()
+                    };
+                    (*caps_slot).CapabilityCount = u32::from(cap_sid_owned.is_some());
+                }
+                ok = launch();
+                if ok != 0 {
+                    CAPABILITY_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+                    let _ = dropped;
+                }
+            }
             if ok == 0 {
                 return Err(io::Error::last_os_error());
             }
-            let _ = cap_sid_owned; // held alive until here
+            let _ = (cap_sid_owned, &harvested); // both back `sec_caps` — held alive until here
 
             // 7. Assign to the job while the child is still SUSPENDED, and only resume
             //    once it is contained — so a child that spawns a descendant can never do
@@ -1442,6 +2034,11 @@ pub(super) mod launch {
     /// since the SID is unique per run and appears nowhere else, exactly our ACE goes.
     struct AceGuard {
         paths: Vec<std::path::PathBuf>,
+        /// Ancestor directories carrying a non-inherited traverse ace. Kept apart from
+        /// `paths` because they must be revoked through the OBJECT-scoped writer: the named
+        /// one would re-propagate inheritance across each ancestor's whole subtree on the way
+        /// out, which is the cost the grant side goes out of its way to avoid.
+        objects: Vec<std::path::PathBuf>,
         sid: Vec<u8>,
     }
     impl Drop for AceGuard {
@@ -1449,6 +2046,9 @@ pub(super) mod launch {
             let sid = self.sid.as_ptr() as PSID;
             for p in &self.paths {
                 let _ = revoke_ace(p, sid);
+            }
+            for p in &self.objects {
+                let _ = set_ace_on_object(p, sid, TRAVERSE_MASK, REVOKE_ACCESS);
             }
         }
     }

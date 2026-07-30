@@ -101,6 +101,8 @@ pub mod policy;
 pub mod preflight;
 pub mod proxy;
 
+#[cfg(target_os = "windows")]
+pub use backend::windows_publish_appcontainer_read;
 pub use backend::{
     CommandArgs, CommandSpec, Degradation, Prepared, PreparedChild, PreparedSignalTarget,
     RuntimeCapability, StatusReport, apply, apply_with_runtime, earliest_bootstrap,
@@ -111,6 +113,12 @@ pub use backend::{
 pub use backend::{
     PreparedSignalCallback, exercise_monitor_state_6, exercise_monitor_state_7,
     exercise_monitor_state_8, exercise_monitor_states_1_to_5,
+};
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub use backend::{
+    windows_ancestor_capability_sids, windows_capability_fallbacks, windows_leaf_grant_redundant,
+    windows_object_traverse_ace,
 };
 
 /// The Linux enforcement suites' skip gate, resolving Bubblewrap candidates the way
@@ -140,7 +148,10 @@ pub use compiler::{
     compile, compile_build_jail, compile_with_warnings,
 };
 #[cfg(windows)]
-pub use compiler::{windows_native_realpath_shim_node_options, windows_realpath_node_options};
+pub use compiler::{
+    windows_build_jail_node_options, windows_native_realpath_shim_node_options,
+    windows_realpath_node_options,
+};
 pub use matcher::Homes;
 
 /// One-time privileged host setup for the Linux agent-sandbox — the implementation behind
