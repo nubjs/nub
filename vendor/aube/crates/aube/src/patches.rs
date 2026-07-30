@@ -308,7 +308,11 @@ pub fn upsert_patched_dependency(cwd: &Path, key: &str, rel_patch_path: &str) ->
             // Standalone aube (reads pnpm config): nest under `pnpm` so real
             // pnpm accepts the lockfile. An embedder that ignores pnpm config:
             // write the un-branded top-level field it actually reads.
-            let namespace = if reads_branded_pnpm { Some("pnpm") } else { None };
+            let namespace = if reads_branded_pnpm {
+                Some("pnpm")
+            } else {
+                None
+            };
             upsert_manifest_patched_dependency(cwd, key, rel_patch_path, namespace)
                 .wrap_err("failed to write package.json")?;
             return Ok(cwd.join("package.json"));

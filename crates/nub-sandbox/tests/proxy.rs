@@ -587,6 +587,7 @@ fn build_jail_net() -> NetPolicy {
             project: project.clone(),
         },
         &package_dir,
+        None,
         Vec::new(),
         Vec::new(),
         Default::default(),

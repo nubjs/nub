@@ -470,9 +470,14 @@ fn build_jail_net() -> Value {
 /// subtrees the embedder derives (the provisioned Node's `include/node` headers so node-gyp
 /// compiles offline, and its `lib/node_modules` so `npm`/`npx` resolve) — see
 /// [`grant_build_jail_extra_reads`].
+///
+/// `package_name` is aube's INSTALLER-RESOLVED identity for this spawn and the only key
+/// the curated per-package exception table ([`super::curated`]) is looked up by. `None` —
+/// aube's root is a checkout it fetched — grants no exception.
 pub fn compile_build_jail(
     homes: Homes,
     package_dir: &Path,
+    package_name: Option<&str>,
     interpreter: Vec<PathBuf>,
     extra_reads: Vec<PathBuf>,
     ambient_env: BTreeMap<String, String>,
@@ -497,6 +502,15 @@ pub fn compile_build_jail(
     grant_build_jail_dependency_reads("build-jail", &mut policy, &ctx, Some(package_dir));
     grant_build_jail_interpreter("build-jail", &mut policy, &ctx);
     grant_build_jail_extra_reads(&mut policy, &extra_reads);
+    // LAST of the grants, so a curated rw wins under last-match-wins over the
+    // front-inserted dependency-tree READ it nests inside. `ctx.homes.project` is the
+    // consumer's project root, which aube guarantees whenever it hands over a name.
+    super::curated::grant_curated_package(
+        &mut policy,
+        &ctx.homes.project,
+        package_dir,
+        package_name,
+    );
     enforce_pure_allowlist("build-jail", &mut policy);
     policy.env = defaults::lifecycle_scrubbed_env(&ambient_env);
     policy.build_jail = true;
@@ -570,6 +584,7 @@ mod tests {
         compile_build_jail(
             homes,
             Path::new("/proj/node_modules/somepkg"),
+            None,
             vec![PathBuf::from("/testhome/.cache/nub/node/v26/bin/node")],
             vec![PathBuf::from(
                 "/testhome/.cache/nub/node/v26/lib/node_modules",
@@ -610,6 +625,66 @@ mod tests {
         }
     }
 
+    /// The curated exception is WIRED and ORDERED, which the `curated` unit tests cannot
+    /// show: they call the granting function against an empty policy, so they would pass
+    /// just as well if `compile_build_jail` never called it, or called it before the
+    /// dependency-tree READ that would then shadow the write under last-match-wins.
+    ///
+    /// Asserted as the WRITE decision specifically. `.prisma` sits inside the enclosing
+    /// `node_modules` read grant, so an ordering bug leaves it readable-but-unwritable —
+    /// which is exactly the `EPERM … mkdir` the exception exists to remove, and is
+    /// invisible to a rule-presence check.
+    #[test]
+    fn a_curated_exception_is_wired_into_the_production_path_and_wins_the_write() {
+        use crate::matcher::PathMatcher;
+        use crate::policy::FsAccess;
+
+        let homes = Homes {
+            home: PathBuf::from("/testhome"),
+            tmp: PathBuf::from("/testtmp"),
+            cache: PathBuf::from("/testhome/.cache"),
+            project: PathBuf::from("/proj"),
+        };
+        let package_dir =
+            PathBuf::from("/proj/node_modules/.store/@prisma+client@6/node_modules/@prisma/client");
+        let sibling = Path::new("/proj/node_modules/.store/@prisma+client@6/node_modules/.prisma");
+        let compile = |name: Option<&str>| {
+            compile_build_jail(
+                homes.clone(),
+                &package_dir,
+                name,
+                Vec::new(),
+                Vec::new(),
+                BTreeMap::new(),
+            )
+            .expect("build-jail compiles")
+        };
+        let writable = |policy: &SandboxPolicy, path: &Path| {
+            let d = PathMatcher::new(&policy.fs.rules).decide(path);
+            d.effect == Effect::Allow && d.access == FsAccess::ReadWrite
+        };
+
+        let named = compile(Some("@prisma/client"));
+        assert!(
+            writable(&named, sibling),
+            "the curated sibling must be WRITABLE, not merely inside the dependency read"
+        );
+        // Two controls, because "writable" alone would also hold for a compiler that made
+        // the whole enclosing node_modules writable — which is the `.bin`/virtual-store
+        // hazard the enumerated form exists to avoid.
+        assert!(
+            !writable(
+                &named,
+                Path::new("/proj/node_modules/.store/@prisma+client@6/node_modules/.bin/x")
+            ),
+            "the exception must not widen the enclosing node_modules"
+        );
+        assert!(
+            !writable(&compile(None), sibling),
+            "an unnamed spawn (a fetched checkout) gets no exception"
+        );
+    }
+
     /// One build-jail compile against REAL directories, so `private_home_dir` materializes.
     /// `home` and `cache` are separate tempdirs so "the private home is writable" and "the
     /// user's home is not" are independent facts here rather than two readings of one path.
@@ -635,6 +710,7 @@ mod tests {
                 project,
             },
             &package_dir,
+            None,
             Vec::new(),
             Vec::new(),
             [("HOME".to_string(), "/the/users/home".to_string())]
@@ -727,6 +803,7 @@ mod tests {
         let policy = compile_build_jail(
             homes,
             &package_dir,
+            None,
             Vec::new(),
             Vec::new(),
             [("HOME".to_string(), "/the/users/home".to_string())]

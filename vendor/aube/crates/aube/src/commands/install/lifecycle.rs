@@ -636,15 +636,40 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     // parallel," not "at most N scripts running," so hook ordering
     // within a single package is preserved.
     //
-    // Cancellation on first failure uses `JoinSet`, which aborts every
-    // outstanding task when it's dropped. A plain `Vec<JoinHandle>`
-    // would NOT be safe here — dropping a `tokio::spawn` handle lets
-    // the task keep running detached, so a failing script would
-    // silently leave N siblings still executing `postinstall` against
-    // the user's machine after the install returned an error.
-    // `join_next` also surfaces whichever task fails first rather than
-    // waiting for the longest-running one to finish.
+    // FAILURE SEMANTICS: a failing script fails the install (pnpm/npm parity),
+    // but it does NOT tear its siblings down mid-write. On the first failure
+    // `failed` is raised, so jobs still queued behind the semaphore return
+    // without starting a build that would be discarded anyway; jobs already
+    // RUNNING drain to completion, and the first error is returned once the set
+    // is empty.
+    //
+    // A predecessor returned from the `join_next` loop on the first error, which
+    // dropped the `JoinSet` and aborted every outstanding task. Its stated
+    // justification — that siblings are "aborted before they can scribble on
+    // disk" — was false on POSIX: the abort SIGKILLs each sibling's shell and
+    // nothing else, so `node-gyp`/`make`/`cc` reparent to init and keep writing
+    // into `node_modules` long after the install returns. It bought no
+    // containment and cost determinism: whether a package finished depended on
+    // which UNRELATED package in the same batch failed first, and on whether its
+    // own orphaned compiler happened to finish before anything looked. Measured
+    // on a 50-package corpus shard, 25 of 27 packages that left no build
+    // artifact in-batch left one when run as the batch's only package.
+    //
+    // Draining is also what pnpm does, structurally: a rejected promise cannot
+    // cancel an already-spawned child process, so its in-flight builds run to
+    // completion and only the install's exit status carries the failure.
+    // `JoinSet` is still the right container — dropping a `Vec<JoinHandle>`
+    // detaches rather than cancels, so a panic path would leak live tasks.
+    //
+    // ACCEPTED COST: the abort was also the only bound on a hung sibling. aube
+    // has no lifecycle-script timeout, so a dependency whose script never exits
+    // now hangs the install after an unrelated failure instead of being killed
+    // on the way out. Taken deliberately — the abort's "bound" was killing a
+    // shell whose compilers kept running anyway, so it bounded the process, not
+    // the machine — and pnpm has the same property. A real fix is a per-script
+    // timeout, which is a separate change.
     let concurrency = child_concurrency.max(1);
+    let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
     let project_dir = project_dir.to_path_buf();
     let modules_dir_name = modules_dir_name.to_string();
@@ -659,6 +684,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         let modules_dir_name = modules_dir_name.clone();
         let node_gyp_bin_dir = node_gyp_bin_dir.clone();
         let jail_policy = jail_policy.clone();
+        let failed = failed.clone();
         let task = crate::dep_chain::scope_current(async move {
             let _permit = sem.acquire().await.unwrap();
             if should_restore_side_effects_cache && let Some(cache_entry) = job.cache_entry.clone()
@@ -681,6 +707,15 @@ pub(crate) async fn run_dep_lifecycle_scripts(
                     }
                     SideEffectsCacheRestore::Miss => {}
                 }
+            }
+            // Placed BELOW the side-effects-cache restore and above the build:
+            // this is the moment a queued job would otherwise start compiling.
+            // The install is already failing, and starting a build whose result
+            // is about to be discarded only adds half-written package dirs — but
+            // a cache RESTORE is a directory copy, not a build, and skipping it
+            // would cost the user that work again on the retry.
+            if failed.load(std::sync::atomic::Ordering::Relaxed) {
+                return Ok(0);
             }
             // Before the lifecycle script runs in-place inside the
             // materialized package directory, break any hardlinks that
@@ -799,15 +834,28 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     }
 
     let mut ran = 0usize;
+    let mut first_error: Option<miette::Report> = None;
     while let Some(res) = set.join_next().await {
-        // `?` on the outer `Result` propagates a real task-level panic
-        // (tokio's `JoinError`); `?` on the inner `miette::Result`
-        // propagates a script failure. Either way, the function
-        // returns, `set` is dropped, and the remaining in-flight
-        // scripts are aborted before they can scribble on disk.
-        ran += res.into_diagnostic()??;
+        // The outer `Result` is tokio's `JoinError` (a task-level panic); the
+        // inner one is a script failure. Both are fatal to the install, and both
+        // are recorded rather than returned, so the loop keeps draining: an
+        // early `return` here is what used to abort the siblings.
+        match res.into_diagnostic().and_then(|inner| inner) {
+            Ok(count) => ran += count,
+            Err(error) => {
+                if first_error.is_none() {
+                    // Raised before the report is stashed so the not-yet-started
+                    // jobs see it as early as possible.
+                    failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                    first_error = Some(error);
+                }
+            }
+        }
     }
-    Ok(ran)
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(ran),
+    }
 }
 
 /// Persist a freshly imported package index under the store key(s) a
@@ -1381,8 +1429,14 @@ mod tests {
     fn embedder_owned_lifecycle_sandbox_suppresses_aubes_jail() {
         // Standalone aube (flag false): `jailBuilds`/`paranoid` engage aube's own jail
         // exactly as before — byte-for-byte default behavior.
-        assert!(jail_enabled(false, true, false), "jailBuilds engages the jail");
-        assert!(jail_enabled(false, false, true), "paranoid engages the jail");
+        assert!(
+            jail_enabled(false, true, false),
+            "jailBuilds engages the jail"
+        );
+        assert!(
+            jail_enabled(false, false, true),
+            "paranoid engages the jail"
+        );
         assert!(!jail_enabled(false, false, false), "neither set → no jail");
         // Embedder-owned confinement (flag true, nub): aube's jail NEVER engages, even
         // when a user (or a compat project's .npmrc) sets jailBuilds/paranoid — the

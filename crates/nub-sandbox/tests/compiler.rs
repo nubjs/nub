@@ -673,6 +673,7 @@ fn build_jail_reaches_an_interpreter_living_under_opt() {
     let p = nub_sandbox::compile_build_jail(
         homes.clone(),
         &homes.project.join("node_modules/native"),
+        None,
         vec![interpreter.clone()],
         vec![
             node_root.join("include/node"),
@@ -743,6 +744,7 @@ fn build_jail_interposition_confines_write_grants_interpreter_and_scrubs_env() {
     let p = nub_sandbox::compile_build_jail(
         homes.clone(),
         &package_dir,
+        None,
         vec![interpreter.clone()],
         vec![include_node.clone()],
         ambient,

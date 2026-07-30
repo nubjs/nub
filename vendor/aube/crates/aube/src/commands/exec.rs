@@ -377,15 +377,7 @@ pub(crate) async fn exec_bin_terminal(
     args: &[String],
     shell_mode: bool,
 ) -> miette::Result<Option<i32>> {
-    exec_bin_terminal_with_env(
-        cwd,
-        bin_path,
-        bin,
-        args,
-        shell_mode,
-        &Default::default(),
-    )
-    .await
+    exec_bin_terminal_with_env(cwd, bin_path, bin, args, shell_mode, &Default::default()).await
 }
 
 pub(crate) async fn exec_bin_terminal_with_env(

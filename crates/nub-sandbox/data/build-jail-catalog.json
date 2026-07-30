@@ -1,0 +1,114 @@
+{
+  "catalogVersion": 1,
+  "networkHosts": [
+    {
+      "host": "nodejs.org",
+      "artifact": "Node headers and libs for a from-source native compile",
+      "fetchedBy": ["node-gyp (any native-build package, including an implicit `node-gyp rebuild` for a root binding.gyp)"],
+      "evidence": "source-read",
+      "observed": "node-gyp's default dist URL, reached whenever the header cache is cold. NOT observed in the 311-package corpus run: that harness sets `npm_config_nodedir` to the provisioned Node root, as nub does, so node-gyp never fetched. Absence there is not evidence the entry is unnecessary — it is evidence the corpus did not exercise a cold header cache.",
+      "platform": "any"
+    },
+    {
+      "host": "binaries.prisma.sh",
+      "artifact": "Prisma query/schema engine binaries",
+      "fetchedBy": ["@prisma/engines"],
+      "evidence": "vendor-documented",
+      "observed": "Named in Prisma's own firewall-allowlist documentation. A grep of the fetched postinstall bundle found no literal match, so the constant lives in a helper chunk that pass did not fetch. Not independently confirmed from source.",
+      "platform": "any"
+    },
+    {
+      "host": "download.cypress.io",
+      "artifact": "The Cypress binary (302 redirect origin)",
+      "fetchedBy": ["cypress"],
+      "evidence": "measured",
+      "observed": "Resolved by cypress's postinstall in the corpus harness-validation run. Paired with cdn.cypress.io because the 302 lands there; granting only one leaves the install broken.",
+      "platform": "linux-arm64"
+    },
+    {
+      "host": "cdn.cypress.io",
+      "artifact": "The Cypress binary (302 redirect target)",
+      "fetchedBy": ["cypress"],
+      "evidence": "measured",
+      "observed": "Resolved by cypress's postinstall in the corpus harness-validation run, as the redirect target of download.cypress.io. cypress is the one corpus package that installs successfully under this four-host list.",
+      "platform": "linux-arm64"
+    }
+  ],
+  "packageGrants": [
+    {
+      "package": "@prisma/client",
+      "versions": "6.x (7.0.0 dropped the postinstall entirely)",
+      "siblingDirs": [".prisma"],
+      "projectReads": ["prisma"],
+      "projectCwd": true,
+      "mechanism": "scripts/postinstall.js does three things, and each masks the next: it calls process.chdir(INIT_CWD); createDefaultGeneratedThrowFiles unconditionally mkdirs path.join(__dirname, '../../../.prisma'), a sibling of @prisma in the package's own enclosing node_modules; then it re-execs the prisma CLI as `prisma generate`, which reads the consumer's prisma/ schema directory. The generated client lands inside package_dir and needs no grant.",
+      "evidence": "measured",
+      "observed": "EPERM mkdir <own node_modules>/.prisma, then EPERM uv_cwd on chdir(INIT_CWD), then EPERM reading the consumer's prisma/ schema. Verified by artifact, not exit code: a generated client of 71282 B carrying a per-run schema nonce, against absent output and 2 EPERMs without the grants. Presence alone is not a valid check here — the script writes throw-stubs before every guard, so it exits 0 having generated nothing.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "@danmarshall/deckgl-typings",
+      "versions": "4.9.28",
+      "siblingDirs": ["@types"],
+      "mechanism": "Its postinstall runs `indefinitely-typed`, which computes path.resolve(cwd, '../..'), asserts that directory is named node_modules, then mkdirs @types there and copySyncs each --folder argument into it. The write target is <own node_modules>/@types — the same enclosing-node_modules sibling shape as Prisma, under a different name.",
+      "evidence": "measured",
+      "observed": "EPERM mkdir <own node_modules>/@types. With the grant, 20 copied type folders present; without it, absent.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "msw",
+      "versions": "2.15.0",
+      "projectWrites": { "manifestField": ["msw", "workerDirectory"] },
+      "projectCwd": true,
+      "mechanism": "config/scripts/postinstall.js reads the CONSUMER's package.json for msw.workerDirectory, returns silently if absent, and otherwise re-execs its own CLI with cwd set to INIT_CWD to copy mockServiceWorker.js into each listed directory. The directories come from the field rather than a literal because msw imposes no convention — the consumer picks them.",
+      "evidence": "measured",
+      "observed": "EPERM uv_cwd. The cwd need bites first: without projectCwd the child dies in uv_cwd before it reads the field at all. With the grants, msw's worker script is present; without them, absent.",
+      "platform": "macos-arm64"
+    }
+  ],
+  "notGranted": {
+    "comment": "Documentation only. Nothing in this object is compiled into any allowlist; it records hosts that a real install was measured to need and that were not admitted, so a contributor can see the bar before opening a PR. A build-time check keeps this list and networkHosts disjoint. Entries carry the same provenance fields as networkHosts, because an evidenced candidate is what makes a later promotion reviewable — `observedUrl` in particular is what a path-scoped grant would have to be written against.",
+    "hosts": [
+      {
+        "host": "github.com",
+        "reason": "write-capable",
+        "requester": "cube-js native installer (`Cube.js Native Installer`); 46 corpus packages total, 14 of them blocking",
+        "observedUrl": "https://github.com/cube-js/cube/releases/download/v1.4.4/native-linux-x64-glibc-fallback.tar.gz",
+        "detail": "The demand is real and measured, and the refusal is NOT about the download. github.com carries `git-receive-pack` — an authenticated write on the same hostname — and CI routinely hands lifecycle scripts a token with push rights, so a host-level grant opens a push path rather than only a fetch path. Host-level DNS gating cannot separate the two. A path-scoped grant limited to /*/*/releases/download/ would, which is the argument for building proxy path support rather than treating this host as permanently refused.",
+        "evidence": "measured",
+        "observed": "FetchError: request to <url> failed, reason: getaddrinfo EAI_AGAIN github.com — the denied arm of the Linux corpus run.",
+        "platform": "linux-x64"
+      },
+      {
+        "host": "storage.googleapis.com",
+        "reason": "multi-tenant",
+        "requester": "@tensorflow/tfjs-node, chromedriver (also puppeteer and taiko on the earlier macOS pass)",
+        "observedUrl": "https://storage.googleapis.com/tensorflow/libtensorflow/libtensorflow-cpu-linux-x86_64-2.9.1.tar.gz; https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.53/linux64/chromedriver-linux64.zip",
+        "detail": "Refused because an attacker can rent a bucket under the same hostname and read back whatever a confined script writes there — the exfiltration criterion, not an integrity one. The two observed prefixes (/tensorflow/ and /chrome-for-testing-public/) are stable and single-tenant, so this is a second candidate for a path-scoped grant.",
+        "evidence": "measured",
+        "observed": "Both artifacts requested in the denied arm of the Linux corpus run; libtensorflow logged as `* Downloading libtensorflow` immediately before the URL.",
+        "platform": "linux-x64"
+      },
+      {
+        "host": "package.cli.amplify.aws",
+        "reason": "not-blocking",
+        "requester": "@aws-amplify/cli",
+        "observedUrl": "https://package.cli.amplify.aws/14.5.1/amplify-pkg-linux-x64.tgz",
+        "detail": "A soft fetch that degrades rather than failing does not earn an entry: the CLI reports `failed to install amplify binary` with egress denied, but the install itself still exits 0.",
+        "evidence": "measured",
+        "observed": "Error fetching release: getaddrinfo EAI_AGAIN package.cli.amplify.aws, followed by `failed to install amplify binary`, in the denied arm of the Linux corpus run.",
+        "platform": "linux-x64"
+      },
+      {
+        "host": "workers.cloudflare.com",
+        "reason": "undecided",
+        "requester": "@cloudflare/wrangler@1.21.0",
+        "observedUrl": "https://workers.cloudflare.com/get-npm-wrangler-binary/1.21.0/x86_64-unknown-linux-musl",
+        "detail": "Recorded as an evidenced candidate, not as a disqualification: no write-capable route or multi-tenant namespace has been established for it, and the fetch is a dedicated single-tenant vendor binary path. Whether it is admitted is a maintainer call, and it is deliberately left out of networkHosts until then. Note the requester is wrangler 1.x, which prints its own deprecation notice directing users to the `wrangler` package — so the demand may not survive the version it was measured on.",
+        "evidence": "measured",
+        "observed": "Downloading release from <url>, then Error fetching release: getaddrinfo EAI_AGAIN workers.cloudflare.com, in the denied arm of the Linux corpus run.",
+        "platform": "linux-x64 (musl artifact)"
+      }
+    ]
+  }
+}

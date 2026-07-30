@@ -94,6 +94,7 @@ pub fn apply(
             command: base_command(&spec, policy),
             degradation: Degradation::full(),
             proxy: None,
+            signal_process_group: false,
             _private_tmp: None,
             redact_stdout: false,
             redact_stderr: false,
@@ -124,6 +125,10 @@ pub fn apply(
     // what the child may OPEN, never what it INHERITS. The Linux backend sweeps them;
     // this is the Seatbelt twin.
     install_fd_sweep(&mut wrapped);
+    // Descendant reaping, when the caller asked for it. See `install_process_group`.
+    if spec.reap_descendants {
+        install_process_group(&mut wrapped);
+    }
     // Point the child at the loopback proxy (cooperative hint; the Seatbelt carve is
     // the real boundary). Set AFTER env_clear so it survives an enforced env scrub.
     if let Some(port) = proxy_port {
@@ -145,6 +150,7 @@ pub fn apply(
         command: wrapped,
         degradation: degradation(policy, proxy_port, tmp_dir),
         proxy: None,
+        signal_process_group: spec.reap_descendants,
         _private_tmp: None,
         redact_stdout: false,
         redact_stderr: false,
@@ -289,6 +295,34 @@ fn install_fd_sweep(command: &mut Command) {
                     libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
                 }
             }
+            Ok(())
+        });
+    }
+}
+
+/// Put the child in its own process GROUP, so its whole descendant tree is reachable as
+/// `-pgid`. Why this backend needs one at all: `CommandSpec::reap_descendants`.
+///
+/// A process-TREE walk (`libproc`) is not an alternative — a grandchild forked between the
+/// walk and the kill is reparented to init and becomes invisible, which is the very leak
+/// being closed.
+///
+/// `setpgid`, NOT the Linux twin's `setsid`: the group is all the reaping needs, and
+/// staying in nub's session leaves the controlling terminal available to a script that
+/// writes to it. The cost is leaving the FOREGROUND group, where a terminal read would
+/// raise `SIGTTIN` and STOP the whole build tree — so both job-control stops are ignored.
+/// Ignoring `SIGTTIN` turns that stop into an `EIO` the reading tool reports and moves
+/// past; a hung install is the worse of the two. Ignoring `SIGTTOU` is behavior-preserving.
+fn install_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: `setpgid` and `signal` are async-signal-safe, allocate nothing, and touch no
+    // parent state — the only things permitted between fork and exec in a threaded parent.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setpgid(0, 0);
+            libc::signal(libc::SIGTTIN, libc::SIG_IGN);
+            libc::signal(libc::SIGTTOU, libc::SIG_IGN);
             Ok(())
         });
     }
@@ -1611,6 +1645,7 @@ mod tests {
         let jail = compile_build_jail(
             homes(),
             Path::new("/proj/node_modules/somepkg"),
+            None,
             vec![PathBuf::from("/testhome/.cache/nub/node/v26/bin/node")],
             Vec::new(),
             BTreeMap::new(),

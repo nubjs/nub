@@ -67,13 +67,13 @@ fn build_isolated_fixture(root: &Path) {
             &format!("{{\"name\":\"bar\",\"version\":\"{version}\"}}\n"),
         );
     }
-    let foo_cell = store.join("foo@1.0.0").join("node_modules").join("foo");
+    let foo_dir = store.join("foo@1.0.0").join("node_modules").join("foo");
     write(
-        &foo_cell.join("index.js"),
+        &foo_dir.join("index.js"),
         "module.exports={barVersion:require('bar').v};\n",
     );
     write(
-        &foo_cell.join("package.json"),
+        &foo_dir.join("package.json"),
         "{\"name\":\"foo\",\"version\":\"1.0.0\",\"main\":\"index.js\"}\n",
     );
 

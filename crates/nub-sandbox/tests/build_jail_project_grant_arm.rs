@@ -39,6 +39,7 @@ fn compile(homes: Homes, package_dir: &Path) -> nub_sandbox::SandboxPolicy {
     nub_sandbox::compile_build_jail(
         homes.clone(),
         package_dir,
+        None,
         Vec::new(),
         Vec::new(),
         BTreeMap::new(),
@@ -70,6 +71,9 @@ fn the_project_grant_seam_is_inert_by_default_and_drops_only_the_project_roots()
     // one `roots` vector with the project pair, and the package's own enclosing
     // `node_modules` is a separate grant with a separate rationale (workspace members).
     let store = homes.cache.join("nub/pm/store");
+    // Read only by the feature-gated arm assertions below; binding it unconditionally
+    // trips `unused_variable` on a default build and fails the workspace clippy gate.
+    #[cfg(feature = "build-jail-project-grant-arm")]
     let own_modules = homes
         .project
         .join("node_modules/.store/dep@1.0.0/node_modules/sibling/index.js");

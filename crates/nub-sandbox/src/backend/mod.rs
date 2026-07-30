@@ -275,6 +275,26 @@ pub struct CommandSpec {
     pub redact_stdout: bool,
     /// Pipe the child's stderr for host-side redaction. See [`redact_stdout`](Self::redact_stdout).
     pub redact_stderr: bool,
+    /// Put the child in its OWN process group so its whole descendant tree can be
+    /// signalled as `-pgid`. For third-party code the host cannot supervise any other way:
+    /// a lifecycle shell's `node-gyp` → `make` → `cc` are unreachable from its pid, so
+    /// killing the shell alone leaves them reparented to init and still writing.
+    ///
+    /// THE CANONICAL ACCOUNT OF WHO REAPS WHAT — the other sites reference this one. Each
+    /// backend already has a mechanism except macOS: bubblewrap reaps through its PID
+    /// namespace, Landlock through a group it takes unconditionally (its `setsid` is also
+    /// its terminal hardening), the Windows AppContainer through a `KILL_ON_JOB_CLOSE` job
+    /// object the child is assigned to while still suspended, and the Windows dedicated
+    /// account through the same job object BEST-EFFORT (seclogon commonly owns the child's
+    /// job first — see `windows_account/launch.rs`). So this flag is honored by the macOS
+    /// backend alone, and as an OPT-IN rather than a default: leaving nub's process group
+    /// is what forfeits a terminal Ctrl-C by membership, so only a caller that arranges its
+    /// own signal reach should pay for it. Default `false` = today's behavior, byte-for-byte.
+    ///
+    /// A REQUEST, not a guarantee. A macOS launch with nothing to confine emits no profile
+    /// and no hook, so it silently declines; `Prepared::spawn_with_signal_target` declines
+    /// again if the kernel does not confirm the group, and warns when it does.
+    pub reap_descendants: bool,
 }
 
 impl CommandSpec {
@@ -287,6 +307,7 @@ impl CommandSpec {
             require_nesting: false,
             redact_stdout: false,
             redact_stderr: false,
+            reap_descendants: false,
         }
     }
     pub fn arg(mut self, a: impl Into<std::ffi::OsString>) -> Self {
@@ -351,6 +372,10 @@ impl CommandSpec {
         self.redact_stderr = redact;
         self
     }
+    pub fn reap_descendants(mut self, reap: bool) -> Self {
+        self.reap_descendants = reap;
+        self
+    }
 }
 
 /// A launch-ready child. The command stays private so backend supervision and
@@ -386,13 +411,18 @@ pub struct Prepared {
     pub(crate) retained_monitor: Option<linux_monitor::RetainedMonitorLaunch>,
     /// Signal and reap the child's whole PROCESS GROUP rather than just the child.
     ///
-    /// Set only by the Landlock build jail, whose `pre_exec` calls `setsid` — so the child is
-    /// a session leader and its PGID equals its PID, making `-pid` a valid group target. It
-    /// is the only handle that path has on descendants: it runs no PID-1 monitor, so without
-    /// this a `Ctrl-C` reaches the script but not the compiler it spawned. MUST stay false
-    /// for every other path, where the child shares nub's own process group and a negative
+    /// Set by the two paths whose `pre_exec` makes the child its own group leader: the
+    /// Landlock build jail (`setsid`) and the macOS Seatbelt wrap when the caller asked
+    /// for [`CommandSpec::reap_descendants`] (`setpgid(0, 0)`). It is the only handle
+    /// either has on descendants — neither runs a PID-1 monitor, so without it a Ctrl-C
+    /// reaches the script but not the compiler it spawned, and a normal return leaves
+    /// that compiler writing into a package dir the installer already reported on.
+    ///
+    /// A REQUEST, not a fact: [`Prepared::spawn_with_signal_target`] downgrades it when
+    /// the kernel does not confirm the child leads its own group. MUST stay false for
+    /// every other path, where the child shares nub's own process group and a negative
     /// target would signal nub itself.
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     pub(crate) signal_process_group: bool,
     /// Windows launch plan — the backend owns spawn+wait+teardown when this is `Some`.
     /// A two-variant enum, one per Windows mechanism: the per-run AppContainer (LowBox
@@ -422,7 +452,7 @@ pub struct PreparedChild {
     signal_target: Option<i32>,
     #[cfg(target_os = "linux")]
     retained_monitor: Option<linux_monitor::RetainedMonitorSession>,
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     signal_process_group: bool,
     _proxy: Option<EgressProxy>,
     #[cfg(target_os = "linux")]
@@ -446,6 +476,19 @@ pub type PreparedSignalCallback =
 impl PreparedChild {
     pub fn id(&self) -> u32 {
         self.child_id
+    }
+
+    /// The child's process GROUP id — `Some` only when this launch put the child in its
+    /// own group AND the kernel confirmed it leads one, which is the only state in which
+    /// `-pgid` names the child's tree and nothing else.
+    ///
+    /// Exposed so a host can register the group with its own terminate-signal reaper: a
+    /// signal whose default action kills nub never runs this handle's `Drop`, so the
+    /// group would otherwise survive nub itself. `None` on every other path — the child
+    /// shares nub's group there and signalling `-pgid` would kill nub and every sibling.
+    #[cfg(unix)]
+    pub fn process_group_id(&self) -> Option<i32> {
+        self.signal_process_group.then_some(self.child_id as i32)
     }
 
     /// Take the piped stdout handle (present only when the launch requested
@@ -484,7 +527,11 @@ impl PreparedChild {
             // bubblewrap path's PID namespace reaped those implicitly when PID 1 exited;
             // signalling the group is this path's only equivalent. Best-effort: an empty
             // group is ESRCH, which is the normal case and not an error.
-            #[cfg(target_os = "linux")]
+            //
+            // Reaping on the SUCCESSFUL return too is the point, not a side effect: the
+            // measured leak is a script that exits 0 having backgrounded a writer, whose
+            // output then keeps landing in a package dir the installer already snapshotted.
+            #[cfg(unix)]
             if self.signal_process_group {
                 unsafe { libc::kill(-(self.child_id as i32), libc::SIGKILL) };
             }
@@ -608,6 +655,44 @@ fn kill_and_reap(child: &mut std::process::Child) {
     let _ = wait_child_eintr(child);
 }
 
+/// Confirm the just-spawned child leads its OWN process group, which is what makes `-pid`
+/// name its tree and nothing else.
+///
+/// THE GATE IS THE SAFETY PROPERTY. If the `pre_exec` hook's `setpgid`/`setsid` failed the
+/// child is still in nub's group, where a negative target would SIGKILL nub itself along
+/// with every sibling script — so the group is signalled on the kernel's word, never on the
+/// assumption that the hook ran.
+///
+/// A PURE READ, deliberately: it never puts the child INTO a group. Completing the textbook
+/// race-free `setpgid` pair from the parent would be both dead and dangerous — dead because
+/// `pre_exec` forces std off `posix_spawn` onto fork+exec, where the parent blocks on the
+/// exec-report pipe until the child has exec'd, so the hook has always run by the time
+/// `spawn` returns; dangerous because it would MANUFACTURE the leadership this then
+/// "confirms", turning any future launch that sets the flag without installing the hook
+/// into a silent relocate-and-kill of an unrelated process.
+///
+/// `ESRCH` counts as confirmation, and is not the fail-open it looks like: macOS `getpgid`
+/// refuses a ZOMBIE (measured; Linux answers correctly), so a script that exits the instant
+/// it is spawned would otherwise disable reaping in precisely the case it exists for — the
+/// shell gone, the writer it backgrounded running on. Safe because the hook provably ran (a
+/// failing `pre_exec` fails the spawn instead) and the pid cannot be recycled while the
+/// caller still holds the unreaped `Child`, so `-pid` names that child's own group or
+/// nothing. The `getpgrp` check keeps that reasoning from being the only thing between a
+/// pid and nub's own group.
+#[cfg(unix)]
+fn confirm_group_leader(pid: i32) -> bool {
+    // SAFETY: `getpgid` on a child of this process, `getpgrp` on ourselves — plain reads.
+    unsafe {
+        if pid == libc::getpgrp() {
+            return false;
+        }
+        match libc::getpgid(pid) {
+            -1 => std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH),
+            pgid => pgid == pid,
+        }
+    }
+}
+
 fn wait_child_eintr(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
     loop {
         match child.wait() {
@@ -673,8 +758,20 @@ impl Prepared {
         // target environment in the long-lived PreparedChild handle.
         #[cfg(target_os = "linux")]
         self._inherited_files.clear();
-        #[cfg(target_os = "linux")]
-        let signal_process_group = self.signal_process_group;
+        // A REQUEST until the kernel confirms it. `confirm_group_leader` is what turns it
+        // into a fact, and everything downstream — the negative signal target, the reap in
+        // `wait`, the pgid handed to the host — keys on the confirmed value.
+        #[cfg(unix)]
+        let signal_process_group =
+            self.signal_process_group && confirm_group_leader(child.id() as i32);
+        #[cfg(unix)]
+        if self.signal_process_group && !signal_process_group {
+            tracing::warn!(
+                "sandbox: the confined child did not become its own process-group leader; \
+                 running without descendant reaping — build tools it spawns may be orphaned \
+                 and keep writing after this command returns"
+            );
+        }
         #[cfg(target_os = "linux")]
         let (launched_child, child_id, signal_target, retained_monitor) =
             match self.retained_monitor.take() {
@@ -695,8 +792,8 @@ impl Prepared {
                     (outer, child_id, None, Some(session))
                 }
                 None => {
-                    // Negative = the whole process group. Valid only because the Landlock
-                    // hook made the child a session leader; see `signal_process_group`.
+                    // Negative = the whole process group, and only ever after
+                    // `confirm_group_leader`; see `signal_process_group`.
                     let target = if signal_process_group {
                         -(child.id() as i32)
                     } else {
@@ -714,7 +811,8 @@ impl Prepared {
         let child = launched_child;
         #[cfg(all(unix, not(target_os = "linux")))]
         let signal_target = {
-            let target = child.id() as i32;
+            let pid = child.id() as i32;
+            let target = if signal_process_group { -pid } else { pid };
             if let Err(error) = ready(PreparedSignalTarget::Direct(target)) {
                 kill_and_reap(&mut child, Some(target));
                 return Err(error);
@@ -732,7 +830,7 @@ impl Prepared {
             signal_target,
             #[cfg(target_os = "linux")]
             retained_monitor,
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             signal_process_group,
             _proxy: self.proxy.take(),
             #[cfg(target_os = "linux")]
@@ -1463,6 +1561,8 @@ fn generic_apply(
         proxy: None,
         #[cfg(target_os = "linux")]
         _inherited_files: Vec::new(),
+        #[cfg(unix)]
+        signal_process_group: false,
         _private_tmp: None,
         redact_stdout: false,
         redact_stderr: false,

@@ -1109,6 +1109,7 @@ mod win {
         let policy = match nub_sandbox::compile_build_jail(
             homes,
             &f.package,
+            None,
             vec![f.child.clone()],
             Vec::new(),
             ambient,
