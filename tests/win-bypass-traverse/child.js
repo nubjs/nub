@@ -203,6 +203,16 @@ async function main() {
   // Node's own `timeout` can arm), which took every op after it — the whole egress table — down
   // with it. So the marker that says "the table completed" must precede the op that can hang.
   one('child:done arm=' + ARM);
+  // OPT-IN via BT_PIPED, and only the unconfined `plain` arm sets it. Under an AppContainer this op
+  // does not fail, it SPINS — so leaving it on cost every confined arm the full launch timeout
+  // (120s x 6 arms) to produce MISSING-OP, which is what it produces when it is skipped too. The
+  // `obj-*` arms measure the same spawn with a 45s bound, a device-repair differential and a CPU
+  // sample, which is strictly more than this cell ever established.
+  if (!process.env.BT_PIPED) {
+    one('op:spawn-piped-whoami=ERR SKIPPED BT_PIPED unset — measured in the obj-* arms instead');
+    one('child:spawn-op-returned arm=' + ARM);
+    return;
+  }
   // Kept as the LAST op, and named for what it measures: a piped child_process spawn is what every
   // npm lifecycle script does, and an indefinite hang is a worse failure mode than a refusal.
   run('spawn-piped-whoami', () => {

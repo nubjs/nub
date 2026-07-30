@@ -136,6 +136,12 @@ public static class Bt
     [DllImport("kernel32.dll", SetLastError = true)] static extern uint WaitForSingleObject(IntPtr h, uint ms);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetExitCodeProcess(IntPtr h, out uint code);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool TerminateProcess(IntPtr h, uint code);
+    // Sampled on TIMEOUT only, and it is what separates the two failure shapes a hang can have:
+    // cpu ~= wall means a busy retry loop (libuv's `uv__pipe_server` incrementing a name and
+    // calling `CreateNamedPipeA` again), cpu ~= 0 means a blocking wait on something.
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetProcessTimes(IntPtr h, out long creation, out long exit,
+        out long kernel, out long user);
 
     const uint GENERIC_READ = 0x80000000, GENERIC_WRITE = 0x40000000;
     const uint FILE_SHARE_READ = 1, FILE_SHARE_WRITE = 2;
@@ -256,8 +262,11 @@ public static class Bt
             string extra = "";
             if (wr == WAIT_TIMEOUT)
             {
+                long c, x, k, u;
+                if (GetProcessTimes(pi.hProcess, out c, out x, out k, out u))
+                    extra = " cpu_ms=" + ((k + u) / 10000L);
                 TerminateProcess(pi.hProcess, 0xDEAD);
-                extra = " TIMED-OUT";
+                extra = " TIMED-OUT" + extra;
             }
             else
             {
@@ -280,6 +289,257 @@ public static class Bt
 '@
 
 Add-Type -TypeDefinition $src -Language CSharp -ErrorAction Stop
+
+# ──────────────────── the DEVICE-OBJECT security surface (separate type) ────────────────────
+#
+# A SECOND `Add-Type` on purpose. This block answers a question the launcher does not — whether an
+# unprivileged process can rewrite `\Device\Null`'s and the NPFS root's DACL — and a compile error
+# in it must degrade to "the device section is unavailable" rather than take the validated
+# filesystem table down with it. Hence its own class, its own try/catch, and `$script:HaveSec`.
+#
+# WHY A HANDLE AND NOT A NAME. `GetNamedSecurityInfoW` on `\\.\pipe\` returns
+# ERROR_INVALID_PARAMETER (87) — measured, run 30473523088 — so the name-based API cannot read a
+# device object's descriptor at all. The handle route (`CreateFileW` -> `GetSecurityInfo`
+# SE_KERNEL_OBJECT) is what Codex's `allow_null_device` uses, and it is the only one that works.
+$secSrc = @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class BtSec
+{
+    [StructLayout(LayoutKind.Sequential)]
+    struct TRUSTEE_W
+    {
+        public IntPtr pMultipleTrustee;
+        public int MultipleTrusteeOperation;
+        public int TrusteeForm;
+        public int TrusteeType;
+        public IntPtr ptstrName;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct EXPLICIT_ACCESS_W
+    {
+        public uint grfAccessPermissions;
+        public uint grfAccessMode;
+        public uint grfInheritance;
+        public TRUSTEE_W Trustee;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct SID_AND_ATTRIBUTES { public IntPtr Sid; public uint Attributes; }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateFileW")]
+    static extern IntPtr OpenObj(string name, uint access, uint share, IntPtr sa, uint disp,
+        uint flags, IntPtr templ);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr p);
+    [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern uint GetSecurityInfo(IntPtr h, int objType, uint secInfo, IntPtr owner,
+        IntPtr group, out IntPtr dacl, IntPtr sacl, out IntPtr sd);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern uint SetSecurityInfo(IntPtr h, int objType, uint secInfo, IntPtr owner,
+        IntPtr group, IntPtr dacl, IntPtr sacl);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern uint SetEntriesInAclW(uint count, ref EXPLICIT_ACCESS_W list, IntPtr oldAcl,
+        out IntPtr newAcl);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool ConvertSecurityDescriptorToStringSecurityDescriptorW(IntPtr sd, uint rev,
+        uint secInfo, out IntPtr str, out uint len);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool ConvertStringSidToSidW(string s, out IntPtr sid);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool OpenProcessToken(IntPtr proc, uint access, out IntPtr tok);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool CreateRestrictedToken(IntPtr existing, uint flags, uint disableCount,
+        IntPtr sidsToDisable, uint delPrivCount, IntPtr privsToDelete, uint restrictCount,
+        IntPtr sidsToRestrict, out IntPtr newTok);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool DuplicateTokenEx(IntPtr tok, uint access, IntPtr sa, int impLevel,
+        int tokType, out IntPtr newTok);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool SetTokenInformation(IntPtr tok, int cls, IntPtr info, uint len);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool ImpersonateLoggedOnUser(IntPtr tok);
+    [DllImport("advapi32.dll", SetLastError = true)] static extern bool RevertToSelf();
+
+    const int SE_KERNEL_OBJECT = 6;
+    const uint OWNER_SI = 1, GROUP_SI = 2, DACL_SI = 4;
+    const uint OPEN_EXISTING = 3;
+    const uint FILE_SHARE_RW = 3;
+    // FILE_FLAG_BACKUP_SEMANTICS is what lets `CreateFileW` open a DIRECTORY object, which is what
+    // the NPFS root (`\\.\pipe\`) is. Without it the open fails and reads as "no such device".
+    const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+    const uint TRUSTEE_IS_SID = 0, TRUSTEE_IS_UNKNOWN = 0;
+    const uint SET_ACCESS = 2, REVOKE_ACCESS = 4;
+    const int TokenIntegrityLevel = 25;
+    const uint SE_GROUP_INTEGRITY = 0x20;
+
+    public const uint READ_CONTROL = 0x00020000, WRITE_DAC = 0x00040000;
+    // Codex's `allow_null_device` mask, reproduced exactly so this measures THEIR remedy rather
+    // than a looser one of ours: FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE.
+    public const uint NUL_MASK = 0x00120089 | 0x00120116 | 0x001200A0;
+    // The NPFS root is a directory and the operation to re-open is CREATING a pipe in it, so the
+    // loose mask is the right FIRST cell: if FILE_ALL_ACCESS does not work, nothing narrower will.
+    public const uint FILE_ALL_ACCESS = 0x001F01FF;
+
+    static IntPtr Open(string path, uint access)
+    {
+        uint flags = path.EndsWith("\\") ? FILE_FLAG_BACKUP_SEMANTICS : 0;
+        return OpenObj(path, access, FILE_SHARE_RW, IntPtr.Zero, OPEN_EXISTING, flags, IntPtr.Zero);
+    }
+
+    /// The object's owner, group and DACL as SDDL. SACL is deliberately NOT requested: reading it
+    /// needs ACCESS_SYSTEM_SECURITY, i.e. SeSecurityPrivilege, which a standard user lacks — asking
+    /// for it would make this read fail for a reason unrelated to what it measures.
+    public static string Sddl(string path)
+    {
+        IntPtr h = Open(path, READ_CONTROL);
+        if (h == new IntPtr(-1)) return "ERR open err=" + Marshal.GetLastWin32Error();
+        IntPtr dacl, sd;
+        try
+        {
+            uint rc = GetSecurityInfo(h, SE_KERNEL_OBJECT, OWNER_SI | GROUP_SI | DACL_SI,
+                IntPtr.Zero, IntPtr.Zero, out dacl, IntPtr.Zero, out sd);
+            if (rc != 0) return "ERR getsecurityinfo rc=" + rc;
+            IntPtr str; uint len;
+            if (!ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, 1,
+                    OWNER_SI | GROUP_SI | DACL_SI, out str, out len))
+                return "ERR tosddl err=" + Marshal.GetLastWin32Error();
+            string s = Marshal.PtrToStringUni(str);
+            LocalFree(str);
+            LocalFree(sd);
+            return s;
+        }
+        finally { CloseHandle(h); }
+    }
+
+    /// Just the OPEN, so "can this context obtain WRITE_DAC" is measured independently of whether
+    /// the subsequent rewrite succeeds. A refusal here is the whole answer to the privilege
+    /// question; a refusal later would be something else entirely.
+    public static string CanOpen(string path, uint access)
+    {
+        IntPtr h = Open(path, access);
+        if (h == new IntPtr(-1)) return "ERR err=" + Marshal.GetLastWin32Error();
+        CloseHandle(h);
+        return "OK";
+    }
+
+    static string Edit(string path, string sidStr, uint mask, uint mode)
+    {
+        IntPtr sid;
+        if (!ConvertStringSidToSidW(sidStr, out sid))
+            return "ERR sid err=" + Marshal.GetLastWin32Error();
+        IntPtr h = Open(path, READ_CONTROL | WRITE_DAC);
+        if (h == new IntPtr(-1))
+        {
+            LocalFree(sid);
+            return "ERR open err=" + Marshal.GetLastWin32Error();
+        }
+        IntPtr newDacl = IntPtr.Zero;
+        try
+        {
+            IntPtr dacl, sd;
+            uint rc = GetSecurityInfo(h, SE_KERNEL_OBJECT, DACL_SI, IntPtr.Zero, IntPtr.Zero,
+                out dacl, IntPtr.Zero, out sd);
+            if (rc != 0) return "ERR getsecurityinfo rc=" + rc;
+            EXPLICIT_ACCESS_W ea = new EXPLICIT_ACCESS_W();
+            ea.grfAccessPermissions = mask;
+            ea.grfAccessMode = mode;
+            ea.grfInheritance = 0;
+            ea.Trustee.TrusteeForm = (int)TRUSTEE_IS_SID;
+            ea.Trustee.TrusteeType = (int)TRUSTEE_IS_UNKNOWN;
+            ea.Trustee.ptstrName = sid;
+            uint rc2 = SetEntriesInAclW(1, ref ea, dacl, out newDacl);
+            if (rc2 != 0) return "ERR setentriesinacl rc=" + rc2;
+            uint rc3 = SetSecurityInfo(h, SE_KERNEL_OBJECT, DACL_SI, IntPtr.Zero, IntPtr.Zero,
+                newDacl, IntPtr.Zero);
+            LocalFree(sd);
+            if (rc3 != 0) return "ERR setsecurityinfo rc=" + rc3;
+            return "OK";
+        }
+        finally
+        {
+            if (newDacl != IntPtr.Zero) LocalFree(newDacl);
+            CloseHandle(h);
+            LocalFree(sid);
+        }
+    }
+
+    public static string Grant(string path, string sidStr, uint mask) { return Edit(path, sidStr, mask, SET_ACCESS); }
+    public static string Revoke(string path, string sidStr) { return Edit(path, sidStr, 0, REVOKE_ACCESS); }
+
+    /// Run `CanOpen` under a DE-ELEVATED impersonation of our own token: Administrators disabled
+    /// (deny-only), every removable privilege dropped, integrity lowered to Medium — the access
+    /// check a standard user gets. The GitHub runner is `runneradmin` and elevated, so an
+    /// elevated-only success would be worthless as evidence for nub's shipping case; this is the
+    /// arm that makes the privilege answer real rather than assumed.
+    ///
+    /// The failure modes are reported DISTINCTLY (`setup-` prefix) because "we could not build the
+    /// de-elevated context" and "the de-elevated context was refused" are opposite conclusions.
+    public static string CanOpenDeElevated(string path, uint access)
+    {
+        IntPtr own = IntPtr.Zero, restricted = IntPtr.Zero, imp = IntPtr.Zero;
+        IntPtr adminSid = IntPtr.Zero, disable = IntPtr.Zero, ilSid = IntPtr.Zero, label = IntPtr.Zero;
+        try
+        {
+            if (!OpenProcessToken(GetCurrentProcess(), 0x0002 | 0x0008, out own))
+                return "ERR setup-openprocesstoken err=" + Marshal.GetLastWin32Error();
+            if (!ConvertStringSidToSidW("BA", out adminSid))
+                return "ERR setup-adminsid err=" + Marshal.GetLastWin32Error();
+            SID_AND_ATTRIBUTES sa = new SID_AND_ATTRIBUTES();
+            sa.Sid = adminSid;
+            sa.Attributes = 0;
+            disable = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(SID_AND_ATTRIBUTES)));
+            Marshal.StructureToPtr(sa, disable, false);
+            // DISABLE_MAX_PRIVILEGE(0x1) additionally deletes every privilege but SeChangeNotify.
+            if (!CreateRestrictedToken(own, 0x1, 1, disable, 0, IntPtr.Zero, 0, IntPtr.Zero,
+                    out restricted))
+                return "ERR setup-createrestrictedtoken err=" + Marshal.GetLastWin32Error();
+            if (!DuplicateTokenEx(restricted, 0x000F01FF, IntPtr.Zero, 2, 2, out imp))
+                return "ERR setup-duplicatetokenex err=" + Marshal.GetLastWin32Error();
+            if (!ConvertStringSidToSidW("S-1-16-8192", out ilSid))
+                return "ERR setup-ilsid err=" + Marshal.GetLastWin32Error();
+            SID_AND_ATTRIBUTES il = new SID_AND_ATTRIBUTES();
+            il.Sid = ilSid;
+            il.Attributes = SE_GROUP_INTEGRITY;
+            label = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(SID_AND_ATTRIBUTES)));
+            Marshal.StructureToPtr(il, label, false);
+            if (!SetTokenInformation(imp, TokenIntegrityLevel, label,
+                    (uint)Marshal.SizeOf(typeof(SID_AND_ATTRIBUTES))))
+                return "ERR setup-setintegrity err=" + Marshal.GetLastWin32Error();
+            // A token derived from our OWN is impersonable without SeImpersonatePrivilege, which a
+            // standard user does not hold (§5e measured `CreateProcessWithTokenW` failing 1314 for
+            // exactly that reason). If this call is what fails, the arm reports `setup-` and the
+            // privilege question stays open rather than being answered wrongly.
+            if (!ImpersonateLoggedOnUser(imp))
+                return "ERR setup-impersonate err=" + Marshal.GetLastWin32Error();
+            try { return CanOpen(path, access); }
+            finally { RevertToSelf(); }
+        }
+        finally
+        {
+            if (label != IntPtr.Zero) Marshal.FreeHGlobal(label);
+            if (disable != IntPtr.Zero) Marshal.FreeHGlobal(disable);
+            if (ilSid != IntPtr.Zero) LocalFree(ilSid);
+            if (adminSid != IntPtr.Zero) LocalFree(adminSid);
+            if (imp != IntPtr.Zero) CloseHandle(imp);
+            if (restricted != IntPtr.Zero) CloseHandle(restricted);
+            if (own != IntPtr.Zero) CloseHandle(own);
+        }
+    }
+}
+'@
+
+$script:HaveSec = $false
+try {
+  Add-Type -TypeDefinition $secSrc -Language CSharp -ErrorAction Stop
+  $script:HaveSec = $true
+} catch {
+  W "  fact:device-security-type-compile = ERR $_"
+}
 
 # ─────────────────────────────── host facts ───────────────────────────────
 
@@ -304,6 +564,103 @@ Fact 'node-version' (& node -p 'process.versions.node')
 foreach ($p in @('C:\', 'C:\Users', $env:USERPROFILE)) {
   W "  fact:icacls[$p] ="
   (icacls $p 2>&1) | ForEach-Object { W ("    " + $_) }
+}
+
+# ──────────────── DEVICE OBJECTS: `\Device\Null` and the NPFS root ────────────────
+#
+# THE CANDIDATE. Microsoft's mxc documents `\Device\Null` as a hard blocker for its own
+# AppContainer backends (`docs/host-prep.md`, `prepare-null-device`): "the Windows kernel resets the
+# SD to a default value at every boot; for the AppContainer-based backends the default does not
+# include the well-known AppContainer SIDs, and processes that open `NUL` for stdin/stdout/stderr
+# redirection fail with ERROR_ACCESS_DENIED partway through startup." Their remedy runs ELEVATED,
+# once per boot — disqualifying for nub. Codex performs the same repair UNPRIVILEGED and
+# best-effort (`windows-sandbox-rs/src/acl.rs` `allow_null_device`), so the question is which of
+# those two is right about the privilege it takes.
+#
+# THE EXTENSION, and the bigger prize. The refused named-pipe namespace is the same SHAPE of
+# problem on a different device: every `\\.\pipe\…` `CreateNamedPipeW` is ACCESS_DENIED to a LowBox
+# token while `\\.\pipe\LOCAL\…` is created (measured, run 30473523088), and libuv's stdio path
+# spells the global form. If the NPFS root's DACL is unprivileged-writable the piped-spawn hang is
+# fixable with no libuv change at all, so both devices are measured with the same three cells.
+#
+# THE ONE-VARIABLE PAIR that makes the privilege answer real: READ_CONTROL and WRITE_DAC requested
+# from the SAME de-elevated impersonation context. Without the READ_CONTROL control a WRITE_DAC
+# refusal cannot be told from an impersonation that never took effect.
+W ''
+W '== device object security =='
+Prop 'device-security-section-available' $script:HaveSec `
+  'the device-object P/Invoke type must compile, or every cell below is absent rather than negative'
+
+$devNull = '\\.\NUL'
+$npfsRoot = '\\.\pipe\'
+$nullSddl = ''
+$npfsSddl = ''
+if ($script:HaveSec) {
+  $nullSddl = [BtSec]::Sddl($devNull)
+  $npfsSddl = [BtSec]::Sddl($npfsRoot)
+  Fact 'sddl[\Device\Null]' $nullSddl
+  Fact 'sddl[NPFS root]' $npfsSddl
+  Prop 'device-sd-read-works' (($nullSddl -notlike 'ERR*') -and ($npfsSddl -notlike 'ERR*')) `
+    "both descriptors must be readable or nothing below is interpretable: null=$nullSddl npfs=$npfsSddl"
+
+  # THE PRECONDITION mxc states. `AC` is the SDDL abbreviation for S-1-15-2-1 (ALL APPLICATION
+  # PACKAGES) and `S-1-15-2-2` is ALL RESTRICTED APPLICATION PACKAGES; either, or any `S-1-15-*`
+  # trustee, would mean the default already admits an AppContainer and the candidate's premise is
+  # false on this image. Matched on both spellings because SDDL emits the abbreviation when one
+  # exists and the raw sid otherwise.
+  # `RC` (RESTRICTED, S-1-5-12) is deliberately NOT counted: mxc's target SDDL grants it, but it is
+  # a restricted-token trustee, not an AppContainer one, and counting it would make the precondition
+  # read as already-satisfied for a reason that has nothing to do with a LowBox token.
+  function Has-AcTrustee([string]$sddl) {
+    return ($sddl -match ';AC\)') -or ($sddl -match ';S-1-15-')
+  }
+  Fact 'null-device-names-an-appcontainer-trustee' (Has-AcTrustee $nullSddl)
+  Fact 'npfs-root-names-an-appcontainer-trustee' (Has-AcTrustee $npfsSddl)
+  Prop 'null-device-default-sd-excludes-appcontainer-sids' (-not (Has-AcTrustee $nullSddl)) `
+    "mxc's stated precondition: the boot default must name no AppContainer trustee. FAIL here means the premise does not hold on this image, which is itself the finding: $nullSddl"
+
+  # The NPFS root has no single canonical Win32 spelling and `GetNamedSecurityInfoW` on it returns
+  # ERROR_INVALID_PARAMETER (run 30473523088), so the alternatives are reported rather than assumed:
+  # a failed open on ONE name must not be read as "the device has no descriptor".
+  foreach ($alt in @('\\.\pipe\', '\\?\pipe\', '\\.\PIPE\')) {
+    Fact "npfs-open-spelling[$alt]" ([BtSec]::CanOpen($alt, [BtSec]::READ_CONTROL))
+  }
+
+  foreach ($pair in @(@('null', $devNull), @('npfs', $npfsRoot))) {
+    $tag = $pair[0]; $obj = $pair[1]
+    Fact "$tag/open-read-control-elevated-context" ([BtSec]::CanOpen($obj, [BtSec]::READ_CONTROL))
+    Fact "$tag/open-write-dac-elevated-context" ([BtSec]::CanOpen($obj, [BtSec]::READ_CONTROL -bor [BtSec]::WRITE_DAC))
+    Fact "$tag/open-read-control-deelevated" ([BtSec]::CanOpenDeElevated($obj, [BtSec]::READ_CONTROL))
+    Fact "$tag/open-write-dac-deelevated" ([BtSec]::CanOpenDeElevated($obj, [BtSec]::READ_CONTROL -bor [BtSec]::WRITE_DAC))
+  }
+  $nullRcDe = [BtSec]::CanOpenDeElevated($devNull, [BtSec]::READ_CONTROL)
+  $nullWdDe = [BtSec]::CanOpenDeElevated($devNull, [BtSec]::READ_CONTROL -bor [BtSec]::WRITE_DAC)
+  $npfsRcDe = [BtSec]::CanOpenDeElevated($npfsRoot, [BtSec]::READ_CONTROL)
+  $npfsWdDe = [BtSec]::CanOpenDeElevated($npfsRoot, [BtSec]::READ_CONTROL -bor [BtSec]::WRITE_DAC)
+  Prop 'deelevated-context-is-live' (($nullRcDe -eq 'OK') -and ($npfsRcDe -eq 'OK')) `
+    "the de-elevated impersonation must still obtain READ_CONTROL on both devices, or a WRITE_DAC refusal below is about the harness rather than about privilege: null=$nullRcDe npfs=$npfsRcDe"
+  Prop 'unprivileged-write-dac-on-null-device' ($nullWdDe -eq 'OK') `
+    "THE question mxc and Codex disagree about — can a standard user rewrite \Device\Null's DACL: $nullWdDe"
+  Prop 'unprivileged-write-dac-on-npfs-root' ($npfsWdDe -eq 'OK') `
+    "the same question for the named-pipe root, where a yes would fix the piped-spawn hang with no libuv change: $npfsWdDe"
+
+  # A THROWAWAY AppContainer sid, so the grant/revoke round trip is exercised against the same kind
+  # of trustee the arms use — and revoked immediately, since a device DACL is machine-global.
+  $devProbeName = "nubbt_dev_$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+  $devProbeSid = [Bt]::CreateProfile($devProbeName)
+  Fact 'device-probe-sid' $devProbeSid
+  if ($devProbeSid -notlike 'ERR*') {
+    Fact 'null/grant-roundtrip' ([BtSec]::Grant($devNull, $devProbeSid, [BtSec]::NUL_MASK))
+    $afterGrant = [BtSec]::Sddl($devNull)
+    Fact 'null/sddl-names-probe-sid-after-grant' ($afterGrant -match [Regex]::Escape($devProbeSid))
+    Fact 'null/revoke-roundtrip' ([BtSec]::Revoke($devNull, $devProbeSid))
+    $afterRevoke = [BtSec]::Sddl($devNull)
+    Fact 'null/sddl-names-probe-sid-after-revoke' ($afterRevoke -match [Regex]::Escape($devProbeSid))
+    Prop 'null-device-grant-is-reversible' (($afterGrant -match [Regex]::Escape($devProbeSid)) -and
+      (-not ($afterRevoke -match [Regex]::Escape($devProbeSid)))) `
+      "a machine-global device DACL edit must be provably revertible before any arm relies on it: present-after-grant=$($afterGrant -match [Regex]::Escape($devProbeSid)) present-after-revoke=$($afterRevoke -match [Regex]::Escape($devProbeSid))"
+    Fact 'device-probe-profile-deleted' ([Bt]::DeleteProfile($devProbeName))
+  }
 }
 
 # ─────────────────────────────── fixture ───────────────────────────────
@@ -521,7 +878,20 @@ function Invoke-Arm {
     # Derive the package sid by hashing the name instead of registering a profile. If a launch
     # works this way, the mechanism writes NO persistent state at all — a stronger zero-setup
     # answer than "it cleans up after itself".
-    [switch]$DeriveOnly
+    [switch]$DeriveOnly,
+    # 120s is right for the fs table, whose only hanging op is now opt-in. The object arms carry an
+    # op that spins FOREVER, and a 120s bound there would cost the run twelve minutes to learn
+    # something a 45s bound establishes just as well.
+    [int]$TimeoutMs = 120000,
+    # Grant this arm's per-run AC sid on `\Device\Null` / the NPFS root for the duration of the
+    # launch. Per-run sids are what make these arms inherently one-variable: each arm's grant names
+    # a trustee no other arm has, so a revoke that failed cannot silently treat a later arm.
+    [switch]$RepairNull,
+    [switch]$RepairNpfs,
+    # `child.js`'s piped spawn is opt-in because it does not fail, it spins — leaving it on cost
+    # every AppContainer arm the full launch timeout while reporting MISSING-OP either way. The
+    # object arms measure the same thing with a repair differential and a bound.
+    [switch]$Piped
   )
   W ''
   W "== arm $Name =="
@@ -544,10 +914,31 @@ function Invoke-Arm {
     if ($sid -like 'ERR*') { $script:fails++; return }
   }
   $granted = @()
+  $devGranted = @()
   try {
     foreach ($p in $GrantRX) { Grant-Ace $p $sid 'ReadAndExecute'; $granted += $p }
     foreach ($p in $GrantModify) { Grant-Ace $p $sid 'Modify'; $granted += $p }
     Fact "$Name/grants" $(if ($granted.Count) { ($granted -join ' ; ') } else { '(none)' })
+
+    # THE DEVICE REPAIRS, and their read-back. Same discipline as the deep file's DACL below: a
+    # grant that never landed would make the treatment arm fail for a reason with nothing to do
+    # with the device, which reads exactly like "the repair does not help".
+    $nullAce = 'none'
+    $npfsAce = 'none'
+    if ($script:HaveSec -and $AppContainer) {
+      if ($RepairNull) {
+        Fact "$Name/repair-null-device" ([BtSec]::Grant('\\.\NUL', $sid, [BtSec]::NUL_MASK))
+        $devGranted += '\\.\NUL'
+      }
+      if ($RepairNpfs) {
+        Fact "$Name/repair-npfs-root" ([BtSec]::Grant('\\.\pipe\', $sid, [BtSec]::FILE_ALL_ACCESS))
+        $devGranted += '\\.\pipe\'
+      }
+      if ([BtSec]::Sddl('\\.\NUL') -match [Regex]::Escape($sid)) { $nullAce = 'present' }
+      if ([BtSec]::Sddl('\\.\pipe\') -match [Regex]::Escape($sid)) { $npfsAce = 'present' }
+    }
+    Fact "$Name/null-device-dacl-for-ac-sid" $nullAce
+    Fact "$Name/npfs-root-dacl-for-ac-sid" $npfsAce
 
     # READ THE DECISIVE TARGET'S DACL BACK. The grant is written on an ANCESTOR as an inheritable
     # ace and relies on `SetNamedSecurityInfo` propagating it into the already-existing deep file.
@@ -565,12 +956,13 @@ function Invoke-Arm {
     Fact "$Name/deep-file-dacl-for-ac-sid" $deepAce
 
     $env:BT_ARM = $Name
+    $env:BT_PIPED = $(if ($Piped) { '1' } else { '' })
     $log = Join-Path $logDir "$Name.log"
     $entry = if ($EntryFile) { $EntryFile } else { $jailChild }
     $flagPart = if ($NodeFlags.Count) { ' ' + ($NodeFlags -join ' ') } else { '' }
     $cmdline = '"' + $jailNode + '"' + $flagPart + ' "' + $entry + '"'
     $sw = [Diagnostics.Stopwatch]::StartNew()
-    $status = [Bt]::Launch($sid, $jailNode, $cmdline, $Cwd, $log, 120000)
+    $status = [Bt]::Launch($sid, $jailNode, $cmdline, $Cwd, $log, $TimeoutMs)
     $sw.Stop()
     Fact "$Name/launch" "$status in $($sw.ElapsedMilliseconds)ms cwd=$Cwd"
     Fact "$Name/cmdline" $cmdline
@@ -586,26 +978,37 @@ function Invoke-Arm {
     # Harness-side cells, not child observations — hence the `dacl:`/`log:` prefixes on the detail
     # so a reader never mistakes them for something the confined process reported.
     $arm['dacl-grants-ac-sid'] = @($(if ($deepAce -eq 'none') { 'ERR' } else { 'OK' }), "dacl:$deepAce")
+    $arm['null-dacl-grants-ac-sid'] = @($(if ($nullAce -eq 'present') { 'OK' } else { 'ERR' }), "dacl:$nullAce")
+    $arm['npfs-dacl-grants-ac-sid'] = @($(if ($npfsAce -eq 'present') { 'OK' } else { 'ERR' }), "dacl:$npfsAce")
     # Did the child die in Node's own realpath walk on the volume root, before user code? This is
     # a property of the LOG, not of an op line — an unflagged confined node emits no op lines at
     # all, so without this cell that arm is indistinguishable from a launch that never happened.
     $raw = ($lines -join "`n")
     $diedRealpath = ($raw -match "EPERM") -and ($raw -match "lstat") -and ($raw -match "realpathSync")
     $arm['node-died-realpath-c-root'] = @($(if ($diedRealpath) { 'OK' } else { 'ERR' }), 'log:derived')
-    $arm['__opcount'] = @(@($arm.Keys | Where-Object { $_ -notlike '__*' -and $_ -notlike 'dacl-*' -and $_ -ne 'node-died-realpath-c-root' }).Count, '')
+    # `*dacl*` and `node-died-*` are harness-side cells, not child observations, so they must not
+    # inflate the op count the flag differential asserts on (`ac-noflags` must report EXACTLY 0).
+    $arm['__opcount'] = @(@($arm.Keys | Where-Object { $_ -notlike '__*' -and $_ -notlike '*dacl*' -and $_ -ne 'node-died-realpath-c-root' }).Count, '')
     $arm['__launch'] = @($status, '')
     $arm['__lines'] = @($lines.Count, '')
     $cells[$Name] = $arm
   }
   finally {
     foreach ($p in $granted) { try { Revoke-Ace $p $sid } catch { W "    revoke failed on $p : $_" } }
+    # A device DACL is MACHINE-GLOBAL, so its revoke is reported rather than done silently: a
+    # residual ace on `\Device\Null` would be state this probe left on the host.
+    foreach ($d in $devGranted) {
+      Fact "$Name/device-revoke[$d]" ([BtSec]::Revoke($d, $sid))
+    }
     if ($profileName) { Fact "$Name/profile-deleted" ([Bt]::DeleteProfile($profileName)) }
   }
 }
 
 # 1. The control that makes every other row readable: identical child, identical paths, no
-#    SECURITY_CAPABILITIES, no ACEs (the user already owns its own profile).
-Invoke-Arm -Name 'plain' -AppContainer $false -Cwd $runtimeDir
+#    SECURITY_CAPABILITIES, no ACEs (the user already owns its own profile). `-Piped` only here:
+#    the unconfined arm is where the piped spawn RETURNS, so it is the one arm where measuring it
+#    costs nothing and yields the allow half of the differential.
+Invoke-Arm -Name 'plain' -AppContainer $false -Cwd $runtimeDir -Piped
 
 # 2. The realistic shape — ONE inheritable grant at a project root directly beneath the profile.
 #    Ungranted ancestors: %USERPROFILE%, C:\Users, C:\.
@@ -642,6 +1045,37 @@ Invoke-Arm -Name 'ac-noflags' -AppContainer $true -GrantRX @($runtimeDir) `
 #    fresh machine work" than measuring that Delete cleans up after Create.
 Invoke-Arm -Name 'ac-derive-only' -AppContainer $true -DeriveOnly -GrantRX @($runtimeDir) `
   -GrantModify @($dataDir) -Cwd $runtimeDir
+
+# ────────────────── THE OBJECT ARMS: NUL, the pipe namespaces, the stdio shapes ──────────────────
+#
+# Five arms, each one variable from its neighbour, all running `child-objects.js` with the SAME
+# grants as arm 3 so the filesystem side is held constant and only the device treatment moves:
+#
+#   obj-plain             UNCONFINED. Every cell must pass. Without it a table of failures in every
+#                         confined arm is indistinguishable from a broken child — the exact false
+#                         negative that has burned two lanes on this effort.
+#   obj-ac-baseline       confined, devices AS SHIPPED. The as-is state of the blocker.
+#   obj-ac-nulfix         confined, `\Device\Null` granted to this arm's sid. ONE variable.
+#   obj-ac-npfsfix        confined, NPFS root granted to this arm's sid. ONE variable.
+#   obj-ac-baseline-again confined, devices as shipped again, run LAST. §5e's `core-js` false
+#                         positive was a persistent marker outside the fixture faking a
+#                         regression; a device DACL is machine-global, so a repair whose revoke
+#                         silently failed would make this arm look repaired. Re-running the
+#                         baseline last is what catches that.
+$objSink = Join-Path $dataDir 'obj-sink.txt'
+$env:BT_OBJ_SINK = $objSink
+$objChild = Join-Path $runtimeDir 'child-objects.js'
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'child-objects.js') -Destination $objChild -Force
+
+Invoke-Arm -Name 'obj-plain' -AppContainer $false -Cwd $runtimeDir -EntryFile $objChild -TimeoutMs 45000
+Invoke-Arm -Name 'obj-ac-baseline' -AppContainer $true -GrantRX @($runtimeDir) `
+  -GrantModify @($dataDir) -Cwd $runtimeDir -EntryFile $objChild -TimeoutMs 45000
+Invoke-Arm -Name 'obj-ac-nulfix' -AppContainer $true -GrantRX @($runtimeDir) `
+  -GrantModify @($dataDir) -Cwd $runtimeDir -EntryFile $objChild -TimeoutMs 45000 -RepairNull
+Invoke-Arm -Name 'obj-ac-npfsfix' -AppContainer $true -GrantRX @($runtimeDir) `
+  -GrantModify @($dataDir) -Cwd $runtimeDir -EntryFile $objChild -TimeoutMs 45000 -RepairNpfs
+Invoke-Arm -Name 'obj-ac-baseline-again' -AppContainer $true -GrantRX @($runtimeDir) `
+  -GrantModify @($dataDir) -Cwd $runtimeDir -EntryFile $objChild -TimeoutMs 45000
 
 # ── ACE RESIDUE: what does a run leave behind on the project tree? ──
 # Every grant is revoked in each arm's `finally`, so a residual ace naming a now-dead sid would

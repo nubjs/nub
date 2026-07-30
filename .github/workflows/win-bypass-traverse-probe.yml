@@ -21,7 +21,7 @@ name: win-bypass-traverse-probe
 
 on:
   push:
-    branches: [sandbox/win-bypass-traverse]
+    branches: [sandbox/win-bypass-traverse, sandbox/win-null-device]
   workflow_dispatch: # inert until this file reaches the default branch; `push` is what fires it
 
 permissions:
@@ -118,6 +118,31 @@ jobs:
                    bypass-traverse-child-chdir-deep bypass-traverse-node-entry-deep \
                    secrets-under-profile-are-denied \
                    egress-denied-with-zero-capabilities; do need "$p"; done
+
+          # ── THE DEVICE-OBJECT QUESTION: \Device\Null and the NPFS root ──
+          # The privilege answer comes FIRST for the same reason the zero-setup gate does: a repair
+          # that needs admin is disqualified for nub whatever else it fixes, so its verdict is not
+          # something to read after a table of capabilities.
+          echo "── device objects: can an UNPRIVILEGED process rewrite them (reported first) ──"
+          for p in device-security-section-available device-sd-read-works deelevated-context-is-live \
+                   null-device-grant-is-reversible; do need "$p"; done
+          for p in unprivileged-write-dac-on-null-device unprivileged-write-dac-on-npfs-root \
+                   null-device-default-sd-excludes-appcontainer-sids; do need "$p"; done
+          grep -E '^  fact:(sddl\[|null/|npfs|null-device|device-probe)' probe.log ||
+            echo "(no device facts — the section did not run)"
+
+          echo "── object-arm controls (a red one invalidates the object table) ──"
+          for p in obj-baseline-unconfined-passes-everything obj-confined-arms-launched \
+                   obj-device-repair-reached-the-object baseline-repeats-after-every-repair \
+                   inherit-stdio-works-under-the-jail; do need "$p"; done
+
+          echo "── the blocker, as shipped and under each repair ──"
+          for p in obj-nul-device-refused-as-shipped \
+                   obj-global-pipe-namespace-refused-local-permitted \
+                   obj-piped-spawn-hangs-as-shipped \
+                   nul-repair-fixes-the-nul-device nul-repair-fixes-stdio-ignore \
+                   nul-repair-does-not-fix-the-piped-hang npfs-repair-fixes-the-piped-hang \
+                   fdfile-mitigation-works-under-the-jail; do need "$p"; done
 
           echo
           echo "── result ──"

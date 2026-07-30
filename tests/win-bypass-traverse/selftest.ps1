@@ -90,6 +90,43 @@ $acNoFlagsArm = Mk @{ 'node-died-realpath-c-root' = 'OK' } 20 'rc=1 (0x00000001)
 # the no-flag arm in a world where the defect does NOT reproduce (so the differential must fail)
 $acNoFlagsRan = Mk (Ops 'OK' 'ERR' 'ERR' 'OK' 'ERR' 'OK' 'ERR') 40 'rc=0 (0x00000000)' 25
 
+# ── THE OBJECT WORLDS ─────────────────────────────────────────────────────────────────────────
+# Same discipline, applied to the device question. The failure this guards against is specific and
+# has a precedent in this very harness (`grant-never-landed`): concluding "the \Device\Null repair
+# does not fix the hang" from an arm where the repair never reached the device.
+#
+# A HANGING ARM IS MODELLED BY OMITTING `spawn-piped` ENTIRELY, because that is exactly what the
+# real thing produces — the op never returns, so its line is never written and `Cell` reports
+# MISSING-OP. Modelling it as `ERR` would be modelling a refusal, which is the opposite finding.
+function ObjArm([string]$nul, [string]$globalPipe, [string]$ignore, [string]$piped,
+                [string]$nullDacl = 'ERR', [string]$npfsDacl = 'ERR') {
+  $h = @{
+    'nul-open-read' = $nul; 'nul-open-write' = $nul
+    'pipe-listen-global' = $globalPipe; 'pipe-listen-local' = 'OK'
+    'spawn-inherit' = 'OK'; 'spawn-ignore' = $ignore; 'spawn-fdfile' = 'OK'
+    'null-dacl-grants-ac-sid' = $nullDacl; 'npfs-dacl-grants-ac-sid' = $npfsDacl
+  }
+  if ($piped -ne 'HANG') { $h['spawn-piped'] = $piped }
+  return $h
+}
+function Merge([hashtable]$a, [hashtable]$b) {
+  $h = @{}
+  foreach ($k in $a.Keys) { $h[$k] = $a[$k] }
+  foreach ($k in $b.Keys) { $h[$k] = $b[$k] }
+  return $h
+}
+
+# THE PREDICTED WORLD, straight off libuv's source: `uv__create_nul_handle` is reached only from the
+# UV_IGNORE branch, so the NUL repair fixes `stdio:'ignore'` and cannot touch the piped path, while
+# the NPFS repair re-opens the global name libuv's stdio path spells and therefore unhangs it.
+$objPredicted = @{
+  'obj-plain' = Mk (ObjArm 'OK' 'OK' 'OK' 'OK')
+  'obj-ac-baseline' = Mk (ObjArm 'ERR' 'ERR' 'ERR' 'HANG')
+  'obj-ac-nulfix' = Mk (ObjArm 'OK' 'ERR' 'OK' 'HANG' 'OK' 'ERR')
+  'obj-ac-npfsfix' = Mk (ObjArm 'ERR' 'OK' 'ERR' 'OK' 'ERR' 'OK')
+  'obj-ac-baseline-again' = Mk (ObjArm 'ERR' 'ERR' 'ERR' 'HANG')
+}
+
 $worlds = @{
   'works' = @{
     plain = Mk $plainOK; 'ac-root-grant' = Mk $acWorks; 'ac-leaf-grants' = Mk $acWorks
@@ -127,6 +164,33 @@ $worlds = @{
     'ac-noflags' = $acNoFlagsRan
   }
 }
+
+# The fs worlds carry the PREDICTED object arms so the object verdict is never evaluated against
+# absent arms; the four worlds below then vary exactly one object fact each.
+$fsWorks = $worlds['works']
+foreach ($w in @($worlds.Keys)) { $worlds[$w] = Merge $worlds[$w] $objPredicted }
+
+$worlds['obj-nul-fixes-the-hang-too'] = Merge $fsWorks (Merge $objPredicted @{
+  # The NUL repair ALSO unhangs the piped spawn — contradicting the source-level prediction. Must be
+  # LOUD, not absorbed: `nul-repair-does-not-fix-the-piped-hang` is written so a FAIL means exactly
+  # "the repair had a broader effect than predicted", which is a finding and not a harness fault.
+  'obj-ac-nulfix' = Mk (ObjArm 'OK' 'ERR' 'OK' 'OK' 'OK' 'ERR')
+})
+$worlds['obj-repair-never-landed'] = Merge $fsWorks (Merge $objPredicted @{
+  # THE FALSE NEGATIVE. Cell-for-cell identical to the baseline in both repaired arms — because the
+  # ace never reached the device — which reads exactly like "neither repair helps". Only the DACL
+  # read-back tells them apart.
+  'obj-ac-nulfix' = Mk (ObjArm 'ERR' 'ERR' 'ERR' 'HANG' 'ERR' 'ERR')
+  'obj-ac-npfsfix' = Mk (ObjArm 'ERR' 'ERR' 'ERR' 'HANG' 'ERR' 'ERR')
+})
+$worlds['obj-baseline-leaked'] = Merge $fsWorks (Merge $objPredicted @{
+  # A revoke that silently failed leaves a MACHINE-GLOBAL device open, so the repeat baseline reads
+  # as repaired. Without the repeat arm this world is indistinguishable from the predicted one.
+  'obj-ac-baseline-again' = Mk (ObjArm 'OK' 'OK' 'OK' 'OK' 'OK' 'OK')
+})
+$worlds['obj-harness-dead'] = Merge $fsWorks (Merge $objPredicted @{
+  'obj-plain' = Mk (ObjArm 'ERR' 'ERR' 'ERR' 'HANG') 0 'launch-error CreateProcessW err=2'
+})
 
 # Property name -> expected outcome, per world. A property missing from a world's map is not
 # asserted; every property the world is ABOUT is asserted explicitly.
@@ -205,9 +269,51 @@ $expect = @{
   }
 }
 
+# Every fs world now carries the predicted object arms, so the object verdict must come back fully
+# green in each — asserted on 'works' so a regression in the object block cannot hide.
+$expect['works'] += @{
+  'obj-baseline-unconfined-passes-everything' = 'PASS'
+  'obj-confined-arms-launched' = 'PASS'
+  'obj-device-repair-reached-the-object' = 'PASS'
+  'obj-nul-device-refused-as-shipped' = 'PASS'
+  'obj-global-pipe-namespace-refused-local-permitted' = 'PASS'
+  'obj-piped-spawn-hangs-as-shipped' = 'PASS'
+  'nul-repair-fixes-the-nul-device' = 'PASS'
+  'nul-repair-fixes-stdio-ignore' = 'PASS'
+  'nul-repair-does-not-fix-the-piped-hang' = 'PASS'
+  'npfs-repair-fixes-the-piped-hang' = 'PASS'
+  'fdfile-mitigation-works-under-the-jail' = 'PASS'
+  'inherit-stdio-works-under-the-jail' = 'PASS'
+  'baseline-repeats-after-every-repair' = 'PASS'
+}
+$expect['obj-nul-fixes-the-hang-too'] = @{
+  'nul-repair-does-not-fix-the-piped-hang' = 'FAIL'
+  'nul-repair-fixes-the-nul-device' = 'PASS'
+  'obj-device-repair-reached-the-object' = 'PASS'
+  'baseline-repeats-after-every-repair' = 'PASS'
+}
+$expect['obj-repair-never-landed'] = @{
+  # The control that makes the negative attributable. Read-cell for read-cell this world is the
+  # "neither repair works" world; only this property separates them.
+  'obj-device-repair-reached-the-object' = 'FAIL'
+  'nul-repair-fixes-the-nul-device' = 'FAIL'
+  'npfs-repair-fixes-the-piped-hang' = 'FAIL'
+  'obj-baseline-unconfined-passes-everything' = 'PASS'
+}
+$expect['obj-baseline-leaked'] = @{
+  'baseline-repeats-after-every-repair' = 'FAIL'
+  'obj-baseline-unconfined-passes-everything' = 'PASS'
+  'obj-device-repair-reached-the-object' = 'PASS'
+}
+$expect['obj-harness-dead'] = @{
+  'obj-baseline-unconfined-passes-everything' = 'FAIL'
+  'obj-confined-arms-launched' = 'PASS'
+}
+
 $bad = 0
 foreach ($name in @('works', 'denied', 'harness-dead', 'ace-inert', 'grant-never-landed',
-                    'defect-absent')) {
+                    'defect-absent', 'obj-nul-fixes-the-hang-too', 'obj-repair-never-landed',
+                    'obj-baseline-leaked', 'obj-harness-dead')) {
   $script:fails = 0
   $captured = Invoke-Verdict -Cells $worlds[$name] 6>&1
   $got = @{}
@@ -230,7 +336,7 @@ foreach ($name in @('works', 'denied', 'harness-dead', 'ace-inert', 'grant-never
 
 Write-Host ''
 if ($bad -eq 0) {
-  Write-Host "SELFTEST OK - the verdict discriminates in all six worlds"
+  Write-Host "SELFTEST OK - the verdict discriminates in all ten worlds"
   exit 0
 }
 Write-Host "SELFTEST FAILED - $bad expectation(s) wrong"

@@ -63,6 +63,17 @@ $script:ProbeAcArms = @('ac-root-grant', 'ac-leaf-grants', 'ac-data-ungranted', 
   'ac-entry-deep')
 $script:SecretArms = @('ac-root-grant', 'ac-leaf-grants', 'ac-cwd-deep')
 
+# The object table is separate from the fs one because it has different arms and a different
+# question. `spawn-piped` is LAST on purpose: in a hanging arm it is the only cell reported as
+# MISSING-OP, and that absence is the measurement.
+$script:ObjOps = @(
+  'null-dacl-grants-ac-sid', 'npfs-dacl-grants-ac-sid',
+  'nul-open-read', 'nul-open-write',
+  'pipe-listen-global', 'pipe-listen-local',
+  'spawn-inherit', 'spawn-ignore', 'spawn-fdfile', 'spawn-piped')
+$script:ObjArms = @('obj-plain', 'obj-ac-baseline', 'obj-ac-nulfix', 'obj-ac-npfsfix',
+  'obj-ac-baseline-again')
+
 function Invoke-Verdict {
   param([hashtable]$Cells)
   $cells = $Cells
@@ -197,5 +208,102 @@ function Invoke-Verdict {
   Prop 'egress-denied-with-zero-capabilities' $egressDenied `
     "internetClient withheld => connect must fail in every AppContainer arm while the plain arm connects ($($egressWhy -join ' '))"
 
+  Invoke-ObjectVerdict -Cells $cells
+
   return $script:fails
+}
+
+# ── THE OBJECT VERDICT: the NUL device, the pipe namespaces, and the piped-spawn hang ──────────
+#
+# Kept in its own function for the same reason the whole file exists: `selftest.ps1` drives it with
+# synthetic worlds in both directions, so a verdict that cannot tell "the repair fixed it" from "the
+# repair was never applied" fails the selftest instead of shipping a wrong conclusion.
+#
+# THE SHAPE OF THE ANSWER THIS ASSERTS. The piped-spawn hang and the NUL denial are DIFFERENT
+# defects that a single `ERROR_ACCESS_DENIED` story conflates. libuv opens `NUL` only in the
+# `UV_IGNORE` branch of `uv__stdio_create` (`deps/uv/src/win/process-stdio.c`), so `stdio:'ignore'`
+# touches the device and `stdio:'pipe'` does not: the piped path goes to `uv__create_stdio_pipe_pair`
+# and spins in `uv__pipe_server`. So a `\Device\Null` repair is predicted to fix `spawn-ignore` and
+# NOT `spawn-piped`, and the two are asserted separately rather than as one "the repair works" cell.
+function Invoke-ObjectVerdict {
+  param([hashtable]$Cells)
+  $cells = $Cells
+
+  W ''
+  W '== object table (NUL device, pipe namespaces, stdio shapes) =='
+  W ("  {0,-28} {1}" -f 'op', (($script:ObjArms | ForEach-Object { "{0,-22}" -f $_ }) -join ''))
+  foreach ($op in $script:ObjOps) {
+    W ("  {0,-28} {1}" -f $op,
+      (($script:ObjArms | ForEach-Object { "{0,-22}" -f (Cell $_ $op) }) -join ''))
+  }
+  W '  launch status per arm:'
+  foreach ($a in $script:ObjArms) { W ("    {0,-24} {1}" -f $a, (LaunchOf $a)) }
+
+  W ''
+  W '== object verdict =='
+
+  # ── CONTROL. The unconfined arm must pass EVERY cell, including the piped spawn. A confined
+  # table of failures means nothing without it.
+  $plainOk = $true
+  $plainWhy = @()
+  foreach ($o in @('nul-open-read', 'nul-open-write', 'pipe-listen-global', 'pipe-listen-local',
+                   'spawn-inherit', 'spawn-ignore', 'spawn-fdfile', 'spawn-piped')) {
+    $c = Cell 'obj-plain' $o
+    $plainWhy += "$o=$c"
+    if ($c -ne 'OK') { $plainOk = $false }
+  }
+  Prop 'obj-baseline-unconfined-passes-everything' $plainOk `
+    "the unconfined control: every object cell must succeed, or a confined failure is the harness ($($plainWhy -join ' '))"
+
+  # ── CONTROL. The confined arms really are confined, and the repairs really landed.
+  Prop 'obj-confined-arms-launched' (((Lines 'obj-ac-baseline') -gt 0) -and
+    ((Lines 'obj-ac-nulfix') -gt 0) -and ((Lines 'obj-ac-npfsfix') -gt 0)) `
+    "each confined object arm must produce a log: baseline=$(Lines 'obj-ac-baseline') nulfix=$(Lines 'obj-ac-nulfix') npfsfix=$(Lines 'obj-ac-npfsfix')"
+  Prop 'obj-device-repair-reached-the-object' `
+    (((Cell 'obj-ac-nulfix' 'null-dacl-grants-ac-sid') -eq 'OK') -and
+     ((Cell 'obj-ac-baseline' 'null-dacl-grants-ac-sid') -eq 'ERR') -and
+     ((Cell 'obj-ac-npfsfix' 'npfs-dacl-grants-ac-sid') -eq 'OK') -and
+     ((Cell 'obj-ac-baseline' 'npfs-dacl-grants-ac-sid') -eq 'ERR')) `
+    "read back from the device's own DACL: the ace must be PRESENT in the repaired arm and ABSENT in the baseline, or the differential varies something other than the repair (nulfix-null=$(Detail 'obj-ac-nulfix' 'null-dacl-grants-ac-sid') baseline-null=$(Detail 'obj-ac-baseline' 'null-dacl-grants-ac-sid') npfsfix-npfs=$(Detail 'obj-ac-npfsfix' 'npfs-dacl-grants-ac-sid') baseline-npfs=$(Detail 'obj-ac-baseline' 'npfs-dacl-grants-ac-sid'))"
+
+  # ── THE AS-SHIPPED BLOCKERS, restated as first-class cells of THIS run rather than recalled.
+  Prop 'obj-nul-device-refused-as-shipped' `
+    (((Cell 'obj-ac-baseline' 'nul-open-read') -eq 'ERR') -and
+     ((Cell 'obj-ac-baseline' 'nul-open-write') -eq 'ERR')) `
+    "the candidate's premise, measured: read=$(Cell 'obj-ac-baseline' 'nul-open-read') write=$(Cell 'obj-ac-baseline' 'nul-open-write')"
+  Prop 'obj-global-pipe-namespace-refused-local-permitted' `
+    (((Cell 'obj-ac-baseline' 'pipe-listen-global') -eq 'ERR') -and
+     ((Cell 'obj-ac-baseline' 'pipe-listen-local') -eq 'OK')) `
+    "the fallback theory, measured through libuv's own CreateNamedPipeW: global=$(Cell 'obj-ac-baseline' 'pipe-listen-global') LOCAL=$(Cell 'obj-ac-baseline' 'pipe-listen-local')"
+  Prop 'obj-piped-spawn-hangs-as-shipped' ((Cell 'obj-ac-baseline' 'spawn-piped') -eq 'MISSING-OP') `
+    "the blocker: the op never returns, so its line is absent while every earlier cell reported. launch=$(LaunchOf 'obj-ac-baseline')"
+
+  # ── THE DECISIVE CELLS. Which repair fixes which shape.
+  Prop 'nul-repair-fixes-the-nul-device' `
+    (((Cell 'obj-ac-nulfix' 'nul-open-read') -eq 'OK') -and
+     ((Cell 'obj-ac-nulfix' 'nul-open-write') -eq 'OK')) `
+    "does granting the AC sid on \Device\Null re-open it: read=$(Cell 'obj-ac-nulfix' 'nul-open-read') write=$(Cell 'obj-ac-nulfix' 'nul-open-write')"
+  Prop 'nul-repair-fixes-stdio-ignore' ((Cell 'obj-ac-nulfix' 'spawn-ignore') -eq 'OK') `
+    "stdio:'ignore' is the shape that opens NUL, so it is the spawn the repair should fix: baseline=$(Cell 'obj-ac-baseline' 'spawn-ignore') repaired=$(Cell 'obj-ac-nulfix' 'spawn-ignore')"
+  Prop 'nul-repair-does-not-fix-the-piped-hang' ((Cell 'obj-ac-nulfix' 'spawn-piped') -eq 'MISSING-OP') `
+    "PREDICTED from libuv source — the piped path never opens NUL, so this repair must NOT be what unhangs it. A PASS here means the candidate is correctly scoped; a FAIL means it also fixed the hang: $(Cell 'obj-ac-nulfix' 'spawn-piped') launch=$(LaunchOf 'obj-ac-nulfix')"
+  Prop 'npfs-repair-fixes-the-piped-hang' ((Cell 'obj-ac-npfsfix' 'spawn-piped') -eq 'OK') `
+    "THE PRIZE: if the NPFS root's DACL admits the AC sid, libuv's global pipe name works and the spawn returns with no libuv change: $(Cell 'obj-ac-npfsfix' 'spawn-piped') global-listen=$(Cell 'obj-ac-npfsfix' 'pipe-listen-global') launch=$(LaunchOf 'obj-ac-npfsfix')"
+
+  # ── THE MITIGATION FLOOR the repairs have to beat. Measured in the same run so "the repair is
+  # unnecessary" and "the repair is insufficient" are distinguishable.
+  Prop 'fdfile-mitigation-works-under-the-jail' ((Cell 'obj-ac-baseline' 'spawn-fdfile') -eq 'OK') `
+    "file-backed descriptors in place of pipes, the measured floor: $(Cell 'obj-ac-baseline' 'spawn-fdfile') $(Detail 'obj-ac-baseline' 'spawn-fdfile')"
+  Prop 'inherit-stdio-works-under-the-jail' ((Cell 'obj-ac-baseline' 'spawn-inherit') -eq 'OK') `
+    "liveness: the confined child CAN spawn, so a piped failure is about the stdio shape and not about spawning: $(Cell 'obj-ac-baseline' 'spawn-inherit')"
+
+  # ── THE BASELINE-REPEAT GUARD. §5e's `core-js` false positive is why this exists, and a
+  # machine-global device DACL makes it sharper: a repair whose revoke failed would leave the
+  # device open and make this arm read as repaired.
+  Prop 'baseline-repeats-after-every-repair' `
+    (((Cell 'obj-ac-baseline-again' 'nul-open-read') -eq (Cell 'obj-ac-baseline' 'nul-open-read')) -and
+     ((Cell 'obj-ac-baseline-again' 'pipe-listen-global') -eq (Cell 'obj-ac-baseline' 'pipe-listen-global')) -and
+     ((Cell 'obj-ac-baseline-again' 'null-dacl-grants-ac-sid') -eq 'ERR') -and
+     ((Cell 'obj-ac-baseline-again' 'npfs-dacl-grants-ac-sid') -eq 'ERR')) `
+    "re-run LAST: the as-shipped arm must reproduce itself, or a repair leaked past its revoke and every cell after it is suspect (nul: $(Cell 'obj-ac-baseline' 'nul-open-read') -> $(Cell 'obj-ac-baseline-again' 'nul-open-read'); global pipe: $(Cell 'obj-ac-baseline' 'pipe-listen-global') -> $(Cell 'obj-ac-baseline-again' 'pipe-listen-global'))"
 }

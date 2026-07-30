@@ -38,6 +38,26 @@ Eight launches, each one variable from its neighbour:
 | `ac-noflags` | yes | leaf grants | **control** — the two realpath-skipping flags withheld. The defect must reproduce here, or the flagged arms prove nothing about the flags. |
 | `ac-derive-only` | yes | leaf grants | the SID hash-derived with no profile registered, so the zero-setup answer is structural rather than a property of the teardown |
 
+## The second question: `\Device\Null`, the pipe namespaces, and the piped-spawn hang
+
+Bypass-traverse cleared the filesystem blocker; two Node/libuv interaction blockers remain, and one of them is the **piped-spawn hang** — a confined `child_process` spawn with piped stdio never returns, which every npm lifecycle script would hit. Five further arms (`obj-*`) settle where it comes from and whether an unprivileged repair exists.
+
+A specific candidate motivated them. Microsoft's own mxc documents `\Device\Null` as a hard blocker for its AppContainer backends — the kernel resets that descriptor at every boot and the default names no AppContainer trustee, so a LowBox child opening `NUL` for stdio redirection gets `ERROR_ACCESS_DENIED` partway through startup. mxc's remedy (`prepare-null-device`) runs **elevated, once per boot**, which is disqualifying for nub; Codex performs the same repair **unprivileged and best-effort** (`windows-sandbox-rs/src/acl.rs`, `allow_null_device`). The two disagree about the privilege it takes, and that disagreement is measurable.
+
+The same shape applies to a second device. Every `\\.\pipe\…` `CreateNamedPipeW` is refused to a LowBox token while `\\.\pipe\LOCAL\…` succeeds, and libuv's stdio path spells the global form — so if the NPFS root's DACL is unprivileged-writable, the hang is fixable with no libuv change at all. Both devices get the same three cells: read the descriptor, try to obtain `WRITE_DAC` (elevated **and** de-elevated), then launch with the repair applied and withheld.
+
+| arm | AppContainer | device treatment | what it isolates |
+| --- | --- | --- | --- |
+| `obj-plain` | no | none | **control** — every object cell must pass, or a confined failure is the harness |
+| `obj-ac-baseline` | yes | as shipped | the blocker in its as-is state |
+| `obj-ac-nulfix` | yes | `\Device\Null` granted to this arm's SID | one variable |
+| `obj-ac-npfsfix` | yes | NPFS root granted to this arm's SID | one variable |
+| `obj-ac-baseline-again` | yes | as shipped, run **last** | a device DACL is machine-global, so a revoke that silently failed would make a later arm read as repaired |
+
+Two design points worth not rediscovering. **The privilege answer is measured de-elevated, not just elevated**: a GitHub runner is `runneradmin` and elevated, so an elevated-only success would say nothing about nub's shipping case — the probe impersonates a restricted token (Administrators deny-only, every removable privilege dropped, Medium integrity) and requests `READ_CONTROL` and `WRITE_DAC` from that same context, so a `WRITE_DAC` refusal cannot be confused with an impersonation that never took effect. And **a hanging arm is identified by an absent op line, not an error**: the spawn does not fail, it spins inside `uv_spawn` before any timer arms, so `child:objects-done` is emitted before it and the launch timeout is the only bound. `GetProcessTimes` is sampled at the timeout, because cpu ≈ wall means a busy retry loop and cpu ≈ 0 means a blocking wait.
+
+Per-run AppContainer SIDs are what make these arms inherently one-variable: each arm's device grant names a trustee no other arm holds, so a failed revoke cannot silently treat a later arm — and the read-back from the device's own DACL is asserted present where granted and absent where withheld.
+
 ## The controls, and why a result without them is worthless
 
 This effort has twice produced tables where every arm failed identically for a harness reason — six launch arms all failing `CreateFileW err=2` because a P/Invoke lacked `CharSet.Unicode`, and an `AccessCheck` sweep whose denials could not be told from a gate that denies unconditionally. So:
@@ -53,7 +73,7 @@ Any pre-existing `S-1-15-*` ACE reaching the test tree would make the ace-absent
 
 ## `selftest.ps1` — the verdict is itself tested
 
-The verdict block lives in `verdict.ps1` so `selftest.ps1` can drive it with **synthetic** cells across six worlds and require a different answer from each:
+The verdict block lives in `verdict.ps1` so `selftest.ps1` can drive it with **synthetic** cells across ten worlds and require a different answer from each:
 
 | world | what it models | required answer |
 | --- | --- | --- |
@@ -63,6 +83,10 @@ The verdict block lives in `verdict.ps1` so `selftest.ps1` can drive it with **s
 | `ace-inert` | everything passes everywhere | the controls fail, so a grant that scopes nothing can never be reported as a pass |
 | `grant-never-landed` | the ACE never propagated into the deep file | the grant-reached control fails. Read-cell for read-cell identical to `denied`, which is the point — without that control a harness slip is indistinguishable from a real kernel denial |
 | `defect-absent` | the no-flag arm ran fine | the flag differential fails, so the flags are never credited with fixing something that was not broken |
+| `obj-nul-fixes-the-hang-too` | the `\Device\Null` repair also unhangs the piped spawn | the "does not fix the hang" property fails, so a broader-than-predicted effect is loud rather than absorbed |
+| `obj-repair-never-landed` | the device ACE never reached the object | the repair-reached control fails. Cell for cell identical to "neither repair works", which is the point |
+| `obj-baseline-leaked` | a device revoke silently failed, so the repeat baseline reads as repaired | the baseline-repeat guard fails |
+| `obj-harness-dead` | `obj-plain` fails every object cell | the unconfined control fails, so a confined table of failures is never reportable |
 
 It needs no Windows APIs and runs anywhere:
 
@@ -74,7 +98,7 @@ CI runs it before the real launch.
 
 ## Reproducing
 
-Push to the `sandbox/win-bypass-traverse` branch; the workflow is `push`-triggered on that branch, so no PR is needed (`gh workflow run` will not work until the file reaches the default branch). To re-run unchanged: `git commit --allow-empty -m rerun && git push`.
+Push to `sandbox/win-bypass-traverse` or `sandbox/win-null-device`; the workflow is `push`-triggered on those branches, so no PR is needed (`gh workflow run` will not work until the file reaches the default branch). To re-run unchanged: `git commit --allow-empty -m rerun && git push`.
 
 On a real Windows box in an **interactive** session (not over SSH — see above):
 
