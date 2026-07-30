@@ -3,10 +3,10 @@
 # WHY THIS EXISTS. A verdict block only ever exercised against the world it expects will happily
 # report PASS on a harness that measured nothing; that is precisely how this effort previously
 # produced a negative it could not falsify and a "confirmation" from a broken control. So the
-# verdict is driven against ELEVEN synthetic worlds and required to give a DIFFERENT answer in each.
-# The first six cover the filesystem question, the last five the device/stdio one (see `ObjArm` and
-# `$objPredicted` below for those; a hanging cell is modelled by OMITTING its op line, because that is
-# what the real thing produces):
+# verdict is driven against FOURTEEN synthetic worlds and required to give a DIFFERENT answer in each.
+# The first six cover the filesystem question, the next five the device/stdio one, and the last three
+# the container-private-pipe candidate fix (see `ObjArm` and `$objPredicted` below for those; a
+# hanging cell is modelled by OMITTING its op line, because that is what the real thing produces):
 #
 #   works        bypass-traverse works        => every property PASSes
 #   denied       bypass-traverse fails        => the bypass-traverse properties FAIL, and every
@@ -130,6 +130,14 @@ $objPredicted = @{
   'obj-ac-baseline-again' = Mk (ObjArm 'ERR' 'ERR' 'ERR' 'HANG')
   'obj-plain-fork' = Mk @{ 'fork-ipc' = 'OK' }
   'obj-ac-fork' = Mk @{}
+  # THE CANDIDATE FIX's predicted world, also straight off libuv's source: `UV_INHERIT_STREAM` and
+  # `UV_INHERIT_FD` only DuplicateHandle an existing end (`process-stdio.c:256,306`), so neither can
+  # be refused by a namespace, and the container-private name is already measured creatable. Same
+  # discipline as the arms above — a HANG is modelled by OMITTING the op, never as `ERR`.
+  'obj-plain-localpipe' = Mk @{ 'pipe-connect-local' = 'OK'; 'spawn-wrap-local' = 'OK' }
+  'obj-ac-localpipe' = Mk @{ 'pipe-connect-local' = 'OK'; 'spawn-wrap-local' = 'OK' }
+  'obj-plain-shimfork' = Mk @{ 'shim-active' = 'OK'; 'shim-fork-roundtrip' = 'OK'; 'shim-fork-nested' = 'OK' }
+  'obj-ac-shimfork' = Mk @{ 'shim-active' = 'OK'; 'shim-fork-roundtrip' = 'OK'; 'shim-fork-nested' = 'OK' }
 }
 
 $worlds = @{
@@ -197,6 +205,26 @@ $worlds['obj-fork-survives'] = Merge $fsWorks (Merge $objPredicted @{
   # fork works under the jail after all — so the residual is smaller than predicted, and the
   # property must say so rather than quietly reporting the predicted answer.
   'obj-ac-fork' = Mk @{ 'fork-ipc' = 'OK' }
+})
+# ── the three worlds the CANDIDATE FIX's verdict has to discriminate ──
+$worlds['obj-localpipe-connect-refused'] = Merge $fsWorks (Merge $objPredicted @{
+  # The prerequisite fails: a LowBox process can CREATE a container-private name but not CONNECT to
+  # it. Every downstream cell then fails too, so the verdict must attribute the cause to the
+  # prerequisite rather than reporting four independent failures.
+  'obj-ac-localpipe' = Mk @{ 'pipe-connect-local' = 'ERR EACCES'; 'spawn-wrap-local' = 'ERR EACCES' }
+  'obj-ac-shimfork' = Mk @{ 'shim-active' = 'OK' }
+})
+$worlds['obj-shim-never-loaded'] = Merge $fsWorks (Merge $objPredicted @{
+  # THE FALSE NEGATIVE for a preload, and the reason `shim-active` is an op and not a note: the arm
+  # ran stock Node, so `fork` hung for the ordinary reason. Cell-for-cell this is "the fix does not
+  # work"; only `shim-preload-was-active` separates them.
+  'obj-ac-shimfork' = Mk @{ 'shim-active' = 'ERR not-installed' }
+})
+$worlds['obj-shimfork-still-hangs'] = Merge $fsWorks (Merge $objPredicted @{
+  # THE CLEAN NEGATIVE, which is a good outcome and must be readable as one: the preload loaded, the
+  # private namespace works, and the emulated channel still does not carry a fork. Distinguished from
+  # the world above only by `shim-active`, and from the one above that only by `pipe-connect-local`.
+  'obj-ac-shimfork' = Mk @{ 'shim-active' = 'OK' }
 })
 $worlds['obj-harness-dead'] = Merge $fsWorks (Merge $objPredicted @{
   'obj-plain' = Mk (ObjArm 'ERR' 'ERR' 'ERR' 'HANG') 0 'launch-error CreateProcessW err=2'
@@ -297,6 +325,38 @@ $expect['works'] += @{
   'baseline-repeats-after-every-repair' = 'PASS'
   'fork-baseline-unconfined-forks' = 'PASS'
   'fork-ipc-hangs-under-the-jail' = 'PASS'
+  'localpipe-baseline-unconfined-passes-everything' = 'PASS'
+  'shim-preload-was-active' = 'PASS'
+  'localpipe-connect-works-under-the-jail' = 'PASS'
+  'inherit-stream-stdio-avoids-the-hang' = 'PASS'
+  'shimmed-fork-converses-under-the-jail' = 'PASS'
+  'shimmed-fork-survives-nesting' = 'PASS'
+}
+$expect['obj-localpipe-connect-refused'] = @{
+  'localpipe-connect-works-under-the-jail' = 'FAIL'
+  'inherit-stream-stdio-avoids-the-hang' = 'FAIL'
+  'shimmed-fork-converses-under-the-jail' = 'FAIL'
+  # the two that must stay green, or the failure is not attributable to the prerequisite
+  'localpipe-baseline-unconfined-passes-everything' = 'PASS'
+  'shim-preload-was-active' = 'PASS'
+}
+$expect['obj-shim-never-loaded'] = @{
+  'shim-preload-was-active' = 'FAIL'
+  'shimmed-fork-converses-under-the-jail' = 'FAIL'
+  # the private namespace itself is fine here, which is what makes this world "the preload never
+  # loaded" and not "the namespace is closed"
+  'localpipe-connect-works-under-the-jail' = 'PASS'
+  'localpipe-baseline-unconfined-passes-everything' = 'PASS'
+}
+$expect['obj-shimfork-still-hangs'] = @{
+  'shimmed-fork-converses-under-the-jail' = 'FAIL'
+  'shimmed-fork-survives-nesting' = 'FAIL'
+  # all three preconditions green: the fix genuinely does not work, and the verdict says so without
+  # any of the harness-fault explanations being available
+  'shim-preload-was-active' = 'PASS'
+  'localpipe-connect-works-under-the-jail' = 'PASS'
+  'inherit-stream-stdio-avoids-the-hang' = 'PASS'
+  'localpipe-baseline-unconfined-passes-everything' = 'PASS'
 }
 $expect['obj-nul-fixes-the-hang-too'] = @{
   'nul-repair-does-not-fix-the-piped-hang' = 'FAIL'
@@ -329,7 +389,9 @@ $expect['obj-harness-dead'] = @{
 $bad = 0
 foreach ($name in @('works', 'denied', 'harness-dead', 'ace-inert', 'grant-never-landed',
                     'defect-absent', 'obj-nul-fixes-the-hang-too', 'obj-repair-never-landed',
-                    'obj-baseline-leaked', 'obj-fork-survives', 'obj-harness-dead')) {
+                    'obj-baseline-leaked', 'obj-fork-survives', 'obj-harness-dead',
+                    'obj-localpipe-connect-refused', 'obj-shim-never-loaded',
+                    'obj-shimfork-still-hangs')) {
   $script:fails = 0
   $captured = Invoke-Verdict -Cells $worlds[$name] 6>&1
   $got = @{}
@@ -352,7 +414,7 @@ foreach ($name in @('works', 'denied', 'harness-dead', 'ace-inert', 'grant-never
 
 Write-Host ''
 if ($bad -eq 0) {
-  Write-Host "SELFTEST OK - the verdict discriminates in all eleven worlds"
+  Write-Host "SELFTEST OK - the verdict discriminates in all fourteen worlds"
   exit 0
 }
 Write-Host "SELFTEST FAILED - $bad expectation(s) wrong"

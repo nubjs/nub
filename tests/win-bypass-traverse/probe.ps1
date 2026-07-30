@@ -1229,6 +1229,42 @@ Invoke-Arm -Name 'obj-plain-fork' -AppContainer $false -Cwd $runtimeDir -EntryFi
 Invoke-Arm -Name 'obj-ac-fork' -AppContainer $true -GrantRX @($runtimeDir) `
   -GrantModify @($dataDir) -Cwd $runtimeDir -EntryFile $objChild -TimeoutMs 30000 -ObjMode 'fork'
 
+# ── THE CANDIDATE FIX: the container-private pipe namespace, reached from userland ──
+# `pipe-listen-local` established that a LowBox process can CREATE a name under `\\.\pipe\LOCAL\`.
+# These arms ask the two further questions a repair depends on, in the order it depends on them:
+#
+#   obj-*-localpipe   PHYSICS, no shim. Can the same process CONNECT to that name, duplex; and does
+#                     a pipe end handed to a child through `stdio` take libuv's `UV_INHERIT_STREAM`
+#                     branch (which only DUPLICATES a handle) instead of `UV_CREATE_PIPE` (which
+#                     calls `CreateNamedPipe` and is refused)?
+#   obj-*-shimfork    THE FIX, end to end and NESTED. Launched with `--import local-pipe-shim.mjs`;
+#                     the child calls plain `fork` + plain `process.send`, so a PASS means
+#                     unmodified package code converses under the jail.
+#
+# The unconfined half of each pair is what makes a confined failure attributable, exactly as for the
+# arms above. The shim is staged into the RX-granted runtime dir; the forkees it writes go to the
+# Modify-granted data dir. The private pipe namespace itself needs NO filesystem grant, which is one
+# reason it beats the file-backed rewrite — that one probes for a writable scratch dir and gives up
+# if it finds none.
+$objShim = Join-Path $runtimeDir 'local-pipe-shim.mjs'
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'local-pipe-shim.mjs') -Destination $objShim -Force
+# `--import` takes a URL or a specifier; a file URL is what nub stamps into NODE_OPTIONS, and it
+# percent-encodes any space in the path instead of splitting the flag.
+$objShimUrl = ([Uri]$objShim).AbsoluteUri
+Fact 'shim-preload' $objShimUrl
+$shimFlags = @('--preserve-symlinks-main', '--preserve-symlinks', '--import', $objShimUrl)
+
+Invoke-Arm -Name 'obj-plain-localpipe' -AppContainer $false -Cwd $runtimeDir -EntryFile $objChild `
+  -TimeoutMs 45000 -ObjMode 'localpipe'
+Invoke-Arm -Name 'obj-ac-localpipe' -AppContainer $true -GrantRX @($runtimeDir) `
+  -GrantModify @($dataDir) -Cwd $runtimeDir -EntryFile $objChild -TimeoutMs 45000 -ObjMode 'localpipe'
+
+Invoke-Arm -Name 'obj-plain-shimfork' -AppContainer $false -Cwd $runtimeDir -EntryFile $objChild `
+  -TimeoutMs 60000 -ObjMode 'shimfork' -NodeFlags $shimFlags
+Invoke-Arm -Name 'obj-ac-shimfork' -AppContainer $true -GrantRX @($runtimeDir) `
+  -GrantModify @($dataDir) -Cwd $runtimeDir -EntryFile $objChild -TimeoutMs 60000 `
+  -ObjMode 'shimfork' -NodeFlags $shimFlags
+
 # ── ACE RESIDUE: what does a run leave behind on the project tree? ──
 # Every grant is revoked in each arm's `finally`, so a residual ace naming a now-dead sid would
 # mean the teardown is incomplete and repeated installs accumulate cruft on the user's project.

@@ -132,8 +132,211 @@ async function forkMode() {
   one('child:fork-returned arm=' + ARM);
 }
 
+// `BT_OBJ_MODE=localpipe` — THE PHYSICS of the candidate fix, with no shim in the picture.
+// `pipe-listen-local` already established that a LowBox process can CREATE a pipe in the
+// container-private namespace. Two things it does not establish, and a repair needs both:
+// whether the same process can CONNECT to that name, and whether a pipe end handed to a child
+// through `stdio` reaches `uv_spawn` on a branch that does not call `CreateNamedPipe` at all.
+// libuv's `UV_INHERIT_FD` and `UV_INHERIT_STREAM` branches only DUPLICATE an existing handle
+// (`deps/uv/src/win/process-stdio.c:256,306`), so neither can be refused by the namespace — that
+// is the prediction these cells test.
+// The `LOCAL\` namespace is the Windows fact under test; the surrounding plumbing (a server, a
+// connect, a Stream in the stdio array) is not. Off Windows these cells fall back to a unix socket so
+// the two new arms can be smoke-tested on a dev machine before a CI run is spent on them — the
+// AppContainer arms only ever run on a Windows runner, where this returns the real private name.
+function localName(tag) {
+  return process.platform === 'win32'
+    ? '\\\\.\\pipe\\LOCAL\\nubobj-' + tag + '-' + nonce
+    : require('path').join(require('os').tmpdir(), 'nubobj-' + tag + '-' + nonce + '.sock');
+}
+
+async function localPipeMode() {
+  one('child:localpipe-arm-start arm=' + ARM);
+  const pipePath = localName('lp');
+
+  // A server whose one connection is served from the SAME process. Under the jail the peer will be
+  // a child in the same AppContainer, i.e. the same private namespace, so a same-process connect is
+  // the weaker of the two and the right thing to gate on.
+  const srv = net.createServer();
+  const connected = new Promise((resolve) => srv.once('connection', resolve));
+  const listening = new Promise((resolve, reject) => {
+    srv.once('error', reject);
+    srv.listen(pipePath, resolve);
+  });
+  try {
+    await listening;
+  } catch (e) {
+    err('pipe-connect-local', e);
+    one('child:localpipe-done arm=' + ARM);
+    return;
+  }
+
+  let client = null;
+  await new Promise((resolve) => {
+    const guard = setTimeout(() => {
+      one('op:pipe-connect-local=ERR HUNG no connect within 6s');
+      resolve();
+    }, 6000);
+    const c = net.connect(pipePath);
+    c.once('error', (e) => {
+      clearTimeout(guard);
+      err('pipe-connect-local', e);
+      resolve();
+    });
+    c.once('connect', async () => {
+      clearTimeout(guard);
+      client = c;
+      // A full DUPLEX round trip, not just a connect: a handle that opens but cannot carry bytes in
+      // both directions would read as a working channel and then fail somewhere with no evidence
+      // attached. An emulated IPC channel needs both directions.
+      const peer = await connected;
+      peer.on('data', (d) => peer.write('echo:' + d.toString()));
+      const back = new Promise((r) => c.once('data', (d) => r(d.toString())));
+      c.write('rt\n');
+      const got = await Promise.race([back, new Promise((r) => setTimeout(() => r('(timeout)'), 4000))]);
+      ok('pipe-connect-local', 'duplex=' + JSON.stringify(got.trim()));
+      resolve();
+    });
+  });
+
+  if (client === null) {
+    srv.close();
+    one('child:localpipe-done arm=' + ARM);
+    return;
+  }
+  client.destroy();
+
+  // THE DECISIVE CELL. A second pipe, whose client end is handed to a child as its stdout via the
+  // `stdio` array — `getValidStdio` turns a Stream into `{type:'wrap'}`
+  // (lib/internal/child_process.js:1078) and libuv takes the `UV_INHERIT_STREAM` branch. If this
+  // returns, an ordinary piped `spawn` is repairable in userland with real streaming semantics,
+  // not just file-backed capture. If it spins, `UV_INHERIT_STREAM` is not the escape it looks like.
+  const outPath = localName('lpout');
+  const outSrv = net.createServer();
+  const outConn = new Promise((resolve) => outSrv.once('connection', resolve));
+  await new Promise((resolve, reject) => {
+    outSrv.once('error', reject);
+    outSrv.listen(outPath, resolve);
+  });
+  const childEnd = await new Promise((resolve, reject) => {
+    const c = net.connect(outPath);
+    c.once('connect', () => resolve(c));
+    c.once('error', reject);
+  });
+
+  // Marker BEFORE the spawn: a spin inside `uv_spawn` takes the process down with no further
+  // output, so the line that says "the table got this far" has to precede the risky op.
+  one('child:localpipe-preswap arm=' + ARM);
+
+  await new Promise((resolve) => {
+    let done = false;
+    const finish = (line) => {
+      if (done) return;
+      done = true;
+      one('op:spawn-wrap-local=' + line);
+      resolve();
+    };
+    let child;
+    try {
+      child = cp.spawn(NODE, ['-e', 'process.stdout.write("wrapmarker\\n")'], {
+        stdio: ['inherit', childEnd, 'inherit'],
+      });
+    } catch (e) {
+      finish('ERR ' + ((e && e.code) || 'throw') + ' ' + String((e && e.message) || e).slice(0, 140));
+      return;
+    }
+    // The parent holds a duplicate of the handle the child got, so EOF on the reading end only
+    // arrives once the parent drops its copy — which is also what production would have to do.
+    child.once('spawn', () => childEnd.destroy());
+    child.once('error', (e) => finish('ERR ' + ((e && e.code) || 'throw')));
+    const guard = setTimeout(() => finish('ERR HUNG no bytes and no exit within 10s'), 10000);
+    outConn.then((peer) => {
+      let buf = '';
+      peer.on('data', (d) => {
+        buf += d.toString();
+      });
+      peer.on('end', () => {
+        clearTimeout(guard);
+        finish('OK streamed=' + JSON.stringify(buf.trim()) + ' eof=yes');
+      });
+    });
+  });
+  outSrv.close();
+  srv.close();
+  one('child:localpipe-done arm=' + ARM);
+}
+
+// `BT_OBJ_MODE=shimfork` — the CANDIDATE FIX, end to end. The arm is launched with
+// `--import local-pipe-shim.mjs`, which replaces the 'ipc' stdio slot with a channel over a
+// container-private pipe. Nothing here knows the shim exists: it calls plain `child_process.fork`
+// and plain `process.send`, so a PASS means unmodified package code works, which is the only
+// result worth having.
+async function shimForkMode() {
+  one('child:shimfork-arm-start arm=' + ARM);
+  // An `op:` line rather than a note, so the verdict can REQUIRE it. Without this cell a preload
+  // that failed to load is indistinguishable from one that loaded and did not help — the same
+  // grant-never-landed shape the device arms already guard against, applied to a preload.
+  one('op:shim-active=' + (globalThis.__nubJailIpcShim ? 'OK installed' : 'ERR not-installed'));
+  const dir = require('path').dirname(process.env.BT_OBJ_SINK);
+
+  const forkee = require('path').join(dir, 'shim-forkee.cjs');
+  fs.writeFileSync(
+    forkee,
+    "process.on('message', (m) => { process.send({ pong: m.ping, connected: process.connected }); });\n",
+  );
+
+  // Nested, because the fix has to survive its own recursion: the grandchild is forked BY a forked
+  // child, so the preload must reach two levels down and a second private pipe must be creatable
+  // from inside an already-confined descendant.
+  const relay = require('path').join(dir, 'shim-relay.cjs');
+  fs.writeFileSync(
+    relay,
+    "const cp = require('child_process');\n" +
+      'const g = cp.fork(' +
+      JSON.stringify(forkee) +
+      ", [], { stdio: 'inherit' });\n" +
+      "g.on('message', (m) => { process.send({ relayed: m.pong }); g.kill(); });\n" +
+      "process.on('message', (m) => g.send({ ping: m.ping }));\n",
+  );
+
+  const converse = (name, entry, payload) =>
+    new Promise((resolve) => {
+      let child;
+      const finish = (line) => {
+        one('op:' + name + '=' + line);
+        try {
+          child && child.kill();
+        } catch (e) {}
+        resolve();
+      };
+      try {
+        child = cp.fork(entry, [], { stdio: 'inherit' });
+      } catch (e) {
+        finish('ERR ' + ((e && e.code) || 'throw') + ' ' + String((e && e.message) || e).slice(0, 160));
+        return;
+      }
+      const guard = setTimeout(() => finish('ERR HUNG no reply within 12s'), 12000);
+      child.once('error', (e) => {
+        clearTimeout(guard);
+        finish('ERR ' + ((e && e.code) || 'throw') + ' ' + String((e && e.message) || e).slice(0, 160));
+      });
+      child.once('message', (m) => {
+        clearTimeout(guard);
+        finish('OK reply=' + JSON.stringify(m));
+      });
+      child.send(payload);
+    });
+
+  one('child:shimfork-preswap arm=' + ARM);
+  await converse('shim-fork-roundtrip', forkee, { ping: 'p1' });
+  await converse('shim-fork-nested', relay, { ping: 'p2' });
+  one('child:shimfork-done arm=' + ARM);
+}
+
 async function main() {
   if (process.env.BT_OBJ_MODE === 'fork') return forkMode();
+  if (process.env.BT_OBJ_MODE === 'localpipe') return localPipeMode();
+  if (process.env.BT_OBJ_MODE === 'shimfork') return shimForkMode();
 
   await listenOnce('pipe-listen-global', '\\\\.\\pipe\\nubobj-g-' + nonce);
   await listenOnce('pipe-listen-local', '\\\\.\\pipe\\LOCAL\\nubobj-l-' + nonce);

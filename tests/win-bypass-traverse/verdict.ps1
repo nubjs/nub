@@ -310,6 +310,45 @@ function Invoke-ObjectVerdict {
   Prop 'fork-ipc-hangs-under-the-jail' ((Cell 'obj-ac-fork' 'fork-ipc') -eq 'MISSING-OP') `
     "PREDICTED: fork's IPC channel is a pipe in the refused namespace and no stdio option removes it, so the fd mitigation cannot cover it. A FAIL means fork survives and the residual is smaller than thought: $(Cell 'obj-ac-fork' 'fork-ipc') launch=$(LaunchOf 'obj-ac-fork')"
 
+  # ── THE CANDIDATE FIX. Read bottom-up: each property is a precondition of the next, so a FAIL
+  # high in the list explains every FAIL below it and the ones below carry no independent news.
+  W ''
+  W '    -- the container-private pipe namespace, from userland --'
+  foreach ($o in @('pipe-connect-local', 'spawn-wrap-local', 'shim-fork-roundtrip', 'shim-fork-nested')) {
+    $armPlain = if ($o -like 'shim-*') { 'obj-plain-shimfork' } else { 'obj-plain-localpipe' }
+    $armAc = if ($o -like 'shim-*') { 'obj-ac-shimfork' } else { 'obj-ac-localpipe' }
+    W ("    {0,-24} plain={1} confined={2}  {3}" -f $o, (Cell $armPlain $o), (Cell $armAc $o),
+      (Detail $armAc $o))
+  }
+
+  # CONTROL FIRST. All four cells are ordinary `net`/`child_process` code with nothing
+  # Windows-security about them, so an unconfined failure is a harness fault and makes the confined
+  # column unreadable — the same discipline as `obj-baseline-unconfined-passes-everything`.
+  $lpPlainOk = ((Cell 'obj-plain-localpipe' 'pipe-connect-local') -eq 'OK') -and
+    ((Cell 'obj-plain-localpipe' 'spawn-wrap-local') -eq 'OK') -and
+    ((Cell 'obj-plain-shimfork' 'shim-fork-roundtrip') -eq 'OK') -and
+    ((Cell 'obj-plain-shimfork' 'shim-fork-nested') -eq 'OK')
+  Prop 'localpipe-baseline-unconfined-passes-everything' $lpPlainOk `
+    "the unconfined control for the candidate fix: connect=$(Cell 'obj-plain-localpipe' 'pipe-connect-local') wrap=$(Cell 'obj-plain-localpipe' 'spawn-wrap-local') shimfork=$(Cell 'obj-plain-shimfork' 'shim-fork-roundtrip') nested=$(Cell 'obj-plain-shimfork' 'shim-fork-nested')"
+
+  # The preload must actually be loaded, or the shim arms measure stock Node under a longer timeout
+  # and a hang there would be blamed on the fix. This is the grant-never-landed guard, for a preload.
+  Prop 'shim-preload-was-active' `
+    (((Cell 'obj-ac-shimfork' 'shim-active') -eq 'OK') -and ((Cell 'obj-plain-shimfork' 'shim-active') -eq 'OK')) `
+    "the child reports whether the preload installed itself, so a shim that never loaded cannot read as a shim that did not help: plain=$(Cell 'obj-plain-shimfork' 'shim-active') confined=$(Cell 'obj-ac-shimfork' 'shim-active')"
+
+  Prop 'localpipe-connect-works-under-the-jail' ((Cell 'obj-ac-localpipe' 'pipe-connect-local') -eq 'OK') `
+    "creating a LOCAL\ name was already measured; CONNECTING to it duplex is the untested half every emulated channel needs: $(Cell 'obj-ac-localpipe' 'pipe-connect-local') $(Detail 'obj-ac-localpipe' 'pipe-connect-local')"
+
+  Prop 'inherit-stream-stdio-avoids-the-hang' ((Cell 'obj-ac-localpipe' 'spawn-wrap-local') -eq 'OK') `
+    "PREDICTED from libuv source: a Stream in the stdio array takes UV_INHERIT_STREAM, which only DuplicateHandle's an existing end and never calls CreateNamedPipe, so the namespace cannot refuse it. A PASS means ordinary piped spawn is repairable in userland WITH streaming semantics, not just file-backed capture: $(Cell 'obj-ac-localpipe' 'spawn-wrap-local') $(Detail 'obj-ac-localpipe' 'spawn-wrap-local')"
+
+  Prop 'shimmed-fork-converses-under-the-jail' ((Cell 'obj-ac-shimfork' 'shim-fork-roundtrip') -eq 'OK') `
+    "THE PRIZE, and the residual the fd mitigation cannot reach: unmodified fork + process.send under the jail, with the IPC channel emulated over a container-private pipe. As shipped obj-ac-fork/fork-ipc=$(Cell 'obj-ac-fork' 'fork-ipc'); shimmed: $(Cell 'obj-ac-shimfork' 'shim-fork-roundtrip') $(Detail 'obj-ac-shimfork' 'shim-fork-roundtrip')"
+
+  Prop 'shimmed-fork-survives-nesting' ((Cell 'obj-ac-shimfork' 'shim-fork-nested') -eq 'OK') `
+    "a fix that works one level down and not two is not a fix — node-gyp and jest both fork from forked children. The preload must reach the grandchild and a second private pipe must be creatable from inside an already-confined descendant: $(Cell 'obj-ac-shimfork' 'shim-fork-nested') $(Detail 'obj-ac-shimfork' 'shim-fork-nested')"
+
   Prop 'baseline-repeats-after-every-repair' `
     (((Cell 'obj-ac-baseline-again' 'nul-open-read') -eq (Cell 'obj-ac-baseline' 'nul-open-read')) -and
      ((Cell 'obj-ac-baseline-again' 'pipe-listen-global') -eq (Cell 'obj-ac-baseline' 'pipe-listen-global')) -and

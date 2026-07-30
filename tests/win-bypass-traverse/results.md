@@ -146,6 +146,20 @@ with the device's own DACL read back **present** where granted and **none** in t
 
 **`child_process.fork` hangs too.** Its IPC channel is a `uv_pipe` with `ipc=1` through the same path, and no `stdio` option removes it: confined `TIMED-OUT cpu_ms=29812`/`29890` at a 30 s bound, unconfined `rc=0`. So the file-descriptor mitigation has a hole that is now measured rather than suspected.
 
+## Round 4 — a userland IPC channel in the container-private pipe namespace
+
+The hang's cause is a NAME: libuv spells every stdio pipe `\\?\pipe\uv\%llu-%lu` (`uv__unique_pipe_name`, `deps/uv/src/win/pipe.c:109`) in the global NPFS namespace, and `\\.\pipe\LOCAL\…` is measured creatable under the same jail. So the question is whether a preload can supply the name libuv will not.
+
+**What the source settles before any run** *(read, not measured — Node 27.0.0 / libuv 1.52.1 in `.repos/node`)*:
+
+- **Node's own IPC cannot be reused from a preload.** `setupChannel` (`lib/internal/child_process.js:619`) has to be handed a *connected* `Pipe(PipeConstants.IPC)`. It is module-internal, and the `Pipe(IPC)` that `getValidStdio` creates is a local of `ChildProcess.prototype.spawn` — not reachable at the one seam a preload has. The only connect-an-existing-handle route, `Pipe.prototype.open(fd)`, is refused for IPC mode: `uv_pipe_open` asserts the handle is **overlapped**, and no userland API yields an overlapped pipe handle as a CRT fd (`fs__open` never sets `FILE_FLAG_OVERLAPPED`). So the channel has to be reimplemented, which is what `local-pipe-shim.mjs` does — newline-delimited JSON, the same framing as Node's own `json` serialization mode.
+- **Two stdio branches cannot be refused by the namespace at all.** `UV_INHERIT_FD` and `UV_INHERIT_STREAM` (`deps/uv/src/win/process-stdio.c:256,306`) only `DuplicateHandle` an end that already exists; neither calls `CreateNamedPipe`. Only `UV_CREATE_PIPE` does. So handing the child a pre-created end sidesteps `uv__pipe_server` entirely — the mechanism the `spawn-wrap-local` cell tests.
+- **`spawnSync` cannot take that route.** `SyncProcessRunner::ParseStdioOption` (`src/spawn_sync.cc`) accepts only `ignore`/`pipe`/`inherit`/`fd` and reaches `UNREACHABLE()` on a `wrap` entry. A pipe-backed numeric fd *is* accepted, but `spawnSync` blocks the loop so nothing drains it and output past the pipe buffer would deadlock. Files stay right for the sync family; pipes are an upgrade for the async one only.
+
+**Host-side fidelity, measured** (`local-pipe-selftest.mjs` — a two-arm differential: every case runs with and without the preload and the transcripts must be identical). Green on Node **20.19.0, 22.15.0, 22.23.1 and 26.5.0**: message round trip, child-initiated send, `connected`/`channel`, deferred `'disconnect'`, `ERR_IPC_CHANNEL_CLOSED` reported through `'error'` rather than thrown, 200 ordered messages, a forkee whose `execArgv` was emptied, a forkee whose `env` was rebuilt from scratch, and no channel residue. Two deliberate divergences are asserted directly instead of as a diff: handle passing and `serialization: 'advanced'` both fail fast with `ERR_NUB_SANDBOX_NO_IPC`, neither being expressible without libuv's IPC frames.
+
+The two things a host run cannot answer, and the arms that do: whether a LowBox process can **connect** to a private name it created (`pipe-connect-local` — creating was already measured, connecting was not), and whether the `UV_INHERIT_STREAM` handoff really escapes the hang (`spawn-wrap-local`). Arms `obj-*-localpipe` and `obj-*-shimfork`, each with an unconfined control; `obj-ac-shimfork` also forks **nested**, because a fix that works one level down and not two is not a fix — node-gyp and jest both fork from forked children.
+
 ## What this does not establish
 
 - **Which mechanism performs the traverse skip.** `crates/nub-sandbox/src/backend/windows.rs` credits `SeChangeNotifyPrivilege` and `FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL` on the volume device. Both predict this observable and this probe cannot separate them.

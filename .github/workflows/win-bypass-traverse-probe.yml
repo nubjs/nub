@@ -21,7 +21,7 @@ name: win-bypass-traverse-probe
 
 on:
   push:
-    branches: [sandbox/win-bypass-traverse, sandbox/win-null-device]
+    branches: [sandbox/win-bypass-traverse, sandbox/win-null-device, sandbox/win-local-pipe]
   workflow_dispatch: # inert until this file reaches the default branch; `push` is what fires it
 
 permissions:
@@ -42,7 +42,7 @@ jobs:
         with:
           node-version: 22
 
-      # The verdict block, driven against six synthetic worlds, must discriminate BEFORE the real
+      # The verdict block, driven against fourteen synthetic worlds, must discriminate BEFORE the real
       # launch runs. A verdict that cannot tell a clean negative from a dead harness would make the
       # rest of this job unreadable, and that failure mode has already cost this effort two runs.
       - name: Verdict self-test (no Windows APIs, no launch)
@@ -144,6 +144,15 @@ jobs:
                    nul-repair-does-not-fix-the-piped-hang npfs-repair-fixes-the-piped-hang \
                    fdfile-mitigation-works-under-the-jail \
                    fork-baseline-unconfined-forks fork-ipc-hangs-under-the-jail; do need "$p"; done
+
+          # ── THE CANDIDATE FIX: a userland IPC channel over the container-private pipe namespace.
+          # Controls first, then the two preconditions, then the prize — a FAIL high in this list
+          # explains every FAIL below it, so reading it in order is what makes a negative
+          # attributable instead of a wall of red.
+          echo "── the candidate fix: pipe\\LOCAL\\ reached from userland (controls first) ──"
+          for p in localpipe-baseline-unconfined-passes-everything shim-preload-was-active; do need "$p"; done
+          for p in localpipe-connect-works-under-the-jail inherit-stream-stdio-avoids-the-hang \
+                   shimmed-fork-converses-under-the-jail shimmed-fork-survives-nesting; do need "$p"; done
 
           echo
           echo "── result ──"
