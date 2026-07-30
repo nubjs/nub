@@ -32,30 +32,6 @@
       "evidence": "measured",
       "observed": "Resolved by cypress's postinstall in the corpus harness-validation run, as the redirect target of download.cypress.io. cypress is the one corpus package that installs successfully under this four-host list.",
       "platform": "linux-arm64"
-    },
-    {
-      "host": "github.com",
-      "artifact": "Release-asset tarballs under /<owner>/<repo>/releases/download/ — how most prebuilt native addons and vendor binaries are published",
-      "fetchedBy": ["@cubejs-backend/native", "tree-sitter-cli"],
-      "evidence": "measured",
-      "observed": "Promoted 2026-07-30 out of notGranted, where it was recorded as `write-capable`. The demand: 17 of the 21 network denials in the three-OS corpus baseline (macOS 33 breaks of 143 admissible, Linux 24 of 143, Windows 13 of 133) are this host — the single largest lever in the run. Verbatim from the denied arm of the Linux corpus run: `FetchError: request to https://github.com/cube-js/cube/releases/download/v1.4.4/native-linux-x64-glibc-fallback.tar.gz failed, reason: getaddrinfo EAI_AGAIN github.com`. The refusal this supersedes rested on git-receive-pack sharing the hostname with the release-asset route; it is answered by the jail's identity-based model rather than by new evidence about the host, and the argument is in data/README.md. Two limits worth stating. The requester population is NOT enumerated here — 46 corpus packages fetch this host, 14 of them blocking on the Linux arm — and this entry alone does not unblock them: the two gates compose, so a package must be named in some entry's fetchedBy or in packageNetwork.full AND target an admitted host. And Windows keeps the deny-all regardless, so nothing here reaches it there.",
-      "platform": "any"
-    },
-    {
-      "host": "release-assets.githubusercontent.com",
-      "artifact": "The bytes of a github.com release asset — the signed, expiring URL a /releases/download/ request redirects to",
-      "fetchedBy": ["@cubejs-backend/native", "tree-sitter-cli"],
-      "evidence": "measured",
-      "observed": "Measured 2026-07-28 against a real release asset: github.com/<owner>/<repo>/releases/download/… 302s here. A load-bearing entry rather than a convenience, on the same pairing as download.cypress.io with cdn.cypress.io — the fetch re-applies this allowlist to EVERY redirect hop, so github.com alone resolves nothing and tree-sitter-cli's artifact went from 0 to 15,599,168 bytes only once this host was reachable too. Deliberately absent alongside it: raw.githubusercontent.com, which github.com/<owner>/<repo>/raw/… redirects to. That is arbitrary repo content rather than a published artifact, and no measured package needs it.",
-      "platform": "any"
-    },
-    {
-      "host": "objects.githubusercontent.com",
-      "artifact": "The same release-asset CDN under its older hostname, still used by directly-published asset URLs",
-      "fetchedBy": ["@cubejs-backend/native", "tree-sitter-cli"],
-      "evidence": "source-read",
-      "observed": "Not the spelling any corpus run hit — the corpus exercised the /releases/download/ route, which 302s to release-assets above. Carried over from nub's own prefetch redirect allowlist (crates/nub-cli/src/pm_engine/build_prefetch.rs), which retains it because a directly-published asset URL still lands on this hostname. Absence from the corpus is not evidence the entry is unnecessary, on the same reading as nodejs.org: the corpus did not exercise the route that reaches it. The fetchedBy names are the packages that fetch the CDN, not packages observed on this spelling.",
-      "platform": "any"
     }
   ],
   "packageGrants": [
@@ -91,14 +67,24 @@
     }
   ],
   "notGranted": {
-    "comment": "Documentation only. Nothing in this object is compiled into any allowlist; it records hosts that a real install was measured to need and that were not admitted, so a contributor can see the bar before opening a PR. A build-time check keeps this list and networkHosts disjoint, which is also why a PROMOTED host leaves this list outright rather than staying behind with an amended rationale — the promotion is recorded on its networkHosts entry instead, and here. PROMOTED 2026-07-30: github.com, out of `write-capable`. Its refusal turned on git-receive-pack sharing a hostname with the release-asset route, so a host-level grant could not admit the fetch without admitting the push, and the recorded plan was to wait for path-scoped proxy support. The identity-based model answers that without the proxy work: no catalog entry means no network at all, an entry means the network the review ratified. The write the refusal feared is thus reachable only by a package a pull request already vetted — a decision the entry makes, not one the hostname makes — while the cost of holding the host fell on 17 unrelated packages, the largest single lever in the three-OS baseline. Entries carry the same provenance fields as networkHosts, because an evidenced candidate is what makes a later promotion reviewable.",
+    "comment": "Documentation only. Nothing in this object is compiled into any allowlist; it records hosts that a real install was measured to need and that were not admitted, so a contributor can see the bar before opening a PR. A build-time check keeps this list and networkHosts disjoint. Entries carry the same provenance fields as networkHosts, because an evidenced candidate is what makes a later promotion reviewable — `observedUrl` in particular is what a path-scoped grant would have to be written against.",
     "hosts": [
+      {
+        "host": "github.com",
+        "reason": "write-capable",
+        "requester": "cube-js native installer (`Cube.js Native Installer`); 46 corpus packages total, 14 of them blocking",
+        "observedUrl": "https://github.com/cube-js/cube/releases/download/v1.4.4/native-linux-x64-glibc-fallback.tar.gz",
+        "detail": "The demand is real and measured, and the refusal is NOT about the download. github.com carries `git-receive-pack` — an authenticated write on the same hostname — and CI routinely hands lifecycle scripts a token with push rights, so a host-level grant opens a push path rather than only a fetch path. Host-level DNS gating cannot separate the two. A path-scoped grant limited to /*/*/releases/download/ would, which is the argument for building proxy path support rather than treating this host as permanently refused.",
+        "evidence": "measured",
+        "observed": "FetchError: request to <url> failed, reason: getaddrinfo EAI_AGAIN github.com — the denied arm of the Linux corpus run.",
+        "platform": "linux-x64"
+      },
       {
         "host": "storage.googleapis.com",
         "reason": "multi-tenant",
         "requester": "@tensorflow/tfjs-node, chromedriver (also puppeteer and taiko on the earlier macOS pass)",
         "observedUrl": "https://storage.googleapis.com/tensorflow/libtensorflow/libtensorflow-cpu-linux-x86_64-2.9.1.tar.gz; https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.53/linux64/chromedriver-linux64.zip",
-        "detail": "Refused because an attacker can rent a bucket under the same hostname and read back whatever a confined script writes there — the exfiltration criterion, not an integrity one. Held rather than promoted alongside github.com on 2026-07-30, because the objection is a DIFFERENT one and does not fall to the same argument. github.com's refusal was that a host grant cannot separate a fetch from a push; the package entry is what decides who may push, so the host label was not carrying the control. This one is a standing exfiltration sink — admitting it hands every catalogued package a readable drop for whatever it sends — and no reasoning about package identity narrows that, because every such package is already past the identity gate. The route forward is no longer the path-scoped grant this entry used to nominate (see data/README.md, Known gaps): it is a maintainer ruling on whether the two observed prefixes (/tensorflow/ and /chrome-for-testing-public/) being stable and single-tenant is worth the sink, weighed against the packages it breaks — @tensorflow/tfjs-node and the chromedriver family. Open.",
+        "detail": "Refused because an attacker can rent a bucket under the same hostname and read back whatever a confined script writes there — the exfiltration criterion, not an integrity one. The two observed prefixes (/tensorflow/ and /chrome-for-testing-public/) are stable and single-tenant, so this is a second candidate for a path-scoped grant.",
         "evidence": "measured",
         "observed": "Both artifacts requested in the denied arm of the Linux corpus run; libtensorflow logged as `* Downloading libtensorflow` immediately before the URL.",
         "platform": "linux-x64"
