@@ -91,13 +91,12 @@ fn entries_from_bunfig(root: &Value) -> Vec<(String, String)> {
             );
         }
     }
-    if let Some(linker) = install
-        .get("linker")
-        .and_then(Value::as_str)
-        .filter(|l| matches!(*l, "hoisted" | "isolated"))
-    {
-        out.push(("nodeLinker".to_string(), linker.to_string()));
-    }
+    // `[install].linker` is deliberately not mapped. Nub's compatibility
+    // guarantee covers version resolution, module resolution, and the project's
+    // lockfile — not node_modules LAYOUT, which is nub's own axis configured
+    // through `nub.jsonc`. A Bun-branded file therefore never directs how the
+    // tree is arranged; every other key below is resolution or network.
+    //
     // Bun's supply-chain age gate: `[install].minimumReleaseAge` → the engine's
     // `minimumReleaseAge` setting (same gate nub reads from `.npmrc`/pnpm
     // config). Without this a bun user's in-bunfig hardening is silently
@@ -312,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_registry_scopes_auth_and_linker() {
+    fn maps_registry_and_scope_auth_but_never_the_layout_linker() {
         let entries = parsed(
             r#"
             [install]
@@ -346,7 +345,10 @@ mod tests {
             "@plain:registry".to_string(),
             "https://plain.example.com/".to_string()
         )));
-        assert!(entries.contains(&("nodeLinker".to_string(), "isolated".to_string())));
+        assert!(
+            entries.iter().all(|(k, _)| k != "nodeLinker"),
+            "bunfig `linker` is layout direction and must not reach the engine: {entries:?}"
+        );
     }
 
     #[test]

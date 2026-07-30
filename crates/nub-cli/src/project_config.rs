@@ -30,9 +30,9 @@ use crate::config::ImplicitDlx;
 
 /// The filename discovered up-tree. `nub.json` is NEVER accepted (no dual-name
 /// ambiguity) — one name, matching the global file.
-const FILE_NAME: &str = "nub.jsonc";
+pub(crate) const FILE_NAME: &str = "nub.jsonc";
 
-const ROOT_KEYS: &[&str] = &[
+pub(crate) const ROOT_KEYS: &[&str] = &[
     "$schema",
     "nodeCompat",
     "preload",
@@ -46,13 +46,13 @@ const ROOT_KEYS: &[&str] = &[
     "install",
     "dlx",
 ];
-const INSTALL_KEYS: &[&str] = &[
+pub(crate) const INSTALL_KEYS: &[&str] = &[
     "linker",
     "publicHoist",
     "minimumReleaseAge",
     "minimumReleaseAgeExclude",
 ];
-const DLX_KEYS: &[&str] = &["consent"];
+pub(crate) const DLX_KEYS: &[&str] = &["consent"];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Error type — fail-loud, with a JSON path so a bad file self-describes.
@@ -93,7 +93,7 @@ impl ConfigError {
     /// Attribute a failure to the file it came from. Discovery walks the ancestor
     /// chain unbounded, so the offending file can sit arbitrarily far above the
     /// cwd — a message naming only `nub.jsonc` sends the author hunting.
-    fn in_file(self, path: &Path) -> Self {
+    pub(crate) fn in_file(self, path: &Path) -> Self {
         ConfigError::InFile {
             path: path.to_path_buf(),
             source: Box::new(self),
@@ -1043,7 +1043,27 @@ enum ConfigScope {
 /// Sections only the global file may carry. Also the source of truth the
 /// published schema is checked against — the schema describes the PROJECT file,
 /// so every key here must be absent from it.
-const GLOBAL_ONLY_KEYS: &[&str] = &["dlx"];
+pub(crate) const GLOBAL_ONLY_KEYS: &[&str] = &["dlx"];
+
+/// Validate a whole document object exactly as the file readers do.
+///
+/// The `nub config set` writer runs the one-key document it is about to write
+/// through this before touching the file, so the writer can never accept a value
+/// the reader refuses, and the rejection carries the reader's own wording. There
+/// is deliberately no second validator to drift from this one.
+pub(crate) fn validate_document(
+    obj: &serde_json::Map<String, Value>,
+    global: bool,
+) -> Result<ProjectConfig> {
+    validate_root(
+        obj,
+        if global {
+            ConfigScope::Global
+        } else {
+            ConfigScope::Project
+        },
+    )
+}
 
 fn validate_root(
     obj: &serde_json::Map<String, Value>,

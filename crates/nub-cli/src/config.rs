@@ -20,12 +20,17 @@
 //! key leaves the rest of a hand-authored file intact. Writes are atomic (temp +
 //! rename via `aube_util`). Only `nub.jsonc` is accepted; `nub.json` is never read.
 //!
-//! The `nub config get/set exec.implicitDlx …` surface is NOT a separate clap
-//! verb (the `config` verb already exists as the engine's `.npmrc` config): the
-//! nub-namespaced dotted key is intercepted in `pm_engine::store_config_family`
-//! and routed here, while every other key stays on the `.npmrc` path.
+//! [`set_json_path`] and [`unset_json_path`] are that CST edit, generalized to an
+//! arbitrary path: they serve this file's own `exec.implicitDlx` key AND every
+//! schema field [`crate::config_fields`] writes, in the PROJECT file as well as
+//! this one, so there is exactly one writer both files go through.
+//!
+//! The `nub config get/set …` surface is NOT a separate clap verb (the `config`
+//! verb already exists as the engine's `.npmrc` config): a key naming a nub
+//! setting is intercepted in `pm_engine::store_config_family` and routed here or
+//! to [`crate::config_fields`], while every other key stays on the `.npmrc` path.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use jsonc_parser::ParseOptions;
 use jsonc_parser::cst::{CstInputValue, CstObject, CstRootNode};
@@ -130,10 +135,87 @@ fn root_object(text: &str) -> (CstRootNode, CstObject) {
     parse(text).unwrap_or_else(|| parse("{}").expect("`{}` parses to an object"))
 }
 
-/// Write `exec.implicitDlx = <value>`, preserving every other key/comment in the
-/// file (comment-aware CST read-modify-write). Creates the file + `nub/` dir if
-/// absent. Returns an error only on an I/O failure the caller should surface — an
-/// in-memory edit never fails.
+/// Get-or-create the object property `name` of `obj`.
+///
+/// A pre-existing `name` that is NOT an object (a hand-authored scalar/array) is
+/// best-effort REPLACED with a fresh object — dropping the malformed value
+/// rather than panicking or leaving a duplicate key. `get_object` matches the
+/// FIRST prop by name, so a stray non-object one must be removed before the
+/// append or the re-fetch would still find it and be `None`.
+fn ensure_object(obj: &CstObject, name: &str) -> CstObject {
+    obj.get_object(name).unwrap_or_else(|| {
+        if let Some(stray) = obj.get(name) {
+            stray.remove();
+        }
+        obj.append(name, CstInputValue::Object(Vec::new()));
+        obj.get_object(name)
+            .expect("just-appended object is present")
+    })
+}
+
+/// Write `value` at the object path `segments` (the last element is the leaf
+/// key), preserving every comment, trailing comma, and key order elsewhere in
+/// the file. Missing intermediate objects are created, as is the file and its
+/// parent directory. Returns an error only on an I/O failure the caller should
+/// surface — an in-memory edit never fails.
+///
+/// This is the ONE write path for both `nub.jsonc` files. `nub config set` runs
+/// through it so a hand-authored, heavily-commented file survives an edit that
+/// touches one key.
+pub(crate) fn set_json_path(
+    path: &Path,
+    segments: &[&str],
+    value: CstInputValue,
+) -> std::io::Result<()> {
+    let text = crate::jsonc::read_guarded(path).unwrap_or_default();
+    let (root, obj) = root_object(&text);
+
+    let (leaf, parents) = segments.split_last().expect("a setting path has a leaf");
+    let mut cursor = obj;
+    for name in parents {
+        cursor = ensure_object(&cursor, name);
+    }
+    match cursor.get(leaf) {
+        Some(prop) => prop.set_value(value),
+        None => cursor.append(leaf, value),
+    }
+
+    aube_util::fs_atomic::atomic_write(path, root.to_string().as_bytes())
+}
+
+/// Remove the key at `segments`, preserving the rest of the file. An absent
+/// file, path, or key is a no-op success — nothing to clear is not an error —
+/// and leaves the file untouched rather than rewriting it. Reports whether a key
+/// was actually removed so a caller can avoid claiming a change it did not make.
+pub(crate) fn unset_json_path(path: &Path, segments: &[&str]) -> std::io::Result<bool> {
+    let Ok(text) = crate::jsonc::read_guarded(path) else {
+        return Ok(false);
+    };
+    let Ok(root) = CstRootNode::parse(&text, &ParseOptions::default()) else {
+        return Ok(false);
+    };
+    let Some(obj) = root.root_value().and_then(|v| v.as_object()) else {
+        return Ok(false);
+    };
+
+    let (leaf, parents) = segments.split_last().expect("a setting path has a leaf");
+    let mut cursor = obj;
+    for name in parents {
+        let Some(next) = cursor.get_object(name) else {
+            return Ok(false);
+        };
+        cursor = next;
+    }
+    let Some(prop) = cursor.get(leaf) else {
+        return Ok(false);
+    };
+    prop.remove();
+
+    aube_util::fs_atomic::atomic_write(path, root.to_string().as_bytes())?;
+    Ok(true)
+}
+
+/// Write `exec.implicitDlx = <value>`. Creates the file + `nub/` dir if absent.
 pub fn set_implicit_dlx(value: ImplicitDlx) -> std::io::Result<()> {
     let path = config_path().ok_or_else(|| {
         std::io::Error::new(
@@ -141,53 +223,21 @@ pub fn set_implicit_dlx(value: ImplicitDlx) -> std::io::Result<()> {
             "could not resolve nub's config directory",
         )
     })?;
-
-    let text = crate::jsonc::read_guarded(&path).unwrap_or_default();
-    let (root, obj) = root_object(&text);
-
-    // Get-or-create the `exec` object, then set-or-append the key inside it.
-    // A pre-existing `exec` that is NOT an object (a hand-authored scalar/array)
-    // is best-effort REPLACED with a fresh object — dropping the malformed value
-    // rather than panicking or leaving a duplicate `exec` key. `get_object`
-    // matches the FIRST `exec` prop by name, so a stray non-object one must be
-    // removed before the append or the re-fetch would still find it and be None.
-    let exec = obj.get_object(TABLE).unwrap_or_else(|| {
-        if let Some(stray) = obj.get(TABLE) {
-            stray.remove();
-        }
-        obj.append(TABLE, CstInputValue::Object(Vec::new()));
-        obj.get_object(TABLE)
-            .expect("just-appended `exec` object is present")
-    });
-    match exec.get(KEY) {
-        Some(prop) => prop.set_value(CstInputValue::String(value.as_str().to_string())),
-        None => exec.append(KEY, CstInputValue::String(value.as_str().to_string())),
-    }
-
-    aube_util::fs_atomic::atomic_write(&path, root.to_string().as_bytes())
+    set_json_path(
+        &path,
+        &[TABLE, KEY],
+        CstInputValue::String(value.as_str().to_string()),
+    )
 }
 
-/// Remove `exec.implicitDlx` (restoring the `prompt` default), preserving the
-/// rest of the file. A `config unset`/`delete` on this key routes here rather than
-/// the engine's `.npmrc` delete. Absent file/key → a no-op success (nothing to
-/// clear is not an error).
+/// Remove `exec.implicitDlx`, restoring the `prompt` default. A `config
+/// unset`/`delete` on this key routes here rather than the engine's `.npmrc`
+/// delete.
 pub fn unset_implicit_dlx() -> std::io::Result<()> {
     let Some(path) = config_path() else {
         return Ok(());
     };
-    let Ok(text) = crate::jsonc::read_guarded(&path) else {
-        return Ok(());
-    };
-    let Ok(root) = CstRootNode::parse(&text, &ParseOptions::default()) else {
-        return Ok(());
-    };
-    let Some(obj) = root.root_value().and_then(|v| v.as_object()) else {
-        return Ok(());
-    };
-    if let Some(prop) = obj.get_object(TABLE).and_then(|exec| exec.get(KEY)) {
-        prop.remove();
-    }
-    aube_util::fs_atomic::atomic_write(&path, root.to_string().as_bytes())
+    unset_json_path(&path, &[TABLE, KEY]).map(|_| ())
 }
 
 /// ONE process-wide lock every test that mutates a shared env var (`XDG_*`, `CI`)

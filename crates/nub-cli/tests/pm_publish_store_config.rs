@@ -567,6 +567,178 @@ fn registry_verbs_are_native_not_npm_only_fallbacks() {
     }
 }
 
+/// A `nub.jsonc` field round-trips through `set` and `get`, lands typed (not as
+/// the shell's string), and stays out of `.npmrc`. The reverse direction is the
+/// other half of the boundary: a setting key that is not a field must not
+/// materialize a `nub.jsonc`.
+#[test]
+fn nub_jsonc_fields_round_trip_and_stay_out_of_npmrc() {
+    let ctx = Ctx::new("field-roundtrip", MANIFEST);
+    let file = ctx.project.join("nub.jsonc");
+
+    for (key, value) in [
+        ("nodeCompat", "true"),
+        ("preload", "./a.ts,./b.ts"),
+        ("install.linker", "hoisted"),
+        ("install.minimumReleaseAge", "3d"),
+    ] {
+        let (_, stderr, code) = ctx.run(&["config", "set", key, value]);
+        assert_eq!(code, 0, "set {key}: {stderr}");
+        let (stdout, stderr, code) = ctx.run(&["config", "get", key]);
+        assert_eq!((stdout.trim(), code), (value, 0), "get {key}: {stderr}");
+    }
+
+    let written: serde_json::Value = serde_json::from_str(&read(&file)).unwrap();
+    assert_eq!(written["nodeCompat"], serde_json::json!(true), "{written}");
+    assert_eq!(
+        written["preload"],
+        serde_json::json!(["./a.ts", "./b.ts"]),
+        "{written}"
+    );
+    assert_eq!(read(&ctx.project.join(".npmrc")), "", "{written}");
+
+    // A key with no field row keeps its `.npmrc` routing untouched.
+    let (_, stderr, code) = ctx.run(&["config", "set", "auto-install-peers", "false"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(read(&ctx.project.join(".npmrc")).contains("auto-install-peers=false"));
+    assert!(
+        !read(&file).contains("auto-install-peers"),
+        "an .npmrc key must not leak into nub.jsonc: {}",
+        read(&file)
+    );
+}
+
+/// The whole reason writes go through a CST edit: `nub.jsonc` is JSON *with
+/// comments*, and a `set` that touches one key must leave a hand-authored file
+/// intact everywhere else — comments, blank lines, trailing commas, and key
+/// order included.
+#[test]
+fn set_preserves_comments_in_a_hand_authored_project_file() {
+    let ctx = Ctx::new("field-comments", MANIFEST);
+    let file = ctx.project.join("nub.jsonc");
+    let before = "{\n  \
+        // relative paths or bare specifiers, loaded in order\n  \
+        \"preload\": [\"./setup.ts\"],\n\n  \
+        /* the whole V8 flag set is available here */\n  \
+        \"v8Flags\": [\"--expose-gc\"],\n  \
+        \"install\": {\n    \
+            // \"global-virtual-store\" (default) | \"isolated\" | \"hoisted\"\n    \
+            \"linker\": \"isolated\",\n  \
+        },\n\
+        }\n";
+    std::fs::write(&file, before).unwrap();
+
+    let (_, stderr, code) = ctx.run(&["config", "set", "install.minimumReleaseAge", "3d"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let after = read(&file);
+    for fragment in [
+        "// relative paths or bare specifiers, loaded in order",
+        "/* the whole V8 flag set is available here */",
+        "// \"global-virtual-store\" (default) | \"isolated\" | \"hoisted\"",
+        "\"preload\": [\"./setup.ts\"],",
+        "\"v8Flags\": [\"--expose-gc\"],",
+        "\"linker\": \"isolated\",",
+    ] {
+        assert!(after.contains(fragment), "lost {fragment:?}:\n{after}");
+    }
+    assert!(after.contains("\"minimumReleaseAge\": \"3d\""), "{after}");
+}
+
+/// An invalid value is refused with the FILE PARSER's own message, and nothing
+/// is written — the writer must never accept a value that would make the next
+/// run fail on a file the user did not hand-edit.
+#[test]
+fn an_invalid_field_value_is_refused_before_anything_is_written() {
+    let ctx = Ctx::new("field-invalid", MANIFEST);
+    let file = ctx.project.join("nub.jsonc");
+
+    for (key, value, expected) in [
+        ("install.minimumReleaseAge", "3", "invalid duration `3`"),
+        ("nodeCompat", "yes", "must be a boolean"),
+        ("install.linker", "flat", "unknown strategy `flat`"),
+    ] {
+        let (_, stderr, code) = ctx.run(&["config", "set", key, value]);
+        assert_eq!(code, 1, "set {key}={value} must fail: {stderr}");
+        assert!(stderr.contains(expected), "set {key}={value}: {stderr}");
+    }
+    assert!(!file.exists(), "a refused set must not create the file");
+}
+
+/// The `dlx` section configures the machine, not a checkout, so it is written to
+/// the GLOBAL file with no scope flag and refused at an explicit project scope.
+#[test]
+fn dlx_consent_targets_the_global_file() {
+    let ctx = Ctx::new("field-dlx", MANIFEST);
+    let global = ctx.home.join("xdg-config/nub/nub.jsonc");
+
+    let (_, stderr, code) = ctx.run(&["config", "set", "dlx.consent", "never"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let body = read(&global);
+    assert!(body.contains("\"consent\": \"never\""), "{body}");
+    assert!(
+        !ctx.project.join("nub.jsonc").exists(),
+        "a global-only field must not create a project file"
+    );
+
+    let (stdout, _, code) = ctx.run(&["config", "get", "dlx.consent"]);
+    assert_eq!((stdout.trim(), code), ("never", 0));
+
+    let (_, stderr, code) = ctx.run(&["config", "set", "--local", "dlx.consent", "prompt"]);
+    assert_eq!(code, 1, "stderr: {stderr}");
+    assert!(stderr.contains("configured globally"), "{stderr}");
+}
+
+/// Help must advertise exactly the surface that runs: `path` is nub's own
+/// subcommand and was invisible, while `explain`/`find`/`tui` were listed and
+/// error on use.
+#[test]
+fn config_help_lists_the_wired_subcommands_only() {
+    let ctx = Ctx::new("config-help", MANIFEST);
+    let (stdout, stderr, code) = ctx.run(&["config", "--help"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let commands = stdout
+        .split("Options:")
+        .next()
+        .expect("help starts with the command list");
+    for wired in ["get", "set", "delete", "list", "path"] {
+        assert!(
+            commands.contains(wired),
+            "{wired} must be listed:\n{stdout}"
+        );
+    }
+    for unwired in ["explain", "find", "tui"] {
+        assert!(
+            !commands.contains(unwired),
+            "{unwired} is refused and must not be listed:\n{stdout}"
+        );
+    }
+
+    let (path_help, _, code) = ctx.run(&["config", "path", "--help"]);
+    assert_eq!(code, 0);
+    assert!(path_help.contains("Usage: nub config path"), "{path_help}");
+
+    // `path` is claimed ahead of the parse, so the interception must also
+    // survive a bare `config` — no subcommand, no args at all. Run without the
+    // shared brand assertion: the merged list this prints carries
+    // `defaultLockfileFormat=aube`, a pre-existing leak in the engine's `list`
+    // output (which no rewrite seam covers) and not this test's subject.
+    let bare = Command::new(nub_binary())
+        .arg("config")
+        .current_dir(&ctx.project)
+        .env("NUB_SELF_SHIM", "0")
+        .env("HOME", &ctx.home)
+        .env("XDG_DATA_HOME", ctx.home.join("xdg-data"))
+        .env("XDG_CACHE_HOME", ctx.home.join("xdg-cache"))
+        .env("XDG_CONFIG_HOME", ctx.home.join("xdg-config"))
+        .output()
+        .expect("failed to spawn nub");
+    let stderr = String::from_utf8_lossy(&bare.stderr);
+    assert!(!stderr.contains("panicked"), "a bare `config`: {stderr}");
+    assert_eq!(bare.status.code(), Some(0), "{stderr}");
+}
+
 /// `stage` is not a real npm/pnpm command and is no longer in the verb
 /// table — it falls through to the generic unknown-command path, never the
 /// npm-only diagnostic.

@@ -435,8 +435,17 @@ fn read_workspace_yaml_raw(cwd: &Path) -> BTreeMap<String, yaml_serde::Value> {
 fn read_yaml_flat(
     map: &std::collections::BTreeMap<String, yaml_serde::Value>,
 ) -> Vec<(String, String)> {
+    // `config get/list` must report what an install would actually use, so a
+    // key the resolver's YAML source no longer supplies is dropped here too —
+    // by NAME as well as by setting, since the trailing scalar pass would
+    // otherwise re-admit it as an unrecognized pass-through key.
+    let mut suppressed: Vec<&str> = Vec::new();
     let mut out: Vec<(String, String)> = Vec::new();
     for meta in settings_meta::all() {
+        if aube_settings::workspace_yaml_suppressed(meta) {
+            suppressed.extend(meta.workspace_yaml_keys.iter().copied());
+            continue;
+        }
         for key in meta.workspace_yaml_keys {
             let Some(raw) = yaml_setting_string(meta, map, key) else {
                 continue;
@@ -448,6 +457,7 @@ fn read_yaml_flat(
     }
     let scalar_entries: Vec<_> = map
         .iter()
+        .filter(|(k, _)| !suppressed.contains(&k.as_str()))
         .filter_map(|(k, v)| yaml_scalar_string(v).map(|raw| (k.clone(), raw)))
         .collect();
     for (key, raw) in scalar_entries {

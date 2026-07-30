@@ -45,7 +45,7 @@ Nub mirrors pnpm most closely: the CLI surface, the isolated `node_modules` layo
     { feature: <><code>onlyBuiltDependencies</code> / <code>neverBuiltDependencies</code></>, status: 'yes' },
     { feature: <><code>packageManager</code> / <code>engines</code></>, status: 'yes' },
     // ── Workspaces ────────────────────────────────────────────────────
-    { feature: <><code>workspaces</code> / <code>pnpm-workspace.yaml</code></>, status: 'yes' },
+    { feature: <><code>workspaces</code> / <code>pnpm-workspace.yaml</code></>, status: 'partial', note: 'Layout keys are not read — layout is configured through nub.jsonc or .npmrc.' },
     { feature: <><code>catalog:</code> / <code>catalogs:</code></>, status: 'yes' },
     { feature: <><code>workspace:</code> protocol</>, status: 'yes' },
     { feature: <><code>namedRegistries</code></>, status: 'yes', note: 'Alias-to-registry map; built-in gh: alias for GitHub Packages.' },
@@ -59,7 +59,7 @@ Nub mirrors pnpm most closely: the CLI surface, the isolated `node_modules` layo
     // ── Lockfiles ─────────────────────────────────────────────────────
     { feature: <><code>pnpm-lock.yaml</code> v9</>, status: 'yes', note: 'v6/v5.4 declined — re-lock under pnpm 9+.' },
     // ── Linking / hoisting ────────────────────────────────────────────
-    { feature: <code>nodeLinker</code>, status: 'partial', note: 'No PnP.' },
+    { feature: <code>nodeLinker</code>, status: 'partial', note: 'From .npmrc or the flag, not pnpm-workspace.yaml. No PnP.' },
   ]}
 />
 
@@ -141,6 +141,8 @@ Under Nub identity, pnpm-named files are outside the supported config surface an
 ## Install behavior
 
 The default `node_modules` layout is **isolated** — pnpm's symlink-into-a-virtual-store scheme. The `--node-linker hoisted` flag gives the flat npm-style layout.
+
+Layout is Nub's own axis rather than something it mirrors, so it comes from `.npmrc`, the flag, or [`nub.jsonc`](/docs/config#installlinker) — a `nodeLinker` or hoisting key in `pnpm-workspace.yaml` has no effect. Everything else in that file, resolution settings included, is read as usual. Because the layout keys stay on the neutral surface, `.npmrc` keeps setting them even under a pnpm 11 project, where pnpm itself no longer reads behavior settings from `.npmrc`.
 
 There is no `pnp` linker. A `node-linker=pnp` request — from `.npmrc` or the `--node-linker pnp` flag — is refused rather than silently downgraded:
 

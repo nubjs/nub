@@ -205,6 +205,66 @@ console.log(JSON.stringify({
         assert_eq!(value["condition"], "condition");
         assert_eq!(value["jsxMode"], "classic");
     }
+
+    /// A `file:` package OUTSIDE the project — forces the nubx registry-
+    /// fallback fetch path (not the `node_modules/.bin` local-bin path
+    /// `assert_nubx_probe` covers), with no network involved. Its bin has a
+    /// `#!/usr/bin/env node` shebang, which is what re-enters nub's `node`
+    /// PATH shim and is the ONLY place augmentation reaches a fetched tool.
+    fn assert_nubx_dlx_fallback_node_flag(&self) {
+        let pkg_dir = self._temp.path().join("dlx-fallback-pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            r#"{ "name": "rtc-dlx-probe", "version": "1.0.0", "bin": { "rtc-dlx-probe": "./bin.js" } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pkg_dir.join("bin.js"),
+            "#!/usr/bin/env node\nconsole.log(JSON.stringify({ stack: Error.stackTraceLimit, snapshot: process.env.__NUB_RUNTIME_CONFIG || null }));\n",
+        )
+        .unwrap();
+
+        let package_spec = format!("file:{}", pkg_dir.display());
+        let run = |extra: &[&str]| {
+            // Three-position rule: a flag BEFORE the bin positional is nubx's
+            // own; after it, the flag would forward to the bin verbatim.
+            let mut args: Vec<&str> = extra.to_vec();
+            args.extend(["-y", "-p", package_spec.as_str(), "rtc-dlx-probe"]);
+            let output = self.command_for(&self.nubx).args(args).output().unwrap();
+            assert!(
+                output.status.success(),
+                "nubx dlx-fallback route {extra:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let line = stdout
+                .lines()
+                .find(|l| l.starts_with('{'))
+                .unwrap_or_else(|| panic!("no JSON line in: {stdout}"));
+            serde_json::from_str::<serde_json::Value>(line).unwrap()
+        };
+
+        let augmented = run(&[]);
+        assert_eq!(
+            augmented["stack"], 23,
+            "fetched bin should be augmented by default: {augmented}"
+        );
+        assert!(
+            !augmented["snapshot"].is_null(),
+            "fetched bin should see the runtime snapshot by default: {augmented}"
+        );
+
+        let compat = run(&["--node"]);
+        assert_eq!(
+            compat["stack"], 10,
+            "--node must reach the fetched bin's re-entrant node shim: {compat}"
+        );
+        assert!(
+            compat["snapshot"].is_null(),
+            "--node must suppress the runtime snapshot on the dlx-fallback path: {compat}"
+        );
+    }
 }
 
 #[test]
@@ -214,6 +274,19 @@ fn runtime_snapshot_reaches_file_script_node_argv0_exec_and_nubx() {
     fixture.assert_probe(&["run", "probe"]);
     fixture.assert_probe(&["exec", "probe"]);
     fixture.assert_nubx_probe();
+}
+
+/// `nubx --node <tool>` on a bin NOT present locally (the registry/`-p`
+/// fetch fallback, not `assert_nubx_probe`'s local-bin path) must disable
+/// augmentation exactly like every other runtime entrypoint. The fetched
+/// bin's `node` shebang re-enters nub as a PATH shim rather than reading
+/// `--node` from argv, so this exercises a genuinely different code path
+/// (`dlx_child_env` stamping `NODE_COMPAT` for the child) than the local-bin
+/// case above.
+#[test]
+fn nubx_node_flag_reaches_the_dlx_fallback_fetch_path() {
+    let fixture = Fixture::new();
+    fixture.assert_nubx_dlx_fallback_node_flag();
 }
 
 #[test]

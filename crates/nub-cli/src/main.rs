@@ -6,6 +6,7 @@
 mod agent;
 mod cli;
 mod config;
+mod config_fields;
 mod dynamic_phantom;
 mod init;
 mod install_engine;

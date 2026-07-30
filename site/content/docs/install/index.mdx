@@ -55,7 +55,7 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
       href: '/docs/install/pnpm',
       items: [
         { code: 'pnpm-lock.yaml', ok: true, note: 'v6/v5.4 declined — re-lock under pnpm 9+.' },
-        { code: 'pnpm-workspace.yaml', ok: true },
+        { code: 'pnpm-workspace.yaml', ok: true, partial: true, note: 'Layout keys are not read — layout is configured through nub.jsonc or .npmrc.' },
         { code: '.pnpmfile.cjs', ok: true },
         { code: '.npmrc', ok: true },
         { code: 'package.json#pnpm', ok: true },
@@ -67,7 +67,6 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
         { code: 'workspace:', ok: true },
         { code: 'workspaces', ok: true },
         { code: 'dependenciesMeta.injected', ok: true },
-        { code: 'nodeLinker', ok: true, partial: true, note: 'No PnP — node-linker=pnp errors.' },
         { code: 'engines / os / cpu', ok: true },
         { code: 'pnpm_config_*', ok: true, note: 'Generic settings under any pnpm version; registry-client keys (registry, proxy, strict-ssl) under pnpm v11+.' },
         { code: 'npm_config_*', ok: true },
@@ -88,7 +87,7 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
           code: '.yarnrc.yml',
           ok: true,
           partial: true,
-          note: 'Not read: per-host proxies, PnP.',
+          note: 'Not read: per-host proxies, nodeLinker and the layout keys.',
         },
         {
           code: '.yarnrc',
@@ -100,7 +99,7 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
           code: 'YARN_*',
           ok: true,
           partial: true,
-          note: 'Reads the registry, auth token/ident, node-linker, CA file, proxy, and strict-SSL env values; map-shaped and scoped env config is not translated.',
+          note: 'Reads the registry, auth token/ident, CA file, proxy, and strict-SSL env values; map-shaped and scoped env config is not translated.',
         },
         { code: '.npmrc', ok: true },
         { code: 'resolutions', ok: true },
@@ -108,7 +107,7 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
         { code: 'workspaces', ok: true },
         { code: 'packageExtensions', ok: true },
         { code: 'dependenciesMeta.built', ok: true },
-        { code: 'nodeLinker', ok: true, partial: true, note: "No PnP — Berry's default and an explicit pnp both abort." },
+        { code: 'nodeLinker: pnp', ok: false, note: "Refused before any write — Berry's default and an explicit pnp both abort." },
         { code: 'engines / os / cpu', ok: true },
       ],
     },
@@ -122,7 +121,7 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
           code: 'bunfig.toml',
           ok: true,
           partial: true,
-          note: '[install] section only.',
+          note: '[install] section only, minus linker — layout is configured through nub.jsonc or .npmrc.',
         },
         { code: 'trustedDependencies', ok: true },
         { code: 'overrides', ok: true },
@@ -174,19 +173,22 @@ The installer is optional. Keep running `npm`, `pnpm`, `yarn`, or `bun` exactly 
 
 ### Resolution versus layout
 
-What the tables above guarantee is **resolution**: which version a range resolves to, and which file a specifier resolves to. Nub mirrors the incumbent on both. It does not guarantee **layout** — how the resolved packages are arranged on disk. Layout is Nub's own axis, defaulting to [the virtual store](/docs/install/virtual-store) and set through the neutral `.npmrc` keys — or, where Nub owns the project, a [`nub.jsonc`](/docs/config#installlinker) block. No lockfile format records a layout, so the round-trip holds either way.
+What the tables above guarantee is **resolution**: which version a range resolves to, and which file a specifier resolves to. Nub mirrors the incumbent on both, and respects the lockfile it finds. It does not guarantee **layout** — how the resolved packages are arranged on disk. Layout is Nub's own axis, defaulting to [the virtual store](/docs/install/virtual-store) and configured through [`nub.jsonc`](/docs/config#installlinker) or the neutral `.npmrc` keys. No lockfile format records a layout, so the round-trip holds either way.
 
-Where an incumbent's layout config expresses a choice Nub can express too, Nub honors it — [per package manager](/docs/install/virtual-store#per-package-manager) has the flat-layout mapping. The rest are layout-only settings with no effect:
+So a layout setting in another manager's config file has no effect, whatever it asks for:
 
 | Incumbent | Setting | Under Nub |
 |---|---|---|
-| **npm** | `install-strategy` | Ignored — except `nested`, which aborts rather than install a tree that resolves differently |
-| **npm** | `global-style` | Ignored |
-| **npm** | `legacy-bundling` | Ignored |
-| **pnpm** | `symlink=false` | Ignored, with a warning — the isolated layout *is* its symlink graph |
-| **Yarn** | `nmHoistingLimits` | Ignored |
-| **Yarn** | `nmMode` | Ignored |
+| **npm** | `install-strategy` | No effect — except `nested`, which aborts rather than install a tree that resolves differently |
+| **npm** | `global-style` | No effect |
+| **npm** | `legacy-bundling` | No effect |
+| **pnpm** | `nodeLinker` and the hoisting keys in `pnpm-workspace.yaml` | No effect |
+| **pnpm** | `symlink=false` | No effect, with a warning — the isolated layout *is* its symlink graph |
+| **Yarn** | `nodeLinker`, `nmHoistingLimits`, `nmMode` in `.yarnrc.yml` | No effect |
 | **Yarn** | `nodeLinker: pnp` | Refused — `ERR_NUB_PNP_UNSUPPORTED`, before any write |
+| **Bun** | `linker` under `[install]` in `bunfig.toml` | No effect |
+
+Plug'n'Play is the one that errors instead of being ignored, because it is not a preference Nub can decline: a PnP project has no `node_modules` tree to install into at all. Everything else in those files — registries, auth, resolution settings, overrides — is read exactly as before. To pick a layout, see [the flat opt-out](/docs/install/virtual-store#the-flat-opt-out).
 
 ### Nub identity
 

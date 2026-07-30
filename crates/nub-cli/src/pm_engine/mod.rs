@@ -1993,7 +1993,18 @@ pub(crate) fn engine_brand_preflight() {
         // reads don't ride the project-scoped gate. (Global WRITES are neutral-only —
         // enforced in store_config_family: `config set -g` never writes a
         // pnpm-branded global file.)
-        c.read_pnpm_global_config = true;
+        // node_modules LAYOUT is nub's own axis, configured through `nub.jsonc`.
+        // The compatibility guarantee covers version resolution, module
+        // resolution, and the project's lockfile — none of which layout touches
+        // — so a pnpm-branded YAML never directs how the tree is arranged, even
+        // under a pnpm incumbent whose resolution config nub mirrors in full.
+        // UNCONDITIONAL, unlike `read_branded_pnpm_config`: that posture is
+        // per-FILE ("is this another tool's state?"), this one is per-AXIS
+        // ("is layout theirs to decide?"), and the answer is never. The neutral
+        // `.npmrc` surface, env aliases, and CLI flags keep setting every one of
+        // these keys. Symmetric with dropping yarn's `.yarnrc.yml nodeLinker`
+        // and bun's `bunfig [install].linker`.
+        c.read_layout_from_workspace_yaml = false;
         c.read_pnpm_config_env_registry = read_pnpm_config_env_registry;
         c.read_yarn_config = read_yarn_config;
         c.yarn_is_classic = yarn_is_classic;

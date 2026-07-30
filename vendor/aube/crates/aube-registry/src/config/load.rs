@@ -50,12 +50,22 @@ fn is_pnpm11_npmrc_readable_key(key: &str) -> bool {
 /// `.npmrc` on its own path and keeps every auth key regardless, so this never
 /// affects auth resolution.
 fn apply_npmrc_settings_allowlist(entries: Vec<(String, String)>) -> Vec<(String, String)> {
-    if !aube_util::engine_context().npmrc_settings_allowlist {
+    let ctx = aube_util::engine_context();
+    if !ctx.npmrc_settings_allowlist {
         return entries;
     }
+    // The allowlist drops layout keys only because pnpm 11 takes them from the
+    // workspace YAML instead. An embedder that also refuses the YAML as a
+    // layout source (`read_layout_from_workspace_yaml = false`) would otherwise
+    // be left with no config file at all for its own layout axis, so the two
+    // postures move together.
+    let keep_layout = !ctx.read_layout_from_workspace_yaml;
     entries
         .into_iter()
-        .filter(|(k, _)| is_pnpm11_npmrc_readable_key(k))
+        .filter(|(k, _)| {
+            is_pnpm11_npmrc_readable_key(k)
+                || (keep_layout && aube_settings::is_layout_npmrc_key(k))
+        })
         .collect()
 }
 

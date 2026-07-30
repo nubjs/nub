@@ -22,8 +22,8 @@
 pub mod meta;
 pub mod values;
 
-pub use meta::{SettingMeta, all, find};
+pub use meta::{SettingMeta, all, find, is_layout_npmrc_key};
 pub use values::{
     ResolveCtx, embedder_defaults, parse_bool, resolved, set_embedder_defaults,
-    set_global_cli_overrides, workspace_yaml_value,
+    set_global_cli_overrides, workspace_yaml_suppressed, workspace_yaml_value,
 };

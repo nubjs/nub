@@ -108,6 +108,24 @@ pub struct EngineContext {
     /// concern, not this read gate.)
     pub read_pnpm_global_config: bool,
 
+    /// Whether LAYOUT settings — the ones flagged `layout = true` in
+    /// `settings.toml`: `nodeLinker`, the hoisting family, `modulesDir`, and
+    /// the virtual-store directories — may resolve from the workspace-YAML
+    /// source family (the project workspace yaml and pnpm's global
+    /// `config.yaml`). `true` (default) preserves upstream aube behavior:
+    /// every declared source applies to every setting.
+    ///
+    /// DISTINCT from [`read_branded_pnpm_config`](Self::read_branded_pnpm_config),
+    /// which decides whether those pnpm-named FILES are read at all. This one
+    /// is per-AXIS rather than per-file: an embedder whose compatibility
+    /// guarantee covers version resolution, module resolution, and the
+    /// lockfile — but NOT how `node_modules` is physically arranged — sets
+    /// this `false` so a mirrored PM's YAML still supplies resolution config
+    /// while layout stays the embedder's own axis. Every other source
+    /// (`.npmrc`, env, CLI, embedder defaults, project config) is unaffected,
+    /// so the same keys keep working from the neutral surfaces.
+    pub read_layout_from_workspace_yaml: bool,
+
     /// Whether aube honors bare `pnpm_config_<registry-client-key>` /
     /// `PNPM_CONFIG_<REGISTRY_CLIENT_KEY>` environment variables on the
     /// registry-client config track — the default `registry`, the proxies,
@@ -376,6 +394,7 @@ impl Default for EngineContext {
             trusted_dependencies_honored: true,
             read_branded_pnpm_config: true,
             read_pnpm_global_config: true,
+            read_layout_from_workspace_yaml: true,
             read_pnpm_config_env_registry: false,
             npmrc_settings_allowlist: false,
             read_yarn_config: false,

@@ -529,8 +529,21 @@ fn apply_env_file_vars(cmd: &mut std::process::Command) {
 /// Build the fetched tool's env overlay. The engine spawns the tool itself, so
 /// the explicit `--env-file` vars have to be handed over as a map rather than
 /// applied to a `Command` the way [`apply_env_file_vars`] does.
-pub(crate) fn dlx_child_env() -> std::collections::BTreeMap<String, String> {
+///
+/// `compat_mode` carries the CLI `--node` flag across the dlx boundary. The
+/// fetched bin's own `node` shebang re-enters nub as a PATH-shim (the same
+/// re-entrant-as-node trick that gives it augmentation at all — see
+/// `apply_lifecycle_augmentation`'s `runtime_node_dir`), and that shim reads
+/// compat from its OWN inherited environment, not from this process's argv.
+/// An ambient `NODE_COMPAT` already survives the hop for free (real env vars
+/// inherit); a bare `--node` flag does not, since it never became an env var.
+/// Stamping `NODE_COMPAT=1` here is what makes `--node` reach the re-entrant
+/// child the same way the persistent env var already does.
+pub(crate) fn dlx_child_env(compat_mode: bool) -> std::collections::BTreeMap<String, String> {
     let mut values = std::collections::BTreeMap::new();
+    if compat_mode {
+        values.insert("NODE_COMPAT".to_string(), "1".to_string());
+    }
     if no_env_file() {
         return values;
     }
@@ -5626,7 +5639,8 @@ fn run_exec_with_dlx(
             crate::nubx_consent::Decision::Proceed { record } => record,
             crate::nubx_consent::Decision::Refused(code) => return Ok(code),
         };
-        let (code, fetched_ok) = crate::pm_engine::run_dlx_for_nubx(bin, args, &flags)?;
+        let (code, fetched_ok) =
+            crate::pm_engine::run_dlx_for_nubx(bin, args, &flags, compat_mode)?;
         // Record consent ONLY after a confirmed successful fetch+run (`fetched_ok`),
         // never on a 404 / failed install — otherwise a one-time `y` on a
         // not-yet-published spec would become a standing silent run-grant for a name

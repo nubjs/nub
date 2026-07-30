@@ -310,6 +310,22 @@ pub fn string_from_npmrc(setting: &str, entries: &[(String, String)]) -> Option<
     None
 }
 
+/// Whether the workspace-YAML source family is suppressed for this
+/// setting. The single choke point for the
+/// `read_layout_from_workspace_yaml` posture: an embedder that owns
+/// `node_modules` layout itself drops the YAML source for the
+/// `layout`-flagged settings, leaving every other source — and every
+/// other setting — untouched. The `meta.layout` test comes first so the
+/// non-layout majority never pays for the context read.
+///
+/// Public because `aube config`'s reporting path flattens the YAML map
+/// itself instead of going through the resolvers below; it must report
+/// what an install would actually use, so it shares this predicate
+/// rather than reimplementing the rule.
+pub fn workspace_yaml_suppressed(meta: &meta::SettingMeta) -> bool {
+    meta.layout && !aube_util::engine_context().read_layout_from_workspace_yaml
+}
+
 /// Resolve a `bool` setting from a raw `pnpm-workspace.yaml` map,
 /// walking the declared `sources.workspaceYaml` aliases. Returns
 /// `None` if no alias is present in the map, the setting isn't a
@@ -324,7 +340,7 @@ pub(crate) fn bool_from_workspace_yaml(
     raw: &std::collections::BTreeMap<String, yaml_serde::Value>,
 ) -> Option<bool> {
     let meta = meta::find(setting)?;
-    if meta.type_ != "bool" {
+    if meta.type_ != "bool" || workspace_yaml_suppressed(meta) {
         return None;
     }
     for key in meta.workspace_yaml_keys {
@@ -357,7 +373,7 @@ pub fn string_from_workspace_yaml(
     raw: &std::collections::BTreeMap<String, yaml_serde::Value>,
 ) -> Option<String> {
     let meta = meta::find(setting)?;
-    if !is_stringish(meta.type_) {
+    if !is_stringish(meta.type_) || workspace_yaml_suppressed(meta) {
         return None;
     }
     for key in meta.workspace_yaml_keys {
@@ -406,7 +422,7 @@ pub(crate) fn u64_from_workspace_yaml(
     raw: &std::collections::BTreeMap<String, yaml_serde::Value>,
 ) -> Option<u64> {
     let meta = meta::find(setting)?;
-    if meta.type_ != "int" {
+    if meta.type_ != "int" || workspace_yaml_suppressed(meta) {
         return None;
     }
     for key in meta.workspace_yaml_keys {
@@ -458,7 +474,7 @@ pub(crate) fn string_list_from_workspace_yaml(
     raw: &std::collections::BTreeMap<String, yaml_serde::Value>,
 ) -> Option<Vec<String>> {
     let meta = meta::find(setting)?;
-    if meta.type_ != "list<string>" {
+    if meta.type_ != "list<string>" || workspace_yaml_suppressed(meta) {
         return None;
     }
     for key in meta.workspace_yaml_keys {

@@ -658,7 +658,12 @@ pub(crate) fn resolve_virtual_store_dir(
             .iter()
             .any(|(k, _)| k == "virtualStoreDir" || k == "virtual-store-dir")
     });
-    let has_explicit_yaml = ctx.workspace_yaml.contains_key("virtualStoreDir");
+    // Guarded by the same posture the resolver's YAML source obeys: when layout
+    // is the embedder's own axis, a workspace-YAML `virtualStoreDir` supplies no
+    // value, so counting it as explicit here would send a project down the
+    // resolver branch with nothing to resolve.
+    let has_explicit_yaml = aube_util::engine_context().read_layout_from_workspace_yaml
+        && ctx.workspace_yaml.contains_key("virtualStoreDir");
     // Mirrors the `sources.env` list in settings.toml (`virtualStoreDir`).
     // Keep all three aliases here — dropping `AUBE_VIRTUAL_STORE_DIR`
     // silently routes through the default branch even though

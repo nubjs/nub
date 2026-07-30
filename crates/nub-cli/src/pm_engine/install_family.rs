@@ -563,7 +563,9 @@ fn run_dlx(typed: &str, args: &[String]) -> Result<i32> {
     finish_code_quieted(
         &globals.output,
         &session,
-        aube::commands::dlx::run_in(verb, None, crate::cli::dlx_child_env()),
+        // `nub dlx` has no `--node` flag of its own; an ambient `NODE_COMPAT`
+        // already reaches the fetched bin via normal env inheritance.
+        aube::commands::dlx::run_in(verb, None, crate::cli::dlx_child_env(false)),
     )
 }
 
@@ -595,6 +597,7 @@ pub fn run_dlx_for_nubx(
     bin: &str,
     args: &[String],
     flags: &crate::cli::NubxDlxFlags,
+    compat_mode: bool,
 ) -> Result<(i32, bool)> {
     if flags.quiet {
         // Same knob aube's own startup flips for `--silent`: drop the animated
@@ -614,7 +617,7 @@ pub fn run_dlx_for_nubx(
     match session.runtime.block_on(aube::commands::dlx::run_in(
         verb,
         None,
-        crate::cli::dlx_child_env(),
+        crate::cli::dlx_child_env(compat_mode),
     )) {
         Ok(code) => Ok((code.unwrap_or(0), true)),
         Err(report) => Ok((present::emit_report(&report), false)),

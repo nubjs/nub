@@ -71,6 +71,13 @@ pub(super) struct SourceIndex {
     project_npmrc: Vec<(String, String)>,
     user_npmrc: Vec<(String, String)>,
     embedder_defaults: Vec<(String, String)>,
+    /// Every package name any importer DECLARES, across the root manifest and
+    /// each workspace member. Not a settings tier — it is the other half of the
+    /// store decision: `disableGlobalVirtualStoreForPackages` is matched against
+    /// this set, and a hit forces the whole install project-local. Held here
+    /// because the layout row must answer that question and only `load` has the
+    /// project root.
+    declared_packages: Vec<String>,
 }
 
 impl SourceIndex {
@@ -80,9 +87,15 @@ impl SourceIndex {
         let workspace_yaml = aube_settings::all()
             .iter()
             .filter(|meta| {
-                meta.workspace_yaml_keys
-                    .iter()
-                    .any(|key| aube_settings::workspace_yaml_value(&raw, key).is_some())
+                // A setting whose YAML source the engine suppresses is not
+                // claimed by the file: without this the presence probe would
+                // record a tier that resolves to nothing, and `resolve` would
+                // stop there instead of falling through to `.npmrc`.
+                !aube_settings::workspace_yaml_suppressed(meta)
+                    && meta
+                        .workspace_yaml_keys
+                        .iter()
+                        .any(|key| aube_settings::workspace_yaml_value(&raw, key).is_some())
             })
             .map(|meta| {
                 (
@@ -98,6 +111,7 @@ impl SourceIndex {
             project_npmrc: npmrc.project,
             user_npmrc: npmrc.user,
             embedder_defaults: aube_settings::embedder_defaults().to_vec(),
+            declared_packages: declared_packages(cwd),
         }
     }
 
@@ -148,6 +162,32 @@ impl SourceIndex {
             .find(|(k, _)| k == setting)
             .map(|(_, value)| (value.clone(), Some(Source::Default)))
     }
+}
+
+/// Every package name declared by the root manifest and by each workspace
+/// member, matching the importer set `find_gvs_incompatible_trigger` scans.
+/// Traversal mirrors `unsupported_config::injected_deps_present`, the other
+/// manifest-wide probe the install header depends on.
+fn declared_packages(root: &Path) -> Vec<String> {
+    let mut roots = vec![root.to_path_buf()];
+    roots.extend(
+        aube_workspace::find_workspace_packages(root)
+            .into_iter()
+            .flatten(),
+    );
+    roots
+        .iter()
+        .filter_map(|dir| super::cached_aube_manifest(&dir.join("package.json")))
+        .flat_map(|manifest| {
+            manifest
+                .dependencies
+                .keys()
+                .chain(manifest.dev_dependencies.keys())
+                .chain(manifest.optional_dependencies.keys())
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// The `nub.jsonc` field a lowered engine setting came from, for the settings
@@ -303,12 +343,18 @@ const RESOLUTION_SETTINGS: &[(&str, &str, &str)] = &[
 /// described a tree nobody gets: with no config at all the packages symlink
 /// into the machine-global store, which is what `global-virtual-store` names.
 ///
-/// Three things flip it back to a project-local store, and they arrive by
+/// Four things flip it back to a project-local store, and they arrive by
 /// different routes — which is why this cannot simply read one setting. An
 /// explicit `enableGlobalVirtualStore=false` and the `hoist=true` nub pushes
-/// for injected dependencies both land in the settings index. A CI environment
-/// does not: `Linker::new` derives it from `is_ci()` at construction, so the
-/// only way to report it is to ask the same question aube will.
+/// for injected dependencies both land in the settings index. The other two do
+/// not. A CI environment is derived from `is_ci()` where the engine plans the
+/// store, so the only way to report it is to ask the same question aube will.
+/// And a declared package on `disableGlobalVirtualStoreForPackages` — nub seeds
+/// `next` and `react-native`, so a stock Next.js project with no config at all
+/// takes this route — is a fact about the MANIFEST, not about any setting: it
+/// reads as unset here while `resolve_global_virtual_store_override` turns it
+/// into a whole-install opt-out. Neither carries a parenthetical, because
+/// neither is a value the reader can find in a config file.
 fn layout_row(index: &SourceIndex) -> (String, Option<Source>) {
     let (linker, linker_source) = index
         .resolve("nodeLinker")
@@ -322,9 +368,36 @@ fn layout_row(index: &SourceIndex) -> (String, Option<Source>) {
         None if aube_util::env::is_ci() => ("isolated".to_string(), None),
         None => match index.resolve("hoist") {
             Some((hoist, source)) if hoist == "true" => ("isolated".to_string(), source),
+            _ if gvs_incompatible_package(index) => ("isolated".to_string(), None),
             _ => ("global-virtual-store".to_string(), None),
         },
     }
+}
+
+/// Whether a declared package matches `disableGlobalVirtualStoreForPackages`,
+/// the whole-install opt-out `resolve_global_virtual_store_override` applies
+/// when nothing set the store bit explicitly. Mirrors that function's guards:
+/// `virtualStoreOnly` suppresses the opt-out, and the CI case is already
+/// decided by the caller before this is reached.
+fn gvs_incompatible_package(index: &SourceIndex) -> bool {
+    if index
+        .resolve("virtualStoreOnly")
+        .is_some_and(|(value, _)| value == "true")
+    {
+        return false;
+    }
+    let Some((raw, _)) = index.resolve("disableGlobalVirtualStoreForPackages") else {
+        return false;
+    };
+    raw.split(',')
+        .map(str::trim)
+        .filter(|pattern| !pattern.is_empty())
+        .any(|pattern| {
+            index
+                .declared_packages
+                .iter()
+                .any(|name| aube_linker::package_name_matches(pattern, name))
+        })
 }
 
 pub(super) fn resolved_rows(index: &SourceIndex) -> Vec<Row> {
@@ -338,8 +411,22 @@ pub(super) fn resolved_rows(index: &SourceIndex) -> Vec<Row> {
     // Both pattern lists answer "where can an undeclared import find this", so
     // they share a row. The patterns ARE the answer — an enumerated package list
     // would be unreadable and a count says nothing at all.
+    //
+    // `shamefullyHoist` is pnpm's sugar for `publicHoistPattern: ['*']`, and the
+    // linker honors it as a strict superset — a true flag skips the pattern test
+    // for every name rather than adding to the list — so it IS the pattern when
+    // set. Reading only the pattern list described a root `node_modules` holding
+    // the few names it mentions while the install had put every name there, and
+    // said nothing at all when the flag was the only thing set.
+    let shamefully_hoist = index
+        .resolve("shamefullyHoist")
+        .filter(|(value, _)| value == "true");
     for setting in ["publicHoistPattern", "hoistPattern"] {
-        let Some((raw, source)) = index.resolve(setting) else {
+        let resolved = match (setting, &shamefully_hoist) {
+            ("publicHoistPattern", Some((_, source))) => Some(("*".to_string(), source.clone())),
+            _ => index.resolve(setting),
+        };
+        let Some((raw, source)) = resolved else {
             continue;
         };
         let patterns: Vec<String> = raw
@@ -681,6 +768,7 @@ mod tests {
             project_npmrc: Vec::new(),
             user_npmrc: Vec::new(),
             embedder_defaults: Vec::new(),
+            declared_packages: Vec::new(),
         };
         assert_eq!(
             layout_row(&shared),
@@ -737,6 +825,95 @@ mod tests {
             ..injected
         };
         assert_eq!(layout_row(&hoisted).0, "hoisted");
+    }
+
+    /// A package the shared store cannot serve takes the store project-local
+    /// without any setting saying so — nub seeds `next`, so a stock Next.js
+    /// project with no config at all lands here. The store bit reads as unset,
+    /// which is why the manifest has to be consulted: reporting the settings
+    /// index alone told that project `global-virtual-store` while every package
+    /// on disk was a real project-local directory.
+    #[test]
+    fn a_gvs_incompatible_dependency_reports_the_project_local_store() {
+        let index = SourceIndex {
+            env: Vec::new(),
+            project_config: Vec::new(),
+            workspace_yaml: Vec::new(),
+            project_npmrc: Vec::new(),
+            user_npmrc: Vec::new(),
+            embedder_defaults: vec![
+                ("nodeLinker".to_string(), "isolated".to_string()),
+                (
+                    "disableGlobalVirtualStoreForPackages".to_string(),
+                    "next,react-native".to_string(),
+                ),
+            ],
+            declared_packages: vec!["next".to_string(), "debug".to_string()],
+        };
+        if !aube_util::env::is_ci() {
+            assert_eq!(layout_row(&index), ("isolated".to_string(), None));
+        }
+
+        // Only a DECLARED name triggers it; the seed on its own must not drag
+        // every project off the shared store.
+        let untriggered = SourceIndex {
+            declared_packages: vec!["debug".to_string()],
+            ..index
+        };
+        if !aube_util::env::is_ci() {
+            assert_eq!(
+                layout_row(&untriggered),
+                ("global-virtual-store".to_string(), None)
+            );
+        }
+
+        // `virtualStoreOnly` suppresses the opt-out engine-side, so the label
+        // must not claim the project-local store the engine will not build.
+        let store_only = SourceIndex {
+            declared_packages: vec!["next".to_string()],
+            project_npmrc: vec![("virtualStoreOnly".to_string(), "true".to_string())],
+            ..untriggered
+        };
+        if !aube_util::env::is_ci() {
+            assert_eq!(layout_row(&store_only).0, "global-virtual-store");
+        }
+    }
+
+    /// `shamefully-hoist` hoists every name in the graph, so it reports as the
+    /// `*` it is — both when a narrower pattern list sits alongside it (which
+    /// the flag overrides wholesale) and when it is the only thing set.
+    #[test]
+    fn shamefully_hoist_reports_the_pattern_it_actually_is() {
+        let index = SourceIndex {
+            env: Vec::new(),
+            project_config: Vec::new(),
+            workspace_yaml: Vec::new(),
+            project_npmrc: vec![
+                ("shamefully-hoist".to_string(), "true".to_string()),
+                ("public-hoist-pattern".to_string(), "ms".to_string()),
+            ],
+            user_npmrc: Vec::new(),
+            embedder_defaults: Vec::new(),
+            declared_packages: Vec::new(),
+        };
+        let rows = resolved_rows(&index);
+        let hoisting = rows.iter().find(|row| row.label == "hoisting").unwrap();
+        assert_eq!(hoisting.values, vec!["*"]);
+        assert_eq!(hoisting.note.as_deref(), Some("(.npmrc)"));
+
+        // nub's own `install.publicHoist` writes `shamefullyHoist=false`
+        // alongside the patterns, so the narrowing must survive it.
+        let narrowed = SourceIndex {
+            project_config: vec![
+                ("shamefullyHoist".to_string(), "false".to_string()),
+                ("publicHoistPattern".to_string(), "@types/*".to_string()),
+            ],
+            project_npmrc: Vec::new(),
+            ..index
+        };
+        let rows = resolved_rows(&narrowed);
+        let hoisting = rows.iter().find(|row| row.label == "hoisting").unwrap();
+        assert_eq!(hoisting.values, vec!["@types/*"]);
     }
 
     /// Nothing materialized prints nothing: materialization is routine, and a
@@ -802,6 +979,7 @@ mod tests {
             project_npmrc: vec![("node-linker".to_string(), "isolated".to_string())],
             user_npmrc: Vec::new(),
             embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
+            declared_packages: Vec::new(),
         };
         assert_eq!(
             index.resolve("nodeLinker"),
@@ -852,6 +1030,7 @@ mod tests {
             project_npmrc: Vec::new(),
             user_npmrc: Vec::new(),
             embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
+            declared_packages: Vec::new(),
         };
         assert_eq!(
             index.resolve("nodeLinker"),
@@ -870,6 +1049,7 @@ mod tests {
             project_npmrc: vec![("auto-install-peers".to_string(), "false".to_string())],
             user_npmrc: vec![("strict-peer-dependencies".to_string(), "true".to_string())],
             embedder_defaults: Vec::new(),
+            declared_packages: Vec::new(),
         };
         let rows = resolved_rows(&index);
         let resolution = rows.iter().find(|row| row.label == "resolution").unwrap();

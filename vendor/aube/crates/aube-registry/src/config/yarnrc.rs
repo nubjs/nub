@@ -84,7 +84,7 @@ fn load_project_yarnrc_entries_with_home(
 /// (root→child order) into the single concatenated list the settings layer
 /// reads.
 ///
-/// Scalar settings (registry/auth/nodeLinker) stay concatenated in order so the
+/// Scalar settings (registry/auth) stay concatenated in order so the
 /// settings reader's last-one-wins (`entries.iter().rev()`) keeps the nearest
 /// file winning. `packageExtensions` is the exception: it is a map-typed
 /// setting, and the settings reader is single-file last-wins, so emitting one
@@ -130,7 +130,6 @@ pub(super) fn yarn_env_entries_from(env: &[(String, String)]) -> Vec<(String, St
             Some("npmRegistryServer") => config.npm_registry_server = Some(value.clone()),
             Some("npmAuthToken") => config.npm_auth_token = Some(value.clone()),
             Some("npmAuthIdent") => config.npm_auth_ident = Some(value.clone()),
-            Some("nodeLinker") => config.node_linker = Some(value.clone()),
             // Yarn Berry resolves env vars with `camelcase(name)` to a flat
             // top-level setting key (`getEnvironmentSettings`), so only the
             // top-level network/TLS settings have a well-defined env spelling.
@@ -331,7 +330,12 @@ struct YarnRc {
     // key (top-level here, `//host/:always-auth` per-registry, or scoped
     // via the owning scope's registry). See `into_entries`.
     npm_always_auth: Option<bool>,
-    node_linker: Option<String>,
+    // `nodeLinker` is absent on purpose. node_modules LAYOUT is outside the
+    // compatibility guarantee (version resolution, module resolution, the
+    // lockfile), so a Yarn-branded file never directs how the tree is
+    // arranged. Yarn PnP is a separate concern the embedder handles by reading
+    // `.yarnrc.yml` itself and refusing the install — a `node_modules` tree is
+    // not a PnP tree, so there is nothing to translate either way.
     // Top-level network/TLS settings. Yarn Berry expresses the CA bundle
     // as a *file path* (`httpsCaFilePath`) and the proxies as plain URLs
     // (`httpProxy` / `httpsProxy`), which map 1:1 onto the npmrc-shaped
@@ -524,16 +528,6 @@ impl YarnRc {
                         "true",
                     );
                 }
-            }
-        }
-
-        if let Some(linker) = self.node_linker.as_deref().map(str::trim) {
-            match linker.to_ascii_lowercase().as_str() {
-                "node-modules" => push(&mut out, "nodeLinker", "hoisted"),
-                "pnpm" => push(&mut out, "nodeLinker", "isolated"),
-                // PnP generation is out of scope. Leave it to nub's existing
-                // Yarn-PnP warning/refusal path instead of pretending support.
-                _ => {}
             }
         }
 
@@ -809,7 +803,6 @@ fn yarn_env_key(key: &str) -> Option<String> {
         "npm_registry_server" => Some("npmRegistryServer".to_string()),
         "npm_auth_token" => Some("npmAuthToken".to_string()),
         "npm_auth_ident" => Some("npmAuthIdent".to_string()),
-        "node_linker" => Some("nodeLinker".to_string()),
         "https_ca_file_path" => Some("httpsCaFilePath".to_string()),
         "http_proxy" => Some("httpProxy".to_string()),
         "https_proxy" => Some("httpsProxy".to_string()),

@@ -18,6 +18,55 @@ Every setting resolves through the same chain, most specific first:
 
 Both files take the same fields, except [`dlx`](#dlx), which is global-only.
 
+## Editing from the command line
+
+Read and write any field with `nub config`, which validates the value and rewrites the file in place.
+
+```bash
+nub config set nodeCompat true                # writes ./nub.jsonc
+nub config get install.linker                 # hoisted
+nub config delete install.minimumReleaseAge
+nub config path                               # the global file's location
+```
+
+Fields are addressed by their dotted path, and each is written whole. Lists are comma-separated.
+
+```bash
+nub config set preload ./setup.ts,tsx/esm
+nub config set loader .graphql=text,.rules=yaml
+```
+
+An argument starting with `[` or `{` is read as JSON, which is how the object forms are written.
+
+```bash
+nub config set install.linker '{"strategy":"isolated","hoist":["@types/*"]}'
+```
+
+Values are checked against the same rules that read the file, so a rejected write leaves it untouched.
+
+```text
+$ nub config set install.minimumReleaseAge 3
+nub: `install.minimumReleaseAge` in /app/nub.jsonc: invalid duration `3` — expected an integer followed by a unit s|m|h|d|w (e.g. "3d")
+```
+
+Comments, blank lines, and key order survive an edit, so a hand-annotated file stays readable.
+
+Writes go to the project file, and `--location user` sends them to the global one instead. Fields under [`dlx`](#dlx) always go there, with or without the flag.
+
+```bash
+nub config set --location user envFile false   # personal default, everywhere
+nub config set dlx.consent never               # global; the flag is redundant
+```
+
+Reads take the project file first and fall back to the global one. An unset field prints `undefined`, and `--json` prints the exact stored value.
+
+```bash
+nub config get --local nodeCompat   # project file only
+nub config get preload --json       # ["./setup.ts","tsx/esm"]
+```
+
+Keys that are not fields of this file keep their existing meaning: they read and write `.npmrc`, unchanged.
+
 ## Reference
 
 Every field, with its full value set. Each has its own section below. Paths are resolved from the directory containing `nub.jsonc`, not the shell's current directory.
