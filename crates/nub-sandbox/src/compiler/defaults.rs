@@ -503,6 +503,17 @@ const BUILD_JAIL_EXTRA_EXACT: &[&str] = &[
     // absent → the toolchain's default SDK/min-OS, so a package pinning either needs them).
     "SDKROOT",
     "MACOSX_DEPLOYMENT_TARGET",
+    // The Windows MSVC trio `node-gyp`'s `findVisualStudio` short-circuits on. WITHOUT THESE
+    // THE JAIL CANNOT BUILD FROM SOURCE AT ALL: its only other discovery routes are a COM
+    // server an AppContainer may not activate and a PowerShell module it cannot see, so the
+    // pre-resolved answer `pm_engine::jail_msvc` stamps is the whole mechanism. Non-secret
+    // toolchain path/version pointers, the same class as `SDKROOT` and `PYTHON` above, so an
+    // ambient value (a developer command prompt's) rides in on the same terms — which is also
+    // the behaviour node-gyp is built around. Inert on POSIX, where nothing sets them, exactly
+    // as the two macOS names above are.
+    "VCINSTALLDIR",
+    "VSCMD_VER",
+    "WindowsSDKVersion",
 ];
 
 /// Whether an env key is admitted into the build-jail's lifecycle env — the
