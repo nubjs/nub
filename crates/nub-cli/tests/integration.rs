@@ -4009,7 +4009,14 @@ fn wait_for_watch_reload(
     stderr: &Path,
     mut poke: impl FnMut(),
 ) -> String {
-    for i in 0..150 {
+    // 60s, not the 15s this used to allow. What is being waited on is a real
+    // process restart — nub startup, Node startup, an oxc transform — and a
+    // legitimate pass was measured at 16.85s on a contended host: past the old
+    // budget while doing nothing wrong. That is a timeout too small for the
+    // machine rather than a flake to retry around. No assertion moves; the
+    // restarted child must still report the new values, and a genuine failure
+    // still fails, just later on a wait that normally returns in ~6s.
+    for i in 0..600 {
         if let Ok(snapshot) = std::fs::read_to_string(path)
             && snapshot.contains(needle)
         {
