@@ -2396,6 +2396,7 @@ fs.writeFileSync({marker}, "sentinel=" + String(globalThis.__nubJailStdioShim) +
         }
 
         // ── the batteries ─────────────────────────────────────────────────────────────
+        let mut ps_reference: Option<BTreeMap<String, String>> = None;
         for plan in &plans {
             println!("  ---- shell {} ----", plan.name);
             println!(
@@ -2404,6 +2405,9 @@ fs.writeFileSync({marker}, "sentinel=" + String(globalThis.__nubJailStdioShim) +
                 nub_sandbox::windows_leaf_grant_redundant(&plan.exe)
             );
             let reference = shell_arm_unconfined(&f, plan, &outroot, &policy);
+            if plan.name == "powershell" {
+                ps_reference = Some(reference.clone());
+            }
             let floor =
                 without_ancestor_repair(|| shell_arm_confined(&f, &policy, plan, &outroot, "off"));
             let ceiling = shell_arm_confined(&f, &policy, plan, &outroot, "on");
@@ -2488,6 +2492,70 @@ fs.writeFileSync({marker}, "sentinel=" + String(globalThis.__nubJailStdioShim) +
                     line(&reference, "cdungranted")
                 ),
             );
+        }
+
+        // ── ATTRIBUTING WINDOWS POWERSHELL 5.1's FAILURE ─────────────────────────────
+        //
+        // Run 30532139228 measured every FileSystem-provider cell failing in BOTH arms with
+        // `CommandNotFoundException: The term 'Test-Path' is not recognized` — the cmdlet is
+        // MISSING, not refused. `Test-Path`, `Get-ChildItem`, `Get-Content`, `Set-Content` and
+        // `Set-Location` all live in the `Microsoft.PowerShell.Management` MODULE under
+        // `$PSHOME\Modules`, while `Get-Command` — the one cell that worked — is in the
+        // always-loaded `Microsoft.PowerShell.Core` snap-in. That says a missing READ GRANT, not
+        // an OS limit, and the difference decides whether 5.1 is fixable or disqualified. One
+        // variable: the same battery, the same repair, plus a read grant on `$PSHOME`.
+        if let (Some(reference), Some(plan)) = (
+            ps_reference.as_ref(),
+            plans.iter().find(|p| p.name == "powershell"),
+        ) {
+            let pshome = plan.exe.parent().map(Path::to_path_buf);
+            if let Some(pshome) = pshome {
+                let mut grants = vec![read_rule(node), read_rule(&pshome)];
+                for extra in [
+                    Some(cmd_exe.clone()),
+                    node.parent().map(Path::to_path_buf),
+                    staged_busybox.clone(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    grants.push(read_rule(&extra));
+                }
+                let ps_policy = jail_shaped(&f, grants, &[("NODE_OPTIONS", node_options.clone())]);
+                println!("  fact:shell-psmodules-grant={}", pshome.display());
+                let arm = shell_arm_confined(&f, &ps_policy, plan, &outroot, "psmodules");
+                for label in SHELL_LABELS {
+                    println!(
+                        "  fact:shell-powershell-psmodules-{label}={}",
+                        line(&arm, label)
+                    );
+                }
+                let diffs: Vec<String> = SHELL_LABELS
+                    .iter()
+                    .copied()
+                    .filter(|l| *l != "cwd" && *l != "cwdafter" && *l != "cdungranted")
+                    .filter(|l| line(&arm, l) != line(reference, l))
+                    .map(|l| format!("{l}:{}!={}", line(&arm, l), line(reference, l)))
+                    .collect();
+                println!(
+                    "  diag:shell-powershell-psmodules-diff={}",
+                    if diffs.is_empty() {
+                        "none".to_string()
+                    } else {
+                        diffs.join(" | ")
+                    }
+                );
+                report(
+                    fails,
+                    "shell-powershell-psmodules-matches-unconfined",
+                    diffs.is_empty(),
+                    &format!(
+                        "{} diverging cell(s) with $PSHOME granted read (a PASS attributes 5.1's \
+                         breakage to a missing grant rather than to the jail)",
+                        diffs.len()
+                    ),
+                );
+            }
         }
     }
 

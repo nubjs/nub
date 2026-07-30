@@ -250,6 +250,15 @@ jobs:
             grep -E "diag:shell-$sh-(off|on)-diff=" probe.log || true
           done
 
+          echo "---- shells: is Windows PowerShell 5.1 broken by the jail, or by a missing grant? ----"
+          if grep -qF "fact:shell-present-powershell=true" probe.log; then
+            need "  fact:shell-psmodules-grant="
+            grep -q "prop:shell-powershell-psmodules-matches-unconfined=" probe.log \
+              || { echo "MISS shell-powershell-psmodules-matches-unconfined (never measured)"; fail=1; }
+            grep -E "prop:shell-powershell-psmodules-matches-unconfined=" probe.log || true
+            grep -E "diag:shell-powershell-psmodules-diff=" probe.log || true
+          fi
+
           echo "---- shells: cmd.exe AS the confined program (the production process shape) ----"
           grep -q "prop:shell-direct-cmd-is-the-confined-program=" probe.log \
             || { echo "MISS shell-direct-cmd-is-the-confined-program (never measured — a watchdog exit means it HUNG)"; fail=1; }
