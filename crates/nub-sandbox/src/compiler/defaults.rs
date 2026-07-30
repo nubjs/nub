@@ -601,6 +601,18 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
 /// than one that cannot start, so this stays unwired even now that a working repair exists
 /// beside it. (`preserve_symlinks_isolated_layout` is the standing regression test; if it ever
 /// stops reproducing, this becomes available again and the test says so.)
+///
+/// AND THE OBVIOUS SALVAGE IS CLOSED TOO — do not re-derive it. The wrong-version hazard above is
+/// attributable to `--preserve-symlinks` ALONE (`preserve_symlinks_isolated_layout` measures
+/// main-only leaving the same fixture correct), so `--preserve-symlinks-main` by itself looks like
+/// a repair that dodges the disqualification. It is not, because it does not repair enough:
+/// `Module._findPath` realpaths every NON-main resolution unless `--preserve-symlinks` is set, so
+/// main-only clears `resolveMainPath` and then every `require()` dies `EPERM` anyway. There is no
+/// cache to lean on — `toRealPath` memoises only what a SUCCESSFUL walk populated, and under this
+/// jail none succeeds. `realpath_unavailable_resolution` measures both halves (entry point runs,
+/// requires fail) against a process where realpath is refused exactly as the AppContainer refuses
+/// it. So the flag pair is the only configuration that WORKS and it is disqualified, while the one
+/// configuration that is not disqualified does not work.
 #[cfg(windows)]
 pub fn windows_realpath_node_options() -> String {
     "--preserve-symlinks-main --preserve-symlinks".to_string()

@@ -1,0 +1,141 @@
+# Branch-scoped ad-hoc probe, NO pull request required (`.claude/skills/ci-adhoc-test/SKILL.md`).
+#
+# THE QUESTION: does bypass-traverse let a real AppContainer child read DEEP into %USERPROFILE%
+# when only a directory BENEATH the profile carries an ACE, with `C:\` and `C:\Users` left exactly
+# as the image ships them? If yes, the AppContainer route for nub's Windows build jail is alive —
+# it buys OS-enforced coarse egress denial (withhold `internetClient`) instead of a userland gate.
+#
+# CI IS THE ONLY VENUE. An AppContainer cannot be launched over OpenSSH: sshd lands in services
+# session 0, which has no window station a LowBox token can attach to, and every launch returns
+# 0xC0000142 STATUS_DLL_INIT_FAILED (MECHANISM-FACTS §5e). A restricted token is exempt; a LowBox
+# token is not. So the standing `nub-win` VM cannot answer this and a runner must.
+#
+# NO RUST BUILD. The probe is PowerShell + a C# P/Invoke launcher mirroring
+# `crates/nub-sandbox/src/backend/windows.rs`'s `run()` step for step. That keeps a run at a couple
+# of minutes instead of the 35+ a cold Windows cargo cache costs, which is what makes iterating on
+# a launch-shaped question affordable at all.
+#
+# BOTH IMAGES, because a single-image answer to a kernel-physics question is a guess about the
+# other one. `fail-fast: false` so one image's failure never hides the other's table.
+name: win-bypass-traverse-probe
+
+on:
+  push:
+    branches: [sandbox/win-bypass-traverse]
+  workflow_dispatch: # inert until this file reaches the default branch; `push` is what fires it
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The verdict block, driven against six synthetic worlds, must discriminate BEFORE the real
+      # launch runs. A verdict that cannot tell a clean negative from a dead harness would make the
+      # rest of this job unreadable, and that failure mode has already cost this effort two runs.
+      - name: Verdict self-test (no Windows APIs, no launch)
+        if: always()
+        shell: pwsh
+        run: pwsh -NoLogo -NonInteractive -File tests/win-bypass-traverse/selftest.ps1
+
+      # Separate from the run below so a probe that HANGS is distinguishable from one still
+      # starting, and so the job timeout cannot cancel the job and discard the log entirely.
+      - name: Probe — AppContainer bypass-traverse
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          pwsh -NoLogo -NonInteractive -File tests/win-bypass-traverse/probe.ps1 *>&1 |
+            Tee-Object -FilePath probe.log
+          exit 0
+
+      - name: Child logs verbatim
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path bt-logs) {
+            Get-ChildItem bt-logs | ForEach-Object {
+              Write-Host "───── $($_.Name) ─────"
+              Get-Content $_.FullName | ForEach-Object { Write-Host "  $_" }
+            }
+          } else { Write-Host "no bt-logs directory — no arm produced a child log" }
+
+      # The verdict is read off the LOG, never off a step's exit status: a property whose `prop:`
+      # line is ABSENT fails here, so a probe that never ran cannot be mistaken for one that passed.
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          fail=0
+          need() {
+            if grep -qF "prop:$1=PASS" probe.log 2>/dev/null; then
+              echo "OK   $1"
+            elif grep -qF "prop:$1=FAIL" probe.log 2>/dev/null; then
+              echo "FAIL $1"
+              fail=1
+            else
+              echo "MISS $1  (property absent — the probe did not reach it)"
+              fail=1
+            fi
+          }
+          [ -s probe.log ] || { echo "MISS the probe produced no output at all"; exit 1; }
+          grep -qF 'PROBE END' probe.log || { echo "MISS the probe did not run to completion"; fail=1; }
+
+          # THE ZERO-SETUP GATE FIRST: a route that works but needs a one-time setup command is
+          # worth less than a weaker route that needs none, so its answer is reported ahead of any
+          # capability result.
+          echo "── zero-setup gate (reported first: a route needing setup is disqualified) ──"
+          for p in zero-setup-profile-leaves-no-residue ace-residue-none-after-revoke; do need "$p"; done
+          grep -E '^  fact:zs/' probe.log || echo "(no zs/ facts — the gate did not run)"
+
+          echo "── controls (a red one invalidates every other row) ──"
+          for p in no-appcontainer-ace-on-test-tree baseline-plain-launched \
+                   baseline-plain-reads-deep baseline-plain-reads-c-root \
+                   baseline-plain-egress-works appcontainer-gate-is-live \
+                   appcontainer-positive-control harness-grant-reached-decisive-target \
+                   realpath-defect-reproduces-without-flags \
+                   preserve-symlinks-flags-unblock-the-child \
+                   control-ace-absent-denies-deep-read \
+                   control-ungranted-sibling-under-profile-denies \
+                   control-ungranted-sibling-inside-root-denies \
+                   secrets-baseline-plain-can-read-them; do need "$p"; done
+
+          echo "── the decisive cells ──"
+          for p in bypass-traverse-deep-read-root-grant bypass-traverse-deep-read-leaf-grants \
+                   bypass-traverse-require-deep bypass-traverse-launch-cwd-deep \
+                   bypass-traverse-child-chdir-deep bypass-traverse-node-entry-deep \
+                   secrets-under-profile-are-denied \
+                   egress-denied-with-zero-capabilities; do need "$p"; done
+
+          echo
+          echo "── result ──"
+          # A red job here means "at least one property did not hold", NOT "AppContainer is dead":
+          # a clean negative (controls green, bypass-traverse red) is a GOOD outcome for this
+          # effort and still exits non-zero. Read the table, not the badge.
+          if [ "$fail" -ne 0 ]; then
+            echo "at least one property did not hold — read the operations table above"
+            exit 1
+          fi
+          echo "every property held: bypass-traverse reaches deep into %USERPROFILE% through"
+          echo "un-ACE'd C:\\ and C:\\Users, the grant scopes, and egress is denied"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: win-bypass-traverse-${{ matrix.os }}
+          path: |
+            probe.log
+            bt-logs/
+          if-no-files-found: warn
