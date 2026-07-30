@@ -174,6 +174,14 @@ jobs:
           echo "---- confinement survives it ----"
           need_pass interp-staged-ungranted-secret-still-refused
 
+          # RECORDED, NOT GATED. Reading the distribution's bundled npm tree is the cell 5j found
+          # failing, but a CJS require of an absolute path realpath's from the volume root and dies
+          # de-elevated on the still-open ancestor repair — in BOTH interpreter arms identically, so
+          # gating on it would report someone else's open work as this group's failure. Absence is
+          # still an error: a fact that was never measured tells us nothing.
+          echo "---- the bundled npm tree (a fact: it rides the ancestor repair, not this one) ----"
+          grep -E '^  fact:interp-(ambient|staged)-npm-tree-read=' probe.log || { echo "MISS the npm-tree facts"; fail=1; }
+
           echo "---- the pre-existing groups must not have regressed ----"
           for p in profile-create-and-launch acl-grant-allow acl-grant-deny teardown \
                    job-reap egress-deny production-jail-launch production-jail-egress; do

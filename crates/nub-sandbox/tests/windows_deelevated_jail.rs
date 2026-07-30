@@ -1419,10 +1419,17 @@ mod win {
         // Reaching the distribution's BUNDLED npm tree is the exact cell an un-ACE'd install fails
         // on, and requiring a file out of it is the cheapest honest way to ask for it. Only single
         // quotes appear inside, because cmd gives the whole `-e` program to `"`.
-        let program = format!(
-            "console.log(process.execPath);\
-             console.log('abi='+process.versions.modules);\
-             console.log('npm='+require({}).version)",
+        let identity = "console.log(process.execPath);console.log('abi='+process.versions.modules)";
+        // READING THE BUNDLED npm TREE IS RECORDED, NOT GATED, and that is a scoping decision with
+        // a measurement behind it. It is the cell §5j found failing, so it belongs here — but a CJS
+        // `require` of an ABSOLUTE path realpath's every prefix from the volume root
+        // (`Module._findPath` → `toRealPath`), which de-elevated dies `EPERM … lstat 'C:\'` in BOTH
+        // interpreter arms identically (run 30544794220). That is the ancestor-reachability repair,
+        // not the interpreter, and gating on it would make this group red for someone else's open
+        // work while reporting nothing about its own subject. So it runs LAST, after the verdict
+        // line, and its outcome is a fact.
+        let npm_read = format!(
+            "console.log('npm='+require({}).version)",
             js_string(&root.join("node_modules/npm/package.json"))
         );
         // Every path INSIDE the script is CWD-RELATIVE, and that is not tidiness. An absolute open
@@ -1449,11 +1456,14 @@ mod win {
                  node -p \"process.version\" >> \"{m}\" 2>&1\r\n\
                  if errorlevel 1 exit /b 11\r\n\
                  echo STEP-BARE-NODE-RESOLVED-AND-RAN>> \"{m}\"\r\n\
-                 node -e \"{e}\" >> \"{m}\" 2>&1\r\n\
+                 node -e \"{i}\" >> \"{m}\" 2>&1\r\n\
                  if errorlevel 1 exit /b 12\r\n\
-                 echo LIFECYCLE-OK>> \"{m}\"\r\n",
+                 echo LIFECYCLE-OK>> \"{m}\"\r\n\
+                 node -e \"{n}\" >> \"{m}\" 2>&1\r\n\
+                 if errorlevel 1 echo NPM-TREE-READ-FAILED>> \"{m}\"\r\n",
                 m = leaf(&marker),
-                e = program
+                i = identity,
+                n = npm_read
             ),
         )
         .expect("write the arm's script");
@@ -1483,6 +1493,10 @@ mod win {
             }
         };
         let log = std::fs::read_to_string(&marker).unwrap_or_default();
+        println!(
+            "  fact:interp-{tag}-npm-tree-read={}",
+            if log.contains("npm=") { "ok" } else { "failed" }
+        );
         println!("    arm:{tag} rc={rc}");
         if log.is_empty() {
             // Nothing ran, so the grant list is the only remaining evidence about why.
