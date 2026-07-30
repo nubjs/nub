@@ -51,7 +51,7 @@ use rolldown_error::{BuildDiagnostic, DiagnosticOptions, EventKind};
 use rolldown_utils::indexmap::FxIndexMap;
 use rolldown_utils::url::clean_url;
 
-use super::loaders;
+use super::{loaders, native};
 
 /// Where the source map goes. `Linked` and `External` both emit a real `.map`;
 /// they differ only in whether the bundle references it — which for a compiled
@@ -105,6 +105,15 @@ pub struct BundleOptions {
     /// `EXT=TYPE` from `--loader`, applied over nub's defaults. See
     /// [`crate::compile::loaders`].
     pub loaders: Vec<String>,
+    /// The platform a `.node` addon must be loadable on, which turns native-addon
+    /// embedding ON. Compile-driven, like [`Self::auto_define`].
+    ///
+    /// `None` leaves `.node` to Rolldown, which is the right answer for a
+    /// `nub build` that emits into a real project: the addon is already beside its
+    /// `node_modules` there, so embedding a copy would only duplicate it. Only a
+    /// self-contained artifact — running from a cache dir with no `node_modules`
+    /// in sight — needs the file carried along.
+    pub native_target: Option<nub_core::compile::TargetPlatform>,
 }
 
 /// One emitted file: a chunk, or a source map that travels with it.
@@ -125,6 +134,8 @@ pub struct BundleResult {
     /// are re-parsed as JavaScript by [`reject_invalid_chunks`], which a `.wasm`
     /// would rightly fail.
     pub assets: Vec<BundledFile>,
+    /// File names of the `.node` addons embedded, for the compile summary.
+    pub native_addons: Vec<String>,
 }
 
 pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
@@ -207,11 +218,23 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
         collected: Arc::clone(&collected),
         files: Arc::clone(&files_plugin),
     });
-    let plugins: Vec<SharedPluginable> = vec![
+    // Sharing `collected` is what makes an addon reached twice ship once, and
+    // gives `.node` the same content-hashed flat naming as every other asset.
+    let native_plugin = opts.native_target.map(|target| {
+        Arc::new(native::NativeAddons::new(
+            target,
+            Arc::clone(&collected),
+            loader_plan.claims_extension("node"),
+        ))
+    });
+    let mut plugins: Vec<SharedPluginable> = vec![
         Arc::clone(&scan) as SharedPluginable,
         Arc::clone(&files_plugin) as SharedPluginable,
         Arc::clone(&new_urls) as SharedPluginable,
     ];
+    if let Some(plugin) = &native_plugin {
+        plugins.push(Arc::clone(plugin) as SharedPluginable);
+    }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -325,11 +348,18 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
 
     reject_nested_chunks(&files, &assets)?;
 
+    // Read AFTER `retain_referenced`, so the summary names what the payload
+    // actually carries rather than every addon the load hook happened to see.
+    let native_addons = native_plugin
+        .map(|n| n.survivors(&assets.iter().map(|a| a.name.as_str()).collect()))
+        .unwrap_or_default();
+
     Ok(BundleResult {
         entry,
         files,
         detached_maps,
         assets,
+        native_addons,
     })
 }
 
@@ -1333,6 +1363,7 @@ mod tests {
             external: Vec::new(),
             tsconfig: None,
             loaders: Vec::new(),
+            native_target: None,
         }
     }
 

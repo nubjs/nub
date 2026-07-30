@@ -33,6 +33,7 @@ pub mod bundle;
 mod external;
 mod inject;
 mod loaders;
+mod native;
 
 pub use bundle::{BundleOptions, SourcemapMode};
 
@@ -103,6 +104,9 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     opts.bundle
         .auto_define
         .extend(external::entry_defines(&opts.bundle.external));
+    // Native addons are embedded for the TARGET, and those same defines are what
+    // make resolution pick the target's platform package rather than the host's.
+    opts.bundle.native_target = Some(target);
     eprintln!("Bundling {} …", opts.entry);
     let bundled = bundle::bundle(&entry_abs, &opts.bundle)?;
     let mut entry_name = layout.bundle_path(&bundled.entry);
@@ -125,6 +129,12 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     let app_sha = sha256_of_app(&app_files);
     if !layout.assets.is_empty() {
         eprintln!("Embedding {} file(s) …", layout.assets.len());
+    }
+    // Worth saying out loud: the binary now carries machine code for one platform,
+    // and an addon that silently failed to resolve would otherwise look identical
+    // to one that embedded correctly.
+    if !bundled.native_addons.is_empty() {
+        eprintln!("Native addons: {}", bundled.native_addons.join(", "));
     }
 
     // 3. Resolve the Node version through nub run's SAME pin chain (so compile
@@ -936,6 +946,7 @@ mod tests {
                 external: Vec::new(),
                 tsconfig: None,
                 loaders: Vec::new(),
+                native_target: None,
             },
         }
     }
@@ -1062,6 +1073,7 @@ mod tests {
             }],
             detached_maps: Vec::new(),
             assets: Vec::new(),
+            native_addons: Vec::new(),
         };
         let layout = assets::Layout {
             entry_prefix: String::new(),
@@ -1098,6 +1110,7 @@ mod tests {
                 }],
                 detached_maps: Vec::new(),
                 assets: Vec::new(),
+                native_addons: Vec::new(),
             },
             assets::Layout {
                 entry_prefix: String::new(),

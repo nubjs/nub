@@ -77,6 +77,19 @@ pub struct Loaders {
     pub file: Vec<String>,
 }
 
+impl Loaders {
+    /// Whether either family claims `ext`.
+    ///
+    /// Used for extensions nub handles OUTSIDE both families — today only
+    /// `.node`, whose addon plugin must yield to a user who mapped it. Neither
+    /// default set contains such an extension, so a hit here can only have come
+    /// from `--loader`, which is exactly the "the user asked for something else"
+    /// signal those plugins need.
+    pub fn claims_extension(&self, ext: &str) -> bool {
+        self.module_types.contains_key(ext) || self.file.iter().any(|e| e == ext)
+    }
+}
+
 /// Build the loader map: nub's defaults, then `--loader EXT=TYPE` over the top.
 ///
 /// A user entry wins over a default in BOTH directions — `--loader .wasm=binary`

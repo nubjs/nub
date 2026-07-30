@@ -2614,6 +2614,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 external,
                 tsconfig: tsconfig.map(PathBuf::from),
                 loaders: loader,
+                native_target: None,
             },
         }),
         Some(Command::Init {
