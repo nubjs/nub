@@ -66,23 +66,13 @@ T1=$(date +%s)
 run sudo du -sh "$JAIL"
 note "system tree rsync: $((T1-T0))s"
 
-hdr "4 ad-hoc re-sign every Mach-O — the step that strips CS_RUNTIME + the Apple identity"
-# Run 2 re-signed /usr/lib/dyld along with everything else and then died with a bare SIGKILL
-# on every exec. dyld is the interpreter the kernel maps before any user code runs, so a
-# broken signature there kills silently — it must keep its Apple signature.
-sudo find "$JAIL/bin" "$JAIL/sbin" "$JAIL/usr/bin" "$JAIL/usr/sbin" "$JAIL/usr/libexec" "$JAIL/usr/lib" \
-  -type f \( -perm -u+x -o -name '*.dylib' \) ! -path "$JAIL/usr/lib/dyld" -print0 2>/dev/null > "$W/tosign"
-N=$(tr -cd '\0' < "$W/tosign" | wc -c | tr -d ' ')
-T0=$(date +%s)
-# One codesign per file: batching aborts a whole batch on the first failure, and the failure
-# count is the number that matters here.
-sudo xargs -0 -P 8 -n 1 codesign -f -s - < "$W/tosign" > "$W/sign.out" 2> "$W/sign.err"
-T1=$(date +%s)
-FAILED=$(grep -ci 'error\|failed\|invalid' "$W/sign.err" 2>/dev/null || echo 0)
-echo "re-signed $N Mach-O files in $((T1-T0))s; codesign complaint lines: $FAILED"
-[ "$FAILED" -gt 0 ] && { echo "--- first 15 codesign errors ---"; grep -i 'error\|failed\|invalid' "$W/sign.err" | head -15; }
-note "re-sign: $N files in $((T1-T0))s, $FAILED complaints"
-run codesign -dvvv "$JAIL/usr/lib/dyld" 2>&1 | grep -E 'Authority|flags|Platform' | head -4
+hdr "4 NO RE-SIGNING — plain copies (runs 2-4 showed re-signing IS the killer)"
+# Reversal. The hypothesis was that `codesign -f -s -` strips CS_RUNTIME and frees the tree.
+# Measured: re-signing is what causes the SIGKILL. It demotes a platform binary to
+# third-party, and every macOS system executable is arm64e-only, an ABI AMFI rejects for
+# third-party code on 14/15 (`AMFI: ... is adhoc signed. AMFI: code signature validation
+# failed.`). A plain copy runs fine in a real reroot. So: copy, do not sign.
+echo "skipping the re-sign sweep by design; tree keeps its Apple signatures"
 
 hdr "5 /private/etc + devfs + DNS"
 sudo tee "$JAIL/private/etc/passwd" >/dev/null <<'EOF'
