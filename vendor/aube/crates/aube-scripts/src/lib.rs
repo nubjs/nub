@@ -537,9 +537,10 @@ fn spawn_jailed_shell(
 ///
 /// The dialect follows the RESOLVED shell, not the target platform: on Windows
 /// an embedder can replace the default with a POSIX shell, and cmd-quoting an
-/// arg a POSIX shell then reparses corrupts it — `%` doubles to `%%`, and
-/// `"$X"` / `"`cmd`"` become live expansions instead of the literal the user
-/// typed. Both dialects are compiled on every platform so each stays testable.
+/// arg a POSIX shell then reparses corrupts it — `%` doubles to `%%`, while a
+/// `$var` or a backtick command substitution stays live inside the double
+/// quotes cmd-quoting emits instead of arriving as the literal the user typed.
+/// Both dialects are compiled on every platform so each stays testable.
 pub fn shell_quote_arg(arg: &str) -> String {
     shell_quote_arg_with_settings(arg, &script_settings())
 }

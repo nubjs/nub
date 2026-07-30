@@ -3800,9 +3800,8 @@ enum StreamMode {
 /// Resolve the bundled busybox-w32 POSIX-`sh` sidecar that backs every script
 /// body nub runs on Windows — `nub run` here, and dependency lifecycle scripts
 /// through the engine-context default `pm_engine` installs
-/// (`apply_lifecycle_script_shell`). The win32 package lays `busybox.exe`
-/// beside `nub.exe` in the
-/// package's `bin/` dir, so it resolves relative to the running executable
+/// (`apply_lifecycle_script_shell`). The win32 package lays `busybox.exe` beside
+/// `nub.exe` in the package's `bin/` dir, so it resolves relative to the running executable
 /// (canonicalized, matching `current_nub_binary`). `__NUB_BUSYBOX_EXE` overrides
 /// the location — an internal test/CI seam that lets the Rust suite and the
 /// branch-scoped Windows probe supply a busybox without the release-packaging step;
