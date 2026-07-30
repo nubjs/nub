@@ -131,24 +131,29 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // deliberate build-against-custom-node choice; the case we fix carries none.
         let probe = ProbeScope::new(&spawn);
 
-        // WINDOWS: deliver the `child_process` stdio shim. A piped spawn under the
-        // AppContainer does not fail, it SPINS — libuv retries the refused named pipe
-        // forever inside `uv_spawn`, before any timeout can arm — and every `node-gyp`
-        // configure pipes. Rationale and the residual it leaves (`fork`/IPC, which no file
-        // can emulate) are on `nub_sandbox::windows_build_jail_node_options`.
+        // WINDOWS: deliver the `child_process` stdio shim AND the per-package network gate,
+        // as two `--import` terms on one `NODE_OPTIONS`. The stdio shim is a repair — a piped
+        // spawn under the AppContainer does not fail, it SPINS, because libuv retries the
+        // refused named pipe forever inside `uv_spawn`, and every `node-gyp` configure pipes.
+        // The gate is a confinement: the package name selects its egress policy from the
+        // catalog, and a package the catalog does not name gets none. Both rationales, and the
+        // residuals each leaves, are on the nub-sandbox functions.
         //
         // UNCONDITIONAL, like `NODE_COMPAT` above: it OVERWRITES any ambient value, which is
         // also the ONLY thing that keeps the env allowlist's `NODE_OPTIONS` entry from
         // becoming an ambient code-injection channel into every lifecycle script. Gated on
         // the interpreter supporting `--import` (20.6+) because an unrecognised option in
         // `NODE_OPTIONS` aborts Node at startup — that would turn a missing repair into a
-        // broken install. An interpreter that cannot be asked gets no stamp, and with it no
+        // broken install. An interpreter that cannot be asked gets no stamp, and so neither
         // shim: the same piped-spawn hang as before, never a worse failure.
+        //
+        // The gate reads the SAME identity the curated filesystem table is keyed by — aube's
+        // installer-resolved `registry_name()`, which a dependency cannot rename itself into.
         #[cfg(windows)]
         if super::build_prefetch::node_version(&ambient, &probe).is_some_and(supports_import) {
             ambient.insert(
                 "NODE_OPTIONS".to_string(),
-                nub_sandbox::windows_build_jail_node_options(),
+                nub_sandbox::windows_build_jail_node_options(spawn.package_name.as_deref()),
             );
         } else {
             ambient.remove("NODE_OPTIONS");

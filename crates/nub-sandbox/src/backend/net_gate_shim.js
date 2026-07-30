@@ -15,11 +15,16 @@
 // contact any host enter through Node or an npm `.cmd` bin shim, so the preload reaches 99.4%
 // of the real surface; the one exception is a POSIX `.sh` that does not run on Windows.
 //
-// THE GATE IS PER-PACKAGE IDENTITY, NOT PER-HOST. A package with a catalog entry may use the
-// network — possibly all of it. A package with NO entry gets none. That is the whole defense:
-// when an attacker bolts a postinstall onto `chalk`, `chalk` has no entry, so the hook cannot
-// reach the network at all regardless of which host it wants. Host filtering is an optional
-// refinement layered on a permitted package, never the mechanism.
+// THE GATE IS A PER-PACKAGE BOOLEAN. A package with a catalog entry may use the network —
+// possibly all of it, and it is not intercepted at all. A package with NO entry gets none. That
+// is the whole defense: when an attacker bolts a postinstall onto `chalk`, `chalk` has no entry,
+// so the hook cannot reach the network regardless of which host it wants.
+//
+// There is deliberately NO host filtering. It is the fragile half — a redirect is a second
+// connection to a second host, so an allowlist naming only the origin denies the download at
+// the second hop, and an upstream moving its CDN breaks a package the list claimed to permit —
+// and it buys little, since narrowing hosts constrains a package somebody already reviewed and
+// does nothing about the unvetted one, which is the actual threat.
 //
 // THE SEAM. Every TCP egress path in Node bottoms out in `net.Socket.prototype.connect` —
 // measured: `http.get`, `http.request`, `fetch` (undici) and `net.connect` each call it exactly
@@ -61,34 +66,26 @@ if (!globalThis[SENTINEL]) {
 }
 
 function install() {
-  // A catalog-listed package with no host refinement gets NO patches at all — the permitted
-  // path stays byte-identical to unjailed Node, which is strictly better than installing
-  // permissive interceptors that still have to be reasoned about.
-  if (POLICY.allow === true && !POLICY.hosts) return;
+  // A catalog-listed package gets NO patches at all — the permitted path stays byte-identical
+  // to unjailed Node, which is strictly better than installing permissive interceptors that
+  // still have to be reasoned about. This early return is the `allow` half of the boolean.
+  if (POLICY.allow === true) return;
 
   // ── the predicate ────────────────────────────────────────────────────────────────────
   //
-  // Loopback is permitted by default. It cannot carry data off the box, and a build that
+  // Under a deny the ONLY thing still permitted is what cannot carry data off the box.
+  // Loopback qualifies, and exempting it is deliberate rather than a concession: a build that
   // starts a local server (dev-server probes, test harnesses, IPC over TCP) is common enough
   // that denying it buys nothing and breaks packages. Packages breaking is the cost this whole
-  // design is optimised against; a loopback residual is not.
+  // design is optimised against; a loopback residual is not. This is NOT host permissioning —
+  // there is no list, no wildcard and nothing per-package about it.
   const LOOPBACK = /^(127\.\d+\.\d+\.\d+|::1|0:0:0:0:0:0:0:1|localhost|.*\.localhost)$/i;
-  const loopbackOk = POLICY.loopback !== false;
 
-  function hostAllowed(host) {
+  // Named for what it now decides: whether a destination is NOT egress. Nothing here consults a
+  // list, so there is no per-host policy to get wrong.
+  function exempt(host) {
     if (host === undefined || host === null || host === "") return true; // no host: not egress
-    const h = String(host).replace(/^\[|\]$/g, "").toLowerCase();
-    if (loopbackOk && LOOPBACK.test(h)) return true;
-    if (POLICY.allow !== true) return false;
-    if (!POLICY.hosts) return true;
-    for (const pattern of POLICY.hosts) {
-      const p = String(pattern).toLowerCase();
-      if (p === h) return true;
-      // A leading `*.` matches proper subdomains ONLY — never the apex, and never a
-      // partial-label suffix, so `*.example.com` cannot admit `evilexample.com`.
-      if (p.startsWith("*.") && h.endsWith(p.slice(1)) && h.length > p.length - 1) return true;
-    }
-    return false;
+    return LOOPBACK.test(String(host).replace(/^\[|\]$/g, ""));
   }
 
   // Windows and POSIX report different errno integers for the same condition; a package that
@@ -143,7 +140,7 @@ function install() {
       host = typeof args[1] === "string" ? args[1] : "localhost"; // connect(port) → localhost
     }
 
-    if (isIpc || hostAllowed(host)) return origConnect.apply(this, args);
+    if (isIpc || exempt(host)) return origConnect.apply(this, args);
 
     // Delivered as an `error` event, never a throw — see the header note on denial shape. The
     // connection is never initiated, so this is a real deny and not a racing abort.
@@ -164,7 +161,7 @@ function install() {
   const origLookup = dns.lookup;
   dns.lookup = function (hostname, options, callback) {
     const cb = typeof options === "function" ? options : callback;
-    if (hostAllowed(hostname) || typeof cb !== "function") {
+    if (exempt(hostname) || typeof cb !== "function") {
       return origLookup.apply(this, arguments);
     }
     return denyLookup(hostname, cb, "dns.lookup");
@@ -172,7 +169,7 @@ function install() {
   if (dns.promises) {
     const origP = dns.promises.lookup;
     dns.promises.lookup = function (hostname, ...rest) {
-      if (hostAllowed(hostname)) return origP.apply(this, [hostname, ...rest]);
+      if (exempt(hostname)) return origP.apply(this, [hostname, ...rest]);
       return Promise.reject(denial(hostname, "dns.promises.lookup"));
     };
   }
@@ -183,7 +180,7 @@ function install() {
     if (typeof orig !== "function") continue;
     dns[fn] = function (hostname, ...rest) {
       const cb = rest.find((a) => typeof a === "function");
-      if (hostAllowed(hostname) || typeof cb !== "function") {
+      if (exempt(hostname) || typeof cb !== "function") {
         return orig.apply(this, [hostname, ...rest]);
       }
       return denyLookup(hostname, cb, `dns.${fn}`);
@@ -196,7 +193,7 @@ function install() {
     // send(msg[, offset, length][, port][, address][, cb]) — the address is the last string
     // argument that is not the message itself.
     const address = args.slice(1).filter((a) => typeof a === "string").pop();
-    if (hostAllowed(address)) return origSend.apply(this, args);
+    if (exempt(address)) return origSend.apply(this, args);
     const err = denial(address, "dgram.send");
     const cb = args.find((a) => typeof a === "function");
     if (cb) process.nextTick(() => cb(err));
@@ -206,7 +203,7 @@ function install() {
   const origDgramConnect = dgram.Socket.prototype.connect;
   dgram.Socket.prototype.connect = function (...args) {
     const address = typeof args[1] === "string" ? args[1] : "localhost";
-    if (hostAllowed(address)) return origDgramConnect.apply(this, args);
+    if (exempt(address)) return origDgramConnect.apply(this, args);
     process.nextTick(() => this.emit("error", denial(address, "dgram.connect")));
     return undefined;
   };
@@ -222,20 +219,17 @@ function install() {
   // `wget` and `git` all honour `http_proxy`/`https_proxy`, and so do the Node packages built on
   // `proxy-from-env` (axios). Pointing them at a closed loopback port turns egress into a
   // connection failure. This is additive only — it is not a boundary, a static binary or a client
-  // that ignores proxy env sails past it, and that residual is accepted.
+  // that ignores proxy env sails past it, and that residual is accepted. Unconditional here
+  // because `install` returned early on `allow:true` — under a deny there is no permitted host
+  // the blackhole could break.
   const forceEnv = (env) => {
     const out = { ...env };
     if (OWN_NODE_OPTIONS !== undefined) out.NODE_OPTIONS = OWN_NODE_OPTIONS;
-    // Only under a FULL deny. Under `allow:true` with a host refinement a blackhole proxy would
-    // break the very hosts the catalog permitted, since `proxy-from-env` clients would route the
-    // permitted request into it.
-    if (POLICY.allow !== true) {
-      for (const k of ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"]) {
-        out[k] = "http://127.0.0.1:1";
-      }
-      delete out.NO_PROXY;
-      delete out.no_proxy;
+    for (const k of ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"]) {
+      out[k] = "http://127.0.0.1:1";
     }
+    delete out.NO_PROXY;
+    delete out.no_proxy;
     return out;
   };
 

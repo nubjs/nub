@@ -629,12 +629,17 @@ pub fn windows_native_realpath_shim_node_options() -> String {
 
 /// The JS the Windows build jail preloads into every confined Node. Kept as a FILE rather
 /// than a Rust string so it stays readable, greppable and lintable; the delivery encoding is
-/// [`windows_build_jail_node_options`]'s job.
-#[cfg(windows)]
+/// [`build_jail_node_options`]'s job.
+///
+/// Not `#[cfg(windows)]`: only the STAMPING DECISION is Windows-specific (see
+/// [`windows_build_jail_node_options`]), and gating the bytes as well would make the
+/// composition untestable on the machines people develop on. An unused `include_str!` costs a
+/// string in the binary, not a behaviour.
 const WINDOWS_STDIO_SHIM: &str = include_str!("../backend/windows_stdio_shim.js");
 
 /// The `NODE_OPTIONS` the Windows build jail STAMPS over any ambient value, delivering the
-/// `child_process` stdio shim ([`WINDOWS_STDIO_SHIM`]).
+/// `child_process` stdio shim ([`WINDOWS_STDIO_SHIM`]) and the per-package network gate
+/// ([`net_gate_node_options`]) as two `--import` terms on one value.
 ///
 /// WHY A STAMP AND NOT A GRANT. The blocker is the OBJECT NAMESPACE, not a permission: under
 /// one policy and one grant set, `\\.\pipe\LOCAL\…` was CREATED while `\\.\pipe\…` was
@@ -655,27 +660,106 @@ const WINDOWS_STDIO_SHIM: &str = include_str!("../backend/windows_stdio_shim.js"
 /// than stamping blind — an unknown flag in `NODE_OPTIONS` aborts Node at startup, which would
 /// turn a missing repair into a broken install.
 #[cfg(windows)]
-pub fn windows_build_jail_node_options() -> String {
+pub fn windows_build_jail_node_options(package_name: Option<&str>) -> String {
+    build_jail_node_options(package_name)
+}
+
+/// Both build-jail preloads on one `NODE_OPTIONS`, as two `--import` terms.
+///
+/// ORDER IS NOT SIGNIFICANT. Both shims patch the same `child_process` seams, and each is
+/// idempotent behind its own `globalThis` sentinel, so either order composes — measured 6/6 by
+/// `probe/net-gate/compose-check.cjs` and pinned by `tests/net_gate_semantics.rs`.
+///
+/// Platform-independent for the same reason [`WINDOWS_STDIO_SHIM`] is: what is Windows-specific
+/// is the DECISION to stamp, which lives in [`windows_build_jail_node_options`] and in the
+/// lifecycle env allowlist that admits `NODE_OPTIONS` only there.
+pub fn build_jail_node_options(package_name: Option<&str>) -> String {
     format!(
-        "--import data:text/javascript,{}",
-        percent_encode_strict(WINDOWS_STDIO_SHIM)
+        "{} {}",
+        data_url_import(WINDOWS_STDIO_SHIM),
+        net_gate_node_options(package_name)
     )
 }
 
-/// Percent-encode everything outside the RFC 3986 unreserved set. Deliberately maximal:
-/// `NODE_OPTIONS` is split on whitespace and re-parsed by Node's own option reader, so an
-/// under-encoded payload does not corrupt a URL, it silently truncates the preload.
-#[cfg(windows)]
-fn percent_encode_strict(src: &str) -> String {
-    let mut out = String::with_capacity(src.len() * 3);
-    for byte in src.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
+/// The JS enforcing per-package egress inside the confined Node. Kept as a FILE rather than a
+/// Rust string so it stays readable, greppable and lintable.
+const NET_GATE_SHIM: &str = include_str!("../backend/net_gate_shim.js");
+
+/// The token the shim reserves for its compiled policy. Substituted, never appended: the shim
+/// reads it as a bare initializer, so a MISSING placeholder yields a module that throws on an
+/// undefined identifier — which aborts the confined Node at startup rather than degrading to
+/// an ungated one. [`net_gate_node_options`] therefore asserts the substitution happened.
+const NET_GATE_POLICY_PLACEHOLDER: &str = "__NUB_NET_POLICY_JSON__";
+
+/// The `--import` term delivering the per-package network gate for `package_name`.
+///
+/// WHAT THIS IS, PLAINLY: userland, and NOT a security boundary. It patches
+/// `net.Socket.prototype.connect`, `dns`, `dgram` and the `child_process` seams inside the
+/// confined Node, so a native addon opening a raw socket bypasses it entirely, and so does any
+/// client that ignores proxy env (`curl --noproxy '*'`, a static binary, Windows PowerShell
+/// 5.1, which reads HKCU proxy settings rather than the environment — a named, accepted
+/// residual; no corpus package uses PowerShell as a lifecycle entry). Do not describe it as an
+/// OS-enforced guarantee.
+///
+/// What it DOES buy is the shape the threat actually has. Shai-Hulud grew by publishing a new
+/// lifecycle hook into packages that never had one, phoning home with plain
+/// `https.get`/`fetch`/`axios`. All of that is denied for any package the catalog does not
+/// name, on all three platforms and at both Node tiers. To spread, a worm must now ship and
+/// load a per-platform native socket addon — a far smaller and far more conspicuous blast
+/// radius than one line of JS. Against nub's 344-package corpus the preload reaches 178 of the
+/// 179 packages that contact any host, the exception being a POSIX `.sh` that does not run on
+/// Windows at all.
+///
+/// THE POLICY IS A PER-PACKAGE BOOLEAN, sourced from package identity
+/// ([`super::build_jail_net_allowed`]). There is deliberately no host list: see that module for
+/// why per-host permissioning was dropped rather than deferred.
+///
+/// PLATFORM-INDEPENDENT on purpose, though only the Windows jail stamps it today (the one
+/// platform with no unprivileged OS egress lever; Linux has a seccomp `AF_INET` ceiling and
+/// macOS pins egress to nub's proxy). Nothing here branches on the OS, so serving as a
+/// defence-in-depth layer elsewhere needs no porting — and keeping it un-gated is what makes
+/// the behaviour testable off Windows.
+pub fn net_gate_node_options(package_name: Option<&str>) -> String {
+    let policy = serde_json::json!({
+        "package": package_name,
+        "allow": super::build_jail_net_allowed(package_name),
+    });
+
+    let js = NET_GATE_SHIM.replace(
+        NET_GATE_POLICY_PLACEHOLDER,
+        &serde_json::to_string(&policy).expect("a policy of strings and bools always serializes"),
+    );
+    debug_assert!(
+        !js.contains(NET_GATE_POLICY_PLACEHOLDER),
+        "net_gate_shim.js must contain exactly one {NET_GATE_POLICY_PLACEHOLDER}"
+    );
+    data_url_import(&js)
+}
+
+/// An `--import` term carrying `js` as a base64 `data:` module.
+///
+/// BASE64, NOT PERCENT-ENCODING — and the reason is the ALPHABET, not the size. `NODE_OPTIONS`
+/// is split on WHITESPACE and each term re-parsed by Node's own option reader, so a payload that
+/// can contain whitespace does not corrupt a URL that Node then rejects — it silently truncates
+/// the preload into a half-loaded shim, or into an option fragment Node aborts on. Base64's
+/// alphabet contains no whitespace at all, which makes that class of failure structurally
+/// unreachable rather than merely avoided by careful escaping. It is also more compact, but only
+/// modestly: MEASURED on both shims together, 37,227 chars against 47,261 percent-encoded, i.e.
+/// 1.27×. (A 2.6× figure circulated earlier; it compared base64 with comments STRIPPED against
+/// percent-encoding with comments kept, which is not the same input twice. Nothing strips
+/// comments today.)
+///
+/// NEITHER IS A FIX FOR A SIZE LIMIT, because there is no limit here to fix. The documented
+/// 32,767-character Windows cap governs `SetEnvironmentVariable`, NOT an environment BLOCK handed
+/// to `CreateProcess`, which is how Node spawns: real `windows-latest` accepted a 49,381-char
+/// percent-encoded pair and armed the gate (run 30503464536), which is why the "payload exceeds
+/// the cap" blocker was retracted. Do not reintroduce it.
+fn data_url_import(js: &str) -> String {
+    use base64::Engine as _;
+    format!(
+        "--import data:text/javascript;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(js)
+    )
 }
 
 /// The build-jail ENV posture (D1): a DEFAULT-DENY allowlist over the effective child
@@ -948,24 +1032,132 @@ mod tests {
         }
     }
 
-    /// `NODE_OPTIONS` is whitespace-separated, so an under-encoded payload does not produce a
-    /// malformed URL that Node rejects — it produces a TRUNCATED preload that silently loads
-    /// half a shim, or an option fragment Node aborts on. Both are quiet, so the encoding is
-    /// asserted rather than eyeballed.
-    #[cfg(windows)]
+    /// `NODE_OPTIONS` is whitespace-separated, so an over-long or under-encoded payload does
+    /// not produce a malformed URL that Node rejects — it produces a TRUNCATED preload that
+    /// silently loads half a shim, or an option fragment Node aborts on. Both are quiet, so
+    /// the encoding is asserted rather than eyeballed.
     #[test]
-    fn the_stamped_node_options_is_a_single_whitespace_free_token() {
-        let stamped = windows_build_jail_node_options();
-        let (flag, url) = stamped.split_once(' ').expect("flag then payload");
+    fn both_shims_compose_on_one_value() {
+        let stamped = build_jail_node_options(Some("chalk"));
+        let terms: Vec<&str> = stamped.split(' ').collect();
+        assert_eq!(
+            terms.len(),
+            4,
+            "expected two `--import <url>` pairs and nothing else: {stamped}"
+        );
+        assert_eq!(terms[0], "--import");
+        assert_eq!(terms[2], "--import");
+        for url in [terms[1], terms[3]] {
+            assert!(url.starts_with("data:text/javascript;base64,"));
+        }
+        // The whole payload must arrive, not merely its opening — an identifier from each
+        // shim's tail is what makes a truncation visible. Decoded rather than matched against
+        // a re-encoding, because base64 is offset-sensitive: the encoding of a substring is
+        // not generally a substring of the encoding.
+        assert!(decode_import(terms[1]).contains("writableScratchDir"));
+        assert!(decode_import(terms[3]).contains("ERR_NUB_JAIL_NET_DENIED"));
+    }
+
+    /// Round-trips an `--import data:…;base64,…` term back to its JS, so an assertion can be
+    /// written against what the confined Node will actually EVALUATE rather than against the
+    /// opaque encoding of it.
+    fn decode_import(url: &str) -> String {
+        use base64::Engine as _;
+        let b64 = url
+            .strip_prefix("data:text/javascript;base64,")
+            .expect("a base64 data: URL");
+        String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .expect("the generator emitted valid base64"),
+        )
+        .expect("the shim is UTF-8")
+    }
+
+    /// The placeholder must be SUBSTITUTED, and the delivered module must carry a real policy
+    /// literal. A missed substitution is the quiet catastrophe: the shim reads
+    /// `__NUB_NET_POLICY_JSON__` as a bare initializer, so an unsubstituted payload throws on
+    /// an undefined identifier and aborts the confined Node at startup.
+    #[test]
+    fn the_compiled_policy_is_substituted_into_the_delivered_module() {
+        let js = decode_import(
+            net_gate_node_options(Some("chalk"))
+                .split_once(' ')
+                .unwrap()
+                .1,
+        );
+        assert!(
+            !js.contains(NET_GATE_POLICY_PLACEHOLDER),
+            "the policy placeholder survived into the delivered module"
+        );
+        assert!(
+            js.contains(r#"const POLICY = {"package":"chalk","allow":false}"#),
+            "{js}"
+        );
+    }
+
+    /// The compiled policy line, as the confined Node will evaluate it.
+    fn compiled_policy(package_name: Option<&str>) -> String {
+        decode_import(
+            net_gate_node_options(package_name)
+                .split_once(' ')
+                .unwrap()
+                .1,
+        )
+        .lines()
+        .find(|l| l.starts_with("const POLICY = "))
+        .expect("the policy line")
+        .to_string()
+    }
+
+    /// PACKAGE IDENTITY IS THE GATE, and it is a BOOLEAN. A package the catalog does not name
+    /// gets `allow:false` — the entire protective mechanism — and an admitted one gets
+    /// `allow:true` with nothing narrowing it, because the grant is ratified by the entry
+    /// existing. A `hosts` key in either direction would mean per-host permissioning came back.
+    #[test]
+    fn an_unlisted_package_is_denied_and_a_listed_one_is_admitted_wholesale() {
+        for unlisted in [None, Some("chalk"), Some("definitely-not-in-the-catalog")] {
+            let line = compiled_policy(unlisted);
+            assert!(
+                line.contains(r#""allow":false"#),
+                "{unlisted:?} has no catalog entry and must be denied: {line}"
+            );
+        }
+        for listed in super::super::PACKAGE_NETWORK_ALLOWED {
+            let line = compiled_policy(Some(listed));
+            assert!(line.contains(r#""allow":true"#), "{listed}: {line}");
+        }
+
+        // Neither direction may compile a host list; per-host permissioning is out of scope,
+        // and a stray `hosts` key would be the tell that it came back.
+        let mut probes = vec![None, Some("chalk")];
+        probes.extend(
+            super::super::PACKAGE_NETWORK_ALLOWED
+                .iter()
+                .copied()
+                .map(Some),
+        );
+        for pkg in probes {
+            assert!(
+                !compiled_policy(pkg).contains("hosts"),
+                "egress is a per-package boolean; a host list must not be compiled: {pkg:?}"
+            );
+        }
+    }
+
+    /// Base64's alphabet contains no whitespace, which is the structural reason the payload
+    /// survives `NODE_OPTIONS`' whitespace split. Asserted on the generator rather than left
+    /// to the encoder's reputation, because a switch back to percent-encoding (or to any
+    /// encoding with a space in its alphabet) reintroduces silent truncation.
+    #[test]
+    fn the_delivered_term_is_whitespace_free_after_the_flag() {
+        let term = net_gate_node_options(Some("chalk"));
+        let (flag, url) = term.split_once(' ').expect("flag then payload");
         assert_eq!(flag, "--import");
         assert!(
             !url.chars().any(char::is_whitespace),
             "the data: URL must survive NODE_OPTIONS' whitespace split: {url}"
         );
-        assert!(url.starts_with("data:text/javascript,"));
-        // The whole payload must arrive, not merely its opening — an identifier from the
-        // shim's tail is what makes a truncation visible.
-        assert!(url.contains(&percent_encode_strict("writableScratchDir")));
     }
 
     #[test]

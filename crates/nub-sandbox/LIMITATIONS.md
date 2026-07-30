@@ -122,6 +122,46 @@ deferred, and the cooperative redirect above is the shipped tier.
 
 An AppContainer child is blocked from loopback destinations by default. The package-wide loopback exemption needed to reach a proxy exposes every local listener, not just the proxy port. The backend therefore rejects per-host and MITM policies before launch, rather than installing the exemption. Coarse `net: true` permits public outbound connections but is not full host networking; coarse deny remains available without elevation.
 
+### The build jail's per-package network gate is USERLAND, and is not a security boundary
+
+The build jail delivers a per-package egress gate into every confined Node as a `data:` `--import`
+preload on `NODE_OPTIONS` (`compiler::net_gate_node_options`, alongside the stdio shim below).
+It exists because Windows has no unprivileged OS egress lever that survives the filesystem: the
+only one is withholding an AppContainer's `internetClient` capability, and being an AppContainer
+is what makes a fresh LowBox profile sid absent from every DACL. WFP and the firewall are
+admin-gated, job objects have no deny flag at all, and `\Device\Afd` is opened namespace-relative
+so its DACL is never consulted.
+
+**What it is.** Egress is a per-package BOOLEAN read from `data/build-jail-catalog.json`: a
+package with an entry may use the network, a package with no entry gets none, and a package in
+`notGranted.packages` gets none regardless. There is deliberately no host filtering — a redirect
+is a second connection to a second host, so an origin-only allowlist denies the download at the
+second hop, and an upstream moving its CDN would break a package the list claimed to permit.
+
+**What it is not.** It patches `net.Socket.prototype.connect`, `dns`, `dgram` and the
+`child_process` env seams *inside* the confined Node. A native addon opening a raw socket
+bypasses it entirely. Do not describe it as an OS-enforced guarantee.
+
+Named residuals, all measured rather than assumed:
+
+- **`curl --noproxy '*'`** — non-Node children are covered only opportunistically, by pointing
+  `http_proxy`/`https_proxy` at a closed loopback port. A client told to ignore proxy
+  configuration, a static binary, or anything not reading proxy env, is not covered.
+- **Windows PowerShell 5.1** — reads HKCU IE proxy settings rather than the environment, so the
+  blackhole does not reach it (PowerShell 7+ *is* covered: its `HttpClient.DefaultProxy` reads
+  proxy env vars). Closing this would need a user-global HKCU write, which rewrites the
+  interactive user's own proxy configuration and races concurrent installs; that was rejected on
+  those grounds, not for lack of coverage. No corpus package uses PowerShell as a lifecycle entry.
+- **Loopback is exempt under a deny**, deliberately: it cannot carry data off the box, and
+  denying it breaks builds that start a local server.
+
+What it buys is the threat's actual shape. Shai-Hulud grew by publishing new lifecycle hooks into
+packages that never had one, phoning home with plain `https.get`/`fetch`/`axios`; all of that is
+denied for any package the catalog does not name. To spread, a worm must now ship and load a
+per-platform native socket addon. Measured against nub's 344-package corpus, 178 of the 179
+packages that contact any host enter through Node or an npm `.cmd` bin shim; the one exception is
+a POSIX `.sh` that does not run on Windows, so the measured child-process leak there is zero.
+
 ### Windows: `child_process` IPC is unavailable in the build jail
 
 Global NPFS (`\\.\pipe\…`) is closed to a LowBox token. Under one policy and one grant set,

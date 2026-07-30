@@ -1,6 +1,17 @@
 // Measures the build jail's per-package network gate (`net_gate_shim.js`) end to end, through
-// the SAME delivery channel production uses: a percent-encoded `data:text/javascript` module on
-// `NODE_OPTIONS=--import`.
+// the SAME delivery channel production uses: a base64 `data:text/javascript` module on
+// `NODE_OPTIONS=--import`, matching `compiler::defaults::data_url_import`.
+//
+// SCOPE. Egress is a per-package BOOLEAN — a catalog entry means network on, no entry means
+// network off. Per-host permissioning was evaluated and dropped (a redirect is a second
+// connection to a second host, so an origin-only allowlist denies the download at the second
+// hop), so this harness has no host-refinement, redirect or catalog-host arms.
+//
+// RELATIONSHIP TO THE TEST SUITE. The behaviours that must never regress silently — the
+// `NODE_OPTIONS` re-stamp and the single-seam call shape — are pinned in
+// `crates/nub-sandbox/tests/net_gate_semantics.rs`, which CI runs and which builds its stamp
+// with the production generator. This harness is the wider exploratory sweep: it stands up a
+// real off-box sink and judges every arm on the SINK's hit count, which no unit test does.
 //
 // WHY THE SINK IS NOT ON LOOPBACK. The gate permits loopback by default (a build that starts a
 // local server must keep working), so a sink on `127.0.0.1` would be ALLOWED and every arm would
@@ -45,22 +56,14 @@ function runChild(code, env, timeout = 15000) {
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SHIM = path.join(here, "..", "..", "crates", "nub-sandbox", "src", "backend", "net_gate_shim.js");
 
-// Mirrors `percent_encode_strict` in compiler/defaults.rs: maximal encoding, because
-// NODE_OPTIONS is split on whitespace and an under-encoded payload silently TRUNCATES the
-// preload rather than failing loudly.
-function encodeStrict(src) {
-  let out = "";
-  for (const byte of Buffer.from(src, "utf8")) {
-    const c = String.fromCharCode(byte);
-    if (/[A-Za-z0-9\-_.~]/.test(c)) out += c;
-    else out += "%" + byte.toString(16).toUpperCase().padStart(2, "0");
-  }
-  return out;
-}
+// Mirrors `data_url_import` in compiler/defaults.rs. Base64 rather than percent-encoding
+// because NODE_OPTIONS is split on WHITESPACE and base64's alphabet contains none, which makes
+// silent truncation of the preload structurally unreachable instead of merely avoided.
+const b64 = (src) => Buffer.from(src, "utf8").toString("base64");
 
 function nodeOptionsFor(policy) {
   const js = fs.readFileSync(SHIM, "utf8").replace("__NUB_NET_POLICY_JSON__", JSON.stringify(policy));
-  return `--import data:text/javascript,${encodeStrict(js)}`;
+  return `--import data:text/javascript;base64,${b64(js)}`;
 }
 
 function lanAddress() {
@@ -202,125 +205,41 @@ for (const { name, deny } of rows) {
   if (/BLOCKED/.test(line)) console.log(`  ${pad(name, 24)} ${line}`);
 }
 
-// ── loopback arm: the default exemption, and turning it off ─────────────────────────────
-console.log("\n--- loopback (the default exemption) ---");
-for (const [label, policy] of [
-  ["allow:false, loopback default", { package: "chalk", allow: false }],
-  ["allow:false, loopback:false", { package: "chalk", allow: false, loopback: false }],
-]) {
-  const env = { ...process.env, NODE_OPTIONS: nodeOptionsFor(policy) };
+// ── loopback: exempt under a deny, deliberately ─────────────────────────────────────────
+//
+// Not host permissioning — there is no list and nothing per-package about it. Loopback cannot
+// carry data off the box, and a build that starts a local server is common enough that denying
+// it would break packages, which is the cost this design is optimised against.
+console.log("\n--- loopback under a full deny (exempt by design) ---");
+{
+  const env = { ...process.env, NODE_OPTIONS: nodeOptionsFor({ package: "chalk", allow: false }) };
   const r = await runChild(
     `const net=require("node:net");const s=net.connect(${PORT},"127.0.0.1",()=>{console.log("REACHED");process.exit(0)});s.on("error",e=>console.log("BLOCKED "+e.code))`,
     env, 8000);
-  console.log(`  ${pad(label, 32)} ${(r.stdout || r.stderr).split("\n").pop()}`);
-}
-
-// ── host refinement on a permitted package ─────────────────────────────────────────────
-console.log("\n--- host allowlist refinement (allow:true + hosts) ---");
-// Judged on the GATE's own decision, not on whether DNS then resolves — the arms below use
-// unresolvable names on purpose, so `err.nubReason` is the only trustworthy discriminator
-// between "the gate denied it" and "the resolver failed".
-for (const [label, hosts, target, expect] of [
-  ["exact host match", [HOST], HOST, "allow"],
-  ["host NOT in list", ["nodejs.org"], HOST, "deny"],
-  ["subdomain via wildcard", ["*.example.com"], "cdn.example.com", "allow"],
-  ["wildcard must not match apex", ["*.example.com"], "example.com", "deny"],
-  ["wildcard partial-label guard", ["*.example.com"], "evilexample.com", "deny"],
-]) {
-  const env = { ...process.env, NODE_OPTIONS: nodeOptionsFor({ package: "playwright", allow: true, hosts }) };
-  const r = await runChild(
-    `require("node:dns").lookup(${JSON.stringify(target)},e=>console.log(e?(e.nubReason==="ERR_NUB_JAIL_NET_DENIED"?"GATE-DENIED":"passed-gate(resolver said "+e.code+")"):"GATE-ALLOWED"))`,
-    env, 8000);
-  const out = (r.stdout || r.stderr).split("\n").pop();
-  const got = /GATE-DENIED/.test(out) ? "deny" : "allow";
-  console.log(`  ${pad(label, 30)} hosts=${pad(JSON.stringify(hosts), 20)} target=${pad(target, 18)} ${got === expect ? "PASS" : "**FAIL**"}  (${out})`);
-}
-
-// ── do listed packages actually get the hosts they need? ────────────────────────────────
-//
-// Evaluated as a batch inside one child so the whole real catalog can be checked cheaply. The
-// discriminator is `err.nubReason`, never whether DNS then resolves — most of these are
-// unresolvable from a CI runner and that must not be read as a gate decision.
-console.log("\n--- real catalog hosts against a listed package's allowlist ---");
-{
-  // The LOW/MEDIUM tiers from .fray/sandbox-buildjail-trusted-download-hosts.md.
-  const catalog = [
-    "nodejs.org", "binaries.prisma.sh", "cdn.playwright.dev",
-    "playwright.download.prss.microsoft.com", "download.cypress.io", "cdn.cypress.io",
-    "downloads.sentry-cdn.com", "downloads.snyk.io",
-    "objects.githubusercontent.com", "release-assets.githubusercontent.com", "codeload.github.com",
-  ];
-  // Must be DENIED even for a listed package: the POST/write/arbitrary-content channels the
-  // catalog doc marks "never allow".
-  const mustDeny = ["api.github.com", "github.com", "gist.github.com",
-                    "raw.githubusercontent.com", "evil.example.com"];
-  const env = { ...process.env, NODE_OPTIONS: nodeOptionsFor({ package: "playwright", allow: true, hosts: catalog }) };
-  const r = await runChild(
-    `const dns=require("node:dns");const hosts=${JSON.stringify([...catalog, ...mustDeny])};
-     let n=0;const out=[];
-     for(const h of hosts){dns.lookup(h,(e)=>{out.push(h+"="+(e&&e.nubReason==="ERR_NUB_JAIL_NET_DENIED"?"DENIED":"ALLOWED"));if(++n===hosts.length)console.log(out.join(" "));});}`,
-    env, 20000);
-  const seen = Object.fromEntries((r.stdout || "").split(/\s+/).filter(Boolean).map((s) => s.split("=")));
-  const bad = [...catalog.filter((h) => seen[h] !== "ALLOWED"), ...mustDeny.filter((h) => seen[h] !== "DENIED")];
-  console.log(`  ${catalog.length} catalog hosts admitted: ${catalog.every((h) => seen[h] === "ALLOWED") ? "all PASS" : "FAIL " + catalog.filter((h) => seen[h] !== "ALLOWED")}`);
-  console.log(`  ${mustDeny.length} never-allow hosts denied: ${mustDeny.every((h) => seen[h] === "DENIED") ? "all PASS" : "FAIL " + mustDeny.filter((h) => seen[h] !== "DENIED")}`);
-  if (bad.length) console.log(`  raw: ${JSON.stringify(r.stdout.slice(0, 400))}`);
-}
-
-// ── the redirect trap: a host allowlist must name the REDIRECT TARGET, not the origin ────
-//
-// This is the operationally sharp edge for a listed package. `github.com/.../releases/download/…`
-// 302s to `release-assets.githubusercontent.com`, and `raw.github.com` 301s to
-// `raw.githubusercontent.com` — the client opens a SECOND connection to the target host, so an
-// allowlist naming only the origin denies the download at the second hop. Demonstrated live with
-// two distinct local addresses, and `loopback:false` so the redirect target is not exempt.
-console.log("\n--- redirect chains (a second connection to a second host) ---");
-{
-  const redirector = http.createServer((req, res) => {
-    res.writeHead(302, { Location: `http://127.0.0.1:${PORT}/redirect-final` });
-    res.end();
-  });
-  await new Promise((r) => redirector.listen(0, HOST, r));
-  const rport = redirector.address().port;
-  for (const [label, hosts] of [
-    ["origin only (the trap)", [HOST]],
-    ["origin + redirect target", [HOST, "127.0.0.1"]],
-  ]) {
-    const env = { ...process.env, NODE_OPTIONS: nodeOptionsFor({ package: "electron", allow: true, hosts, loopback: false }) };
-    const r = await runChild(
-      `fetch("http://${HOST}:${rport}/dl").then(x=>console.log("FOLLOWED-TO-END "+x.status),
-        e=>console.log((e.cause?.nubReason==="ERR_NUB_JAIL_NET_DENIED")?"BLOCKED-AT-REDIRECT-HOP":"other:"+(e.cause?.code||e.message)))`,
-      env, 12000);
-    console.log(`  ${pad(label, 26)} hosts=${pad(JSON.stringify(hosts), 26)} -> ${(r.stdout || r.stderr).split("\n").pop()}`);
-  }
-  redirector.close();
+  console.log(`  ${pad("allow:false, loopback target", 32)} ${(r.stdout || r.stderr).split("\n").pop()}`);
 }
 
 // ── Windows-only arms ───────────────────────────────────────────────────────────────────
-// Three things cannot be measured off Windows: whether the gate works on win32 Node at all,
-// whether the payload fits Windows' single-env-var cap, and whether PowerShell — the one non-Node
-// child a real postinstall plausibly reaches for — is covered by the blackhole proxy.
+// Two things cannot be measured off Windows: whether both shims delivered together survive the
+// real Windows environment block, and whether PowerShell — the one non-Node child a real
+// postinstall plausibly reaches for — is covered by the blackhole proxy.
 if (process.platform === "win32") {
   console.log("\n=== Windows-only arms ===");
 
-  // 1. The env-var cap. Documented as 32,767 characters per variable; if the combined payload
-  //    cannot be handed to a child at all, that is a hard shipping blocker, not a tuning note.
+  // 1. Delivery of BOTH shims on one value, at the size the production encoding actually
+  //    produces. The documented 32,767-character Windows env cap governs
+  //    `SetEnvironmentVariable`, NOT the environment BLOCK `CreateProcess` receives — which is
+  //    how Node spawns — and real windows-latest accepted 49,381 chars and armed the gate
+  //    (run 30503464536). So this is a delivery regression check, not an open question.
   const stdioShim = fs.readFileSync(
     path.join(here, "..", "..", "crates", "nub-sandbox", "src", "backend", "windows_stdio_shim.js"), "utf8");
   const gateJs = fs.readFileSync(SHIM, "utf8").replace("__NUB_NET_POLICY_JSON__", JSON.stringify(DENIED));
-  const strip = (s) => s.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n").replace(/\n{2,}/g, "\n");
-  const b64 = (s) => Buffer.from(s, "utf8").toString("base64");
-
-  const variants = {
-    "percent, comments kept": `--import data:text/javascript,${encodeStrict(stdioShim)} --import data:text/javascript,${encodeStrict(gateJs)}`,
-    "base64, comments kept": `--import data:text/javascript;base64,${b64(stdioShim)} --import data:text/javascript;base64,${b64(gateJs)}`,
-    "base64, comments stripped": `--import data:text/javascript;base64,${b64(strip(stdioShim))} --import data:text/javascript;base64,${b64(strip(gateJs))}`,
-  };
-  for (const [label, value] of Object.entries(variants)) {
+  const both = `--import data:text/javascript;base64,${b64(stdioShim)} --import data:text/javascript;base64,${b64(gateJs)}`;
+  {
     const r = await runChild(
       `const net=require("node:net");const s=net.connect(80,${JSON.stringify(HOST)},()=>console.log("GATE-NOT-ARMED"));s.on("error",e=>console.log(e.nubReason==="ERR_NUB_JAIL_NET_DENIED"?"GATE-ARMED":"other:"+e.code))`,
-      { ...process.env, NODE_OPTIONS: value }, 10000);
-    console.log(`  ${pad(label, 28)} len=${String(value.length).padStart(6)}  rc=${r.status}  ${JSON.stringify((r.stdout || r.stderr).slice(0, 90))}`);
+      { ...process.env, NODE_OPTIONS: both, __NUB_JAIL_STDIO_SHIM_FORCE: "1" }, 10000);
+    console.log(`  ${pad("both shims, base64", 28)} len=${String(both.length).padStart(6)}  rc=${r.status}  ${JSON.stringify((r.stdout || r.stderr).slice(0, 90))}`);
   }
 
   // 2. PowerShell. Docs say PS7+ HttpClient reads proxy env vars while Windows PowerShell 5.1
