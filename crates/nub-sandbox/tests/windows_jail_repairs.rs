@@ -716,6 +716,544 @@ mod win {
         out
     }
 
+    // ── group 0: what the ancestor ace COSTS ─────────────────────────────────────────
+    //
+    // The ancestor repair is what makes the Windows jail work unprivileged, and its cost is
+    // per lifecycle SPAWN, so a slow writer is not a wart — it is what wedged a 20-minute CI
+    // step and stalled three runs of this very probe. `backend/windows.rs` now writes the
+    // traverse ace with `SetKernelObjectSecurity`, which goes straight to
+    // `NtSetSecurityObject` and has no user-mode inheritance-propagation pass. This group is
+    // the measurement of that claim, and it is a TIMING claim, so it needs a differential.
+    //
+    // THE CONTROL IS LOCAL, DELIBERATELY. `named_propagating_ace` below is a copy of the
+    // writer the backend used to call. It lives here rather than in the product because a
+    // second writer reachable from `apply` would be dead weight the moment this lands — and
+    // because the comparison it enables is only worth anything run on the SAME path with the
+    // SAME trustee in the SAME run. One variable: which primitive writes the descriptor.
+    //
+    // THE TREE IS SYNTHETIC, ALSO DELIBERATELY. `%TEMP%` on a hosted runner is enormous but
+    // its size is unknown and varies run to run, so it cannot be the empty-directory control's
+    // counterpart. Two sibling directories under one fixture root — identical DACL, identical
+    // volume, differing only in descendant count — can. `%TEMP%` is still measured, with the
+    // kernel writer only: it is the path that actually stalled, and the propagating writer on
+    // it is unbounded by construction.
+    //
+    // WHAT THIS GROUP DOES NOT MEASURE, because a sibling group already does: whether the ace
+    // reaches the confined child, and whether it stops at the directory object. Both now run
+    // through this writer, so `repair-on-lstat-chain-permitted` is the effect proof and
+    // `repair-on-ancestor-sibling-read-refused` is the scope proof. What is asserted HERE is
+    // the DACL-level shape (present, non-inherited, exact mask, absent on a child) and that
+    // the descriptor's control bits survive a grant/revoke round trip — the hand-built
+    // descriptor starts with a zero control word, so carrying those bits is a property of the
+    // new code with nothing else watching it.
+
+    /// Descendants under the populated arm. Sized against python's `Lib\` at 6,412 entries —
+    /// the tree that measured ~1000 ms — so the propagating writer has something real to walk.
+    const POPULATED_ENTRIES: usize = 4000;
+
+    mod ace {
+        use std::io;
+        use std::path::Path;
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+        };
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertSidToStringSidW, ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS,
+            GetNamedSecurityInfoW, GetSecurityInfo, NO_MULTIPLE_TRUSTEE, REVOKE_ACCESS,
+            SE_FILE_OBJECT, SetEntriesInAclW, SetSecurityInfo, TRUSTEE_IS_SID, TRUSTEE_IS_USER,
+            TRUSTEE_W,
+        };
+        use windows_sys::Win32::Security::Isolation::{
+            CreateAppContainerProfile, DeleteAppContainerProfile,
+        };
+        use windows_sys::Win32::Security::{
+            ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION,
+            EqualSid, GetAce, GetSecurityDescriptorControl, OBJECT_INHERIT_ACE,
+            PSECURITY_DESCRIPTOR, PSID,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+
+        /// Byte-identical to the backend's `TRAVERSE_MASK`, so the two writers are asked for
+        /// the same thing and a cost difference cannot be a mask difference.
+        pub const TRAVERSE_MASK: u32 = 0x0010_00a1;
+        pub const INHERIT_FLAGS: u32 = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
+        const NO_INHERITANCE: u32 = 0x0;
+        const READ_CONTROL: u32 = 0x0002_0000;
+        const WRITE_DAC: u32 = 0x0004_0000;
+
+        fn wide(s: &str) -> Vec<u16> {
+            s.encode_utf16().chain(std::iter::once(0)).collect()
+        }
+        fn wide_path(p: &Path) -> Vec<u16> {
+            wide(&p.to_string_lossy())
+        }
+
+        /// An ephemeral AppContainer identity, used purely as a trustee. Unique per run and
+        /// deleted on drop, so an ace this probe fails to remove names a SID that no longer
+        /// resolves rather than a real principal.
+        pub struct Trustee {
+            name: Vec<u16>,
+            pub sddl: String,
+        }
+        impl Trustee {
+            pub fn new() -> io::Result<Self> {
+                let nonce = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
+                let name = wide(&format!("nub_acecost_{}_{nonce:x}", std::process::id()));
+                let mut sid: PSID = std::ptr::null_mut();
+                let hr = unsafe {
+                    CreateAppContainerProfile(
+                        name.as_ptr(),
+                        name.as_ptr(),
+                        name.as_ptr(),
+                        std::ptr::null(),
+                        0,
+                        &mut sid,
+                    )
+                };
+                if hr != 0 {
+                    return Err(io::Error::other(format!(
+                        "CreateAppContainerProfile failed hr=0x{hr:08x}"
+                    )));
+                }
+                let mut out: *mut u16 = std::ptr::null_mut();
+                let ok = unsafe { ConvertSidToStringSidW(sid, std::ptr::from_mut(&mut out)) };
+                unsafe { LocalFree(sid.cast()) };
+                if ok == 0 {
+                    let e = io::Error::last_os_error();
+                    unsafe { DeleteAppContainerProfile(name.as_ptr()) };
+                    return Err(e);
+                }
+                let mut len = 0usize;
+                while unsafe { *out.add(len) } != 0 {
+                    len += 1;
+                }
+                let sddl =
+                    String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(out, len) });
+                unsafe { LocalFree(out.cast()) };
+                Ok(Trustee { name, sddl })
+            }
+        }
+        impl Drop for Trustee {
+            fn drop(&mut self) {
+                unsafe { DeleteAppContainerProfile(self.name.as_ptr()) };
+            }
+        }
+
+        struct Sid(PSID);
+        impl Sid {
+            fn new(sddl: &str) -> io::Result<Self> {
+                let w = wide(sddl);
+                let mut sid: PSID = std::ptr::null_mut();
+                if unsafe { ConvertStringSidToSidW(w.as_ptr(), &mut sid) } == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(Sid(sid))
+            }
+        }
+        impl Drop for Sid {
+            fn drop(&mut self) {
+                unsafe { LocalFree(self.0.cast()) };
+            }
+        }
+
+        struct Handle(HANDLE);
+        impl Drop for Handle {
+            fn drop(&mut self) {
+                unsafe { CloseHandle(self.0) };
+            }
+        }
+
+        /// THE CONTROL WRITER: what `backend/windows.rs` called before this change. Identical
+        /// handle, identical merged DACL, identical non-inherited traverse ace — the only
+        /// difference is that `SetSecurityInfo` runs advapi32's inheritance propagation over
+        /// the directory's existing children before it returns.
+        pub fn named_propagating_ace(dir: &Path, sddl: &str, grant: bool) -> io::Result<()> {
+            let sid = Sid::new(sddl)?;
+            let wpath = wide_path(dir);
+            let handle = unsafe {
+                CreateFileW(
+                    wpath.as_ptr(),
+                    READ_CONTROL | WRITE_DAC,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS,
+                    std::ptr::null_mut(),
+                )
+            };
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+            let _h = Handle(handle);
+
+            let mut old: *mut ACL = std::ptr::null_mut();
+            let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+            let rc = unsafe {
+                GetSecurityInfo(
+                    handle,
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut old,
+                    std::ptr::null_mut(),
+                    &mut sd,
+                )
+            };
+            if rc != 0 {
+                return Err(io::Error::from_raw_os_error(rc as i32));
+            }
+            let mut ea: EXPLICIT_ACCESS_W = unsafe { std::mem::zeroed() };
+            ea.grfAccessPermissions = TRAVERSE_MASK;
+            ea.grfAccessMode = if grant { GRANT_ACCESS } else { REVOKE_ACCESS };
+            ea.grfInheritance = NO_INHERITANCE;
+            ea.Trustee = TRUSTEE_W {
+                pMultipleTrustee: std::ptr::null_mut(),
+                MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: TRUSTEE_IS_USER,
+                ptstrName: sid.0.cast(),
+            };
+            let mut new: *mut ACL = std::ptr::null_mut();
+            let rc = unsafe { SetEntriesInAclW(1, &ea, old, &mut new) };
+            unsafe { LocalFree(sd.cast()) };
+            if rc != 0 {
+                return Err(io::Error::from_raw_os_error(rc as i32));
+            }
+            let rc = unsafe {
+                SetSecurityInfo(
+                    handle,
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    new,
+                    std::ptr::null_mut(),
+                )
+            };
+            unsafe { LocalFree(new.cast()) };
+            if rc != 0 {
+                return Err(io::Error::from_raw_os_error(rc as i32));
+            }
+            Ok(())
+        }
+
+        /// `(access_mask, ace_flags)` of every ace on `dir` naming `sddl`. Empty ⇒ no ace.
+        pub fn aces_for(dir: &Path, sddl: &str) -> io::Result<Vec<(u32, u32)>> {
+            let sid = Sid::new(sddl)?;
+            let (dacl, sd) = read_dacl(dir)?;
+            let mut out = Vec::new();
+            if !dacl.is_null() {
+                unsafe {
+                    for i in 0..(*dacl).AceCount as u32 {
+                        let mut ace: *mut std::ffi::c_void = std::ptr::null_mut();
+                        if GetAce(dacl, i, &mut ace) == 0 {
+                            continue;
+                        }
+                        let allow = ace.cast::<ACCESS_ALLOWED_ACE>();
+                        let ace_sid: PSID = std::ptr::addr_of!((*allow).SidStart).cast_mut().cast();
+                        if EqualSid(ace_sid, sid.0) != 0 {
+                            out.push((
+                                (*allow).Mask,
+                                u32::from((*ace.cast::<ACE_HEADER>()).AceFlags),
+                            ));
+                        }
+                    }
+                }
+            }
+            unsafe { LocalFree(sd.cast()) };
+            Ok(out)
+        }
+
+        /// The DACL's control word — `SE_DACL_AUTO_INHERITED` / `SE_DACL_PROTECTED` live here,
+        /// and a hand-built descriptor that dropped them would show up as a change across a
+        /// grant/revoke round trip.
+        pub fn control(dir: &Path) -> io::Result<u16> {
+            let (_dacl, sd) = read_dacl(dir)?;
+            let mut control = 0u16;
+            let mut revision = 0u32;
+            let ok = unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut revision) };
+            unsafe { LocalFree(sd.cast()) };
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(control)
+        }
+
+        fn read_dacl(dir: &Path) -> io::Result<(*mut ACL, PSECURITY_DESCRIPTOR)> {
+            let wpath = wide_path(dir);
+            let mut dacl: *mut ACL = std::ptr::null_mut();
+            let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+            let rc = unsafe {
+                GetNamedSecurityInfoW(
+                    wpath.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut dacl,
+                    std::ptr::null_mut(),
+                    &mut sd,
+                )
+            };
+            if rc != 0 {
+                return Err(io::Error::from_raw_os_error(rc as i32));
+            }
+            Ok((dacl, sd))
+        }
+    }
+
+    /// Grant then revoke with the PRODUCT's writer, returning both durations in microseconds.
+    /// Only the grant is compared: the grant is what a lifecycle spawn pays before the child
+    /// starts, and it is where the stall was.
+    fn time_kernel(dir: &Path, sddl: &str) -> (u128, u128) {
+        let t0 = std::time::Instant::now();
+        nub_sandbox::windows_object_traverse_ace(dir, sddl, true).expect("kernel grant");
+        let grant = t0.elapsed().as_micros();
+        let t1 = std::time::Instant::now();
+        nub_sandbox::windows_object_traverse_ace(dir, sddl, false).expect("kernel revoke");
+        (grant, t1.elapsed().as_micros())
+    }
+
+    fn time_named(dir: &Path, sddl: &str) -> (u128, u128) {
+        let t0 = std::time::Instant::now();
+        ace::named_propagating_ace(dir, sddl, true).expect("named grant");
+        let grant = t0.elapsed().as_micros();
+        let t1 = std::time::Instant::now();
+        ace::named_propagating_ace(dir, sddl, false).expect("named revoke");
+        (grant, t1.elapsed().as_micros())
+    }
+
+    fn ace_cost(fails: &mut u32) {
+        let f = Fixture::new("cost");
+        let trustee = match ace::Trustee::new() {
+            Ok(t) => t,
+            Err(e) => {
+                report(fails, "ace-cost-trustee-minted", false, &format!("{e}"));
+                return;
+            }
+        };
+        println!("  fact:ace-cost-trustee={}", trustee.sddl);
+
+        let empty = f.root.join("tree-empty");
+        let full = f.root.join("tree-full");
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::create_dir_all(&full).unwrap();
+        // Spread across subdirectories: the propagation pass walks the whole subtree, and a
+        // flat directory understates a real toolchain layout.
+        for i in 0..POPULATED_ENTRIES {
+            if i % 200 == 0 {
+                std::fs::create_dir_all(full.join(format!("d{}", i / 200))).unwrap();
+            }
+            std::fs::write(full.join(format!("d{}/f{i}.bin", i / 200)), b"x").unwrap();
+        }
+        println!("  fact:ace-cost-populated-entries={POPULATED_ENTRIES}");
+
+        let control_before = ace::control(&full).expect("read control");
+        let (k_empty, k_empty_rev) = time_kernel(&empty, &trustee.sddl);
+        let (k_full, k_full_rev) = time_kernel(&full, &trustee.sddl);
+        let (n_empty, n_empty_rev) = time_named(&empty, &trustee.sddl);
+        let (n_full, n_full_rev) = time_named(&full, &trustee.sddl);
+        let control_after = ace::control(&full).expect("read control");
+        println!(
+            "  fact:ace-cost-us kernel-empty={k_empty} kernel-full={k_full} \
+             named-empty={n_empty} named-full={n_full}"
+        );
+        println!(
+            "  fact:ace-revoke-us kernel-empty={k_empty_rev} kernel-full={k_full_rev} \
+             named-empty={n_empty_rev} named-full={n_full_rev}"
+        );
+
+        // THE CONTROL. If the propagating writer did NOT get materially slower on the
+        // populated tree, the tree walk never reproduced on this machine and every comparison
+        // below is measuring noise — the one outcome that must not read as a pass.
+        report(
+            fails,
+            "ace-cost-named-writer-scales-with-tree",
+            n_full > n_empty.saturating_mul(3).max(n_empty + 5_000),
+            &format!(
+                "named: {n_empty}us empty -> {n_full}us at {POPULATED_ENTRIES} entries \
+                 (THE CONTROL: without this the kernel numbers prove nothing)"
+            ),
+        );
+        // The claim: the kernel writer's cost is a descriptor write, so tree size does not
+        // enter into it. Floored generously — building 4000 entries leaves cache state, and the
+        // runner is shared.
+        report(
+            fails,
+            "ace-cost-kernel-writer-flat-in-tree-size",
+            k_full < k_empty.saturating_mul(3).max(k_empty + 20_000),
+            &format!("kernel: {k_empty}us empty -> {k_full}us at {POPULATED_ENTRIES} entries"),
+        );
+        report(
+            fails,
+            "ace-cost-kernel-beats-named-on-populated-tree",
+            k_full < n_full,
+            &format!("kernel={k_full}us named={n_full}us on the same directory"),
+        );
+
+        // A re-grant with the ace already present. A tree walk costs the same either way (the
+        // signature measured on python's tree); a descriptor write is the same tiny cost.
+        nub_sandbox::windows_object_traverse_ace(&full, &trustee.sddl, true).expect("pre-grant");
+        let t = std::time::Instant::now();
+        nub_sandbox::windows_object_traverse_ace(&full, &trustee.sddl, true).expect("re-grant");
+        let regrant = t.elapsed().as_micros();
+        let landed = ace::aces_for(&full, &trustee.sddl).expect("read aces");
+        let child_aces = ace::aces_for(&full.join("d0"), &trustee.sddl).expect("read child aces");
+        nub_sandbox::windows_object_traverse_ace(&full, &trustee.sddl, false).expect("revoke");
+        let after_revoke = ace::aces_for(&full, &trustee.sddl).expect("read aces");
+        println!("  fact:ace-regrant-us={regrant}");
+
+        // EFFECT, not just a call that returned: the ace is on the DACL carrying exactly the
+        // traverse mask. `repair-on-lstat-chain-permitted` in the next group is the same fact
+        // seen from inside the jail.
+        report(
+            fails,
+            "ace-lands-with-exact-traverse-mask",
+            landed.len() == 1 && landed[0].0 == ace::TRAVERSE_MASK,
+            &format!(
+                "aces={landed:?} expected one at 0x{:08x}",
+                ace::TRAVERSE_MASK
+            ),
+        );
+        // SCOPE, and it is a security property: a non-inherited ace grants the directory
+        // OBJECT. An inheritable one would silently turn every ancestor into a readable
+        // subtree.
+        report(
+            fails,
+            "ace-carries-no-inheritance-flags",
+            landed.len() == 1 && landed[0].1 & ace::INHERIT_FLAGS == 0,
+            &format!("flags=0x{:02x}", landed.first().map_or(0, |a| a.1)),
+        );
+        report(
+            fails,
+            "ace-absent-on-child-directory",
+            child_aces.is_empty(),
+            &format!("child aces={child_aces:?} (the grant must stop at the object)"),
+        );
+        report(
+            fails,
+            "ace-revoke-removes-it",
+            after_revoke.is_empty(),
+            &format!("aces after revoke={after_revoke:?}"),
+        );
+        // The hand-built descriptor starts with a zero control word. Clearing
+        // SE_DACL_AUTO_INHERITED or SE_DACL_PROTECTED on a directory nub does not own would be
+        // a lasting change to the user's machine, so the bits are carried across explicitly.
+        report(
+            fails,
+            "ace-preserves-dacl-control-bits",
+            control_before == control_after,
+            &format!("control 0x{control_before:04x} -> 0x{control_after:04x}"),
+        );
+
+        // %TEMP% is the path that actually stalled, and it is on every fixture's ancestor
+        // chain. Kernel writer only: the propagating writer here is unbounded by construction,
+        // which is exactly why three runs of this probe lost their answer.
+        let tmp = std::env::temp_dir();
+        let (t_grant, t_revoke) = time_kernel(&tmp, &trustee.sddl);
+        println!("  fact:ace-cost-real-temp-us grant={t_grant} revoke={t_revoke}");
+        report(
+            fails,
+            "ace-cost-real-temp-under-a-second",
+            t_grant < 1_000_000,
+            &format!("{t_grant}us on {} (was minutes)", tmp.display()),
+        );
+
+        // The AAP skip. Which paths already publish read+execute to every AppContainer is a
+        // property of the MACHINE's default ACLs, so the %ProgramFiles% cells are FACTS; the
+        // fixture cell is the assertion, because a protected user-only root must never look
+        // already-granted or the skip would drop a grant the jail needs.
+        let pf = std::env::var("ProgramFiles").ok();
+        for (label, dir) in [
+            ("programfiles", pf.clone()),
+            ("programfiles-nodejs", pf.map(|p| format!("{p}\\nodejs"))),
+        ] {
+            match dir {
+                Some(d) if Path::new(&d).exists() => println!(
+                    "  fact:aap-readable-{label}={}",
+                    nub_sandbox::windows_leaf_grant_redundant(Path::new(&d))
+                ),
+                _ => println!("  fact:aap-readable-{label}=absent"),
+            }
+        }
+        report(
+            fails,
+            "aap-skip-declines-a-protected-fixture-root",
+            !nub_sandbox::windows_leaf_grant_redundant(&full),
+            "a user-only protected tree must still get its grant",
+        );
+    }
+
+    /// The teardown half of the AAP skip: a pre-existing inheritable
+    /// `ALL APPLICATION PACKAGES` ace must SURVIVE a launch that granted the path, because the
+    /// launch skipped writing one and therefore has nothing to revoke. Getting this wrong would
+    /// strip an ace off the user's own `%ProgramFiles%` tree, so it is asserted end to end
+    /// through `apply` rather than reasoned about from the skip's return value.
+    fn aap_skip_teardown(fails: &mut u32, node: &Path) {
+        let f = Fixture::new("aap");
+        let shared = f.root.join("shared-tool");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("tool.txt"), b"shared").unwrap();
+        let seeded = std::process::Command::new("icacls")
+            .arg(&shared)
+            .args(["/grant", "*S-1-15-2-1:(OI)(CI)(RX)"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !seeded {
+            report(
+                fails,
+                "aap-skip-fixture-seeded",
+                false,
+                "icacls could not place the ALL APPLICATION PACKAGES ace",
+            );
+            return;
+        }
+        report(
+            fails,
+            "aap-skip-sees-the-seeded-grant",
+            nub_sandbox::windows_leaf_grant_redundant(&shared),
+            "the seeded inheritable AAP ace must make the grant redundant",
+        );
+
+        let policy = jail_shaped(&f, vec![read_rule(node), read_rule(&shared)], &[]);
+        let run = fsprobe(
+            &f,
+            &policy,
+            "aap",
+            &[(
+                "toolread".to_string(),
+                "read",
+                shared.join("tool.txt").to_string_lossy().into_owned(),
+            )],
+        );
+        report(
+            fails,
+            "aap-skip-child-still-reads-the-tool",
+            line(&run, "toolread").starts_with("ok:"),
+            &line(&run, "toolread"),
+        );
+        let survivors = ace::aces_for(&shared, "S-1-15-2-1").expect("read aces");
+        report(
+            fails,
+            "aap-skip-leaves-the-preexisting-ace-alone",
+            survivors
+                .iter()
+                .any(|(_, flags)| flags & ace::INHERIT_FLAGS != 0),
+            &format!(
+                "AAP aces after teardown={survivors:?} \
+                 (the jail must not strip one it did not create)"
+            ),
+        );
+    }
+
     // ── group 1: ancestor reachability, both directions ──────────────────────────────
 
     /// ONE fixture, ONE variable. The unrepaired arm runs first and must reproduce the defect;
@@ -1462,12 +2000,17 @@ try {{
             let _ = std::io::stdout().flush();
         };
 
-        // require_shapes FIRST, deliberately. It is the blast-radius measurement, it writes no
-        // ancestor ace at all (every cell is repair-OFF), and it therefore cannot trigger the
-        // DACL-propagation stall that has taken the later groups down. Ordering a group that
-        // cannot stall behind one that can is how three runs lost the answer they were for.
+        // The CHEAP, CANNOT-STALL groups come first, deliberately: ordering a group that cannot
+        // stall behind one that can is how three runs lost the answer they were for.
+        // `require_shapes` is the blast-radius measurement and writes no ancestor ace at all
+        // (every cell is repair-OFF). `ace_cost` bounds itself — its propagating-writer control
+        // runs on a synthetic 4000-entry tree, never on `%TEMP%` — and it is the group that says
+        // whether the stall is gone, so it must not sit behind anything that could reproduce it.
         step("token_privileges");
         token_privileges(&mut fails);
+
+        step("ace_cost");
+        ace_cost(&mut fails);
 
         // The shipping configuration. A second arm under `--preserve-symlinks` was measured here
         // and has been REMOVED: the flag is off the table, because a hoisted layout still symlinks
@@ -1479,6 +2022,9 @@ try {{
 
         step("ancestor_repair");
         ancestor_repair(&mut fails, node.as_path());
+
+        step("aap_skip_teardown");
+        aap_skip_teardown(&mut fails, node.as_path());
 
         step("stdio_shim");
         stdio_shim(&mut fails, node.as_path());
