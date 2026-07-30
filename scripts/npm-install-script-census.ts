@@ -204,6 +204,33 @@ const paceOk = new Map<string, number>();
 const PACE_MIN_STEP = 15;
 const PACE_MAX = 400;
 
+// Per-host concurrency ceiling, measured not guessed. A burst test against
+// api.npmjs.org's per-package endpoint: 2 workers -> 37% of responses 429, 4
+// workers -> 100% 429, 8 workers -> 100% 429. So that host tolerates roughly one
+// in-flight request with pacing, and no amount of retrying buys throughput —
+// only spacing does. registry.npmjs.org is CDN-fronted and never throttled
+// across ~6,400 control requests, so it keeps the full concurrency budget.
+const HOST_CONCURRENCY: Record<string, number> = { "api.npmjs.org": 2 };
+const hostInFlight = new Map<string, number>();
+
+const acquireHost = async (host: string): Promise<void> => {
+  const cap = HOST_CONCURRENCY[host];
+  if (cap === undefined) return;
+  for (;;) {
+    const n = hostInFlight.get(host) ?? 0;
+    if (n < cap) {
+      hostInFlight.set(host, n + 1);
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+};
+
+const releaseHost = (host: string): void => {
+  if (HOST_CONCURRENCY[host] === undefined) return;
+  hostInFlight.set(host, Math.max(0, (hostInFlight.get(host) ?? 1) - 1));
+};
+
 const pace = async (host: string): Promise<void> => {
   const delay = paceDelay.get(host) ?? 0;
   if (delay === 0) return;
@@ -240,34 +267,50 @@ const getJSON = async (
   headers: Record<string, string> = {},
 ): Promise<{ ok: true; body: unknown } | { ok: false; status: number | string }> => {
   const host = new URL(url).host;
+  let lastWas429 = false;
   for (let attempt = 0; attempt < 8; attempt++) {
     if (attempt > 0) {
       retryCount++;
-      await new Promise((r) => setTimeout(r, Math.min(30_000, 400 * 2 ** attempt) + Math.random() * 500));
+      // A 429 is answered by SPACING, not by a long sleep. The burst test showed
+      // throughput is set purely by inter-request spacing, so a ladder climbing to
+      // 30 s just parks a worker while the pacing gate already carries the fix —
+      // and on a run of throttles the ladder is what collapses throughput. Cap the
+      // per-attempt wait near the pacing ceiling and let the gate do the work.
+      const wait = lastWas429 ? Math.min(1500, 200 * attempt) : Math.min(20_000, 400 * 2 ** attempt);
+      await new Promise((r) => setTimeout(r, wait + Math.random() * 300));
     }
+    lastWas429 = false;
     try {
       await pace(host);
+      await acquireHost(host);
       fetchCount++;
-      const res = await fetch(url, { headers: { "User-Agent": UA, ...headers } });
+      let res: Response;
+      try {
+        res = await fetch(url, { headers: { "User-Agent": UA, ...headers } });
+      } finally {
+        releaseHost(host);
+      }
       if (res.ok) {
         paceSucceeded(host);
         return { ok: true, body: await res.json() };
       }
       if (res.status === 404) return { ok: false, status: 404 };
-      if (res.status === 429) paceThrottled(host);
-      if (res.status !== 429 && res.status < 500) {
+      if (res.status === 429) {
+        paceThrottled(host);
+        lastWas429 = true;
+      } else if (res.status < 500) {
         failures.push({ url, status: res.status });
         return { ok: false, status: res.status };
       }
     } catch (e) {
-      if (attempt === 5) {
+      if (attempt === 7) {
         failures.push({ url, status: String(e) });
         return { ok: false, status: String(e) };
       }
     }
   }
-  failures.push({ url, status: "retries-exhausted" });
-  return { ok: false, status: "retries-exhausted" };
+  failures.push({ url, status: "throttled-out" });
+  return { ok: false, status: "throttled-out" };
 };
 
 // Fixed in-flight window rather than batching, so one slow response cannot stall
