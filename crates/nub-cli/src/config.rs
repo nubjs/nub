@@ -221,7 +221,9 @@ pub(crate) fn set_json_path(
     write_preserving_mode(path, &root.to_string())
 }
 
-/// Write through the atomic temp-and-rename, then restore the mode the file had.
+/// Write through the atomic temp-and-rename, carrying across the two properties
+/// of the prior file that the new inode would otherwise lose: its mode, and a
+/// leading UTF-8 BOM.
 ///
 /// The rename installs a NEW inode carrying the temp file's default permissions,
 /// so a config the user had narrowed — `600` on a file they consider private —
@@ -229,9 +231,20 @@ pub(crate) fn set_json_path(
 /// do as a side effect of setting a key. A brand-new file keeps the default;
 /// there is no prior mode to restore, and inventing a narrower one would be its
 /// own surprise.
+///
+/// The BOM is the same concern one layer up: the reader strips it so the parser
+/// accepts a Windows-authored file, which leaves it absent from the CST's
+/// rendering. Not restoring it would make a one-key `set` rewrite line 1 too —
+/// defeating, for exactly the files that carry a BOM, the point of the
+/// comment-preserving CST write. It is the byte-level sibling of keeping the
+/// author's CRLF line endings.
 fn write_preserving_mode(path: &Path, text: &str) -> std::io::Result<()> {
     let prior = std::fs::metadata(path).ok().map(|m| m.permissions());
-    aube_util::fs_atomic::atomic_write(path, text.as_bytes())?;
+    let bytes = match crate::jsonc::starts_with_bom(path) {
+        true => [crate::jsonc::UTF8_BOM, text.as_bytes()].concat(),
+        false => text.as_bytes().to_vec(),
+    };
+    aube_util::fs_atomic::atomic_write(path, &bytes)?;
     if let Some(mode) = prior {
         // Best effort: the bytes are already committed, and failing the whole
         // write because the mode could not be restored would be the worse trade.
@@ -548,9 +561,37 @@ mod tests {
         .unwrap();
         set_json_path(&path, &["preload"], CstInputValue::Array(Vec::new()))
             .expect("a BOM is stripped, not a parse failure");
+        let raw = std::fs::read(&path).unwrap();
+        assert!(
+            raw.starts_with(crate::jsonc::UTF8_BOM),
+            "the author's BOM survives the edit, like their comments and CRLFs"
+        );
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(after.contains("// kept"), "kept the comment: {after}");
         assert!(after.contains("\"preload\""), "applied the edit: {after}");
+        // Exactly one: the reader strips only a leading marker, so restoring it
+        // must not stack a second one on the next edit.
+        set_json_path(
+            &path,
+            &["tsconfig"],
+            CstInputValue::String("./a.json".into()),
+        )
+        .unwrap();
+        let raw = std::fs::read(&path).unwrap();
+        assert!(raw.starts_with(crate::jsonc::UTF8_BOM), "still BOM'd");
+        assert!(
+            !raw[3..].starts_with(crate::jsonc::UTF8_BOM),
+            "a repeated edit must not stack BOMs"
+        );
+        // A file with NO BOM must not acquire one.
+        std::fs::write(&path, b"{\n  \"nodeCompat\": false\n}\n").unwrap();
+        set_json_path(&path, &["preload"], CstInputValue::Array(Vec::new())).unwrap();
+        assert!(
+            !std::fs::read(&path)
+                .unwrap()
+                .starts_with(crate::jsonc::UTF8_BOM),
+            "a plain file never gains a BOM"
+        );
 
         // The blank slates that legitimately remain: absent, empty, and
         // comment-only, the last of which keeps its comment.

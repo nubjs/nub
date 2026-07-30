@@ -92,13 +92,29 @@ pub(crate) fn read_guarded(path: &Path) -> std::io::Result<String> {
     // and the JSONC parser reports one as a syntax error at line 1 column 1 —
     // pointing at a file that looks perfectly correct in the editor that wrote
     // it. Stripping it here covers every reader and the CST writer alike, so a
-    // BOM'd file round-trips instead of being rejected wholesale.
+    // BOM'd file round-trips instead of being rejected wholesale. Only a LEADING
+    // one is a marker; anywhere else U+FEFF is data and must survive verbatim.
     let bytes = bytes
-        .strip_prefix(&[0xEF, 0xBB, 0xBF][..])
+        .strip_prefix(UTF8_BOM)
         .map_or(bytes.as_slice(), |rest| rest)
         .to_vec();
     String::from_utf8(bytes)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.utf8_error()))
+}
+
+/// The UTF-8 encoding of U+FEFF. Named so the reader that strips it and the
+/// writer that puts it back cannot drift.
+pub(crate) const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
+
+/// Whether the file at `path` opens with a UTF-8 BOM — what [`read_guarded`]
+/// stripped, so a rewriter can restore it. An absent or unreadable file is
+/// `false`: there is no prior marker to carry, and inventing one would be its
+/// own surprise.
+pub(crate) fn starts_with_bom(path: &Path) -> bool {
+    let mut head = [0u8; 3];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok_and(|()| head == *UTF8_BOM)
 }
 
 /// Byte-scan for the deepest `{`/`[` nesting, ignoring delimiters inside strings
