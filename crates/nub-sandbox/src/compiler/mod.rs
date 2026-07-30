@@ -20,6 +20,10 @@ mod preset;
 mod resolve;
 mod reuse;
 
+/// Exposed on EVERY platform, unlike the stamp itself, so `stdio_shim_semantics` drives the
+/// payload that actually ships rather than the source file it is derived from — comment-stripping
+/// is part of the delivery, so testing the unstripped file would leave it unmeasured.
+pub use defaults::build_jail_stdio_preload_js;
 #[cfg(windows)]
 pub use defaults::{
     windows_build_jail_node_options, windows_native_realpath_shim_node_options,

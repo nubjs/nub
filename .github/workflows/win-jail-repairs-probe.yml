@@ -6,8 +6,16 @@
 # WHAT IS MEASURED. Repair 1 makes every ancestor of a granted path reachable, so an absolute
 # `require()` no longer dies on `EPERM: lstat 'C:\'` — by writing a non-inherited traverse ACE
 # where the user can, and requesting the capability SIDs already on those DACLs where it
-# cannot. Repair 2 stamps a NODE_OPTIONS preload that rewrites piped stdio into scratch files,
-# so a confined `child_process` spawn returns instead of spinning in libuv's retry loop.
+# cannot. Repair 2 stamps a NODE_OPTIONS preload that creates each pipe ITSELF in the
+# AppContainer-private namespace (`\\.\pipe\LOCAL\…`) and hands the child an already-connected end
+# as a raw fd, so a confined `child_process` spawn STREAMS instead of spinning in libuv's retry
+# loop — and `fork()` gets a real channel over that same namespace rather than failing fast.
+#
+# THE TWO ARMS THAT NEED A REAL LOWBOX TOKEN, and cannot be measured anywhere else: whether
+# `fs.openSync` on a `LOCAL\` pipe name is permitted (the fd handed to the child), and whether a
+# CONFINED DESCENDANT can create a second private pipe of its own (`shim-fork-nested`). Everything
+# about how faithfully the shim reproduces `child_process` is measured cross-platform by
+# `stdio_shim_semantics`; only the namespace question lives here.
 #
 # THE CONTROLS. `NUB_SANDBOX_WIN_NO_ANCESTOR_REPAIR` disables repair 1 for one arm of the same
 # run, on the same fixture, so the repaired arm has something to differ from; the unshimmed
@@ -29,7 +37,7 @@ on:
   push:
     # Path-filtered so a change to a SIBLING probe does not spend ~25 minutes of Windows runner
     # on this one. Shared capacity: every push here costs the full matrix.
-    branches: [sandbox/win-jail-caps, sandbox/win-ace-kernel]
+    branches: [sandbox/win-jail-caps, sandbox/win-ace-kernel, sandbox/win-stdio-stream-verify]
     paths:
       - 'crates/nub-sandbox/**'
       - '.github/workflows/win-jail-repairs-probe.yml'
@@ -187,12 +195,25 @@ jobs:
             need_pass "$p"
           done
 
+          # The env-block ceiling is a HARD one and the margin is thinner than the payload alone
+          # suggests: a CreateProcessW environment block holds 32767 characters IN TOTAL, the
+          # stamped NODE_OPTIONS is 23995 of them, and the whole block measured 27557 on this runner
+          # — about 5.2k spare, which PATH and npm_config_* have to fit inside. `tiny` carries a
+          # flag-sized value and `full` the real one, so a launch failure caused by SIZE separates
+          # itself from anything the shim does.
+          echo "---- NODE_OPTIONS delivery size ----"
+          for p in node-options-tiny-launches \
+                   node-options-full-launches; do
+            need_pass "$p"
+          done
+
           echo "---- stdio shim ----"
           for p in shim-execfile-async-returns \
                    shim-execfilesync-returns \
                    shim-spawnsync-returns \
                    shim-spawn-stream-returns \
-                   shim-fork-fails-fast \
+                   shim-fork-roundtrip \
+                   shim-fork-nested \
                    unshimmed-piped-hangs; do
             need_pass "$p"
           done

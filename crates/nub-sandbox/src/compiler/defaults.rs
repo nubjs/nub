@@ -642,8 +642,45 @@ pub fn windows_native_realpath_shim_node_options() -> String {
 /// The JS the Windows build jail preloads into every confined Node. Kept as a FILE rather
 /// than a Rust string so it stays readable, greppable and lintable; the delivery encoding is
 /// [`windows_build_jail_node_options`]'s job.
-#[cfg(windows)]
 const WINDOWS_STDIO_SHIM: &str = include_str!("../backend/windows_stdio_shim.js");
+
+/// Drop whole-line comments and indentation before the payload is encoded.
+///
+/// THIS IS A HARD BUDGET, NOT A TIDY-UP. A `CreateProcessW` environment block is capped at 32767
+/// CHARACTERS *in total*, and percent-encoding costs three characters for every byte outside the
+/// unreserved set — so the shim's own prose is charged at roughly 3x and the source, shipped raw,
+/// does not fit in the block AT ALL, let alone alongside `PATH` and the `npm_config_*` family.
+/// Stripping is what lets the file stay densely commented (which is where its provenance lives)
+/// while the delivered payload stays affordable. `stdio_shim_payload_fits_the_env_block` pins the
+/// margin so an innocent-looking edit cannot quietly break every jailed launch.
+///
+/// WHOLE LINES ONLY, deliberately: a partial-line stripper would have to know whether `//` sits
+/// inside a string, a regex or a template literal. Trimming and dropping entire lines is correct
+/// for any content EXCEPT a template literal spanning lines, of which the shim has none — every
+/// backtick in it opens and closes on one line, and the suite would catch a regression anyway.
+fn strip_js_comments(src: &str) -> String {
+    src.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The JS actually delivered to a confined Node.
+pub fn build_jail_stdio_preload_js() -> String {
+    strip_js_comments(WINDOWS_STDIO_SHIM)
+}
+
+/// The `--import` term that delivers the stdio shim, encoded as the jail delivers it. Built off
+/// Windows too, so the encoding and the env-block budget are gated on every platform's `cargo test`
+/// rather than only where the stamp is used.
+#[cfg(any(windows, test))]
+fn stdio_shim_import_term() -> String {
+    format!(
+        "--import data:text/javascript,{}",
+        percent_encode_strict(&strip_js_comments(WINDOWS_STDIO_SHIM))
+    )
+}
 
 /// The `NODE_OPTIONS` the Windows build jail STAMPS over any ambient value, delivering the
 /// `child_process` stdio shim ([`WINDOWS_STDIO_SHIM`]).
@@ -668,16 +705,13 @@ const WINDOWS_STDIO_SHIM: &str = include_str!("../backend/windows_stdio_shim.js"
 /// turn a missing repair into a broken install.
 #[cfg(windows)]
 pub fn windows_build_jail_node_options() -> String {
-    format!(
-        "--import data:text/javascript,{}",
-        percent_encode_strict(WINDOWS_STDIO_SHIM)
-    )
+    stdio_shim_import_term()
 }
 
 /// Percent-encode everything outside the RFC 3986 unreserved set. Deliberately maximal:
 /// `NODE_OPTIONS` is split on whitespace and re-parsed by Node's own option reader, so an
 /// under-encoded payload does not corrupt a URL, it silently truncates the preload.
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn percent_encode_strict(src: &str) -> String {
     let mut out = String::with_capacity(src.len() * 3);
     for byte in src.bytes() {
@@ -964,20 +998,51 @@ mod tests {
     /// malformed URL that Node rejects — it produces a TRUNCATED preload that silently loads
     /// half a shim, or an option fragment Node aborts on. Both are quiet, so the encoding is
     /// asserted rather than eyeballed.
-    #[cfg(windows)]
+    /// Runs everywhere, because the encoding is not a Windows fact — only the DECISION to stamp is.
     #[test]
     fn the_stamped_node_options_is_a_single_whitespace_free_token() {
-        let stamped = windows_build_jail_node_options();
+        let stamped = stdio_shim_import_term();
+        #[cfg(windows)]
+        assert_eq!(stamped, windows_build_jail_node_options());
         let (flag, url) = stamped.split_once(' ').expect("flag then payload");
         assert_eq!(flag, "--import");
         assert!(
             !url.chars().any(char::is_whitespace),
-            "the data: URL must survive NODE_OPTIONS' whitespace split: {url}"
+            "the data: URL must survive NODE_OPTIONS' whitespace split"
         );
         assert!(url.starts_with("data:text/javascript,"));
         // The whole payload must arrive, not merely its opening — an identifier from the
         // shim's tail is what makes a truncation visible.
         assert!(url.contains(&percent_encode_strict("writableScratchDir")));
+    }
+
+    /// A `CreateProcessW` environment block is capped at 32767 CHARACTERS IN TOTAL, and this one
+    /// value is the largest thing in it by an order of magnitude. Left unstripped the shim does not
+    /// fit at all (measured: 56215 characters, ~1.7x the whole block), and every jailed launch on
+    /// Windows would fail for a reason that looks nothing like its cause.
+    ///
+    /// The ceiling here is what remains for `PATH` and the `npm_config_*` family that a real
+    /// install also has to carry, so it is deliberately well below 32767 rather than at it. If a
+    /// future edit trips this, shrink the payload — do not raise the number without re-measuring a
+    /// real install's block on Windows.
+    #[test]
+    fn stdio_shim_payload_fits_the_env_block() {
+        const BUDGET: usize = 26_000;
+        let stamped = stdio_shim_import_term();
+        assert!(
+            stamped.len() <= BUDGET,
+            "the stamped NODE_OPTIONS is {} chars, over the {BUDGET} budget; a CreateProcessW \
+             env block holds 32767 in total and must still fit PATH and npm_config_*",
+            stamped.len()
+        );
+        // Stripping must remove PROSE and nothing else: an identifier from the shim's tail proves
+        // the code survived, and the comment marker proves the prose did not.
+        let payload = strip_js_comments(WINDOWS_STDIO_SHIM);
+        assert!(payload.contains("writableScratchDir"));
+        assert!(
+            !payload.lines().any(|line| line.starts_with("//")),
+            "whole-line comments must be gone from the delivered payload"
+        );
     }
 
     #[test]

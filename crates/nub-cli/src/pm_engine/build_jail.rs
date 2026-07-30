@@ -148,8 +148,9 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // WINDOWS: deliver the `child_process` stdio shim. A piped spawn under the
         // AppContainer does not fail, it SPINS — libuv retries the refused named pipe
         // forever inside `uv_spawn`, before any timeout can arm — and every `node-gyp`
-        // configure pipes. Rationale and the residual it leaves (`fork`/IPC, which no file
-        // can emulate) are on `nub_sandbox::windows_build_jail_node_options`.
+        // configure pipes. Rationale, and the residuals it still leaves (handle passing and
+        // `serialization: 'advanced'`, which no userland stream can carry), are on
+        // `nub_sandbox::windows_build_jail_node_options`.
         //
         // UNCONDITIONAL, like `NODE_COMPAT` above: it OVERWRITES any ambient value, which is
         // also the ONLY thing that keeps the env allowlist's `NODE_OPTIONS` entry from
