@@ -636,6 +636,21 @@ Invoke-Arm -Name 'ac-entry-deep' -AppContainer $true -GrantRX @($runtimeDir) `
 Invoke-Arm -Name 'ac-noflags' -AppContainer $true -GrantRX @($runtimeDir) `
   -GrantModify @($dataDir) -Cwd $runtimeDir -NodeFlags @()
 
+# 7b. THE MAIN-ONLY ARM — one flag, not two, and the arm the shipping decision turns on.
+#     `--preserve-symlinks` is disqualified on its own merits (`preserve_symlinks_isolated_layout`:
+#     it silently binds a different version of a package under nub's default Isolated linker), and
+#     that hazard is attributable to it ALONE — main-only leaves the same fixture resolving
+#     correctly. So main-only is the only realpath-skipping configuration that is not already
+#     disqualified, and whether it clears the jail decides the whole route.
+#
+#     Node answers structurally: `_findPath` realpaths every NON-main resolution unless
+#     `--preserve-symlinks` is set, so the entry point should run while every `require()` dies. This
+#     arm measures that on the real kernel instead of inferring it from source. The `read-deep`
+#     cell sitting beside the `require-deep` cell is what makes a denial attributable to realpath
+#     rather than to a grant that never landed.
+Invoke-Arm -Name 'ac-mainonly' -AppContainer $true -GrantRX @($runtimeDir) `
+  -GrantModify @($dataDir) -Cwd $runtimeDir -NodeFlags @('--preserve-symlinks-main')
+
 # 8. THE ZERO-SETUP ARM. Same as arm 3, but the package sid is DERIVED by hashing the name and no
 #    profile is ever registered. If this launches and reads, the mechanism writes no persistent
 #    machine state whatsoever — which is a stronger answer to "does the first `nub install` on a

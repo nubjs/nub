@@ -3,7 +3,7 @@
 # WHY THIS EXISTS. A verdict block only ever exercised against the world it expects will happily
 # report PASS on a harness that measured nothing; that is precisely how this effort previously
 # produced a negative it could not falsify and a "confirmation" from a broken control. So the
-# verdict is driven against SIX synthetic worlds and required to give a DIFFERENT answer in each:
+# verdict is driven against SEVEN synthetic worlds and required to give a DIFFERENT answer in each:
 #
 #   works        bypass-traverse works        => every property PASSes
 #   denied       bypass-traverse fails        => the bypass-traverse properties FAIL, and every
@@ -20,6 +20,10 @@
 #   defect-absent the no-flag arm ran fine     => the flag differential FAILS, so the flags are
 #                                                never credited with fixing something that was
 #                                                not broken in this run.
+#   mainonly-suf `--preserve-symlinks-main`    => the insufficiency property FAILS. The one world
+#   ficient      alone resolves dependencies      whose answer would UNBLOCK the jail, so the
+#                                                property that reports "main-only is insufficient"
+#                                                is required to be capable of saying otherwise.
 #
 # Run: pwsh -File selftest.ps1
 
@@ -90,16 +94,26 @@ $acNoFlagsArm = Mk @{ 'node-died-realpath-c-root' = 'OK' } 20 'rc=1 (0x00000001)
 # the no-flag arm in a world where the defect does NOT reproduce (so the differential must fail)
 $acNoFlagsRan = Mk (Ops 'OK' 'ERR' 'ERR' 'OK' 'ERR' 'OK' 'ERR') 40 'rc=0 (0x00000000)' 25
 
+# THE MAIN-ONLY ARM, in the two worlds that matter. Both reach the operations table — that is the
+# half `--preserve-symlinks-main` is expected to fix — and they differ in exactly one cell.
+# Insufficient: the plain read of the deep file succeeds while `require()` of that SAME file fails,
+# which is the pairing that attributes the failure to realpath rather than to a missing grant.
+$mainOnlyOps = Ops 'OK' 'ERR' 'ERR' 'OK' 'ERR' 'OK' 'ERR'
+$mainOnlyOps['require-deep-granted'] = 'ERR'
+$acMainOnlyInsufficient = Mk $mainOnlyOps 40 'rc=1 (0x00000001)' 25
+# Sufficient: identical but `require()` resolves. The world whose answer would ship the jail.
+$acMainOnlySufficient = Mk (Ops 'OK' 'ERR' 'ERR' 'OK' 'ERR' 'OK' 'ERR') 40 'rc=0 (0x00000000)' 25
+
 $worlds = @{
   'works' = @{
     plain = Mk $plainOK; 'ac-root-grant' = Mk $acWorks; 'ac-leaf-grants' = Mk $acWorks
     'ac-data-ungranted' = Mk $acNoGrant; 'ac-cwd-deep' = Mk $acWorks; 'ac-entry-deep' = Mk $acWorks
-    'ac-noflags' = $acNoFlagsArm
+    'ac-noflags' = $acNoFlagsArm; 'ac-mainonly' = $acMainOnlyInsufficient
   }
   'denied' = @{
     plain = Mk $plainOK; 'ac-root-grant' = Mk $acDenied; 'ac-leaf-grants' = Mk $acDenied
     'ac-data-ungranted' = Mk $acNoGrant; 'ac-cwd-deep' = Mk $acDenied; 'ac-entry-deep' = Mk $acDenied
-    'ac-noflags' = $acNoFlagsArm
+    'ac-noflags' = $acNoFlagsArm; 'ac-mainonly' = $acMainOnlyInsufficient
   }
   'harness-dead' = @{
     plain = Mk $allERR 0 'launch-error CreateProcessW err=2'
@@ -109,22 +123,31 @@ $worlds = @{
     'ac-cwd-deep' = Mk $allERR 0 'launch-error CreateProcessW err=2'
     'ac-entry-deep' = Mk $allERR 0 'launch-error CreateProcessW err=2'
     'ac-noflags' = Mk $allERR 0 'launch-error CreateProcessW err=2' 0
+    'ac-mainonly' = Mk $allERR 0 'launch-error CreateProcessW err=2' 0
   }
   'ace-inert' = @{
     plain = Mk $plainOK; 'ac-root-grant' = Mk $acInert; 'ac-leaf-grants' = Mk $acInert
     'ac-data-ungranted' = Mk $acInert; 'ac-cwd-deep' = Mk $acInert; 'ac-entry-deep' = Mk $acInert
-    'ac-noflags' = $acNoFlagsArm
+    'ac-noflags' = $acNoFlagsArm; 'ac-mainonly' = Mk $acInert
   }
   'grant-never-landed' = @{
     plain = Mk $plainOK
     'ac-root-grant' = Mk $acGrantNeverLanded; 'ac-leaf-grants' = Mk $acGrantNeverLanded
     'ac-data-ungranted' = Mk $acNoGrant; 'ac-cwd-deep' = Mk $acGrantNeverLanded
     'ac-entry-deep' = Mk $acGrantNeverLanded; 'ac-noflags' = $acNoFlagsArm
+    'ac-mainonly' = $acMainOnlyInsufficient
   }
   'defect-absent' = @{
     plain = Mk $plainOK; 'ac-root-grant' = Mk $acWorks; 'ac-leaf-grants' = Mk $acWorks
     'ac-data-ungranted' = Mk $acNoGrant; 'ac-cwd-deep' = Mk $acWorks; 'ac-entry-deep' = Mk $acWorks
-    'ac-noflags' = $acNoFlagsRan
+    'ac-noflags' = $acNoFlagsRan; 'ac-mainonly' = $acMainOnlyInsufficient
+  }
+  # The world that would UNBLOCK the jail: identical to 'works' except main-only also resolves
+  # dependencies. Exists so the insufficiency property is provably able to report the good news.
+  'mainonly-sufficient' = @{
+    plain = Mk $plainOK; 'ac-root-grant' = Mk $acWorks; 'ac-leaf-grants' = Mk $acWorks
+    'ac-data-ungranted' = Mk $acNoGrant; 'ac-cwd-deep' = Mk $acWorks; 'ac-entry-deep' = Mk $acWorks
+    'ac-noflags' = $acNoFlagsArm; 'ac-mainonly' = $acMainOnlySufficient
   }
 }
 
@@ -148,6 +171,8 @@ $expect = @{
     'control-ungranted-sibling-under-profile-denies' = 'PASS'
     'control-ungranted-sibling-inside-root-denies' = 'PASS'
     'egress-denied-with-zero-capabilities' = 'PASS'
+    'mainonly-fixes-the-entry-point' = 'PASS'
+    'mainonly-leaves-dependency-resolution-broken' = 'PASS'
   }
   'denied' = @{
     # A CLEAN NEGATIVE: the decisive cells fail while every control still holds.
@@ -174,6 +199,7 @@ $expect = @{
     'baseline-plain-reads-c-root' = 'FAIL'; 'baseline-plain-egress-works' = 'FAIL'
     'appcontainer-positive-control' = 'FAIL'
     'bypass-traverse-deep-read-leaf-grants' = 'FAIL'
+    'mainonly-fixes-the-entry-point' = 'FAIL'
   }
   'grant-never-landed' = @{
     # Looks identical to 'denied' on every read cell, and must NOT be reportable as a clean
@@ -203,11 +229,18 @@ $expect = @{
     # the whole point: a grant that scopes nothing leaks $HOME secrets, and that must be loud
     'secrets-under-profile-are-denied' = 'FAIL'
   }
+  'mainonly-sufficient' = @{
+    # The good-news world. Every control still holds, and the insufficiency property must be able
+    # to say so — a property that can only ever PASS proves nothing about the thing it names.
+    'appcontainer-gate-is-live' = 'PASS'; 'harness-grant-reached-decisive-target' = 'PASS'
+    'mainonly-fixes-the-entry-point' = 'PASS'
+    'mainonly-leaves-dependency-resolution-broken' = 'FAIL'
+  }
 }
 
 $bad = 0
 foreach ($name in @('works', 'denied', 'harness-dead', 'ace-inert', 'grant-never-landed',
-                    'defect-absent')) {
+                    'defect-absent', 'mainonly-sufficient')) {
   $script:fails = 0
   $captured = Invoke-Verdict -Cells $worlds[$name] 6>&1
   $got = @{}
@@ -230,7 +263,7 @@ foreach ($name in @('works', 'denied', 'harness-dead', 'ace-inert', 'grant-never
 
 Write-Host ''
 if ($bad -eq 0) {
-  Write-Host "SELFTEST OK - the verdict discriminates in all six worlds"
+  Write-Host "SELFTEST OK - the verdict discriminates in all seven worlds"
   exit 0
 }
 Write-Host "SELFTEST FAILED - $bad expectation(s) wrong"

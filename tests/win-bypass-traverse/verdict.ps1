@@ -55,12 +55,13 @@ $script:ProbeOps = @(
   'dns-lookup-registry', 'net-connect-ip', 'net-connect-name', 'net-connect-loopback',
   'spawn-piped-whoami')
 $script:ProbeArms = @('plain', 'ac-root-grant', 'ac-leaf-grants', 'ac-data-ungranted', 'ac-cwd-deep',
-  'ac-noflags', 'ac-derive-only')
+  'ac-noflags', 'ac-mainonly', 'ac-derive-only')
 # `ac-noflags` and `ac-entry-deep` are excluded from the gate check below: the first emits no op
 # lines at all by design (it dies in Node's bootstrap), and the second reports the root cell under
-# a different op name.
+# a different op name. `ac-mainonly` IS included — it reaches the table, so it must be shown to be
+# as confined as the rest before anything is concluded from which of its cells failed.
 $script:ProbeAcArms = @('ac-root-grant', 'ac-leaf-grants', 'ac-data-ungranted', 'ac-cwd-deep',
-  'ac-entry-deep')
+  'ac-entry-deep', 'ac-mainonly')
 $script:SecretArms = @('ac-root-grant', 'ac-leaf-grants', 'ac-cwd-deep')
 
 function Invoke-Verdict {
@@ -126,6 +127,26 @@ function Invoke-Verdict {
   Prop 'preserve-symlinks-flags-unblock-the-child' (((OpCount 'ac-leaf-grants') -gt 10) -and
     ((Cell 'ac-leaf-grants' 'node-died-realpath-c-root') -eq 'ERR')) `
     "the SAME grants WITH the flags must reach the operations table: ops=$(OpCount 'ac-leaf-grants') died-in-realpath=$(Cell 'ac-leaf-grants' 'node-died-realpath-c-root')"
+
+  # ── THE MAIN-ONLY SPLIT, which is what the shipping decision turns on. `--preserve-symlinks` is
+  # disqualified by `preserve_symlinks_isolated_layout` (silent wrong-version binding under the
+  # default Isolated linker), and that hazard is attributable to it ALONE, so main-only is the only
+  # realpath-skipping configuration still on the table. Node's `_findPath` realpaths every NON-main
+  # resolution unless `--preserve-symlinks` is set, which predicts: entry point runs, every
+  # `require()` dies. Measured here rather than inferred.
+  #
+  # READ THE DIRECTION CAREFULLY. `mainonly-leaves-dependency-resolution-broken` PASSing means the
+  # route is DEAD — main-only is insufficient. Its FAILING would be the good news (main-only
+  # suffices, and the jail ships). The badge is inverted for this one property, deliberately: the
+  # property is named for the claim it measures, not for the outcome anyone wanted.
+  Prop 'mainonly-fixes-the-entry-point' (((OpCount 'ac-mainonly') -gt 10) -and
+    ((Cell 'ac-mainonly' 'node-died-realpath-c-root') -eq 'ERR') -and
+    ((Cell 'ac-mainonly' 'dacl-grants-ac-sid') -eq 'OK')) `
+    "one flag must be enough to clear resolveMainPath, with the grant confirmed landed: ops=$(OpCount 'ac-mainonly') died-in-realpath=$(Cell 'ac-mainonly' 'node-died-realpath-c-root') dacl=$(Detail 'ac-mainonly' 'dacl-grants-ac-sid')"
+  Prop 'mainonly-leaves-dependency-resolution-broken' `
+    (((Cell 'ac-mainonly' 'require-deep-granted') -eq 'ERR') -and
+     ((Cell 'ac-mainonly' 'read-deep-granted') -eq 'OK')) `
+    "PASS here means main-only is INSUFFICIENT and the route dies. require() must fail while the plain read of the SAME file succeeds — that pairing is what attributes the failure to realpath rather than to the grant: require=$(Cell 'ac-mainonly' 'require-deep-granted') read=$(Cell 'ac-mainonly' 'read-deep-granted') $(Detail 'ac-mainonly' 'require-deep-granted')"
 
   # ── CONTROL: the grant physically REACHED the decisive target. The ace is written on an
   # ancestor as an inheritable one and relies on propagation into the already-existing deep file.

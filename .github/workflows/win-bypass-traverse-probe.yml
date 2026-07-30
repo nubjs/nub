@@ -21,7 +21,7 @@ name: win-bypass-traverse-probe
 
 on:
   push:
-    branches: [sandbox/win-bypass-traverse]
+    branches: [sandbox/win-bypass-traverse, sandbox/win-preserve-main-only]
   workflow_dispatch: # inert until this file reaches the default branch; `push` is what fires it
 
 permissions:
@@ -111,6 +111,15 @@ jobs:
                    control-ungranted-sibling-under-profile-denies \
                    control-ungranted-sibling-inside-root-denies \
                    secrets-baseline-plain-can-read-them; do need "$p"; done
+
+          # THE MAIN-ONLY SPLIT. `--preserve-symlinks` is disqualified for silently binding the
+          # wrong package version, and that hazard is attributable to it ALONE, so
+          # `--preserve-symlinks-main` by itself is the only realpath-skipping configuration left.
+          # NOTE THE INVERTED READING on the second property: PASS means main-only is INSUFFICIENT
+          # and the AppContainer route dies; a FAIL there would be the good news.
+          echo "── the main-only split (decides whether the jail can ship) ──"
+          for p in mainonly-fixes-the-entry-point \
+                   mainonly-leaves-dependency-resolution-broken; do need "$p"; done
 
           echo "── the decisive cells ──"
           for p in bypass-traverse-deep-read-root-grant bypass-traverse-deep-read-leaf-grants \
