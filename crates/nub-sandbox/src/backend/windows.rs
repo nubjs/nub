@@ -879,6 +879,34 @@ pub fn windows_leaf_grant_redundant(dir: &std::path::Path) -> bool {
     launch::leaf_read_grant_redundant(dir)
 }
 
+/// Publish `dir` to every AppContainer as read+execute, inheritably — the ONE grant an embedder
+/// writes AHEAD of a launch rather than per-run, and the reason a nub-owned interpreter copy costs
+/// nothing at spawn time.
+///
+/// CALL THIS ON AN EMPTY DIRECTORY, THEN POPULATE IT. The ace is inheritable, so children pick it
+/// up AT CREATION and there is no propagation pass; writing the same ace over an already-populated
+/// tree is a walk, and the two are not close (measured on `windows-latest`: 24 ms on an empty
+/// directory against 426 ms re-granting a 2,435-entry Node distribution — run 30517506683). The
+/// per-launch saving is the same number again: an inheritable AAP ace is exactly what
+/// [`windows_leaf_grant_redundant`] looks for, so the backend's own leaf grant on this directory
+/// SKIPS, and a per-run package sid — which would have to be written every spawn — is never needed.
+///
+/// The trustee is the STABLE `ALL APPLICATION PACKAGES` rather than a per-run profile sid, and that
+/// is sound because a zero-capability LowBox token reads through it (measured — it is why System32
+/// is readable at all). What it costs is that the directory becomes readable to every AppContainer
+/// on the machine, so an embedder may only publish a tree whose contents are already public: the
+/// intended one is a copy of the user's own Node distribution, which is public bytes from
+/// nodejs.org.
+///
+/// Needs no elevation on any path a user owns, which is the whole point — it is the escape from
+/// writing a DACL somewhere a standard user cannot (`%ProgramFiles%\nodejs`, `C:\hostedtoolcache`),
+/// measured as `PrivilegeNotHeldException` there and as a clean write plus read-back under a
+/// restricted token on nub's own directory.
+#[cfg(target_os = "windows")]
+pub fn windows_publish_appcontainer_read(dir: &std::path::Path) -> std::io::Result<()> {
+    launch::publish_appcontainer_read(dir)
+}
+
 // ── the FFI launcher ────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
@@ -1184,6 +1212,19 @@ pub(super) mod launch {
     #[doc(hidden)]
     pub(super) fn leaf_read_grant_redundant(dir: &Path) -> bool {
         already_granted_to_appcontainers(dir, GENERIC_READ | GENERIC_EXECUTE)
+    }
+
+    /// See [`super::windows_publish_appcontainer_read`].
+    #[doc(hidden)]
+    pub(super) fn publish_appcontainer_read(dir: &Path) -> io::Result<()> {
+        let sid = CapSid::new(ALL_APPLICATION_PACKAGES_SID)?;
+        set_ace(
+            dir,
+            sid.0,
+            GENERIC_READ | GENERIC_EXECUTE,
+            GRANT_ACCESS,
+            true,
+        )
     }
 
     /// Each granted path's STRICT ancestors, deduped and ordered shallowest-first. These are
@@ -1692,16 +1733,38 @@ pub(super) mod launch {
                         GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE,
                     )
                 }));
+            //    A REFUSED **READ** GRANT IS SKIPPED, NOT FATAL — same reasoning as the
+            //    ancestor chain in 2b, which the read grants share a failure mode with.
+            //    Writing a DACL needs `WRITE_DAC`, and a read grant may legitimately name a
+            //    path the user does not hold it on: a toolchain outside their profile
+            //    (`C:\hostedtoolcache`, an all-users Python) is granted read, and taking `?`
+            //    there aborted EVERY lifecycle script on the machine over one unreachable
+            //    toolchain — the loudest possible failure for the mildest cause. Skipping
+            //    cannot open the jail: a grant is a REDUCTION from the unconfined lifecycle
+            //    spawn's complete access, so a grant not installed leaves the child with
+            //    LESS, and the worst outcome is one package failing to find one tool. The
+            //    interpreter no longer relies on this — nub stages a copy it owns (see
+            //    `pm_engine::jail_bin`) — which is what makes it a genuine safety net rather
+            //    than the mechanism.
+            //
+            //    WRITE grants stay FATAL. Every one of them is nub's own private tmp or the
+            //    package directory being built, both under the user's own tree, so a refusal
+            //    there is not a reachable configuration — it is a broken assumption, and
+            //    continuing would launch a build that silently cannot write its output.
             for (kind, dir, access) in leaves {
-                let installed = grant_leaf_ace(dir, ac_sid, access).map_err(|error| {
-                    io::Error::new(
-                        error.kind(),
-                        format!(
-                            "sandbox: installing {kind} grant ACE on {} failed: {error}",
-                            dir.display()
-                        ),
-                    )
-                })?;
+                let installed = match grant_leaf_ace(dir, ac_sid, access) {
+                    Ok(installed) => installed,
+                    Err(_) if kind == "read" => continue,
+                    Err(error) => {
+                        return Err(io::Error::new(
+                            error.kind(),
+                            format!(
+                                "sandbox: installing {kind} grant ACE on {} failed: {error}",
+                                dir.display()
+                            ),
+                        ));
+                    }
+                };
                 if installed && !_aces.paths.contains(dir) {
                     _aces.paths.push(dir.clone());
                 }

@@ -101,6 +101,8 @@ pub mod policy;
 pub mod preflight;
 pub mod proxy;
 
+#[cfg(target_os = "windows")]
+pub use backend::windows_publish_appcontainer_read;
 pub use backend::{
     CommandArgs, CommandSpec, Degradation, Prepared, PreparedChild, PreparedSignalTarget,
     RuntimeCapability, StatusReport, apply, apply_with_runtime, earliest_bootstrap,

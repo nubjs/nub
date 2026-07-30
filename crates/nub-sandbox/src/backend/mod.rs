@@ -121,6 +121,8 @@ pub fn earliest_bootstrap() -> std::io::Result<RuntimeCapability> {
 #[cfg(any(target_os = "windows", test))]
 mod windows;
 #[cfg(target_os = "windows")]
+pub use windows::windows_publish_appcontainer_read;
+#[cfg(target_os = "windows")]
 #[doc(hidden)]
 pub use windows::{
     windows_ancestor_capability_sids, windows_capability_fallbacks, windows_leaf_grant_redundant,

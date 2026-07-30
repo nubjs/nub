@@ -112,17 +112,6 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // Windows stamps `NODE_OPTIONS` too — below, where the interpreter's version is
         // already known.
 
-        // The interpreter closure to grant READ. nub provisions its own Node under its
-        // store (not `/usr`), so the tight-read base can't reach it. Under nub a bare
-        // `node` resolves via the PATH-prepended shim (`NODE`) which re-execs the real
-        // binary (`npm_node_execpath`), so BOTH must be readable/executable — grant each
-        // (compile_build_jail dedups and adds each one's bin dir).
-        let interpreter: Vec<PathBuf> = ["npm_node_execpath", "NODE"]
-            .iter()
-            .filter_map(|k| ambient.get(*k))
-            .map(PathBuf::from)
-            .collect();
-
         // Make node-gyp compile offline. It reads Node headers from `npm_config_nodedir/
         // include/node` (default devdir `~/.cache/node-gyp/<ver>`, unreadable → network
         // fallback the jail denies). Point nodedir at a directory that ACTUALLY HOLDS
@@ -130,6 +119,31 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // the interpreter grant). Set-if-absent: an explicit ambient nodedir is a
         // deliberate build-against-custom-node choice; the case we fix carries none.
         let probe = ProbeScope::new(&spawn);
+
+        // WINDOWS: redirect the interpreter to a nub-owned COPY of the same distribution,
+        // BEFORE anything else reads `npm_node_execpath`. Two independent reasons the ambient
+        // one is unusable — nub cannot write the read-grant ACE where the stock MSI installs,
+        // and a confined caller cannot open that image even where it can — are on
+        // [`super::jail_bin`]'s module doc with their measurements. Everything below then
+        // derives from the copy: the interpreter grant, `node_layout`'s `node_modules` and
+        // header paths, and the version the `NODE_OPTIONS` gate asks for. Declining leaves the
+        // ambient interpreter, which is the behavior before this existed.
+        #[cfg(windows)]
+        if let Some(staged) = super::jail_bin::stage(&ambient, &probe) {
+            staged.redirect_env(&mut ambient);
+        }
+
+        // The interpreter closure to grant READ. nub provisions its own Node under its
+        // store (not `/usr`), so the tight-read base can't reach it. Under nub a bare
+        // `node` resolves via the PATH-prepended shim (`NODE`) which re-execs the real
+        // binary (`npm_node_execpath`), so BOTH must be readable/executable — grant each
+        // (compile_build_jail dedups and adds each one's bin dir). On Windows both spellings
+        // already name the staged copy, so this resolves to one directory.
+        let interpreter: Vec<PathBuf> = ["npm_node_execpath", "NODE"]
+            .iter()
+            .filter_map(|k| ambient.get(*k))
+            .map(PathBuf::from)
+            .collect();
 
         // WINDOWS: deliver the `child_process` stdio shim. A piped spawn under the
         // AppContainer does not fail, it SPINS — libuv retries the refused named pipe
