@@ -147,14 +147,23 @@ pub struct FileAsset {
 /// the invariant this loader rests on, and [`crate::compile::bundle`] asserts it.
 #[derive(Debug, Default)]
 pub struct FilePlugin {
-    exts: Vec<String>,
+    /// Every mapped extension → whether the `file` loader owns it. Both families
+    /// are present so [`FilePlugin::claims`] can resolve specificity across them;
+    /// see its doc comment.
+    by_ext: BTreeMap<String, bool>,
     collected: Mutex<BTreeMap<String, Vec<u8>>>,
 }
 
 impl FilePlugin {
     pub fn new(loaders: &Loaders) -> Self {
+        let mut by_ext: BTreeMap<String, bool> = loaders
+            .module_types
+            .keys()
+            .map(|ext| (ext.clone(), false))
+            .collect();
+        by_ext.extend(loaders.file.iter().map(|ext| (ext.clone(), true)));
         Self {
-            exts: loaders.file.clone(),
+            by_ext,
             collected: Mutex::new(BTreeMap::new()),
         }
     }
@@ -172,11 +181,26 @@ impl FilePlugin {
             .collect()
     }
 
+    /// Whether the `file` loader owns `id`.
+    ///
+    /// MIRRORS ROLLDOWN'S OWN EXTENSION LOOKUP, and must keep doing so. Rolldown
+    /// matches the suffix after EVERY dot, left to right, taking the first hit —
+    /// so `x.tar.gz` tries `tar.gz` before `gz`, and the most specific mapping
+    /// wins. Matching only `Path::extension()` here (the last component) made the
+    /// two families disagree: `--loader .tar.gz=text` worked while
+    /// `--loader .tar.gz=file` silently did not claim the file, which then
+    /// reached the JS parser and failed the build.
+    ///
+    /// The lookup spans BOTH families rather than just this plugin's own, because
+    /// this hook runs BEFORE Rolldown consults `module_types`. Checking only the
+    /// `file` set would let a broad `.gz=file` steal a file that a more specific
+    /// `.tar.gz=text` had claimed — the loser being decided by hook order rather
+    /// than by specificity.
     fn claims(&self, id: &str) -> bool {
-        Path::new(id)
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|ext| self.exts.iter().any(|e| e == ext))
+        id.match_indices('.')
+            .find_map(|(i, _)| self.by_ext.get(&id[i + 1..]))
+            .copied()
+            .unwrap_or(false)
     }
 }
 
@@ -318,6 +342,41 @@ mod tests {
             "the text default must yield, or Rolldown would load it as text \
              and nub's file loader would never see it"
         );
+    }
+
+    // Rolldown matches the suffix after EVERY dot, so a multi-dot mapping has to
+    // as well. Matching only the last component made `--loader .tar.gz=file`
+    // silently not claim the file (which then failed in the JS parser) while
+    // `--loader .tar.gz=text` worked — the same flag behaving differently
+    // depending on which loader family the value named.
+    #[test]
+    fn a_multi_dot_extension_is_claimed_the_way_rolldown_matches_it() {
+        let p = FilePlugin::new(&plan(&[".tar.gz=file".into()]).expect("valid"));
+        assert!(p.claims("/proj/bundle.tar.gz"));
+        assert!(!p.claims("/proj/notes.gz"), "only .tar.gz was mapped");
+    }
+
+    // The `file` hook runs BEFORE Rolldown consults its extension map, so
+    // without a cross-family lookup a broad `.gz=file` would steal a file that a
+    // more specific `.tar.gz=text` had claimed — specificity decided by hook
+    // order instead of by the mapping.
+    #[test]
+    fn the_more_specific_mapping_wins_across_loader_families() {
+        let loaders = plan(&[".gz=file".into(), ".tar.gz=text".into()]).expect("valid");
+        let p = FilePlugin::new(&loaders);
+        assert!(
+            !p.claims("/proj/bundle.tar.gz"),
+            "the text mapping is more specific and must win"
+        );
+        assert!(p.claims("/proj/blob.gz"), "the broad mapping still applies");
+    }
+
+    // A path component containing a dot must not be read as an extension.
+    #[test]
+    fn a_dot_in_a_directory_name_does_not_decide_the_loader() {
+        let p = FilePlugin::new(&plan(&[]).expect("valid"));
+        assert!(p.claims("/home/user.v2/app/icon.png"));
+        assert!(!p.claims("/home/user.v2/app/main.ts"));
     }
 
     #[test]
