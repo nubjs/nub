@@ -1,0 +1,249 @@
+# Raw measurement log — FROM-SOURCE node-gyp / MSBuild compiles under the
+# restricted-token + low-IL Windows build jail.
+#
+# Closes the one write pattern probe-log.txt could not exercise: that box had no
+# MSVC, so every native package took the prebuilt-DOWNLOAD path and MSBuild
+# creating build\ with hundreds of intermediates was never tested.
+#
+# Machine: disposable GCE nub-win-msvc, windows-2022 (Windows Server 2022,
+# 10.0.20348), e2-standard-8 x86_64, 150 GB.
+# Toolchain: VS Build Tools 17.14 / MSVC 14.44.35207 / Windows SDK 10.0.26100.0,
+# Node v24.11.0, npm 11.6.1, Python 3.12.8, node-gyp bundled with npm 11.
+# Harness: tests/win-restricted-token/{Jail.cs,gyp.ps1,vm-startup.ps1}.
+#
+# DE-ELEVATION (measured every arm, printed by `Jail.exe report`):
+#   user_sid=S-1-5-21-3862338339-3918335738-1697652116-1002
+#   integrity=S-1-16-8192 (Medium)   elevated=False   in_admins=False
+#   privileges(2)=SeChangeNotifyPrivilege SeIncreaseWorkingSetPrivilege
+#   -> no SeAssignPrimaryToken, no SeIncreaseQuota, no SeImpersonate.
+# `probe` is a local account in BUILTIN\Users only. Reached by SSH-ing AS probe,
+# so the token is sshd's, not a re-derived one.
+#
+# SETUP FACTS (measured; cost time, recorded so the next run skips them)
+# - windows-2022's guest agent DOES wire nothing useful for ssh either; the
+#   startup script must install OpenSSH.Server, start sshd, and write the key.
+#   Appending to sshd_config lands the directive INSIDE the trailing
+#   `Match Group administrators` block -> sshd will not start. Insert before the
+#   first Match line. (Same trap as the windows-2025 run.)
+# - MEASURED: `Start-Process -Credential` to cross into another local account
+#   from an SSH session does NOT work here — the child logon succeeds (the
+#   profile is created) but the process dies at init producing zero output, and
+#   PowerShell reports an EMPTY $p.ExitCode. Cross-user window-station attachment
+#   in the services session, the same class of problem AppContainer hits.
+#   REMEDY, simpler than the wrapper: put the pubkey in the probe account's own
+#   authorized_keys and SSH AS probe. sshd sets the station up correctly.
+# - MEASURED: a scheduled task cannot create the probe profile either —
+#   BUILTIN\Users holds no SeBatchLogonRight by default, so `schtasks /run` as a
+#   standard user fails. The first interactive logon is what creates the profile.
+# - MEASURED: `node-gyp` is NOT on PATH from a bare shell. npm puts its own shim
+#   dir C:\node\node_modules\npm\bin\node-gyp-bin on PATH for lifecycle scripts;
+#   without it EVERY from-source package fails "'node-gyp' is not recognized",
+#   which reads exactly like a jail failure and is not one.
+# - HARNESS BUG THE SMOKE ARM CAUGHT: a PowerShell function returns its whole
+#   PIPELINE, so `Layout` returning $d actually returned npm's output lines too;
+#   the first was used as a directory ("A drive with the name 'npm notice To
+#   update run' does not exist"). Caught only because the il=none smoke arm
+#   failed. Functions here must emit nothing.
+
+================================================================
+WRITE MAP — which candidate location can the child write?
+Direct measurement, cheaper and more legible than inferring the
+same thing from build failures. il=none is the CONTROL.
+================================================================
+target                                        il=none   il=low + 4 grants
+--------------------------------------------- --------  -----------------
+TEMP (effective; low-labeled dir at low IL)   ALLOW     ALLOW
+%LOCALAPPDATA%\Temp  (the Medium real one)    ALLOW     DENY
+nub PM cache (granted)                        ALLOW     ALLOW
+%USERPROFILE%\.node-gyp (granted)             ALLOW     ALLOW
+%LOCALAPPDATA%\node-gyp (granted)             ALLOW     ALLOW
+%APPDATA%\npm-cache                           ALLOW     DENY
+%LOCALAPPDATA%\Microsoft\VisualStudio         ALLOW     DENY
+%LOCALAPPDATA%\Microsoft\Windows\PowerShell   ALLOW     DENY
+%USERPROFILE%\.vs                             ALLOW     DENY
+%USERPROFILE%   (negative control)            ALLOW     DENY
+C:\BuildTools   (the VS install tree)         DENY      DENY
+C:\             (negative control)            DENY      DENY
+HKCU write                                    ALLOW     DENY
+
+=> The VS install tree is ALREADY read-only for a standard user with NO jail at
+   all (DENY in the il=none control), so "read-only suffices" is not something
+   the jail has to arrange — the DACL already does it. Confirmed.
+=> %LOCALAPPDATA%\Microsoft\VisualStudio, ...\Windows\PowerShell and
+   %USERPROFILE%\.vs are all DENIED under the jail. Whether any of them is
+   LOAD-BEARING for a compile is what the arms below answer; a DENY that nothing
+   needs is not a grant.
+
+================================================================
+ARM A_none — BASELINE CONTROL (il=none, no labels anywhere)
+MANDATORY. Proves the toolchain and every fixture work at all.
+================================================================
+package         rc   wall_ms  build_files  build_bytes  obj  .node artifact
+--------------- ---  -------  -----------  -----------  ---  --------------------------
+better-sqlite3   0    27058        68        59,519,540   6   better_sqlite3.node 1,891,328 B
+                                                             test_extension.node   103,936 B
+cpu-features     0    16478        47        10,139,141  16   cpufeatures.node      174,080 B
+keytar           0    13109        24        10,489,593   4   keytar.node           163,840 B
+gc-stats         0     9534        25         8,037,471   2   gcstats.node          121,856 B
+bcrypt           7     2235         -                 -   -   BASELINE FAILURE
+sqlite3          1     5363         -                 -   -   BASELINE FAILURE
+
+All four passing packages spawned
+  C:\BuildTools\MSBuild\Current\Bin\MSBuild.exe
+so these are genuine from-source MSBuild compiles, not prebuilt downloads —
+which is the whole point of this box. `npm_config_build_from_source=true` is the
+forcing function; without it better-sqlite3/keytar/sqlite3 fetch a binary.
+
+THE TWO BASELINE FAILURES, neither jail-related (they fail identically in every
+arm, which is exactly why they stay in the corpus):
+- bcrypt@5.1.1 rc=7: `node-pre-gyp ERR! stack Error: spawn EINVAL` at
+  @mapbox/node-pre-gyp/lib/util/compile.js:80 — node-pre-gyp 1.x spawns a .cmd
+  without shell:true, which Node blocks on Windows since 18.20.2/20.12
+  (CVE-2024-27980). A Node-version incompatibility in the package.
+- sqlite3@5.1.7 rc=1: `gyp ERR! find VS ... - missing any Windows SDK`. sqlite3
+  bundles its OWN older node-gyp, whose find-visualstudio does not recognise
+  Windows SDK 10.0.26100. npm 11's bundled node-gyp finds the same SDK fine —
+  the four passing packages use it.
+
+================================================================
+THE ARMS TABLE — from-source MSBuild compiles under the jail
+Every cell is rc / the .node artifact size. "absent" = no build\
+output at all. `-` = package not in that arm's subset.
+================================================================
+arm                      il    grants                     better-sqlite3      cpu-features      keytar          gc-stats
+------------------------ ----  -------------------------  ------------------  ----------------  --------------  --------------
+A_none  *BASELINE*       none  (no labels anywhere)       0 / 1,891,328 B     0 / 174,080 B     0 / 163,840 B   0 / 121,856 B
+B_low_all *CANDIDATE*    low   pkgdir,temp,cache,devdir   0 / 1,891,328 B     0 / 174,080 B     0 / 163,840 B   0 / 121,856 B
+C_no_temp                low   minus temp                 1 / absent          1 / absent        -               -
+C_no_cache               low   minus cache                0 / 1,891,328 B     0 / 174,080 B     -               -
+C_no_pkgdir              low   minus pkgdir               1 / absent          1 / absent        -               -
+C_no_nodegyp (WARM hdrs) low   minus devdir               0 / 1,891,328 B     0 / 174,080 B     -               -
+D_cold_none  *CONTROL*   none  (no labels), COLD headers  -                   0 / 174,080 B     -               -
+D_cold_low_all           low   all four, COLD headers     -                   0 / 174,080 B     -               -
+D_cold_low_no_devdir     low   minus devdir, COLD headers -                   1 / absent        -               -
+A2_none_repeat *LAST*    none  (no labels anywhere)       0 / 1,891,328 B     0 / 174,080 B     0 / 163,840 B   0 / 121,856 B
+
+Full artifact accounting, A_none vs B_low_all (byte counts, not exit codes —
+34 corpus packages exit 0 with the work skipped, so rc=0 proves nothing):
+package         build_files  obj   .node                    none vs low
+--------------- -----------  ----  -----------------------  -----------
+better-sqlite3      68 / 68   6/6  better_sqlite3.node      1,891,328 = 1,891,328
+                                   test_extension.node        103,936 =   103,936
+cpu-features        47 / 47  16/16 cpufeatures.node           174,080 =   174,080
+keytar              24 / 24   4/4  keytar.node                163,840 =   163,840
+gc-stats            25 / 25   2/2  gcstats.node               121,856 =   121,856
+Every .node is BYTE-IDENTICAL between the baseline and the jailed arm, and the
+object-file and build-file counts match exactly. build_bytes differs by ~1-10 KB
+per package (MSBuild logs carry timestamps), which is why the .node size and the
+obj count are the artifact of record, not the tree total.
+
+BASELINE REPEAT (the confound guard the prior lane's core-js false positive
+earned): A2_none_repeat ran LAST, after every low-IL arm, and reproduced A_none
+exactly — same rc, same artifact bytes, same two baseline failures. No arm left
+persistent state outside its fixture that faked a regression.
+
+================================================================
+VERDICT: FROM-SOURCE NATIVE COMPILATION WORKS UNDER THE LOW-IL
+JAIL. It needs ONE grant beyond the four already known.
+================================================================
+⭐ GRANT #5 — the node-gyp DEVDIR / header cache. MEASURED, three arms, control
+included. On node-gyp >= 9 this is %LOCALAPPDATA%\node-gyp (verified: it holds
+3,330 entries after a cold fetch, while %USERPROFILE%\.node-gyp stays at 0
+entries — the older <=8 location is dead here, but grant both to be version-
+agnostic). Load-bearing ONLY when the header cache is COLD, which a fresh
+machine always is:
+  D_cold_none      il=none, cold   rc=0  174,080 B   <- rules out "cold is the problem"
+  D_cold_low_all   il=low,  cold   rc=0  174,080 B   <- headers fetched over HTTPS INSIDE the jail
+  D_cold_low_no_devdir              rc=1  absent
+    gyp ERR! stack Error: EPERM: operation not permitted, mkdir
+      'C:\Users\probe\AppData\Local\node-gyp\Cache'
+    at async go (node-gyp/lib/install.js:161:23)
+  C_no_nodegyp     il=low,  WARM   rc=0  174,080 B   <- warm headers are READ-only, no grant needed
+D_cold_low_all's headers came over the wire from nodejs.org at low IL (95 s vs
+17 s warm), so this is also a second independent confirmation that HTTPS works
+inside the jail — by download latency and a byte-identical artifact, not by rc.
+
+⭐ THE TEMP GRANT IS LOAD-BEARING IN A NEW AND ACTIVELY MISLEADING WAY. Withhold
+it and node-gyp does not report a permission error — it reports that MSVC is not
+installed:
+    gyp ERR! find VS could not use PowerShell to find Visual Studio 2017 or newer
+    gyp ERR! find VS Failure details: undefined
+node-gyp's find-visualstudio shells out to PowerShell `Add-Type`, which COMPILES
+a C# assembly into %TEMP%. No writable TEMP -> no VS detection -> "could not find
+a version of Visual Studio 2017 or newer". cpu-features' own buildcheck.js fails
+the same way with `Error: Unable to detect compiler type`. Anyone debugging this
+in the field will go hunting for a broken toolchain. Worth an error-message
+mapping in nub.
+
+✅ NO SIXTH GRANT IS NEEDED. Everything else MSBuild and the VS toolchain touch
+is either already writable via the five, or not needed at all. Specifically
+measured DENIED under the jail while all four compiles still succeeded:
+  %LOCALAPPDATA%\Microsoft\VisualStudio    DENY - not needed
+  %LOCALAPPDATA%\Microsoft\Windows\PowerShell DENY - not needed (PowerShell's
+                                            ModuleAnalysisCache write is
+                                            best-effort; find-visualstudio still
+                                            works, given TEMP)
+  %USERPROFILE%\.vs                        DENY - not needed
+  %APPDATA%\npm-cache                      DENY - not needed (nub points
+                                            npm_config_cache at its own granted cache)
+  C:\BuildTools (the VS install tree)      DENY *even at il=none* - a standard
+                                            user cannot write it with no jail at
+                                            all, so READ-ONLY genuinely suffices
+                                            and the jail need not arrange it.
+  HKCU write                               DENY
+Also scanned every successful low-IL build log for a SUPPRESSED failure
+(`denied|EPERM|EACCES|warning MSB|MSB4|cannot open|failed to write`): zero hits.
+The builds are not quietly degrading around a refused write.
+
+⭐ HKCU IS NOT A PROBLEM FOR THE COMPILE PATH. This was the open worry, because
+HKCU has no file-label remedy. MSBuild, cl.exe, link.exe and the VS toolchain
+perform NO load-bearing HKCU write: all four packages compile to byte-identical
+artifacts with HKCU writes denied. Verified as a one-variable check rather than
+inferred — the probe key was deleted, the low-IL arm re-run, `reg add HKCU\...`
+returned DENY, and the key was still absent afterwards. The §5e HKCU residual
+therefore does NOT extend to from-source compilation.
+
+⚠️ THE PM CACHE GRANT IS NOT NEEDED FOR THE FROM-SOURCE PATH (C_no_cache passes
+with byte-identical artifacts). It remains required for the PREBUILT-DOWNLOAD
+path, which is what §5e measured. Both grants are needed overall because a real
+install mixes the two; neither subsumes the other.
+
+================================================================
+LABELING COST ON A REAL POST-BUILD TREE (matters: grants are per-launch)
+================================================================
+Recursive relabel of each package's full post-build tree, two passes:
+tree              entries  pass1_ms  pass2_ms  errors
+----------------  -------  --------  --------  ------
+gc-stats              124       122       144       0
+cpu-features          283       348       338       0
+keytar                464       455       320       0
+better-sqlite3        539       424       491       0
+bcrypt                624       553       505       0
+sqlite3              1451      1293      1075       0
+
+=> ~0.8-0.9 ms per entry, LINEAR, zero errors. Recalibrates the prior lane's
+   number: 11 entries / 77 ms read as ~7 ms/entry, but that was fixed cost — the
+   real marginal rate is an order of magnitude cheaper.
+=> The largest tree here, 1,451 entries, costs ~1.1 s. That is fine for a package
+   dir and would NOT be fine for a whole monorepo root (50k entries ~ 45 s), so
+   the grant must stay scoped to the package/project dir rather than sprayed at
+   a workspace root.
+=> The label is INHERITED (OICI, flags=0x3), so files MSBuild creates during the
+   build pick up Low automatically. The recursive pass only has to cover
+   PRE-EXISTING content; the several-hundred build\ intermediates cost nothing at
+   creation time. This is why an MSBuild tree being "far bigger" turned out not
+   to matter.
+
+================================================================
+COMPILE WALL TIMES (contended shared VM; ratios only, not absolutes)
+================================================================
+package         il=none   il=low(all grants)
+--------------- --------  ------------------
+better-sqlite3   27.1 s      24.4 s
+cpu-features     16.5 s      17.4 s
+keytar           13.1 s      12.7 s
+gc-stats          9.5 s       9.3 s
+cold headers    101.3 s      95.1 s
+No measurable jail overhead on the compile itself; differences are within the
+noise of a shared box. The per-launch cost the jail adds is the labeling pass
+above, not the build.

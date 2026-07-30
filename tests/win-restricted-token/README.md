@@ -70,3 +70,41 @@ Two further traps this harness hit, both worth preserving:
 
 `cpu-features` fails in **both** arms on a box without MSVC. That is a baseline
 failure, not a jail failure — do not report it as one.
+
+## From-source MSVC compiles (`gyp.ps1`)
+
+The measurements above ran on a box with **no MSVC**, so every native package
+took the prebuilt-*download* path and the heaviest write pattern in the
+ecosystem — MSBuild creating `build\` with hundreds of intermediates — was never
+exercised. `gyp.ps1` closes that. Results in `gyp-findings.txt`, conclusions in
+`.fray/sandbox-MECHANISM-FACTS.md` §5g.
+
+`vm-startup.ps1` is the GCE `windows-startup-script-ps1` that provisions the box:
+OpenSSH, the two accounts, and **VS Build Tools + Windows SDK + Python + Node**.
+Pass it with `--metadata-from-file windows-startup-script-ps1=…` after
+substituting `__PUBKEY__`. Budget ~7 minutes for the Build Tools install.
+
+```powershell
+powershell -File gyp.ps1 -Mode writes -Il low -Grants pkgdir,temp,cache,nodegyp
+powershell -File gyp.ps1 -Mode arm -Arm A_none    -Il none -Grants none        # BASELINE
+powershell -File gyp.ps1 -Mode arm -Arm B_low_all -Il low  -Grants pkgdir,temp,cache,nodegyp
+powershell -File gyp.ps1 -Mode arm -Arm C_no_temp -Il low  -Grants pkgdir,cache,nodegyp
+powershell -File gyp.ps1 -Mode arm -Arm D_cold    -Il low  -Grants pkgdir,temp,cache -ColdHeaders
+powershell -File gyp.ps1 -Mode labelcost -Arm B_low_all
+```
+
+Reach the box by SSH-ing **as the unprivileged account itself**, not by crossing
+into it with `Start-Process -Credential` — that fails here (the child dies at
+init with an empty exit code, a cross-user window-station problem in the services
+session). `asprobe.ps1` is kept only as the record of that dead end.
+
+Three things this harness will bite you with if you skip them:
+
+- **`-Grants` is exact.** Withholding a grant is the whole method, so an arm's
+  grant list must be typed deliberately; `-Grants none` means no labels at all.
+- **A PowerShell function returns its whole PIPELINE.** `Layout` originally
+  returned the fixture path and got npm's output lines back with it, which were
+  then used as a directory. The `il=none` smoke arm is what caught it.
+- **npm's `node-gyp-bin` shim dir must be on `PATH`.** Without it every
+  from-source package fails `'node-gyp' is not recognized`, which reads exactly
+  like a jail failure.
