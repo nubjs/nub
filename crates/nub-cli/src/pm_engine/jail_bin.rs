@@ -26,10 +26,13 @@
 //! to load. The copy is byte-identical to the project's own distribution and keyed by the version
 //! it reported, which makes the constraint structural rather than a check.
 //!
-//! GRANT FIRST, THEN POPULATE. [`nub_sandbox::windows_publish_appcontainer_read`] carries why:
-//! the ace is inheritable, so writing it on the EMPTY directory has every entry inherit at
-//! creation (24 ms) instead of walking a populated 2,435-entry tree (426 ms), and an inheritable
-//! AAP ace is exactly what the backend's leaf grant skips on — so a lifecycle spawn pays nothing.
+//! WHAT LIVES WHERE. The publishing MECHANISM — grant the empty directory, copy into it, rename
+//! into place — is the engine's
+//! (`nub_sandbox::backend::windows_jail_bin::stage_appcontainer_readable_copy`), because it is
+//! Windows confinement plumbing with no PM knowledge in it, and because that is what lets the
+//! branch-scoped Windows probe drive the same code this does rather than a re-implementation of
+//! it. What stays HERE is every PM decision: which interpreter, what the cache key is, when a
+//! previous stage counts as complete, and how the child's env is rewritten.
 //!
 //! WHAT THIS DOES NOT DO. It does not copy Python or the MSVC toolchain, and must not: those are
 //! the user's own, versions matter, and they are granted read where they already live. Nor is the
@@ -60,13 +63,6 @@ pub(super) struct JailBin {
     /// The distribution the copy was taken from. Removed from the child's `PATH`.
     source_root: PathBuf,
 }
-
-/// Refuse a source tree that is not shaped like a Node distribution before spending a copy on
-/// it. The real payload is 2,435 entries / ~101 MiB (measured on both Windows images), so these
-/// are loose enough to never bind on a real one and tight enough that a mis-set
-/// `npm_node_execpath` cannot turn an install into an unbounded copy.
-const MAX_ENTRIES: usize = 20_000;
-const MAX_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Stage the ambient interpreter into a nub-owned, AppContainer-readable directory, reusing a
 /// previous stage when one is already published.
@@ -100,98 +96,41 @@ pub(super) fn stage(
         .join("jail-bin")
         .join(super::build_prefetch::node_dist_key(ambient, probe)?);
 
-    if dest.join("node.exe").is_file() {
-        return Some(JailBin {
-            exe: dest.join("node.exe"),
-            dir: dest,
-            source_root,
-        });
-    }
-    populate(&source_root, &dest)?;
-    Some(JailBin {
+    let bin = JailBin {
         exe: dest.join("node.exe"),
         dir: dest,
         source_root,
-    })
+    };
+    // `node.exe` IS the completeness test, and the engine's publish-by-rename is what makes it
+    // sound: the destination is never observable half-populated, so its presence means the whole
+    // distribution is there. Which file that is, is PM knowledge, so the engine asks the caller.
+    if bin.exe.is_file() {
+        return Some(bin);
+    }
+    // A leftover directory without `node.exe` cannot be a concurrent publish (those are atomic) —
+    // it is broken state in a directory nub owns and keys by version, so it is replaced.
+    if bin.dir.exists() {
+        std::fs::remove_dir_all(&bin.dir).ok();
+    }
+    if publish(&bin.source_root, &bin.dir) {
+        return Some(bin);
+    }
+    // A concurrent install may have published first, in which case its tree is a copy of the same
+    // distribution and is adopted rather than refused.
+    bin.exe.is_file().then_some(bin)
 }
 
-/// Publish `source` at `dest` by copying into an ACE'd staging sibling and renaming.
-///
-/// The rename is what makes the hit test above (`node.exe` exists) sound: `dest` is never
-/// observable half-populated, so a concurrent install either sees nothing or sees a complete
-/// tree. The ace is written on the staging directory while it is still EMPTY and travels with it
-/// through the rename — an explicit ace is not recomputed by a same-volume move.
-fn populate(source: &Path, dest: &Path) -> Option<()> {
-    let parent = dest.parent()?;
-    std::fs::create_dir_all(parent).ok()?;
-    // A `dest` that exists without `node.exe` cannot be a concurrent publish (those are atomic);
-    // it is a broken leftover in a directory nub owns and keys by version, so it is replaced.
-    if dest.exists() {
-        std::fs::remove_dir_all(dest).ok();
-    }
-    let staging = tempfile::TempDir::new_in(parent).ok()?;
-    publish_appcontainer_read(staging.path());
-    copy_tree(source, staging.path(), &mut Budget::default())?;
-
-    let staged = staging.keep();
-    match std::fs::rename(&staged, dest) {
-        Ok(()) => Some(()),
-        // A concurrent install published first — its tree is a copy of the same distribution, so
-        // adopt it rather than fail. Anything else leaves the interpreter unstaged.
-        Err(_) => {
-            std::fs::remove_dir_all(&staged).ok();
-            dest.join("node.exe").is_file().then_some(())
-        }
-    }
-}
-
-/// BEST-EFFORT, deliberately. A staged copy with no AAP ace still fixes the defect — nub owns the
-/// directory, so the backend's own per-run leaf grant succeeds on it unprivileged. What the ace
-/// buys is that the per-run grant SKIPS instead of walking the tree, which is a ~400 ms/spawn
-/// saving, not correctness.
 #[cfg(windows)]
-fn publish_appcontainer_read(dir: &Path) {
-    let _ = nub_sandbox::windows_publish_appcontainer_read(dir);
+fn publish(source: &Path, dest: &Path) -> bool {
+    nub_sandbox::backend::windows_jail_bin::stage_appcontainer_readable_copy(source, dest).is_ok()
 }
 
+/// Staging exists for a Windows ACE constraint, so off Windows there is nothing to publish and
+/// [`stage`] always declines. Present as a stub rather than `cfg`-ing the module out, so the env
+/// rewrite and its tests compile — and run — on the dev host.
 #[cfg(not(windows))]
-fn publish_appcontainer_read(_dir: &Path) {}
-
-#[derive(Default)]
-struct Budget {
-    entries: usize,
-    bytes: u64,
-}
-
-/// Copy `source`'s tree into `dest`, which already exists and already carries the ace.
-///
-/// Symlinks and reparse points are SKIPPED rather than followed: the Windows Node archive
-/// contains none, and following one would either copy an unbounded foreign tree in or leave the
-/// jail reading through a link whose target it was never granted.
-fn copy_tree(source: &Path, dest: &Path, budget: &mut Budget) -> Option<()> {
-    for entry in std::fs::read_dir(source).ok()? {
-        let entry = entry.ok()?;
-        let kind = entry.file_type().ok()?;
-        if kind.is_symlink() {
-            continue;
-        }
-        budget.entries += 1;
-        if budget.entries > MAX_ENTRIES {
-            return None;
-        }
-        let target = dest.join(entry.file_name());
-        if kind.is_dir() {
-            std::fs::create_dir(&target).ok()?;
-            copy_tree(&entry.path(), &target, budget)?;
-            continue;
-        }
-        budget.bytes += entry.metadata().ok()?.len();
-        if budget.bytes > MAX_BYTES {
-            return None;
-        }
-        std::fs::copy(entry.path(), &target).ok()?;
-    }
-    Some(())
+fn publish(_source: &Path, _dest: &Path) -> bool {
+    false
 }
 
 impl JailBin {

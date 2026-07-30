@@ -1023,6 +1023,10 @@ mod win {
         // actually clears the jail for default-on.
         production_jail(&mut r, &f);
 
+        // (7) …and with the REAL interpreter rather than the probe binary, which is the one
+        // variable (6) cannot vary and the one that carried the showstopper.
+        interpreter_group(&mut r, &f);
+
         println!(
             "ARM done elevated={} failures={}",
             u8::from(elevated),
@@ -1141,6 +1145,304 @@ mod win {
             egress == 5 || egress == 6,
             &format!("(child exit {egress}; 5/6 = denied)"),
         );
+    }
+
+    // ── the interpreter group: can a lifecycle script run at all? ─────────────────
+
+    /// THE SHOWSTOPPER THIS GROUP EXISTS FOR. `production_jail` above grants the PROBE BINARY as
+    /// the interpreter — a file in the fixture, which nub owns — so it has always passed and could
+    /// never have seen the real defect. A real install grants the user's own Node, and for a
+    /// standard user with an all-users install that is a path nub cannot write an ACE on
+    /// (`%ProgramFiles%\nodejs`, `C:\hostedtoolcache`) AND, independently, an image a confined
+    /// caller cannot open. Either one makes the jail unable to start a single lifecycle script.
+    ///
+    /// So this runs the SAME lifecycle script twice under the SAME real `compile_build_jail`
+    /// policy, with ONE variable: whether the interpreter is the ambient install or a nub-owned
+    /// copy of it. The ambient arm is the CONTROL — without an arm where the defect still
+    /// reproduces, a green staged arm is measuring nothing.
+    ///
+    /// It calls the same engine entry the product does
+    /// (`windows_jail_bin::stage_appcontainer_readable_copy`) rather than re-implementing the
+    /// staging, because a probe that re-implements the mechanism measures the probe.
+    fn interpreter_group(r: &mut Report, f: &Fixture) {
+        let Some(source_exe) = ambient_node() else {
+            for prop in INTERPRETER_PROPS {
+                r.record(
+                    prop,
+                    false,
+                    "(no ambient node.exe found — nothing measured)",
+                );
+            }
+            return;
+        };
+        let source_root = source_exe
+            .parent()
+            .expect("node.exe has a parent")
+            .to_path_buf();
+        println!("  fact:interp-source={}", source_exe.display());
+        // Whether the SOURCE install already publishes read to AppContainers is the fact that
+        // decides whether this machine can exhibit the defect at all: on one that does (43 of the
+        // 44 `C:\Program Files` children do — `nodejs` is the outlier), the ambient arm passes for
+        // a reason that has nothing to do with nub, and the differential is VOID rather than green.
+        let source_publishes = nub_sandbox::windows_leaf_grant_redundant(&source_root);
+        println!("  fact:interp-source-publishes-aap={source_publishes}");
+
+        let (ambient_rc, ambient_log) = lifecycle_arm(f, "ambient", &source_exe, &source_root);
+
+        // Staged under the fixture's own cache home, which is where `compile_build_jail`'s `$cache`
+        // anchor points — the same relationship the product's `<cache>/jail-bin/<key>` has, without
+        // touching the real user cache.
+        let staged_dir = f.home.join("cache/nub/pm/jail-bin/probe");
+        let began = Instant::now();
+        let staged = nub_sandbox::backend::windows_jail_bin::stage_appcontainer_readable_copy(
+            &source_root,
+            &staged_dir,
+        );
+        let staged_exe = staged_dir.join("node.exe");
+        println!(
+            "  fact:interp-stage-ms={} result={staged:?}",
+            began.elapsed().as_millis()
+        );
+        // THE ZERO-PRIVILEGE CLAIM, and it is only a claim in the de-elevated arm — which is
+        // exactly why it lives in this differential rather than in a Windows unit test.
+        r.record(
+            "interp-staging-succeeds",
+            staged.is_ok() && staged_exe.is_file(),
+            &format!("({staged:?}; node.exe present {})", staged_exe.is_file()),
+        );
+
+        let (staged_rc, staged_log) = lifecycle_arm(f, "staged", &staged_exe, &staged_dir);
+
+        // The control. `!= 0` rather than a specific code because the ambient arm can fail at
+        // either of two independent points — the ACE write, or the confined image open — and
+        // pinning one would make the property FAIL when the OTHER cause fired.
+        r.record(
+            "interp-ambient-install-cannot-run-a-lifecycle-script",
+            ambient_rc != 0 && !ambient_log.contains("LIFECYCLE-OK"),
+            &format!("(rc {ambient_rc}; log {})", one_line(&ambient_log)),
+        );
+        r.record(
+            "interp-staged-copy-runs-a-lifecycle-script-to-completion",
+            staged_rc == 0 && staged_log.contains("LIFECYCLE-OK"),
+            &format!("(rc {staged_rc}; log {})", one_line(&staged_log)),
+        );
+        // ATTRIBUTION, and it is what stops the staged arm passing for the wrong reason. A refused
+        // read grant is now SKIPPED rather than fatal, so a launch can succeed while the child
+        // quietly ran the ambient interpreter off some other PATH entry — which would look
+        // identical here. The child reports its own `process.execPath`, so it cannot.
+        r.record(
+            "interp-staged-child-execpath-is-the-nub-owned-copy",
+            staged_log
+                .lines()
+                .any(|l| l.trim().eq_ignore_ascii_case(&staged_exe.to_string_lossy())),
+            &format!(
+                "(expected {}; log {})",
+                staged_exe.display(),
+                one_line(&staged_log)
+            ),
+        );
+        // THE ABI CONSTRAINT, measured rather than asserted: `prebuild-install` and
+        // `node-gyp-build` both default the prebuild they fetch to `process.versions.modules` of
+        // the RUNNING Node, so a staged interpreter reporting a different one would silently make
+        // every package in that family download an unloadable binary. Both arms report it, so this
+        // compares the copy against its own source rather than against a tabulated expectation.
+        let (source_abi, copy_abi) = (abi_of(&ambient_log), abi_of(&staged_log));
+        r.record(
+            "interp-staged-abi-matches-the-source",
+            copy_abi.is_some() && copy_abi == source_abi,
+            &format!("(source {source_abi:?}, staged {copy_abi:?})"),
+        );
+        // The cost claim: a published tree is what the backend's own leaf grant SKIPS on, so a
+        // lifecycle spawn writes no DACL across the ~2,400-entry tree. Asserted on a DEEP entry
+        // too, which is the half that proves the ace was written BEFORE the copy — an entry
+        // several levels down carries it only by inheritance at creation.
+        r.record(
+            "interp-staged-dir-publishes-read-to-appcontainers",
+            nub_sandbox::windows_leaf_grant_redundant(&staged_dir),
+            "(an inheritable ALL APPLICATION PACKAGES ace ⇒ the per-spawn leaf grant skips)",
+        );
+        let deep = staged_dir.join("node_modules/npm/bin");
+        r.record(
+            "interp-staged-deep-entry-inherited-the-ace-at-creation",
+            deep.is_dir() && nub_sandbox::windows_leaf_grant_redundant(&deep),
+            &format!("({} exists {})", deep.display(), deep.is_dir()),
+        );
+        // Confinement survives it: the jail is not merely startable, it still withholds what it
+        // never granted.
+        let policy = build_jail_for(f, &staged_exe, &staged_dir);
+        let denied = code(
+            &policy,
+            f,
+            &f.package,
+            &["__sbxchild__", "read", &f.secret.to_string_lossy()],
+        );
+        r.record(
+            "interp-staged-ungranted-secret-still-refused",
+            denied == 5 || denied == 9,
+            &format!("(child exit {denied}; 5/9 = denied)"),
+        );
+    }
+
+    /// Every property [`interpreter_group`] reports, so a machine with no Node still emits a
+    /// verdict for each rather than leaving the table looking complete with rows missing.
+    const INTERPRETER_PROPS: &[&str] = &[
+        "interp-staging-succeeds",
+        "interp-ambient-install-cannot-run-a-lifecycle-script",
+        "interp-staged-copy-runs-a-lifecycle-script-to-completion",
+        "interp-staged-child-execpath-is-the-nub-owned-copy",
+        "interp-staged-abi-matches-the-source",
+        "interp-staged-dir-publishes-read-to-appcontainers",
+        "interp-staged-deep-entry-inherited-the-ace-at-creation",
+        "interp-staged-ungranted-secret-still-refused",
+    ];
+
+    /// The all-users MSI install first, because it is the configuration that exhibits the defect
+    /// and the one a real user has; the runner's unzipped `hostedtoolcache` Node otherwise, which
+    /// carries no AppContainer ace either. Whichever it found is reported, so a run that measured
+    /// an already-readable Node is legible rather than silently reassuring.
+    fn ambient_node() -> Option<PathBuf> {
+        let msi = PathBuf::from(std::env::var("ProgramFiles").unwrap_or_default())
+            .join("nodejs/node.exe");
+        if msi.is_file() {
+            return Some(msi);
+        }
+        std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+            .map(|d| d.join("node.exe"))
+            .find(|c| c.is_file())
+    }
+
+    /// One arm: the real production policy for `exe`, running a real `.cmd` lifecycle script
+    /// through `cmd.exe` — which is how aube spawns one, and the shape that makes the child's own
+    /// `node` a NESTED spawn from inside the AppContainer rather than one nub performs itself.
+    ///
+    /// The script deliberately contains NO PIPE. A piped `child_process` spawn under an
+    /// AppContainer hangs in libuv's named-pipe retry, which is a SEPARATE defect with a separate
+    /// repair (the `NODE_OPTIONS` stdio shim) — including one here would make a hang
+    /// indistinguishable from an interpreter that could not be read.
+    fn lifecycle_arm(f: &Fixture, tag: &str, exe: &Path, root: &Path) -> (i32, String) {
+        let marker = f.package.join(format!("lc-{tag}.log"));
+        let script = f.package.join(format!("lc-{tag}.cmd"));
+        let entry = f.package.join(format!("lc-{tag}.js"));
+        // Reaching the distribution's BUNDLED npm tree is the exact cell an un-ACE'd install fails
+        // on, and requiring a file out of it is the cheapest honest way to ask for it.
+        std::fs::write(
+            &entry,
+            format!(
+                "console.log(process.execPath);\n\
+                 console.log('abi=' + process.versions.modules);\n\
+                 console.log('npm=' + require({}).version);\n",
+                js_string(&root.join("node_modules/npm/package.json"))
+            ),
+        )
+        .expect("write the arm's entry file");
+        // `node` BARE, not by absolute path: a PATH search is itself a directory probe, and a
+        // confined child is refused on an un-ACE'd install tree — which surfaces as `'node' is not
+        // recognized`, a different and earlier failure than a refused image open. Both are the
+        // defect; naming the interpreter absolutely would have measured only the second.
+        std::fs::write(
+            &script,
+            format!(
+                "@echo off\r\n\
+                 node -p \"process.version\" > \"{m}\" 2>&1\r\n\
+                 if errorlevel 1 exit /b 11\r\n\
+                 node \"{e}\" >> \"{m}\" 2>&1\r\n\
+                 if errorlevel 1 exit /b 12\r\n\
+                 echo LIFECYCLE-OK>> \"{m}\"\r\n",
+                m = marker.display(),
+                e = entry.display()
+            ),
+        )
+        .expect("write the arm's script");
+
+        let policy = build_jail_for(f, exe, root);
+        let comspec = std::env::var("ComSpec").unwrap_or_else(|_| {
+            format!(
+                "{}\\System32\\cmd.exe",
+                std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into())
+            )
+        });
+        let spec = CommandSpec::new(&comspec)
+            .arg("/c")
+            .arg(&script)
+            .cwd(&f.package);
+        let rc = match apply(&policy, spec) {
+            Ok(p) => match p.status() {
+                Ok(s) => s.code().unwrap_or(-1),
+                Err(e) => {
+                    println!("    [{tag} status Err] {e} os={:?}", e.raw_os_error());
+                    -101
+                }
+            },
+            Err(d) => {
+                println!("    [{tag} apply Err] {d:?}");
+                -100
+            }
+        };
+        let log = std::fs::read_to_string(&marker).unwrap_or_default();
+        println!("    arm:{tag} rc={rc}");
+        for line in log.lines() {
+            println!("      {tag}| {line}");
+        }
+        (rc, log)
+    }
+
+    /// The REAL production policy — `compile_build_jail`, the entry aube's lifecycle hook drives —
+    /// with the interpreter and its distribution's global package tree as the only variables. The
+    /// env mirrors what the embedder constructs: both interpreter spellings named, and `PATH`
+    /// carrying the distribution plus the OS floor.
+    fn build_jail_for(f: &Fixture, exe: &Path, root: &Path) -> SandboxPolicy {
+        let system32 = format!(
+            "{}\\System32",
+            std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into())
+        );
+        let mut ambient: BTreeMap<String, String> = std::env::vars().collect();
+        ambient.insert("PATH".to_string(), format!("{};{system32}", root.display()));
+        ambient.insert(
+            "npm_node_execpath".to_string(),
+            exe.to_string_lossy().into_owned(),
+        );
+        ambient.insert("NODE".to_string(), exe.to_string_lossy().into_owned());
+        let homes = nub_sandbox::Homes {
+            home: f.home.clone(),
+            tmp: std::env::temp_dir(),
+            cache: f.home.join("cache"),
+            project: f.project.clone(),
+        };
+        nub_sandbox::compile_build_jail(
+            homes,
+            &f.package,
+            vec![exe.to_path_buf()],
+            vec![root.join("node_modules")],
+            ambient,
+        )
+        .expect("compile_build_jail")
+    }
+
+    /// A Windows path as a JS string literal — backslashes doubled, so the emitted `require()`
+    /// argument is the path rather than a run of escape sequences.
+    fn js_string(p: &Path) -> String {
+        format!("\"{}\"", p.to_string_lossy().replace('\\', "\\\\"))
+    }
+
+    fn abi_of(log: &str) -> Option<&str> {
+        log.lines().find_map(|l| l.trim().strip_prefix("abi="))
+    }
+
+    /// A child log flattened onto the single `prop:` line, so a verdict carries its own evidence
+    /// without the reader having to correlate it against the interleaved arm output.
+    fn one_line(log: &str) -> String {
+        let flat: Vec<&str> = log
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        let joined = flat.join(" / ");
+        match joined.char_indices().nth(240) {
+            Some((cut, _)) => format!("{}…", &joined[..cut]),
+            None => joined,
+        }
     }
 
     // ── the differential driver ───────────────────────────────────────────────────
@@ -1337,29 +1639,29 @@ mod win {
         println!("\n── DIFFERENTIAL ────────────────────────────────────────────");
         println!("de-elevation route: {route}");
         println!(
-            "{:<28} {:>10} {:>14}",
+            "{:<58} {:>10} {:>14}",
             "token state", "elevated", "de-elevated"
         );
         println!(
-            "{:<28} {:>10} {:>14}",
+            "{:<58} {:>10} {:>14}",
             "admin authority (SCM)",
             elev_arm.map_or("n/a", |a| if a.admin { "YES" } else { "NO" }),
             if deelev.admin { "YES" } else { "NO" }
         );
         println!(
-            "{:<28} {:>10} {:>14}",
+            "{:<58} {:>10} {:>14}",
             "integrity level",
             elev_arm.map_or("n/a".to_string(), |a| a.il.to_string()),
             deelev.il
         );
         println!(
-            "{:<28} {:>10} {:>14}",
+            "{:<58} {:>10} {:>14}",
             "TokenIsElevated flag (stale)",
             elev_arm.map_or("n/a", |a| if a.elevated { "1" } else { "0" }),
             if deelev.elevated { "1" } else { "0" }
         );
         println!(
-            "{:<28} {:>10} {:>14}",
+            "{:<58} {:>10} {:>14}",
             "property", "elevated", "de-elevated"
         );
         for (name, ok) in &deelev.props {
@@ -1368,7 +1670,7 @@ mod win {
                 .map(|(_, v)| if *v { "PASS" } else { "FAIL" })
                 .unwrap_or("n/a");
             println!(
-                "{name:<28} {e:>10} {:>14}",
+                "{name:<58} {e:>10} {:>14}",
                 if *ok { "PASS" } else { "FAIL" }
             );
             if !ok {
