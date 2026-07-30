@@ -70,3 +70,45 @@ Two further traps this harness hit, both worth preserving:
 
 `cpu-features` fails in **both** arms on a box without MSVC. That is a baseline
 failure, not a jail failure — do not report it as one.
+
+---
+
+## The unique-restricting-SID arm (added by the `win-unique-restricting-sid` lane)
+
+A second question on the same harness: can a restricted token whose **restricting-SID list contains a
+SID that appears in no DACL** give deny-by-default filesystem reads, with an unprivileged ACE as the
+allow-grant? Conclusions live in `.fray/sandbox-MECHANISM-FACTS.md` §5g; the raw output is
+`usid-log.txt`; the per-round scripts are `arm-*.ps1` in the order they were run.
+
+New `Jail.exe` verbs:
+
+```
+sidgen                                  # build an arbitrary sid, prove it maps to no account,
+                                        # and that CreateRestrictedToken accepts it
+grant <path> <sid|unique> [-r] [-revoke] [--mask <hex>]   # DACL ace for an unresolvable sid
+grantreg <CURRENT_USER|MACHINE\...> <sid|unique>          # the registry equivalent
+dacl <path>                             # owner + DACL + label as SDDL
+check --il <lvl> [--restrict <spec>] -- <paths...>        # AccessCheck READ/TRAVERSE/WRITE matrix
+launch ... --restrict <spec> [--startup-impersonate <spec>] [--revert-after <ms>]
+label <path> noreadup                   # Medium NRNWNX -- the mandatory-policy denylist lead
+```
+
+`<spec>` is a comma list of SDDL SID strings or the aliases `unique`, `self`, `users`, `world`,
+`restricted`, `logon`.
+
+Three things about running it that cost real time:
+
+- **Export `NUB_JAIL_UNIQUE_SID` once and reuse it.** Every `Jail.exe` invocation otherwise mints its
+  own random SID, so `grant` would write an ACE for a SID no token holds — which reads exactly like
+  "ACL writes don't work". `usid.ps1` generates it and exports it; the `arm-*.ps1` scripts assume it is
+  already in the environment.
+- **Run the baseline (`--il none`, no `--restrict`) LAST as well as first.** Two arms in this lane
+  produced a DENIED that a baseline immediately explained: a read-only ACE mask denying a write that
+  the label was supposed to allow, and a `%USERPROFILE%` listing failing as `File Not Found` rather
+  than `Access is denied`.
+- **`cmd.exe` builtins are the right probe for read confinement.** No grandchild process can start
+  under a restricting set that omits the user's own SID, so `type`/`dir` measure the token's read
+  behaviour where `whoami`/`node` only measure the startup blocker.
+
+Provisioning is `gce-startup.ps1` (a GCE `windows-startup-script-ps1`): `windows-2022` ships without
+OpenSSH Server, so `enable-windows-ssh=TRUE` alone never opens port 22.

@@ -1,0 +1,984 @@
+# Unique-restricting-SID probe log
+
+Box: disposable GCE nub-win-usid, Windows Server 2022 (windows-2022 image), x86_64.
+Identity: local account probe2, group Users only. Node v24.9.0 at C:
+ode.
+Harness: Jail.cs (extended from the low-IL lane) + usid.ps1.
+
+user_sid=S-1-5-21-909783838-3121932791-2427634611-1002
+integrity=S-1-16-8192
+elevated=False
+group LOGONSID S-1-5-5-0-8893650 attrs=0xc0000007
+in_admins=False logon_sids=1
+privileges(2)=SeChangeNotifyPrivilege(0x3) SeIncreaseWorkingSetPrivilege(0x3) 
+--- setup ---
+proj=C:\Users\probe2.NUB-WIN-USID\jail\project
+sibling=C:\Users\probe2.NUB-WIN-USID\jail\sibling
+profile=C:\Users\probe2.NUB-WIN-USID
+
+===== STAGE gate =====
+generated NUB_JAIL_UNIQUE_SID=S-1-0-3616468677-3473763307-2660762958-3313688747
+Get-History : Cannot bind parameter 'Id'. Cannot convert value "GATE Q1/Q3 -- arbitrary sid, zero 
+registration" to type "System.Int64". Error: "Input string was not in a correct format."
+At C:\Users\probe2.NUB-WIN-USID\probe\usid.ps1:51 char:5
++   H 'GATE Q1/Q3 -- arbitrary sid, zero registration'
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidArgument: (:) [Get-History], ParameterBindingException
+    + FullyQualifiedErrorId : CannotConvertArgumentNoMessage,Microsoft.PowerShell.Commands.GetHist 
+   oryCommand
+ 
+unique_sid=S-1-0-3616468677-3473763307-2660762958-3313688747
+sid_len=24
+lookup_account=UNRESOLVED err=1332 (1332=ERROR_NONE_MAPPED)
+sddl_roundtrip=OK
+CreateRestrictedToken(SidsToRestrict=[unique])=ACCEPTED
+  unique_sid_in_token_groups=False (restricting sids report via TokenRestrictedSids; groups check is indicative only)
+--- DACL of the project dir BEFORE ---
+Get-History : Cannot bind parameter 'Id'. Cannot convert value "GATE Q2 -- does 
+SetNamedSecurityInfoW accept an ace for an unresolvable sid?" to type "System.Int64". Error: 
+"Input string was not in a correct format."
+At C:\Users\probe2.NUB-WIN-USID\probe\usid.ps1:54 char:5
++   H 'GATE Q2 -- does SetNamedSecurityInfoW accept an ace for an unres ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidArgument: (:) [Get-History], ParameterBindingException
+    + FullyQualifiedErrorId : CannotConvertArgumentNoMessage,Microsoft.PowerShell.Commands.GetHist 
+   oryCommand
+ 
+dacl C:\Users\probe2.NUB-WIN-USID\jail\project = O:S-1-5-21-909783838-3121932791-2427634611-1002G:S-1-5-21-909783838-3121932791-2427634611-513D:(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;S-1-5-21-909783838-3121932791-2427634611-1002)
+grant OK  C:\Users\probe2.NUB-WIN-USID\jail\project  sid=S-1-0-3616468677-3473763307-2660762958-3313688747 mask=0x1200a9
+--- DACL of the project dir AFTER ---
+dacl C:\Users\probe2.NUB-WIN-USID\jail\project = O:S-1-5-21-909783838-3121932791-2427634611-1002G:S-1-5-21-909783838-3121932791-2427634611-513D:AI(A;OICI;0x1200a9;;;S-1-0-3616468677-3473763307-2660762958-3313688747)(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;S-1-5-21-909783838-3121932791-2427634611-1002)
+--- a leaf file ---
+grant OK  C:\Users\probe2.NUB-WIN-USID\jail\project\package.json  sid=S-1-0-3616468677-3473763307-2660762958-3313688747 mask=0x1200a9
+dacl C:\Users\probe2.NUB-WIN-USID\jail\project\package.json = O:S-1-5-21-909783838-3121932791-2427634611-1002G:S-1-5-21-909783838-3121932791-2427634611-513D:AI(A;;0x1200a9;;;S-1-0-3616468677-3473763307-2660762958-3313688747)(A;ID;0x1200a9;;;S-1-0-3616468677-3473763307-2660762958-3313688747)(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;S-1-5-21-909783838-3121932791-2427634611-1002)
+--- NEGATIVE CONTROL: the same write on paths we do not own ---
+grant ERR=5  C:\  sid=S-1-0-3616468677-3473763307-2660762958-3313688747 mask=0x1200a9
+grant ERR=5  C:\Windows  sid=S-1-0-3616468677-3473763307-2660762958-3313688747 mask=0x1200a9
+--- CONTROL: the sibling dir stays UNGRANTED on purpose ---
+dacl C:\Users\probe2.NUB-WIN-USID\jail\sibling = O:S-1-5-21-909783838-3121932791-2427634611-1002G:S-1-5-21-909783838-3121932791-2427634611-513D:(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;S-1-5-21-909783838-3121932791-2427634611-1002)
+
+===== STAGE dacl (trustees on every decision path) =====
+
+########## DACLs of every decision path (what trustees exist where) ##########
+dacl C:\ = O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464G:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;CI;LC;;;BU)(A;CIIO;DC;;;BU)(A;OICIIO;GA;;;CO)
+dacl C:\Users = O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;BU)(A;OICIIO;GXGR;;;BU)(A;;0x1200a9;;;WD)(A;OICIIO;GXGR;;;WD)
+dacl C:\Users\probe2.NUB-WIN-USID = O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;S-1-5-21-909783838-3121932791-2427634611-1002)
+dacl C:\Users\probe2.NUB-WIN-USID\.ssh = O:S-1-5-21-909783838-3121932791-2427634611-1002G:S-1-5-21-909783838-3121932791-2427634611-513D:(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;S-1-5-21-909783838-3121932791-2427634611-1002)
+dacl C:\Users\probe2.NUB-WIN-USID\.ssh\id_rsa = O:S-1-5-21-909783838-3121932791-2427634611-1002G:S-1-5-21-909783838-3121932791-2427634611-513D:(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;S-1-5-21-909783838-3121932791-2427634611-1002)
+dacl C:\Users\probe2.NUB-WIN-USID\.npmrc = O:S-1-5-21-909783838-3121932791-2427634611-1002G:S-1-5-21-909783838-3121932791-2427634611-513D:(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;S-1-5-21-909783838-3121932791-2427634611-1002)
+dacl C:\Users\probe2.NUB-WIN-USID\jail\project = O:S-1-5-21-909783838-3121932791-2427634611-1002G:S-1-5-21-909783838-3121932791-2427634611-513D:AI(A;OICI;0x1200a9;;;S-1-0-3616468677-3473763307-2660762958-3313688747)(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;S-1-5-21-909783838-3121932791-2427634611-1002)
+dacl C:\Users\probe2.NUB-WIN-USID\jail\project\package.json = O:S-1-5-21-909783838-3121932791-2427634611-1002G:S-1-5-21-909783838-3121932791-2427634611-513D:AI(A;;0x1200a9;;;S-1-0-3616468677-3473763307-2660762958-3313688747)(A;ID;0x1200a9;;;S-1-0-3616468677-3473763307-2660762958-3313688747)(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;S-1-5-21-909783838-3121932791-2427634611-1002)
+dacl C:\Users\probe2.NUB-WIN-USID\jail\project\node_modules\nested-pkg\a\b\c\probe.js = O:S-1-5-21-909783838-3121932791-2427634611-1002G:S-1-5-21-909783838-3121932791-2427634611-513D:AI(A;ID;0x1200a9;;;S-1-0-3616468677-3473763307-2660762958-3313688747)(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;S-1-5-21-909783838-3121932791-2427634611-1002)
+dacl C:\Users\probe2.NUB-WIN-USID\jail\sibling = O:S-1-5-21-909783838-3121932791-2427634611-1002G:S-1-5-21-909783838-3121932791-2427634611-513D:(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;S-1-5-21-909783838-3121932791-2427634611-1002)
+dacl C:\Users\probe2.NUB-WIN-USID\jail\sibling\sibling.txt = O:S-1-5-21-909783838-3121932791-2427634611-1002G:S-1-5-21-909783838-3121932791-2427634611-513D:(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;S-1-5-21-909783838-3121932791-2427634611-1002)
+dacl C:\Windows = O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464G:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464D:PAI(A;;FA;;;S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)(A;CIIO;GA;;;S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)(A;;0x1301bf;;;SY)(A;OICIIO;GA;;;SY)(A;;0x1301bf;;;BA)(A;OICIIO;GA;;;BA)(A;;0x1200a9;;;BU)(A;OICIIO;GXGR;;;BU)(A;OICIIO;GA;;;CO)(A;;0x1200a9;;;AC)(A;OICIIO;GXGR;;;AC)(A;;0x1200a9;;;S-1-15-2-2)(A;OICIIO;GXGR;;;S-1-15-2-2)
+dacl C:\Windows\System32 = O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464G:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464D:PAI(A;;FA;;;S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)(A;CIIO;GA;;;S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)(A;;0x1301bf;;;SY)(A;OICIIO;GA;;;SY)(A;;0x1301bf;;;BA)(A;OICIIO;GA;;;BA)(A;;0x1200a9;;;BU)(A;OICIIO;GXGR;;;BU)(A;OICIIO;GA;;;CO)(A;;0x1200a9;;;AC)(A;OICIIO;GXGR;;;AC)(A;;0x1200a9;;;S-1-15-2-2)(A;OICIIO;GXGR;;;S-1-15-2-2)
+dacl C:\Windows\System32\ntdll.dll = O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464G:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464D:PAI(A;;FA;;;S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)(A;;0x1200a9;;;BA)(A;;0x1200a9;;;SY)(A;;0x1200a9;;;BU)(A;;0x1200a9;;;AC)(A;;0x1200a9;;;S-1-15-2-2)S:AI
+dacl C:\node\node.exe = O:BAG:S-1-5-21-909783838-3121932791-2427634611-513D:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1200a9;;;BU)
+
+===== STAGE check (AccessCheck matrix) =====
+
+########## ACCESSCHECK MATRIX ##########
+== il=none restrict=(none) ==
+  C:\
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=GRANTED(0x120116)
+  C:\Users\probe2.NUB-WIN-USID\.ssh
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=GRANTED(0x120116)
+  C:\Users\probe2.NUB-WIN-USID\.ssh\id_rsa
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=GRANTED(0x120116)
+  C:\Users\probe2.NUB-WIN-USID\.npmrc
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=GRANTED(0x120116)
+  C:\Users\probe2.NUB-WIN-USID\jail\project
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=GRANTED(0x120116)
+  C:\Users\probe2.NUB-WIN-USID\jail\project\package.json
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=GRANTED(0x120116)
+  C:\Users\probe2.NUB-WIN-USID\jail\project\node_modules\nested-pkg\a\b\c\probe.js
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=GRANTED(0x120116)
+  C:\Users\probe2.NUB-WIN-USID\jail\sibling
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=GRANTED(0x120116)
+  C:\Users\probe2.NUB-WIN-USID\jail\sibling\sibling.txt
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=GRANTED(0x120116)
+  C:\Windows
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Windows\System32
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Windows\System32\ntdll.dll
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\node\node.exe
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+== il=low restrict=(none) ==
+  C:\
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\.ssh
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\.ssh\id_rsa
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\.npmrc
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\project
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\project\package.json
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\project\node_modules\nested-pkg\a\b\c\probe.js
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\sibling
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\sibling\sibling.txt
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Windows
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Windows\System32
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Windows\System32\ntdll.dll
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\node\node.exe
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+restricting_sids(1)=S-1-0-3616468677-3473763307-2660762958-3313688747
+default_dacl_grant_unique=OK
+== il=low restrict=unique ==
+  C:\
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\.ssh
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\.ssh\id_rsa
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\.npmrc
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\project
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\project\package.json
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\project\node_modules\nested-pkg\a\b\c\probe.js
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\sibling
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\sibling\sibling.txt
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Windows
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Windows\System32
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Windows\System32\ntdll.dll
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\node\node.exe
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+restricting_sids(2)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-5-12
+default_dacl_grant_unique=OK
+== il=low restrict=unique,restricted ==
+  C:\
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\.ssh
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\.ssh\id_rsa
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\.npmrc
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\project
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\project\package.json
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\project\node_modules\nested-pkg\a\b\c\probe.js
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\sibling
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\sibling\sibling.txt
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Windows
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Windows\System32
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Windows\System32\ntdll.dll
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\node\node.exe
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+restricting_sids(2)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0
+default_dacl_grant_unique=OK
+== il=low restrict=unique,world ==
+  C:\
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\.ssh
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\.ssh\id_rsa
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\.npmrc
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\project
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\project\package.json
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\project\node_modules\nested-pkg\a\b\c\probe.js
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\sibling
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\sibling\sibling.txt
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Windows
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Windows\System32
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Windows\System32\ntdll.dll
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\node\node.exe
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+restricting_sids(2)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-5-32-545
+default_dacl_grant_unique=OK
+== il=low restrict=unique,users ==
+  C:\
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\.ssh
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\.ssh\id_rsa
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\.npmrc
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\project
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\project\package.json
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\project\node_modules\nested-pkg\a\b\c\probe.js
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\sibling
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\sibling\sibling.txt
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Windows
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Windows\System32
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Windows\System32\ntdll.dll
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\node\node.exe
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+
+===== STAGE launch (real CreateProcessAsUserW) =====
+
+########## REAL LAUNCH -- can a child even start with the unique sid as the only restrictor? ##########
+---- restrict=(none) ----
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=(none) desktop=(inherit) => LAUNCHED pid=1380
+child_exit=0x0 (0)
+---- child output ----
+CHILD_ALIVE 
+nub-win-usid\probe2
+
+---- restrict=unique ----
+restricting_sids(1)=S-1-0-3616468677-3473763307-2660762958-3313688747
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=unique desktop=(inherit) => LAUNCHED pid=1532
+child_exit=0xc0000022 (-1073741790)
+---- child output ----
+
+---- restrict=unique,restricted ----
+restricting_sids(2)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-5-12
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=unique,restricted desktop=(inherit) => LAUNCHED pid=2640
+child_exit=0x1 (1)
+---- child output ----
+CHILD_ALIVE 
+
+---- restrict=unique,world ----
+restricting_sids(2)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=unique,world desktop=(inherit) => LAUNCHED pid=3156
+child_exit=0x1 (1)
+---- child output ----
+CHILD_ALIVE 
+
+---- restrict=unique,users ----
+restricting_sids(2)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-5-32-545
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=unique,users desktop=(inherit) => LAUNCHED pid=4360
+child_exit=0xc0000022 (-1073741790)
+---- child output ----
+
+
+===== combined restricting sets =====
+---- restrict=unique,restricted,users ----
+restricting_sids(3)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-5-12 S-1-5-32-545
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=unique,restricted,users desktop=(inherit) => LAUNCHED pid=3684
+child_exit=0xc0000142 (-1073741502)
+---- child output ----
+CHILD_ALIVE 
+
+---- restrict=unique,world,users ----
+restricting_sids(3)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-32-545
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=unique,world,users desktop=(inherit) => LAUNCHED pid=4768
+child_exit=0xc0000142 (-1073741502)
+---- child output ----
+CHILD_ALIVE 
+
+---- restrict=unique,world,restricted,users ----
+restricting_sids(4)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=unique,world,restricted,users desktop=(inherit) => LAUNCHED pid=3284
+child_exit=0xc0000142 (-1073741502)
+---- child output ----
+CHILD_ALIVE 
+
+---- restrict=unique,world,restricted,users,logon ----
+restricting_sids(5)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545 S-1-5-5-0-10320403
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=True restrict_sids=False restrict=unique,world,restricted,users,logon desktop=(inherit) => LAUNCHED pid=996
+child_exit=0xc0000142 (-1073741502)
+---- child output ----
+CHILD_ALIVE 
+
+
+===== one-variable launch arms =====
+
+---- [cmd builtins] restrict=unique,world,restricted,users ----
+restricting_sids(4)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=unique,world,restricted,users desktop=(inherit) => LAUNCHED pid=3392
+child_exit=0x1 (1)
+---- child output ----
+ALIVE 
+{"name":"jail-fixture","version":"1.0.0"}
+node_modules
+package.json
+Access is denied.
+
+
+---- [whoami.exe] restrict=unique,world,restricted,users ----
+restricting_sids(4)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=unique,world,restricted,users desktop=(inherit) => LAUNCHED pid=3060
+child_exit=0xc0000142 (-1073741502)
+---- child output ----
+
+
+---- [node -e] restrict=unique,world,restricted,users ----
+restricting_sids(4)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=unique,world,restricted,users desktop=(inherit) => LAUNCHED pid=4416
+child_exit=0xc0000142 (-1073741502)
+---- child output ----
+
+
+---- [node -e +logon] restrict=unique,world,restricted,users,logon ----
+restricting_sids(5)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545 S-1-5-5-0-10732511
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=True restrict_sids=False restrict=unique,world,restricted,users,logon desktop=(inherit) => LAUNCHED pid=3000
+child_exit=0xc0000142 (-1073741502)
+---- child output ----
+
+
+---- [BASELINE node] restrict= ----
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=(none) desktop=(inherit) => LAUNCHED pid=3900
+child_exit=0x1 (1)
+---- child output ----
+[eval]:1
+console.log(NODE_ALIVE,process.version)
+            ^
+
+ReferenceError: NODE_ALIVE is not defined
+    at [eval]:1:13
+    at runScriptInThisContext (node:internal/vm:219:10)
+    at node:internal/process/execution:451:12
+    at [eval]-wrapper:6:24
+    at runScriptInContext (node:internal/process/execution:449:60)
+    at evalFunction (node:internal/process/execution:283:30)
+    at evalTypeScript (node:internal/process/execution:295:3)
+    at node:internal/main/eval_string:71:3
+
+Node.js v24.9.0
+
+
+===== 0xC0000142 diagnosis arms =====
+
+---- [medium+unique-set] il=medium restrict=unique,world,restricted,users  ----
+restricting_sids(4)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545
+default_dacl_grant_unique=OK
+api=asuser il=medium keep_logon_sid=False restrict_sids=False restrict=unique,world,restricted,users desktop=(inherit) => LAUNCHED pid=680
+child_exit=0xc0000142 (-1073741502)
+---- child output ----
+
+
+---- [no-unique] il=low restrict=world,restricted,users  ----
+restricting_sids(3)=S-1-1-0 S-1-5-12 S-1-5-32-545
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=world,restricted,users desktop=(inherit) => LAUNCHED pid=2388
+child_exit=0xc0000142 (-1073741502)
+---- child output ----
+
+
+---- [no-unique+logon] il=low restrict=world,restricted,users,logon --keep-logon-sid ----
+restricting_sids(4)=S-1-1-0 S-1-5-12 S-1-5-32-545 S-1-5-5-0-11688228
+api=asuser il=low keep_logon_sid=True restrict_sids=False restrict=world,restricted,users,logon desktop=(inherit) => LAUNCHED pid=3152
+child_exit=0xc0000142 (-1073741502)
+---- child output ----
+
+
+---- [with-self] il=low restrict=unique,world,restricted,users,self  ----
+restricting_sids(5)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545 S-1-5-21-909783838-3121932791-2427634611-1002
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=unique,world,restricted,users,self desktop=(inherit) => LAUNCHED pid=4776
+child_exit=0x1 (1)
+---- child output ----
+[eval]:1
+console.log(NODE_ALIVE,process.version)
+            ^
+
+ReferenceError: NODE_ALIVE is not defined
+    at [eval]:1:13
+    at runScriptInThisContext (node:internal/vm:219:10)
+    at node:internal/process/execution:451:12
+    at [eval]-wrapper:6:24
+    at runScriptInContext (node:internal/process/execution:449:60)
+    at evalFunction (node:internal/process/execution:283:30)
+    at evalTypeScript (node:internal/process/execution:295:3)
+    at node:internal/main/eval_string:71:3
+
+Node.js v24.9.0
+
+
+---- [with-self+logon] il=low restrict=unique,world,restricted,users,self,logon --keep-logon-sid ----
+restricting_sids(6)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545 S-1-5-21-909783838-3121932791-2427634611-1002 S-1-5-5-0-11688228
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=True restrict_sids=False restrict=unique,world,restricted,users,self,logon desktop=(inherit) => LAUNCHED pid=3972
+child_exit=0x1 (1)
+---- child output ----
+[eval]:1
+console.log(NODE_ALIVE,process.version)
+            ^
+
+ReferenceError: NODE_ALIVE is not defined
+    at [eval]:1:13
+    at runScriptInThisContext (node:internal/vm:219:10)
+    at node:internal/process/execution:451:12
+    at [eval]-wrapper:6:24
+    at runScriptInContext (node:internal/process/execution:449:60)
+    at evalFunction (node:internal/process/execution:283:30)
+    at evalTypeScript (node:internal/process/execution:295:3)
+    at node:internal/main/eval_string:71:3
+
+Node.js v24.9.0
+
+
+---- [self-only] il=low restrict=self  ----
+restricting_sids(1)=S-1-5-21-909783838-3121932791-2427634611-1002
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=self desktop=(inherit) => LAUNCHED pid=4032
+child_exit=0xc0000022 (-1073741790)
+---- child output ----
+
+
+---- [BASELINE] il=low restrict=  ----
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=(none) desktop=(inherit) => LAUNCHED pid=2316
+child_exit=0x1 (1)
+---- child output ----
+[eval]:1
+console.log(NODE_ALIVE,process.version)
+            ^
+
+ReferenceError: NODE_ALIVE is not defined
+    at [eval]:1:13
+    at runScriptInThisContext (node:internal/vm:219:10)
+    at node:internal/process/execution:451:12
+    at [eval]-wrapper:6:24
+    at runScriptInContext (node:internal/process/execution:449:60)
+    at evalFunction (node:internal/process/execution:283:30)
+    at evalTypeScript (node:internal/process/execution:295:3)
+    at node:internal/main/eval_string:71:3
+
+Node.js v24.9.0
+
+
+===== bisect: which non-user sid unblocks startup =====
+You cannot call a method on a null-valued expression.
+At C:\Users\probe2.NUB-WIN-USID\probe\l5.ps1:19 char:31
++   $body = if (Test-Path $o) { (Get-Content $o -Raw).Trim() } else { ' ...
++                               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : InvokeMethodOnNull
+ 
+Method invocation failed because [System.Object[]] does not contain a method named 'Substring'.
+At C:\Users\probe2.NUB-WIN-USID\probe\l5.ps1:20 char:3
++   Write-Output ("{0,-16} {1}  out=[{2}]" -f $c[0], ($exit -replace '^ ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : MethodNotFound
+ 
+You cannot call a method on a null-valued expression.
+At C:\Users\probe2.NUB-WIN-USID\probe\l5.ps1:19 char:31
++   $body = if (Test-Path $o) { (Get-Content $o -Raw).Trim() } else { ' ...
++                               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : InvokeMethodOnNull
+ 
+Method invocation failed because [System.Object[]] does not contain a method named 'Substring'.
+At C:\Users\probe2.NUB-WIN-USID\probe\l5.ps1:20 char:3
++   Write-Output ("{0,-16} {1}  out=[{2}]" -f $c[0], ($exit -replace '^ ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : MethodNotFound
+ 
+You cannot call a method on a null-valued expression.
+At C:\Users\probe2.NUB-WIN-USID\probe\l5.ps1:19 char:31
++   $body = if (Test-Path $o) { (Get-Content $o -Raw).Trim() } else { ' ...
++                               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : InvokeMethodOnNull
+ 
+Method invocation failed because [System.Object[]] does not contain a method named 'Substring'.
+At C:\Users\probe2.NUB-WIN-USID\probe\l5.ps1:20 char:3
++   Write-Output ("{0,-16} {1}  out=[{2}]" -f $c[0], ($exit -replace '^ ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : MethodNotFound
+ 
+You cannot call a method on a null-valued expression.
+At C:\Users\probe2.NUB-WIN-USID\probe\l5.ps1:19 char:31
++   $body = if (Test-Path $o) { (Get-Content $o -Raw).Trim() } else { ' ...
++                               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : InvokeMethodOnNull
+ 
+Method invocation failed because [System.Object[]] does not contain a method named 'Substring'.
+At C:\Users\probe2.NUB-WIN-USID\probe\l5.ps1:20 char:3
++   Write-Output ("{0,-16} {1}  out=[{2}]" -f $c[0], ($exit -replace '^ ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : MethodNotFound
+ 
+You cannot call a method on a null-valued expression.
+At C:\Users\probe2.NUB-WIN-USID\probe\l5.ps1:19 char:31
++   $body = if (Test-Path $o) { (Get-Content $o -Raw).Trim() } else { ' ...
++                               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : InvokeMethodOnNull
+ 
+Method invocation failed because [System.Object[]] does not contain a method named 'Substring'.
+At C:\Users\probe2.NUB-WIN-USID\probe\l5.ps1:20 char:3
++   Write-Output ("{0,-16} {1}  out=[{2}]" -f $c[0], ($exit -replace '^ ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : MethodNotFound
+ 
+You cannot call a method on a null-valued expression.
+At C:\Users\probe2.NUB-WIN-USID\probe\l5.ps1:19 char:31
++   $body = if (Test-Path $o) { (Get-Content $o -Raw).Trim() } else { ' ...
++                               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : InvokeMethodOnNull
+ 
+Method invocation failed because [System.Object[]] does not contain a method named 'Substring'.
+At C:\Users\probe2.NUB-WIN-USID\probe\l5.ps1:20 char:3
++   Write-Output ("{0,-16} {1}  out=[{2}]" -f $c[0], ($exit -replace '^ ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : MethodNotFound
+ 
+You cannot call a method on a null-valued expression.
+At C:\Users\probe2.NUB-WIN-USID\probe\l5.ps1:19 char:31
++   $body = if (Test-Path $o) { (Get-Content $o -Raw).Trim() } else { ' ...
++                               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : InvokeMethodOnNull
+ 
+Method invocation failed because [System.Object[]] does not contain a method named 'Substring'.
+At C:\Users\probe2.NUB-WIN-USID\probe\l5.ps1:20 char:3
++   Write-Output ("{0,-16} {1}  out=[{2}]" -f $c[0], ($exit -replace '^ ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : MethodNotFound
+ 
+You cannot call a method on a null-valued expression.
+At C:\Users\probe2.NUB-WIN-USID\probe\l5.ps1:19 char:31
++   $body = if (Test-Path $o) { (Get-Content $o -Raw).Trim() } else { ' ...
++                               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : InvokeMethodOnNull
+ 
+Method invocation failed because [System.Object[]] does not contain a method named 'Substring'.
+At C:\Users\probe2.NUB-WIN-USID\probe\l5.ps1:20 char:3
++   Write-Output ("{0,-16} {1}  out=[{2}]" -f $c[0], ($exit -replace '^ ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : MethodNotFound
+ 
+INTERACTIVE      child_exit=0xc0000142 (-1073741502)  out=[]
+AUTH_USERS       child_exit=0xc0000142 (-1073741502)  out=[]
+THIS_ORG         child_exit=0xc0000142 (-1073741502)  out=[]
+NTLM_AUTH        child_exit=0xc0000142 (-1073741502)  out=[]
+LOCAL_ACCOUNT    child_exit=0xc0000142 (-1073741502)  out=[]
+LOCAL            child_exit=0xc0000142 (-1073741502)  out=[]
+CONSOLE_LOGON    child_exit=0xc0000142 (-1073741502)  out=[]
+PRINCIPAL_SELF   child_exit=0xc0000142 (-1073741502)  out=[]
+build_rc=0
+--- HKCU root dacl BEFORE, then grant unique KEY_READ (container-inherit) ---
+grantreg OK  CURRENT_USER  sid=S-1-0-3616468677-3473763307-2660762958-3313688747 mask=0x20019
+  now=D:PAI(A;CI;KR;;;S-1-0-3616468677-3473763307-2660762958-3313688747)(A;OICI;KA;;;S-1-5-21-909783838-3121932791-2427634611-1002)(A;OICI;KA;;;SY)(A;OICI;KA;;;BA)(A;OICI;KR;;;RC)(A;;KR;;;AC)(A;;KR;;;S-1-15-3-1024-1065365936-1281604716-3511738428-1654721687-432734479-3232135806-4053264122-3456934681)
+
+--- relaunch node with the SAME restricting set as the failing arm ---
+restricting_sids(4)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=unique,world,restricted,users desktop=(inherit) => LAUNCHED pid=4768
+child_exit=0xc0000142 (-1073741502)
+---- child output ----
+
+
+===== two-token startup driven from the parent =====
+build_rc=0
+
+======== [no-revert] primary={unique,world,restricted,users}  startup-impersonate=self-full ========
+restricting_sids(4)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=unique,world,restricted,users desktop=(inherit) => LAUNCHED pid=484
+startup_impersonate=self-full SetThreadToken=OK
+child_exit=0xc00000a5 (-1073741659)
+---- child output ----
+
+
+======== [revert-2000ms] primary={unique,world,restricted,users}  startup-impersonate=self-full ========
+restricting_sids(4)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=unique,world,restricted,users desktop=(inherit) => LAUNCHED pid=4752
+startup_impersonate=self-full SetThreadToken=OK
+revert_after_ms=2000 SetThreadToken(NULL)=OK
+child_exit=0xc00000a5 (-1073741659)
+---- child output ----
+
+
+======== [revert-0ms] primary={unique,world,restricted,users}  startup-impersonate=self-full ========
+restricting_sids(4)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=unique,world,restricted,users desktop=(inherit) => LAUNCHED pid=2564
+startup_impersonate=self-full SetThreadToken=OK
+revert_after_ms=0 SetThreadToken(NULL)=OK
+child_exit=0xc0000142 (-1073741502)
+---- child output ----
+
+
+======== [BASELINE last] il=none, no restricting set, same ops file ========
+api=asuser il=none keep_logon_sid=False restrict_sids=False restrict=(none) desktop=(inherit) => LAUNCHED pid=2348
+child_exit=0x0 (0)
+---- child output ----
+== node v24.9.0  cwd(attempt below)  proj=C:\Users\probe2.NUB-WIN-USID\jail\project
+  PASS GRANTED readFileSync leaf                      43B
+  PASS GRANTED readdirSync project                    2 entries
+  PASS GRANTED realpathSync leaf                      C:\Users\probe2.NUB-WIN-USID\jail\project\package.json
+  PASS GRANTED process.cwd()                          C:\Users\probe2.NUB-WIN-USID\jail\project
+  PASS GRANTED require() deep file                    leftpad-stub-loaded
+  PASS GRANTED bare require from nested dir           C:\Users\probe2.NUB-WIN-USID\jail\project\node_modules\leftpad-stub\index.js
+  PASS GRANTED find-up walk to root                   reached root, 2 package.json ancestors
+  PASS GRANTED write into project (label)             hello
+  PASS DENY-WANTED read ~/.ssh/id_rsa                 FAKE-PRIVATE-KEY-MUST-STAY-DENIED
+  PASS DENY-WANTED read ~/.npmrc                      //registry.npmjs.org/:_authToken=FAKE-TO
+  PASS DENY-WANTED readdirSync %USERPROFILE%          31 entries
+  PASS DENY-WANTED statSync %USERPROFILE%             true
+  PASS DENY-WANTED readdirSync C:\Users               9 entries
+  PASS DENY-WANTED readdirSync C:\                    15 entries
+  PASS DENY-WANTED read ungranted sibling             SIBLING-MUST-STAY-DENIED
+  PASS DENY-WANTED readdirSync ungranted sibling      1 entries
+
+== ops summary pass=16 fail=0
+
+
+===== Chromium two-token shape, same IL =====
+======== A: does node START with same-IL initial impersonation, never reverted? ========
+restricting_sids(4)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=True restrict_sids=False restrict=unique,world,restricted,users desktop=(inherit) => LAUNCHED pid=4696
+restricting_sids(6)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545 S-1-5-21-909783838-3121932791-2427634611-1002 S-1-5-5-0-16577262
+default_dacl_grant_unique=OK
+startup_impersonate=unique,world,restricted,users,self,logon SetThreadToken=OK
+child_exit=0x86 (134)
+---- child output ----
+
+  #  C:\node\node.exe[4696]: std::shared_ptr<InitializationResultImpl> __cdecl node::InitializeOncePerProcessInternal(const std::vector<std::string> &, ProcessInitializationFlags::Flags) at src\node.cc:1222
+  #  Assertion failed: ncrypto::CSPRNG(nullptr, 0)
+
+----- Native stack trace -----
+
+ 1: 00007FF624FD0D2A v8::base::CPU::num_virtual_address_bits+198298
+ 2: 00007FF6250276F6 node::InitializeOncePerProcess+2790
+ 3: 00007FF62502869A node::Start+154
+ 4: 00007FF62603E9C2 AES_cbc_encrypt+2546
+ 5: 00007FF626E942F4 v8::base::UnsignedDivisionByConstant<unsigned __int64>+2829972
+ 6: 00007FF8AB2F4CB0 BaseThreadInitThunk+16
+ 7: 00007FF8AC71EDEB RtlUserThreadStart+43
+
+
+======== B: parent strips impersonation at 1000ms; child reads at 3000ms ========
+restricting_sids(4)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=True restrict_sids=False restrict=unique,world,restricted,users desktop=(inherit) => LAUNCHED pid=2548
+restricting_sids(6)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545 S-1-5-21-909783838-3121932791-2427634611-1002 S-1-5-5-0-16577262
+default_dacl_grant_unique=OK
+startup_impersonate=unique,world,restricted,users,self,logon SetThreadToken=OK
+revert_after_ms=1000 SetThreadToken(NULL)=OK
+child_exit=0x86 (134)
+---- child output ----
+
+  #  C:\node\node.exe[2548]: std::shared_ptr<InitializationResultImpl> __cdecl node::InitializeOncePerProcessInternal(const std::vector<std::string> &, ProcessInitializationFlags::Flags) at src\node.cc:1222
+  #  Assertion failed: ncrypto::CSPRNG(nullptr, 0)
+
+----- Native stack trace -----
+
+ 1: 00007FF624FD0D2A v8::base::CPU::num_virtual_address_bits+198298
+ 2: 00007FF6250276F6 node::InitializeOncePerProcess+2790
+ 3: 00007FF62502869A node::Start+154
+ 4: 00007FF62603E9C2 AES_cbc_encrypt+2546
+ 5: 00007FF626E942F4 v8::base::UnsignedDivisionByConstant<unsigned __int64>+2829972
+ 6: 00007FF8AB2F4CB0 BaseThreadInitThunk+16
+ 7: 00007FF8AC71EDEB RtlUserThreadStart+43
+
+
+======== C: BASELINE last -- same delayed ops file, no confinement ========
+api=asuser il=none keep_logon_sid=False restrict_sids=False restrict=(none) desktop=(inherit) => LAUNCHED pid=1484
+child_exit=0x0 (0)
+---- child output ----
+== node v24.9.0  delayMs=3000  proj=C:\Users\probe2.NUB-WIN-USID\jail\project
+  PASS GRANTED readFileSync leaf                      43B
+  PASS GRANTED readdirSync project                    3 entries
+  PASS GRANTED realpathSync leaf                      C:\Users\probe2.NUB-WIN-USID\jail\project\package.json
+  PASS GRANTED process.cwd()                          C:\Users\probe2.NUB-WIN-USID\jail\project
+  PASS GRANTED require() deep file                    leftpad-stub-loaded
+  PASS GRANTED bare require from nested dir           C:\Users\probe2.NUB-WIN-USID\jail\project\node_modules\leftpad-stub\index.js
+  PASS GRANTED find-up walk to root                   reached root, 2 package.json ancestors
+  PASS GRANTED write into project (label)             hello
+  PASS DENY-WANTED read ~/.ssh/id_rsa                 FAKE-PRIVATE-KEY-MUST-STAY-DENIED
+  PASS DENY-WANTED read ~/.npmrc                      //registry.npmjs.org/:_authToken=FAKE-TO
+  PASS DENY-WANTED readdirSync %USERPROFILE%          31 entries
+  PASS DENY-WANTED statSync %USERPROFILE%             true
+  PASS DENY-WANTED readdirSync C:\Users               9 entries
+  PASS DENY-WANTED readdirSync C:\                    15 entries
+  PASS DENY-WANTED read ungranted sibling             SIBLING-MUST-STAY-DENIED
+  PASS DENY-WANTED readdirSync ungranted sibling      1 entries
+
+== ops summary pass=16 fail=0
+
+
+===== in-situ confinement, grandchild, composition, cost =====
+######## 1. IN-SITU confinement via cmd builtins (no impersonation at all) ########
+restricting_sids(4)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=unique,world,restricted,users desktop=(inherit) => LAUNCHED pid=2300
+child_exit=0x0 (0)
+---- child output ----
+ALIVE 
+[granted project] 
+{"name":"jail-fixture","version":"1.0.0"}
+[ungranted sibling] 
+Access is denied.
+[profile npmrc] 
+Access is denied.
+[profile ssh key] 
+Access is denied.
+[profile listing] 
+File Not Found
+[C:\ listing] 
+inetpub
+node
+PerfLogs
+Program Files
+Program Files (x86)
+startup-log.txt
+Users
+Windows
+[deep granted] 
+module.exports = require("leftpad-stub");
+
+
+######## 1b. BASELINE, identical command, il=none ########
+api=asuser il=none keep_logon_sid=False restrict_sids=False restrict=(none) desktop=(inherit) => LAUNCHED pid=3252
+child_exit=0x0 (0)
+---- child output ----
+ALIVE 
+[granted project] 
+{"name":"jail-fixture","version":"1.0.0"}
+[ungranted sibling] 
+SIBLING-MUST-STAY-DENIED
+[profile npmrc] 
+//registry.npmjs.org/:_authToken=FAKE-TOKEN-MUST-STAY-DENIED
+[profile ssh key] 
+FAKE-PRIVATE-KEY-MUST-STAY-DENIED
+[profile listing] 
+.npmrc
+.ssh
+Desktop
+Documents
+Downloads
+Favorites
+jail
+Links
+Music
+Pictures
+probe
+Saved Games
+Videos
+[C:\ listing] 
+inetpub
+node
+PerfLogs
+Program Files
+Program Files (x86)
+startup-log.txt
+Users
+Windows
+[deep granted] 
+module.exports = require("leftpad-stub");
+
+
+######## 2. GRANDCHILD spawn -- can the jail run another exe? ########
+restricting_sids(4)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=unique,world,restricted,users desktop=(inherit) => LAUNCHED pid=180
+child_exit=0x0 (0)
+---- child output ----
+AFTER_WHOAMI
+
+-- baseline --
+api=asuser il=none keep_logon_sid=False restrict_sids=False restrict=(none) desktop=(inherit) => LAUNCHED pid=4740
+child_exit=0x0 (0)
+---- child output ----
+nub-win-usid\probe2
+AFTER_WHOAMI
+
+
+######## 3. Q5 COMPOSITION: low mandatory label + restricting sids ########
+label OK  C:\Users\probe2.NUB-WIN-USID\jail\project  [S:(ML;OICI;NW;;;LW)]
+recurse labeled=12 errors=0
+path=C:\Users\probe2.NUB-WIN-USID\jail\project
+  owner=S-1-5-21-909783838-3121932791-2427634611-1002
+  label=[type=17 flags=0x3 policy=0x1 sid=S-1-16-4096] 
+restricting_sids(4)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545
+default_dacl_grant_unique=OK
+== il=low restrict=unique,world,restricted,users ==
+  C:\Users\probe2.NUB-WIN-USID\jail\project
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\project\package.json
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\jail\sibling
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\.npmrc
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+-- and in situ: write into the labeled+granted project from the jail --
+restricting_sids(4)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=unique,world,restricted,users desktop=(inherit) => LAUNCHED pid=500
+child_exit=0x1 (1)
+---- child output ----
+Access is denied.
+The system cannot find the file specified.
+The filename, directory name, or volume label syntax is incorrect.
+
+
+######## 4. Q6 COST: recursive grant over a real node_modules ########
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v11.19.0
+npm notice To update run: npm install -g npm@11.19.0
+npm notice
+entries_under_big=1737
+grant OK  C:\Users\probe2.NUB-WIN-USID\jail\big  sid=S-1-0-3616468677-3473763307-2660762958-3313688747 mask=0x1200a9
+recurse granted=1737 errors=0 ms=1289
+-- second pass (already-granted, measures steady-state re-run cost) --
+grant OK  C:\Users\probe2.NUB-WIN-USID\jail\big  sid=S-1-0-3616468677-3473763307-2660762958-3313688747 mask=0x1200a9
+recurse granted=1737 errors=0 ms=1225
+
+===== Q5 write composition + residue =====
+######## Q5 completed: the ace mask must include WRITE for the second check ########
+grant OK  C:\Users\probe2.NUB-WIN-USID\jail\project  sid=S-1-0-3616468677-3473763307-2660762958-3313688747 mask=0x1301bf
+recurse granted=12 errors=0 ms=7
+restricting_sids(4)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545
+default_dacl_grant_unique=OK
+== il=low restrict=unique,world,restricted,users ==
+  C:\Users\probe2.NUB-WIN-USID\jail\project
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=GRANTED(0x120116)
+  C:\Users\probe2.NUB-WIN-USID\jail\project\package.json
+      READ=GRANTED(0x120089)  TRAVERSE=GRANTED(0x20)  WRITE=GRANTED(0x120116)
+  C:\Users\probe2.NUB-WIN-USID\jail\sibling
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+  C:\Users\probe2.NUB-WIN-USID\.npmrc
+      READ=DENIED  TRAVERSE=DENIED  WRITE=DENIED
+-- in situ --
+restricting_sids(4)=S-1-0-3616468677-3473763307-2660762958-3313688747 S-1-1-0 S-1-5-12 S-1-5-32-545
+default_dacl_grant_unique=OK
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=unique,world,restricted,users desktop=(inherit) => LAUNCHED pid=1928
+child_exit=0x1 (1)
+---- child output ----
+hi 
+Access is denied.
+Access is denied.
+
+
+######## RESIDUE: can the grant be revoked, leaving the dacl as found? ########
+dacl C:\Users\probe2.NUB-WIN-USID\jail\project = O:S-1-5-21-909783838-3121932791-2427634611-1002G:S-1-5-21-909783838-3121932791-2427634611-513D:AI(A;OICI;0x1301bf;;;S-1-0-3616468677-3473763307-2660762958-3313688747)(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;S-1-5-21-909783838-3121932791-2427634611-1002)S:AI(ML;OICI;NW;;;LW)
+revoke OK  C:\Users\probe2.NUB-WIN-USID\jail\project  sid=S-1-0-3616468677-3473763307-2660762958-3313688747 mask=0x1200a9
+recurse granted=13 errors=0 ms=10
+dacl C:\Users\probe2.NUB-WIN-USID\jail\project = O:S-1-5-21-909783838-3121932791-2427634611-1002G:S-1-5-21-909783838-3121932791-2427634611-513D:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;S-1-5-21-909783838-3121932791-2427634611-1002)S:AI(ML;OICI;NW;;;LW)
+dacl C:\Users\probe2.NUB-WIN-USID\jail\project\package.json = O:S-1-5-21-909783838-3121932791-2427634611-1002G:S-1-5-21-909783838-3121932791-2427634611-513D:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;S-1-5-21-909783838-3121932791-2427634611-1002)S:AI(ML;;NW;;;LW)
+
+===== LEAD: NO_READ_UP mandatory-label denylist =====
+build_rc=0
+---- BEFORE labeling: proven low-IL token reads the secrets (the gap) ----
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=(none) desktop=(inherit) => LAUNCHED pid=1532
+child_exit=0x0 (0)
+---- child output ----
+ALIVE 
+[npmrc] 
+//registry.npmjs.org/:_authToken=FAKE-TOKEN-MUST-STAY-DENIED
+[sshkey] 
+FAKE-PRIVATE-KEY-MUST-STAY-DENIED
+[project] 
+{"name":"jail-fixture","version":"1.0.0"}
+
+
+---- label the secrets Medium/NO_READ_UP as their unprivileged OWNER ----
+label OK  C:\Users\probe2.NUB-WIN-USID\.npmrc  [S:(ML;;NRNWNX;;;ME)]
+label OK  C:\Users\probe2.NUB-WIN-USID\.ssh  [S:(ML;OICI;NRNWNX;;;ME)]
+recurse labeled=1 errors=0
+path=C:\Users\probe2.NUB-WIN-USID\.npmrc
+  owner=S-1-5-21-909783838-3121932791-2427634611-1002
+  label=[type=17 flags=0x0 policy=0x7 sid=S-1-16-8192] 
+-- NEGATIVE CONTROL: the same label write on a path we do not own --
+label ERR=5  C:\Windows  [S:(ML;OICI;NRNWNX;;;ME)]
+
+---- AFTER labeling: same token, same command ----
+api=asuser il=low keep_logon_sid=False restrict_sids=False restrict=(none) desktop=(inherit) => LAUNCHED pid=724
+child_exit=0x0 (0)
+---- child output ----
+ALIVE 
+[npmrc] 
+Access is denied.
+[sshkey] 
+Access is denied.
+[project] 
+{"name":"jail-fixture","version":"1.0.0"}
+
+
+---- CONTROL: a MEDIUM-il child (a normal app) must still read them ----
+api=asuser il=medium keep_logon_sid=False restrict_sids=False restrict=(none) desktop=(inherit) => LAUNCHED pid=4888
+child_exit=0x0 (0)
+---- child output ----
+ALIVE 
+[npmrc] 
+//registry.npmjs.org/:_authToken=FAKE-TOKEN-MUST-STAY-DENIED
+[sshkey] 
+FAKE-PRIVATE-KEY-MUST-STAY-DENIED
+[project] 
+{"name":"jail-fixture","version":"1.0.0"}
+
