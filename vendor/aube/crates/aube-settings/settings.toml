@@ -3316,7 +3316,7 @@ unset, empty string, or arbitrary text) leaves the default
 """
 sources.cli = ["no-install"]
 sources.env = ["npm_config_aube_no_auto_install", "NPM_CONFIG_AUBE_NO_AUTO_INSTALL", "AUBE_NO_AUTO_INSTALL"]
-sources.npmrc = ["aubeNoAutoInstall", "aube-no-auto-install", "nubNoAutoInstall", "nub-no-auto-install"]
+sources.npmrc = ["aubeNoAutoInstall", "aube-no-auto-install"]
 sources.workspaceYaml = ["aubeNoAutoInstall"]
 examples = [
     "AUBE_NO_AUTO_INSTALL=1 aube run dev",
