@@ -29,25 +29,28 @@
 //! package is one we looked at and admitted, and the alternative is a broken install plus a
 //! catalog that lies about what it covers.
 //!
-//! # NOT YET ENFORCED — the jail's egress is still GLOBAL
+//! # ENFORCED, AND AS A BOOLEAN — not as a host set
 //!
-//! Read this before relying on anything above. `preset::build_jail_net` compiles to
-//! `["$downloads"]` for EVERY jailed lifecycle spawn, and `compile_build_jail`'s
-//! `package_name` reaches only the filesystem axis. So today a package with no entry still
-//! reaches all of `DOWNLOAD_HOSTS`, and the package-identity gate this module describes is
-//! data without an enforcer.
+//! `preset::build_jail_net` consults this table per spawn: a package with any entry reaches
+//! the `$downloads` hosts, a package with none reaches nothing. So both entry shapes above
+//! compile to the SAME grant, and the distinction between them is a record of WHY the package
+//! was admitted rather than a difference in what it receives.
 //!
-//! Closing that is the single highest-value change the catalog now makes possible, and it is
-//! deliberately not done here: flipping egress to per-package denies the network to every
-//! package the corpus did not name, which is the intended design but a behavioral change that
-//! needs its own measurement pass. Tracked in the catalog as
-//! `knownDefects: per-package-egress-not-enforced`.
+//! That is deliberate, not a shortcut. Per-host permissioning is not a capability of this
+//! jail: Windows refuses a per-host policy outright, and the Linux build jail is Landlock-only
+//! — no netns to route through the proxy — so `backend::linux::apply_landlock` passes
+//! `per_host=false` and its net axis is a binary seccomp family filter. Resolving a package to
+//! a narrower host list would be enforcing something no backend can hold, on top of
+//! constraining only the packages somebody already reviewed.
+//!
+//! What remains is the gate that blunts the attack, which is the one worth having: an unvetted
+//! package now gets zero egress where a global set handed it all 33 admitted hosts.
 
 /// What the catalog says one package may reach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageNetwork {
-    /// No entry. Under the model above this is "no egress" — see the module's enforcement
-    /// caveat for why it is not that yet.
+    /// No entry, or an entry the catalog refuses (`build.rs` subtracts
+    /// `notGranted.packages`). This is NO EGRESS — the model's default and its whole point.
     NoEntry,
     /// The hosts this package was observed to fetch.
     Hosts(&'static [&'static str]),

@@ -347,6 +347,16 @@ fn gen_package_network(catalog: &serde_json::Value) -> String {
         .map(|(i, e)| string(e, "package", &format!("notGranted.packages[{i}]")))
         .collect();
 
+    // A REFUSAL BEATS AN OBSERVATION. `fetchedBy` is a factual record of what a package was
+    // seen fetching; `notGranted.packages` is the verdict that the package should not have the
+    // access at all. The two are not contradictory data, so this is a subtraction rather than a
+    // build failure — but the inversion must not hand a refused package a grant. `install-peers`
+    // is the live case: it appears under `registry.npmjs.org` because it shells a real
+    // `npm install` into the consumer's tree, which is precisely why it is refused.
+    for name in &refused {
+        hosts.remove(name);
+    }
+
     let mut full = Vec::new();
     for (i, entry) in array_at(catalog, &["packageNetwork", "full"])
         .iter()

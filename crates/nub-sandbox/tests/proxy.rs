@@ -575,7 +575,11 @@ fn socks5_without_userpass_auth_is_refused() {
 /// The net axis of the real build-jail policy — compiled through the production entry so
 /// this exercises what a dependency lifecycle spawn actually gets, not a hand-built
 /// stand-in that could drift from it.
-fn build_jail_net() -> NetPolicy {
+///
+/// `package` is the identity the gate turns on: the catalog decides whether the spawn gets
+/// the `$downloads` set or nothing, so a caller wanting the admitted policy has to name an
+/// admitted package.
+fn build_jail_net(package: Option<&str>) -> NetPolicy {
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("project");
     let package_dir = project.join("node_modules/pkg");
@@ -587,7 +591,7 @@ fn build_jail_net() -> NetPolicy {
             project: project.clone(),
         },
         &package_dir,
-        None,
+        package,
         Vec::new(),
         Vec::new(),
         Default::default(),
@@ -601,7 +605,9 @@ fn build_jail_gate_admits_the_download_set_and_refuses_everything_else() {
     // The decider IS the proxy's gate (it consults this seam for both the CONNECT
     // authority and the SNI), so asserting on it covers both gates without needing the
     // listed hosts to be reachable from wherever the suite runs.
-    let decider = StaticDecider::new(build_jail_net());
+    // `canvas` is catalogued, so this is the ADMITTED arm. The uncatalogued arm is the
+    // differential at the bottom of this test.
+    let decider = StaticDecider::new(build_jail_net(Some("canvas")));
     let decide = |h: &str| decider.decide(&Host::Name(h.to_string()));
 
     // Windows cannot enforce a per-host policy at all, so its jail keeps the deny-all.
@@ -634,6 +640,19 @@ fn build_jail_gate_admits_the_download_set_and_refuses_everything_else() {
             "`{refused}` must not pass the build jail's gate"
         );
     }
+
+    // THE IDENTITY DIFFERENTIAL, at the same seam. `left-pad` carries no catalog entry, so the
+    // hosts admitted above are refused for it. This is the pair that shows the gate turns on the
+    // PACKAGE rather than the host — without it, every assertion above would read identically
+    // under the global egress set this replaced.
+    let unvetted = StaticDecider::new(build_jail_net(Some("left-pad")));
+    for listed in ["nodejs.org", "binaries.prisma.sh", "cdn.cypress.io"] {
+        assert_eq!(
+            unvetted.decide(&Host::Name(listed.to_string())),
+            Decision::Deny,
+            "`{listed}` is an admitted host, but an uncatalogued package must not reach it"
+        );
+    }
 }
 
 #[test]
@@ -645,7 +664,7 @@ fn build_jail_proxy_refuses_a_tunnel_to_an_unlisted_upstream() {
     let upstream = echo_server();
     let target = format!("127.0.0.1:{}", upstream.port());
 
-    let jailed = start(build_jail_net());
+    let jailed = start(build_jail_net(Some("canvas")));
     assert!(
         http_connect(jailed.port(), &target, jailed.token()).is_err(),
         "an upstream outside $downloads must not be tunneled"

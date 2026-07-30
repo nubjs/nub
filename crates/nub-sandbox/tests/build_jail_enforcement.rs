@@ -193,6 +193,11 @@ fn build_jail_confines_writes_and_hides_secrets() {
 /// The per-host GATE (a listed host admitted, an unlisted one refused through the
 /// sanctioned path) is proven hermetically against this same policy in `tests/proxy.rs`;
 /// what only an enforcing OS can prove is that the wall around it holds.
+///
+/// Runs as a CATALOGUED package (`canvas`). Egress is gated on package identity, so the proxy
+/// hole exists only for a package the catalog names; an unnamed package gets no network and no
+/// proxy, which `an_uncatalogued_package_gets_no_egress_and_no_proxy` asserts. Passing `None`
+/// here would compile the deny-all policy and leave the positive control unsatisfiable.
 #[test]
 fn build_jail_blocks_direct_egress_and_leaves_only_the_proxy_reachable() {
     let root = tempfile::tempdir().unwrap();
@@ -234,7 +239,7 @@ fn build_jail_blocks_direct_egress_and_leaves_only_the_proxy_reachable() {
     let policy = nub_sandbox::compile_build_jail(
         homes(&home, &project),
         &package_dir,
-        None,
+        Some("canvas"),
         vec![home.join("Library/Caches/nub/node/bin/node")],
         Vec::new(),
         ambient,
@@ -263,6 +268,62 @@ fn build_jail_blocks_direct_egress_and_leaves_only_the_proxy_reachable() {
         stdout.contains("PROXY_REACHED"),
         "the proxy port must be reachable, or DIRECT_BLOCKED above just means the child \
          has no networking at all:\n{stdout}"
+    );
+}
+
+/// The enforcing-OS twin of the test above, and the one that makes the package-identity gate
+/// real rather than asserted: the SAME jail, the SAME probe, a package the catalog does not
+/// name — and now there is no proxy to reach.
+///
+/// The differential is what carries it. Both arms run `DIRECT_BLOCKED`, so that line alone
+/// cannot distinguish "egress is gated" from "networking is dead"; the discriminator is
+/// `PROXY_ENV_SET`/`PROXY_REACHED`, which hold for `canvas` above and must NOT hold here.
+/// Without this pair, a regression that denied every package's egress would keep the test
+/// above passing on its DIRECT_BLOCKED assertion alone.
+#[test]
+fn an_uncatalogued_package_gets_no_egress_and_no_proxy() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let project = root.path().join("project");
+    let package_dir = project.join("node_modules/.aube/unvetted@1.0.0/node_modules/unvetted");
+    std::fs::create_dir_all(&package_dir).unwrap();
+
+    let script = r#"
+        case "${HTTP_PROXY:-}" in http://*) echo PROXY_ENV_SET ;; *) echo PROXY_ENV_MISSING ;; esac
+        "#;
+
+    let ambient: BTreeMap<String, String> = [("PATH".to_string(), "/usr/bin:/bin".to_string())]
+        .into_iter()
+        .collect();
+    // A name no catalog entry carries — the Shai-Hulud shape: an ordinary package that
+    // acquired a lifecycle script nobody reviewed.
+    let policy = nub_sandbox::compile_build_jail(
+        homes(&home, &project),
+        &package_dir,
+        Some("unvetted"),
+        vec![home.join("Library/Caches/nub/node/bin/node")],
+        Vec::new(),
+        ambient,
+    )
+    .expect("compile build-jail");
+    assert!(
+        policy.net.enforce && policy.net.rules.is_empty(),
+        "an uncatalogued package must compile to coarse deny-all, not a host list"
+    );
+
+    let spec = nub_sandbox::CommandSpec::new("/bin/sh")
+        .arg("-c")
+        .arg(script)
+        .cwd(&package_dir);
+    let runtime = nub_sandbox::earliest_bootstrap().expect("bootstrap");
+    let prepared = nub_sandbox::apply_with_runtime(&policy, spec, &runtime)
+        .expect("apply build-jail (fail-closed on error)");
+    let out = prepared.output().expect("run confined script");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("PROXY_ENV_MISSING"),
+        "no proxy may be offered to a package the catalog does not name:\n{stdout}"
     );
 }
 

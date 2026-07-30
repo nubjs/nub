@@ -507,33 +507,33 @@ fn keys_inside_an_axis_object_do_not_implicitly_inherit() {
 
 #[test]
 fn build_jail_preset_expands() {
-    // The STATIC `--sandbox build-jail` preset (v2): tight, default-deny read of the
+    // The STATIC `--sandbox build-jail` preset (v3): tight, default-deny read of the
     // project + `$tooldirs` (the OS backends supply the system/toolchain closure under a
-    // minimal root), a private tmp, egress curated to `$downloads`, strip-all env. The
-    // per-package WRITE grant + provisioned-interpreter read + scrubbed lifecycle env are
-    // the interposition's job (see `build_jail_interposition_*`), NOT this static preset.
+    // minimal root), a private tmp, NO egress, strip-all env. The per-package WRITE grant +
+    // provisioned-interpreter read + scrubbed lifecycle env are the interposition's job (see
+    // `build_jail_interposition_*`), NOT this static preset.
+    //
+    // Egress is DENY-ALL here because this arm carries no package identity, and identity is
+    // the gate: `--sandbox build-jail` names no package, which resolves the same way as the
+    // `None` aube hands over for a fetched checkout. The catalogued arm is
+    // `build_jail_interposition_gates_egress_on_package_identity`.
     let ctx = common::ctx(true, &[("PATH", "/bin"), ("NPM_TOKEN", "t")]);
     let p = compile(&json!("build-jail"), &ctx).unwrap();
     assert!(p.net.enforce, "build-jail enforces the net axis");
-    let hosts = nub_sandbox::matcher::HostMatcher::new(&p.net);
-    // Windows cannot enforce a per-host policy (its backend refuses one outright), so the
-    // jail keeps the strictly-tighter deny-all there; everywhere else a lifecycle script
-    // reaches the install-time artifact hosts and nothing else.
-    assert_eq!(
-        hosts.admits("nodejs.org"),
-        !cfg!(windows),
-        "build-jail admits a $downloads host off Windows, and nothing on Windows"
+    assert!(
+        p.net.rules.is_empty(),
+        "the static preset carries no package identity, so it grants no egress"
     );
-    // The negative is now an UNLISTED host rather than a write-capable one: catalog v2
-    // admits `github.com`, `api.github.com`, `registry.npmjs.org` and
-    // `storage.googleapis.com` with a named residual apiece, because refusing them cost 26
-    // points of ecosystem coverage. What the jail must still refuse is anything the catalog
-    // does not name — including a telemetry sink and a container registry, both of which are
-    // recorded refusals rather than omissions.
-    for unlisted in ["evil.test", "www.google-analytics.com", "ghcr.io"] {
+    let hosts = nub_sandbox::matcher::HostMatcher::new(&p.net);
+    for host in [
+        "nodejs.org",
+        "evil.test",
+        "www.google-analytics.com",
+        "ghcr.io",
+    ] {
         assert!(
-            !hosts.admits(unlisted),
-            "build-jail must admit only hosts the catalog names: `{unlisted}` is not one"
+            !hosts.admits(host),
+            "the identity-less preset must admit nothing, not even a $downloads host: `{host}`"
         );
     }
     assert!(
@@ -718,6 +718,72 @@ fn build_jail_reaches_an_interpreter_living_under_opt() {
     }
 }
 
+/// EGRESS IS GATED ON PACKAGE IDENTITY — the whole resolution rule, in one place.
+///
+/// Asserted through `compile_build_jail` rather than against the catalog accessor, because the
+/// accessor was already correct while nothing consumed it: the defect this pins is that the
+/// compiled POLICY ignored the package. Each row therefore names a real catalog fact, so a
+/// catalog edit that moved a package between classes would fail here rather than silently
+/// change what a user gets.
+#[test]
+fn build_jail_interposition_gates_egress_on_package_identity() {
+    use std::collections::BTreeMap;
+    let homes = common::homes();
+    let proj = homes.project.clone();
+    let ambient: BTreeMap<String, String> = [("PATH".to_string(), "/bin".to_string())]
+        .into_iter()
+        .collect();
+
+    let compile_for = |name: Option<&str>| {
+        let dir = proj.join("node_modules/.aube/x@1.0.0/node_modules/x");
+        nub_sandbox::compile_build_jail(
+            homes.clone(),
+            &dir,
+            name,
+            Vec::new(),
+            Vec::new(),
+            ambient.clone(),
+        )
+        .expect("compile build-jail")
+    };
+
+    // GRANTED — both catalog shapes collapse to the same boolean. `canvas` carries an
+    // inverted host list (it fetches GitHub release assets); `node-libcurl` carries
+    // `packageNetwork.full`. Neither resolves to a narrower set than the other: per-host
+    // permissioning is not a capability here, so an admitted package reaches `$downloads`.
+    for admitted in ["canvas", "node-libcurl"] {
+        let p = compile_for(Some(admitted));
+        assert!(p.net.enforce, "{admitted}: the net axis still enforces");
+        let hosts = nub_sandbox::matcher::HostMatcher::new(&p.net);
+        assert_eq!(
+            hosts.admits("nodejs.org"),
+            !cfg!(windows),
+            "{admitted} is catalogued, so it reaches $downloads off Windows"
+        );
+        assert!(
+            !hosts.admits("evil.test"),
+            "{admitted}: an admitted package still reaches only the curated set"
+        );
+    }
+
+    // DENIED — the default, and the case that matters. `left-pad` is an ordinary dependency
+    // with no catalog entry: exactly the Shai-Hulud shape, a package that could acquire a
+    // lifecycle script nobody reviewed. `None` is what aube hands over when the spawn root is
+    // a checkout it fetched. `install-peers` is the third clause: it appears under
+    // `registry.npmjs.org` in `fetchedBy` AND in `notGranted.packages`, and the refusal wins.
+    for denied in [Some("left-pad"), None, Some("install-peers")] {
+        let p = compile_for(denied);
+        assert!(
+            p.net.enforce && p.net.rules.is_empty(),
+            "{denied:?} has no admitted entry, so it must compile to deny-all egress"
+        );
+        assert!(
+            !nub_sandbox::matcher::HostMatcher::new(&p.net).admits("nodejs.org"),
+            "{denied:?} must reach no host at all, $downloads included"
+        );
+    }
+}
+
 #[test]
 fn build_jail_interposition_confines_write_grants_interpreter_and_scrubs_env() {
     use std::collections::BTreeMap;
@@ -818,14 +884,13 @@ fn build_jail_interposition_confines_write_grants_interpreter_and_scrubs_env() {
         ),
         "the home secret set stays denied"
     );
-    // Egress curated: the install-time artifact hosts, nothing else. Windows cannot
-    // enforce a per-host policy, so its jail keeps the tighter deny-all.
-    assert!(p.net.enforce);
-    let hosts = nub_sandbox::matcher::HostMatcher::new(&p.net);
-    assert_eq!(hosts.admits("nodejs.org"), !cfg!(windows));
+    // Egress: NONE. `left-pad` carries no catalog entry, and egress is gated on package
+    // identity — the axis is exercised across all three resolution classes in
+    // `build_jail_interposition_gates_egress_on_package_identity`.
+    assert!(p.net.enforce && p.net.rules.is_empty());
     assert!(
-        !hosts.admits("evil.test"),
-        "a host the catalog does not name is never admitted"
+        !nub_sandbox::matcher::HostMatcher::new(&p.net).admits("nodejs.org"),
+        "an uncatalogued package reaches no host, $downloads included"
     );
     // Env: the constructed lifecycle env is KEPT minus credential-shaped keys.
     assert!(p.env.enforce);
