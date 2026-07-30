@@ -1,0 +1,273 @@
+// Build jail, network axis: a PER-PACKAGE egress gate enforced inside the confined Node.
+//
+// WHY THIS EXISTS. Coarse egress denial is free on Linux (a seccomp AF_INET ceiling) and on
+// macOS (Seatbelt pins egress to nub's proxy port). On Windows there is no unprivileged OS
+// lever: withholding an AppContainer's `internetClient` capability is the only one, and being
+// an AppContainer is precisely what breaks filesystem reads (a fresh LowBox profile sid is in
+// no DACL). WFP is admin-gated. So on Windows the gate is USERLAND.
+//
+// WHAT IT IS AND IS NOT. This is NOT a security boundary. A native addon opening a raw socket
+// bypasses it, and a non-Node child process is never reached by it. What it buys is the shape
+// the threat model actually has: a worm that publishes a NEW lifecycle hook into a package that
+// never had one, and phones home with plain `https.get` / `fetch` / `axios`. Blocking that
+// forces a worm to ship a per-platform native socket addon to spread, which is a dramatically
+// smaller blast radius. Measured against nub's 344-package corpus: 178 of the 179 packages that
+// contact any host enter through Node or an npm `.cmd` bin shim, so the preload reaches 99.4%
+// of the real surface; the one exception is a POSIX `.sh` that does not run on Windows.
+//
+// THE GATE IS PER-PACKAGE IDENTITY, NOT PER-HOST. A package with a catalog entry may use the
+// network — possibly all of it. A package with NO entry gets none. That is the whole defense:
+// when an attacker bolts a postinstall onto `chalk`, `chalk` has no entry, so the hook cannot
+// reach the network at all regardless of which host it wants. Host filtering is an optional
+// refinement layered on a permitted package, never the mechanism.
+//
+// THE SEAM. Every TCP egress path in Node bottoms out in `net.Socket.prototype.connect` —
+// measured: `http.get`, `http.request`, `fetch` (undici) and `net.connect` each call it exactly
+// once, so `axios`/`node-fetch`/`got`/`ws`/`tls`/`http2` are covered transitively by the one
+// patch rather than by chasing every high-level client. DNS and UDP are patched alongside it:
+// not for TCP coverage, which `connect` already has, but because a query NAME and a datagram
+// are each an exfil channel in their own right.
+//
+// DENIAL SHAPE IS DELIBERATE. A refused connection is delivered as an `error` EVENT carrying
+// `ECONNREFUSED`-shaped fields, not as a synchronous throw, because that is what every HTTP
+// client's existing error handling already expects — a throw from inside `connect` surfaces as
+// an unhandled exception instead of a rejected request. Denied DNS reports `ENOTFOUND` for the
+// same reason. The nub-specific reason rides along in `err.nubReason` for diagnostics without
+// changing the shape a package matches on.
+//
+// DELIVERY. Static `import` (not `require`) because this is preloaded as a `data:text/javascript`
+// ESM module via `--import`, the same channel as `windows_stdio_shim.js`: `defaultResolve`
+// short-circuits on `data:` before touching the filesystem, so the preload needs no grant and
+// the package it confines cannot tamper with it on disk.
+import net from "node:net";
+import dns from "node:dns";
+import dgram from "node:dgram";
+import cp from "node:child_process";
+
+// Captured at MODULE EVALUATION, which happens before any package code runs. This is what makes
+// the child-env repair below un-defeatable by the obvious move: a script that does
+// `delete process.env.NODE_OPTIONS` before spawning cannot erase a value already closed over.
+const OWN_NODE_OPTIONS = process.env.NODE_OPTIONS;
+
+// Replaced with a JSON literal by the Rust generator. Inlined rather than read from the
+// environment on purpose: a confined script can rewrite `process.env`, but it cannot reach
+// inside an already-evaluated `data:` module.
+const POLICY = __NUB_NET_POLICY_JSON__;
+
+const SENTINEL = "__nubJailNetGate";
+if (!globalThis[SENTINEL]) {
+  globalThis[SENTINEL] = true;
+  install();
+}
+
+function install() {
+  // A catalog-listed package with no host refinement gets NO patches at all — the permitted
+  // path stays byte-identical to unjailed Node, which is strictly better than installing
+  // permissive interceptors that still have to be reasoned about.
+  if (POLICY.allow === true && !POLICY.hosts) return;
+
+  // ── the predicate ────────────────────────────────────────────────────────────────────
+  //
+  // Loopback is permitted by default. It cannot carry data off the box, and a build that
+  // starts a local server (dev-server probes, test harnesses, IPC over TCP) is common enough
+  // that denying it buys nothing and breaks packages. Packages breaking is the cost this whole
+  // design is optimised against; a loopback residual is not.
+  const LOOPBACK = /^(127\.\d+\.\d+\.\d+|::1|0:0:0:0:0:0:0:1|localhost|.*\.localhost)$/i;
+  const loopbackOk = POLICY.loopback !== false;
+
+  function hostAllowed(host) {
+    if (host === undefined || host === null || host === "") return true; // no host: not egress
+    const h = String(host).replace(/^\[|\]$/g, "").toLowerCase();
+    if (loopbackOk && LOOPBACK.test(h)) return true;
+    if (POLICY.allow !== true) return false;
+    if (!POLICY.hosts) return true;
+    for (const pattern of POLICY.hosts) {
+      const p = String(pattern).toLowerCase();
+      if (p === h) return true;
+      // A leading `*.` matches proper subdomains ONLY — never the apex, and never a
+      // partial-label suffix, so `*.example.com` cannot admit `evilexample.com`.
+      if (p.startsWith("*.") && h.endsWith(p.slice(1)) && h.length > p.length - 1) return true;
+    }
+    return false;
+  }
+
+  // Windows and POSIX report different errno integers for the same condition; a package that
+  // reads `errno` rather than `code` must not be handed a value its own platform never emits.
+  const ECONNREFUSED_ERRNO = process.platform === "win32" ? -4078 : -61;
+  const ENOTFOUND_ERRNO = process.platform === "win32" ? -4058 : -3008;
+
+  const pkg = POLICY.package || "this package";
+  function denial(host, api) {
+    const target = host ? String(host) : "<unknown host>";
+    const err = new Error(
+      `nub build sandbox: blocked network access to ${target} by ${pkg}. Packages may only ` +
+        `reach the network if they carry an entry in nub's build catalog. If ${pkg} genuinely ` +
+        `needs network access, that is a catalog PR. To run its install scripts unsandboxed, ` +
+        `add to your package.json: "dependenciesMeta": { "${POLICY.package || "<package>"}": ` +
+        `{ "sandbox": false } }`,
+    );
+    err.code = "ECONNREFUSED";
+    err.errno = ECONNREFUSED_ERRNO;
+    err.syscall = "connect";
+    err.nubReason = "ERR_NUB_JAIL_NET_DENIED";
+    err.nubApi = api;
+    err.nubHost = target;
+    return err;
+  }
+
+  // ── TCP: the one seam that covers every client ───────────────────────────────────────
+  const origConnect = net.Socket.prototype.connect;
+  net.Socket.prototype.connect = function (...args) {
+    // ⚠️ TWO CALL SHAPES, and missing the second one silently disables the whole gate.
+    // `net.connect`, `http`, `https` and undici all run `normalizeArgs` themselves and then
+    // call this with a SINGLE argument: the array `[options, cb]` (net's internal
+    // `normalizedArgsSymbol` shape). Direct user code uses the documented `(options)` /
+    // `(port[, host])` / `(path)` forms. An `Array.isArray` guard that EXCLUDES the array
+    // therefore excludes every real client — measured: it let `http.get`, `fetch` and
+    // `net.connect` straight through while `dns`/`dgram` still denied, which reads exactly
+    // like "the TCP patch is not installed."
+    const raw = args[0];
+    const first = Array.isArray(raw) ? raw[0] : raw;
+    let host;
+    let isIpc = false;
+    if (first !== null && typeof first === "object") {
+      // A `path` option is a unix socket / Windows named pipe: IPC, not egress, and permitting
+      // it is required — Node's own inspector and many build tools use one.
+      if (first.path) isIpc = true;
+      // Node itself defaults a host-less `connect(port)` to localhost; mirror that rather than
+      // leaving `host` undefined, which the predicate would read as "not egress at all".
+      else host = first.host ?? first.hostname ?? "localhost";
+    } else if (typeof first === "string" && !/^\d+$/.test(first)) {
+      isIpc = true; // connect(path[, cb])
+    } else {
+      host = typeof args[1] === "string" ? args[1] : "localhost"; // connect(port) → localhost
+    }
+
+    if (isIpc || hostAllowed(host)) return origConnect.apply(this, args);
+
+    // Delivered as an `error` event, never a throw — see the header note on denial shape. The
+    // connection is never initiated, so this is a real deny and not a racing abort.
+    process.nextTick(() => this.destroy(denial(host, "net.Socket.connect")));
+    return this;
+  };
+
+  // ── DNS: an exfil channel in its own right (the query NAME carries the payload) ───────
+  const denyLookup = (host, cb, api) => {
+    const err = denial(host, api);
+    err.code = "ENOTFOUND";
+    err.errno = ENOTFOUND_ERRNO;
+    err.syscall = "getaddrinfo";
+    err.hostname = String(host);
+    process.nextTick(() => cb(err));
+  };
+
+  const origLookup = dns.lookup;
+  dns.lookup = function (hostname, options, callback) {
+    const cb = typeof options === "function" ? options : callback;
+    if (hostAllowed(hostname) || typeof cb !== "function") {
+      return origLookup.apply(this, arguments);
+    }
+    return denyLookup(hostname, cb, "dns.lookup");
+  };
+  if (dns.promises) {
+    const origP = dns.promises.lookup;
+    dns.promises.lookup = function (hostname, ...rest) {
+      if (hostAllowed(hostname)) return origP.apply(this, [hostname, ...rest]);
+      return Promise.reject(denial(hostname, "dns.promises.lookup"));
+    };
+  }
+  for (const fn of ["resolve", "resolve4", "resolve6", "resolveAny", "resolveTxt",
+                    "resolveCname", "resolveMx", "resolveNs", "resolveSrv", "resolvePtr",
+                    "resolveNaptr", "resolveSoa"]) {
+    const orig = dns[fn];
+    if (typeof orig !== "function") continue;
+    dns[fn] = function (hostname, ...rest) {
+      const cb = rest.find((a) => typeof a === "function");
+      if (hostAllowed(hostname) || typeof cb !== "function") {
+        return orig.apply(this, [hostname, ...rest]);
+      }
+      return denyLookup(hostname, cb, `dns.${fn}`);
+    };
+  }
+
+  // ── UDP: a datagram needs no handshake, so `connect` never sees it ───────────────────
+  const origSend = dgram.Socket.prototype.send;
+  dgram.Socket.prototype.send = function (...args) {
+    // send(msg[, offset, length][, port][, address][, cb]) — the address is the last string
+    // argument that is not the message itself.
+    const address = args.slice(1).filter((a) => typeof a === "string").pop();
+    if (hostAllowed(address)) return origSend.apply(this, args);
+    const err = denial(address, "dgram.send");
+    const cb = args.find((a) => typeof a === "function");
+    if (cb) process.nextTick(() => cb(err));
+    else process.nextTick(() => this.emit("error", err));
+    return undefined;
+  };
+  const origDgramConnect = dgram.Socket.prototype.connect;
+  dgram.Socket.prototype.connect = function (...args) {
+    const address = typeof args[1] === "string" ? args[1] : "localhost";
+    if (hostAllowed(address)) return origDgramConnect.apply(this, args);
+    process.nextTick(() => this.emit("error", denial(address, "dgram.connect")));
+    return undefined;
+  };
+
+  // ── children: keep the gate attached across a spawn ───────────────────────────────────
+  //
+  // MEASURED, both arms, before this existed: a spawned `node` inherits `NODE_OPTIONS` and is
+  // gated for free, but `delete process.env.NODE_OPTIONS` before the spawn produced a child that
+  // reached the sink — a one-line bypass. Re-stamping the captured value closes it, so defeating
+  // the gate now requires more than forgetting to inherit it.
+  //
+  // The proxy variables are for the case the preload can NEVER reach: a non-Node child. `curl`,
+  // `wget` and `git` all honour `http_proxy`/`https_proxy`, and so do the Node packages built on
+  // `proxy-from-env` (axios). Pointing them at a closed loopback port turns egress into a
+  // connection failure. This is additive only — it is not a boundary, a static binary or a client
+  // that ignores proxy env sails past it, and that residual is accepted.
+  const forceEnv = (env) => {
+    const out = { ...env };
+    if (OWN_NODE_OPTIONS !== undefined) out.NODE_OPTIONS = OWN_NODE_OPTIONS;
+    // Only under a FULL deny. Under `allow:true` with a host refinement a blackhole proxy would
+    // break the very hosts the catalog permitted, since `proxy-from-env` clients would route the
+    // permitted request into it.
+    if (POLICY.allow !== true) {
+      for (const k of ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"]) {
+        out[k] = "http://127.0.0.1:1";
+      }
+      delete out.NO_PROXY;
+      delete out.no_proxy;
+    }
+    return out;
+  };
+
+  // `envPairs` is the `KEY=value` array the async path has already materialised by this point;
+  // rewriting it is the only place that catches every async spawn regardless of entry point.
+  const origCpSpawn = cp.ChildProcess.prototype.spawn;
+  cp.ChildProcess.prototype.spawn = function (options) {
+    if (Array.isArray(options?.envPairs)) {
+      const kept = options.envPairs.filter(
+        (p) => !/^(NODE_OPTIONS|https?_proxy|HTTPS?_PROXY|ALL_PROXY|all_proxy|NO_PROXY|no_proxy)=/.test(p),
+      );
+      const forced = forceEnv({});
+      options.envPairs = kept.concat(Object.entries(forced).map(([k, v]) => `${k}=${v}`));
+    }
+    return origCpSpawn.call(this, options);
+  };
+
+  // The sync family bottoms out in a module-local `spawnSync` that never reaches the seam above,
+  // so it needs its own repair. An absent `options.env` means "inherit `process.env`" — which the
+  // script may already have edited — so it must be materialised rather than left alone.
+  const origCpSpawnSync = cp.spawnSync;
+  cp.spawnSync = function (file, argsOrOptions, maybeOptions) {
+    let args = argsOrOptions;
+    let opts = maybeOptions;
+    if (!Array.isArray(argsOrOptions) && argsOrOptions !== null && typeof argsOrOptions === "object") {
+      args = undefined;
+      opts = argsOrOptions;
+    }
+    const patched = { ...(opts || {}) };
+    patched.env = forceEnv(patched.env || process.env);
+    return args === undefined
+      ? origCpSpawnSync(file, patched)
+      : origCpSpawnSync(file, args, patched);
+  };
+}
