@@ -1,7 +1,13 @@
 # Branch-scoped macOS probe (see .claude/skills/ci-adhoc-test) — NO PR needed.
-# Answers whether macOS permits a genuinely rerooted filesystem (chroot) with SIP ENABLED,
-# which decides whether the build jail can stop being a path allowlist. Needs sudo, a devfs
-# mount and a multi-GB jail, so it must run on an ephemeral runner, never the dev host.
+# Answers whether macOS permits a genuinely rerooted filesystem (chroot), which decides
+# whether the build jail can stop being a path allowlist. Needs sudo, a devfs mount and a
+# multi-GB jail, so it must run on an ephemeral runner, never the dev host.
+#
+# Two separable questions, hence two jobs. `gate` asks whether AMFI lets you ENTER a chroot
+# and needs a SIP-ENABLED machine to mean anything (run 1 measured macos-latest as SIP-off,
+# so it sweeps labels looking for one). `jail` asks whether anything WORKS once inside —
+# realpath, identity leakage, node-gyp ABI — none of which involve AMFI, so a SIP-off runner
+# answers those honestly.
 name: macos-chroot-probe
 on:
   push:
@@ -15,19 +21,26 @@ permissions:
   contents: read
 
 jobs:
-  probe:
-    name: chroot / AMFI gate (${{ matrix.os }})
+  gate:
+    name: AMFI chroot gate (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 12
     strategy:
       fail-fast: false
       matrix:
-        # Only labels guaranteed to exist — an unknown label queues until timeout rather
-        # than failing fast, which would burn the whole 45-minute budget on nothing.
-        os: [macos-latest]
+        os: [macos-latest, macos-15, macos-14]
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
-      - name: Probe
-        run: bash tests/macos-chroot-probe/probe.sh 2>&1
+      - run: bash tests/macos-chroot-probe/gate.sh 2>&1
+
+  jail:
+    name: jail viability (macos-latest)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - run: bash tests/macos-chroot-probe/jail.sh 2>&1
