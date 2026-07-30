@@ -131,6 +131,25 @@ mod tests {
         }
     }
 
+    /// A REFUSAL BEATS AN OBSERVATION — the third clause of the resolution rule, pinned at the
+    /// table rather than only at the compiled policy, because `build.rs` is what enforces it
+    /// and a regression there would be silent.
+    ///
+    /// `install-peers` is the live case and the reason this is not hypothetical: it appears
+    /// under `registry.npmjs.org` in `fetchedBy` because its postinstall shells a REAL
+    /// `npm install` into the consumer's tree, which is exactly the ground it is refused on. The
+    /// two records are not contradictory — one is an observation, one is a verdict — so the
+    /// generator subtracts rather than failing, and the grant must not survive.
+    #[test]
+    fn a_refused_package_gets_no_grant_however_it_was_observed() {
+        assert_eq!(
+            package_network(Some("install-peers")),
+            PackageNetwork::NoEntry,
+            "install-peers is in notGranted.packages, so no observation of what it fetched may \
+             hand it egress"
+        );
+    }
+
     /// The table has to actually cover the ecosystem it claims to, or the model above is
     /// describing an empty set. The corpus found 146 network-needing packages; the inversion
     /// plus the full grants must account for essentially all of them.
