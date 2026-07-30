@@ -121,9 +121,41 @@ public static class Probe
 
     [DllImport("userenv.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern int DeriveAppContainerSidFromAppContainerName(string name, out IntPtr sid);
-    [DllImport("userenv.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    static extern bool DeriveCapabilitySidsFromName(string name,
-        out IntPtr groupSids, out uint groupCount, out IntPtr capSids, out uint capCount);
+    // The export lives in different modules across SKUs, and asking the wrong one returns false for
+    // EVERY name — which reads as "nothing derived" rather than "wrong dll". Resolved dynamically
+    // below, with the winning module reported, after a userenv-only first revision derived 0/530.
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+    static extern IntPtr GetProcAddress(IntPtr mod, string name);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr LoadLibraryW(string name);
+
+    delegate bool DeriveCapsFn(string name, out IntPtr groupSids, out uint groupCount,
+        out IntPtr capSids, out uint capCount);
+    static DeriveCapsFn deriveCaps = null;
+    static string deriveCapsFrom = "(unresolved)";
+
+    static void ResolveDeriveCaps()
+    {
+        string[] mods = new string[] { "kernelbase.dll", "userenv.dll", "advapi32.dll",
+            "api-ms-win-security-capability-l1-1-0.dll", "sechost.dll" };
+        for (int i = 0; i < mods.Length; i++)
+        {
+            IntPtr m = LoadLibraryW(mods[i]);
+            if (m == IntPtr.Zero) continue;
+            IntPtr p = GetProcAddress(m, "DeriveCapabilitySidsFromName");
+            if (p == IntPtr.Zero) continue;
+            deriveCaps = (DeriveCapsFn)Marshal.GetDelegateForFunctionPointer(p, typeof(DeriveCapsFn));
+            deriveCapsFrom = mods[i];
+            return;
+        }
+    }
+
+    /// RtlIsCapabilitySid — the kernel's OWN predicate for "may this sid go in a capability array".
+    /// Calling it directly turns NtCreateLowBoxToken's single STATUS_INVALID_PARAMETER (which says
+    /// only that SOMETHING in the array was rejected) into a per-sid verdict, which is the difference
+    /// between "the capability is unholdable" and "one of the sids I batched was bad".
+    [DllImport("ntdll.dll")] static extern bool RtlIsCapabilitySid(IntPtr sid);
+    [DllImport("ntdll.dll")] static extern bool RtlIsPackageSid(IntPtr sid);
 
     [DllImport("ntdll.dll")]
     static extern int NtCreateLowBoxToken(out IntPtr token, IntPtr existing, uint access,
@@ -603,7 +635,9 @@ public static class Probe
                         else W("    value " + vns[vi] + " = " + v);
                     }
                     string[] sks = k.GetSubKeyNames();
-                    W("    subkeys=" + sks.Length);
+                    // The CapabilityClasses subkey names ARE the class taxonomy, which is what
+                    // identifies the 65536 family; print them rather than only counting them.
+                    W("    subkeys=" + sks.Length + (sks.Length <= 16 ? "  " + string.Join(", ", sks) : ""));
                     for (int si = 0; si < sks.Length; si++)
                         if (!names.Contains(sks[si])) names.Add(sks[si]);
                 }
@@ -629,15 +663,27 @@ public static class Probe
         };
         for (int i = 0; i < extra.Length; i++) if (!names.Contains(extra[i])) names.Add(extra[i]);
         W("  candidate capability names: " + names.Count);
+        // The AppSilo family is what the ancestor chain names, so list every candidate that looks
+        // like one — this is the machine telling us the family exists, independent of derivation.
+        StringBuilder iso = new StringBuilder();
+        for (int i = 0; i < names.Count; i++)
+            if (names[i].IndexOf("isolated", StringComparison.OrdinalIgnoreCase) >= 0
+                || names[i].IndexOf("appSilo", StringComparison.OrdinalIgnoreCase) >= 0)
+                iso.Append(names[i]).Append("  ");
+        W("  isolated/appSilo-shaped names: " + (iso.Length == 0 ? "(none)" : iso.ToString()));
 
+        ResolveDeriveCaps();
+        Fact("DeriveCapabilitySidsFromName-resolved-from", deriveCapsFrom);
         Dictionary<string, string> sidToName = new Dictionary<string, string>();
         int derived = 0;
-        for (int i = 0; i < names.Count; i++)
+        int deriveErr = 0;
+        for (int i = 0; deriveCaps != null && i < names.Count; i++)
         {
             IntPtr gs, cs; uint gc, cc;
             try
             {
-                if (!DeriveCapabilitySidsFromName(names[i], out gs, out gc, out cs, out cc)) continue;
+                if (!deriveCaps(names[i], out gs, out gc, out cs, out cc))
+                { if (deriveErr == 0) deriveErr = Marshal.GetLastWin32Error(); continue; }
                 derived++;
                 for (uint j = 0; j < cc; j++)
                 {
@@ -652,7 +698,8 @@ public static class Probe
             }
             catch (Exception) { }
         }
-        Fact("capability-names-derived", derived + "/" + names.Count);
+        Fact("capability-names-derived", derived + "/" + names.Count
+            + (deriveErr != 0 ? " first-err=" + deriveErr : ""));
         Fact("distinct-derived-sids", sidToName.Count.ToString());
         int matchedCount = 0;
         for (int i = 0; i < harvested.Count; i++)
@@ -749,6 +796,54 @@ public static class Probe
             return RestrictedToken("S-1-16-4096", new string[] { "S-1-5-11" }); });
         Add("R8-restrict-users-authusers-self", delegate {
             return RestrictedToken("S-1-16-4096", new string[] { "S-1-5-32-545", "S-1-5-11", meSid }); });
+
+        // ═══ 3a — WHY a capability is or is not holdable, per sid ═══
+        //
+        // NtCreateLowBoxToken returns ONE status for the whole array, so a refusal cannot be
+        // attributed to a particular sid — and "the batch was rejected" is not an answer to "can the
+        // sid the disk grants be held". RtlIsCapabilitySid is the kernel's own predicate for exactly
+        // that question, so asking it per sid converts the batch refusal into an attributable result.
+        // The shape probes discriminate the three capability-sid classes: well-known (S-1-15-3-<n>),
+        // hash-named (S-1-15-3-1024-<8>), and the AppSilo class the disk actually names
+        // (S-1-15-3-65536-<8>).
+        W("");
+        W("SECTION 3a  RtlIsCapabilitySid / RtlIsPackageSid, per sid");
+        List<string> shapeProbes = new List<string>();
+        shapeProbes.Add("S-1-15-3-1");
+        shapeProbes.Add("S-1-15-3-12");
+        shapeProbes.Add("S-1-15-3-1024-1-2-3-4-5-6-7-8");
+        shapeProbes.Add("S-1-15-3-65536-1-2-3-4-5-6-7-8");
+        shapeProbes.Add("S-1-15-3-65537-1-2-3-4-5-6-7-8");
+        shapeProbes.Add("S-1-15-3-1-2-3-4-5");
+        shapeProbes.Add("S-1-15-2-1");
+        shapeProbes.Add("S-1-15-2-2");
+        shapeProbes.Add("S-1-5-32-545");
+        shapeProbes.Add(meSid);
+        for (int i = 0; i < harvested.Count; i++) shapeProbes.Add(harvested[i]);
+        for (int i = 0; i < shapeProbes.Count; i++)
+        {
+            IntPtr s = StrSid(shapeProbes[i]);
+            if (s == IntPtr.Zero) { W("  sid " + shapeProbes[i] + " = UNPARSEABLE"); continue; }
+            bool isCap = false, isPkg = false;
+            try { isCap = RtlIsCapabilitySid(s); } catch (Exception) { }
+            try { isPkg = RtlIsPackageSid(s); } catch (Exception) { }
+            // The authoritative test is not the predicate but whether the syscall accepts it alone.
+            string lb;
+            try
+            {
+                IntPtr b = OwnToken();
+                try
+                {
+                    IntPtr t = LowBoxToken(b, pkg, new string[] { shapeProbes[i] });
+                    CloseHandle(t); lb = "ACCEPTED";
+                }
+                finally { CloseHandle(b); }
+            }
+            catch (Exception e) { lb = "refused " + e.Message.Replace("NtCreateLowBoxToken: ", ""); }
+            W(string.Format("  sid {0,-100} isCapability={1,-5} isPackage={2,-5} asLowBoxCapability={3}",
+                shapeProbes[i], isCap, isPkg, lb));
+            LocalFree(s);
+        }
 
         // The remaining construction paths, reported as facts rather than arms because they either
         // produce no token or produce one already covered above.
