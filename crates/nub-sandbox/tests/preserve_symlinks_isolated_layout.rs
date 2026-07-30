@@ -133,4 +133,35 @@ fn preserve_symlinks_silently_resolves_the_wrong_version_in_an_isolated_layout()
         !with.starts_with("threw:"),
         "the failure must be SILENT to be worth this test; a throw would be recoverable"
     );
+
+    // THE THIRD ARM, and the reason this file is the right home for it: the repair that ships
+    // instead of the flag is measured on the SAME fixture, one line below the hazard it must not
+    // reintroduce. `realpath_shim_node_options` tolerates a refused `lstat` only for a strict
+    // ancestor of a granted root and still reads every symlink at or below one, so the store-cell
+    // link resolves and the private dependency wins. If this ever answers `bar@1.0.0` the repair
+    // has become the flag and must not ship — the full differential, including the simulated
+    // jail that makes the tolerance actually fire, is `realpath_shim_semantics`.
+    let repaired = resolve_with_shim(root);
+    assert_eq!(
+        repaired, "bar@2.0.0",
+        "the shipped realpath repair must resolve like the control, not like the flag \
+         (got {repaired:?})"
+    );
+}
+
+/// The same fixture under the shipping realpath repair. The force seam activates the shim off
+/// Windows; the root is passed as a jail anchor because that is what scopes its tolerance rule.
+fn resolve_with_shim(root: &Path) -> String {
+    let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let out = Command::new("node")
+        .arg("script.js")
+        .current_dir(root)
+        .env(
+            "NODE_OPTIONS",
+            nub_sandbox::realpath_shim_node_options(std::slice::from_ref(&canonical)),
+        )
+        .env("__NUB_JAIL_REALPATH_SHIM_FORCE", &canonical)
+        .output()
+        .expect("run node");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }

@@ -572,9 +572,19 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
 /// WHY NOT REDIRECT REALPATH AT ITS NATIVE TWIN. That was the first candidate, and it is
 /// REFUTED by measurement: `fs.realpathSync.native` is refused under this jail too, with
 /// `EPERM ... realpath` on a file the jail GRANTED and Node can `readFileSync` in the same
-/// breath (run 30460192608). Its single `GetFinalPathNameByHandleW` needs more than the leaf
-/// handle the jail allows, so pointing the JS realpath at it buys nothing. Both realpath
-/// implementations are unavailable, which leaves only NOT CALLING one.
+/// breath (run 30460192608, re-measured with attribution in 30513204884 — both images, every
+/// path shape tried, including one whose whole ancestor chain is AAP-granted bar `C:\`).
+///
+/// The REASON stated here was wrong, and the corrected one matters because it closes a route
+/// rather than leaving one open. It said `GetFinalPathNameByHandleW` needs more than the leaf
+/// handle the jail allows; the documented per-component sensitivity of that call is scoped to
+/// SMB, which on local NTFS would have left it available. The refusal is EARLIER: libuv's
+/// `fs__realpath` opens with `dwShareMode=0`, so if its `CreateFileW` had succeeded, holding
+/// the file open elsewhere would turn the retry into ERROR_SHARING_VIOLATION — libuv's `EBUSY`.
+/// Held, it is still `EPERM`, i.e. ERROR_ACCESS_DENIED, so the OPEN is what the LowBox check
+/// refuses and the normalized-name query is never reached. `fs.openSync` on the same leaf
+/// succeeds in the same arm, which is what makes that a statement about libuv's call shape
+/// rather than about the file.
 ///
 /// WHAT IT WOULD DO. `--preserve-symlinks-main` clears the realpath in `resolveMainPath`
 /// (`internal/modules/run_main.js`) and `--preserve-symlinks` clears the ones in `_findPath`
@@ -679,6 +689,71 @@ pub fn build_jail_node_options(package_name: Option<&str>) -> String {
         data_url_import(WINDOWS_STDIO_SHIM),
         net_gate_node_options(package_name)
     )
+}
+
+/// The JS that repairs `fs.realpath*` inside a confined Node. Kept as a FILE for the same
+/// reasons [`WINDOWS_STDIO_SHIM`] is, and un-gated for the same reason: the repair is a Windows
+/// fact, but whether the walk reproduces Node's own resolution is not, and gating the bytes
+/// would leave the part most likely to break untestable off Windows.
+const WINDOWS_REALPATH_SHIM: &str = include_str!("../backend/windows_realpath_shim.js");
+
+/// The token the realpath shim reserves for the jail's granted anchors. Substituted, never
+/// appended — the shim reads it as a bare initializer, so a MISSING placeholder yields a module
+/// that throws on an undefined identifier and aborts the confined Node at startup rather than
+/// degrading to one whose tolerance rule is scoped to nothing.
+const REALPATH_ROOTS_PLACEHOLDER: &str = "__NUB_REALPATH_ROOTS_JSON__";
+
+/// The `--import` term repairing module resolution under the AppContainer, plus the
+/// `--preserve-symlinks-main` the entry point needs alongside it.
+///
+/// THE DEFECT. Node's JS `realpathSync` opens every path prefix as a TARGET, starting with the
+/// volume root. Bypass-traverse exempts INTERMEDIATE components of one open; it does not make
+/// an ancestor openable as a target. So `lstat 'C:\'` is refused and every `require()` of an
+/// absolute path dies `EPERM` on a file the same process can `readFileSync`.
+///
+/// WHY THIS EXISTS ALONGSIDE THE BACKEND'S ANCESTOR REPAIR, not instead of it. `windows.rs`
+/// makes the ancestor chain openable from both ends — a non-inherited traverse ACE where the
+/// unprivileged user can write one, the capability SIDs Windows already granted where it cannot
+/// — and that repair is best-effort BY DESIGN: a refused ACE write is skipped, and a path whose
+/// DACL names no harvestable capability yields nothing to request. This term is what keeps the
+/// jail working in exactly those cases, and it costs nothing when the ancestor repair did land:
+/// with every `lstat` succeeding, the tolerance rule never fires and the walk is Node's own.
+///
+/// WHY NOT THE PRESERVE-SYMLINKS PAIR, which also works. Under nub's default `Isolated` linker
+/// `--preserve-symlinks` resolves a dependency under its LINK path, so the parent walk skips the
+/// store cell holding that package's private dependencies and silently binds an unrelated
+/// top-level version — see [`windows_realpath_node_options`], which stays unwired for that
+/// reason. This repair keeps resolution intact instead: it only asserts that a component the
+/// jail refuses to interrogate is a plain directory, and those are exactly the ones above every
+/// grant.
+///
+/// `--preserve-symlinks-main` IS still required: `--import` preloads run inside
+/// `executeUserEntryPoint`, after `resolveMainPath` (`internal/modules/run_main.js`), so the
+/// entry point's own realpath happens before the shim exists. Its known residual — an entry
+/// reached THROUGH a symlink roots the `node_modules` walk at the link path — does not arise for
+/// a lifecycle spawn: aube hands the script a store-cell REAL path as `package_dir`
+/// (`materialized_pkg_dir`, used as `current_dir` in `install/lifecycle.rs`), so no lifecycle
+/// entry arrives through a link.
+///
+/// An empty `roots` yields an empty string: with nothing to scope the tolerance to, the shim
+/// would be inert anyway, and stamping an inert preload only widens the `NODE_OPTIONS` surface.
+pub fn realpath_shim_node_options(roots: &[std::path::PathBuf]) -> String {
+    if roots.is_empty() {
+        return String::new();
+    }
+    let json = serde_json::to_string(
+        &roots
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+    )
+    .expect("a list of strings always serializes");
+    let js = WINDOWS_REALPATH_SHIM.replace(REALPATH_ROOTS_PLACEHOLDER, &json);
+    debug_assert!(
+        !js.contains(REALPATH_ROOTS_PLACEHOLDER),
+        "windows_realpath_shim.js must contain exactly one {REALPATH_ROOTS_PLACEHOLDER}"
+    );
+    format!("--preserve-symlinks-main {}", data_url_import(&js))
 }
 
 /// The JS enforcing per-package egress inside the confined Node. Kept as a FILE rather than a

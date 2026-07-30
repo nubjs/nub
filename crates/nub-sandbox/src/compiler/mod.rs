@@ -21,7 +21,7 @@ mod preset;
 mod resolve;
 mod reuse;
 
-pub use defaults::{build_jail_node_options, net_gate_node_options};
+pub use defaults::{build_jail_node_options, net_gate_node_options, realpath_shim_node_options};
 #[cfg(windows)]
 pub use defaults::{
     windows_build_jail_node_options, windows_native_realpath_shim_node_options,

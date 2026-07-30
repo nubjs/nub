@@ -65,7 +65,14 @@ function install(roots) {
     return -1;
   };
 
-  const norm = (p) => (isWindows ? path.resolve(p).toLowerCase() : path.resolve(p));
+  // The `\\?\` / `\\?\UNC\` prefixes are stripped for COMPARISON only — the walk still passes the
+  // caller's own spelling to `lstat`. Without this a long-path spelling of a jailed path finds no
+  // matching root and the tolerance never fires, which measured as `native-longpath-granted=ERR`
+  // in an otherwise repaired arm (run 30513204884).
+  const stripLongPrefix = (p) =>
+    p.startsWith("\\\\?\\UNC\\") ? `\\\\${p.slice(8)}` : p.startsWith("\\\\?\\") ? p.slice(4) : p;
+  const norm = (p) =>
+    isWindows ? stripLongPrefix(path.resolve(p)).toLowerCase() : path.resolve(p);
   const normRoots = roots.map(norm);
 
   // MICROSOFT'S PREDICATE, generalised from one app root to the jail's several granted anchors:
