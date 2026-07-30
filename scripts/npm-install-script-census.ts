@@ -539,7 +539,8 @@ const stageWeekly = async (names: string[], label: string): Promise<Map<string, 
       // attempt. A throttled batch is left uncached and picked up by the next run.
       for (const n of batch) {
         const s = await getJSON(POINT + enc(n));
-        record(n, s.ok ? Number((s.body as { downloads?: number }).downloads ?? 0) : 0);
+        if (s.ok) record(n, Number((s.body as { downloads?: number }).downloads ?? 0));
+        else unresolved.push(n);
       }
     } else {
       unresolved.push(...batch);
@@ -547,10 +548,17 @@ const stageWeekly = async (names: string[], label: string): Promise<Map<string, 
     bar(`${label} bulk`, ++done, batches.length);
   });
 
+  // A FAILED LOOKUP MUST NOT BE CACHED AS ZERO. Recording 0 for a throttled
+  // request makes the package read as below-threshold forever, and because the
+  // zero is cached, a re-run will not correct it — the census silently loses real
+  // members. This bug put 431 zeros in the cache and dropped 219 packages from a
+  // band whose LOWEST member has 54.6M monthly downloads. Leave a failure
+  // uncached so a later run retries it, and count it as unresolved.
   done = 0;
   await pmap(scoped, CONCURRENCY, async (n) => {
     const r = await getJSON(POINT + enc(n));
-    record(n, r.ok ? Number((r.body as { downloads?: number }).downloads ?? 0) : 0);
+    if (r.ok) record(n, Number((r.body as { downloads?: number }).downloads ?? 0));
+    else unresolved.push(n);
     bar(`${label} scoped`, ++done, scoped.length);
   });
 
@@ -571,7 +579,7 @@ const stageWeekly = async (names: string[], label: string): Promise<Map<string, 
           record(n, e && typeof e.downloads === "number" ? e.downloads : 0);
         }
       } else {
-        failures.push({ url: `weekly batch of ${batch.length}`, status: r.status });
+        for (const n of batch) failures.push({ url: `weekly ${n}`, status: r.status });
       }
       bar(`${label} retry`, ++retried, rebatch.length);
     });
@@ -718,6 +726,18 @@ const main = async (): Promise<void> => {
 
   const rank = STAGE === undefined || STAGE === "rank" ? await stageRank() : loadRank();
   if (STAGE === "rank") return;
+
+  // PREWARM. The two bottlenecks sit on different hosts — npm's download API
+  // throttles to ~76 lookups/min while the registry's packuments come off a CDN
+  // that never throttled across ~6,400 control requests — so the manifest fetch
+  // can run concurrently with, rather than after, the download sweep. This stage
+  // populates the manifest cache for the top `--prewarm-top` ranked names
+  // independently of the threshold, taking the registry work off the critical path.
+  if (STAGE === "prewarm") {
+    const names = rank.slice(0, num("--prewarm-top", 10_000)).map((r) => r.name);
+    await stageManifests(names);
+    return;
+  }
 
   // The seed control set: names that must appear in the census even if the
   // ranking sweep never surfaced them, so a pipeline hole shows up as an explicit
