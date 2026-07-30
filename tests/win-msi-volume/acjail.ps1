@@ -154,19 +154,28 @@ public static class AcJail
 
     public static int LastErr;
 
-    /// A token with `BUILTIN\Administrators` DENY-ONLY and every privilege but
-    /// `SeChangeNotifyPrivilege` deleted — i.e. an admin-stripped version of this process's own
-    /// principal, suitable for `RunImpersonated`. It is what the "could nub repair the MSI's DACL
-    /// without elevation?" arm impersonates.
+    /// An admin-stripped version of this process's own principal, suitable for `RunImpersonated` —
+    /// `BUILTIN\Administrators` deny-only, plus privileges removed. It is what the "could nub repair
+    /// the MSI's DACL without elevation?" arm impersonates.
     ///
-    /// It is a SYNTHESIZED principal, not a separate standard-user account: the user SID survives,
-    /// so `HKCU` and `%LOCALAPPDATA%` are still an admin's profile (the same residual
-    /// MECHANISM-FACTS §5h records for the de-elevated lane). That is fine for THIS question, which
-    /// is only about whether the authority to rewrite a DACL on an admin-owned path survives.
-    public static long DeElevatedToken()
+    /// `hardDelete` IS THE WHOLE POINT OF THE PARAMETER, and run 1 is why it exists.
+    /// `DISABLE_MAX_PRIVILEGE` only **disables** privileges; a disabled privilege is still HELD and
+    /// can be re-enabled with `AdjustTokenPrivileges`, which .NET's `Set-Acl` path does for
+    /// `SeSecurityPrivilege` / `SeRestorePrivilege` / `SeTakeOwnershipPrivilege` when it needs them.
+    /// So the `false` variant measured an admin who had merely put his authority down, and reported
+    /// that `C:\Program Files\nodejs` was rewritable unprivileged — the exact shape of a control that
+    /// confirms a false claim. `true` enumerates the token's privileges and DELETES every one but
+    /// `SeChangeNotifyPrivilege`, which is irreversible. Both variants are run and reported so the
+    /// artifact stays visible rather than being quietly corrected away.
+    ///
+    /// Either way this is a SYNTHESIZED principal, not a separate standard-user account: the user SID
+    /// survives, so `HKCU` and `%LOCALAPPDATA%` are still an admin's profile (the same residual
+    /// MECHANISM-FACTS §5h records). That is fine for THIS question, which is only about whether the
+    /// authority to rewrite a DACL on an admin-owned path survives.
+    public static long DeElevatedToken(bool hardDelete)
     {
         LastErr = 0;
-        IntPtr src = IntPtr.Zero, admins = IntPtr.Zero, buf = IntPtr.Zero;
+        IntPtr src = IntPtr.Zero, admins = IntPtr.Zero, buf = IntPtr.Zero, privBuf = IntPtr.Zero;
         try
         {
             if (!OpenProcessToken(GetCurrentProcess(),
@@ -179,19 +188,61 @@ public static class AcJail
             saa.Attributes = 0;
             buf = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(SID_AND_ATTRIBUTES)));
             Marshal.StructureToPtr(saa, buf, false);
+
+            uint flags = hardDelete ? 0 : DISABLE_MAX_PRIVILEGE;
+            uint deleteCount = 0;
+            if (hardDelete)
+            {
+                LUID keep;
+                if (!LookupPrivilegeValueW(null, "SeChangeNotifyPrivilege", out keep))
+                { LastErr = Marshal.GetLastWin32Error(); return 0; }
+                uint need = 0;
+                GetTokenInformation(src, TokenPrivileges, IntPtr.Zero, 0, out need);
+                IntPtr q = Marshal.AllocHGlobal((int)need);
+                try
+                {
+                    if (!GetTokenInformation(src, TokenPrivileges, q, need, out need))
+                    { LastErr = Marshal.GetLastWin32Error(); return 0; }
+                    int count = Marshal.ReadInt32(q);
+                    int stride = Marshal.SizeOf(typeof(LUID_AND_ATTRIBUTES));
+                    var del = new System.Collections.Generic.List<LUID_AND_ATTRIBUTES>();
+                    for (int i = 0; i < count; i++)
+                    {
+                        LUID_AND_ATTRIBUTES la = (LUID_AND_ATTRIBUTES)Marshal.PtrToStructure(
+                            new IntPtr(q.ToInt64() + 4 + (long)i * stride), typeof(LUID_AND_ATTRIBUTES));
+                        if (la.Luid.LowPart == keep.LowPart && la.Luid.HighPart == keep.HighPart) continue;
+                        la.Attributes = 0;
+                        del.Add(la);
+                    }
+                    if (del.Count > 0)
+                    {
+                        privBuf = Marshal.AllocHGlobal(stride * del.Count);
+                        for (int i = 0; i < del.Count; i++)
+                            Marshal.StructureToPtr(del[i], new IntPtr(privBuf.ToInt64() + (long)i * stride), false);
+                    }
+                    deleteCount = (uint)del.Count;
+                }
+                finally { Marshal.FreeHGlobal(q); }
+            }
+
             IntPtr tok;
-            if (!CreateRestrictedToken(src, DISABLE_MAX_PRIVILEGE, 1, buf, 0, IntPtr.Zero,
+            if (!CreateRestrictedToken(src, flags, 1, buf, deleteCount, privBuf,
                     0, IntPtr.Zero, out tok))
             { LastErr = Marshal.GetLastWin32Error(); return 0; }
             return tok.ToInt64();
         }
         finally
         {
+            if (privBuf != IntPtr.Zero) Marshal.FreeHGlobal(privBuf);
             if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf);
             if (admins != IntPtr.Zero) LocalFree(admins);
             if (src != IntPtr.Zero) CloseHandle(src);
         }
     }
+
+    /// The privilege list of an arbitrary token handle, so an impersonation arm can prove what it is
+    /// actually running as instead of assuming the construction worked.
+    public static string PrivsOf(long token) { return PrivsOfToken(new IntPtr(token)); }
 
     public static string CreateProfile(string name)
     {
@@ -494,6 +545,20 @@ function Get-AceRightsFor([string]$path, [string]$sid) {
   } catch { return "unreadable:$($_.Exception.GetType().Name)" }
 }
 
+# Every ACE's trustee AS A SID. `GetAccessRules(…, [SecurityIdentifier])` asks the framework to hand
+# back SID-form identities rather than translating `NTAccount` strings afterwards — RUN 1 IS WHY:
+# `IdentityReference.Translate([SecurityIdentifier])` silently produced no SIDs, so
+# `has-all-application-packages` read False for `C:\Program Files` while the printed ACE list plainly
+# showed both app-package ACEs on it. The derived boolean lied; only the raw dump caught it. Both are
+# emitted for exactly that reason — a derived cell must always be checkable against the raw one.
+function Get-DaclSids($acl) {
+  if ($null -eq $acl) { return @() }
+  try {
+    return @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |
+      ForEach-Object { $_.IdentityReference.Value })
+  } catch { return @("translate-failed:$($_.Exception.GetType().Name)") }
+}
+
 # Structured DACL dump: every ACE with its trustee, rights, inheritance and whether it was
 # inherited, plus the owner and whether the DACL is PROTECTED (inheritance disabled). The MSI
 # question turns on exactly those last two: a `D:PAI` descriptor is why nothing propagates in from
@@ -508,9 +573,8 @@ function Show-Dacl([string]$label, [string]$path) {
     W ("    ace[$label] " + $a.IdentityReference.Value + " | " + $a.AccessControlType + " | " +
        $a.FileSystemRights + " | inherit=" + $a.InheritanceFlags + " | inherited=" + $a.IsInherited)
   }
-  $sids = @($acl.Access | ForEach-Object {
-    try { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value }
-    catch { $_.IdentityReference.Value } })
+  $sids = Get-DaclSids $acl
+  Fact "dacl/$label/sids" ($sids -join ',')
   Fact "dacl/$label/has-all-application-packages" ($sids -contains 'S-1-15-2-1')
   Fact "dacl/$label/has-all-restricted-application-packages" ($sids -contains 'S-1-15-2-2')
   Fact "dacl/$label/any-appcontainer-sid" (@($sids | Where-Object { $_ -like 'S-1-15-2-*' }).Count)

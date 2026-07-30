@@ -67,6 +67,8 @@ function New-MsiWorld {
       '__launch' = (C 'rc=0 isAC=1'); '__lines' = (C 4)
     }
     'ac-exec-toolcache'         = @{ 'exec-inline' = (C 'OK'); '__launch' = (C 'rc=0 isAC=1'); '__lines' = (C 1) }
+    'plain-progfiles-npm'       = @{ 'entry-ran' = (C 'OK' 'log:10.9.4'); '__launch' = (C 'rc=0'); '__lines' = (C 1) }
+    'ac-exec-progfiles-npm'     = @{ 'entry-ran' = (C 'ERR' 'log:MODULE_NOT_FOUND'); '__launch' = (C 'rc=1 isAC=1'); '__lines' = (C 6) }
     'ac-read-progfiles'         = @{
       'cwd-at-entry' = (C 'OK'); 'stat-c-root' = (C 'ERR'); 'read-system32-hosts' = (C 'OK')
       'read-progfiles-node-exe' = (C 'ERR'); 'stat-progfiles-node-exe' = (C 'ERR')
@@ -78,11 +80,14 @@ function New-MsiWorld {
 }
 function New-MsiFacts {
   return @{
+    'msi-install-succeeded' = $true; 'msi-install-why' = 'True '
     'msi-has-aap' = $false; 'msi-has-arap' = $false; 'msi-protected' = $true
     'msi-owner' = 'NT SERVICE\TrustedInstaller'; 'toolcache-has-aap' = $true
     'sibling-has-aap' = $true; 'sibling-name' = '7/12'
     'deelev-admin' = $false; 'deelev-own-profile-write' = 'OK'
     'deelev-progfiles-write' = 'ERR UnauthorizedAccessException'
+    'deelev-disable-artifact' = 'disable-variant pf-write=OK'
+    'deelev-delete-privs' = 'SeChangeNotifyPrivilege:on'
   }
 }
 
@@ -98,12 +103,14 @@ $w = New-MsiWorld
 $w['ac-exec-progfiles'] = @{ 'exec-inline' = (C 'OK'); '__launch' = (C 'rc=0 isAC=1'); '__lines' = (C 1) }
 $w['ac-read-progfiles']['read-progfiles-node-exe'] = (C 'OK')
 $w['ac-read-progfiles']['read-npm-package-json'] = (C 'OK')
+$w['ac-exec-progfiles-npm']['entry-ran'] = (C 'OK' 'log:10.9.4')
 $f = New-MsiFacts
 $f['msi-has-aap'] = $true; $f['msi-protected'] = $false
 $null = Invoke-MsiVerdict -Cells $w -Facts $f
 Check 'msi/no-defect' @(
   'msi-install-dir-lacks-all-application-packages', 'msi-install-dir-dacl-is-protected',
   'msi-node-cannot-be-executed-by-an-appcontainer', 'msi-tree-cannot-be-read-by-an-appcontainer',
+  'bundled-npm-cannot-run-inside-the-jail',
   'ci-provisioned-node-and-msi-node-disagree-on-exec')
 
 # 3. THE DECEPTIVE ONE. The repaired arm fails too, so the refusal is NOT attributable to the DACL —
@@ -119,6 +126,7 @@ $null = Invoke-MsiVerdict -Cells @{} -Facts (New-MsiFacts)
 Check 'msi/dead-harness' @(
   'msi-baseline-plain-execs-progfiles-node', 'msi-appcontainer-gate-is-live',
   'msi-appcontainer-positive-control', 'msi-exec-is-restored-by-adding-the-ace',
+  'npm-baseline-plain-runs-bundled-npm',
   'nub-provisioned-node-shape-execs-under-appcontainer',
   'ci-provisioned-node-and-msi-node-disagree-on-exec')
 
@@ -178,7 +186,9 @@ function New-VolFacts {
 Write-Host ''
 Write-Host 'volume verdict — synthetic worlds'
 
-# 1. The privilege IS the mechanism and traverse holds on every volume. Nothing may fail.
+# 1. The privilege IS the mechanism and traverse holds on every volume. `cn-deleted` reached the table
+#    and was REFUSED (read-deep=ERR), which is what makes the differential positive rather than
+#    inconclusive. Nothing may fail.
 $null = Invoke-VolVerdict -Cells (New-VolWorld) -Facts (New-VolFacts)
 Check 'vol/privilege-is-the-mechanism' @()
 
@@ -221,6 +231,16 @@ $null = Invoke-VolVerdict -Cells $w -Facts $f
 Check 'vol/flag-is-the-candidate-but-uniform' @(
   'device-flag-varies-across-the-volumes-measured', 'deleting-changenotify-breaks-the-deep-read')
 
+# 6b. RUN 1'S ACTUAL WORLD, and the one the old predicate got wrong: the treatment child never started
+#     (rc=0xC0000022, zero-byte log), so its read cell is MISSING-OP. The differential must read as
+#     INCONCLUSIVE — `cn-deleted-child-started-at-all` fails and the treatment property fails too,
+#     rather than the treatment property PASSing off a read that was never attempted.
+$w = New-VolWorld
+$w['cn-deleted'].Remove('read-deep')
+$null = Invoke-VolVerdict -Cells $w -Facts (New-VolFacts)
+Check 'vol/cn-treatment-never-ran' @(
+  'cn-deleted-child-started-at-all', 'deleting-changenotify-breaks-the-deep-read')
+
 # 7. A volume that could not be provisioned must surface as a GAP, never as a silent pass.
 $w = New-VolWorld
 foreach ($k in @('vhd-plain', 'vhd-rootgrant', 'vhd-deepgrant')) { $w.Remove($k) }
@@ -246,7 +266,8 @@ Check 'vol/dead-harness' @(
   'subst-grant-reached-the-deep-target', 'subst-ungranted-sibling-denied', 'subst-bypass-traverse-holds',
   'unc-plain-baseline-reads-deep', 'unc-reachable-when-whole-chain-granted',
   'unc-grant-reached-the-deep-target', 'unc-ungranted-sibling-denied', 'unc-bypass-traverse-holds',
-  'cn-control-restricted-launch-path-works')
+  'cn-control-restricted-launch-path-works', 'cn-deleted-child-started-at-all',
+  'deleting-changenotify-breaks-the-deep-read')
 
 Write-Host ''
 if ($script:selftestFails -eq 0) {

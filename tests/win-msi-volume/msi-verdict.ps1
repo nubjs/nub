@@ -21,10 +21,11 @@
 . (Join-Path (Join-Path (Join-Path $PSScriptRoot '..') 'win-bypass-traverse') 'verdict.ps1')
 
 $script:MsiArms = @('plain-progfiles', 'ac-exec-progfiles', 'ac-exec-progfiles-repaired',
-  'ac-exec-userstore', 'ac-exec-toolcache', 'ac-read-progfiles')
-$script:MsiOps = @('exec-inline', 'cwd-at-entry', 'read-progfiles-node-exe', 'stat-progfiles-node-exe',
-  'readdir-progfiles-dir', 'read-npm-package-json', 'readdir-npm-tree', 'walk-from-progfiles',
-  'stat-c-root', 'read-system32-hosts')
+  'ac-exec-userstore', 'ac-exec-toolcache', 'ac-read-progfiles',
+  'plain-progfiles-npm', 'ac-exec-progfiles-npm')
+$script:MsiOps = @('exec-inline', 'entry-ran', 'cwd-at-entry', 'read-progfiles-node-exe',
+  'stat-progfiles-node-exe', 'readdir-progfiles-dir', 'read-npm-package-json', 'readdir-npm-tree',
+  'walk-from-progfiles', 'stat-c-root', 'read-system32-hosts')
 
 function Invoke-MsiVerdict {
   param([hashtable]$Cells, [hashtable]$Facts)
@@ -66,6 +67,12 @@ function Invoke-MsiVerdict {
      ((Cell 'ac-exec-userstore' 'read-system32-hosts') -eq 'OK')) `
     "System32 carries an ALL APPLICATION PACKAGES ace, so a confined child must still read it: read-arm=$(Cell 'ac-read-progfiles' 'read-system32-hosts') userstore-arm=$(Cell 'ac-exec-userstore' 'read-system32-hosts')"
 
+  # ── THE CONTROL THAT MAKES THE DACL ROWS ATTRIBUTABLE TO THE MSI. If msiexec did not run, those
+  # rows describe whatever the runner IMAGE left on that directory — plausibly identical, wrongly
+  # attributed. Reported ahead of the DACL properties for that reason.
+  Prop 'msi-install-actually-succeeded' ((F 'msi-install-succeeded') -eq $true) `
+    "a real MSI must have installed, or every DACL row below is about the image and not the installer: $(F 'msi-install-why')"
+
   # ── THE DACL ITSELF, read off a real MSI install. `#63590` predicts all three: no `S-1-15-2-1`,
   # no `S-1-15-2-2`, and a PROTECTED descriptor (so nothing propagates in from `C:\Program Files`,
   # which does carry the ace). Reported as three separate properties because each has a different
@@ -98,6 +105,16 @@ function Invoke-MsiVerdict {
      ((Cell 'ac-read-progfiles' 'read-npm-package-json') -ne 'OK')) `
     "PASS means the npm tree beside node.exe is unreadable too: node.exe=$(Cell 'ac-read-progfiles' 'read-progfiles-node-exe') npm/package.json=$(Cell 'ac-read-progfiles' 'read-npm-package-json') readdir=$(Cell 'ac-read-progfiles' 'readdir-npm-tree')"
 
+  # ── THE PRACTICAL CONSEQUENCE, which is where the exec/read dissociation actually bites. Starting
+  # `node.exe` is a PARENT-context image open, but the bundled npm is an ordinary file READ by the
+  # confined child. So the question that matters for a lifecycle script is not whether node starts —
+  # it is whether the npm sitting beside it still runs. One variable between these two arms.
+  Prop 'npm-baseline-plain-runs-bundled-npm' ((Cell 'plain-progfiles-npm' 'entry-ran') -eq 'OK') `
+    "an UNCONFINED child must run the bundled npm-cli.js, or the arm below measures a broken fixture: $(Cell 'plain-progfiles-npm' 'entry-ran') $(Detail 'plain-progfiles-npm' 'entry-ran')"
+  # INVERTED READING: PASS means the bundled npm is unusable inside the jail.
+  Prop 'bundled-npm-cannot-run-inside-the-jail' ((Cell 'ac-exec-progfiles-npm' 'entry-ran') -ne 'OK') `
+    "PASS means node STARTS but the npm beside it cannot be read, so a lifecycle script reaching for the ambient npm dies: confined=$(Cell 'ac-exec-progfiles-npm' 'entry-ran') $(Detail 'ac-exec-progfiles-npm' 'entry-ran') launch=$(LaunchOf 'ac-exec-progfiles-npm')"
+
   # ── THE CONTRAST THAT BOUNDS THE FINDING. nub provisions its own Node under
   # `%USERPROFILE%\.cache\nub\node\<version>\`, a path the user owns and nub can ACE. If that shape
   # execs cleanly, the defect is scoped to an AMBIENT/MSI node rather than to the route.
@@ -119,8 +136,12 @@ function Invoke-MsiVerdict {
   # never took effect.
   Prop 'unprivileged-repair-control-own-profile-write-succeeds' ((F 'deelev-own-profile-write') -eq 'OK') `
     "under the admin-stripped impersonation, an ace write inside %USERPROFILE% must succeed or the arm is inconclusive: $(F 'deelev-own-profile-write') admin-under-impersonation=$(F 'deelev-admin')"
+  # Read off the DELETE variant only. The `disable` variant is reported beside it because it produced
+  # a false positive in run 1 and the counter-example is worth keeping on screen.
+  Fact 'deelev-disable-variant-artifact' (F 'deelev-disable-artifact')
+  Fact 'deelev-delete-variant-privileges' (F 'deelev-delete-privs')
   Prop 'unprivileged-repair-of-program-files-is-refused' ((F 'deelev-progfiles-write') -ne 'OK') `
-    "PASS means nub cannot fix this on the user's behalf without elevation: $(F 'deelev-progfiles-write') owner=$(F 'msi-owner')"
+    "PASS means nub cannot fix this on the user's behalf without elevation. Measured on the privilege-DELETED token, not the merely-disabled one: $(F 'deelev-progfiles-write') owner=$(F 'msi-owner')"
 
   return $script:fails
 }

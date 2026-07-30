@@ -394,6 +394,11 @@ $facts['cn-kept-has-privilege'] = Has-Cn 'cn-kept'
 $facts['cn-deleted-has-privilege'] = Has-Cn 'cn-deleted'
 Fact 'cn-kept-token' (LaunchOf 'cn-kept')
 Fact 'cn-deleted-token' (LaunchOf 'cn-deleted')
+# The raw exit status and log size, because run 1's treatment child died at `rc=0xC0000022` with a
+# zero-byte log — created but dead in ntdll init, so it never attempted the read. Recorded explicitly
+# so "the differential is inconclusive" is legible from the facts and not only from a property.
+Fact 'cn-deleted-log-lines' (Lines 'cn-deleted')
+Fact 'cn-kept-log-lines' (Lines 'cn-kept')
 
 # ─────────────── verdict ───────────────
 

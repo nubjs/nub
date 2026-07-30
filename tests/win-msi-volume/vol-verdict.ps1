@@ -118,9 +118,21 @@ function Invoke-VolVerdict {
     "read back off the process that ACTUALLY ran: $(LaunchOf 'cn-kept')"
   Prop 'cn-control-deleted-token-really-lacks-the-privilege' ((F 'cn-deleted-has-privilege') -eq $false) `
     "…and the treatment token must genuinely not hold it, or the differential varied nothing: $(LaunchOf 'cn-deleted')"
-  # INVERTED READING: PASS here means SeChangeNotifyPrivilege IS the mechanism.
-  Prop 'deleting-changenotify-breaks-the-deep-read' ((Cell 'cn-deleted' 'read-deep') -ne 'OK') `
-    "PASS means the traverse skip is the PRIVILEGE (and any token lacking it loses deep reads); FAIL means the privilege is not what carries it and the volume flag is the remaining candidate: kept=$(Cell 'cn-kept' 'read-deep') deleted=$(Cell 'cn-deleted' 'read-deep')"
+  # ── THE CONTROL RUN 1 DID NOT HAVE, and its absence turned an INCONCLUSIVE result into a
+  # false-looking PASS. Deleting the privilege made the LowBox process die at `rc=0xC0000022` with a
+  # ZERO-BYTE log — created, but dead in initialization before Node emitted a line. The old predicate
+  # was `read-deep -ne 'OK'`, which happily accepted `MISSING-OP`; a differential whose treatment arm
+  # never executed the operation under test measures nothing. So the child must be shown to have RUN
+  # before its read cell is allowed to mean anything.
+  # The predicate demands a real OK/ERR, not merely "not MISSING-OP": a MISSING-ARM (the arm never
+  # ran at all) must fail here too, and an earlier version of this line let that through.
+  Prop 'cn-deleted-child-started-at-all' (@('OK', 'ERR') -contains (Cell 'cn-deleted' 'read-deep')) `
+    "the treatment child must reach the operations table, or the differential is INCONCLUSIVE rather than positive — a LowBox process that cannot finish startup without the privilege never attempts the read: read-deep=$(Cell 'cn-deleted' 'read-deep') lines=$(Lines 'cn-deleted') launch=$(LaunchOf 'cn-deleted')"
+  # INVERTED READING, and now gated on the child having actually run: PASS = the privilege IS the
+  # mechanism, measured on a read the child genuinely attempted.
+  Prop 'deleting-changenotify-breaks-the-deep-read' `
+    (((Cell 'cn-deleted' 'read-deep') -eq 'ERR') -and ((Cell 'cn-kept' 'read-deep') -eq 'OK')) `
+    "PASS means the traverse skip is the PRIVILEGE, on a read the child ATTEMPTED and was refused. FAIL with read-deep=OK means the privilege is not what carries it; FAIL with MISSING-OP means the process never started and this differential cannot answer the question at all: kept=$(Cell 'cn-kept' 'read-deep') deleted=$(Cell 'cn-deleted' 'read-deep')"
 
   return $script:fails
 }

@@ -61,7 +61,7 @@ $pr = New-Object Security.Principal.WindowsPrincipal($id)
 # it is NOT the gate — `CreateRestrictedToken` copies that flag, so a de-elevated token still
 # reports elevated=1 while holding no admin authority (§5h methodology note).
 Fact 'admin' $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-Fact 'token-is-elevated-flag' ([bool]([Security.Principal.WindowsIdentity]::GetCurrent().Owner -eq $null) -eq $false)
+Fact 'integrity-level' (((whoami /groups 2>&1) | Select-String 'Mandatory Label') -join ' ')
 Fact 'session-id' (Get-Process -Id $PID).SessionId
 
 # ─────────────── survey EVERY Node on the box, BEFORE touching anything ───────────────
@@ -109,11 +109,20 @@ $msiOk = $false
 $msiWhy = ''
 try {
   $idx = Invoke-RestMethod -Uri 'https://nodejs.org/dist/index.json' -TimeoutSec 60
-  $pick = @($idx | Where-Object { $_.lts -and ($_.files -contains $msiKey) })[0]
-  if (-not $pick) { $pick = @($idx | Where-Object { $_.files -contains $msiKey })[0] }
-  if (-not $pick) { throw "no release in index.json lists $msiKey" }
-  $ver = $pick.version.TrimStart('v')
   $arch = if ($msiKey -eq 'win-arm64-msi') { 'arm64' } else { 'x64' }
+  # RUN 1 BUG: gating on the index `files` key skipped the ARM image entirely — `index.json` never
+  # lists `win-arm64-msi` for ANY release, yet `node-v24.18.1-arm64.msi` is served (HTTP 200). So the
+  # index picks the VERSION and a HEAD request decides whether the artifact exists. Without this the
+  # ARM row silently measured the runner image's directory while looking like an MSI result.
+  $ver = $null
+  foreach ($r in @($idx | Where-Object { $_.lts })) {
+    $v = $r.version.TrimStart('v')
+    try {
+      $h = Invoke-WebRequest -Uri "https://nodejs.org/dist/v$v/node-v$v-$arch.msi" -Method Head -TimeoutSec 30
+      if ($h.StatusCode -eq 200) { $ver = $v; break }
+    } catch { }
+  }
+  if (-not $ver) { throw "no LTS release serves a $arch .msi" }
   $url = "https://nodejs.org/dist/v$ver/node-v$ver-$arch.msi"
   Fact 'msi-url' $url
   $msiPath = Join-Path $env:TEMP "node-$ver-$arch.msi"
@@ -139,33 +148,34 @@ $null = Show-Dacl 'progfiles-node-exe' (Join-Path $progFiles 'node.exe')
 $null = Show-Dacl 'progfiles-npm-tree' (Join-Path $progFiles 'node_modules\npm')
 $null = Show-Dacl 'program-files-parent' 'C:\Program Files'
 
-function Sids-Of($acl) {
-  if ($null -eq $acl) { return @() }
-  return @($acl.Access | ForEach-Object {
-    try { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value }
-    catch { $_.IdentityReference.Value } })
-}
-$msiSids = Sids-Of $msiAcl
+$msiSids = Get-DaclSids $msiAcl
 $facts = @{}
+# THE CONTROL THAT KEEPS THE DACL PROPERTIES HONEST. If msiexec did not run, every DACL property
+# below is measuring whatever the runner IMAGE happened to leave on that directory — which may look
+# identical while attributing it to the wrong installer. Without this the probe could confirm #63590
+# off a descriptor the MSI never wrote.
+$facts['msi-install-succeeded'] = [bool]$msiOk
+$facts['msi-install-why'] = "$msiOk $msiWhy"
 $facts['msi-has-aap'] = ($msiSids -contains 'S-1-15-2-1')
 $facts['msi-has-arap'] = ($msiSids -contains 'S-1-15-2-2')
 $facts['msi-protected'] = $(if ($msiAcl) { [bool]$msiAcl.AreAccessRulesProtected } else { $null })
 $facts['msi-owner'] = $(if ($msiAcl) { $msiAcl.Owner } else { '(unreadable)' })
-$facts['toolcache-has-aap'] = $(if ($tcAcl) { ((Sids-Of $tcAcl) -contains 'S-1-15-2-1') } else { $null })
+$facts['toolcache-has-aap'] = $(if ($tcAcl) { ((Get-DaclSids $tcAcl) -contains 'S-1-15-2-1') } else { $null })
 
 # THE SIBLING CONTROL. "nodejs lacks the ace" is only a defect if sibling directories under the same
-# parent HAVE it — otherwise it would just be how `C:\Program Files` works. Several siblings are
-# sampled and the count reported, so the control does not hinge on one directory's happening to be
-# packaged a particular way.
+# parent HAVE it — otherwise it would just be how `C:\Program Files` works. Every sibling is sampled
+# and the count reported, so the control does not hinge on one directory happening to be packaged a
+# particular way. `dotnet` is named separately because it is the issue's own example.
 $sibs = @(Get-ChildItem -LiteralPath 'C:\Program Files' -Directory -EA SilentlyContinue |
-  Where-Object { $_.Name -ne 'nodejs' } | Select-Object -First 12)
+  Where-Object { $_.Name -ne 'nodejs' })
 $sibWith = @()
 foreach ($s in $sibs) {
-  try { if ((Sids-Of (Get-Acl -LiteralPath $s.FullName)) -contains 'S-1-15-2-1') { $sibWith += $s.Name } } catch {}
+  try { if ((Get-DaclSids (Get-Acl -LiteralPath $s.FullName)) -contains 'S-1-15-2-1') { $sibWith += $s.Name } } catch {}
 }
 $facts['sibling-has-aap'] = ($sibWith.Count -gt 0)
-$facts['sibling-name'] = "$($sibWith.Count)/$($sibs.Count) sampled siblings carry it: $($sibWith -join ',')"
+$facts['sibling-name'] = "$($sibWith.Count)/$($sibs.Count) siblings carry it: $($sibWith -join ',')"
 Fact 'siblings-with-all-application-packages' $facts['sibling-name']
+$null = Show-Dacl 'program-files-dotnet' 'C:\Program Files\dotnet'
 
 # ─────────────── fixture: a granted script dir + a user-store node copy ───────────────
 # The interpreter for the READ arm is a COPY under the user's own store, because that is the shape
@@ -200,9 +210,11 @@ function Invoke-MsiArm {
     [string]$Name,
     [bool]$AppContainer,
     [string]$Exe,
-    [string]$Mode,             # 'inline' => node -e ; 'script' => node child.js
+    [string]$Mode,             # 'inline' => node -e ; 'script' => node child.js ; 'entry' => node $EntryFile
     [string[]]$GrantRX = @(),
-    [string]$Targets = ''
+    [string]$Targets = '',
+    [string]$EntryFile = '',
+    [string]$EntryArgs = ''
   )
   W ''
   W "== arm $Name =="
@@ -228,8 +240,11 @@ function Invoke-MsiArm {
     $env:AJ_ARM = $Name
     $env:AJ_TARGETS = $Targets
     $log = Join-Path (Join-Path $PWD 'msi-logs') "$Name.log"
-    $cmdline = if ($Mode -eq 'inline') { '"' + $Exe + '" ' + $flags + ' -e "' + $inlineJs + '"' }
-               else { '"' + $Exe + '" ' + $flags + ' "' + $childJs + '"' }
+    $cmdline = switch ($Mode) {
+      'inline' { '"' + $Exe + '" ' + $flags + ' -e "' + $inlineJs + '"' }
+      'entry'  { '"' + $Exe + '" ' + $flags + ' "' + $EntryFile + '"' + $(if ($EntryArgs) { " $EntryArgs" } else { '' }) }
+      default  { '"' + $Exe + '" ' + $flags + ' "' + $childJs + '"' }
+    }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     # 60 s, bounded: this child never spawns and never touches the network, so anything slower is a
     # hang and must be terminated rather than allowed to eat the job.
@@ -245,6 +260,18 @@ function Invoke-MsiArm {
     foreach ($l in $lines) {
       W ("    | " + $l)
       if ($l -match '^op:([^=]+)=(OK|ERR)\s*(.*)$') { $arm[$Matches[1]] = @($Matches[2], $Matches[3]) }
+    }
+    # The npm arms run a THIRD-PARTY entry point that prints a version, not an `op:` line, so the cell
+    # is derived from the log — the same shape as the existing probe's `node-died-realpath-c-root`. A
+    # bare semver on stdout is npm having run; `Cannot find module` / `EPERM` is the entry file having
+    # been unreadable. Both are recorded so the two are never conflated.
+    if ($Mode -eq 'entry') {
+      $raw = ($lines -join "`n")
+      $ran = ($raw -match '(?m)^\s*\d+\.\d+\.\d+') -and ($raw -notmatch 'Cannot find module')
+      $why = if ($raw -match 'Cannot find module') { 'MODULE_NOT_FOUND' }
+             elseif ($raw -match 'EPERM|EACCES|ENOENT') { ($raw -split "`n" | Select-String 'EPERM|EACCES|ENOENT' | Select-Object -First 1) }
+             else { ($lines | Select-Object -First 1) }
+      $arm['entry-ran'] = @($(if ($ran) { 'OK' } else { 'ERR' }), "log:$why")
     }
     $arm['__launch'] = @($status, '')
     $arm['__lines'] = @($lines.Count, '')
@@ -295,6 +322,17 @@ $tgt = @(
 Invoke-MsiArm -Name 'ac-read-progfiles' -AppContainer $true -Exe $storeNode -Mode 'script' `
   -GrantRX @($root) -Targets $tgt
 
+# 7. THE PRACTICAL CONSEQUENCE, and the cell run 1 was missing. Exec of `node.exe` is a PARENT-context
+#    image open, but the bundled `npm` is an ordinary FILE READ by the confined child — so the
+#    interesting question is not whether node starts, it is whether the npm every lifecycle script
+#    reaches for still works. Both arms use the MSI node as the interpreter, one variable apart.
+$npmCli = Join-Path $progFiles 'node_modules\npm\bin\npm-cli.js'
+Fact 'npm-cli-path' "$npmCli (exists=$(Test-Path -LiteralPath $npmCli))"
+Invoke-MsiArm -Name 'plain-progfiles-npm' -AppContainer $false -Exe (Join-Path $progFiles 'node.exe') `
+  -Mode 'entry' -EntryFile $npmCli -EntryArgs '--version'
+Invoke-MsiArm -Name 'ac-exec-progfiles-npm' -AppContainer $true -Exe (Join-Path $progFiles 'node.exe') `
+  -Mode 'entry' -EntryFile $npmCli -EntryArgs '--version'
+
 # ─────────────── could nub repair the DACL WITHOUT elevation? ───────────────
 # Measured under an impersonated admin-stripped token rather than inferred from the DACL, with the
 # control that makes a refusal attributable: the SAME impersonated write inside `%USERPROFILE%` must
@@ -302,21 +340,30 @@ Invoke-MsiArm -Name 'ac-read-progfiles' -AppContainer $true -Exe $storeNode -Mod
 
 W ''
 W '== unprivileged repair attempt (impersonated, admin stripped) =='
-$facts['deelev-admin'] = '(not attempted)'
-$facts['deelev-own-profile-write'] = '(not attempted)'
-$facts['deelev-progfiles-write'] = '(not attempted)'
-$tokPtr = [AcJail]::DeElevatedToken()
-Fact 'deelev-token' $(if ($tokPtr -ne 0) { "created" } else { "FAILED err=$([AcJail]::LastErr)" })
-if ($tokPtr -ne 0) {
-  $probeSid = 'S-1-15-2-1'   # ALL APPLICATION PACKAGES: the exact ace #63590 says is missing
-  $ownDir = Join-Path $root 'deelev-control'
-  New-Item -ItemType Directory -Force -Path $ownDir | Out-Null
+# TWO VARIANTS, and the pair is the point. RUN 1 measured only `disable`, and it reported that an
+# "unprivileged" principal COULD rewrite `C:\Program Files\nodejs` — a FALSE POSITIVE, because
+# `DISABLE_MAX_PRIVILEGE` only DISABLES privileges (they are still HELD) and .NET's `Set-Acl` path
+# re-enables `SeSecurityPrivilege`/`SeRestorePrivilege`/`SeTakeOwnershipPrivilege` when it needs them.
+# `delete` removes them irreversibly. Both are run and reported so the artifact stays VISIBLE rather
+# than being quietly corrected away, and each token's privilege list is read back rather than assumed.
+$probeSid = 'S-1-15-2-1'   # ALL APPLICATION PACKAGES: the exact ace #63590 says is missing
+$ownDir = Join-Path $root 'deelev-control'
+New-Item -ItemType Directory -Force -Path $ownDir | Out-Null
+foreach ($variant in @('disable', 'delete')) {
+  $hard = ($variant -eq 'delete')
+  $facts["deelev-$variant-admin"] = '(not attempted)'
+  $facts["deelev-$variant-own"] = '(not attempted)'
+  $facts["deelev-$variant-pf"] = '(not attempted)'
+  $facts["deelev-$variant-privs"] = '(not attempted)'
+  $tokPtr = [AcJail]::DeElevatedToken($hard)
+  Fact "deelev/$variant/token" $(if ($tokPtr -ne 0) { 'created' } else { "FAILED err=$([AcJail]::LastErr)" })
+  if ($tokPtr -eq 0) { continue }
+  $facts["deelev-$variant-privs"] = [AcJail]::PrivsOf($tokPtr)
   $h = New-Object Microsoft.Win32.SafeHandles.SafeAccessTokenHandle([IntPtr]$tokPtr)
   try {
     $res = [Security.Principal.WindowsIdentity]::RunImpersonated($h, [Func[object]]{
       $out = @{}
-      $wi = [Security.Principal.WindowsIdentity]::GetCurrent()
-      $wp = New-Object Security.Principal.WindowsPrincipal($wi)
+      $wp = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
       $out['admin'] = $wp.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
       foreach ($pair in @(@('own', $ownDir), @('pf', $progFiles))) {
         try { Grant-AcAce $pair[1] $probeSid 'ReadAndExecute'; $out[$pair[0]] = 'OK' }
@@ -324,27 +371,42 @@ if ($tokPtr -ne 0) {
       }
       return $out
     })
-    $facts['deelev-admin'] = $res['admin']
-    $facts['deelev-own-profile-write'] = $res['own']
-    $facts['deelev-progfiles-write'] = $res['pf']
-  } catch { Fact 'deelev-impersonation-error' "$_" }
+    $facts["deelev-$variant-admin"] = $res['admin']
+    $facts["deelev-$variant-own"] = $res['own']
+    $facts["deelev-$variant-pf"] = $res['pf']
+  } catch { Fact "deelev/$variant/impersonation-error" "$_" }
   finally { $h.Dispose() }
-  # If the impersonated write DID land on Program Files, undo it — the probe must not leave a machine
-  # more permissive than it found it.
-  if ($facts['deelev-progfiles-write'] -eq 'OK') {
-    try { Revoke-AcAce $progFiles $probeSid; Fact 'deelev-progfiles-ace-reverted' 'yes' }
-    catch { Fact 'deelev-progfiles-ace-reverted' "FAILED $_" }
+  # If the impersonated write DID land on Program Files, undo it before the next variant — the probe
+  # must not leave the machine more permissive than it found it, and variant 2 must start clean.
+  if ($facts["deelev-$variant-pf"] -eq 'OK') {
+    try { Revoke-AcAce $progFiles $probeSid; Fact "deelev/$variant/progfiles-ace-reverted" 'yes' }
+    catch { Fact "deelev/$variant/progfiles-ace-reverted" "FAILED $_" }
   }
+  Fact "deelev/$variant/privileges-held" $facts["deelev-$variant-privs"]
+  Fact "deelev/$variant/admin-under-impersonation" $facts["deelev-$variant-admin"]
+  Fact "deelev/$variant/write-inside-userprofile" $facts["deelev-$variant-own"]
+  Fact "deelev/$variant/write-on-program-files-nodejs" $facts["deelev-$variant-pf"]
 }
-Fact 'deelev/admin-under-impersonation' $facts['deelev-admin']
-Fact 'deelev/write-inside-userprofile' $facts['deelev-own-profile-write']
-Fact 'deelev/write-on-program-files-nodejs' $facts['deelev-progfiles-write']
+# The verdict reads the DELETE variant: it is the only one whose principal genuinely lacks the
+# authority. `disable` is retained beside it as the visible counter-example.
+$facts['deelev-admin'] = $facts['deelev-delete-admin']
+$facts['deelev-own-profile-write'] = $facts['deelev-delete-own']
+$facts['deelev-progfiles-write'] = $facts['deelev-delete-pf']
+$facts['deelev-disable-artifact'] = "disable-variant pf-write=$($facts['deelev-disable-pf']) (privileges DISABLED not deleted, so this variant retains the authority)"
+Fact 'deelev/artifact-note' $facts['deelev-disable-artifact']
 
-# ── residue: the repaired arm's grant must be gone, or the probe left the box more permissive ──
-$residue = Get-AceRightsFor $progFiles 'S-1-15-2-1'
-Fact 'progfiles-all-application-packages-ace-after-probe' $residue
-Prop 'probe-left-no-appcontainer-ace-on-program-files' ($residue -eq 'none') `
-  "the repaired arm and the de-elevated attempt must both be fully reverted: $residue"
+# ── residue: EVERY `S-1-15-*` ace must be gone, not just the well-known one. The repaired arm grants
+# a per-run package sid and the de-elevated attempt grants `S-1-15-2-1`, so checking one name would
+# miss the other and the probe would leave the machine more permissive than it found it.
+$residueAces = @()
+try {
+  $residueAces = @((Get-Acl -LiteralPath $progFiles).Access |
+    Where-Object { $_.IdentityReference.Value -like 'S-1-15-*' } |
+    ForEach-Object { "$($_.IdentityReference.Value)=$($_.FileSystemRights)" })
+} catch { $residueAces = @("unreadable:$_") }
+Fact 'progfiles-appcontainer-aces-after-probe' $(if ($residueAces.Count) { ($residueAces -join ' ; ') } else { 'none' })
+Prop 'probe-left-no-appcontainer-ace-on-program-files' ($residueAces.Count -eq 0) `
+  "the repaired arm and the de-elevated attempt must both be fully reverted: $(if ($residueAces.Count) { ($residueAces -join ' ; ') } else { 'none' })"
 
 # ─────────────── verdict ───────────────
 
