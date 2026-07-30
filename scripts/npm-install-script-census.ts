@@ -349,10 +349,31 @@ const pmap = async <T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>
   return out;
 };
 
+// A multi-hour run needs an auditable log, not a \r-updated line: carriage
+// returns collapse into one unreadable line in a redirected file, and afterwards
+// there is no way to tell when a stall began. Emit a timestamped, newline-
+// terminated checkpoint periodically alongside the interactive bar.
+const CHECKPOINT_EVERY = 2000;
 const bar = (label: string, done: number, total: number): void => {
+  if (done % CHECKPOINT_EVERY === 0) {
+    process.stderr.write(`\n[${new Date().toISOString()}] ${label}: ${done}/${total}\n`);
+    return;
+  }
   if (done % 50 === 0 || done === total) {
     process.stderr.write(`\r  ${label}: ${done}/${total}      `);
-    if (done === total) process.stderr.write("\n");
+    if (done === total) process.stderr.write(`\n[${new Date().toISOString()}] ${label}: complete (${total})\n`);
+  }
+};
+
+// npm reports the exact 7-day window it counted, and the census is reproducible
+// only if that window is RECORDED rather than described. Captured from real
+// responses instead of computed from the run date, since the API lags a day or two.
+const observedWindow: { start?: string; end?: string } = {};
+const noteWindow = (body: unknown): void => {
+  const b = body as { start?: string; end?: string };
+  if (typeof b?.start === "string" && typeof b?.end === "string") {
+    observedWindow.start = b.start;
+    observedWindow.end = b.end;
   }
 };
 
@@ -536,6 +557,7 @@ const stageWeekly = async (names: string[], label: string): Promise<Map<string, 
       const body = r.body as Record<string, { downloads?: number } | null>;
       for (const n of batch) {
         const e = body[n];
+        if (e) noteWindow(e);
         record(n, e && typeof e.downloads === "number" ? e.downloads : 0);
       }
     } else if (r.status === 404 || (typeof r.status === "number" && r.status < 500)) {
@@ -565,8 +587,10 @@ const stageWeekly = async (names: string[], label: string): Promise<Map<string, 
   done = 0;
   await pmap(scoped, CONCURRENCY, async (n) => {
     const r = await getJSON(POINT + enc(n));
-    if (r.ok) record(n, Number((r.body as { downloads?: number }).downloads ?? 0));
-    else unresolved.push(n);
+    if (r.ok) {
+      noteWindow(r.body);
+      record(n, Number((r.body as { downloads?: number }).downloads ?? 0));
+    } else unresolved.push(n);
     bar(`${label} scoped`, ++done, scoped.length);
   });
 
@@ -951,6 +975,9 @@ const main = async (): Promise<void> => {
   const summary = {
     meta: {
       generated: RUN_AT,
+      completed: new Date().toISOString(),
+      // The actual 7-day window npm counted, read off its own responses.
+      measured_download_window: observedWindow.start ? `${observedWindow.start} .. ${observedWindow.end}` : "unknown",
       threshold_weekly_downloads: THRESHOLD,
       top_versions_per_package: TOP_N,
       download_window: "last-week (api.npmjs.org/downloads/point/last-week and /versions/<pkg>/last-week)",
