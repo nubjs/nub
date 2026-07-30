@@ -1,6 +1,6 @@
 # Build jail on Windows — every approach tried, and why
 
-Canonical ledger of every mechanism attempted for nub's **build jail** on Windows, one heading per approach. The build jail confines dependency lifecycle scripts during `nub install` and must be **totally unprivileged with no setup command, ever** — that constraint is what kills most of what follows. The separate `nub sandbox` product is allowed a one-time elevation and is covered here only where a route was tried for the build jail and survives there.
+Canonical ledger of every mechanism attempted for Nub's **build jail** on Windows, one heading per approach. The build jail confines dependency lifecycle scripts during `nub install` and must be **totally unprivileged with no setup command, ever** — that constraint is what kills most of what follows. The separate `nub sandbox` product is allowed a one-time elevation and is covered here only where a route was tried for the build jail and survives there.
 
 **This document exists because approaches keep getting re-proposed after being refuted.** A preload realpath patch was proposed, refuted, and proposed again. The `--preserve-symlinks` flag was proposed despite a formal rejection already on record. An expensive detour into restricted tokens happened because a probe using `AccessCheck` concluded AppContainer could not do reads, when the traverse model at `crates/nub-sandbox/src/backend/windows.rs:412-423` already said leaf grants suffice — and `AccessCheck` **cannot model bypass-traverse by construction**. Read this before proposing a Windows mechanism.
 
@@ -50,7 +50,7 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **What it is.** Granting the AppContainer SID read/modify on only the allowed **leaves**, and relying on the object manager to skip the access check on intermediate path components. A LowBox token retains `SeChangeNotifyPrivilege` (Bypass Traverse Checking) enabled, and standard local NTFS volumes carry `FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL` on the volume device object. Traverse model recorded at `windows.rs:412-423`.
 
-**What it buys.** It dissolves the problem that four separate sections of the record treated as fatal: nub never needs `WRITE_DAC` on `C:\` or `C:\Users`, and never touches them.
+**What it buys.** It dissolves the problem that four separate sections of the record treated as fatal: Nub never needs `WRITE_DAC` on `C:\` or `C:\Users`, and never touches them.
 
 **Measured** by a real AppContainer launch. With one inheritable grant at `%USERPROFILE%\<project>`, a confined child five components down at `%USERPROFILE%\<proj>\data\proj\node_modules\dep\index.js` succeeded on `readFileSync` (812 B), `require()`, `statSync`, `readdirSync`, `writeFileSync`, `process.chdir` plus a relative read, `node <that file>` as the entry point, and a **bare** specifier resolved through `_nodeModulePaths` probing every ancestor's `node_modules`. **Nothing was written on `C:\` or `C:\Users`** — every ACE went inside `C:\Users\runneradmin\…`, which the invoking user owns.
 
@@ -74,11 +74,11 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **What it is.** A `NODE_OPTIONS=--import data:…` preload (`backend/net_gate_shim.js`, delivered by `compiler/defaults.rs`'s `net_gate_node_options`) that patches `net.Socket.prototype.connect`, `dns`, `dgram` and the `child_process` seams inside the confined Node, keyed on a per-package boolean from package identity.
 
-**What it buys.** The shape the threat actually has. Shai-Hulud grew by publishing a new lifecycle hook into packages that never had one, phoning home with plain `https.get`/`fetch`/`axios` — all of which this denies for any package the catalog does not name, on all three platforms and at both Node tiers. Against nub's 344-package corpus the preload reaches 178 of the 179 packages that contact any host; the exception is a POSIX `.sh` that does not run on Windows at all.
+**What it buys.** The shape the threat actually has. Shai-Hulud grew by publishing a new lifecycle hook into packages that never had one, phoning home with plain `https.get`/`fetch`/`axios` — all of which this denies for any package the catalog does not name, on all three platforms and at both Node tiers. Against Nub's 344-package corpus the preload reaches 178 of the 179 packages that contact any host; the exception is a POSIX `.sh` that does not run on Windows at all.
 
 **Named residuals, all accepted.** A native addon opening a raw socket bypasses it entirely, and so does any client ignoring proxy env — `curl --noproxy '*'`, a static binary, or Windows PowerShell 5.1, which reads HKCU proxy settings rather than the environment. No corpus package uses PowerShell as a lifecycle entry.
 
-**Verdict.** Adopted, and **must never be described as an OS-enforced guarantee.** Windows is the one platform with no unprivileged OS egress lever finer than on/off, which is why the gate exists there; Linux has the seccomp socket-family ceiling and macOS pins egress to nub's proxy.
+**Verdict.** Adopted, and **must never be described as an OS-enforced guarantee.** Windows is the one platform with no unprivileged OS egress lever finer than on/off, which is why the gate exists there; Linux has the seccomp socket-family ceiling and macOS pins egress to Nub's proxy.
 
 **A cross-platform claim this makes precise.** Describing Linux and Windows together as best-effort egress via `HTTP(S)_PROXY` env vars is accurate for Windows through this gate, and **false for Linux**, where no proxy env reaches the child at all (measured).
 
@@ -89,7 +89,7 @@ Each approach carries a status, what it would have bought, the evidence with its
 **Two independent reasons the ambient interpreter is unusable**, which is what makes this necessary rather than an optimisation. Either one alone is sufficient.
 
 - **The read-grant ACE cannot be written where the stock MSI installs.** A leaf read grant is an ACE, and an ACE needs `WRITE_DAC` on the target. Measured de-elevated on a restricted token (`admin-authority=false`, IL 8192, privileges cut to `SeChangeNotifyPrivilege`) against the REAL `C:\Program Files\nodejs\node.exe` with its DACL unmodified — `Users:(RX)`, `Authenticated Users:(RX)`, `Administrators:(F)`, `SYSTEM:(F)`, **no `ALL APPLICATION PACKAGES` entry**, `WRITE_DAC` for Administrators and SYSTEM only — the launch FAILED with `installing read grant ACE on C:/Program Files/nodejs/node.exe failed: Access is denied. (os error 5)`. A nub-owned staged copy in the **same run** LAUNCHED, `code=0`. `C:\hostedtoolcache` behaves the same, and the already-granted-to-AppContainers skip does not rescue either: that skip needs an **inheritable** ACE, which no file object can carry.
-- **Widening that DACL would not have made a nested spawn work even where nub can write it.** `CreateProcessW` opens the image in the **caller's** context, so once the caller is itself inside the AppContainer, opening the ambient `node.exe` by absolute path is a confined open and is refused — measured `Access is denied.` confined against the identical command line succeeding unconfined.
+- **Widening that DACL would not have made a nested spawn work even where Nub can write it.** `CreateProcessW` opens the image in the **caller's** context, so once the caller is itself inside the AppContainer, opening the ambient `node.exe` by absolute path is a confined open and is refused — measured `Access is denied.` confined against the identical command line succeeding unconfined.
 
 **The constraint that shapes it: the staged copy must be the project's OWN Node version.** `prebuild-install/util.js:18-19` defaults the ABI it fetches for to `process.versions.modules` of the **running** Node (`node_abi` likewise), and `node-gyp-build/node-gyp-build.js:10` does the same — so a version-mismatched interpreter makes that whole family fetch a wrong-ABI prebuild that then fails to load. Enforced **structurally** rather than by convention: the cache key is `<version>-<arch>` derived from the source interpreter, and the tree is a byte copy.
 
@@ -105,7 +105,7 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 ## Writing the ancestor traverse ACE with `SetKernelObjectSecurity` — ADOPTED
 
-**What it is.** The primitive the ancestor repair writes its non-inherited traverse ACE with: `SetKernelObjectSecurity` over a **hand-built** descriptor (`InitializeSecurityDescriptor` + `SetSecurityDescriptorDacl`) rather than `SetEntriesInAclW`'s convenience wrapper. `windows.rs:1355-1460`, commit `c85fcb7a61`. `SetEntriesInAclW` still does the ACL merge — it only assembles an ACL in memory and never propagated anything — and `SE_DACL_AUTO_INHERITED` / `SE_DACL_PROTECTED` are carried across so writing a fresh descriptor cannot clear them on a directory nub does not own.
+**What it is.** The primitive the ancestor repair writes its non-inherited traverse ACE with: `SetKernelObjectSecurity` over a **hand-built** descriptor (`InitializeSecurityDescriptor` + `SetSecurityDescriptorDacl`) rather than `SetEntriesInAclW`'s convenience wrapper. `windows.rs:1355-1460`, commit `c85fcb7a61`. `SetEntriesInAclW` still does the ACL merge — it only assembles an ACL in memory and never propagated anything — and `SE_DACL_AUTO_INHERITED` / `SE_DACL_PROTECTED` are carried across so writing a fresh descriptor cannot clear them on a directory Nub does not own.
 
 **What it replaced, and why BOTH predecessors failed.** `SetNamedSecurityInfoW` re-applies inheritable ACEs to every descendant on any DACL rewrite; on an ancestor like the user profile or a tool cache that is minutes of I/O per launch, and it wedged a 20-minute CI step. The handle-based `SetSecurityInfo` was tried next and **narrowed nothing** — both `Set*SecurityInfo` entry points run advapi32's user-mode propagation pass before returning, and for file objects it still walks existing children. The chain includes `%TEMP%`. `SetKernelObjectSecurity` goes straight to `NtSetSecurityObject`: it writes the object's own descriptor, and there is no propagation pass.
 
@@ -132,7 +132,7 @@ The old writer blows up **~1,444×** with tree size; the new one is flat. The re
 
 ## Fail-soft leaf grants — ADOPTED
 
-**What it is.** A refused **read** grant is skipped rather than fatal: `grant_leaf_ace` returns `io::Result<bool>` and the call site's `.map_err(…)?` became a `match` (`windows.rs:1762-1780`), with the drop-only seam `NUB_SANDBOX_WIN_FAIL_CLOSED_READ_GRANTS` restoring the old behaviour so a probe can measure both directions in one run. **Write** grants stay fatal — every one is nub's own tmp or the package dir being built. Commit `d016eeefc6`.
+**What it is.** A refused **read** grant is skipped rather than fatal: `grant_leaf_ace` returns `io::Result<bool>` and the call site's `.map_err(…)?` became a `match` (`windows.rs:1762-1780`), with the drop-only seam `NUB_SANDBOX_WIN_FAIL_CLOSED_READ_GRANTS` restoring the old behaviour so a probe can measure both directions in one run. **Write** grants stay fatal — every one is Nub's own tmp or the package dir being built. Commit `d016eeefc6`.
 
 **Why it is right rather than a loosening.** It mirrors the contract the ancestor repair two dozen lines below it already carried — *"a refused ACE write is therefore skipped, not fatal"* — and follows the project principle that a residual is acceptable while packages breaking is not: a grant is a REDUCTION from the unconfined lifecycle spawn's complete access, so skipping one leaves the child with **less** reach, never more. A read grant may legitimately name a toolchain the user holds no `WRITE_DAC` on, and aborting every lifecycle script over one unreachable toolchain is the loudest possible failure for the mildest cause.
 
@@ -159,7 +159,7 @@ with the fail-closed arm's launcher naming its own refusal: `installing read gra
 
 ## Bundled busybox as the Windows lifecycle shell — ADOPTED
 
-**What it is.** Dependency lifecycle scripts on Windows run through nub's bundled `busybox-w32` `sh` instead of `cmd.exe`. Mechanism: a new `EngineContext::default_script_shell` embedder seam, copied into `ScriptSettings::default_shell` by the settings pass and read by the spawn only when the user set no `script-shell` — precedence **user `script-shell` → embedder default → platform default**, so `None` reproduces aube's own behaviour exactly. nub fills it on Windows with `busybox.exe sh -c`, the **applet-name** form (a multi-call binary dispatches on `argv[0]` or a leading applet name, and `busybox.exe -c` selects no shell), resolved through the same `resolve_bundled_busybox` — byte-identical to what `nub run` on Windows already passes. A missing sidecar warns and leaves `cmd.exe` rather than failing read-only verbs that never spawn a script. Commit `38c169f19a`, branch `busybox-lifecycle-shell` — **not yet folded into `sandbox/integration`**.
+**What it is.** Dependency lifecycle scripts on Windows run through Nub's bundled `busybox-w32` `sh` instead of `cmd.exe`. Mechanism: a new `EngineContext::default_script_shell` embedder seam, copied into `ScriptSettings::default_shell` by the settings pass and read by the spawn only when the user set no `script-shell` — precedence **user `script-shell` → embedder default → platform default**, so `None` reproduces aube's own behaviour exactly. Nub fills it on Windows with `busybox.exe sh -c`, the **applet-name** form (a multi-call binary dispatches on `argv[0]` or a leading applet name, and `busybox.exe -c` selects no shell), resolved through the same `resolve_bundled_busybox` — byte-identical to what `nub run` on Windows already passes. A missing sidecar warns and leaves `cmd.exe` rather than failing read-only verbs that never spawn a script. Commit `38c169f19a`, branch `busybox-lifecycle-shell` — **not yet folded into `sandbox/integration`**.
 
 **Grounds, all measured — and note the first is a plain correctness bug independent of any sandbox.** `cmd.exe` **exits 0 while writing the wrong bytes** for `echo "MARK=${VAR:-default}"`, because it has no POSIX parameter expansion. That is a silently wrong result in the shipped status quo, not a jail concern at all.
 
@@ -220,7 +220,7 @@ A developer desktop behaves identically to the server images, so this is **not**
 
 **What it was.** Rather than write an ACE, **request** the capability Windows already granted on those paths. `C:\` carries `(A;;0x1000a1;;;S-1-15-3-65536-1888954469-…-700089176)` and `C:\Users` carries a different one at `(A;;0x100021;;;S-1-15-3-65536-4045685566-…-191844675)`. Harvest them off the DACLs at launch (`windows.rs:1080` `harvest_capability_sids`) and pass them in the capability array.
 
-**Why it looked right.** The SIDs are real, `RtlIsCapabilitySid` returns True for them, they carry the exact traverse+read-attributes mask, they sit on the exact paths the error names, and requesting a raw capability SID is unprivileged — nub already does it for `internetClient`.
+**Why it looked right.** The SIDs are real, `RtlIsCapabilitySid` returns True for them, they carry the exact traverse+read-attributes mask, they sit on the exact paths the error names, and requesting a raw capability SID is unprivileged — Nub already does it for `internetClient`.
 
 **Measured refusal, and it is surgical rather than a shape check** — `RtlIsCapabilitySid` + `NtCreateLowBoxToken` on both images, harness `tests/win-both-gates/probe.ps1`, workflow `win-both-gates-probe.yml`, run 30504494371. `65536 = 0x10000 = SECURITY_CAPABILITY_APP_SILO_RID`:
 
@@ -282,7 +282,7 @@ A developer desktop behaves identically to the server images, so this is **not**
 
 ## Restricted token plus low integrity level — DEAD (mechanism) as a read jail
 
-**What it was.** Derive a restricted token from nub's own token via `CreateRestrictedToken`, drop it to low integrity, and launch with `CreateProcessAsUserW`. Reference implementation read: `srt`'s `token.rs`.
+**What it was.** Derive a restricted token from Nub's own token via `CreateRestrictedToken`, drop it to low integrity, and launch with `CreateProcessAsUserW`. Reference implementation read: `srt`'s `token.rs`.
 
 **What it would have bought.** Reads with no ACE anywhere — which dissolves the ancestor problem outright, since `realpathSync`, `process.cwd()`, `find-up`/`pkg-dir`/`cosmiconfig` upward walks and `_nodeModulePaths` probing are all reads.
 
@@ -290,7 +290,7 @@ A developer desktop behaves identically to the server images, so this is **not**
 
 - `CreateProcessAsUserW` **is unprivileged** — launched at none/medium/low/untrusted IL. The documented `CreateRestrictedToken` exemption from `SE_ASSIGNPRIMARYTOKEN` holds.
 - `CreateProcessWithTokenW` **fails `err=1314 ERROR_PRIVILEGE_NOT_HELD`** at every IL — it needs `SeImpersonatePrivilege`, which a standard user lacks.
-- An unprivileged **owner can lower an object's integrity label**: `SetNamedSecurityInfoW(..., LABEL_SECURITY_INFORMATION,...)` with `S:(ML;OICI;NW;;;LW)` returned rc=0 on the project dir, nub store and nub cache. **Negative control: `ERR=5 ACCESS_DENIED` on `C:\` and `C:\Windows`** — owner/DACL-derived, exactly the grant scope wanted.
+- An unprivileged **owner can lower an object's integrity label**: `SetNamedSecurityInfoW(..., LABEL_SECURITY_INFORMATION, ...)` with `S:(ML;OICI;NW;;;LW)` returned rc=0 on the project dir, Nub store and Nub cache. **Negative control: `ERR=5 ACCESS_DENIED` on `C:\` and `C:\Windows`** — owner/DACL-derived, exactly the grant scope wanted.
 - The write allowlist works end to end: labeled project dir **WROTE**; `%USERPROFILE%` and `C:\` **Access is denied**.
 - **Low IL does not break TLS**, refuting `srt`'s stated reason for choosing Medium (`token.rs:45-47`). On Server 2025 + Node 24 at low IL: `registry.npmjs.org` 200 TLSv1.2, `nodejs.org` 200 TLSv1.3 (327,277 B), `github.com` 200 TLSv1.3 (591,653 B), all byte-for-byte matching baseline. Also fine at low IL: `dns.lookup`, named-pipe round trip, child spawn, `cmd.exe`, `whoami /groups` (LSA), `os.userInfo()`, HKCU reads, HKLM reads.
 - **Real packages pass: 10/11 lifecycle scripts rc=0, identical to baseline**, judged by artifact not exit code (`sqlite3` `build\` 1,980,416 B; `keytar.node` 707,584 B; `bufferutil` prebuilds 341,880 B; `esbuild.exe` 11,670,528 B). `cpu-features` fails identically in both arms (no MSVC on that box).
@@ -312,7 +312,7 @@ Confirmed in situ: at low IL without a restricting set, `~\.npmrc` and `~\.ssh\i
 
 | broken at low IL | why | remedy (measured) |
 | --- | --- | --- |
-| `%TEMP%` write (`EPERM`) | `%LOCALAPPDATA%\Temp` is Medium-labeled | label a low temp dir and point `TEMP`/`TMP` at it. Windows' own `…\Temp\Low` convention, **measured ABSENT** on the image, so nub must create it. |
+| `%TEMP%` write (`EPERM`) | `%LOCALAPPDATA%\Temp` is Medium-labeled | label a low temp dir and point `TEMP`/`TMP` at it. Windows' own `…\Temp\Low` convention, **measured ABSENT** on the image, so Nub must create it. |
 | `prebuild-install` / `node-pre-gyp` on a **cold** cache | stages the download into `%APPDATA%\npm-cache\_prebuilds`, Medium-labeled | label the PM cache dir the scripts inherit via `npm_config_cache` |
 | node-gyp **devdir** on a **cold** header cache | `%LOCALAPPDATA%\node-gyp` is Medium-labeled | label it; grant `%USERPROFILE%\.node-gyp` too for version-independence (the ≤ 8 location measured at **0** entries) |
 | HKCU **write** (`ACCESS_DENIED`) | HKCU carries a Medium label | no file-label fix; same API on a registry object. Narrow exposure, and **not needed for the compile path** — all four MSVC packages compile byte-identically with HKCU writes denied |
@@ -343,7 +343,7 @@ The setup gate passed all three checks with **zero registration**: `AllocateAndI
 
 Bypass-traverse covered the ancestors here too, in situ: with an ACE on `…\jail\project` and nothing written on `%USERPROFILE%` or `…\jail` (both DENIED for traverse), a low-IL restricted child read `project\package.json` **and** `project\node_modules\nested-pkg\a\b\c\probe.js`. It also composed with the low-IL write label — **gotcha: the ACE mask must include write (`0x1301bf`)**; with a read-only mask (`0x1200a9`) the write is denied even on a Low-labeled dir, because the label satisfies the mandatory check while the discretionary second check still needs write. A first pass read that as "the two mechanisms do not compose"; they do.
 
-**The blocker: that token cannot start a process tree nub does not own.**
+**The blocker: that token cannot start a process tree Nub does not own.**
 
 | restricting set | `cmd.exe` (console only) | `whoami.exe` / `node.exe` |
 | --- | --- | --- |
@@ -364,7 +364,7 @@ Bypass-traverse covered the ancestors here too, in situ: with an ACE on `…\jai
 
 **There is no middle ground on this axis: the one SID that fixes startup is the one SID whose absence was doing the confining.**
 
-**Cost and residue, recorded in case the route ever revives.** Recursive grant over a real 1,737-entry `node_modules` is **1,289 ms** first pass, 1,225 ms steady state (~0.74 ms/entry), but the root ACE is `OICI` so anything created afterwards inherits it — a tree nub creates itself costs one ACL write. Revoke restores the DACL exactly as found (13 entries / 10 ms). A per-run unique SID would accumulate one dead ACE per run toward the ACL size limit; a fixed nub-specific constant SID is equally safe, since holding it in a token confers nothing a process already running as that user does not have *(INFERRED, not measured)*.
+**Cost and residue, recorded in case the route ever revives.** Recursive grant over a real 1,737-entry `node_modules` is **1,289 ms** first pass, 1,225 ms steady state (~0.74 ms/entry), but the root ACE is `OICI` so anything created afterwards inherits it — a tree Nub creates itself costs one ACL write. Revoke restores the DACL exactly as found (13 entries / 10 ms). A per-run unique SID would accumulate one dead ACE per run toward the ACL size limit; a fixed nub-specific constant SID is equally safe, since holding it in a token confers nothing a process already running as that user does not have *(INFERRED, not measured)*.
 
 **What would change the verdict.** A parent-side way to let an arbitrary uncooperative image finish DLL init under a restricting set — i.e. Windows shipping the broker step Chromium does in-process. Not a tuning knob.
 
@@ -392,7 +392,7 @@ Chromium's `app_container_unittest.cc:231-244` asserts the result keeps the base
 
 **Measured working, with all three controls**. Before: the shipped low-IL token read `~\.npmrc` and `~\.ssh\id_rsa` in full. The label write is unprivileged **as the owner**: `S:(ML;;NRNWNX;;;ME)` on `.npmrc` and `S:(ML;OICI;NRNWNX;;;ME)` on `.ssh` → rc=0, read back `type=17 policy=0x7 sid=S-1-16-8192` (`NO_WRITE_UP|NO_READ_UP|NO_EXECUTE_UP` at Medium). **Negative control `ERR=5` on `C:\Windows`.** After, same token and same command: both paths `Access is denied.`, project still readable. **Collateral control: a Medium-IL child still reads them both**, so ordinary applications are unaffected.
 
-**Why it is held back, deliberately.** It is a **DENYLIST rather than deny-by-default**, which the build jail's design forbids — **and it MUTATES THE USER'S REAL FILES**: the label persists if nub dies mid-run and affects every low-IL process on the machine. Open questions for whoever picks it up: which paths to enumerate, whether persistently relabelling a user's real `~\.ssh` is acceptable, and how to restore on uninstall.
+**Why it is held back, deliberately.** It is a **DENYLIST rather than deny-by-default**, which the build jail's design forbids — **and it MUTATES THE USER'S REAL FILES**: the label persists if Nub dies mid-run and affects every low-IL process on the machine. Open questions for whoever picks it up: which paths to enumerate, whether persistently relabelling a user's real `~\.ssh` is acceptable, and how to restore on uninstall.
 
 **What would make it the answer.** The AppContainer realpath fix failing. It is the recorded fallback and nothing else, per.
 
@@ -446,7 +446,7 @@ Chromium's `app_container_unittest.cc:231-244` asserts the result keeps the base
 
 ## The AppContainer loopback exemption — DEAD (privilege), and doubly wrong
 
-**What it was.** Register a machine-wide loopback exemption for the per-run AppContainer SID via `NetworkIsolationSetAppContainerConfig`, so the child can reach nub's loopback egress proxy as its sole egress and get per-host filtering through it. Implemented as `WinNetPlan::Tier1` (`windows.rs:363-377`), reachable only when nub is already elevated.
+**What it was.** Register a machine-wide loopback exemption for the per-run AppContainer SID via `NetworkIsolationSetAppContainerConfig`, so the child can reach Nub's loopback egress proxy as its sole egress and get per-host filtering through it. Implemented as `WinNetPlan::Tier1` (`windows.rs:363-377`), reachable only when Nub is already elevated.
 
 **Why it is dead for the build jail.** The registration needs admin (`windows.rs:356-362`). And it is wrong on a second axis: **the available exemption exposes every loopback listener, including local forwarders**, so a script could stand up its own forwarder and bypass the hostname gate (`windows.rs:26-27`, `preset.rs:443-447`). Deny-all is the stricter posture, so the Windows divergence loses a capability and never enforcement.
 
@@ -484,7 +484,7 @@ Chromium's `app_container_unittest.cc:231-244` asserts the result keeps the base
 
 **It works.** Measured on Windows CI as a one-variable differential in the same run: `ac-noflags` produced **0 ops, rc=1**, dying in realpath; the same grants **with** the flags produced **30 ops**. Run 30463527647 separately confirms the entry point runs, dependency `require`s resolve, and a lifecycle script body completes under the real build-jail policy.
 
-**And it is disqualified, because it silently binds the wrong version.** nub's default node linker is `Isolated` (`aube-linker/src/lib.rs:185`), which materialises each package in its own store cell and wires dependencies as symlinks. With `--preserve-symlinks` a dependency resolves under its **link** path, so the parent-directory walk from `node_modules/<pkg>` skips the store cell holding that package's private dependencies and lands on the project's top-level `node_modules`. Against a fixture mirroring the real `.aube/<dep_path>/node_modules/<name>` layout, a package whose private dependency is `bar@2.0.0` resolved **`bar@1.0.0`** and threw nothing. Standing regression test `crates/nub-sandbox/tests/preserve_symlinks_isolated_layout.rs`; record at `compiler/defaults.rs`'s `windows_realpath_node_options`, retained explicitly as **NOT SHIPPED**.
+**And it is disqualified, because it silently binds the wrong version.** Nub's default node linker is `Isolated` (`aube-linker/src/lib.rs:185`), which materialises each package in its own store cell and wires dependencies as symlinks. With `--preserve-symlinks` a dependency resolves under its **link** path, so the parent-directory walk from `node_modules/<pkg>` skips the store cell holding that package's private dependencies and lands on the project's top-level `node_modules`. Against a fixture mirroring the real `.aube/<dep_path>/node_modules/<name>` layout, a package whose private dependency is `bar@2.0.0` resolved **`bar@1.0.0`** and threw nothing. Standing regression test `crates/nub-sandbox/tests/preserve_symlinks_isolated_layout.rs`; record at `compiler/defaults.rs`'s `windows_realpath_node_options`, retained explicitly as **NOT SHIPPED**.
 
 **A lifecycle script that builds against the wrong dependency version and exits 0 is worse than one that cannot start.**
 
@@ -500,7 +500,7 @@ Chromium's `app_container_unittest.cc:231-244` asserts the result keeps the base
 
 **The clean half.** The wrong-version hazard **is** attributable to `--preserve-symlinks` alone — measured, `preserve_symlinks_isolated_layout`, 4 arms, one fixture, Node 26.5.0: control `bar@2.0.0` · `--preserve-symlinks-main` **`bar@2.0.0`** · `--preserve-symlinks` `bar@1.0.0` · both `bar@1.0.0`. The prior note that "the pair mis-resolves" was correct but too coarse to act on.
 
-**A second hazard that bounds the claim.** Main-only has its **own** wrong-version hazard when the entry point is reached through a symlink (measured): `node node_modules/foo/build.js` where `node_modules/foo` is a store-cell link → main-only silently binds `bar@1.0.0`. Mechanism, also measured via `__filename`: skipping the main realpath leaves the entry on its **link** path, and the entry's resolved path is the ROOT of the `node_modules` walk, so it moves dependency resolution transitively. **Does not fire under nub** — `materialized_pkg_dir` (`aube/src/commands/install/bin_linking.rs:24-49`) gives a dep's lifecycle script a store-cell **real** path for `current_dir` (`install/lifecycle.rs:484`) and gives the Windows `.cmd` shims real-path targets (same file:164), so no lifecycle entry arrives through a link. *(INFERRED FROM CODE — not measured against a real install.)*
+**A second hazard that bounds the claim.** Main-only has its **own** wrong-version hazard when the entry point is reached through a symlink (measured): `node node_modules/foo/build.js` where `node_modules/foo` is a store-cell link → main-only silently binds `bar@1.0.0`. Mechanism, also measured via `__filename`: skipping the main realpath leaves the entry on its **link** path, and the entry's resolved path is the ROOT of the `node_modules` walk, so it moves dependency resolution transitively. **Does not fire under Nub** — `materialized_pkg_dir` (`aube/src/commands/install/bin_linking.rs:24-49`) gives a dep's lifecycle script a store-cell **real** path for `current_dir` (`install/lifecycle.rs:484`) and gives the Windows `.cmd` shims real-path targets (same file:164), so no lifecycle entry arrives through a link. *(INFERRED FROM CODE — not measured against a real install.)*
 
 **The killer, and it is structural: main-only does not fix the jail at all.** `Module._findPath` realpaths **every non-main resolution** unless `--preserve-symlinks` is set — read out of the running binary, not recalled: `if (!isMain) { if (--preserve-symlinks) resolve else toRealPath } else if (--preserve-symlinks-main) resolve else toRealPath`. No cache rescues it: `toRealPath` memoises only what a **successful** walk populated, and here none succeeds. Measured against a process with realpath refused for every path — the jail's own condition, since `realpathSync` was already measured failing on a granted deep file: control dies in `resolveMainPath` with the same stack as run 30506129146; **main-only reaches user code and then every `require()` dies `EPERM`**; both flags resolve fine. Standing regression test `crates/nub-sandbox/tests/realpath_unavailable_resolution.rs` (branch `sandbox/win-preserve-main-only`).
 
@@ -597,7 +597,7 @@ The shipping backend writes **leaf** grants, so the per-launch figure is the ~20
 
 ## Environment keys containing `=` fail the launch closed — OPEN
 
-**The defect.** `backend/mod.rs:1132` rejects any env key containing `=`, but **cmd.exe injects hidden `=C:` / `=ExitCode` variables**, so `apply()` fail-closes. All three of nub's own `windows_enforcement` failures on `windows-latest` are this, on `env.enforce == false` control arms. **The build jail is unaffected** — its env is allowlist-scrubbed. Pre-existing, not from the sandbox branches.
+**The defect.** `backend/mod.rs:1132` rejects any env key containing `=`, but **cmd.exe injects hidden `=C:` / `=ExitCode` variables**, so `apply()` fail-closes. All three of Nub's own `windows_enforcement` failures on `windows-latest` are this, on `env.enforce == false` control arms. **The build jail is unaffected** — its env is allowlist-scrubbed. Pre-existing, not from the sandbox branches.
 
 ## A space-bearing Windows profile path cannot prefetch — OPEN
 
@@ -609,7 +609,7 @@ The confined launch owns spawn+wait internally and cannot hand back piped stdio,
 
 ## Session 0 cannot launch an AppContainer
 
-**Not a defect — a measurement-environment fact that shapes every Windows probe.** OpenSSH puts you in the `services` session 0, which has no window station a LowBox token can attach to, so **every launch returns `0xC0000142 STATUS_DLL_INIT_FAILED`**. Proven environmental by a sharp control: nub's own CI-proven `windows_enforcement` harness fails identically there (27/35, every one `-1073741502`) versus 32/35 for the same binary on `windows-latest`. And now measured rather than inferred: `session-id = 2` on both GitHub runners, which is why CI works.
+**Not a defect — a measurement-environment fact that shapes every Windows probe.** OpenSSH puts you in the `services` session 0, which has no window station a LowBox token can attach to, so **every launch returns `0xC0000142 STATUS_DLL_INIT_FAILED`**. Proven environmental by a sharp control: Nub's own CI-proven `windows_enforcement` harness fails identically there (27/35, every one `-1073741502`) versus 32/35 for the same binary on `windows-latest`. And now measured rather than inferred: `session-id = 2` on both GitHub runners, which is why CI works.
 
 **⇒ Windows sandbox work goes through `ci-adhoc-test` (branch-scoped, no PR), not the standing VM.** The restricted-token routes were measurable over plain SSH precisely because they are **not** AppContainers, which is the one operational advantage they had.
 
@@ -624,5 +624,5 @@ Surfacing these is part of this document's job.
 
 ## Changelog
 
-- 2026-07-30 — Recorded four newly settled approaches, all ADOPTED: the nub-owned staged interpreter copy, `SetKernelObjectSecurity` as the ancestor-ACE writer, fail-soft leaf grants, and bundled busybox as the Windows lifecycle shell. Corrected the capability-SID comments in `backend/windows.rs` and `compiler/defaults.rs`, which described the AppSilo capability as reachable unprivileged; both now state the measured kernel refusal.
+- 2026-07-30 — Moved into tracked `docs/design/` so code comments can link here, and scrubbed of pointers into untracked documents. Recorded four newly settled approaches, all ADOPTED: the nub-owned staged interpreter copy, `SetKernelObjectSecurity` as the ancestor-ACE writer, fail-soft leaf grants, and bundled busybox as the Windows lifecycle shell. Corrected the capability-SID comments in `backend/windows.rs` and `compiler/defaults.rs`, which described the AppSilo capability as reachable unprivileged; both now state the measured kernel refusal.
 - 2026-07-29 — Initial consolidation.

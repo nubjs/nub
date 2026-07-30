@@ -1,6 +1,6 @@
 # Build jail on macOS — every approach tried, and why
 
-Canonical ledger of every mechanism attempted for nub's **build jail** on macOS, one heading per approach. The build jail confines dependency lifecycle scripts during `nub install` and must be **totally unprivileged with no setup command, ever**. macOS is the platform where that constraint costs the least: Seatbelt is unprivileged, `/usr/bin/sandbox-exec` ships with the OS, and there is no setup command to skip. **macOS is therefore where the strongest enforcement lives — and the place where over-claiming it as cross-platform is most tempting.**
+Canonical ledger of every mechanism attempted for Nub's **build jail** on macOS, one heading per approach. The build jail confines dependency lifecycle scripts during `nub install` and must be **totally unprivileged with no setup command, ever**. macOS is the platform where that constraint costs the least: Seatbelt is unprivileged, `/usr/bin/sandbox-exec` ships with the OS, and there is no setup command to skip. **macOS is therefore where the strongest enforcement lives — and the place where over-claiming it as cross-platform is most tempting.**
 
 **This document exists because approaches keep getting re-proposed after being refuted**, and because macOS carries two capabilities the other platforms do not — deny-inside-allow and genuine per-host egress — which makes it easy to write a claim here that is false on Linux or Windows.
 
@@ -34,7 +34,7 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 ## Seatbelt via `sandbox-exec -p` — ADOPTED
 
-**What it is.** The resolved policy IR is compiled to an SBPL profile and enforced by wrapping the child in `sandbox-exec -p <profile> -- <cmd>`. Module doc: `crates/nub-sandbox/src/backend/macos.rs:1-35`. Posture is `(deny default)`; the `MACOS_SEATBELT_BASE` block (ported from Codex/Chromium, `backend/macos_seatbelt_base.sbpl`) is the bootstrap that lets an arbitrary binary dyld-load under a deny-default profile, and nub then appends the IR-derived read/write/net rules.
+**What it is.** The resolved policy IR is compiled to an SBPL profile and enforced by wrapping the child in `sandbox-exec -p <profile> -- <cmd>`. Module doc: `crates/nub-sandbox/src/backend/macos.rs:1-35`. Posture is `(deny default)`; the `MACOS_SEATBELT_BASE` block (ported from Codex/Chromium, `backend/macos_seatbelt_base.sbpl`) is the bootstrap that lets an arbitrary binary dyld-load under a deny-default profile, and Nub then appends the IR-derived read/write/net rules.
 
 **What it buys.** Deny-by-default filesystem confinement, **live evaluation** with no enumeration break, closed path-based evasion, mediated metadata ops, and — uniquely among the three platforms — **genuine per-host egress at zero privilege**.
 
@@ -56,7 +56,7 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 - The consumer's `node_modules` (**not** the whole project). A lifecycle script's own dependencies are hoisted there, so `node-gyp-build` and `prebuild-install` resolve out of `<project>/node_modules/.bin`; dropping the project read outright fails **27 of 33** packages, and keeping only `node_modules` costs nothing.
 - The consumer's top-level `package.json` **as one file, never the directory that holds it**. Two packages at scale crash with an uncaught `ENOENT` without it — `@sentry/capacitor` cross-checks its version against sibling `@sentry/*` entries, and `simple-git-hooks` looks for its own config field.
-- Two `NUB_PM_CACHE_PATTERNS` subtrees of nub's own PM cache — including `<cache>/nub/pm/tools/node-gyp`, **a toolchain grant wearing a cache-directory name**, which under nub is the ONLY node-gyp a confined script can reach. The other 15 `$tooldirs` patterns (`~/.cargo/registry`, `~/.m2/repository`, the pnpm/yarn/bun stores) were reached by **no package in either corpus**.
+- Two `NUB_PM_CACHE_PATTERNS` subtrees of Nub's own PM cache — including `<cache>/nub/pm/tools/node-gyp`, **a toolchain grant wearing a cache-directory name**, which under Nub is the ONLY node-gyp a confined script can reach. The other 15 `$tooldirs` patterns (`~/.cargo/registry`, `~/.m2/repository`, the pnpm/yarn/bun stores) were reached by **no package in either corpus**.
 - The `node_modules` the package **actually** sits in, which is not always the project's — aube's hoisted planner is per-importer, so a workspace member's dependency resolves through `<root>/packages/<m>/node_modules/.bin`, outside `<project>/node_modules` entirely. Missing it reproduces exactly the 27-of-33 failure, **but only in workspaces**, which is how it would have escaped a single-project corpus.
 
 **What the narrowing bought.** Under the old `"./"` grant a dependency's install script could read the consumer's source, config, `.git/hooks/` and `.github/workflows/`.
@@ -73,7 +73,7 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 ## The loopback egress proxy with port pinning — ADOPTED, and the only genuine per-host enforcement anywhere
 
-**What it is.** Egress is permitted to **exactly** the proxy's loopback port — `(allow network* (remote ip "localhost:{port}"))` at `macos.rs:719`, deliberately **not** `localhost:*`, with a test asserting that (`macos.rs:2583-2596`). Every packet must traverse nub's proxy, and **a raw socket cannot bypass it.**
+**What it is.** Egress is permitted to **exactly** the proxy's loopback port — `(allow network* (remote ip "localhost:{port}"))` at `macos.rs:719`, deliberately **not** `localhost:*`, with a test asserting that (`macos.rs:2583-2596`). Every packet must traverse Nub's proxy, and **a raw socket cannot bypass it.**
 
 **What it buys.** Real per-host containment at zero privilege — the one platform where the build jail's host allowlist is an actual boundary rather than a hint.
 
@@ -234,7 +234,7 @@ libc execvp (/usr/bin/env): rc=0 ← skips the entry, finds /usr/bin/make
 
 **The defect.** `grep -c pre_exec backend/macos.rs` returned **0**. Linux runs `close_range(3, u32::MAX, CLOSE_RANGE_CLOEXEC)`; macOS relied entirely on CLOEXEC-by-construction in mio and socket2. *"One mistake wide"* — a `dup()`ed socket or a `socket2::Socket::new_raw` would leak.
 
-**The fix.** A `pre_exec` sweep marking fds ≥ 3 CLOEXEC, enumerated via `PROC_PIDLISTFDS` — macOS has no `close_range`, and nub raises `RLIMIT_NOFILE` to ~1M, so a blind loop would cost ~1M syscalls per spawn.
+**The fix.** A `pre_exec` sweep marking fds ≥ 3 CLOEXEC, enumerated via `PROC_PIDLISTFDS` — macOS has no `close_range`, and Nub raises `RLIMIT_NOFILE` to ~1M, so a blind loop would cost ~1M syscalls per spawn.
 
 **The test's negative control demonstrates the escape**: without the sweep, a confined child read a file the policy denies. **Pairs with the Linux fd-egress measurement — both backends were leaking.**
 
@@ -256,8 +256,8 @@ libc execvp (/usr/bin/env): rc=0 ← skips the entry, finds /usr/bin/make
 
 ## Claims that failed to reproduce — REFUTED, recorded so they are not re-filed
 
-- **`file:` deps bypass the jail entirely.** The premise was simply wrong. Both `file:` shapes are fully jailed (tarball and `file:../dir`; all escape probes blocked EPERM, no escape file). **`file:` deps never reach `RootProvenance`** — they go through `run_dep_hook`, which sandboxes unconditionally under the nub embedder (`vendor/aube/.../lib.rs:1612`); `RootProvenance` is reached only from the git-dep nested install. Fork-discipline risk avoided entirely.
-- **The CAS-store `.mk` write is a macOS sandbox defect.** Confirmed as a real break but **misfiled**: it is a **linker** bug and **not macOS-specific**. `require('node-addon-api').gyp` returns a path that climbs out of the project because nub symlinks registry deps to the global CAS, and gyp re-anchors it under `build/`. There is no acceptable jail-side fix — the target is an arbitrary ancestor-relative phantom tree outside the project, so granting write there would be a filesystem-wide hole. The correct fix materializes registry packages into `node_modules/.store/<name>@<ver>/node_modules/<name>` by hardlink/clonefile. **The layout is platform-independent, so Linux hits it too** — tracked in [`build-jail-linux.md`](build-jail-linux.md)..
+- **`file:` deps bypass the jail entirely.** The premise was simply wrong. Both `file:` shapes are fully jailed (tarball and `file:../dir`; all escape probes blocked EPERM, no escape file). **`file:` deps never reach `RootProvenance`** — they go through `run_dep_hook`, which sandboxes unconditionally under the Nub embedder (`vendor/aube/.../lib.rs:1612`); `RootProvenance` is reached only from the git-dep nested install. Fork-discipline risk avoided entirely.
+- **The CAS-store `.mk` write is a macOS sandbox defect.** Confirmed as a real break but **misfiled**: it is a **linker** bug and **not macOS-specific**. `require('node-addon-api').gyp` returns a path that climbs out of the project because Nub symlinks registry deps to the global CAS, and gyp re-anchors it under `build/`. There is no acceptable jail-side fix — the target is an arbitrary ancestor-relative phantom tree outside the project, so granting write there would be a filesystem-wide hole. The correct fix materializes registry packages into `node_modules/.store/<name>@<ver>/node_modules/<name>` by hardlink/clonefile. **The layout is platform-independent, so Linux hits it too** — tracked in [`build-jail-linux.md`](build-jail-linux.md)..
 - **Both of the code audit's "REAL" pen-test findings** failed to reproduce as breaches under a running install (macOS Seatbelt arm,).
 
 ---
@@ -300,4 +300,5 @@ Two recorded traps where a macOS-only measurement produced a broken cross-platfo
 
 ## Changelog
 
+- 2026-07-30 — Moved into tracked `docs/design/` so code comments can link here, and scrubbed of pointers into untracked documents. Every measurement, table and verdict is unchanged.
 - 2026-07-29 — Initial consolidation.

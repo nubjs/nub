@@ -1,6 +1,6 @@
 # Build jail on Linux — every approach tried, and why
 
-Canonical ledger of every mechanism attempted for nub's **build jail** on Linux, one heading per approach. The build jail confines dependency lifecycle scripts during `nub install` and must be **totally unprivileged with no setup command, ever, including inside a container** — that constraint is what decides almost every row below, and it is the single reason bubblewrap is not the answer here.
+Canonical ledger of every mechanism attempted for Nub's **build jail** on Linux, one heading per approach. The build jail confines dependency lifecycle scripts during `nub install` and must be **totally unprivileged with no setup command, ever, including inside a container** — that constraint is what decides almost every row below, and it is the single reason bubblewrap is not the answer here.
 
 **This document exists because approaches keep getting re-proposed after being refuted.** The most-repeated Linux mistake is proposing bubblewrap for the build jail, which is on record as already-burned; the second is proposing a Landlock deny rule, which no ABI has.
 
@@ -123,17 +123,17 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **⚠️ The broken control that produced the contested reading — do not repeat it.** `unshare --user true` and `unshare --user --net true` return **rc=0 on all four hosts**, including the 24.04 where bwrap fails. `unshare(1)` writes no uid map, and **writing the uid map is precisely what AppArmor denies**, so a green `unshare --user` says nothing about whether a userns is USABLE. The earlier report of "`bwrap --unshare-user` succeeding" on an unverified VM almost certainly measured this instead. **Always probe with a uid-map write (real `bwrap`), and always print the sysctl beside the result.**
 
-**And the path-keyed hypothesis is now the correct model, reversing a note that called it refuted.** AppArmor profiles are keyed to a binary PATH: 24.04 has no `bwrap` profile at all, so even the SYSTEM `/usr/bin/bwrap` is denied, and nub's digest-pinned `nub-resources/bwrap` is unprofiled on every release, so it is denied wherever the restriction is enforcing — 26.04's `bwrap-userns-restrict` covers `/usr/bin/bwrap`, **not** nub's copy. The reason this hypothesis looked refuted was that the observation it had to explain (a *success* on 24.04) was itself the broken control above.
+**And the path-keyed hypothesis is now the correct model, reversing a note that called it refuted.** AppArmor profiles are keyed to a binary PATH: 24.04 has no `bwrap` profile at all, so even the SYSTEM `/usr/bin/bwrap` is denied, and Nub's digest-pinned `nub-resources/bwrap` is unprofiled on every release, so it is denied wherever the restriction is enforcing — 26.04's `bwrap-userns-restrict` covers `/usr/bin/bwrap`, **not** Nub's copy. The reason this hypothesis looked refuted was that the observation it had to explain (a *success* on 24.04) was itself the broken control above.
 
 **Why this no longer blocks anything.** The build jail does not use bubblewrap. Confirmed end to end: on the same 24.04 box where `bwrap --unshare-user` fails, a real `nub install` build jail confines the filesystem identically to 22.04, and the jailed child's netns inode equals the host's. **Do not re-open it as a build-jail blocker.**
 
 **What would change the verdict.** Universal unprivileged userns — i.e. every distro shipping an exemption profile **and** containers granting `cap_sys_admin`. Neither is coming.
 
-## Shipping a nub AppArmor profile in the distro — DEAD (privilege / feasibility)
+## Shipping a Nub AppArmor profile in the distro — DEAD (privilege / feasibility)
 
-**What it was.** Get an AppArmor profile for nub's own digest-pinned `bwrap` copy into Ubuntu and Debian, so the path-keyed restriction exempts it the way it exempts `/usr/bin/bwrap` on 26.04.
+**What it was.** Get an AppArmor profile for Nub's own digest-pinned `bwrap` copy into Ubuntu and Debian, so the path-keyed restriction exempts it the way it exempts `/usr/bin/bwrap` on 26.04.
 
-**Why it is dead.** Maintainer, 2026-07-28: *"We are not gonna be able to ship a default nub profile in the distro for many years. That is not feasible."* Multi-year lead time; **not a path.**
+**Why it is dead.** Maintainer, 2026-07-28: *"We are not gonna be able to ship a default Nub profile in the distro for many years. That is not feasible."* Multi-year lead time; **not a path.**
 
 **What survives.** On a restricted-userns host the only route for `nub sandbox` is the local one-time `sudo nub setup-sandbox`, which installs a root-owned helper plus a path-keyed profile (D5). That is `nub sandbox`'s escalation and is never the build jail's.
 
@@ -177,7 +177,7 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **What it was.** Widen `PROC_READ_PATHS` to cover per-process `/proc` entries so a build tool can read its own `/proc/self/...`.
 
-**Why it is refused, two stated reasons** (`linux_landlock.rs:85-99`): the ruleset is built **pre-`fork`**, so `/proc/self` would resolve to **nub's** PID rather than the child's; and granting per-process entries would expose every same-uid process's `environ` and `cmdline` — the user's shell, editor and other tools, environment variables included. That is *"a secret-disclosure channel the bubblewrap path did not have, and it is a strictly worse trade than the build breakage avoided."*
+**Why it is refused, two stated reasons** (`linux_landlock.rs:85-99`): the ruleset is built **pre-`fork`**, so `/proc/self` would resolve to **Nub's** PID rather than the child's; and granting per-process entries would expose every same-uid process's `environ` and `cmdline` — the user's shell, editor and other tools, environment variables included. That is *"a secret-disclosure channel the bubblewrap path did not have, and it is a strictly worse trade than the build breakage avoided."*
 
 **⇒ Any `/proc/self` dependency must be fixed in the code that reads it, never in the grant set.** Do not propose widening `PROC_READ_PATHS`.
 
@@ -185,7 +185,7 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **Two real defects this created, both fixed by moving the code rather than the grant.**
 
-- **nub's own runtime capture reads `/proc/self/maps`** to pin the monitor's runtime identity, and that read is denied under the jail with no grant possible. Failing the capture eagerly **aborted every nub process nested inside a jail before its work began** — including the node shim every lifecycle script invokes. Fix: the capture stays eager (observing the pristine process image before any application code runs *is* the anti-substitution property), and only the **failure** is deferred to the one consumer that needs the authority — the bubblewrap launch. The Landlock path materializes no runtime image at all, so nothing is weakened silently. Commit `f2e7e6c5bd`; regression test pins a nub binary completing its earliest bootstrap inside a real Landlock jail, paired with that same jail withholding a home secret while the package's own file reads back, so a ruleset that restricted nothing could not satisfy it.
+- **Nub's own runtime capture reads `/proc/self/maps`** to pin the monitor's runtime identity, and that read is denied under the jail with no grant possible. Failing the capture eagerly **aborted every Nub process nested inside a jail before its work began** — including the node shim every lifecycle script invokes. Fix: the capture stays eager (observing the pristine process image before any application code runs *is* the anti-substitution property), and only the **failure** is deferred to the one consumer that needs the authority — the bubblewrap launch. The Landlock path materializes no runtime image at all, so nothing is weakened silently. Commit `f2e7e6c5bd`; regression test pins a Nub binary completing its earliest bootstrap inside a real Landlock jail, paired with that same jail withholding a home secret while the package's own file reads back, so a ruleset that restricted nothing could not satisfy it.
 - **The `/proc/self/maps` parse itself was wrong** — fixed to `split(maxsplit=5)`.
 
 ## Granting `/dev/tty` — REJECTED (design)
@@ -228,7 +228,7 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **Landlock cannot present `ENOENT`** — there is no stat right to withhold, so this is inherent, not a grant bug. **Measured cost: ~0.5% of a 367-package corpus (2 packages).** Treat as an accepted compat cost to document, not a defect to chase.
 
-**A second, sharper instance of the same difference — and this one WAS a real break.** Under bubblewrap nub's own preload was never loaded: the runtime dir sits outside the child's mount view, so preload discovery found nothing and ran unaugmented. Under Landlock the same dir is **visible but ungranted**, so discovery **succeeded**, nub injected `--import …/preload.mjs`, and **Node died on the unreadable file.** Fix (`6253f4b3c6`): stamp `NODE_COMPAT=1` on the constructed lifecycle env so the shim skips preload injection outright, making both mechanisms agree on the behaviour bubblewrap already had. Correct on its own terms too — *"a published postinstall never asked for nub's augmentation, and keeping nub's runtime — including the dlopen'd native addon — out of untrusted code removes surface instead of widening the allowlist to grant it in."* Landlock P0, branch `shim-maps-fix`: 0/20 → 20/20, corpus 121 → 2 → **0 genuine**.
+**A second, sharper instance of the same difference — and this one WAS a real break.** Under bubblewrap Nub's own preload was never loaded: the runtime dir sits outside the child's mount view, so preload discovery found nothing and ran unaugmented. Under Landlock the same dir is **visible but ungranted**, so discovery **succeeded**, Nub injected `--import …/preload.mjs`, and **Node died on the unreadable file.** Fix (`6253f4b3c6`): stamp `NODE_COMPAT=1` on the constructed lifecycle env so the shim skips preload injection outright, making both mechanisms agree on the behaviour bubblewrap already had. Correct on its own terms too — *"a published postinstall never asked for Nub's augmentation, and keeping Nub's runtime — including the dlopen'd native addon — out of untrusted code removes surface instead of widening the allowlist to grant it in."* Landlock P0, branch `shim-maps-fix`: 0/20 → 20/20, corpus 121 → 2 → **0 genuine**.
 
 **A `test`-before-`read` script takes the read path and crashes.** `test -r $PROJECT/.env` reports **readable** and `[ -e ]` reports **exists**, while `open()` then returns `EACCES`, where bwrap's `ENOENT` made the same probe skip honestly. Not fixable by any grant.
 
@@ -246,7 +246,7 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **What it is.** Landlock has no PID namespace. A `setsid` daemon survives (mitigable unprivileged via `PR_SET_CHILD_SUBREAPER`); `kill -TERM` on any same-uid process needs **kernel ≥ 6.12** to close, and **24.04 LTS is 6.8**.
 
-**What ships instead.** The `pre_exec` hook calls `setsid`, so the child is a session leader and its PGID equals its PID — enough to signal and sweep the group. Gated on a flag because every other path shares nub's own process group, where a negative target would signal nub itself. Commit `e7f483a544`.
+**What ships instead.** The `pre_exec` hook calls `setsid`, so the child is a session leader and its PGID equals its PID — enough to signal and sweep the group. Gated on a flag because every other path shares Nub's own process group, where a negative target would signal Nub itself. Commit `e7f483a544`.
 
 **Weaker than the namespace it replaces, and stated as such:** a script that calls `setsid` itself leaves the group and survives. `build_jail.rs`'s comment claimed a whole-tree reap that was **never true on this path**; corrected rather than left describing bubblewrap.
 
@@ -254,7 +254,7 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **What it was.** Use Landlock's audit records to tell a user exactly which grant a failing build needed.
 
-**The record content is ideal** — symbolic blocker, **full path**, dev/ino, and a `domain=` id per `restrict_self` call. **But reading it needs `CAP_AUDIT_READ`**, and **`LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON` defaults OFF**, which is exactly nub's post-`execve` case.
+**The record content is ideal** — symbolic blocker, **full path**, dev/ino, and a `domain=` id per `restrict_self` call. **But reading it needs `CAP_AUDIT_READ`**, and **`LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON` defaults OFF**, which is exactly Nub's post-`execve` case.
 
 **What would change the verdict.** An unprivileged per-domain audit read. Until then, diagnostics come from run-log mining and the `access`/`stat` gap.
 
@@ -326,7 +326,7 @@ All four closed in `890476426c`, listed because each is the kind of thing a port
 
 # Open Linux defects
 
-## Elevated `nub install` breaks when nub lives under `$HOME` — OPEN, bubblewrap-only
+## Elevated `nub install` breaks when Nub lives under `$HOME` — OPEN, bubblewrap-only
 
 **The defect.** `bwrap: Can't find source path /proc/self/fd/204: Permission denied` at euid 0, **even with AppArmor disabled**. fd 204 is the runtime image pinned from `/proc/self/exe` via `--ro-bind-fd`. bwrap maps only uid 0, and a capability in a non-initial userns does **not** override DAC for a file owned by an unmapped uid; `/home/<user>` is 0750 (Ubuntu `HOME_MODE` since 21.04). Confirmed by `chmod 755 $HOME` flipping it. Affects the curl installer's `~/.nub/bin/nub` and every dev build.
 
@@ -336,7 +336,7 @@ All four closed in `890476426c`, listed because each is the kind of thing a port
 
 ## The `--ro-bind-fd` TOCTOU class — OPEN, bubblewrap-only
 
-**What it is.** `--ro-bind-fd` is **not** a descriptor bind. It stores the literal string `/proc/self/fd/N` (`bubblewrap.c:1736`) and `realpath()`s it later (`:1402`), so it binds **whatever that name points at then**. Latent instances at `linux_monitor.rs:1110` and `:6317` on `/proc/self/exe` and `/proc/self/maps`: **if the nub binary is unlinked while running — which an in-place `nub upgrade` would do — every confined launch dies.**
+**What it is.** `--ro-bind-fd` is **not** a descriptor bind. It stores the literal string `/proc/self/fd/N` (`bubblewrap.c:1736`) and `realpath()`s it later (`:1402`), so it binds **whatever that name points at then**. Latent instances at `linux_monitor.rs:1110` and `:6317` on `/proc/self/exe` and `/proc/self/maps`: **if the Nub binary is unlinked while running — which an in-place `nub upgrade` would do — every confined launch dies.**
 
 **Related bwrap facts worth keeping.** An overmount cannot revoke an already-open `struct file`, and `fstat(2)` performs no permission check, so inherited stdio is unaffected by masks. Masks are construction-time snapshots: a file created afterwards in a masked dir is not covered. And `DENY_WALK_SKIP_DIRS = ["node_modules", ".git"]` — bwrap **deliberately does not** walk those, for cost.
 
@@ -360,7 +360,7 @@ A jailed script can read every package **any** project installed, including priv
 
 ## Node-gyp writes into a sibling store cell — OPEN, and it is a linker bug, not a jail defect
 
-**What happens.** `require('node-addon-api').gyp` returns a path that climbs **out of the project**, because nub symlinks registry deps to the global CAS. gyp then re-anchors it under `build/`:
+**What happens.** `require('node-addon-api').gyp` returns a path that climbs **out of the project**, because Nub symlinks registry deps to the global CAS. gyp then re-anchors it under `build/`:
 
 ```text
 jailed: PermissionError [Errno 1]: './build/../../../../../../.cache/nub/pm/store/…/nothing.target.mk'
@@ -369,7 +369,7 @@ control: gyp info ok (unjailed, same dir, same node-gyp)
 
 **There is no acceptable jail-side fix** — the target is an arbitrary ancestor-relative phantom tree outside the project, so granting write there would be a filesystem-wide hole. **The correct fix is in the linker**: materialize registry packages into `node_modules/.store/<name>@<ver>/node_modules/<name>` by hardlink/clonefile instead of symlinking to the global CAS. That also fixes a **non-sandbox** bug (`require('node-addon-api').include_dir` resolving outside the project). **The layout is platform-independent, so this is not a macOS item** even though it was first filed as one..
 
-**A related and genuinely upstream defect, resolved as a doc caveat.** The escaping-`base_path` sibling write in `gyp/pylib/gyp/generator/make.py:2434` — `output_file = os.path.join(options.depth, options.generator_output, base_path, base_name)` with `depth="."` and `generator_output="build"` — prepends `build/` in a way that cancels only the FIRST `..`, so the write lands one level short. **Reproduces byte-for-byte under real pnpm's `.pnpm` virtual store**, so it is not nub-specific and pnpm has not special-cased it. **~29% of a 35-package sample use the vulnerable idiom** (`bcrypt`, `sqlite3`, `ffi-napi`, `ref-napi`, `node-pty`, `tree-sitter`) — it is node-addon-api's **own documented boilerplate**; `include_dirs`/`.include_dir` is the safe form. Flag-injection is **not viable** (`--depth`/`--generator-output` are hardcoded in node-gyp's `configure.js`, and a package running `node-gyp rebuild` directly resolves via bare PATH, bypassing `npm_config_node_gyp`). Root-cause fix is genuinely infeasible in nub, so the documented workaround is correct under the prefer-root-cause rule's stated exception. Doc shipped on `main` @ `dc27843e26`.
+**A related and genuinely upstream defect, resolved as a doc caveat.** The escaping-`base_path` sibling write in `gyp/pylib/gyp/generator/make.py:2434` — `output_file = os.path.join(options.depth, options.generator_output, base_path, base_name)` with `depth="."` and `generator_output="build"` — prepends `build/` in a way that cancels only the FIRST `..`, so the write lands one level short. **Reproduces byte-for-byte under real pnpm's `.pnpm` virtual store**, so it is not nub-specific and pnpm has not special-cased it. **~29% of a 35-package sample use the vulnerable idiom** (`bcrypt`, `sqlite3`, `ffi-napi`, `ref-napi`, `node-pty`, `tree-sitter`) — it is node-addon-api's **own documented boilerplate**; `include_dirs`/`.include_dir` is the safe form. Flag-injection is **not viable** (`--depth`/`--generator-output` are hardcoded in node-gyp's `configure.js`, and a package running `node-gyp rebuild` directly resolves via bare PATH, bypassing `npm_config_node_gyp`). Root-cause fix is genuinely infeasible in Nub, so the documented workaround is correct under the prefer-root-cause rule's stated exception. Doc shipped on `main` @ `dc27843e26`.
 
 ## Stale comments that produced wrong conclusions — OPEN
 
@@ -404,4 +404,5 @@ Recorded because a negative needs its positive controls named. Against `sandbox/
 
 ## Changelog
 
+- 2026-07-30 — Moved into tracked `docs/design/` so code comments can link here, and scrubbed of pointers into untracked documents. Every measurement, table and verdict is unchanged.
 - 2026-07-29 — Initial consolidation.
