@@ -94,6 +94,13 @@
 
 pub mod arm;
 pub mod backend;
+// The catalog PARSER is compiled into the crate only for the dev-only override; `build.rs`
+// pulls the same file in with `#[path]` and always runs it. A shipped build therefore
+// contains no catalog-parsing code at all — the strongest form of "the dev path is absent,
+// not merely inert". See `catalog_override`.
+#[cfg(feature = "build-jail-catalog-override")]
+pub mod catalog;
+pub mod catalog_override;
 pub mod compiler;
 pub mod conformance;
 pub mod matcher;
@@ -101,6 +108,8 @@ pub mod policy;
 pub mod preflight;
 pub mod proxy;
 
+#[cfg(target_os = "windows")]
+pub use backend::windows_publish_appcontainer_read;
 pub use backend::{
     CommandArgs, CommandSpec, Degradation, Prepared, PreparedChild, PreparedSignalTarget,
     RuntimeCapability, StatusReport, apply, apply_with_runtime, earliest_bootstrap,
@@ -112,6 +121,9 @@ pub use backend::{
     PreparedSignalCallback, exercise_monitor_state_6, exercise_monitor_state_7,
     exercise_monitor_state_8, exercise_monitor_states_1_to_5,
 };
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub use backend::{windows_leaf_grant_redundant, windows_object_traverse_ace};
 
 /// The Linux enforcement suites' skip gate, resolving Bubblewrap candidates the way
 /// production does. Test support, not an embedder API.
@@ -136,11 +148,16 @@ pub mod windows_admin {
     pub use crate::backend::windows_account::{SETUP_COMMAND, clean, setup, status, teardown};
 }
 pub use compiler::{
-    CommandRunner, CompileCtx, CompileError, CompileWarning, DOWNLOAD_HOSTS, ScopeCapabilities,
-    compile, compile_build_jail, compile_with_warnings,
+    CommandRunner, CompileCtx, CompileError, CompileWarning, DOWNLOAD_HOSTS,
+    PACKAGE_NETWORK_ALLOWED, ScopeCapabilities, build_jail_net_allowed, build_jail_node_options,
+    build_jail_stdio_preload_js, compile, compile_build_jail, compile_with_warnings,
+    download_hosts, net_gate_node_options, package_network_allowed, realpath_shim_node_options,
 };
 #[cfg(windows)]
-pub use compiler::{windows_native_realpath_shim_node_options, windows_realpath_node_options};
+pub use compiler::{
+    windows_build_jail_node_options, windows_native_realpath_shim_node_options,
+    windows_realpath_node_options,
+};
 pub use matcher::Homes;
 
 /// One-time privileged host setup for the Linux agent-sandbox — the implementation behind

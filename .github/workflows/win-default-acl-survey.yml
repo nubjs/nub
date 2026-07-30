@@ -1,0 +1,75 @@
+# Branch-scoped ad-hoc probe: do Windows' DEFAULT ancestor DACLs already let an AppContainer
+# child traverse `C:\` and `C:\Users`? No pull request required
+# (.claude/skills/ci-adhoc-test/SKILL.md).
+#
+# WHY THIS RUNS BEFORE ANY MORE WORK ON THE REPAIR. The ancestor-ACE repair is only worth making
+# affordable if it is needed and available. It is measured NEEDED on a `windows-latest` runner —
+# but that is a SERVER image, and default ACLs are image-dependent, so it may not be needed on
+# the developer desktops that are the actual population. This job answers that across every
+# image the runner pool offers, and it modifies nothing: `Get-Acl` only.
+#
+# THE MATRIX IS THE POINT. `windows-11-arm` is a CLIENT image; `windows-latest` and
+# `windows-2022` are server images. A single row proves nothing about the others, which is why
+# every row carries its build, UBR and edition and `fail-fast` is off — a label that does not
+# resolve must not take the informative rows down with it.
+#
+# Pure PowerShell, no cargo build: seconds per image rather than the sibling probe's ~25 minutes,
+# which is what makes it affordable to fan across images at all.
+name: win-default-acl-survey
+
+on:
+  push:
+    branches: [sandbox/win-jail-caps]
+    paths:
+      - 'tests/win-default-acl/**'
+      - '.github/workflows/win-default-acl-survey.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  survey:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [windows-latest, windows-2022, windows-11-arm]
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Survey the default ancestor DACLs
+        if: always()
+        shell: pwsh
+        run: |
+          .\tests\win-default-acl\survey.ps1 > survey.log 2>&1
+          $rc = $LASTEXITCODE
+          Write-Output "survey exit=$rc"
+          Get-Content survey.log
+
+      # The verdict is read off the log, never off a step's exit status, so a survey that never
+      # ran cannot be mistaken for one that found nothing.
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          fail=0
+          [ -s survey.log ] || { echo "MISS the survey produced no output at all"; fail=1; }
+          grep -q "SURVEY end" survey.log || { echo "MISS the survey did not run to completion"; fail=1; }
+          for f in image-caption image-build image-producttype runner-elevated; do
+            grep -q "fact:$f=" survey.log || { echo "MISS label $f"; fail=1; }
+          done
+          echo "---- the rows that decide it ----"
+          grep -E 'prop:(lstat|traverse)-without-a-grant|prop:standard-group-can-write-dacl' survey.log || echo "(none reported)"
+          echo "---- full survey ----"
+          grep -E '^  (fact|prop):' survey.log || true
+          exit $fail
+
+      - name: Upload survey log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-default-acl-survey-${{ matrix.image }}
+          path: survey.log
+          if-no-files-found: warn

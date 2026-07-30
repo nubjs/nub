@@ -2,6 +2,7 @@
 # `aube access list packages`
 
 - **Usage**: `aube access list packages [ENTITY]`
+- **Effect**: read-only
 
 List packages visible to the current user or an optional entity
 

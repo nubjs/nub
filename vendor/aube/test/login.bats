@@ -115,6 +115,32 @@ teardown() {
 		"//127.0.0.1:$MOCK_WEB_LOGIN_PORT/:_authToken=mock-web-token"
 }
 
+@test "aube login --auth-type=web caps the token response body" {
+	export MOCK_WEB_LOGIN_OVERSIZED_TOKEN=1
+	_start_mock_web_login
+	AUBE_NO_BROWSER=1 run aube login \
+		--auth-type=web \
+		--registry="http://127.0.0.1:$MOCK_WEB_LOGIN_PORT/"
+	assert_failure
+	assert_output --partial "ERR_AUBE_WEB_LOGIN_RESPONSE_TOO_LARGE"
+	assert_output --partial "exceeds 65536 bytes"
+	run grep "_authToken" "$HOME/.npmrc"
+	assert_failure
+}
+
+@test "aube login --auth-type=web caps a chunked token response body" {
+	export MOCK_WEB_LOGIN_CHUNKED_TOKEN=1
+	_start_mock_web_login
+	AUBE_NO_BROWSER=1 run aube login \
+		--auth-type=web \
+		--registry="http://127.0.0.1:$MOCK_WEB_LOGIN_PORT/"
+	assert_failure
+	assert_output --partial "ERR_AUBE_WEB_LOGIN_RESPONSE_TOO_LARGE"
+	assert_output --partial "exceeds 65536 bytes"
+	run grep "_authToken" "$HOME/.npmrc"
+	assert_failure
+}
+
 @test "aube login --auth-type=web --scope writes the scope mapping" {
 	_start_mock_web_login
 	AUBE_NO_BROWSER=1 run aube login \

@@ -645,6 +645,67 @@ fn dedupe_ignores_workspace_links_and_check_passes() {
     );
 }
 
+/// An `npm:` alias must not read as a dedupe change (#578). The pnpm
+/// reader synthesizes an alias-keyed package and used to keep the
+/// canonical real-name entry too, while a fresh resolve emits only the
+/// clone — so `dedupe` reported the target as removed on every run and
+/// `--check` failed forever on a byte-identical lockfile. Needs the
+/// registry: dedupe's whole job is a fresh resolve.
+#[test]
+#[ignore = "network: resolves + fetches is-number@7.0.0 from the npm registry"]
+fn dedupe_ignores_npm_alias_targets_and_check_passes() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("dedupe-alias");
+    // `packageManager` selects pnpm-lock.yaml; the bug is specific to that
+    // format, since only its writer re-keys an alias under the real name.
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"fixture","private":true,"packageManager":"pnpm@11.17.0","dependencies":{"number-alias":"npm:is-number@7.0.0"}}"#,
+    )
+    .unwrap();
+    let (data, cache) = (
+        pm_tmpdir("dedupe-alias-data"),
+        pm_tmpdir("dedupe-alias-cache"),
+    );
+
+    let install = run_nub_with(&dir, &["install"], &data, &cache);
+    assert_eq!(
+        install.code, 0,
+        "stdout: {}\nstderr: {}",
+        install.stdout, install.stderr
+    );
+    let lock_before = std::fs::read_to_string(dir.join("pnpm-lock.yaml")).unwrap();
+
+    let dedupe = run_nub_with(&dir, &["dedupe"], &data, &cache);
+    assert_eq!(
+        dedupe.code, 0,
+        "stdout: {}\nstderr: {}",
+        dedupe.stdout, dedupe.stderr
+    );
+    assert!(
+        dedupe.combined().contains("already deduped"),
+        "an alias target must not be reported as removed: {}",
+        dedupe.combined()
+    );
+    dedupe.assert_brand_clean();
+    assert_eq!(
+        std::fs::read_to_string(dir.join("pnpm-lock.yaml")).unwrap(),
+        lock_before,
+        "dedupe must not change the lockfile"
+    );
+
+    let check = run_nub_with(&dir, &["dedupe", "--check"], &data, &cache);
+    assert_eq!(
+        check.code,
+        0,
+        "dedupe --check must pass on an aliased project: {}",
+        check.combined()
+    );
+}
+
 /// `nub import` converts a foreign lockfile to pnpm-lock.yaml (nub's
 /// canonical format — never aube-lock.yaml), refuses a second run without
 /// `--force`, and works fully offline.

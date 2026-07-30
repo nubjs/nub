@@ -5,6 +5,14 @@ use miette::{Context, IntoDiagnostic, miette};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::IsTerminal;
 
+#[derive(Debug)]
+struct CatalogUpdateTarget {
+    manifest_key: String,
+    catalog: String,
+    original_range: String,
+    source: super::CatalogSource,
+}
+
 #[derive(Debug, Clone, Args)]
 pub struct UpdateArgs {
     /// Package(s) to update (all if empty)
@@ -308,7 +316,8 @@ pub async fn run(
             if all_specifiers.contains_key(name.as_str()) {
                 if ignored_updates.contains(name.as_str()) {
                     return Err(miette!(
-                        "package '{name}' is ignored by updateConfig.ignoreDependencies"
+                        "package '{name}' is ignored by update.ignoreDeps \
+                         (or legacy updateConfig.ignoreDependencies)"
                     ));
                 }
                 continue;
@@ -332,7 +341,8 @@ pub async fn run(
             }
             if ignored_updates.contains(name.as_str()) {
                 return Err(miette!(
-                    "package '{name}' is ignored by updateConfig.ignoreDependencies"
+                    "package '{name}' is ignored by update.ignoreDeps \
+                     (or legacy updateConfig.ignoreDependencies)"
                 ));
             }
             indirect_arg_names.insert(name.clone());
@@ -350,7 +360,9 @@ pub async fn run(
             .filter(|p| all_specifiers.contains_key(p.as_str()))
             .filter(|p| {
                 if ignored_updates.contains(p.as_str()) {
-                    tracing::info!("skipping {p} (updateConfig.ignoreDependencies)");
+                    tracing::info!(
+                        "skipping {p} (update.ignoreDeps or legacy updateConfig.ignoreDependencies)"
+                    );
                     false
                 } else {
                     true
@@ -544,6 +556,36 @@ pub async fn run(
         .map(|k| resolve_real_name(k))
         .collect();
 
+    let mut workspace_catalogs = super::load_workspace_catalogs(&cwd)?;
+    let mut catalog_targets = Vec::new();
+    if effective_latest {
+        for key in &manifest_keys_to_update {
+            if !should_rewrite_key(key) || preserve_pin.contains(key) {
+                continue;
+            }
+            let original = all_specifiers.get(key).map(String::as_str).unwrap_or("");
+            let Some(catalog) = catalog_name_from_spec(original) else {
+                continue;
+            };
+            let Some(entries) = workspace_catalogs.get_mut(catalog) else {
+                continue;
+            };
+            let Some(original_range) = entries.get(key).cloned() else {
+                continue;
+            };
+            let Some(source) = super::catalog_entry_source(&cwd, catalog, key) else {
+                continue;
+            };
+            entries.insert(key.clone(), "latest".to_string());
+            catalog_targets.push(CatalogUpdateTarget {
+                manifest_key: key.clone(),
+                catalog: catalog.to_string(),
+                original_range,
+                source,
+            });
+        }
+    }
+
     if update_all {
         eprintln!("Updating all dependencies...");
     } else {
@@ -693,7 +735,6 @@ pub async fn run(
             Some((h, f)) => (Some(h), f),
             None => (None, Vec::new()),
         };
-    let workspace_catalogs = super::load_workspace_catalogs(&cwd)?;
     let workspace_package_versions = workspace_package_versions(&cwd)?;
     let mut resolver = super::build_resolver(&cwd, &manifest, workspace_catalogs)?;
     if let Some(host) = read_package_host {
@@ -715,6 +756,47 @@ pub async fn run(
     // records flush to stdout before afterAllResolved emits its own.
     crate::pnpmfile::ReadPackageHostChain::drain_forwarders(read_package_forwarders).await;
     crate::pnpmfile::run_after_all_resolved_chain(&pnpmfile_paths, &cwd, &mut graph).await?;
+
+    let mut catalog_updates: BTreeMap<super::CatalogSource, Vec<super::catalogs::CatalogUpdate>> =
+        BTreeMap::new();
+    for target in &catalog_targets {
+        let real_name = resolve_real_name(&target.manifest_key);
+        let Some(resolved) = lookup_pkg(&graph, &["."], &target.manifest_key, &real_name)
+            .map(|pkg| pkg.version.clone())
+        else {
+            continue;
+        };
+        let persisted_range = if no_save {
+            target.original_range.clone()
+        } else {
+            rewrite_specifier(&target.original_range, &real_name, &resolved, args.exact)
+        };
+        if let Some(entry) = graph
+            .catalogs
+            .get_mut(&target.catalog)
+            .and_then(|entries| entries.get_mut(&target.manifest_key))
+        {
+            entry.specifier = persisted_range.clone();
+        }
+        if !no_save && persisted_range != target.original_range {
+            catalog_updates
+                .entry(target.source.clone())
+                .or_default()
+                .push(super::catalogs::CatalogUpdate {
+                    catalog: target.catalog.clone(),
+                    package: target.manifest_key.clone(),
+                    range: persisted_range,
+                });
+        }
+    }
+    for (source, updates) in &catalog_updates {
+        super::catalogs::update_catalog_entries(source, updates)?;
+        let path = match source {
+            super::CatalogSource::WorkspaceYaml(path)
+            | super::CatalogSource::PackageJson { path, .. } => path,
+        };
+        eprintln!("Updated {}", path.display());
+    }
 
     // Report what changed. Aliased direct deps (`"alias": "npm:real@x"`)
     // land in the lockfile graph with `pkg.name == "alias"` and
@@ -1107,8 +1189,7 @@ async fn pick_update_interactively(
             .and_then(|g| lookup_pkg(g, existing_importers, key, &real_name))
             .map(|p| p.version.as_str());
         let registry_latest = packument.dist_tags.get("latest").map(String::as_str);
-        let wanted =
-            super::max_satisfying_version(packument, spec).or_else(|| current.map(str::to_owned));
+        let wanted = super::wanted_version(packument, spec).or_else(|| current.map(str::to_owned));
         // `--latest` rewrites past the manifest range, so the picker
         // shows the dist-tag latest as the target. Without `--latest`
         // we only refresh inside the range, so target = wanted.
@@ -1260,7 +1341,7 @@ async fn pick_update_rich(
             .or_else(|| specifiers.get(key.as_str()))
             .map(String::as_str)
             .unwrap_or("");
-        let wanted = super::max_satisfying_version(packument, spec)
+        let wanted = super::wanted_version(packument, spec)
             .or_else(|| packument.dist_tags.get(spec).cloned());
         let registry_latest = packument.dist_tags.get("latest").map(String::as_str);
         // The displayed spec is always the MANIFEST's (the dim annotation
@@ -1315,6 +1396,12 @@ fn real_name_from_spec(manifest_key: &str, specifier: Option<&String>) -> String
         return rest.to_string();
     }
     manifest_key.to_string()
+}
+
+fn catalog_name_from_spec(specifier: &str) -> Option<&str> {
+    specifier
+        .strip_prefix("catalog:")
+        .map(|name| if name.is_empty() { "default" } else { name })
 }
 
 /// Look up the LockedPackage for a direct dep of the current importer.
@@ -1373,36 +1460,67 @@ fn resolve_update_settings(
     cwd: &std::path::Path,
     manifest: &aube_manifest::PackageJson,
 ) -> miette::Result<UpdateSettings> {
-    let mut ignored: BTreeSet<String> = manifest.update_ignore_dependencies().into_iter().collect();
-    let rewrites_specifier = with_update_settings_ctx(cwd, |ctx| {
-        if let Some(from_settings) = aube_settings::resolved::update_config_ignore_dependencies(ctx)
-        {
-            ignored.extend(from_settings);
-        }
-        aube_settings::resolved::update_rewrites_specifier(ctx)
-    })?;
-    Ok(UpdateSettings {
-        ignored,
-        rewrites_specifier,
+    with_update_settings_ctx(cwd, |ctx| UpdateSettings {
+        ignored: ignored_update_dependencies_from_ctx(ctx, manifest),
+        rewrites_specifier: aube_settings::resolved::update_rewrites_specifier(ctx),
     })
+}
+
+pub(super) fn ignored_update_dependencies(
+    cwd: &std::path::Path,
+    manifest: &aube_manifest::PackageJson,
+) -> miette::Result<BTreeSet<String>> {
+    with_update_settings_ctx(cwd, |ctx| {
+        ignored_update_dependencies_from_ctx(ctx, manifest)
+    })
+}
+
+pub(super) fn ignored_update_dependencies_from_ctx(
+    ctx: &aube_settings::ResolveCtx<'_>,
+    manifest: &aube_manifest::PackageJson,
+) -> BTreeSet<String> {
+    let configured = aube_settings::resolved::update_ignore_deps(ctx)
+        .map(|canonical| (true, canonical))
+        .or_else(|| {
+            aube_settings::resolved::update_config_ignore_dependencies(ctx)
+                .map(|legacy| (false, legacy))
+        });
+    if let Some((true, canonical)) = configured {
+        return canonical.into_iter().collect();
+    }
+    let mut ignored: BTreeSet<String> = manifest.update_ignore_dependencies().into_iter().collect();
+    if let Some((false, legacy)) = configured {
+        ignored.extend(legacy);
+    }
+    ignored
 }
 
 fn with_update_settings_ctx<T>(
     cwd: &std::path::Path,
     f: impl FnOnce(&aube_settings::ResolveCtx<'_>) -> T,
 ) -> miette::Result<T> {
-    let files = crate::commands::FileSources::load(cwd);
     // `pnpm-workspace.yaml` lives at the workspace root, not in
     // sub-packages. Filtered runs (`update -r`) call us with the
     // sub-package as cwd, so an unwalked load returns an empty map and
     // `updateConfig.ignoreDependencies` silently drops every entry.
     // Discussion #602: zod was in the ignore list yet appeared in the
-    // recursive picker because of this miss. Fall back to cwd if no
-    // workspace root is found (single-project case).
+    // recursive picker because of this miss. Load root project sources,
+    // then append member project sources so member-local values retain
+    // their normal precedence. Fall back to cwd if no workspace root is
+    // found (single-project case).
     let yaml_root = crate::dirs::find_workspace_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
-    let (_workspace_config, raw_workspace) = aube_manifest::workspace::load_both(&yaml_root)
-        .into_diagnostic()
-        .wrap_err("failed to read workspace config")?;
+    let mut files = crate::commands::FileSources::load(&yaml_root);
+    if cwd != yaml_root {
+        files.extend_project_sources(cwd);
+    }
+    let raw_workspace = aube_manifest::workspace::load_raw(&yaml_root).unwrap_or_else(|error| {
+        tracing::debug!(
+            %error,
+            workspace_root = %yaml_root.display(),
+            "ignoring invalid workspace config while resolving update settings"
+        );
+        BTreeMap::new()
+    });
     let env = aube_settings::values::process_env();
     let ctx = files.ctx(&raw_workspace, env, &[]);
     Ok(f(&ctx))
@@ -1930,6 +2048,85 @@ fn exact_pin_version(spec: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_update_ignores_replace_package_json_legacy_values() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages: []\nupdate:\n  ignoreDeps:\n    - canonical\n",
+        )
+        .unwrap();
+        let manifest = aube_manifest::PackageJson::parse(
+            &dir.path().join("package.json"),
+            r#"{"updateConfig":{"ignoreDependencies":["legacy"]}}"#.to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            ignored_update_dependencies(dir.path(), &manifest).unwrap(),
+            BTreeSet::from(["canonical".to_string()])
+        );
+    }
+
+    #[test]
+    fn malformed_workspace_yaml_does_not_block_package_json_update_ignores() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pnpm-workspace.yaml"), "packages: [\n").unwrap();
+        let manifest = aube_manifest::PackageJson::parse(
+            &dir.path().join("package.json"),
+            r#"{"updateConfig":{"ignoreDependencies":["legacy"]}}"#.to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            ignored_update_dependencies(dir.path(), &manifest).unwrap(),
+            BTreeSet::from(["legacy".to_string()])
+        );
+    }
+
+    #[test]
+    fn workspace_members_read_update_ignores_from_root_npmrc() {
+        let dir = tempfile::tempdir().unwrap();
+        let member = dir.path().join("packages/app");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - packages/*\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".npmrc"),
+            "update.ignoreDeps=[\"canonical\"]\n",
+        )
+        .unwrap();
+        let manifest = aube_manifest::PackageJson::default();
+
+        assert_eq!(
+            ignored_update_dependencies(&member, &manifest).unwrap(),
+            BTreeSet::from(["canonical".to_string()])
+        );
+    }
+
+    #[test]
+    fn workspace_member_update_ignores_override_root_project_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let member = dir.path().join("packages/app");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - packages/*\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join(".npmrc"), "update.ignoreDeps=[\"root\"]\n").unwrap();
+        std::fs::write(member.join(".npmrc"), "update.ignoreDeps=[\"member\"]\n").unwrap();
+        let manifest = aube_manifest::PackageJson::default();
+
+        assert_eq!(
+            ignored_update_dependencies(&member, &manifest).unwrap(),
+            BTreeSet::from(["member".to_string()])
+        );
+    }
 
     fn locked(name: &str, version: &str) -> aube_lockfile::LockedPackage {
         aube_lockfile::LockedPackage {

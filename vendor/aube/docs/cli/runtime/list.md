@@ -3,5 +3,6 @@
 
 - **Usage**: `aube runtime list`
 - **Aliases**: `ls`
+- **Effect**: read-only
 
 Show the resolved runtime and installed versions

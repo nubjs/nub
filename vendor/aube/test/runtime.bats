@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# shellcheck disable=SC2030,SC2031
 # Node runtime switching: version sources (.nvmrc / .node-version /
 # devEngines.runtime), install discovery (aube dir + mise dir), onFail
 # policies, and `aube runtime` CLI surface. Hermetic — no network:
@@ -258,6 +259,29 @@ _basic_project() {
 	run node --version
 	assert_success
 	assert_output --partial "v1.2.3"
+}
+
+@test "activated shims survive removal of the aube version that created them" {
+	local real_aube v1 v2
+	real_aube="$(command -v aube)"
+	v1="$TEST_TEMP_DIR/aube-v1"
+	v2="$TEST_TEMP_DIR/aube-v2"
+	mkdir -p "$v1" "$v2"
+	cp "$real_aube" "$v1/aube"
+	cp "$real_aube" "$v2/aube"
+	chmod +x "$v1/aube" "$v2/aube"
+	export PATH="$v1:$PATH"
+
+	run aube activate bash
+	assert_success
+	eval "$output"
+	refute [ -L "$AUBE_SHIM_DIR/pnpm" ]
+	rm "$v1/aube"
+	export PATH="${PATH/$v1/$v2}"
+
+	run pnpm --version
+	assert_success
+	assert_output --regexp '^[0-9]+\.[0-9]+\.[0-9]+'
 }
 
 @test "pnpm shim routes install through aube without changing lockfile kind" {

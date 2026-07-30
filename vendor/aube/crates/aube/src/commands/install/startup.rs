@@ -101,12 +101,60 @@ fn install_fast_path_eligible(
     // consulted), leaving `aube install -v` silent on repeat-install loops
     // that originate from state drift rather than lockfile drift.
     match state::check_needs_install_with_flags(cwd, &opts.cli_flags) {
-        None => true,
+        None => compatibility_metadata_is_current(cwd),
         Some(reason) => {
             tracing::debug!("install warm path skipped: {reason}");
             false
         }
     }
+}
+
+fn compatibility_metadata_is_current(cwd: &Path) -> bool {
+    let Some(layout) = state::read_state_layout(cwd) else {
+        return false;
+    };
+    let modules_dir_name = super::super::resolve_modules_dir_name_for_cwd(cwd);
+    let aube_dir = super::super::resolve_virtual_store_dir_for_cwd(cwd);
+    let mut legacy_vite_patches_current = true;
+    let expected = match layout.linker {
+        state::InstallLayoutMode::Hoisted => Some(aube_dir),
+        state::InstallLayoutMode::Isolated => {
+            let global_virtual_store = super::super::global_virtual_store_dir(cwd);
+            match super::gvs::detect_existing_global_virtual_store(
+                cwd,
+                &aube_dir,
+                &modules_dir_name,
+                &global_virtual_store,
+            ) {
+                Some(true) => {
+                    legacy_vite_patches_current =
+                        super::gvs::legacy_vite_patches_are_current(&aube_dir);
+                    Some(global_virtual_store)
+                }
+                Some(false) => Some(aube_dir),
+                None => {
+                    tracing::debug!(
+                        "install warm path skipped: unable to detect virtual-store layout"
+                    );
+                    return false;
+                }
+            }
+        }
+    };
+    if !legacy_vite_patches_current {
+        tracing::debug!("install warm path skipped: legacy Vite patch is missing");
+        return false;
+    }
+    let metadata_current = super::gvs::modules_metadata_is_current(
+        cwd,
+        layout.direct_entries.keys().map(String::as_str),
+        &modules_dir_name,
+        expected.as_deref(),
+    );
+    if !metadata_current {
+        tracing::debug!("install warm path skipped: .modules.yaml metadata is stale");
+    }
+    metadata_current
 }
 
 fn trust_policy_requires_validation(cwd: &Path, opts: &InstallOptions) -> bool {

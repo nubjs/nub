@@ -474,6 +474,28 @@ pub struct EngineContext {
     /// Same additive shape as [`env_overlay`](Self::env_overlay)/[`path_prepends`](Self::path_prepends):
     /// default-empty is behavior-preserving.
     pub lifecycle_sandbox: Option<Arc<dyn LifecycleSandbox>>,
+
+    /// Replacement DEFAULT shell for every lifecycle-script spawn, used only
+    /// when the user configured no `script-shell` (which still wins). `None`
+    /// (default) keeps aube's platform default — `sh -c` on Unix, `cmd.exe
+    /// /d /s /c` on Windows.
+    ///
+    /// Exists for the Windows default specifically: an embedder that runs the
+    /// same POSIX script bodies through its own surfaces wants ONE shell, and
+    /// a POSIX shell is the more robust choice under an OS sandbox because it
+    /// needs no filesystem-ancestor repair to behave correctly. aube itself
+    /// takes no position — it consumes whatever the embedder resolved.
+    pub default_script_shell: Option<ScriptShell>,
+}
+
+/// A shell invocation: the program plus the leading args that precede the
+/// script body. Two args are needed because a multi-call binary dispatches on
+/// an applet name — busybox is spawned as `busybox.exe sh -c <body>`, where a
+/// plain shell takes `<shell> -c <body>`.
+#[derive(Clone, Debug)]
+pub struct ScriptShell {
+    pub program: PathBuf,
+    pub args: Vec<String>,
 }
 
 impl Default for EngineContext {
@@ -506,6 +528,7 @@ impl Default for EngineContext {
             embedder_package_extensions: None,
             enforce_package_extensions_checksum: false,
             lifecycle_sandbox: None,
+            default_script_shell: None,
         }
     }
 }

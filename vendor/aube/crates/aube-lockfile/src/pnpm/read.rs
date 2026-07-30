@@ -11,7 +11,7 @@ use crate::{
     ParseOptions, PeerDepMeta, RuntimePin, RuntimeTarget, RuntimeVariant, git_commits_match,
 };
 use aube_util::path::normalize_lexical;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 fn rebase_importer_local(local: LocalSource, importer_path: &str) -> LocalSource {
@@ -854,6 +854,10 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
     // as a filesystem name) and every reference to the raw alias
     // spelling is remapped afterwards.
     let mut alias_local_renames: BTreeMap<String, String> = BTreeMap::new();
+    // Canonical keys the loop below cloned an alias out of. Collected so the
+    // orphan sweep after it can drop the ones nothing else references — see
+    // the sweep for why.
+    let mut alias_clone_sources: BTreeSet<String> = BTreeSet::new();
     for (alias_dep_path, real_dep_path, alias_name, real_name) in alias_remaps {
         // Skip if the alias entry already exists (aube-written
         // lockfile that emitted both `aliasOf:` and an alias-keyed
@@ -893,6 +897,18 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
                 ),
             ));
         };
+        // Record the key actually cloned from — `peerless_alias_target`
+        // may resolve to a peerless variant rather than `real_dep_path`.
+        // A `file:`-keyed target reaches this branch too (pnpm writes
+        // `version: <real>@file:<path>` for a local dep consumed under
+        // another name, and the local-rename branch above only fires when
+        // that package is ALSO a local direct dep), so gate on
+        // `local_source` here rather than assuming the branch above caught
+        // every local: the writer keys locals by `pkg.name`, so a swept
+        // local canonical is not regenerable from the clone.
+        if real_pkg.local_source.is_none() {
+            alias_clone_sources.insert(real_pkg.dep_path.clone());
+        }
         let mut aliased = real_pkg.clone();
         aliased.name = alias_name;
         aliased.dep_path = alias_dep_path.clone();
@@ -922,6 +938,59 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
                 }
             }
         }
+    }
+
+    // Drop each alias-clone source that nothing else in the graph reaches.
+    //
+    // pnpm v9 writes only the canonical (real-name-keyed) entry for an
+    // `npm:` alias, so the loop above clones it under the alias key. That
+    // left BOTH in the graph, while a fresh resolve produces only the
+    // alias-keyed one — an asymmetry every consumer that walks `packages`
+    // raw then disagreed on (#578: dedupe reported a phantom removal on
+    // every run and `--check` failed forever; `fetch` over-counted and
+    // re-imported the tarball; `rebuild <real-name>` matched a package
+    // that is not an installed dependency). `install`/linker were immune
+    // only because they run `filter_graph`'s reachability GC first.
+    //
+    // Dropping is safe for serialization: the pnpm writer regenerates the
+    // canonical `packages:`/`snapshots:` key from the alias clone via
+    // `alias_of`. It is NOT safe unconditionally — an aliased package is
+    // frequently also a genuine dep of something else (`@isaacs/cliui`
+    // reaches `string-width@4.2.3` both through its `string-width-cjs`
+    // alias and through `wrap-ansi@7.0.0`'s own edge), so the entry only
+    // goes when no importer and no surviving package edge resolves to it.
+    // Edges resolve through `resolve_dep_edge` — the same convention
+    // `filter_graph` uses — so a git/remote-tarball child keyed
+    // `name@url+<hash>` is not mistaken for unreferenced. Both dep maps
+    // are scanned even though the parse loop already folds
+    // `optional_dependencies` into `dependencies`: a missed edge would
+    // drop a live entry, so the scan errs toward keeping.
+    //
+    // Local (`file:`) targets never enter `alias_clone_sources` (see the
+    // `local_source` gate at the insert), so their canonical entry always
+    // survives — the writer keys locals by `pkg.name`, not `alias_of`, and
+    // could not regenerate one from the clone.
+    if !alias_clone_sources.is_empty() {
+        let mut referenced: BTreeSet<String> = BTreeSet::new();
+        for deps in importers.values() {
+            for dep in deps {
+                referenced.insert(dep.dep_path.clone());
+            }
+        }
+        for pkg in packages.values() {
+            for map in [&pkg.dependencies, &pkg.optional_dependencies] {
+                for (dep_name, value) in map {
+                    if let Some(child) =
+                        crate::resolve_dep_edge(dep_name, value, |k| packages.contains_key(k))
+                    {
+                        referenced.insert(child);
+                    }
+                }
+            }
+        }
+        packages.retain(|key, pkg| {
+            pkg.alias_of.is_some() || !alias_clone_sources.contains(key) || referenced.contains(key)
+        });
     }
 
     // Normalize git / remote-tarball references so a lockfile round-trip

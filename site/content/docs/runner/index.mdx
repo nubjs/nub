@@ -38,7 +38,7 @@ nubx: refusing to download cowsay in CI.
   A CI job should declare the tool as a dependency, or pass -y to fetch it.
 ```
 
-A fetched package runs through Nub's normal install resolver, so the registry safeguards apply: the `minimumReleaseAge` cooling window (see [the trust floor](/docs/install#default-trust-floor)) and skipped lifecycle scripts. The [remote bin runner](/docs/runner/dlx) is the explicit way to fetch and run a package outside the prompt, and covers both in full.
+A fetched package runs through Nub's normal install resolver, so the registry safeguards apply: the `minimumReleaseAge` cooling window (see [the cooling window](/docs/install#cooling-window)) and skipped lifecycle scripts. The [remote bin runner](/docs/runner/dlx) is the explicit way to fetch and run a package outside the prompt, and covers both in full.
 
 ### `-y`
 

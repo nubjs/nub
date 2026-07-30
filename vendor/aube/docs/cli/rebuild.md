@@ -3,6 +3,7 @@
 
 - **Usage**: `aube rebuild [PACKAGE]…`
 - **Aliases**: `rb`
+- **Effect**: modifies state
 
 Re-run root lifecycle scripts and allowlisted dependency builds
 

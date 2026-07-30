@@ -2,6 +2,7 @@
 # `aube config set`
 
 - **Usage**: `aube config set [--local] [--location <LOCATION>] <KEY> <VALUE>`
+- **Effect**: modifies state
 
 Write a key=value pair to aube config or the selected `.npmrc` file
 

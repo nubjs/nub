@@ -2,6 +2,7 @@
 # `aube deprecate`
 
 - **Usage**: `aube deprecate [FLAGS] <PACKAGE> <MESSAGE>`
+- **Effect**: modifies state
 
 Mark published versions of a package as deprecated on the registry
 

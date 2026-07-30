@@ -28,6 +28,9 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 fn main() -> Result<()> {
     // Must be the first embedder action: Linux monitor mode is selected from a
     // private argv/descriptor handshake and never enters logging or CLI setup.
+    // It precedes even the identity registration below because nub-sandbox has
+    // zero aube dependency, so nothing on this path can derive a brand-scoped
+    // path before the profile is set.
     // Leaked to `'static`: the capability lives for the whole process (held until
     // `process::exit`, which skips Drop anyway), and the build-jail interposition hook
     // — stored on the process-global engine context — must capture it beyond any stack
@@ -35,6 +38,18 @@ fn main() -> Result<()> {
     // instance is the clean way to give it the required lifetime.
     let sandbox_runtime: &'static nub_sandbox::RuntimeCapability =
         Box::leak(Box::new(nub_sandbox::earliest_bootstrap()?));
+
+    // Embedder identity before any line of nub that could reach the engine. Every
+    // brand-scoped path the engine derives — cache root, data root, config
+    // home — flows from `aube_util::embedder()`, which falls back to the
+    // *aube* profile whenever the OnceLock is unset. Registering only inside
+    // `engine_brand_preflight` left that fallback live on every non-PM path,
+    // so `nub run` wrote the engine's node-gyp shim to `<cache>/aube/...` and
+    // exported that path to scripts as `npm_config_node_gyp`. Registering here
+    // makes the fallback structurally unreachable in the nub binary rather
+    // than fixing one call site at a time; preflight still re-registers
+    // (set-once, idempotent) so pm_engine stays self-contained under test.
+    pm_engine::identity::register();
 
     if std::env::var_os("__NUB_VALIDATE_RESOURCE_BUNDLE").is_some() {
         nub_sandbox::validate_adjacent_resource_bundle()
@@ -57,6 +72,20 @@ fn main() -> Result<()> {
     // arm, and an active arm announces itself, so a study run can never measure one
     // configuration while believing it measured another. `nub_sandbox::arm` module doc.
     match nub_sandbox::arm::init_from_env() {
+        Ok(decision) => {
+            if let Some(banner) = decision.banner() {
+                eprintln!("{banner}");
+            }
+        }
+        Err(refusal) => anyhow::bail!(refusal),
+    }
+
+    // Latch the development-only catalog override, on the same terms and for the same
+    // reason as the arm above: before any command, so before any dependency script exists.
+    // A set variable this binary cannot honour ABORTS; a catalog that fails to load falls
+    // back to the compiled-in copy and SAYS SO, so a run always knows which catalog it
+    // measured. `nub_sandbox::catalog_override` module doc.
+    match nub_sandbox::catalog_override::init_from_env() {
         Ok(decision) => {
             if let Some(banner) = decision.banner() {
                 eprintln!("{banner}");

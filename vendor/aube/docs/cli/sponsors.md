@@ -2,5 +2,6 @@
 # `aube sponsors`
 
 - **Usage**: `aube sponsors`
+- **Effect**: read-only
 
 Show the companies sponsoring aube and the jdx.dev open source tools

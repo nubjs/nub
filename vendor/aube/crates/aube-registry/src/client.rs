@@ -25,6 +25,7 @@ mod slow_tarball_tests;
 
 pub use cache::CachedPackumentLookup;
 use dist_tags::*;
+pub use endpoints::PackageSearchResult;
 use http::*;
 pub use npm_verbs::{Owner, TokenInfo};
 use parse::parse_full_response;

@@ -1,12 +1,23 @@
 [env]
 _.path = ["./bin"]
 
+[settings]
+experimental = true
+cargo.binstall_native = true
+
 [tools]
 actionlint = "latest"
-cargo-binstall = "latest"
 communique = "latest"
 "github:bnjbvr/cargo-machete" = "latest"
 "github:foresterre/cargo-msrv" = "latest"
+# Pinned rather than "latest" because tak is the measuring instrument: an
+# upgrade that changes how it samples would land in the series as a step
+# change in aube's numbers, indistinguishable from a real regression. Bump
+# deliberately, on a commit that does nothing else.
+# TODO: switch to plain `tak = "0.0.4"` once a mise release ships the registry
+# entry from jdx/mise#11307 — the shorthand exists on main but the registry is
+# compiled in, so it is not usable until then.
+"github:jdx/tak" = "0.0.4"
 hk = "latest"
 node = "24"
 pitchfork = "latest"
@@ -100,6 +111,38 @@ run = [
   "cargo build --release",
   "mise x aqua:sharkdp/hyperfine@latest github:pnpm/pnpm@latest npm:@yarnpkg/cli-dist@latest bun@latest deno@latest npm:vlt@latest node@24 -- bash benchmarks/bench.sh",
   "node benchmarks/update-readme.mts",
+]
+
+# Instruction-counted benchmarks (see tak.toml). Needs valgrind for counts;
+# without it tak reports wall clock only and says so, so this still works on
+# macOS.
+#
+# GVS is pinned for the same reason benchmarks/bench.sh pins it: aube's default
+# flips based on the inherited CI=true, so without this a laptop and a CI runner
+# would be measuring different code paths and the series would be meaningless.
+#
+# The store warm-up is the one networked step. It has to happen before tak runs
+# because the install benchmark uses --offline, and it is outside the
+# measurement on purpose — nothing tak times ever touches the registry.
+[tasks.perf]
+dir = "{{config_root}}"
+env = { npm_config_enable_global_virtual_store = "true" }
+run = [
+  "cargo build --release",
+  "./target/release/aube -C fixtures/medium install --frozen-lockfile",
+  "tak run",
+]
+
+# Same measurement, appended to refs/notes/tak for this commit. Run by the
+# `perf` workflow on every push to main; the notes are what the history is.
+# Safe to run locally — nothing leaves the machine until `tak push`.
+[tasks."perf:record"]
+dir = "{{config_root}}"
+env = { npm_config_enable_global_virtual_store = "true" }
+run = [
+  "cargo build --release",
+  "./target/release/aube -C fixtures/medium install --frozen-lockfile",
+  "tak run --record",
 ]
 
 [tasks."build:pgo"]

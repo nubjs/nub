@@ -2,6 +2,7 @@
 # `aube peers`
 
 - **Usage**: `aube peers <SUBCOMMAND>`
+- **Effect**: read-only
 
 Inspect peer-dependency resolution from the lockfile
 

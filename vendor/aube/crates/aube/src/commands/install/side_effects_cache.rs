@@ -1,7 +1,21 @@
 use miette::{Context, IntoDiagnostic, miette};
 use sha2::Digest;
 
-const SIDE_EFFECTS_CACHE_MARKER: &str = ".aube-side-effects-cache";
+/// The per-package marker the side-effects cache stamps. Brand-scoped to the
+/// active embedder because this file lands inside the global CAS store AND
+/// inside a consumer's `node_modules` — a hardcoded `aube` leaf puts the
+/// engine's brand in an embedder's user-visible tree. `prog()` is `"aube"`
+/// under the default profile, so standalone aube's on-disk name is unchanged.
+fn side_effects_cache_marker() -> String {
+    format!(".{}-side-effects-cache", aube_util::prog())
+}
+
+/// True for this cache's marker under ANY brand — `.<tool>-side-effects-cache`.
+/// Used by the directory hash so a marker left by a differently-branded build
+/// is excluded from the digest rather than changing it.
+fn is_side_effects_marker_name(name: &str) -> bool {
+    name.starts_with('.') && name.ends_with("-side-effects-cache")
+}
 const SIDE_EFFECTS_CACHE_TMP_PREFIX: &str = ".tmp-side-effects-";
 const SIDE_EFFECTS_CACHE_TMP_STALE_AFTER: std::time::Duration =
     std::time::Duration::from_secs(60 * 60);
@@ -53,7 +67,12 @@ impl<'a> SideEffectsCacheConfig<'a> {
 
 #[derive(Debug, Clone)]
 pub(super) struct SideEffectsCacheEntry {
-    engine: String,
+    /// Everything about the build environment an entry is only valid under:
+    /// the Node engine that compiled its addons, plus the shell that ran the
+    /// build. One string because both are the same kind of fact — "this output
+    /// is only meaningful under X" — and both must appear in the path AND the
+    /// marker or a mismatched directory gets skipped instead of rebuilt.
+    build_env: String,
     input_hash: String,
     path: std::path::PathBuf,
 }
@@ -90,13 +109,20 @@ impl SideEffectsCacheEntry {
             Some(v) => aube_lockfile::graph_hash::engine_name_default(v).0,
             None => aube_lockfile::graph_hash::platform_name(),
         };
+        // The shell belongs in the key because a build run under a different
+        // one can be WRONG, not merely stale: `cmd.exe` exits 0 while writing
+        // an unexpanded `${VAR:-default}` literally, so a Windows tree cached
+        // under cmd.exe must be rebuilt — not restored — once the lifecycle
+        // shell becomes POSIX `sh`. Read from the same `ScriptSettings` the
+        // spawn resolves, so a user `script-shell` participates too.
+        let build_env = format!("{engine}-{}", aube_scripts::resolved_shell_id());
         Ok(Self {
             path: location
                 .root
                 .join(format!("{safe_name}@{version}"))
-                .join(&engine)
+                .join(&build_env)
                 .join(&input_hash),
-            engine,
+            build_env,
             input_hash,
         })
     }
@@ -121,25 +147,36 @@ impl SideEffectsCacheEntry {
                 self.path.display()
             )
         })?;
+        // Build output is locally compiled, so on macOS it is ad-hoc
+        // signed at best and Gatekeeper refuses it outright once
+        // quarantined. Both restore modes carry the attribute in: a
+        // hardlink shares the cache entry's inode and therefore its
+        // xattrs, and the `fs::copy` fallback is `fcopyfile` with
+        // `COPYFILE_ALL`. The copy also mints a new inode, which a
+        // quarantine-enabled process has stamped whatever the source
+        // was — so this belongs after the restore rather than once when
+        // the entry is written. Walk-driven because this output was
+        // never in a package index. No-op off macOS.
+        aube_linker::strip_quarantine_from_tree(package_dir);
         // The copy carries the entry's own marker across, so restamping is
         // a no-op except for an entry saved before markers named an engine
         // — that one would fail every future match and re-copy forever.
-        write_side_effects_marker(package_dir, &self.engine, &self.input_hash)?;
+        write_side_effects_marker(package_dir, &self.build_env, &self.input_hash)?;
         tracing::debug!("side-effects-cache: restored {}", self.path.display());
         Ok(SideEffectsCacheRestore::Restored)
     }
 
     /// True when this package directory's contents were produced by *this*
-    /// entry. Both halves are load-bearing: entries segregate by engine, so
-    /// several now share one input hash, and matching on the hash alone
-    /// would let the skip above fire for a build made under a different
-    /// Node ABI — leaving that build's `.node` in place for a runtime
-    /// `NODE_MODULE_VERSION` failure. A marker with no engine (written
-    /// before this was recorded) never matches, so it degrades to a restore
-    /// or a rebuild, never to a silent skip.
+    /// entry. Both halves are load-bearing: entries segregate by build
+    /// environment, so several now share one input hash, and matching on the
+    /// hash alone would let the skip above fire for a build made under a
+    /// different Node ABI (a runtime `NODE_MODULE_VERSION` failure) or a
+    /// different shell (bytes the shell mis-expanded). A marker naming a
+    /// different — or no — build environment never matches, so it degrades to
+    /// a restore or a rebuild, never to a silent skip.
     fn marker_matches(&self, package_dir: &std::path::Path) -> bool {
         read_valid_side_effects_marker(package_dir).is_some_and(|marker| {
-            marker.engine.as_deref() == Some(self.engine.as_str())
+            marker.build_env.as_deref() == Some(self.build_env.as_str())
                 && marker.input_hash == self.input_hash
         })
     }
@@ -155,7 +192,7 @@ impl SideEffectsCacheEntry {
                     .into_diagnostic()
                     .wrap_err_with(|| format!("failed to remove {}", self.path.display()))?;
             } else {
-                write_side_effects_marker(package_dir, &self.engine, &self.input_hash)?;
+                write_side_effects_marker(package_dir, &self.build_env, &self.input_hash)?;
                 return Ok(());
             }
         }
@@ -169,7 +206,7 @@ impl SideEffectsCacheEntry {
             .into_diagnostic()
             .wrap_err_with(|| format!("failed to create {}", parent.display()))?;
         sweep_stale_side_effects_tmp_dirs(parent);
-        write_side_effects_marker(package_dir, &self.engine, &self.input_hash)?;
+        write_side_effects_marker(package_dir, &self.build_env, &self.input_hash)?;
 
         let tmp = parent.join(format!(
             "{SIDE_EFFECTS_CACHE_TMP_PREFIX}{}-{}",
@@ -247,26 +284,28 @@ pub(crate) fn side_effects_cache_root(store: &aube_store::Store) -> std::path::P
         .join("side-effects-v1")
 }
 
-/// Parsed marker contents: `<engine>:<input_hash>`. `engine` is `None` for
-/// the bare-hash form written before the engine was recorded.
+/// Parsed marker contents: `<build_env>:<input_hash>`. `build_env` is `None`
+/// for the bare-hash form written before the build environment was recorded;
+/// a marker from an older build that recorded only the engine simply names a
+/// different build environment, which is already a non-match.
 struct SideEffectsMarker {
-    engine: Option<String>,
+    build_env: Option<String>,
     input_hash: String,
 }
 
 /// Only the hash half is validated, because only the hash is ever joined
-/// into a path — the engine a lookup keys on comes from the install's own
-/// resolved Node, and the marker's copy is compared, never trusted as a
-/// path segment.
+/// into a path — the build environment a lookup keys on comes from the
+/// install's own resolved Node and shell, and the marker's copy is compared,
+/// never trusted as a path segment.
 fn read_valid_side_effects_marker(package_dir: &std::path::Path) -> Option<SideEffectsMarker> {
-    let marker = std::fs::read_to_string(package_dir.join(SIDE_EFFECTS_CACHE_MARKER)).ok()?;
+    let marker = std::fs::read_to_string(package_dir.join(side_effects_cache_marker())).ok()?;
     let marker = marker.trim();
-    let (engine, hash) = match marker.rsplit_once(':') {
-        Some((engine, hash)) => (Some(engine), hash),
+    let (build_env, hash) = match marker.rsplit_once(':') {
+        Some((build_env, hash)) => (Some(build_env), hash),
         None => (None, marker),
     };
     is_side_effects_cache_hash(hash).then(|| SideEffectsMarker {
-        engine: engine.map(str::to_owned),
+        build_env: build_env.map(str::to_owned),
         input_hash: hash.to_ascii_lowercase(),
     })
 }
@@ -277,12 +316,12 @@ fn is_side_effects_cache_hash(value: &str) -> bool {
 
 fn write_side_effects_marker(
     package_dir: &std::path::Path,
-    engine: &str,
+    build_env: &str,
     input_hash: &str,
 ) -> miette::Result<()> {
     aube_util::fs_atomic::atomic_write(
-        &package_dir.join(SIDE_EFFECTS_CACHE_MARKER),
-        format!("{engine}:{input_hash}").as_bytes(),
+        &package_dir.join(side_effects_cache_marker()),
+        format!("{build_env}:{input_hash}").as_bytes(),
     )
     .into_diagnostic()
     .wrap_err_with(|| {
@@ -314,7 +353,15 @@ fn hash_dir_inner(
 
     for entry in entries {
         let path = entry.path();
-        if path.file_name().and_then(|n| n.to_str()) == Some(SIDE_EFFECTS_CACHE_MARKER) {
+        // Skip ANY brand's marker, not just the active one. A tree installed by
+        // an earlier build carries the previous spelling, and folding that file
+        // into the hash would invalidate every cached entry exactly once, for a
+        // file this cache wrote itself.
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(is_side_effects_marker_name)
+        {
             continue;
         }
         let rel = path
@@ -532,6 +579,30 @@ mod tests {
         );
     }
 
+    /// Output built under one shell can be WRONG under another, not merely
+    /// stale — `cmd.exe` exits 0 having written `${VAR:-default}` literally —
+    /// so an entry must not be restorable across a shell change. Asserted
+    /// against the resolved id rather than by flipping shells: `ScriptSettings`
+    /// is process-global outside an install scope, and mutating it here would
+    /// leak into the sibling tests. `aube-scripts` owns the id's own coverage.
+    #[test]
+    fn cache_path_segregates_by_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = package_fixture(dir.path());
+        let path = entry_path(dir.path(), &pkg, Some("22.15.0"));
+        let build_env = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let shell = aube_scripts::resolved_shell_id();
+        assert!(
+            build_env.ends_with(&format!("-{shell}")),
+            "build-env segment {build_env} does not name the resolved shell {shell}"
+        );
+    }
+
     #[test]
     fn cache_path_segregates_by_node_major() {
         let dir = tempfile::tempdir().unwrap();
@@ -565,14 +636,14 @@ mod tests {
     #[test]
     fn side_effects_marker_accepts_only_sha512_hex() {
         let dir = tempfile::tempdir().unwrap();
-        let marker_path = dir.path().join(SIDE_EFFECTS_CACHE_MARKER);
+        let marker_path = dir.path().join(side_effects_cache_marker());
 
         std::fs::write(&marker_path, "../../evil").unwrap();
         assert!(read_valid_side_effects_marker(dir.path()).is_none());
 
         std::fs::write(
             &marker_path,
-            format!("darwin-arm64-node26:{}", "z".repeat(128)),
+            format!("darwin-arm64-node26-sh:{}", "z".repeat(128)),
         )
         .unwrap();
         assert!(
@@ -582,16 +653,16 @@ mod tests {
 
         std::fs::write(&marker_path, format!("{}\n", "A".repeat(128))).unwrap();
         let legacy = read_valid_side_effects_marker(dir.path()).unwrap();
-        assert_eq!(legacy.engine, None);
+        assert_eq!(legacy.build_env, None);
         assert_eq!(legacy.input_hash, "a".repeat(128));
 
         std::fs::write(
             &marker_path,
-            format!("darwin-arm64-node26:{}\n", "A".repeat(128)),
+            format!("darwin-arm64-node26-sh:{}\n", "A".repeat(128)),
         )
         .unwrap();
         let current = read_valid_side_effects_marker(dir.path()).unwrap();
-        assert_eq!(current.engine.as_deref(), Some("darwin-arm64-node26"));
+        assert_eq!(current.build_env.as_deref(), Some("darwin-arm64-node26-sh"));
         assert_eq!(current.input_hash, "a".repeat(128));
     }
 
@@ -646,7 +717,7 @@ mod tests {
 
         let saved = entry(&root, &pkg, Some("26.5.0"));
         saved.save(&pkg, false).unwrap();
-        std::fs::write(pkg.join(SIDE_EFFECTS_CACHE_MARKER), &saved.input_hash).unwrap();
+        std::fs::write(pkg.join(side_effects_cache_marker()), &saved.input_hash).unwrap();
 
         let reread = entry(&root, &pkg, Some("26.5.0"));
         assert_eq!(

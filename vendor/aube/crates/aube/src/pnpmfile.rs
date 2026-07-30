@@ -445,7 +445,7 @@ async fn run_one_shot_hook(
 ) -> Result<Vec<u8>> {
     tracing::debug!("running pnpmfile hook {hook_name} ({})", pnpmfile.display());
 
-    let mut cmd = tokio::process::Command::new(crate::runtime::node_program());
+    let mut cmd = tokio::process::Command::new(crate::runtime::internal_node_program());
     cmd.arg("-e")
         .arg(one_shot_hook_shim())
         .env("AUBE_PNPMFILE", pnpmfile)
@@ -762,7 +762,7 @@ impl ReadPackageHost {
             "spawning pnpmfile readPackage host ({})",
             pnpmfile.display()
         );
-        let mut cmd = tokio::process::Command::new(crate::runtime::node_program());
+        let mut cmd = tokio::process::Command::new(crate::runtime::internal_node_program());
         cmd.arg("-e")
             .arg(read_package_shim())
             .env("AUBE_PNPMFILE", pnpmfile)
@@ -989,7 +989,7 @@ loadPnpmfile(process.env.AUBE_PNPMFILE)
 /// `export const hooks = …` all count, mirroring pnpm's resolution.
 pub async fn exports_hooks(pnpmfile: &Path) -> Result<bool> {
     let shim = format!("{LOAD_PNPMFILE_JS}{HOOKS_GATE_SHIM}");
-    let output = tokio::process::Command::new(crate::runtime::node_program())
+    let output = tokio::process::Command::new(crate::runtime::internal_node_program())
         .arg("-e")
         .arg(shim)
         .env("AUBE_PNPMFILE", pnpmfile)
@@ -1194,7 +1194,7 @@ mod tests {
     /// True iff `node --version` exits 0. The `exports_hooks` tests gate
     /// on this so CI runners without node skip rather than fail.
     fn node_available() -> bool {
-        std::process::Command::new(crate::runtime::node_program())
+        std::process::Command::new(crate::runtime::internal_node_program())
             .arg("--version")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

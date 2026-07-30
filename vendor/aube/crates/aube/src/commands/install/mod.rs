@@ -42,7 +42,8 @@ pub use args::{InstallArgs, InstallOptions};
 pub(crate) use bin_linking::{PkgJsonCache, link_dep_bins, materialized_pkg_dir};
 pub use control::{
     InstallControl, InstallEvent, InstallOutputLevel, InstallOutputMode, InstallPhase,
-    InstallProgressSnapshot, InstallReporter,
+    InstallProgressSnapshot, InstallPrompt, InstallPromptFuture, InstallPromptHandler,
+    InstallReporter,
 };
 pub(crate) use default_trust::DefaultTrustFloor;
 pub use dep_selection::DepSelection;
@@ -59,6 +60,14 @@ pub(crate) use lifecycle::{
 use lifecycle::{
     resolve_link_strategy, run_import_on_blocking, run_root_lifecycle, validate_required_scripts,
 };
+
+pub(crate) fn resolve_active_lockfile_dir(
+    cwd: &std::path::Path,
+    manifest: &aube_manifest::PackageJson,
+    settings_ctx: &aube_settings::ResolveCtx<'_>,
+) -> miette::Result<std::path::PathBuf> {
+    layout::resolve_lockfile_location(cwd, manifest, settings_ctx).map(|(dir, _)| dir)
+}
 use lockfile_dir::{
     parse_lockfile_dir_remapped_with_kind_and_options, write_lockfile_dir_remapped,
 };
@@ -801,13 +810,12 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     let lockfile_parse_options = aube_lockfile::ParseOptions {
         strict_store_integrity: strict_store_integrity_setting,
     };
-    // An embedding host (mise) can supply the node runtime for lifecycle
-    // scripts. Seed it into the scoped runtime slot before `ensure` runs —
-    // `ensure` returns early when the slot is set, so aube skips its own
-    // runtime resolution and scripts spawn on the host's node.
-    if let Some(bin_dir) = &opts.embedder_node_bin_dir {
-        crate::runtime::seed_embedder_node(bin_dir.clone()).await;
-    }
+    // An embedding host (mise, or a wrapper) can describe how Node is
+    // invoked for lifecycle scripts. Seed it into the scoped runtime slot
+    // before `ensure` runs — `ensure` returns early when the slot is set,
+    // so aube skips its own runtime resolution and scripts invoke the
+    // host's Node. A per-call runtime wins over the process-wide one.
+    crate::runtime::seed_install_embedder_runtime(opts.embedder_runtime.as_ref());
     if !opts.dry_run {
         crate::runtime::ensure(
             &cwd,
@@ -1526,6 +1534,11 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             };
             let lock_materialize_handle =
                 spawn_gvs_prewarm(lock_prewarm_inputs, lock_materialize_rx);
+            let lock_project_local_dep_paths = if planned_gvs {
+                gvs::legacy_vite_project_local_closure(&graph)
+            } else {
+                Default::default()
+            };
 
             let fetch_result = fetch_packages_with_root(
                 &graph.packages,
@@ -1553,6 +1566,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 // upstream behavior exactly.
                 /*skip_already_linked_shortcut=*/
                 has_workspace && warm_store_verify(),
+                &lock_project_local_dep_paths,
                 virtual_store_dir_max_length,
                 opts.ignore_scripts,
                 network_concurrency_setting,
@@ -2731,6 +2745,11 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 let catchup_start = std::time::Instant::now();
                 let cwd_for_catchup_client = cwd.clone();
                 let catchup_network_mode = opts.network_mode;
+                let project_local_dep_paths = if planned_gvs {
+                    gvs::legacy_vite_project_local_closure(&graph)
+                } else {
+                    Default::default()
+                };
                 let (catchup_indices, catchup_cached, catchup_fetched, catchup_integrities) =
                     fetch_packages_with_root(
                         &missing_packages,
@@ -2751,6 +2770,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                         // upstream `has_workspace` value.
                         /*skip_already_linked_shortcut=*/
                         has_workspace && warm_store_verify(),
+                        &project_local_dep_paths,
                         virtual_store_dir_max_length,
                         opts.ignore_scripts,
                         network_concurrency_setting,
@@ -3027,6 +3047,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         jail_policy: &jail_policy,
         stats: &stats,
         node_linker,
+        planned_gvs,
         virtual_store_only,
         current_leaf_hashes,
         current_subtree_hashes,

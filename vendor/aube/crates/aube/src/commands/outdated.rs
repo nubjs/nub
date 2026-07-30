@@ -14,7 +14,7 @@ use aube_registry::Packument;
 use clap::Args;
 use miette::{Context, IntoDiagnostic};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 pub const AFTER_LONG_HELP: &str = "\
@@ -189,6 +189,16 @@ async fn run_filtered(
     };
     let mut any_drift = false;
     let mut printed_table = false;
+    let root_files = super::FileSources::load(&root);
+    let raw_workspace = aube_manifest::workspace::load_raw(&root).unwrap_or_else(|error| {
+        tracing::debug!(
+            %error,
+            workspace_root = %root.display(),
+            "ignoring invalid workspace config while resolving outdated settings"
+        );
+        BTreeMap::new()
+    });
+    let env = aube_settings::values::process_env();
     for pkg in matched {
         let importer = pkg
             .name
@@ -200,6 +210,17 @@ async fn run_filtered(
             .get(&importer_path)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
+        let mut files = root_files.clone();
+        if pkg.dir != root {
+            files.extend_project_sources(&pkg.dir);
+        }
+        let ctx = files.ctx(&raw_workspace, env, &[]);
+        let ignored = super::update::ignored_update_dependencies_from_ctx(&ctx, &pkg.manifest);
+        let selected_roots: Vec<DirectDep> = roots
+            .iter()
+            .filter(|dep| !ignored.contains(&dep.name))
+            .cloned()
+            .collect();
         // Discussion #602: separate per-importer tables with a blank
         // line so the headers don't pile up against each other when
         // every workspace package has drift. JSON output is suppressed
@@ -211,7 +232,7 @@ async fn run_filtered(
             &root,
             args.clone_for_fanout(),
             &graph,
-            roots,
+            &selected_roots,
             Some(importer),
         )
         .await?;
@@ -326,6 +347,7 @@ async fn run_global(args: OutdatedArgs) -> miette::Result<Option<i32>> {
 
 async fn run_one(cwd: &Path, args: OutdatedArgs, importer: Option<String>) -> miette::Result<bool> {
     let manifest = super::load_manifest(&cwd.join("package.json"))?;
+    let ignored = super::update::ignored_update_dependencies(cwd, &manifest)?;
 
     let graph = match aube_lockfile::parse_lockfile(cwd, &manifest) {
         Ok(g) => g,
@@ -339,7 +361,13 @@ async fn run_one(cwd: &Path, args: OutdatedArgs, importer: Option<String>) -> mi
         Err(e) => return Err(miette::Report::new(e)).wrap_err("failed to parse lockfile"),
     };
 
-    run_graph(cwd, args, &graph, graph.root_deps(), importer).await
+    let roots: Vec<DirectDep> = graph
+        .root_deps()
+        .iter()
+        .filter(|dep| !ignored.contains(&dep.name))
+        .cloned()
+        .collect();
+    run_graph(cwd, args, &graph, &roots, importer).await
 }
 
 async fn run_graph(
@@ -406,13 +434,32 @@ async fn collect_rows(
     let client = std::sync::Arc::new(make_client(cwd));
     let cache_dir = packument_cache_dir();
 
+    // An `npm:` alias carries the alias as `DirectDep.name`, which the
+    // registry has never heard of — fetching by it produced a bogus
+    // "failed to fetch packument for <alias>" warning and then reported
+    // the dep as up to date forever. The real name lives on the resolved
+    // package, so key every fetch on `registry_name()` while rows keep
+    // displaying the alias the user actually wrote in package.json.
+    let registry_name_for = |dep: &DirectDep| -> String {
+        graph
+            .get_package(&dep.dep_path)
+            .map(|p| p.registry_name().to_string())
+            .unwrap_or_else(|| dep.name.clone())
+    };
+
     // Fetch every packument in parallel via a JoinSet. Failures are surfaced
     // per-row so a single missing package doesn't sink the whole report.
+    // Deduplicated by registry name so two aliases of one package (or an
+    // alias alongside the real dep) don't fetch it twice.
     let mut set = tokio::task::JoinSet::new();
+    let mut fetching: HashSet<String> = HashSet::new();
     for dep in &roots {
+        let name = registry_name_for(dep);
+        if !fetching.insert(name.clone()) {
+            continue;
+        }
         let client = client.clone();
         let cache_dir = cache_dir.clone();
-        let name = dep.name.clone();
         set.spawn(async move {
             let result = client.fetch_packument_cached(&name, &cache_dir).await;
             (name, result)
@@ -426,8 +473,14 @@ async fn collect_rows(
     }
 
     let mut rows: Vec<Row> = Vec::new();
+    // Several deps can share one registry name, and the lookup below reads
+    // the shared entry rather than consuming it, so a failed fetch would
+    // otherwise warn once per dep.
+    let mut warned: HashSet<String> = HashSet::new();
     for dep in &roots {
-        let packument = packuments.remove(&dep.name);
+        let registry_name = registry_name_for(dep);
+        // `get`, not `remove`: several deps can share one registry name.
+        let packument = packuments.get(&registry_name);
         let current = match graph.get_package(&dep.dep_path) {
             Some(p) => p.version.clone(),
             None => "(missing)".to_string(),
@@ -435,7 +488,9 @@ async fn collect_rows(
         let packument = match packument {
             Some(Ok(p)) => p,
             Some(Err(e)) => {
-                eprintln!("warn: failed to fetch packument for {}: {e}", dep.name);
+                if warned.insert(registry_name.clone()) {
+                    eprintln!("warn: failed to fetch packument for {registry_name}: {e}");
+                }
                 continue;
             }
             None => continue,
@@ -452,7 +507,7 @@ async fn collect_rows(
         let wanted = dep
             .specifier
             .as_deref()
-            .and_then(|spec| super::max_satisfying_version(&packument, spec))
+            .and_then(|spec| super::wanted_version(packument, spec))
             .unwrap_or_else(|| current.clone());
 
         let latest_known = latest.is_some();

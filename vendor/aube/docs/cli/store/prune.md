@@ -2,6 +2,7 @@
 # `aube store prune`
 
 - **Usage**: `aube store prune`
+- **Effect**: modifies state
 
 Remove unreferenced packages from the global store.
 

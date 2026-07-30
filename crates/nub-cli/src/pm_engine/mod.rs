@@ -57,11 +57,15 @@ pub mod build_jail;
 // allowlist and the fail-soft contract.
 mod build_prefetch;
 mod bun_config;
+// The nub-owned Node copy the Windows build jail runs on, because a leaf read grant is an ACE and
+// the stock MSI installs where a standard user cannot write one. See its module doc.
 pub mod config_scope;
 mod expo_compat;
 pub mod identity;
 pub mod info_family;
 pub mod install_family;
+mod jail_bin;
+mod jail_msvc;
 pub mod log;
 pub mod min_release_age;
 pub mod output;
@@ -875,6 +879,7 @@ fn engine_session_inner(
             .as_ref()
             .and_then(|config| config.node_options.as_deref()),
     );
+    apply_lifecycle_script_shell();
     Ok(EngineSession {
         detected,
         runtime: build_runtime()?,
@@ -1659,6 +1664,64 @@ fn apply_lifecycle_augmentation(cwd: &Path, configured_node_options: Option<&str
         c.runtime_node_dir = runtime_node_dir;
         c.runtime_node_bin = runtime_node_bin;
     });
+}
+
+/// Replace the engine's Windows default lifecycle shell with nub's bundled
+/// busybox-w32 `sh`, so a dependency's `postinstall` gets the same POSIX shell
+/// `nub run` already uses (`crate::cli::resolve_bundled_busybox`) instead of
+/// `cmd.exe`. No-op on Unix, where the engine default is already `sh`.
+///
+/// Three reasons:
+///
+/// 1. ONE SHELL. `nub run` already defaults to busybox on Windows, so leaving
+///    the lifecycle path on `cmd.exe` meant one POSIX script body behaved
+///    differently depending on which nub surface ran it. This removes a
+///    divergence rather than creating one.
+/// 2. NO COMPATIBILITY COST, AND TWO FIXES. A sweep of the 344 widely-used
+///    packages that run install scripts found ZERO of 363 script bodies using
+///    cmd-only syntax (no `%VAR%`, `%~dp0`, `if exist`, `copy`/`del`/`rd`,
+///    `>nul`, `call`, `set VAR=`, caret escapes, `.cmd`/`.bat` invocation) —
+///    `sh` parses all 363. Two (`detox-recorder`, `svf-lib`) invoke `./*.sh`
+///    and only work under `sh`.
+/// 3. ROBUSTNESS UNDER THE SANDBOX. Confined in an AppContainer with no
+///    ancestor repair at all, busybox's `cd`, globbing, redirection, reads and
+///    whole spawn battery are byte-identical to unconfined. `cmd.exe` instead
+///    depends on the sandbox's ancestor repair (`nub-sandbox`'s traverse ACEs
+///    plus the capability SIDs it harvests off each ancestor's DACL) to report
+///    the filesystem correctly — and that repair is best-effort BY DESIGN: a
+///    refused ACE write is skipped rather than fatal, and an ancestor whose
+///    DACL names no harvestable capability yields nothing to request. A shell
+///    that needs no repair cannot be degraded by one that partially failed.
+///
+/// A user's explicit `script-shell` still wins — aube consults this only when
+/// that is unset. A missing sidecar (a broken install; `nub run` is equally
+/// dead in that state) warns and leaves the engine on `cmd.exe` rather than
+/// failing read-only verbs like `nub list` that never spawn a script.
+fn apply_lifecycle_script_shell() {
+    if !cfg!(windows) {
+        return;
+    }
+    match crate::cli::resolve_bundled_busybox() {
+        Ok(busybox) => aube_util::update_engine_context(|c| {
+            c.default_script_shell = Some(busybox_script_shell(&busybox));
+        }),
+        Err(err) => tracing::warn!(
+            "{err:#}\ndependency lifecycle scripts will run under cmd.exe, which does not \
+             support POSIX script bodies"
+        ),
+    }
+}
+
+/// busybox is a multi-call binary: it dispatches on `argv[0]`, or on a leading
+/// applet name. Spawned as `busybox.exe` the applet name must LEAD, so a bare
+/// `-c` would not select `sh` at all. Split out of the Windows-gated caller so
+/// the form is pinned by a test on every platform — dropping `"sh"` breaks only
+/// Windows, where no other test in this suite would see it.
+fn busybox_script_shell(busybox: &str) -> aube_util::ScriptShell {
+    aube_util::ScriptShell {
+        program: PathBuf::from(busybox),
+        args: vec!["sh".to_string(), "-c".to_string()],
+    }
 }
 
 /// `--dir` / `-C` (and the global `--cwd`, which dispatch applies earlier):
@@ -4613,6 +4676,19 @@ mod tests {
             "a member install builds the workspace's one shared tree, so anchoring \
              Node discovery anywhere but the root keys the ABI caches to a Node the \
              install state never saw"
+        );
+    }
+
+    #[test]
+    fn busybox_lifecycle_shell_leads_with_the_sh_applet_name() {
+        let spec = busybox_script_shell(r"C:\nub\bin\busybox.exe");
+        assert_eq!(spec.program, PathBuf::from(r"C:\nub\bin\busybox.exe"));
+        assert_eq!(
+            spec.args,
+            ["sh", "-c"],
+            "busybox dispatches on argv[0] or a leading applet name, so spawned as \
+             `busybox.exe` it needs `sh` before `-c` — `busybox.exe -c <body>` runs \
+             no shell. This test exists because that mistake is invisible off Windows."
         );
     }
 }

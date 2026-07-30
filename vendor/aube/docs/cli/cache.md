@@ -2,6 +2,7 @@
 # `aube cache`
 
 - **Usage**: `aube cache <SUBCOMMAND>`
+- **Effect**: read-only
 
 Inspect and manage the packument metadata cache
 

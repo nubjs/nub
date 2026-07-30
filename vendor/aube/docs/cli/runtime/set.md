@@ -2,6 +2,7 @@
 # `aube runtime set`
 
 - **Usage**: `aube runtime set [FLAGS] <NAME> <VERSION>`
+- **Effect**: modifies state
 
 Pin a runtime in package.json devEngines.runtime and install it
 

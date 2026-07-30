@@ -1,0 +1,4 @@
+out/
+out-*/
+evidence/
+verdict-table.json

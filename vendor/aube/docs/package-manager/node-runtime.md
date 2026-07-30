@@ -76,9 +76,11 @@ aube activate fish | source
 ```
 
 Activation creates shims under aube's data directory and prepends that
-directory to PATH for the current shell. The `node` shim resolves the
-project runtime and execs the selected Node. The `npm`, `npx`, `pnpm`,
-`pnpx`, `yarn`, and `yarnpkg` shims route common package-manager
+directory to PATH for the current shell. On Unix these are dispatcher
+scripts that resolve the current `aube` from PATH, so upgrading aube does
+not leave them pointing at a removed version. The `node` shim resolves
+the project runtime and execs the selected Node. The `npm`, `npx`,
+`pnpm`, `pnpx`, `yarn`, and `yarnpkg` shims route common package-manager
 commands to aube, so an accidental `pnpm install` in a project with a
 different existing lockfile still lets aube preserve that lockfile kind.
 

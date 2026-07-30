@@ -109,25 +109,8 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // instead of widening the allowlist to grant nub's own runtime into untrusted code.
         ambient.insert("NODE_COMPAT".to_string(), "1".to_string());
 
-        // NOTHING IS STAMPED FOR THE WINDOWS REALPATH DEFECT, deliberately. Under the
-        // AppContainer every absolute `require()` dies on `EPERM: lstat 'C:\'`, and the one
-        // NODE_OPTIONS repair that clears it (`--preserve-symlinks`) is REFUSED here: under
-        // nub's DEFAULT isolated layout it silently resolves a dependency to the WRONG version
-        // rather than failing. Measured, not reasoned — the evidence and the surviving options
-        // live on `nub_sandbox::windows_realpath_node_options`. A confined Windows lifecycle
-        // script therefore still fails, but it fails LOUDLY, which is the only property worth
-        // holding until a real fix lands.
-
-        // The interpreter closure to grant READ. nub provisions its own Node under its
-        // store (not `/usr`), so the tight-read base can't reach it. Under nub a bare
-        // `node` resolves via the PATH-prepended shim (`NODE`) which re-execs the real
-        // binary (`npm_node_execpath`), so BOTH must be readable/executable — grant each
-        // (compile_build_jail dedups and adds each one's bin dir).
-        let interpreter: Vec<PathBuf> = ["npm_node_execpath", "NODE"]
-            .iter()
-            .filter_map(|k| ambient.get(*k))
-            .map(PathBuf::from)
-            .collect();
+        // Windows stamps `NODE_OPTIONS` too — below, where the interpreter's version is
+        // already known.
 
         // Make node-gyp compile offline. It reads Node headers from `npm_config_nodedir/
         // include/node` (default devdir `~/.cache/node-gyp/<ver>`, unreadable → network
@@ -136,6 +119,74 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // the interpreter grant). Set-if-absent: an explicit ambient nodedir is a
         // deliberate build-against-custom-node choice; the case we fix carries none.
         let probe = ProbeScope::new(&spawn);
+
+        // WINDOWS: redirect the interpreter to a nub-owned COPY of the same distribution,
+        // BEFORE anything else reads `npm_node_execpath`. Two independent reasons the ambient
+        // one is unusable — nub cannot write the read-grant ACE where the stock MSI installs,
+        // and a confined caller cannot open that image even where it can — are on
+        // [`super::jail_bin`]'s module doc with their measurements. Everything below then
+        // derives from the copy: the interpreter grant, `node_layout`'s `node_modules` and
+        // header paths, and the version the `NODE_OPTIONS` gate asks for. Declining leaves the
+        // ambient interpreter, which is the behavior before this existed.
+        #[cfg(windows)]
+        if let Some(staged) = super::jail_bin::stage(&ambient, &probe) {
+            staged.redirect_env(&mut ambient);
+        }
+
+        // The interpreter closure to grant READ. nub provisions its own Node under its
+        // store (not `/usr`), so the tight-read base can't reach it. Under nub a bare
+        // `node` resolves via the PATH-prepended shim (`NODE`) which re-execs the real
+        // binary (`npm_node_execpath`), so BOTH must be readable/executable — grant each
+        // (compile_build_jail dedups and adds each one's bin dir). On Windows both spellings
+        // already name the staged copy, so this resolves to one directory.
+        let interpreter: Vec<PathBuf> = ["npm_node_execpath", "NODE"]
+            .iter()
+            .filter_map(|k| ambient.get(*k))
+            .map(PathBuf::from)
+            .collect();
+
+        // WINDOWS: deliver the `child_process` stdio shim. A piped spawn under the
+        // AppContainer does not fail, it SPINS — libuv retries the refused named pipe
+        // forever inside `uv_spawn`, before any timeout can arm — and every `node-gyp`
+        // configure pipes. Rationale, and the residuals it still leaves (handle passing and
+        // `serialization: 'advanced'`, which no userland stream can carry), are on
+        // `nub_sandbox::windows_build_jail_node_options`.
+        //
+        // UNCONDITIONAL, like `NODE_COMPAT` above: it OVERWRITES any ambient value, which is
+        // also the ONLY thing that keeps the env allowlist's `NODE_OPTIONS` entry from
+        // becoming an ambient code-injection channel into every lifecycle script. Gated on
+        // the interpreter supporting `--import` (20.6+) because an unrecognised option in
+        // `NODE_OPTIONS` aborts Node at startup — that would turn a missing repair into a
+        // broken install. An interpreter that cannot be asked gets no stamp, and so neither
+        // shim: the same piped-spawn hang as before, never a worse failure.
+        //
+        // The gate reads the SAME identity the curated filesystem table is keyed by — aube's
+        // installer-resolved `registry_name()`, which a dependency cannot rename itself into.
+        //
+        // THE THIRD TERM is the realpath repair. The backend's ancestor repair
+        // (`ancestor_chain`) is best-effort — a refused ACE write is skipped — so this
+        // preload is what keeps module resolution working when it did not land, and is inert when
+        // it did. Its roots are the anchors the jail actually grants, which is what scopes the
+        // tolerance rule; the interpreter is among them so a `require()` of npm's own modules out
+        // of the Node install tree resolves too.
+        #[cfg(windows)]
+        if super::build_prefetch::node_version(&ambient, &probe).is_some_and(supports_import) {
+            let mut realpath_roots = vec![spawn.project_root.clone(), spawn.package_dir.clone()];
+            realpath_roots.extend(interpreter.iter().cloned());
+            let realpath = nub_sandbox::realpath_shim_node_options(&realpath_roots);
+            ambient.insert(
+                "NODE_OPTIONS".to_string(),
+                format!(
+                    "{} {realpath}",
+                    nub_sandbox::windows_build_jail_node_options(spawn.package_name.as_deref())
+                )
+                .trim_end()
+                .to_string(),
+            );
+        } else {
+            ambient.remove("NODE_OPTIONS");
+        }
+
         let mut extra_reads = Vec::new();
         // npm's builtin `lib/node_modules/npm/npmrc` (no leading dot) sits inside the
         // `lib/node_modules` grant below; the Linux deny-search walk must be SEEDED there
@@ -188,6 +239,17 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             // reaches the child at all — it is honoured here only as a resolution input.
             ambient.insert("npm_config_python".to_string(), python.executable);
             extra_reads.extend(python.reads);
+        }
+
+        // WINDOWS: node-gyp's THIRD out-of-jail toolchain dependency, and the only one whose
+        // discovery an AppContainer cannot perform at all — it activates a COM server, which
+        // no filesystem grant reaches and no unprivileged permission opens. Pre-resolved out
+        // here and handed over as the env trio `findVisualStudio` short-circuits on; see
+        // [`super::jail_msvc`] for why the trio is stamped as a unit.
+        #[cfg(windows)]
+        if let Some(msvc) = super::jail_msvc::resolve(&ambient, &spawn, &probe) {
+            msvc.stamp(&mut ambient);
+            extra_reads.extend(msvc.reads);
         }
 
         // PREFETCH — the same move `npm_config_nodedir` makes above, applied to the
@@ -668,6 +730,18 @@ struct NodeLayout {
     global_modules: PathBuf,
 }
 
+/// Whether a `process.versions.node` string names a Node that accepts `--import`, the flag
+/// the Windows stdio shim is delivered on (landed in 20.6.0). Unparseable ⇒ `false`: the
+/// stamp is a repair, and guessing wrong costs a startup abort on every lifecycle script.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn supports_import(version: &str) -> bool {
+    let mut parts = version.split('.').map(str::parse::<u32>);
+    match (parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => major > 20 || (major == 20 && minor >= 6),
+        _ => false,
+    }
+}
+
 fn node_layout(exec: &Path) -> Option<NodeLayout> {
     let dir = exec.parent()?;
     let flat = exec
@@ -980,7 +1054,10 @@ const PYTHON_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// Collect `child`'s stdout, killing it if it outlives `timeout`. The reader runs on its
 /// own thread because a child that fills the pipe blocks until someone drains it — polling
 /// `try_wait` alone would deadlock against exactly the hang this bounds.
-fn read_bounded(child: &mut std::process::Child, timeout: std::time::Duration) -> Option<Vec<u8>> {
+pub(super) fn read_bounded(
+    child: &mut std::process::Child,
+    timeout: std::time::Duration,
+) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut pipe = child.stdout.take()?;
     let reader = std::thread::spawn(move || {
@@ -1069,8 +1146,17 @@ fn python_reads(probe_stdout: &str) -> Option<PythonToolchain> {
     })
 }
 
+/// The matcher's canonicalizer, NOT `std::fs::canonicalize`. On Windows the latter is
+/// `GetFinalPathNameByHandleW(VOLUME_NAME_DOS)`, which always returns the `\\?\` verbatim
+/// form — a spelling nothing downstream expects. Everything derived here is consumed as a
+/// PLAIN path: `npm_config_python` is parsed by node-gyp and the tools it spawns, the read
+/// grants are slash-normalized by the compiler where the `?` would re-read as a glob
+/// metachar and get the grant DROPPED, and [`ProbeScope`] compares it against raw
+/// (never-verbatim) candidate spellings. `canonicalize_including_nonexistent` strips the
+/// prefix (see its doc for the volume-GUID case it deliberately leaves alone) and resolves
+/// a path whose tail does not exist yet instead of returning it untouched.
 fn canonical(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    nub_sandbox::matcher::path::canonicalize_including_nonexistent(path)
 }
 
 /// Whether a derived path may become a read grant at all.
@@ -1078,10 +1164,10 @@ fn canonical(path: &Path) -> PathBuf {
 /// Refused: anything at or one level below the filesystem root (`sys.prefix` is `/usr` for
 /// a distro Python, which every backend's system floor already covers), the user's HOME or
 /// an ancestor of it (a version manager installed as `~/x -> ~/opt/x` would otherwise hand
-/// a hop grant on the whole home directory), and any path still carrying `..`/`.` —
-/// `canonical` falls back to its input for a path that does not exist, so a traversal
-/// would survive the component count and only collapse later, inside the policy compiler,
-/// landing on `/`.
+/// a hop grant on the whole home directory), and any path still carrying `..`/`.`. That
+/// last one is belt-and-braces since `canonical` collapses a traversal even through a
+/// non-existent tail, and it stays because the cost of a surviving `..` is a grant that
+/// collapses later, inside the policy compiler, landing on `/`.
 fn grantable(path: &Path) -> bool {
     use std::path::Component;
     if !path.is_absolute() || path.components().count() <= 2 {
@@ -1120,6 +1206,19 @@ fn symlink_hop_dirs(path: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gate on the Windows stdio-shim stamp. Getting it wrong in the permissive
+    /// direction does not degrade the repair, it aborts Node at startup for every lifecycle
+    /// script — so the boundary and the unparseable case are both pinned.
+    #[test]
+    fn only_a_node_that_accepts_import_gets_the_shim_stamp() {
+        assert!(!supports_import("18.19.0"));
+        assert!(!supports_import("20.5.1"));
+        assert!(supports_import("20.6.0"));
+        assert!(supports_import("22.23.1"));
+        assert!(!supports_import(""));
+        assert!(!supports_import("v20.6.0"));
+    }
 
     /// Only an explicit `false` unjails. The `true` and absent cases are not symmetry
     /// for its own sake: they are what keeps the field a narrowing switch, so no manifest

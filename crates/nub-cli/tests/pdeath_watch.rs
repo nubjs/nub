@@ -199,3 +199,88 @@ fn deliberate_background_survivor_outlives_normal_exit() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Spawn `nub watch <file>` as its own process-group leader, mirroring
+/// [`spawn_nub_run`]'s topology.
+fn spawn_nub_watch(dir: &Path, file: &str) -> std::process::Child {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new(nub_binary());
+    cmd.args(["watch", file])
+        .current_dir(dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // SAFETY: setpgid(0, 0) between fork and exec is async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setpgid(0, 0);
+            Ok(())
+        });
+    }
+    cmd.spawn().expect("spawn nub watch")
+}
+
+/// The watch-path twin of [`sigkill_on_nub_group_terminates_the_script_child`],
+/// and a regression for the leak it did not cover.
+///
+/// `run_watch` was the one long-lived spawn in nub that called `Command::status()`
+/// directly, so its `node --watch` supervisor was never placed in nub's process
+/// group and never covered by the #480 reaper. That matters more here than
+/// anywhere else: `node --watch` is designed never to exit, so a leader death left
+/// it — and the grandchild it supervises — running under PID 1 forever, each
+/// holding an fsevents watch on a source tree. They accumulated monotonically;
+/// 99 such orphans were found on one dev host, the oldest 17 hours old.
+#[test]
+fn sigkill_on_nub_group_terminates_the_watched_node() {
+    let dir = std::env::temp_dir().join(format!("nub-pdw-watch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // The watched script records its own pid, then idles. `node --watch` keeps
+    // supervising it after it exits, which is precisely the process that leaked.
+    std::fs::write(
+        dir.join("w.js"),
+        "require('fs').writeFileSync('child.pid', String(process.pid));\nsetTimeout(() => {}, 30000);\n",
+    )
+    .unwrap();
+
+    let mut nub = spawn_nub_watch(&dir, "w.js");
+    let child_pid = read_pid(&dir.join("child.pid"));
+    assert!(
+        alive(child_pid),
+        "watched child must be alive before the kill"
+    );
+
+    // SIGKILL the nub LEADER ONLY — deliberately not the group.
+    //
+    // This distinction is the whole test. Killing the GROUP proves nothing here: on
+    // the unfixed code the watched node INHERITS nub's process group, so a group
+    // signal reaches it directly and the test passes without any reaper at all
+    // (verified — that version passed against unfixed code). Once fixed, node is its
+    // own group leader via `group_on_spawn`, so a group signal cannot reach it and
+    // only the reaper can.
+    //
+    // Killing the leader alone is also the shape of the real leak: an agent session
+    // or test harness dies, nub goes with it, and `node --watch` — which never exits
+    // on its own — reparents to launchd and runs forever.
+    unsafe { libc::kill(nub.id() as i32, libc::SIGKILL) };
+    let _ = nub.wait();
+
+    let mut died = false;
+    for _ in 0..80 {
+        if !alive(child_pid) {
+            died = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if !died {
+        // Never leak a watcher into the test environment on failure.
+        unsafe { libc::kill(child_pid, libc::SIGKILL) };
+    }
+    assert!(
+        died,
+        "watched node (pid {child_pid}) survived SIGKILL of the nub LEADER — \
+         run_watch is bypassing the group reaper again, so a dying session leaks a \
+         watcher that never exits on its own"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

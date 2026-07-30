@@ -4649,9 +4649,11 @@ enum StreamMode {
     Prefixed,
 }
 
-/// Resolve the bundled busybox-w32 POSIX-`sh` sidecar that backs `nub run` script
-/// bodies on Windows. The win32 package lays `busybox.exe` beside `nub.exe` in the
-/// package's `bin/` dir, so it resolves relative to the running executable
+/// Resolve the bundled busybox-w32 POSIX-`sh` sidecar that backs every script
+/// body nub runs on Windows — `nub run` here, and dependency lifecycle scripts
+/// through the engine-context default `pm_engine` installs
+/// (`apply_lifecycle_script_shell`). The win32 package lays `busybox.exe` beside
+/// `nub.exe` in the package's `bin/` dir, so it resolves relative to the running executable
 /// (canonicalized, matching `current_nub_binary`). `__NUB_BUSYBOX_EXE` overrides
 /// the location — an internal test/CI seam that lets the Rust suite and the
 /// branch-scoped Windows probe supply a busybox without the release-packaging step;
@@ -4660,7 +4662,7 @@ enum StreamMode {
 /// fallback — that would resurrect the non-POSIX script semantics busybox replaces.
 /// Only reached on Windows (the `cfg!(windows)` default arm); cross-platform std so
 /// it compiles everywhere.
-fn resolve_bundled_busybox() -> Result<String> {
+pub(crate) fn resolve_bundled_busybox() -> Result<String> {
     let to_utf8 = |p: PathBuf| -> Result<String> {
         p.to_str()
             .map(str::to_string)
@@ -4783,6 +4785,9 @@ fn build_script_command(
     // can confine it (an in-process interpreter could do neither). This replaces
     // the former implicit `cmd.exe` default. busybox is a multi-call binary, so
     // its `sh` applet name precedes `-c`; every other shell here takes plain `-c`.
+    // The engine's dependency-lifecycle spawn resolves the same sidecar the same
+    // way (`pm_engine::apply_lifecycle_script_shell`), so one POSIX script body
+    // behaves identically whether `nub run` or a `postinstall` runs it.
     let custom_shell = script_shell_override
         .map(str::to_string)
         .or_else(|| nub_core::workspace::scripts::script_shell(&project.root));
@@ -5708,12 +5713,15 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         let mut node_args = vec!["--watch".to_string(), "--watch-preserve-output".to_string()];
         node_args.push(file.to_string());
         node_args.extend(args.iter().cloned());
-        let status = std::process::Command::new(node.path.as_str())
-            .args(&node_args)
+        let mut cmd = std::process::Command::new(node.path.as_str());
+        cmd.args(&node_args)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status()?;
+            .stderr(std::process::Stdio::inherit());
+        // Not `.status()` — see the note on the augmented path below. `node --watch`
+        // never exits on its own, so a bare status() leaks the supervisor and its
+        // watched child on leader death.
+        let status = nub_core::node::spawn::status_forwarding_signals(&mut cmd)?;
         return Ok(nub_core::node::spawn::exit_code_from_status(&status));
     }
     let runtime_node_options = runtime_node_options(&runtime, &node)?;
@@ -5995,7 +6003,19 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
             cmd.env("NODE_OPTIONS", parts.join(" "));
         }
     }
-    let status = cmd.status()?;
+    // NOT `cmd.status()`. Every other long-lived spawn in nub goes through a
+    // process-group + reaper path; watch was the sole exception, and it is the one
+    // that matters most: `node --watch` is a supervisor that by design never exits,
+    // and it spawns a watched grandchild of its own. A bare `status()` leaves both
+    // outside nub's group, so when the leader dies (a killed agent session, a test
+    // harness that gives up, a closed terminal) they reparent to launchd and run
+    // forever, each holding an fsevents watch on a source tree. They accumulate
+    // monotonically — 99 such orphans were found on the dev host, the oldest 17h
+    // old, none of them rustc or cargo. `status_forwarding_signals` is the
+    // signal-faithful equivalent of `status()`: own process group, the #480
+    // SIGKILL-on-leader reaper held across the wait, and terminating signals
+    // forwarded to the whole subtree.
+    let status = nub_core::node::spawn::status_forwarding_signals(&mut cmd)?;
 
     // PATH shim cleanup is handled once at the top level (see `run`).
     Ok(nub_core::node::spawn::exit_code_from_status(&status))
@@ -7271,11 +7291,18 @@ fn swap_dir(install_dir: &Path, name: &str, new_src: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Set the executable bit (0o755) on a freshly-installed binary. The release
-/// archive ships the binary at 0o644 — CI's upload/download-artifact round-trip
-/// strips the +x install.sh would otherwise rely on — so the self-owned upgrade
-/// path must re-apply it or the upgraded `nub` is non-executable. Not compiled
-/// on Windows (executability is by extension, not a mode bit).
+/// Make a freshly-downloaded binary runnable: set the executable bit
+/// (0o755), then clear `com.apple.quarantine`.
+///
+/// The release archive ships the binary at 0o644 — CI's
+/// upload/download-artifact round-trip strips the +x install.sh would
+/// otherwise rely on — so the self-owned upgrade path must re-apply it or
+/// the upgraded `nub` is non-executable. Both callers hand this an
+/// archive nub itself downloaded and checksum-verified, and both then run
+/// it (the upgrade swap, and the self-shim's provision-then-exec), so the
+/// quarantine strip belongs on the same seam; see `drop_quarantine`.
+/// Not compiled on Windows (executability is by extension, not a mode
+/// bit, and quarantine is a macOS concept).
 #[cfg(not(windows))]
 fn ensure_bin_executable(path: &Path) -> Result<()> {
     #[cfg(unix)]
@@ -7289,7 +7316,35 @@ fn ensure_bin_executable(path: &Path) -> Result<()> {
             )
         })?;
     }
+    drop_quarantine(path);
     Ok(())
+}
+
+/// Drop `com.apple.quarantine` from a binary nub just downloaded.
+///
+/// Released nub binaries are ad-hoc signed — `codesign` reports
+/// `adhoc, linker-signed` with no Team ID — and macOS kills a quarantined
+/// ad-hoc-signed executable on exec rather than merely warning about it.
+/// `curl` and `tar` run as children of this process, so when nub is invoked
+/// from a terminal that inherited quarantine flags (one embedded in a
+/// Gatekeeper-enabled app), everything they write is stamped: the upgrade
+/// would install a nub that cannot start, and the self-shim would exec one.
+/// Both archives are checksum-verified before use, and the attribute is not
+/// a judgement about them — it reflects only which terminal the upgrade was
+/// run from. See `nub_core::quarantine` for the full rationale.
+///
+/// Best-effort by the resilience contract in `perform_selfowned_upgrade`:
+/// the binary is already swapped and executable, so a failure warns with the
+/// manual fix rather than aborting.
+#[cfg(not(windows))]
+fn drop_quarantine(path: &Path) {
+    if let Err(err) = nub_core::quarantine::clear(path) {
+        eprintln!(
+            "nub: warning: could not clear com.apple.quarantine on {p} ({err}); \
+             if macOS refuses to run it, clear it with: xattr -d com.apple.quarantine {p}",
+            p = path.display()
+        );
+    }
 }
 
 /// Extract a release archive into `dest` by shelling to `tar`, returning whether

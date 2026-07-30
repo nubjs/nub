@@ -194,8 +194,11 @@ pub fn compute_package_hashes(
         .packages
         .par_iter()
         .map(|(dep_path, pkg)| {
-            let patch_key = format!("{}@{}", pkg.name, pkg.version);
-            let patch = patch_hashes.get(&patch_key).map(String::as_str);
+            // Alias-aware so an npm-aliased patched entry's fingerprint
+            // tracks its patch hash (keyed by the registry identity).
+            let patch = pkg
+                .lookup_patch(patch_hashes)
+                .map(|(_, hash)| hash.as_str());
             (dep_path.clone(), fingerprint(pkg, patch, project_root))
         })
         .collect()

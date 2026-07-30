@@ -7,6 +7,6 @@
 #
 # UPDATE THIS IN THE SAME COMMIT that changes the vendored tree's upstream base.
 
-commit = 9f2f5f8255
-tag    = v1.32.0
-venue  = nubjs/aube nub-fork
+commit = fff2bb681a
+tag    = v1.35.0
+venue  = derived at bump time from this tree via `git commit-tree` — nothing stored

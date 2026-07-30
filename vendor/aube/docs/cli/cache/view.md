@@ -2,6 +2,7 @@
 # `aube cache view`
 
 - **Usage**: `aube cache view [--json] <NAME>`
+- **Effect**: read-only
 
 View the cached metadata for a single package.
 

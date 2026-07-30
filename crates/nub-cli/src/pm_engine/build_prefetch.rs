@@ -244,6 +244,33 @@ fn node_facts(
         .as_ref()
 }
 
+/// The interpreter's `process.versions.node`, when it could be asked. Shares the memo above,
+/// so a caller that only wants the version pays nothing beyond what the header prefetch has
+/// already spent.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(super) fn node_version(
+    ambient: &BTreeMap<String, String>,
+    probe: &ProbeScope,
+) -> Option<&'static str> {
+    node_facts(ambient, probe).map(|facts| facts.version.as_str())
+}
+
+/// The cache key for a copy of this interpreter's distribution: the version it reports plus its
+/// architecture. Shares the memo above, so it costs nothing beyond what the header prefetch has
+/// already spent.
+///
+/// The VERSION is what makes a staged copy ABI-correct by construction rather than by assertion
+/// (see `jail_bin`), and the ARCH is what keeps a same-version x64 and arm64 install from
+/// colliding on one directory.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(super) fn node_dist_key(
+    ambient: &BTreeMap<String, String>,
+    probe: &ProbeScope,
+) -> Option<String> {
+    let facts = node_facts(ambient, probe)?;
+    Some(format!("{}-{}", facts.version, facts.arch))
+}
+
 /// Separated from the spawn so the parse is unit-testable without a Node on disk.
 fn parse_node_facts(stdout: &str) -> Option<NodeFacts> {
     let line = stdout.lines().next()?;
@@ -1304,12 +1331,15 @@ fn host_allowed(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|u| {
         u.scheme() == "https"
             && u.host_str().is_some_and(|h| {
-                nub_sandbox::DOWNLOAD_HOSTS.contains(&h) || extra_prefetch_hosts().contains(&h)
+                // Through the accessor, not the `const`: prefetch must admit exactly what the
+                // jail's egress allowlist admits, so a dev catalog override has to move both
+                // together or a promoted host would be fetchable by one and not the other.
+                nub_sandbox::download_hosts().contains(&h) || extra_prefetch_hosts().contains(&h)
             })
     })
 }
 
-fn cache_root() -> Option<PathBuf> {
+pub(super) fn cache_root() -> Option<PathBuf> {
     aube_store::dirs::cache_dir()
 }
 

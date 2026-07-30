@@ -69,6 +69,10 @@ __pycache__/
 
 # === Build / IDE artifacts ===
 /target/
+# Staging dir for scripts/rust-build.sh's target-dir seeding, renamed into place
+# once the clone completes. A killed clone leaves one behind until the script
+# retires it; it must never be stageable in the meantime.
+/target*.seeding/
 # nub-native is its own Cargo workspace; its build output is routed into the root
 # /target/ above (via crates/nub-native/.cargo/config.toml), but guard against a
 # stray local target/ if it's ever built without that routing.
@@ -107,7 +111,11 @@ npm/nub-*/*.tgz
 # Kept on disk (and in the Desktop backup) but NOT published to the public repo:
 # roadmap, competitive research, design plans, per-version epics. Agents working
 # from a full local checkout still have them; the public repo does not.
-wiki/
+# `wiki/` is now TRACKED and public — the canonical home for design and research
+# docs the repo ships. The internal corpus (roadmap, per-subcommand plans, and the
+# raw provenance from the lifecycle-script investigation) lives under `internal/`,
+# which is a symlink to an external dir.
+internal
 epics/
 
 # Maintainer-local agent-orientation overlay + its Claude Code loader. Neither
@@ -132,9 +140,12 @@ tests/bench/RESULTS.md
 .fray/
 
 # local-only design corpus (symlink to external dir) — never tracked
-wiki
+internal
 
 # The repo root is npm-only — a root pnpm-lock.yaml (beside a workspace
 # yaml) would mark the root as a workspace for nub and re-trigger the
 # engines-redirect the soak surfaces were moved to tools/ to avoid.
 /pnpm-lock.yaml
+
+# Maintainer-local fray worker norms (names private orchestration tooling).
+FRAY.md

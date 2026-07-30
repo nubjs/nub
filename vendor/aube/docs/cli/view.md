@@ -3,6 +3,7 @@
 
 - **Usage**: `aube view [FLAGS] [PACKAGE] [FIELD]`
 - **Aliases**: `info`, `show`
+- **Effect**: read-only
 
 Print package metadata from the registry
 

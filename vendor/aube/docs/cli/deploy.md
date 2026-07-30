@@ -2,6 +2,7 @@
 # `aube deploy`
 
 - **Usage**: `aube deploy [FLAGS] <TARGET>`
+- **Effect**: modifies state
 
 Deploy a workspace package into a target directory with deps inlined
 

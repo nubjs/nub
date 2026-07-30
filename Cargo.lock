@@ -203,7 +203,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "aube"
-version = "1.32.0"
+version = "1.35.0"
 dependencies = [
  "ambient-id",
  "aube-codes",
@@ -224,7 +224,7 @@ dependencies = [
  "ci_info",
  "clap",
  "clap_usage",
- "clx",
+ "clx 3.0.2",
  "console",
  "demand",
  "diffy",
@@ -261,7 +261,7 @@ dependencies = [
 
 [[package]]
 name = "aube-codes"
-version = "1.32.0"
+version = "1.35.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "aube-linker"
-version = "1.32.0"
+version = "1.35.0"
 dependencies = [
  "aube-codes",
  "aube-lockfile",
@@ -296,7 +296,7 @@ dependencies = [
 
 [[package]]
 name = "aube-lockfile"
-version = "1.32.0"
+version = "1.35.0"
 dependencies = [
  "aube-codes",
  "aube-manifest",
@@ -320,7 +320,7 @@ dependencies = [
 
 [[package]]
 name = "aube-manifest"
-version = "1.32.0"
+version = "1.35.0"
 dependencies = [
  "aube-codes",
  "aube-util",
@@ -337,7 +337,7 @@ dependencies = [
 
 [[package]]
 name = "aube-registry"
-version = "1.32.0"
+version = "1.35.0"
 dependencies = [
  "aube-codes",
  "aube-manifest",
@@ -362,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "aube-resolver"
-version = "1.32.0"
+version = "1.35.0"
 dependencies = [
  "aube-codes",
  "aube-lockfile",
@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "aube-runtime"
-version = "1.32.0"
+version = "1.35.0"
 dependencies = [
  "aube-codes",
  "aube-manifest",
@@ -413,7 +413,7 @@ dependencies = [
 
 [[package]]
 name = "aube-scripts"
-version = "1.32.0"
+version = "1.35.0"
 dependencies = [
  "aube-codes",
  "aube-manifest",
@@ -432,7 +432,7 @@ dependencies = [
 
 [[package]]
 name = "aube-settings"
-version = "1.32.0"
+version = "1.35.0"
 dependencies = [
  "aube-codes",
  "aube-util",
@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "aube-store"
-version = "1.32.0"
+version = "1.35.0"
 dependencies = [
  "aube-util",
  "base64",
@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "aube-util"
-version = "1.32.0"
+version = "1.35.0"
 dependencies = [
  "aube-codes",
  "blake3",
@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "aube-workspace"
-version = "1.32.0"
+version = "1.35.0"
 dependencies = [
  "aube-codes",
  "aube-manifest",
@@ -844,9 +844,9 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "clap_usage"
-version = "2.0.3"
+version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7179a7bcab80d71e4524ae4a384cb9180b6ca3eb30d8e398add707541989ce4a"
+checksum = "46d067625f5704e5722fe7e46407fef7e79680d6dfd045d29036149d90ec044b"
 dependencies = [
  "clap",
  "usage-lib",
@@ -863,7 +863,23 @@ dependencies = [
  "serde",
  "serde_json",
  "strum",
- "tera",
+ "tera 1.20.1",
+ "thiserror 2.0.18",
+ "unicode-width 0.2.2",
+]
+
+[[package]]
+name = "clx"
+version = "3.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03a65674abcd65c2846d6bfc4c9816ab9177b15277a18a78aa1691683ce63095"
+dependencies = [
+ "console",
+ "nix 0.31.3",
+ "serde",
+ "serde_json",
+ "strum",
+ "tera 2.1.0",
  "thiserror 2.0.18",
  "unicode-width 0.2.2",
 ]
@@ -2174,6 +2190,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "itertools"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b4baf93f58d4425749ca49a51c50ebab072c5df6994d08fed93541c331481dc"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2695,7 +2720,7 @@ dependencies = [
  "aube-workspace",
  "base64",
  "clap",
- "clx",
+ "clx 2.1.0",
  "console",
  "demand",
  "dirs-next",
@@ -3927,9 +3952,9 @@ dependencies = [
 
 [[package]]
 name = "roff"
-version = "0.2.2"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88f8660c1ff60292143c98d08fc6e2f654d722db50410e3f3797d40baaf9d8f3"
+checksum = "323c417e1d9665a65b263ec744ba09030cfb277e9daa0b018a4ab62e57bc8189"
 
 [[package]]
 name = "rustc-demangle"
@@ -4891,6 +4916,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tera"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "511f07fd91a70e92efbe4793d111aaa9035f8474dd157aaa1e31e7c27f5051da"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "termcolor"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5449,14 +5483,14 @@ dependencies = [
 
 [[package]]
 name = "usage-lib"
-version = "2.18.2"
+version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1851c9ddbc3a428af152852227363e7f66b73ca2ce732c8db3c2d4ab37eb63d2"
+checksum = "b60d4043943b220cc7269576a383ff2d62ab00f208f10d94b2496791729f8b02"
 dependencies = [
  "clap",
  "heck",
  "indexmap 2.14.0",
- "itertools 0.14.0",
+ "itertools 0.15.0",
  "kdl",
  "log",
  "miette",
@@ -5465,7 +5499,7 @@ dependencies = [
  "serde",
  "shell-words",
  "strum",
- "tera",
+ "tera 2.1.0",
  "thiserror 2.0.18",
  "versions",
  "xx",

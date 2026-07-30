@@ -555,6 +555,9 @@ where
 
     let after = std::mem::take(map);
     write_workspace_yaml(path, original_source.as_deref(), &before, &after)?;
+    if let Some(project_dir) = path.parent() {
+        super::config::invalidate_cache(project_dir);
+    }
     Ok(path.to_path_buf())
 }
 

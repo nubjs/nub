@@ -2,6 +2,7 @@
 # `aube patch-commit`
 
 - **Usage**: `aube patch-commit [--patches-dir <DIR>] <DIR>`
+- **Effect**: modifies state
 
 Generate a `.patch` file from a `aube patch` edit directory
 

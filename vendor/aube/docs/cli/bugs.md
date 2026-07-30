@@ -3,6 +3,7 @@
 
 - **Usage**: `aube bugs [FLAGS] [PACKAGES]…`
 - **Aliases**: `issues`
+- **Effect**: read-only
 
 Open package bug tracker URLs
 

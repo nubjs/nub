@@ -1,0 +1,124 @@
+# On-demand macOS build: produce a runnable arm64 `nub` + N-API addon on a real Mac and
+# publish them as artifacts for `scripts/mac-build.ts` to pull down.
+#
+# WHY THIS EXISTS. The dev host is a contended 10-core M1 Max. The GCE cross-compile path
+# (scripts/remote-build.ts) offloads the work but pays for it with hand-maintained Apple
+# framework stubs — 371 frozen symbols against a real export surface of ~8,700, so a routine
+# dependency bump can break the LINK after a full compile. A real macOS runner has none of
+# that: native `cargo build`, complete SDK, correct deployment target. See
+# wiki/research/remote-build-offload.md.
+#
+# SEPARATE FROM ci.yml ON PURPOSE. This produces an ARTIFACT for a human to run locally; it
+# is not a test gate. Keeping it out of ci.yml means it cannot destabilise the matrix-plan
+# logic, needs no `ci-gate` wiring, and can be deleted wholesale if the approach is dropped.
+#
+# RUNNER SELECTION. `depot-macos-26` (M4, 8 CPU / 24 GB / 400 GB) when the Depot GitHub App
+# is installed on this org, else GitHub's `macos-14`. The fallback is not cosmetic: GitHub's
+# macOS runners give only ~14 GB of disk, which a release build plus a target dir can crowd,
+# so a failure here that mentions ENOSPC means the fallback was used.
+name: mac-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Cargo profile for the CLI
+        type: choice
+        options: [release, fast]
+        default: release
+      runner:
+        description: Which macOS runner to build on
+        type: choice
+        options: [depot, github]
+        default: depot
+  # Lets the workflow be exercised from a branch BEFORE it reaches the default branch —
+  # `workflow_dispatch` is inert until the file lands on main (see ci-adhoc-test skill).
+  push:
+    branches: [depot-probe, mac-build-probe]
+    paths: ['.github/workflows/mac-build.yml', 'scripts/mac-build.ts']
+
+permissions: {}
+
+jobs:
+  build:
+    name: Build macOS arm64 (${{ inputs.profile || 'release' }})
+    # Only an explicit dispatch asks for Depot. A `push` smoke-test has no inputs and must
+    # NOT select depot-macos-26, or it queues forever waiting on a runner class that is not
+    # yet wired up — which reads as a hang rather than a configuration gap.
+    runs-on: ${{ inputs.runner == 'depot' && 'depot-macos-26' || 'macos-14' }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+
+      # On DEPOT runners this transparently writes to Depot Cache (25 GB on the Developer
+      # plan) instead of GitHub's — which matters, because this repo's GitHub Actions cache is
+      # already at 11.03 GB against a 10 GB limit and actively LRU-evicting, so a
+      # GitHub-backed cache here would evict other workflows' entries to no one's benefit.
+      #
+      # Two workspaces because nub-native is its own (the CLI is panic=abort, the cdylib
+      # panic=unwind), and it is a separate `cargo build` below that would otherwise go
+      # uncached. rust-cache strips every crate whose manifest lives under the repo root
+      # before saving, so what this actually caches is the ~598 registry dependencies — the
+      # local crates recompile regardless, since checkout does not preserve mtimes.
+      #
+      # zizmor: ignore[cache-poisoning] this workflow produces a dev artifact for local use
+      # and publishes nothing; only main-ref runs seed the cache, which requires push access.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: mac-build-${{ inputs.profile || 'release' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: |
+            .
+            crates/nub-native
+
+      # The workspace needs Node for two independent reasons, both of which fail QUIETLY:
+      # aube-resolver/build.rs ships an EMPTY primer without it (a binary that falls back to
+      # network packument fetches, exit code 0), and the root npm install provides
+      # @oxc-project/runtime which several tests import.
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: 26
+      - run: npm install --no-audit --no-fund --loglevel=error
+
+      # Belt and braces against the silent-primer path above.
+      - name: Build the CLI
+        env:
+          AUBE_REQUIRE_PRIMER: '1'
+        run: cargo build -p nub-cli --profile ${{ inputs.profile || 'release' }}
+
+      # nub-native is its OWN workspace (the CLI uses panic=abort, the cdylib needs
+      # panic=unwind), so it is built from inside the crate. Without it the CLI runs and
+      # installs packages but dies on the first .ts file — a partial artifact that looks
+      # complete, which is exactly how the cross-compile path first failed.
+      - name: Build the N-API addon
+        run: cd crates/nub-native && cargo build --release
+
+      - name: Stage artifacts
+        run: |
+          set -euo pipefail
+          PROFILE='${{ inputs.profile || 'release' }}'
+          mkdir -p dist
+          cp "target/$PROFILE/nub" dist/nub
+          cp target/release/libnub_native.dylib dist/nub-native.node
+          # arm64 macOS SIGKILLs an unsigned binary, so verify rather than discover it later
+          # on the developer's machine where it looks like a build bug.
+          codesign --verify --verbose=1 dist/nub || codesign -s - dist/nub
+          file dist/nub dist/nub-native.node
+          # Hash from INSIDE dist/ so the recorded paths are bare filenames. Recording
+          # `dist/nub` makes `shasum -c` fail after download, since the artifact extracts
+          # flat — a checksum file that cannot be checked is worse than none.
+          (cd dist && shasum -a 256 nub nub-native.node | tee SHA256SUMS)
+          ./dist/nub --version
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: macos-arm64-${{ inputs.profile || 'release' }}
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error

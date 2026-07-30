@@ -1,0 +1,60 @@
+# Branch-scoped ad-hoc probe: does the build jail's per-package userland egress gate hold on
+# WINDOWS? No pull request required (.claude/skills/ci-adhoc-test/SKILL.md).
+#
+# THE QUESTION. Windows has no unprivileged OS-level egress lever — job objects cannot block,
+# silos/firewall/WFP are admin, and the restricted-token/`\Device\Afd` route fails because
+# `socket()` opens a namespace name whose DACL the OS never consults. AppContainer capability
+# withholding is the only unprivileged lever and it is the one that breaks filesystem reads. So the
+# gate is userland JS on `NODE_OPTIONS`, and the three things that cannot be measured off Windows
+# are: whether it arms on win32 Node, whether the payload fits Windows' single-env-var cap
+# (documented 32,767 chars — both shims percent-encoded measure 47,614, so this is a suspected
+# BLOCKER), and whether PowerShell is covered by the blackhole proxy env.
+#
+# THE CONTROLS. Every attack arm runs THREE ways: no jail, package denied, package permitted. A
+# blocked arm proves nothing without the paired no-jail arm showing the same exfiltration
+# succeeding, and the permitted arm is what shows the gate does not simply break everything. The
+# verdict is the SINK's own hit count, not the child's self-report.
+#
+# WHY THE SINK IS NOT ON LOOPBACK. The gate permits loopback by default, so a `127.0.0.1` sink
+# would be allowed and every arm would pass for the wrong reason. The harness binds a real
+# non-loopback interface address. It also spawns asynchronously: with `spawnSync` the sink (in the
+# same process) cannot answer until the child has exited, which made all three arms fail
+# identically and read exactly like "the gate does nothing".
+#
+# ubuntu runs as a cross-platform control: the gate is platform-independent JS apart from two errno
+# integers, so a Windows-only failure means a Windows-specific cause.
+name: win-egress-gate-probe
+
+on:
+  push:
+    branches: [win-egress]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        # 22.15 is the fast-tier floor and 24 a current major; `--import` needs >= 20.6, so the
+        # floor is the leg most likely to expose a delivery difference.
+        node: ["22.15.0", "24"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: node + curl available
+        if: always()
+        run: |
+          node --version
+          curl --version
+        shell: bash
+      - name: run the egress-gate harness
+        if: always()
+        run: node probe/net-gate/harness.mjs
+        shell: bash

@@ -91,21 +91,40 @@ pub fn grant_build_jail_interpreter(name: &str, policy: &mut SandboxPolicy, ctx:
 /// (below) plus the resolved Python's own closure, whose derivation and bounds live with
 /// the embedder because it owns where each toolchain comes from.
 ///
-/// The Node pair is its C/C++ header dir
-/// (`<node-root>/include/node`) and `<node-root>/lib/node_modules`. node-gyp compiles an
-/// addon against the headers under `npm_config_nodedir/include/node`, and `npm`/`npx`/
-/// `corepack` are each a symlink into `lib/node_modules`, so without it they dangle and
-/// the standard `prebuild-install || npm run build` fallback dies at `npm: not found`.
-/// nub provisions Node under its version store (`~/.cache/nub/node/<ver>`) — a path in
-/// neither `$tooldirs` nor the interpreter grant (which covers only `bin/node` + the bin
-/// dir). Without these grants node-gyp finds no local headers and falls back to a network
-/// header download — reachable now that `nodejs.org` is allowed, but it re-fetches the
-/// headers on a cold cache for every native build the jail runs, and on an offline or
-/// air-gapped host the whole native-compile ecosystem fails outright. The grant is what
-/// keeps the offline path working. The embedder supplies the concrete paths — it owns where nub puts Node,
-/// and keeps the grant on SUBTREES rather than the bare root, which for a system Node is
-/// a shared prefix. A nonexistent path (a system Node shipping no headers) yields an
-/// inert allow.
+/// The Node pair is the GLOBAL PACKAGE TREE and the C/C++ HEADERS, and both are spelled by
+/// the embedder because BOTH DIFFER BY DISTRIBUTION SHAPE — the layouts are not variants of
+/// one path, they are two different answers:
+///
+/// - The global tree is `<node-root>/lib/node_modules` on POSIX and `<node-root>/node_modules`
+///   on Windows, whose archive is FLAT (`node.exe` with `node_modules` beside it, no `bin/`
+///   and no `lib/`). It is what makes `npm`/`npx`/`corepack` resolvable at all — each is a
+///   symlink into that tree on POSIX, a `%~dp0`-relative `.cmd` shim on Windows — and on POSIX
+///   it is genuinely load-bearing, because it sits OUTSIDE the granted bin dir (`../lib/…`):
+///   without it all three dangle and the standard `prebuild-install || npm run build` fallback
+///   dies at `npm: not found` (measured on `keytar`: rc 127 → rc 0 once the target is
+///   readable). On the FLAT layout it is redundant rather than load-bearing, since read grants
+///   are subtree grants ([`push_read_path`]) and the interpreter's own directory IS the
+///   distribution root — spelled anyway, so the grant states what the jail needs instead of
+///   depending on that coincidence.
+/// - The headers are `<node-root>/include/node` **only where the distribution ships them**,
+///   which the Windows one does not — verified against `node-v24.18.1-win-x64.zip`'s central
+///   directory (zero `include/`, `.h` or `.lib` entries). So `include/node` is a POSIX answer,
+///   and the embedder asks the DISK rather than the platform: where the directory exists it
+///   names the distribution root, and where it does not it prefetches the `-headers.tar.gz`
+///   plus `node.lib` OUT of jail into a tree nub owns and names that instead.
+///
+/// Either way `npm_config_nodedir` names the granted tree, which is what makes the grant
+/// load-bearing rather than an optimisation. node-gyp reads `<nodedir>/include/node/*` and
+/// `<nodedir>/$(Configuration)/<name>.lib` when nodedir is set, and when it is NOT set it
+/// DOWNLOADS the headers into its own `%LOCALAPPDATA%\node-gyp\Cache` / `~/.cache/node-gyp`
+/// devDir (node-gyp 13 `lib/configure.js` `getNodeDir`, `lib/install.js`) — a fetch the jail's
+/// deny-all egress refuses, so an ungranted nodedir is not a slow native build, it is no
+/// native build at all. nub provisions Node under its version store (`~/.cache/nub/node/
+/// <ver>`), a path in neither `$tooldirs` nor the interpreter grant, so nothing else covers it.
+///
+/// The embedder keeps the grant on SUBTREES rather than the bare root, which for a system Node
+/// is a shared prefix carrying unrelated `etc/`/`var/`. A nonexistent path yields an inert
+/// allow, which is what lets the embedder pass a speculative spelling without probing first.
 /// Front-inserted as base allows so the reasserted secret/`.env` floor stays authoritative;
 /// these paths never overlap a secret.
 fn grant_build_jail_extra_reads(policy: &mut SandboxPolicy, extra_reads: &[PathBuf]) {
@@ -211,6 +230,8 @@ fn private_home_dir(homes: &Homes, package_dir: &Path) -> Option<PathBuf> {
 /// Create `dir` owner-only. The home holds one package's install scratch; nothing else on
 /// the machine has business in it, and the umask default (0755) would publish it.
 fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    // Only the `unix` arm mutates the builder; elsewhere the binding is immutable.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -369,7 +390,8 @@ fn push_read_path(out: &mut Vec<FsRule>, path: &Path, origin: FsOrigin) {
 /// The build-jail baseline surface. Tight, default-deny read — the dependency tree and
 /// nub's own toolchain cache ([`grant_build_jail_dependency_reads`], front-inserted after
 /// this folds) plus the OS backends' minimal-root closure — with WRITE confined to a
-/// private per-run tmp and, via [`compile_build_jail`], the script's own package dir.
+/// per-run tmp (private everywhere but Windows, which takes the shared tmp; see the `$tmp`
+/// comment below) and, via [`compile_build_jail`], the script's own package dir.
 /// Egress curated down to the install-time artifact hosts (see [`build_jail_net`]).
 ///
 /// `package_dir` is the per-spawn WRITE grant. It stays LAST so its read-write access
@@ -382,6 +404,20 @@ fn build_jail_surface(package_dir: Option<&Path>, private_home: Option<&Path>) -
     let mut fs = serde_json::Map::new();
     // `$tmp` sets the private per-run tmp MODE (TmpMode::Private) — a writable scratch,
     // shared host tmp hidden. It emits no ordinary fs rule.
+    //
+    // WINDOWS takes the SHARED tmp instead, spelled as the key's ABSENCE (`Shared` is the
+    // default and the sentinel deliberately cannot name it). It is not a concession: the
+    // AppContainer backend cannot enforce `Private` at all, so asking for it only ever
+    // produced a standing `tmp-private` lost axis plus a per-run scratch dir the confined
+    // launch path never points the child at. The child is not left without scratch — the
+    // OS redirects an AppContainer's TEMP into its own
+    // `…\AppData\Local\Packages\<profile>\AC` profile, writable by construction (measured).
+    // Free by construction, which is the load-bearing part: a tmp MODE emits no fs rule, so
+    // no inheritable ACE and no DACL propagation. Granting the literal `%TEMP%` PATH instead
+    // would cost a full inheritable-ACE tree walk over an enormous directory on every
+    // lifecycle spawn (`set_ace` propagates; ~1000 ms on a populated tree vs 3 ms on an
+    // empty one) — that is why the widening is a mode change and not a path grant.
+    #[cfg(not(windows))]
     fs.insert("$tmp".to_string(), json!("rw"));
     if let Some(dir) = private_home {
         // This package's own HOME (see `private_home_dir`), read-write.
@@ -465,9 +501,10 @@ fn build_jail_net() -> Value {
 /// aube-process env plus the command's overlay), already reconstructed by the caller.
 /// `interpreter` is the closure to grant read (the provisioned Node + shim); each
 /// path and its bin dir become read grants. `extra_reads` are additional per-spawn read
-/// subtrees the embedder derives (the provisioned Node's `include/node` headers so node-gyp
-/// compiles offline, and its `lib/node_modules` so `npm`/`npx` resolve) — see
-/// [`grant_build_jail_extra_reads`].
+/// subtrees the embedder derives — the headers node-gyp compiles against and the global
+/// package tree `npm`/`npx` resolve through, both spelled per distribution shape (POSIX
+/// `include/node` + `lib/node_modules`; Windows a prefetched header tree + a flat
+/// `node_modules`) — see [`grant_build_jail_extra_reads`].
 ///
 /// `package_name` is aube's INSTALLER-RESOLVED identity for this spawn and the only key
 /// the curated per-package exception table ([`super::curated`]) is looked up by. `None` —
@@ -573,6 +610,34 @@ mod tests {
     /// declines on the denies-only static skeleton; that difference is exactly why the
     /// pure-allowlist invariant is asserted on both.
     fn production_build_jail_policy() -> SandboxPolicy {
+        let (interpreter, extra_reads) = POSIX_LAYOUT;
+        production_build_jail_policy_for(interpreter, extra_reads)
+    }
+
+    /// The two DISTRIBUTION SHAPES the embedder can hand `compile_build_jail`, as
+    /// (interpreter, extra reads). They are not variants of one path — see
+    /// [`grant_build_jail_extra_reads`] — so both are exercised rather than the POSIX one
+    /// standing in for both, which is how the Windows spelling stayed inert unnoticed.
+    ///
+    /// Spelled POSIX-style because the compiler is OS-agnostic and the drive letter is not what
+    /// differs: the SHAPE is (nested `bin/` + sibling `lib/` + in-tree headers) against (flat
+    /// root + headers in a separately-prefetched tree).
+    const POSIX_LAYOUT: (&str, &[&str]) = (
+        "/testhome/.cache/nub/node/v26/bin/node",
+        &[
+            "/testhome/.cache/nub/node/v26/include/node",
+            "/testhome/.cache/nub/node/v26/lib/node_modules",
+        ],
+    );
+    const FLAT_LAYOUT: (&str, &[&str]) = (
+        "/testhome/.cache/nub/pm/jail-bin/24.18.1-x64/node.exe",
+        &[
+            "/testhome/.cache/nub/pm/node-headers/24.18.1",
+            "/testhome/.cache/nub/pm/jail-bin/24.18.1-x64/node_modules",
+        ],
+    );
+
+    fn production_build_jail_policy_for(interpreter: &str, extra_reads: &[&str]) -> SandboxPolicy {
         let homes = Homes {
             home: PathBuf::from("/testhome"),
             tmp: PathBuf::from("/testtmp"),
@@ -583,13 +648,49 @@ mod tests {
             homes,
             Path::new("/proj/node_modules/somepkg"),
             None,
-            vec![PathBuf::from("/testhome/.cache/nub/node/v26/bin/node")],
-            vec![PathBuf::from(
-                "/testhome/.cache/nub/node/v26/lib/node_modules",
-            )],
+            vec![PathBuf::from(interpreter)],
+            extra_reads.iter().map(PathBuf::from).collect(),
             BTreeMap::new(),
         )
         .expect("build-jail compiles")
+    }
+
+    /// Each shape's toolchain reads actually LAND — the headers node-gyp compiles against and
+    /// the global package tree `npm` resolves through — while a sibling of the distribution
+    /// stays refused.
+    ///
+    /// The refused sibling is what makes this non-vacuous: asserting only that the two trees are
+    /// readable would pass just as well if the grant had widened to the whole cache home. And
+    /// asserting it per SHAPE is the point — the Windows spellings were a POSIX path and a
+    /// directory that does not exist in that archive at all, which a POSIX-only fixture cannot
+    /// distinguish from a working grant.
+    #[test]
+    fn both_distribution_shapes_grant_their_headers_and_global_package_tree() {
+        for (label, (interpreter, extra_reads)) in [("posix", POSIX_LAYOUT), ("flat", FLAT_LAYOUT)]
+        {
+            let policy = production_build_jail_policy_for(interpreter, extra_reads);
+            let m = crate::matcher::PathMatcher::new(&policy.fs.rules);
+            for read in extra_reads {
+                let deep = Path::new(read).join("npm/bin/npm-cli.js");
+                assert_eq!(
+                    m.decide(&deep).effect,
+                    Effect::Allow,
+                    "{label}: {} must be readable",
+                    deep.display()
+                );
+            }
+            let sibling = Path::new(interpreter)
+                .parent()
+                .and_then(Path::parent)
+                .expect("the fixture interpreter has a grandparent")
+                .join("unrelated/secret.txt");
+            assert_ne!(
+                m.decide(&sibling).effect,
+                Effect::Allow,
+                "{label}: the grant widened past the distribution to {}",
+                sibling.display()
+            );
+        }
     }
 
     /// THE build-jail invariant: the compiled policy is a PURE ALLOWLIST — zero deny rules.

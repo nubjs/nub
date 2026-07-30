@@ -3,6 +3,7 @@
 
 - **Usage**: `aube why [FLAGS] <PACKAGE>`
 - **Aliases**: `w`
+- **Effect**: read-only
 
 Print reverse dependency chains explaining why a package is installed
 

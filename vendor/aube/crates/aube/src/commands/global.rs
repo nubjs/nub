@@ -94,10 +94,12 @@ pub fn prefix_dir() -> miette::Result<PathBuf> {
     resolve_home()
 }
 
-// Android is the Termux/CLI case: bionic userland with a Linux-shaped
-// HOME/XDG layout, so it shares the linux default rather than needing
-// its own arm.
-#[cfg(any(target_os = "linux", target_os = "android"))]
+// Linux plus every other Unix (FreeBSD, Android/Termux, …): pnpm
+// special-cases only macOS (`~/Library/pnpm`), while Windows has its own
+// arm below. Scoped to `unix` so a non-Unix, non-Windows target doesn't
+// silently inherit the XDG/HOME logic — it gets a compile error instead,
+// which is the signal we'd want before shipping such a build.
+#[cfg(all(unix, not(target_os = "macos")))]
 fn platform_default() -> miette::Result<PathBuf> {
     if let Some(xdg) = aube_util::env::xdg_data_home() {
         return Ok(xdg.join("pnpm"));
@@ -330,6 +332,12 @@ pub fn unlink_bins(install_dir: &Path, bin_dir: &Path, bin_names: &[String]) {
         let install_lex = aube_linker::normalize_path(install_dir);
         for name in bin_names {
             let link = bin_dir.join(name);
+            // A scoped name (`@scope/foo`) puts the link a directory below
+            // `bin_dir`, and `create_bin_shim` anchors both the symlink
+            // target and the shim's `$basedir` on that deeper directory.
+            // Resolving from `bin_dir` instead lands one level too shallow
+            // and the bin silently survives the unlink.
+            let link_parent = link.parent().unwrap_or(bin_dir);
             match std::fs::read_link(&link) {
                 Ok(target) => {
                     // Symlink bin: fully resolve and check against
@@ -337,7 +345,7 @@ pub fn unlink_bins(install_dir: &Path, bin_dir: &Path, bin_names: &[String]) {
                     let absolute = if target.is_absolute() {
                         target
                     } else {
-                        bin_dir.join(target)
+                        link_parent.join(target)
                     };
                     let Some(install_canon) = install_canon.as_ref() else {
                         continue;
@@ -354,8 +362,9 @@ pub fn unlink_bins(install_dir: &Path, bin_dir: &Path, bin_names: &[String]) {
                     // read the `# aube-bin-shim` marker line generated
                     // alongside the script body to recover the
                     // `$basedir`-relative target, then lex-normalize from
-                    // `bin_dir` to match the shim's string-level
-                    // resolution semantics. Canonicalizing here would
+                    // the link's own directory to match the shim's
+                    // string-level resolution semantics (`$basedir` is
+                    // `dirname "$0"`). Canonicalizing here would
                     // follow the install's symlinks into the shared
                     // virtual store, so the ownership check has to
                     // stay textual.
@@ -365,7 +374,7 @@ pub fn unlink_bins(install_dir: &Path, bin_dir: &Path, bin_names: &[String]) {
                     let Some(rel) = aube_linker::parse_posix_shim_target(&content) else {
                         continue;
                     };
-                    let resolved = aube_linker::normalize_path(&bin_dir.join(rel));
+                    let resolved = aube_linker::normalize_path(&link_parent.join(rel));
                     if resolved.starts_with(&install_lex)
                         || install_canon
                             .as_ref()
@@ -536,5 +545,50 @@ mod tests {
         let a = cache_key(&["lodash".into()], &regs);
         let b = cache_key(&["chalk".into()], &regs);
         assert_ne!(a, b);
+    }
+
+    /// A scoped bin lives at `<bin_dir>/@scope/foo`, so `create_bin_shim`
+    /// anchors its relative target one directory deeper than a bare name.
+    /// Ownership detection has to undo that from the same anchor, or it
+    /// resolves above the real target and leaves the bin behind on
+    /// `remove -g`. Both link shapes carry a relative target, so both
+    /// arms of the ownership check are exercised.
+    #[cfg(unix)]
+    #[test]
+    fn unlink_bins_removes_a_scoped_bin_it_owns() {
+        for prefer_symlink in [None, Some(false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let install_dir = dir.path().join("install");
+            let bin_dir = dir.path().join("bin");
+            let pkg_bin = install_dir.join("node_modules/pkg/bin");
+            std::fs::create_dir_all(&pkg_bin).unwrap();
+            std::fs::create_dir_all(&bin_dir).unwrap();
+            let target = pkg_bin.join("foo.js");
+            std::fs::write(&target, b"#!/usr/bin/env node\n").unwrap();
+
+            let names = ["bare".to_string(), "@scope/foo".to_string()];
+            for name in &names {
+                aube_linker::create_bin_shim(
+                    &bin_dir,
+                    name,
+                    &target,
+                    aube_linker::BinShimOptions {
+                        prefer_symlinked_executables: prefer_symlink,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
+
+            unlink_bins(&install_dir, &bin_dir, &names);
+
+            for name in &names {
+                assert!(
+                    bin_dir.join(name).symlink_metadata().is_err(),
+                    "bin {name:?} is owned by this install and must be removed \
+                     (prefer_symlinked_executables={prefer_symlink:?})"
+                );
+            }
+        }
     }
 }

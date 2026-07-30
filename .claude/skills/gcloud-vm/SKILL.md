@@ -82,6 +82,11 @@ gcloud compute instances add-metadata nub-linux-tmp --zone us-central1-a \
   output beats guessing "network problem" every time.
 - **Size ≥16 GB for anything that compiles the nub Rust workspace.** An e2-small (2 GB) cannot build
   it and will OOM-wedge. e2-standard-4 (16 GB) is the proven size.
+- **For a nub RUST BUILD, use the `remote-build` skill, not this one.** `scripts/remote-build.ts`
+  provisions an ephemeral spot builder from a pre-baked image, cross-compiles
+  `aarch64-apple-darwin` on Linux (cargo-zigbuild, no Apple SDK) and pulls the signed binary
+  back — which inverts the next bullet for the Linux/Rust case. This skill remains the right
+  entry point for Windows/MSVC and for an interactive box.
 - **Prefer cross-compile-on-Mac + scp the artifact over building on the VM.** *Running* a binary
   needs almost no RAM, so it sidesteps VM build capacity entirely and is much faster. For Windows,
   the VM's MSVC BuildTools is often a broken shell with no `cl.exe` — cross-compile for

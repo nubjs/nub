@@ -122,6 +122,75 @@ deferred, and the cooperative redirect above is the shipped tier.
 
 An AppContainer child is blocked from loopback destinations by default. The package-wide loopback exemption needed to reach a proxy exposes every local listener, not just the proxy port. The backend therefore rejects per-host and MITM policies before launch, rather than installing the exemption. Coarse `net: true` permits public outbound connections but is not full host networking; coarse deny remains available without elevation.
 
+### The build jail's per-package network gate is USERLAND, and is not a security boundary
+
+The build jail delivers a per-package egress gate into every confined Node as a `data:` `--import`
+preload on `NODE_OPTIONS` (`compiler::net_gate_node_options`, alongside the stdio shim below).
+It exists because Windows has no unprivileged OS egress lever that survives the filesystem: the
+only one is withholding an AppContainer's `internetClient` capability, and being an AppContainer
+is what makes a fresh LowBox profile sid absent from every DACL. WFP and the firewall are
+admin-gated, job objects have no deny flag at all, and `\Device\Afd` is opened namespace-relative
+so its DACL is never consulted.
+
+**What it is.** Egress is a per-package BOOLEAN read from `data/build-jail-catalog.json`: a
+package with an entry may use the network, a package with no entry gets none, and a package in
+`notGranted.packages` gets none regardless. There is deliberately no host filtering — a redirect
+is a second connection to a second host, so an origin-only allowlist denies the download at the
+second hop, and an upstream moving its CDN would break a package the list claimed to permit.
+
+**What it is not.** It patches `net.Socket.prototype.connect`, `dns`, `dgram` and the
+`child_process` env seams *inside* the confined Node. A native addon opening a raw socket
+bypasses it entirely. Do not describe it as an OS-enforced guarantee.
+
+Named residuals, all measured rather than assumed:
+
+- **`curl --noproxy '*'`** — non-Node children are covered only opportunistically, by pointing
+  `http_proxy`/`https_proxy` at a closed loopback port. A client told to ignore proxy
+  configuration, a static binary, or anything not reading proxy env, is not covered.
+- **Windows PowerShell 5.1** — reads HKCU IE proxy settings rather than the environment, so the
+  blackhole does not reach it (PowerShell 7+ *is* covered: its `HttpClient.DefaultProxy` reads
+  proxy env vars). Closing this would need a user-global HKCU write, which rewrites the
+  interactive user's own proxy configuration and races concurrent installs; that was rejected on
+  those grounds, not for lack of coverage. No corpus package uses PowerShell as a lifecycle entry.
+- **Loopback is exempt under a deny**, deliberately: it cannot carry data off the box, and
+  denying it breaks builds that start a local server.
+
+What it buys is the threat's actual shape. Shai-Hulud grew by publishing new lifecycle hooks into
+packages that never had one, phoning home with plain `https.get`/`fetch`/`axios`; all of that is
+denied for any package the catalog does not name. To spread, a worm must now ship and load a
+per-platform native socket addon. Measured against nub's 344-package corpus, 178 of the 179
+packages that contact any host enter through Node or an npm `.cmd` bin shim; the one exception is
+a POSIX `.sh` that does not run on Windows, so the measured child-process leak there is zero.
+
+### Windows: `child_process` IPC is unavailable in the build jail
+
+Global NPFS (`\\.\pipe\…`) is closed to a LowBox token. Under one policy and one grant set,
+`\\.\pipe\LOCAL\…` was CREATED while `\\.\pipe\…` was REFUSED — the gate is the object
+NAMESPACE, not any permission, so no filesystem rule reaches it and a maximally loose policy
+still fails. libuv creates a named pipe per piped stdio stream and spells only the global form,
+and `uv__pipe_server` treats the refusal as a name collision and retries forever inside
+`uv_spawn`, before any timer arms: a confined piped spawn SPINS rather than failing (cpu ≈ wall,
+measured). Compiler Explorer hit the same wall under an AppContainer
+([ninja-build/ninja#2354](https://github.com/ninja-build/ninja/pull/2354)).
+
+- **What is repaired.** The build jail preloads a shim that rewrites every `'pipe'` stdio slot
+  into a scratch FILE, which the same jail permits. `exec`, `execFile`, `execSync`,
+  `execFileSync` and `spawnSync` buffer to completion anyway, so for them the repair is exact —
+  this is the shape `node-gyp` uses (`lib/util.js` wraps `cp.execFile` with a callback).
+- **Residual: a streaming `spawn()`.** Output is delivered at child exit rather than as it is
+  produced. Buffered consumers cannot tell; a caller rendering progress can.
+- **Residual: `fork()` and an explicit `'ipc'` slot.** An IPC channel is a duplex pipe and a
+  file cannot emulate one. These now FAIL FAST with `ERR_NUB_SANDBOX_NO_IPC`, naming the
+  per-package opt-out, rather than becoming an unkillable spin. A refusal is recoverable; the
+  hang was not.
+- **Residual: Node below 20.6.** The shim is delivered on `--import`, so an older interpreter
+  gets no shim and the original hang stands. Stamping it blind would abort Node at startup,
+  which is worse than the defect.
+- **Residual: a child conversing over `stdin`.** Its stdin is an already-EOF file; writes to
+  `child.stdin` are accepted and discarded.
+- **Residual: `maxBuffer` stops applying.** A file has no backpressure, so a runaway child
+  fills the disk rather than tripping `ERR_CHILD_PROCESS_STDIO_MAXBUFFER`.
+
 ### MITM tier: credential-brokering residuals (INFO, doc-only)
 
 The capability-derived MITM tier (see
@@ -427,14 +496,149 @@ paths, it does not probe the host).
   the allow-set. A system interpreter is covered by the essential base and never hits
   this.
 
-### Windows confined work dirs need a CLEAN-DACL root (not a nub-owned store; not ancestor traverse grants)
+### Windows confined work dirs need a CLEAN-DACL root (not a nub-owned store)
 
-Superseded — a LowBox token retains SeChangeNotifyPrivilege (Bypass Traverse Checking) and
-standard NTFS volumes carry `FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL`, so intermediate-dir
-ACLs are NOT access-checked: a leaf-only AC-SID grant is reachable under an ORDINARY
-`%TEMP%`/profile tree with no ancestor traverse grants and no `C:\`-owned store (VM-verified
-under `%TEMP%`, `tests/windows_enforcement.rs` + `windows_residuals.rs`). nub never needs
-`WRITE_DAC` on a shared ancestor.
+A LowBox token retains SeChangeNotifyPrivilege (Bypass Traverse Checking) and standard NTFS
+volumes carry `FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL`, so a leaf-only AC-SID grant is
+OPENABLE under an ORDINARY `%TEMP%`/profile tree with no `C:\`-owned store (VM-verified under
+`%TEMP%`, `tests/windows_enforcement.rs` + `windows_residuals.rs`).
+
+- **Traverse-bypass does not make an ancestor openable as a TARGET, and Node opens every one.**
+  `realpathSync` walks a path prefix by prefix from the volume root, so an absolute `require()`
+  died on `EPERM: lstat 'C:\'` while the granted leaf itself read fine. The backend reaches the
+  chain one way, needing no elevation: a NON-INHERITED traverse + read-attributes ACE where the
+  unprivileged user can write one, which is their own profile and below. `C:\` and `C:\Users`
+  are NOT repairable by anyone unprivileged, so a realpath walk still dies on its FIRST
+  component — see the bullet below. Non-inherited is the load-bearing word: the
+  ACE governs the directory object alone, so an ancestor never becomes a subtree read, and
+  there is no DACL propagation to pay for per spawn. Both halves are best-effort — a refused
+  ACE write is skipped, never fatal.
+- **The capability half is GONE — the kernel refuses the SID class outright.** A second
+  mechanism used to sit alongside the ACE: harvest the `S-1-15-3-65536-…` capability SIDs
+  Windows already places on `C:\` and `C:\Users` and request them in `SECURITY_CAPABILITIES`.
+  `NtCreateLowBoxToken` refuses that AppSilo RID class (`0xc000000d`) while a `65537` sibling is
+  accepted, so it is a deliberate kernel block, and every launch fell back — measured in BOTH
+  the elevated and de-elevated principals. It never once widened a launch and has been removed.
+- **The ancestor ACE write is affordable now: 630 µs on the runner's own `%TEMP%`, where it used
+  to stall for minutes.** Any DACL write through `Set*SecurityInfo` runs advapi32's inheritance
+  propagation over the object's existing subtree before returning, and `%TEMP%` is on the chain,
+  so the write took minutes with a duration that varied run to run — which is what kept the
+  piped-stdio measurements from running at all. `SetKernelObjectSecurity` goes straight to
+  `NtSetSecurityObject`, where there is no propagation pass. Measured against the writer it
+  replaced on the same path with the same trustee in the same run (`ace-cost` in
+  `tests/windows_jail_repairs.rs`, run 30528232196): 131 µs versus 534,378 µs on a 4,000-entry
+  tree, and a re-grant with the ace already present costs the same as a fresh one — a descriptor
+  write, not a tree walk. **Still secondary to the blocker below** — cost only matters for a
+  mechanism that is available, and above the user profile this one is not.
+- **A leaf grant still propagates, because it is inheritable by design — so it is SKIPPED where
+  the target already publishes it.** `%ProgramFiles%` carries `ALL APPLICATION PACKAGES:
+  ReadAndExecute` inheritably (`aap-readable-programfiles=true`, with `nodejs` the measured
+  outlier), so an all-users python or node needs no ace at all; per-user layouts such as the
+  runner's `hostedtoolcache` carry none and still pay. Narrowing the grant instead is not
+  available: a narrow python grant fails `0xc0000135 STATUS_DLL_NOT_FOUND` because
+  `python3.dll`, `python312.dll` and `vcruntime140*.dll` sit in the install root beside the exe.
+
+- **BLOCKER: `C:\` and `C:\Users` are unreachable to an unprivileged AppContainer, on every image
+  measured.** Surveyed read-only across three runner images, each labelled, `Get-Acl` only:
+
+  | image | edition | build.UBR | type | `lstat C:\` w/o a grant | `lstat C:\Users` w/o a grant | standard-group WRITE_DAC |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | `windows-11-arm` | Windows 11 Enterprise 25H2 | 26200.8875 | workstation | NO | NO | NO on both |
+  | `windows-latest` | Server 2025 Datacenter 24H2 | 26100.32995 | server | NO | NO | NO on both |
+  | `windows-2022` | Server 2022 Datacenter 21H2 | 20348.5386 | server | NO | NO | NO on both |
+
+  There is **no `ALL APPLICATION PACKAGES` or `ALL RESTRICTED APPLICATION PACKAGES` ACE on any
+  chain member on any image** — the only LowBox-relevant trustee on `C:\` and `C:\Users` is a
+  capability SID, and those cannot be requested. Two independent reasons: `CreateProcessW` refuses
+  the `S-1-15-3-65536-…` form, and `C:\Users`' ACE is `0x100021` — traverse and list, but **no
+  `FILE_READ_ATTRIBUTES`** — so it could not satisfy an `lstat` even if it were holdable.
+
+  Nor can a standard user author the repair there: `C:\` is owned by `NT SERVICE\TrustedInstaller`
+  and `C:\Users` by `NT AUTHORITY\SYSTEM`, neither grants WRITE_DAC to `BUILTIN\Users` /
+  `Authenticated Users` / `Everyone`, and both were measured WRITE_DAC-refused de-elevated. From
+  `%USERPROFILE%` down the user owns the chain and the repair works.
+
+  So the wall is exactly the two directories ABOVE the user profile, and it is not a CI artefact —
+  the workstation image behaves the same as the server images. **Any project inside the user
+  profile therefore cannot have its ancestor chain repaired without elevation**, which the build
+  jail does not get. Scoping this is the maintainer's call: the options that stay unprivileged are
+  a narrower Windows jail, or not confining the operations that need the walk. A residual is
+  acceptable here; requiring privilege is not.
+
+- **THE CAUSE IS THE APPCONTAINER'S SECOND GATE, AND A RESTRICTED TOKEN DOES NOT HAVE IT
+  (measured).** Everything above describes the AppContainer, and it is not a Windows limit on
+  unprivileged directory reads. A LowBox token is access-checked TWICE: the ordinary DACL check,
+  plus a gate requiring the DACL to grant the user AND either the package sid or a held capability.
+  The second gate is what fails, and no ace nub can write above `%USERPROFILE%` satisfies it. A
+  restricted token simply does not carry that gate. Measured by `AccessCheck` on both a Windows 11
+  Enterprise 25H2 workstation and Server 2025, identical, with an unmodified-token baseline GRANTED
+  throughout:
+
+  | token | read `C:\` / `C:\Users` / profile | write `C:\` | write profile | write project |
+  | --- | --- | --- | --- | --- |
+  | own token (baseline control) | GRANTED | GRANTED | GRANTED | GRANTED |
+  | restricted, medium integrity | GRANTED | DENIED | GRANTED | GRANTED |
+  | restricted, low integrity | GRANTED | DENIED | DENIED | DENIED |
+
+  Reads succeed with NO ace written anywhere, which dissolves the ancestor problem: `realpathSync`,
+  `process.cwd()`, the `find-up`/`cosmiconfig` upward walks and `_nodeModulePaths` probing are all
+  reads. Integrity then supplies the write fence that the AppContainer's DACL grants were doing.
+
+  **It is NOT that the AppContainer sid "is in no DACL" while a restricted token "keeps the user's
+  sid" — that framing was mine and it is wrong.** A LowBox token retains the base token's user sid
+  (asserted in Chromium's `app_container_unittest.cc`), and it can be built ON a restricted base via
+  `NtCreateLowBoxToken`. Measured in both construction orders, the composed token is denied exactly
+  where a plain LowBox token is: the gate is not bypassed by the base's sid. So the two mechanisms
+  compose structurally and buy nothing, which means Windows forces a CHOICE — coarse egress-deny
+  (an AppContainer withholding `internetClient`) or ancestor reads (a restricted token), not both.
+  Job objects are not a third option: their only network knob is bandwidth shaping plus a DSCP tag,
+  with no deny. One untested candidate remains, `CreateRestrictedToken`'s `SidsToRestrict`, which
+  could deny `\Device\Afd` while leaving `C:\` readable — unmeasured, and a hypothesis only.
+
+  Three things this does NOT establish, kept explicit because a green table invites over-reading:
+  low integrity denies EVERY write including the project dir, and since the mandatory check runs
+  BEFORE the DACL, a DACL ace cannot re-open one — the object's own label must come down, via
+  `LABEL_SECURITY_INFORMATION`, which needs WRITE_OWNER and is therefore plausibly unprivileged on
+  paths the user owns but is UNMEASURED. Whether such a child can be launched unprivileged is
+  likewise unmeasured. And egress is an open tension rather than a solved one: coarse deny is
+  unprivileged only by withholding an AppContainer capability, and a restricted token has no
+  capability set, so the two mechanisms may be mutually exclusive — the LowBox check that breaks
+  reads is exactly what being an AppContainer means.
+
+- **BLAST RADIUS: essentially every Node lifecycle script, and the boundary is "any file module
+  at all".** Measured with the repair OFF, which is the shipping configuration above the profile.
+  The builtin-only row is the control — without it a uniformly red group cannot be told from a
+  broken harness:
+
+  | shape | unrepaired |
+  | --- | --- |
+  | `node -e`, no require | starts, exit 0 |
+  | `node -e require('fs')` (builtin) | starts, exit 0 |
+  | `node -e require('<absolute>')` | refused, `realpathSync` on `C:\` |
+  | `node -e require('./dep.js')` | refused, same |
+  | `node -e require('dep')` through a junction | refused, same |
+  | `node <file>` | refused, same, at `resolveMainPath` |
+
+  So this is not a require-SHAPE distinction. Node starts and builtins work; the instant any
+  file-based module resolution happens — entry point or require, absolute or relative or bare —
+  `realpathSync` lstats the volume root and the LowBox check refuses it. `resolveMainPath`
+  realpaths the main script before a line of user code runs, so a script's content is irrelevant
+  to whether it starts.
+
+  Against the 346-package lifecycle corpus: 319 run a script that makes `node` execute a FILE, and
+  the 8 that use only `node -e` load a relative file, which realpaths too (`loader.js` non-main
+  branch, ESM `resolve.js`) — **327 of 346 reach `realpathSync`**. The 19 that never invoke Node
+  are mostly `chmod` and `.sh`, only about 4 of which run under `cmd.exe` at all. By class the
+  breakage is near-total everywhere: native-build-prebuilt 104/105, binary-downloader 76/77,
+  hook-installer 11/11. (That corpus was selected for HAVING lifecycle scripts, so this is
+  composition within it, not a ratio over all of npm.)
+
+  **The posture consequence, stated plainly: a Windows build jail that cannot repair above the
+  user profile confines almost nothing while appearing to.** Some of those scripts fail SILENTLY —
+  `core-js` runs `node -e "try{require('./postinstall')}catch(e){}"`, and the `|| exit 0` fallback
+  chains through the gyp rows do the same — so a default-on jail would report success while the
+  package's work never happened. That is the false-assurance case, and it is why this is a posture
+  question rather than a coverage percentage.
 
 - **The precondition is INHERITABILITY, not a protected ancestor.** Where an
   `ALL APPLICATION PACKAGES` allow-ACE can reach a work dir, an ungranted secret UNDER it is

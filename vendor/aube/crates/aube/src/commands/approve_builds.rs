@@ -73,10 +73,11 @@ pub async fn run(args: ApproveBuildsArgs) -> miette::Result<()> {
     .await
 }
 
-/// Approve builds for the current project and return the approved
-/// names (empty when nothing was ignored, nothing was selected, or the
-/// interactive confirmation was declined — the caller skips the build
-/// step in all three cases).
+/// Approve builds for the current project and return the GRAPH names to
+/// rebuild — the alias spelling for an `npm:`-aliased dep, not the real
+/// name it was approved under. Empty when nothing was ignored, nothing
+/// was selected, or the interactive confirmation was declined (the caller
+/// skips the build step in all three cases).
 fn run_project(cwd: &Path, all: bool, packages: Vec<String>) -> miette::Result<Vec<String>> {
     let ignored = super::ignored_builds::collect_ignored(cwd)?;
     if ignored.is_empty() {
@@ -96,7 +97,10 @@ fn run_project(cwd: &Path, all: bool, packages: Vec<String>) -> miette::Result<V
     // source key, never its bare name, so the `allowBuilds` write must use
     // `approval_key`. The follow-up rebuild instead matches deps by graph
     // `name` (pnpm's `rebuild <name>` contract), so the two lists diverge
-    // for source-backed deps and must be threaded separately.
+    // for source-backed deps and must be threaded separately. An `npm:`
+    // alias is the second divergence class: the entry is reported and
+    // approved under the REAL name, while the graph node it must rebuild
+    // is keyed by the alias — hence `graph_names` rather than `selected`.
     let entries = selected_entries(&ignored, &selected);
     let approval_keys = dedupe(entries.iter().map(|e| e.approval_key.clone()).collect());
     let display = entries
@@ -134,7 +138,19 @@ fn run_project(cwd: &Path, all: bool, packages: Vec<String>) -> miette::Result<V
     for entry in &entries {
         println!("  {}", entry.display_spec());
     }
-    Ok(selected)
+    Ok(rebuild_handoff_names(&entries))
+}
+
+/// The names to hand `rebuild` for a set of approved entries: the GRAPH
+/// spelling, which is the alias for an `npm:`-aliased dep and so differs
+/// from the real name the entry was reported and approved under.
+fn rebuild_handoff_names(entries: &[&super::ignored_builds::IgnoredEntry]) -> Vec<String> {
+    dedupe(
+        entries
+            .iter()
+            .flat_map(|e| e.graph_names.iter().cloned())
+            .collect(),
+    )
 }
 
 /// The `IgnoredEntry`s whose bare `name` the caller selected, preserving
@@ -460,6 +476,32 @@ fn pick_global_interactively(
 mod tests {
     use super::format_picker_label;
     use aube_scripts::{Suspicion, SuspicionKind};
+
+    /// The rebuild handoff must carry the GRAPH names, not the approved
+    /// (registry) name: an `npm:` alias is reported and written to
+    /// `allowBuilds` as the real package, but `rebuild` matches deps by
+    /// their graph name, so returning the approved spelling made
+    /// `approve-builds` dead-end in `no installed dependency matches`.
+    #[test]
+    fn rebuild_handoff_uses_graph_names_not_the_approved_name() {
+        let entry = super::super::ignored_builds::IgnoredEntry {
+            name: "esbuild".to_string(),
+            version: "0.21.5".to_string(),
+            approval_key: "esbuild".to_string(),
+            suspicions: Vec::new(),
+            graph_names: vec!["eb".to_string(), "eb2".to_string()],
+        };
+        // Both aliases must be handed over: one approved build can back
+        // several graph nodes, and `rebuild` names each one separately.
+        assert_eq!(
+            super::rebuild_handoff_names(&[&entry]),
+            vec!["eb".to_string(), "eb2".to_string()],
+        );
+        assert!(
+            !super::rebuild_handoff_names(&[&entry]).contains(&entry.name),
+            "the approved registry name is not a graph node and would not match"
+        );
+    }
 
     #[test]
     fn label_for_clean_package_is_bare_spec() {

@@ -75,12 +75,19 @@ pub const PACKUMENT_FULL_CACHE_SUBDIR: &str = "packuments-full-v1";
 ///   single backup/mount captures the whole store; matches pnpm's
 ///   `~/.pnpm-store/v11/{files,index.db}` grouping)
 ///
-/// `cache_dir` ($XDG_CACHE_HOME/aube) still holds genuinely
-/// regenerable caches: the virtual store and packument metadata.
+/// `cache_dir` (the `cacheDir` setting, default: the platform cache
+/// dir) still holds genuinely regenerable caches: the global virtual
+/// store and packument metadata.
 #[derive(Clone)]
 pub struct Store {
     root: PathBuf,
     cache_dir: PathBuf,
+    /// Root of the global virtual store. Defaults to
+    /// `<cache_dir>/virtual-store` and is overridden wholesale by the
+    /// `globalVirtualStoreDir` setting, which users point at the
+    /// `storeDir` volume so materialized packages can be hardlinked
+    /// out of the CAS.
+    virtual_store_dir: PathBuf,
     /// When set, `create_cas_file` writes directly to the final
     /// content-addressed path on non-Linux platforms instead of the
     /// tempfile-then-rename dance. Caller must guarantee no concurrent
@@ -91,43 +98,46 @@ pub struct Store {
 }
 
 impl Store {
-    /// Open the store at the default location (see [`dirs::store_dir`]).
+    /// Open the store at the platform default location (see
+    /// [`dirs::store_dir`] and [`dirs::cache_dir`]).
+    ///
+    /// aube's own CLI resolves `storeDir` / `cacheDir` /
+    /// `globalVirtualStoreDir` first and goes through [`Store::with_dirs`];
+    /// this is the entry point for embedders that just want the same
+    /// directories a default install would use.
     pub fn default_location() -> Result<Self, Error> {
         let root = dirs::store_dir().ok_or(Error::NoHome)?;
         let cache_dir = dirs::cache_dir().ok_or(Error::NoHome)?;
-        let store = Self {
-            root,
-            cache_dir,
-            fast_path: Arc::new(AtomicBool::new(false)),
-        };
-        store.migrate_legacy_index_dir();
-        Ok(store)
+        Ok(Self::with_dirs(root, cache_dir))
     }
 
-    /// Open the store with an explicit root, keeping the default
-    /// cache dir (`$XDG_CACHE_HOME/aube`). Used when a user overrides
-    /// `storeDir` via `.npmrc` / `pnpm-workspace.yaml` — only the CAS
-    /// moves; the packument and virtual-store caches stay where the
-    /// rest of aube expects them.
+    /// Open the store with an explicit CAS root, keeping the platform
+    /// cache dir for the global virtual store and packument caches.
+    /// Equivalent to `with_dirs(root, dirs::cache_dir())`.
     pub fn with_root(root: PathBuf) -> Result<Self, Error> {
         let cache_dir = dirs::cache_dir().ok_or(Error::NoHome)?;
-        Ok(Self::with_root_and_cache_inner(root, cache_dir))
+        Ok(Self::with_dirs(root, cache_dir))
     }
 
-    /// Open the store with both root and cache dir supplied explicitly.
-    /// Unlike [`with_root`] / [`default_location`] this never resolves a
-    /// HOME/XDG path of its own, so it cannot fail with [`Error::NoHome`]
-    /// — the caller resolves both paths (including any graceful `$TMPDIR`
-    /// fallback when no HOME is set). This is the path the embedded install
-    /// pipeline uses so a configured `storeDir` is honored even when the
-    /// environment has no HOME (a stripped test env or a minimal container).
-    pub fn with_root_and_cache(root: PathBuf, cache_dir: PathBuf) -> Result<Self, Error> {
-        Ok(Self::with_root_and_cache_inner(root, cache_dir))
-    }
-
-    fn with_root_and_cache_inner(root: PathBuf, cache_dir: PathBuf) -> Self {
+    /// Open the store with an explicit CAS root and cache dir. Used when
+    /// a user overrides `storeDir` (the CAS) and/or `cacheDir` (the
+    /// global virtual store + packument caches); the two are independent
+    /// settings, but the global virtual store hardlinks out of the CAS,
+    /// so a caller pointing them at different volumes gives up the
+    /// hardlink fast path.
+    ///
+    /// `root` is the CAS shard directory (`<storeDir>/v1/files`), not the
+    /// user-facing store dir. The global virtual store lands under
+    /// `cache_dir` unless [`Store::with_virtual_store_dir`] moves it.
+    ///
+    /// Infallible by construction: unlike [`with_root`] / [`default_location`]
+    /// it resolves no HOME/XDG path of its own, so the embedded install
+    /// pipeline can honor a configured `storeDir` in an environment with no
+    /// HOME (a stripped test env, a minimal container).
+    pub fn with_dirs(root: PathBuf, cache_dir: PathBuf) -> Self {
         let store = Self {
             root,
+            virtual_store_dir: cache_dir.join(aube_util::embedder().virtual_store_subdir),
             cache_dir,
             fast_path: Arc::new(AtomicBool::new(false)),
         };
@@ -135,13 +145,23 @@ impl Store {
         store
     }
 
+    /// Point the global virtual store somewhere other than
+    /// `<cache_dir>/<embedder virtual-store subdir>` (the
+    /// `globalVirtualStoreDir` setting). The path is used verbatim.
+    #[must_use]
+    pub fn with_virtual_store_dir(mut self, dir: PathBuf) -> Self {
+        self.virtual_store_dir = dir;
+        self
+    }
+
     /// Open the store at a specific path (cache dir derived from store root).
     /// Used by tests that need a fully isolated layout; production code
-    /// should prefer `default_location` or `with_root`.
+    /// should prefer `with_dirs`.
     pub fn at(root: PathBuf) -> Self {
         let cache_dir = root.parent().unwrap_or(&root).join(CACHE_DIR_NAME);
         Self {
             root,
+            virtual_store_dir: cache_dir.join(aube_util::embedder().virtual_store_subdir),
             cache_dir,
             fast_path: Arc::new(AtomicBool::new(false)),
         }
@@ -278,15 +298,16 @@ impl Store {
         }
     }
 
-    /// Directory for the global virtual store (materialized packages).
+    /// `<cacheDir>/<leaf>/` unless `globalVirtualStoreDir` moved it, so it
+    /// follows `cacheDir` by default.
     ///
-    /// The leaf name is the active embedder's [`virtual_store_subdir`] —
-    /// `virtual-store` for standalone aube, an embedder's own name otherwise
+    /// The default leaf name is the active embedder's [`virtual_store_subdir`]
+    /// — `virtual-store` for standalone aube, an embedder's own name otherwise
     /// (nub: `store`) — so the shared store follows the host's naming.
     ///
     /// [`virtual_store_subdir`]: aube_util::Embedder::virtual_store_subdir
     pub fn virtual_store_dir(&self) -> PathBuf {
-        self.cache_dir.join(aube_util::embedder().virtual_store_subdir)
+        self.virtual_store_dir.clone()
     }
 
     /// Root of the per-package *extracted-tree* tier, a sibling of the
@@ -385,23 +406,24 @@ mod tests {
     fn store_for_migration_test(root: PathBuf, cache_dir: PathBuf) -> Store {
         Store {
             root,
+            virtual_store_dir: cache_dir.join(aube_util::embedder().virtual_store_subdir),
             cache_dir,
             fast_path: Arc::new(AtomicBool::new(false)),
         }
     }
 
     #[test]
-    fn with_root_and_cache_never_needs_home() {
+    fn with_dirs_never_needs_home() {
         // The embedded install pipeline resolves both the store root and the
         // cache dir itself (with a $TMPDIR fallback) and hands them in, so a
         // configured storeDir is honored even with no HOME in the env — e.g.
         // pnpm's own test harness strips HOME. `with_root`/`default_location`
-        // would have aborted with `NoHome`; this ctor must not.
+        // would have aborted with `NoHome`; this ctor must not — it is
+        // infallible precisely so it can't.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("store/v1/files");
         let cache_dir = tmp.path().join("cache");
-        let store = Store::with_root_and_cache(root.clone(), cache_dir.clone())
-            .expect("with_root_and_cache must not require HOME");
+        let store = Store::with_dirs(root.clone(), cache_dir.clone());
         assert_eq!(store.root(), root);
         assert_eq!(store.index_dir(), tmp.path().join("store/v1/index"));
     }

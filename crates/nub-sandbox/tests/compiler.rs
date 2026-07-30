@@ -532,9 +532,14 @@ fn build_jail_preset_expands() {
         p.env.enforce && p.env.constructed.is_empty(),
         "static build-jail strips env"
     );
-    assert!(
+    // Windows takes the SHARED tmp: `Private` was never enforced there — `tmp_lost_axis`
+    // reported it lost on every confined spawn while `make_private_tmp` allocated a dir the
+    // confined path never used, because the OS redirects an AppContainer's TEMP into its own
+    // profile regardless. Same cfg-split shape as the `$downloads` assertion above.
+    assert_eq!(
         matches!(p.fs.tmp, nub_sandbox::policy::TmpMode::Private),
-        "build-jail gives a private per-run tmp"
+        !cfg!(windows),
+        "build-jail gives a private per-run tmp off Windows, and the shared tmp on Windows"
     );
     let m = nub_sandbox::matcher::PathMatcher::new(&p.fs.rules);
     let proj = common::homes().project;

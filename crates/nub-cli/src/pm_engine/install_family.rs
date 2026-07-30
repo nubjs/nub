@@ -563,7 +563,7 @@ fn run_dlx(typed: &str, args: &[String]) -> Result<i32> {
     finish_code_quieted(
         &globals.output,
         &session,
-        aube::commands::dlx::run_with_child_env(verb, crate::cli::dlx_child_env(false)),
+        aube::commands::dlx::run_in(verb, None, crate::cli::dlx_child_env(false)),
     )
 }
 
@@ -612,12 +612,11 @@ pub fn run_dlx_for_nubx(
     // Ok(None)); `Err` = the fetch/install failed before the tool ran. We surface
     // the Err's report exactly as `finish_code` would, but also report the
     // success bit so the consent caller never records a failed fetch.
-    match session
-        .runtime
-        .block_on(aube::commands::dlx::run_with_child_env(
-            verb,
-            crate::cli::dlx_child_env(compat_mode),
-        )) {
+    match session.runtime.block_on(aube::commands::dlx::run_in(
+        verb,
+        None,
+        crate::cli::dlx_child_env(compat_mode),
+    )) {
         Ok(code) => Ok((code.unwrap_or(0), true)),
         Err(report) => Ok((present::emit_report(&report), false)),
     }

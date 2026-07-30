@@ -277,11 +277,18 @@ pub fn trusted_net_rules(effect: Effect) -> Vec<NetRule> {
 // `npm publish` is a PUT to the host that serves the read.
 include!(concat!(env!("OUT_DIR"), "/download_hosts.rs"));
 
+/// The `$downloads` hosts in force: [`DOWNLOAD_HOSTS`], unless the dev-only catalog override
+/// replaced it. Every consumer must read the set through here rather than the `const`, or a
+/// dev override would apply to some call sites and not others.
+pub fn download_hosts() -> &'static [&'static str] {
+    crate::catalog_override::download_hosts().unwrap_or(DOWNLOAD_HOSTS)
+}
+
 /// Expand `$downloads` into one [`NetRule`] per host with the given effect (Allow for a
 /// bare `$downloads`, Deny for `!$downloads`). Mirrors [`trusted_net_rules`], including
 /// its trailing-dot normalization, so the two sets produce byte-comparable IR.
 pub fn download_net_rules(effect: Effect) -> Vec<NetRule> {
-    DOWNLOAD_HOSTS
+    download_hosts()
         .iter()
         .map(|h| NetRule {
             target: NetTarget::Host(crate::matcher::host::strip_trailing_dot(h).to_string()),
