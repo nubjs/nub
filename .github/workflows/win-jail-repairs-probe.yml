@@ -274,11 +274,21 @@ jobs:
           echo "---- does `node <absolute file>` resolve for each principal? ----"
           # Repair 1's whole purpose. A FAIL in the de-elevated arm means the repair reaches the
           # profile chain but not the volume root, so every absolute entry point still dies.
+          # Three arms: repair-off (the control), repair-on, and repair-on PLUS the realpath
+          # preload. The third exists because a preload is the only thing that could rescue
+          # resolution where the ancestor repair cannot reach — and the only such preload in this
+          # tree is `#[doc(hidden)]` and self-described as REFUTED, so a FAIL is expected and is
+          # the finding. The env-block ceiling is gated, because an overflow would mean production
+          # could not stamp both terms either.
           for arm in "" "deelev-"; do
-            p="${arm}shell-node-absolute-entry-resolves-repair-on"
-            grep -q "prop:$p=" probe.log || { echo "MISS $p (never measured)"; fail=1; }
-            grep -E "prop:$p=" probe.log || true
+            for p in "${arm}shell-node-absolute-entry-resolves-repair-on" \
+                     "${arm}shell-node-absolute-entry-resolves-repair-on-plus-realpath-shim"; do
+              grep -q "prop:$p=" probe.log || { echo "MISS $p (never measured)"; fail=1; }
+              grep -E "prop:$p=" probe.log || true
+            done
+            need_pass "${arm}shell-nodeopts-with-realpath-fits-the-env-block"
           done
+          grep -E 'fact:(deelev-)?shell-nodeopts-chars-' probe.log || { echo "MISS the NODE_OPTIONS size facts"; fail=1; }
           grep -E 'fact:(deelev-)?shell-node-entry-(off|on)=' probe.log || true
 
           echo "---- shells: the gates (no cell below counts as evidence without these) ----"

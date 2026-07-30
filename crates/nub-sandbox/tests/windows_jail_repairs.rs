@@ -2775,12 +2775,62 @@ fs.writeFileSync({marker}, "entry=ok require=" + String(dep));
             dep = js_literal(&f.work.join("dep.js")),
             marker = js_literal(&entry_marker),
         );
-        for arm in ["off", "on"] {
+        // THE THIRD ARM asks whether a REALPATH PRELOAD rescues resolution where the ancestor
+        // repair could not reach. `windows_native_realpath_shim_node_options` is the only such
+        // preload in this tree, it is `#[doc(hidden)]`, and its own doc calls it "the REFUTED
+        // native-realpath shim" — so this is a re-measurement of a rejected string in the ONE
+        // context it was never tried in (an unprivileged token, where the ancestor repair
+        // genuinely does not land) rather than a validation of a shipping configuration.
+        // `build_jail.rs` stamps exactly ONE term on every branch in this repo; there is no
+        // roots-scoped realpath term to compose with.
+        let realpath_options = format!(
+            "{node_options} {}",
+            nub_sandbox::windows_native_realpath_shim_node_options()
+        );
+        let realpath_policy = jail_shaped(
+            &f,
+            vec![read_rule(&bin_dir), read_rule(&staged_node)],
+            &[
+                ("NODE_OPTIONS", realpath_options.clone()),
+                ("PATH", staged_path.clone()),
+            ],
+        );
+        // The delivered block is bounded by `CreateProcessW`'s documented 32,767 CHARACTERS for
+        // the WHOLE environment, not by the variable — so the ceiling is a property of the
+        // policy, and it is reported for both so an overflow is a measured shipping defect
+        // rather than a guess.
+        println!(
+            "  fact:shell-nodeopts-chars-stdio-only={} env-block={}",
+            node_options.len(),
+            env_block_chars(&policy)
+        );
+        println!(
+            "  fact:shell-nodeopts-chars-with-realpath={} env-block={} ceiling=32767",
+            realpath_options.len(),
+            env_block_chars(&realpath_policy)
+        );
+        report(
+            fails,
+            "shell-nodeopts-with-realpath-fits-the-env-block",
+            env_block_chars(&realpath_policy) <= 32767,
+            &format!(
+                "{} chars of 32767 (an overflow means production could not stamp both terms \
+                 either)",
+                env_block_chars(&realpath_policy)
+            ),
+        );
+
+        for arm in ["off", "on", "on-realpath"] {
             let _ = std::fs::remove_file(&entry_marker);
+            let arm_policy = if arm == "on-realpath" {
+                &realpath_policy
+            } else {
+                &policy
+            };
             let go = || {
                 node_arm(
                     &f,
-                    &policy,
+                    arm_policy,
                     &format!("shellentry-{arm}"),
                     &staged_node,
                     &f.work,
@@ -2810,6 +2860,17 @@ fs.writeFileSync({marker}, "entry=ok require=" + String(dep));
                     !resolved,
                     &format!(
                         "{} (the floor must still reproduce the realpath defect)",
+                        text.trim()
+                    ),
+                );
+            } else if arm == "on-realpath" {
+                report(
+                    fails,
+                    "shell-node-absolute-entry-resolves-repair-on-plus-realpath-shim",
+                    resolved,
+                    &format!(
+                        "{} (repair on PLUS the realpath preload — a FAIL means no preload in \
+                         this tree rescues resolution for this token)",
                         text.trim()
                     ),
                 );
