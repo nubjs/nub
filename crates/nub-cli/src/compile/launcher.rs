@@ -245,8 +245,11 @@ fn cache_path(cache_root: &Path, target: &TargetPlatform) -> PathBuf {
 /// `v<version>`. A canary build has no versioned release — the pipeline recreates
 /// one rolling `canary` tag per built commit — so it reads that, accepting that
 /// the assets there may already be a newer canary. Same channel split
-/// `nub upgrade` makes, and a genuine incompatibility still fails closed at
-/// `decode`'s format-version gate.
+/// `nub upgrade` makes. Be precise about what that costs: `decode` gates the
+/// CONTAINER format byte only, so two canary commits that change launcher
+/// behavior without bumping `FORMAT_VERSION` pair silently. It is a narrow
+/// exposure — a canary host target takes the sibling, so only a canary
+/// CROSS-compile is affected — but it is not "fails closed".
 fn release_tag() -> String {
     // Both borrowed from the upgrade channel rather than restated: a change to
     // the canary marker or the tag name there must move this with it, and a
@@ -304,7 +307,6 @@ impl Drop for FileGuard {
 mod tests {
     use super::*;
     use nub_core::compile::SUPPORTED_TRIPLES;
-    use sha2::{Digest, Sha256};
 
     fn fresh_dir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("nub-launcher-{name}-{}", std::process::id()));

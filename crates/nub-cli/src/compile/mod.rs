@@ -68,17 +68,21 @@ type AppFiles = Vec<(String, Vec<u8>)>;
 
 pub fn run(mut opts: CompileOptions) -> Result<i32> {
     let target = resolve_platform(opts.platform.as_deref())?;
-    // Resolved AND verified before any work: a cross-compile whose launcher
+
+    // A typo'd entry costs one stat, so it is checked before anything that can
+    // touch the network — a foreign target's launcher fetch would otherwise
+    // download a template only to report the entry does not exist.
+    let entry_path = Path::new(&opts.entry);
+    if !entry_path.is_file() {
+        bail!("entry file not found: {}", opts.entry);
+    }
+
+    // Resolved AND verified before any real work: a cross-compile whose launcher
     // template is missing, or is not that platform's executable, must fail in the
     // first second — not after downloading and recompressing a ~100 MB Node for
     // the target. For a foreign target this may fetch the template from this
     // release, a few hundred KB, still the cheapest step to fail on.
     let template = launcher::locate(&target)?;
-
-    let entry_path = Path::new(&opts.entry);
-    if !entry_path.is_file() {
-        bail!("entry file not found: {}", opts.entry);
-    }
     let entry_abs =
         fs::canonicalize(entry_path).with_context(|| format!("resolving entry {}", opts.entry))?;
     let stem = entry_abs
