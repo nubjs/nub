@@ -2783,18 +2783,51 @@ fs.writeFileSync({marker}, "entry=ok require=" + String(dep));
         // genuinely does not land) rather than a validation of a shipping configuration.
         // `build_jail.rs` stamps exactly ONE term on every branch in this repo; there is no
         // roots-scoped realpath term to compose with.
-        let realpath_options = format!(
+        let native_options = format!(
             "{node_options} {}",
             nub_sandbox::windows_native_realpath_shim_node_options()
         );
-        let realpath_policy = jail_shaped(
-            &f,
-            vec![read_rule(&bin_dir), read_rule(&staged_node)],
-            &[
-                ("NODE_OPTIONS", realpath_options.clone()),
-                ("PATH", staged_path.clone()),
-            ],
+        // THE PRODUCTION TERM, reproduced byte-for-byte rather than approximated. It is a pure
+        // function of the shim JS and the roots, so the probe can build the exact string
+        // `build_jail.rs` stamps: substitute the roots JSON into the one placeholder, then
+        // base64 into a `data:` import, plus the `--preserve-symlinks-main` the entry point needs
+        // because `--import` preloads run after `resolveMainPath`. Roots are scoped as production
+        // scopes them — `[project_root, package_dir, ...interpreter]`, which here is the work dir
+        // (both, since the fixture package IS the project) and the staged interpreter FILE.
+        let roots_json = format!(
+            "[{}]",
+            [f.work.as_path(), staged_node.as_path()]
+                .iter()
+                .map(|p| format!("{:?}", p.to_string_lossy()))
+                .collect::<Vec<_>>()
+                .join(",")
         );
+        let shim_js = include_str!("fixtures/windows_realpath_shim.js")
+            .replace("__NUB_REALPATH_ROOTS_JSON__", &roots_json);
+        assert!(
+            !shim_js.contains("__NUB_REALPATH_ROOTS_JSON__"),
+            "the roots placeholder must be substituted, never appended"
+        );
+        let prod_options = {
+            use base64::Engine as _;
+            format!(
+                "{node_options} --preserve-symlinks-main --import data:text/javascript;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(&shim_js)
+            )
+        };
+        println!("  fact:shell-realpath-roots={roots_json}");
+        let mk = |opts: &str| {
+            jail_shaped(
+                &f,
+                vec![read_rule(&bin_dir), read_rule(&staged_node)],
+                &[
+                    ("NODE_OPTIONS", opts.to_string()),
+                    ("PATH", staged_path.clone()),
+                ],
+            )
+        };
+        let native_policy = mk(&native_options);
+        let realpath_policy = mk(&prod_options);
         // The delivered block is bounded by `CreateProcessW`'s documented 32,767 CHARACTERS for
         // the WHOLE environment, not by the variable — so the ceiling is a property of the
         // policy, and it is reported for both so an overflow is a measured shipping defect
@@ -2806,8 +2839,13 @@ fs.writeFileSync({marker}, "entry=ok require=" + String(dep));
         );
         println!(
             "  fact:shell-nodeopts-chars-with-realpath={} env-block={} ceiling=32767",
-            realpath_options.len(),
+            prod_options.len(),
             env_block_chars(&realpath_policy)
+        );
+        println!(
+            "  fact:shell-nodeopts-chars-with-native-shim={} env-block={}",
+            native_options.len(),
+            env_block_chars(&native_policy)
         );
         report(
             fails,
@@ -2820,12 +2858,12 @@ fs.writeFileSync({marker}, "entry=ok require=" + String(dep));
             ),
         );
 
-        for arm in ["off", "on", "on-realpath"] {
+        for arm in ["off", "on", "on-realpath", "on-native-shim"] {
             let _ = std::fs::remove_file(&entry_marker);
-            let arm_policy = if arm == "on-realpath" {
-                &realpath_policy
-            } else {
-                &policy
+            let arm_policy = match arm {
+                "on-realpath" => &realpath_policy,
+                "on-native-shim" => &native_policy,
+                _ => &policy,
             };
             let go = || {
                 node_arm(
@@ -2864,15 +2902,29 @@ fs.writeFileSync({marker}, "entry=ok require=" + String(dep));
                     ),
                 );
             } else if arm == "on-realpath" {
+                // THE ANSWER. In the ELEVATED arm this doubles as the POSITIVE CONTROL for the
+                // whole port: the ancestor repair already landed there, so the shim's tolerance
+                // rule never fires and the entry point must still resolve. If it does, the term
+                // is well-formed, base64-clean and actually delivered — which is what makes a
+                // de-elevated FAIL attributable to the mechanism instead of to this encoding.
                 report(
                     fails,
                     "shell-node-absolute-entry-resolves-repair-on-plus-realpath-shim",
                     resolved,
                     &format!(
-                        "{} (repair on PLUS the realpath preload — a FAIL means no preload in \
-                         this tree rescues resolution for this token)",
+                        "{} (repair on PLUS the PRODUCTION roots-scoped realpath term)",
                         text.trim()
                     ),
+                );
+            } else if arm == "on-native-shim" {
+                // The REFUTED native shim, kept beside it so the two mechanisms are separated in
+                // one run rather than conflated: this one points realpath at
+                // `GetFinalPathNameByHandleW`, which the AppContainer also refuses.
+                report(
+                    fails,
+                    "shell-node-absolute-entry-resolves-repair-on-plus-native-shim",
+                    resolved,
+                    &format!("{} (the refuted native-realpath shim)", text.trim()),
                 );
             } else {
                 // A MEASUREMENT: whether repair 1 reaches far enough for THIS principal.

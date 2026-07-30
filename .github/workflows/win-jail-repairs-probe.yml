@@ -282,13 +282,19 @@ jobs:
           # could not stamp both terms either.
           for arm in "" "deelev-"; do
             for p in "${arm}shell-node-absolute-entry-resolves-repair-on" \
-                     "${arm}shell-node-absolute-entry-resolves-repair-on-plus-realpath-shim"; do
+                     "${arm}shell-node-absolute-entry-resolves-repair-on-plus-realpath-shim" \
+                     "${arm}shell-node-absolute-entry-resolves-repair-on-plus-native-shim"; do
               grep -q "prop:$p=" probe.log || { echo "MISS $p (never measured)"; fail=1; }
               grep -E "prop:$p=" probe.log || true
             done
             need_pass "${arm}shell-nodeopts-with-realpath-fits-the-env-block"
           done
           grep -E 'fact:(deelev-)?shell-nodeopts-chars-' probe.log || { echo "MISS the NODE_OPTIONS size facts"; fail=1; }
+          grep -E 'fact:(deelev-)?shell-realpath-roots=' probe.log || { echo "MISS the realpath roots"; fail=1; }
+          # THE POSITIVE CONTROL for the ported term: elevated, the ancestor repair already
+          # landed, so the shim is inert and the entry point MUST still resolve. Without this a
+          # de-elevated failure could just as well be a defect in how the probe built the string.
+          need_pass "shell-node-absolute-entry-resolves-repair-on-plus-realpath-shim"
           grep -E 'fact:(deelev-)?shell-node-entry-(off|on)=' probe.log || true
 
           echo "---- shells: the gates (no cell below counts as evidence without these) ----"
