@@ -462,6 +462,43 @@ fn sweep_abandoned(base: &Path, uid: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    /// A fixture root that satisfies [`bwrap_resolves`] by construction, for the tests that
+    /// must watch an object stop resolving and therefore have to see it resolve FIRST.
+    ///
+    /// `tempfile::tempdir()` cannot carry that precondition: it honours `TMPDIR`, and a
+    /// runner whose temp root is foreign-owned or group-writable fails the very first
+    /// assertion, so the property under test never runs and the failure says nothing about
+    /// the code. Reusing production's own base search instead makes the fixture valid
+    /// exactly where staging itself is — the same reason bubblewrap's suite stages under a
+    /// hardcoded `/var/tmp` rather than the environment's.
+    ///
+    /// `None` is the one honest skip, and it announces itself on the REAL stderr because
+    /// libtest swallows the `eprintln!` family on a run that passes.
+    fn resolvable_root(test: &str) -> Option<StagedRuntime> {
+        match create_stage_dir() {
+            Some((dir, lock)) => Some(StagedRuntime { dir, _lock: lock }),
+            None => {
+                let _ = std::io::stderr().write_all(
+                    format!(
+                        "SKIP {test}: no base in {STAGE_BASES:?} yields a directory whose chain \
+                         resolves, so this test's precondition cannot hold on this host.\n"
+                    )
+                    .as_bytes(),
+                );
+                None
+            }
+        }
+    }
+
+    /// `fs::write` creates 0666 masked by the umask, so a 002 umask — Debian's
+    /// `USERGROUPS_ENAB` default — leaves the fixture group-writable, which `tamper_proof`
+    /// then rejects for exactly the right reason. Pin the mode instead of inheriting it.
+    fn write_fixture(path: &Path, bytes: &[u8]) {
+        fs::write(path, bytes).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
 
     #[test]
     fn a_0750_home_owned_by_a_foreign_uid_is_unsearchable_from_the_namespace() {
@@ -510,9 +547,11 @@ mod tests {
 
     #[test]
     fn an_unlinked_descriptor_does_not_resolve() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("victim");
-        fs::write(&path, b"payload").unwrap();
+        let Some(root) = resolvable_root("an_unlinked_descriptor_does_not_resolve") else {
+            return;
+        };
+        let path = root.dir.join("victim");
+        write_fixture(&path, b"payload");
         let file = File::open(&path).unwrap();
         let identity = FileIdentity::from_file(&file).unwrap();
         let object = PinnedObject {
@@ -521,16 +560,23 @@ mod tests {
             identity,
             private_name: "victim".into(),
         };
-        assert!(bwrap_resolves(&object));
+        assert!(
+            bwrap_resolves(&object),
+            "the fixture must resolve before it is broken"
+        );
         fs::remove_file(&path).unwrap();
         assert!(!bwrap_resolves(&object));
     }
 
     #[test]
     fn a_path_that_now_names_a_different_inode_does_not_resolve() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("upgraded");
-        fs::write(&path, b"old").unwrap();
+        let Some(root) =
+            resolvable_root("a_path_that_now_names_a_different_inode_does_not_resolve")
+        else {
+            return;
+        };
+        let path = root.dir.join("upgraded");
+        write_fixture(&path, b"old");
         let file = File::open(&path).unwrap();
         let identity = FileIdentity::from_file(&file).unwrap();
         let object = PinnedObject {
@@ -539,9 +585,12 @@ mod tests {
             identity,
             private_name: "upgraded".into(),
         };
-        assert!(bwrap_resolves(&object));
-        let replacement = dir.path().join("replacement");
-        fs::write(&replacement, b"new").unwrap();
+        assert!(
+            bwrap_resolves(&object),
+            "the fixture must resolve before it is replaced"
+        );
+        let replacement = root.dir.join("replacement");
+        write_fixture(&replacement, b"new");
         fs::rename(&replacement, &path).unwrap();
         assert!(!bwrap_resolves(&object));
     }

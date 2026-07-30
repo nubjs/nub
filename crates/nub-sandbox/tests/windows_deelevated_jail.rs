@@ -2119,7 +2119,7 @@ flush();
         // ── the NODE_OPTIONS values. THE ARMS CARRY THE REALPATH TERM ALONE, deliberately:
         //    the question is whether the ancestor repair earns its place GIVEN the realpath
         //    preload, and the stdio shim and the net gate are orthogonal to it. Stamping all
-        //    three would put ~55k characters into an environment block and make every arm a
+        //    three would put ~34k characters into an environment block and make every arm a
         //    measurement of the block ceiling instead of of the repair — one variable, not three.
         let realpath = realpath_term(f, exe);
         // …and the PRODUCTION stamp is still built and launched once, as its own fact, because

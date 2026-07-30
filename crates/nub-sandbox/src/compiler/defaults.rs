@@ -676,26 +676,42 @@ pub fn windows_native_realpath_shim_node_options() -> String {
 /// string in the binary, not a behaviour.
 const WINDOWS_STDIO_SHIM: &str = include_str!("../backend/windows_stdio_shim.js");
 
-/// Drop whole-line comments and indentation before the payload is encoded.
+/// Drop whole-line comments and indentation before a payload is encoded. Applied to EVERY
+/// stamped shim — stdio, net gate and realpath — so the sources stay densely commented (which is
+/// where their provenance lives) while the delivered payload does not carry the prose.
 ///
 /// THIS IS A BUDGET, NOT A TIDY-UP. The stamp is by far the largest thing in the child's
 /// environment block, and how much block a `CreateProcessW` child will accept is not a number we
 /// have a documented ceiling for (see `stamped_node_options_fits_the_env_block` — the widely-cited
-/// 32767 belongs to other API paths, not to `lpEnvironment`). Stripping is what lets the file stay
-/// densely commented (which is where its provenance lives) while the delivered payload stays
-/// affordable, and that test pins the margin so an innocent-looking edit cannot quietly push the
-/// stamp past anything we have measured to launch.
+/// 32767 belongs to other API paths, not to `lpEnvironment`). That test pins the margin so an
+/// innocent-looking edit cannot quietly push the stamp past anything we have measured to launch.
 ///
-/// WHOLE LINES ONLY, deliberately: a partial-line stripper would have to know whether `//` sits
-/// inside a string, a regex or a template literal. Trimming and dropping entire lines is correct
-/// for any content EXCEPT a template literal spanning lines, of which the shim has none — every
-/// backtick in it opens and closes on one line, and the suite would catch a regression anyway.
+/// WHOLE LINES ONLY, and NOT a step on the way to a character-level stripper. Deciding what a
+/// mid-line `/` means is context-sensitive grammar — regex-literal versus division is settled by
+/// the PARSER's expectation state, not lexically, which is why doing it properly costs a full
+/// lexer coupled to a parser (oxc's `lexer/regex.rs` is entered from the parser, not from a
+/// standalone scan). Reaching for one here would trade a dead-simple transform for a parser whose
+/// failure mode is a silently half-valid module evaluated inside a confined child, and the payoff
+/// is nil: line-leading comments are already over half of every shim (55-62%).
+///
+/// ITS PRECONDITION, machine-checked below rather than promised in prose: no string or template
+/// literal may span a newline. Trimming and dropping whole lines is otherwise exactly
+/// semantics-preserving — comments and blank lines are already whitespace to the parser, and one
+/// newline per surviving line is kept, so ASI is untouched.
 fn strip_js_comments(src: &str) -> String {
-    src.lines()
+    let out = src
+        .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with("//"))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    // Checked on the OUTPUT, where the comment lines that legitimately carry lone backticks
+    // (prose quoting an identifier) are already gone, so only code is measured.
+    debug_assert!(
+        out.lines().all(|l| l.matches('`').count() % 2 == 0) && !out.contains("\\\n"),
+        "strip_js_comments is unsound where a string or template literal spans a newline"
+    );
+    out
 }
 
 /// The JS actually delivered to a confined Node.
@@ -859,7 +875,9 @@ pub fn realpath_shim_node_options(roots: &[std::path::PathBuf]) -> String {
             .collect::<Vec<_>>(),
     )
     .expect("a list of strings always serializes");
-    let js = WINDOWS_REALPATH_SHIM.replace(REALPATH_ROOTS_PLACEHOLDER, &json);
+    // Stripped BEFORE substitution so the injected roots never pass through the stripper; the
+    // assertion below then doubles as the check that stripping did not eat the placeholder line.
+    let js = strip_js_comments(WINDOWS_REALPATH_SHIM).replace(REALPATH_ROOTS_PLACEHOLDER, &json);
     debug_assert!(
         !js.contains(REALPATH_ROOTS_PLACEHOLDER),
         "windows_realpath_shim.js must contain exactly one {REALPATH_ROOTS_PLACEHOLDER}"
@@ -911,7 +929,8 @@ pub fn net_gate_node_options(package_name: Option<&str>) -> String {
         "allow": super::build_jail_net_allowed(package_name),
     });
 
-    let js = NET_GATE_SHIM.replace(
+    // Stripped before substitution, for the reason given in `realpath_shim_node_options`.
+    let js = strip_js_comments(NET_GATE_SHIM).replace(
         NET_GATE_POLICY_PLACEHOLDER,
         &serde_json::to_string(&policy).expect("a policy of strings and bools always serializes"),
     );
@@ -930,10 +949,11 @@ pub fn net_gate_node_options(package_name: Option<&str>) -> String {
 /// the preload into a half-loaded shim, or into an option fragment Node aborts on. Base64's
 /// alphabet contains no whitespace at all, which makes that class of failure structurally
 /// unreachable rather than merely avoided by careful escaping. It is also more compact, but only
-/// modestly: MEASURED on both shims together, 37,227 chars against 47,261 percent-encoded, i.e.
-/// 1.27×. (A 2.6× figure circulated earlier; it compared base64 with comments STRIPPED against
-/// percent-encoding with comments kept, which is not the same input twice. Nothing strips
-/// comments today.)
+/// modestly: MEASURED on both shims together back when neither was stripped, 37,227 chars against
+/// 47,261 percent-encoded, i.e. 1.27×. The ratio is a property of the alphabets and survives
+/// [`strip_js_comments`]; the absolutes do not. (A 2.6× figure circulated earlier; it compared
+/// base64 with comments STRIPPED against percent-encoding with comments kept, which is not the
+/// same input twice.)
 ///
 /// NEITHER IS A FIX FOR A SIZE LIMIT, because there is no limit here to fix. The documented
 /// 32,767-character Windows cap governs `SetEnvironmentVariable`, NOT an environment BLOCK handed
@@ -1366,17 +1386,19 @@ mod tests {
     /// deployment-dependent; the roots below are deep and multi-root on purpose, because shallow
     /// ones understate a real jail.
     ///
-    /// THE NUMBER. Set below the largest block MEASURED to launch, so a stamp that passes is
-    /// smaller than a block that provably started — and that block carried `PATH` and the
-    /// `npm_config_*` family alongside it, which is the room the remaining margin represents. The
-    /// margin is deliberately thin — the stamp as composed here is ~55.6k, so roughly 0.9k of
-    /// growth is available. If a future edit trips this, shrink the payload first: unlike the stdio
-    /// shim, the net-gate and realpath shims still ship their comments unstripped, and stripping
-    /// them reclaims thousands. Do not raise the number without re-measuring a real jailed launch
-    /// on Windows.
+    /// THE NUMBER, and why it is far below the 56790 that launched. All three shims now go
+    /// through [`strip_js_comments`], which took the stamp from ~55.6k to ~33.8k; a budget still
+    /// pinned near the measured ceiling would leave ~22k of slack and stop guarding anything. So
+    /// this tracks the payload rather than the ceiling — it is set just over the composition
+    /// below, whose Windows form is the larger one because [`with_alternate_spellings`] can
+    /// double the roots (~34.3k worst case). The ceiling remains the real constraint and is not
+    /// re-measured here; it is simply no longer the binding number.
+    ///
+    /// If a future edit trips this, the first question is what grew, not whether to raise the
+    /// budget — the cheap reclaim (comments) is already spent, so growth here is real payload.
     #[test]
     fn stamped_node_options_fits_the_env_block() {
-        const BUDGET: usize = 56_500;
+        const BUDGET: usize = 36_000;
         let roots: Vec<std::path::PathBuf> = [
             r"C:\Users\runneradmin\AppData\Local\nub\store\v1\registry.npmjs.org\esbuild\0.21.5\node_modules\esbuild",
             r"C:\Users\runneradmin\work\monorepo\packages\web-app\node_modules\.pnpm\esbuild@0.21.5\node_modules\esbuild",
@@ -1397,14 +1419,29 @@ mod tests {
              and npm_config_*",
             stamped.len()
         );
-        // Stripping must remove PROSE and nothing else: an identifier from the shim's tail proves
-        // the code survived, and the comment marker proves the prose did not.
-        let payload = strip_js_comments(WINDOWS_STDIO_SHIM);
-        assert!(payload.contains("writableScratchDir"));
-        assert!(
-            !payload.lines().any(|line| line.starts_with("//")),
-            "whole-line comments must be gone from the delivered payload"
-        );
+
+        // Asserted on what the child will EVALUATE, not on the constants, so a call site that
+        // forgets the stripper is caught alongside a stripper that stops working. Stripping must
+        // remove PROSE and nothing else: a tail identifier per shim proves the code survived past
+        // the point a truncation would bite, and the absence of a line-leading `//` proves the
+        // prose did not.
+        let payloads: Vec<String> = stamped
+            .split(' ')
+            .filter(|t| t.starts_with("data:"))
+            .map(decode_import)
+            .collect();
+        assert_eq!(payloads.len(), 3, "stdio, net gate and realpath: {stamped}");
+        for (payload, tail) in payloads.iter().zip([
+            "writableScratchDir",
+            "origCpSpawnSync",
+            "fs.promises.realpath",
+        ]) {
+            assert!(payload.contains(tail), "{tail} missing from a payload");
+            assert!(
+                !payload.lines().any(|line| line.starts_with("//")),
+                "whole-line comments must be gone from every delivered payload"
+            );
+        }
     }
 
     #[test]
