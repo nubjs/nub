@@ -247,3 +247,19 @@ cold headers    101.3 s      95.1 s
 No measurable jail overhead on the compile itself; differences are within the
 noise of a shared box. The per-launch cost the jail adds is the labeling pass
 above, not the build.
+
+================================================================
+RE-VERIFICATION of the one row whose control could have been broken
+================================================================
+The "warm headers need no devdir grant" row (C_no_nodegyp) first ran while
+`label remove` was NON-recursive, so an earlier arm's recursive Low labels could
+have survived on the devdir's CHILDREN — the arm would then have been silently
+GRANTED and its pass would have proved nothing. Re-run after making removal
+recursive, with the label state read back on both sides:
+  before arm:  C:\...\node-gyp\Cache  label=(none => implicit Medium)
+  C_no_nodegyp_warm2  il=low, devdir withheld, WARM  rc=0  cpufeatures.node 174,080 B
+  after arm:   C:\...\node-gyp        label=(none => implicit Medium)
+               C:\...\node-gyp\Cache  label=(none => implicit Medium)
+=> The devdir was genuinely unlabeled throughout and the warm build still passed
+   with a byte-identical artifact. The row stands, now on evidence rather than on
+   a control that varied more than one thing.
