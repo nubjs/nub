@@ -35,18 +35,21 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail};
+use oxc_ast::ast::{Expression, NewExpression, Program};
 use rolldown::plugin::__inner::SharedPluginable;
 use rolldown::plugin::{
-    HookTransformArgs, HookTransformReturn, HookUsage, Plugin, SharedTransformPluginContext,
+    HookTransformArgs, HookTransformOutput, HookTransformOutputMap, HookTransformReturn, HookUsage,
+    Plugin, SharedTransformPluginContext,
 };
 use rolldown::{BundlerBuilder, BundlerOptions, InputItem};
 use rolldown_common::bundler_options::{BundlerTransformOptions, Either, JsxOptions};
 use rolldown_common::{
-    InnerOptions, IsExternal, Output, OutputFormat, Platform, RawMinifyOptions, ResolveOptions,
-    SourceMapType, StrOrBytes, TreeshakeOptions, TsConfig,
+    InnerOptions, IsExternal, ModuleType, Output, OutputFormat, Platform, RawMinifyOptions,
+    ResolveOptions, SourceMapType, StrOrBytes, TreeshakeOptions, TsConfig,
 };
 use rolldown_error::{BuildDiagnostic, DiagnosticOptions, EventKind};
 use rolldown_utils::indexmap::FxIndexMap;
+use rolldown_utils::url::clean_url;
 
 use super::loaders;
 
@@ -117,10 +120,10 @@ pub struct BundleResult {
     pub files: Vec<BundledFile>,
     /// `--sourcemap=external` maps: emitted, unreferenced, not shipped.
     pub detached_maps: Vec<BundledFile>,
-    /// Loader-emitted assets — in practice the `file` loader's payload, since
-    /// nothing else in nub's configuration makes Rolldown emit a non-map asset.
-    /// Kept APART from [`Self::files`] because those are re-parsed as JavaScript
-    /// by [`reject_invalid_chunks`], which a `.wasm` would rightly fail.
+    /// Files embedded beside the chunks: the `file` loader's payload and the
+    /// targets of [`NewUrlAssets`]. Kept APART from [`Self::files`] because those
+    /// are re-parsed as JavaScript by [`reject_invalid_chunks`], which a `.wasm`
+    /// would rightly fail.
     pub assets: Vec<BundledFile>,
 }
 
@@ -192,11 +195,22 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
         ..Default::default()
     };
 
-    let scan = std::sync::Arc::new(DynamicImportScan::default());
-    let files_plugin = std::sync::Arc::new(loaders::FilePlugin::new(&loader_plan));
+    let scan = Arc::new(DynamicImportScan::default());
+    // One collector behind both emitting plugins, so a file reached by an
+    // `import` AND by a `new URL(…)` ships once.
+    let collected = Arc::new(loaders::Assets::default());
+    let files_plugin = Arc::new(loaders::FilePlugin::new(
+        &loader_plan,
+        Arc::clone(&collected),
+    ));
+    let new_urls = Arc::new(NewUrlAssets {
+        collected: Arc::clone(&collected),
+        files: Arc::clone(&files_plugin),
+    });
     let plugins: Vec<SharedPluginable> = vec![
-        std::sync::Arc::clone(&scan) as SharedPluginable,
-        std::sync::Arc::clone(&files_plugin) as SharedPluginable,
+        Arc::clone(&scan) as SharedPluginable,
+        Arc::clone(&files_plugin) as SharedPluginable,
+        Arc::clone(&new_urls) as SharedPluginable,
     ];
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -233,7 +247,7 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
     let mut entry = None;
     let mut files = Vec::new();
     let mut maps = Vec::new();
-    let mut assets: Vec<BundledFile> = files_plugin
+    let mut assets: Vec<BundledFile> = collected
         .take()
         .into_iter()
         .map(|a| BundledFile {
@@ -267,16 +281,16 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
                 // is not in the payload — a runtime ENOENT with nothing failing
                 // at build time.
                 //
-                // Nothing reaches this branch today: nub's `file` loader collects
-                // its own bytes, and Rolldown's asset path is gated on
+                // Nothing reaches this branch today: both of nub's asset paths —
+                // the `file` loader and [`NewUrlAssets`] — collect their own
+                // bytes, and Rolldown's own asset path is gated on
                 // `experimental.resolve_new_url_to_asset`, which defaults off and
-                // nub never sets — so a `new URL(…, import.meta.url)` is left as
-                // a literal and emits nothing. This is kept as the correct
-                // handling rather than a silent drop, so enabling that flag (or
-                // any future emitting plugin) cannot quietly produce a broken
-                // artifact. `--include` never routes through here at all — it
-                // embeds bytes straight from disk, which is what makes it
-                // verbatim.
+                // nub never sets (see [`NewUrlAssets`] for why it is not the
+                // mechanism used). This is kept as the correct handling rather
+                // than a silent drop, so enabling that flag — or any future
+                // emitting plugin — cannot quietly produce a broken artifact.
+                // `--include` never routes through here at all: it embeds bytes
+                // straight from disk, which is what makes it verbatim.
                 if a.filename.ends_with(".map") {
                     maps.push(file);
                 } else {
@@ -321,11 +335,17 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
 
 /// Drop assets that no emitted chunk names.
 ///
-/// The `file` loader reads and records an asset in its `load` hook, which runs
-/// while the graph is being built — before anything is tree-shaken. So an import
-/// whose binding goes unused still collects its bytes, and without this pass a
-/// stray `import splash from "./splash.mp4"` would embed the file in every
-/// artifact forever. (This is entry-language-dependent and therefore easy to
+/// Both asset paths record their bytes while the graph is being built — the
+/// `file` loader in `load`, [`NewUrlAssets`] in `transform` — which is before
+/// anything is tree-shaken. So a reference whose result goes unused still
+/// collects its bytes, and without this pass a stray `import splash from
+/// "./splash.mp4"` would embed the file in every artifact forever.
+///
+/// It prunes what the SHAKER left, so how much it recovers differs by path. The
+/// `file` loader marks its synthesized module side-effect-free, so an unused
+/// import is shaken and its asset dropped. A `new URL(…)` is a constructor call
+/// Rolldown cannot prove pure, so an unused binding in a REACHED module keeps its
+/// bytes; only an unreachable module drops them. (This is entry-language-dependent and therefore easy to
 /// miss: a `.ts` entry never reaches the hook at all, because the TypeScript
 /// transform elides an unused import as possibly-type-only, while the identical
 /// `.js` entry does. The payload should not depend on which one you wrote.)
@@ -346,16 +366,17 @@ fn retain_referenced(chunks: &[BundledFile], assets: &mut Vec<BundledFile>) {
     assets.retain(|asset| code.iter().any(|c| c.contains(&asset.name)));
 }
 
-/// Assert the flat-output invariant the `file` loader rests on.
+/// Assert the flat-output invariant both asset paths rest on.
 ///
-/// A `file` import evaluates to `new URL("./<name>", import.meta.url)`, resolved
-/// against whichever CHUNK the importing module was bundled into. That is only
-/// the asset's location while every chunk and every nub-emitted asset sit in one
-/// directory. Rolldown's defaults do put them there, but `chunkFileNames` is
-/// configurable and a future flag could nest them — at which point every `file`
-/// import would silently resolve to a path that does not exist, on the deploy
-/// machine, with no build-time signal. Checking is a string scan; the failure it
-/// prevents is a shipped-broken binary.
+/// A `file` import and a rewritten [`NewUrlAssets`] reference both evaluate to
+/// `new URL("./<name>", import.meta.url)`, resolved against whichever CHUNK the
+/// referencing module was bundled into. That is only the asset's location while
+/// every chunk and every nub-emitted asset sit in one directory. Rolldown's
+/// defaults do put them there, but `chunkFileNames` is configurable and a future
+/// flag could nest them — at which point every asset reference would silently
+/// resolve to a path that does not exist, on the deploy machine, with no
+/// build-time signal. Checking is a string scan; the failure it prevents is a
+/// shipped-broken binary.
 ///
 /// Rolldown's OWN assets are exempt: it rewrites those references itself
 /// (`compute_relative_path`), so a nested `assets/x-HASH.png` stays correct.
@@ -391,6 +412,348 @@ fn absolutize(path: &Path) -> PathBuf {
         return path.to_path_buf();
     }
     std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
+}
+
+// ---- `new URL(…, import.meta.url)` asset embedding -----------------------------
+
+/// Embeds the file a `new URL("./x", import.meta.url)` names, and repoints the
+/// URL at the embedded copy.
+///
+/// This is the idiomatic ESM way to reach a file sitting beside your module, and
+/// it was the one asset form that compiled CLEAN and then died: the artifact
+/// carried no copy of `x`, and the source tree the URL pointed at is not on the
+/// machine the binary ships to, so the first read was an ENOENT with no
+/// build-time signal at all. Embedding makes it work; there is nothing for the
+/// user to opt into.
+///
+/// THE REWRITE IS NUB'S RATHER THAN ROLLDOWN'S, deliberately. Rolldown has
+/// `experimental.resolve_new_url_to_asset`, but it routes the referenced file
+/// through the module graph as `ModuleType::Asset` — where nub's own extension
+/// map and `file` loader already claim it, so a `new URL("./logo.png", …)` would
+/// be loaded as JavaScript by one and emitted as an asset by the other — and it
+/// names what it emits under Rolldown's `assetFileNames`, a second layout and a
+/// second naming scheme beside the flat content-hashed one everything else here
+/// depends on. Emitting from nub keeps ONE collector, one naming rule, one
+/// reachability pass ([`retain_referenced`]), and the same `import.meta.url` base
+/// that makes the path correct from any cwd.
+///
+/// WHAT IS OUT OF SCOPE, AND WHY IT IS SILENT. Only a statically analyzable
+/// specifier can be embedded, so `new URL(name, import.meta.url)` is left exactly
+/// as written — no rewrite and no build error. Failing it would be wrong twice
+/// over: the same expression is how a program names a file it intends to WRITE,
+/// and a computed URL is routinely on a branch the artifact never takes. The same
+/// reasoning covers a specifier resolving to nothing on the build machine.
+#[derive(Debug)]
+struct NewUrlAssets {
+    collected: Arc<loaders::Assets>,
+    /// The `file` loader, consulted only to skip the modules IT synthesized: the
+    /// module it emits is itself a `new URL(…, import.meta.url)`, so rescanning
+    /// one would re-resolve an already-hashed asset name against the original
+    /// file's directory.
+    files: Arc<loaders::FilePlugin>,
+}
+
+/// One `new URL(<literal>, import.meta.url)` whose file this build can embed.
+#[derive(Debug, Clone)]
+struct NewUrlEdit {
+    /// Byte range of the FIRST argument within the module's own source.
+    start: usize,
+    end: usize,
+    /// The file on the build machine the URL names.
+    source: PathBuf,
+}
+
+impl Plugin for NewUrlAssets {
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("nub:new-url-assets")
+    }
+
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::Transform
+    }
+
+    fn transform(
+        &self,
+        _ctx: SharedTransformPluginContext,
+        args: &HookTransformArgs<'_>,
+    ) -> impl std::future::Future<Output = HookTransformReturn> + Send {
+        // Real JavaScript sources only. A `text`/`json` module's "code" IS the
+        // file's content, so parsing markdown as JavaScript and rewriting what
+        // happened to look like a URL inside it would corrupt the user's data.
+        let scannable = matches!(
+            args.module_type,
+            ModuleType::Js | ModuleType::Jsx | ModuleType::Ts | ModuleType::Tsx
+        ) && !self.files.claims(clean_url(args.id));
+        let edits = if scannable {
+            scan_new_urls(args.id, args.code)
+        } else {
+            Vec::new()
+        };
+        // Cloned only when there is an edit to make — this hook runs on every
+        // module in the graph, and almost none of them have one.
+        let source = (!edits.is_empty()).then(|| args.code.to_string());
+        async move {
+            let Some(source) = source else {
+                return Ok(None);
+            };
+            let mut named = Vec::with_capacity(edits.len());
+            for edit in edits {
+                let bytes = std::fs::read(&edit.source)
+                    .map_err(|e| anyhow!("reading {} for new URL(): {e}", edit.source.display()))?;
+                let name = self.collected.add(&edit.source, bytes)?;
+                named.push((edit, name));
+            }
+            Ok(Some(HookTransformOutput {
+                code: Some(rewrite_new_urls(&source, &named)),
+                // NOT `Omitted`, which means "this transform broke the map":
+                // Rolldown answers that by dropping the module's mapping entirely
+                // and warning on every build. `Null` says the transform does not
+                // move positions — true here, since only a string literal's
+                // CONTENT changes and every line still starts where it did, so the
+                // codegen map still lands on the right line.
+                map: HookTransformOutputMap::Null,
+                ..Default::default()
+            }))
+        }
+    }
+}
+
+/// Splice each embedded asset's name in over the specifier it replaces.
+///
+/// LINE-PRESERVING, which is what makes the `Null` sourcemap honest: only a
+/// string literal's CONTENT changes, and a no-substitution template literal that
+/// spanned lines gives those newlines back as ordinary whitespace between
+/// `new URL`'s arguments.
+fn rewrite_new_urls(source: &str, edits: &[(NewUrlEdit, String)]) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut last = 0usize;
+    for (edit, name) in edits {
+        out.push_str(&source[last..edit.start]);
+        out.push_str(
+            &serde_json::to_string(&format!("./{name}")).expect("an asset name serializes"),
+        );
+        out.extend(std::iter::repeat_n(
+            '\n',
+            source[edit.start..edit.end].matches('\n').count(),
+        ));
+        last = edit.end;
+    }
+    out.push_str(&source[last..]);
+    out
+}
+
+/// Every embeddable `new URL(<literal>, import.meta.url)` in `source`, in source
+/// order — [`rewrite_new_urls`] splices in one forward pass. A parse failure
+/// yields nothing: the bundler's own parse error is the better diagnostic, and
+/// this pass must never be the thing that fails a build.
+fn scan_new_urls(id: &str, source: &str) -> Vec<NewUrlEdit> {
+    use oxc_allocator::Allocator;
+    use oxc_ast_visit::{Visit, walk};
+    use oxc_parser::Parser;
+    use oxc_span::{GetSpan, SourceType};
+
+    let Some(dir) = Path::new(clean_url(id)).parent().map(Path::to_path_buf) else {
+        return Vec::new();
+    };
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(id).unwrap_or_else(|_| SourceType::mjs());
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    if parsed.panicked || binds_url(&parsed.program) {
+        return Vec::new();
+    }
+
+    struct Visitor {
+        dir: PathBuf,
+        found: Vec<NewUrlEdit>,
+    }
+
+    impl<'a> Visit<'a> for Visitor {
+        fn visit_new_expression(&mut self, it: &NewExpression<'a>) {
+            if let Some(edit) = self.embeddable(it) {
+                self.found.push(edit);
+            }
+            walk::walk_new_expression(self, it);
+        }
+    }
+
+    impl Visitor {
+        fn embeddable(&self, expr: &NewExpression<'_>) -> Option<NewUrlEdit> {
+            let Expression::Identifier(callee) = &expr.callee else {
+                return None;
+            };
+            if callee.name != "URL" {
+                return None;
+            }
+            if !is_import_meta_url(expr.arguments.get(1)?.as_expression()?) {
+                return None;
+            }
+            let arg = expr.arguments.first()?.as_expression()?;
+            let source = self.embed_target(&static_specifier(arg)?)?;
+            let span = arg.span();
+            Some(NewUrlEdit {
+                start: span.start as usize,
+                end: span.end as usize,
+                source,
+            })
+        }
+
+        /// The file on the build machine a specifier names, if this build can
+        /// embed it.
+        ///
+        /// Deliberately narrow, and every exclusion leaves TODAY'S behavior in
+        /// place rather than failing. A specifier carrying a SCHEME is already an
+        /// absolute URL (`data:`, `https:`, and — the one that bites — a Windows
+        /// `C:\…`), so it does not describe a file beside the module; a leading
+        /// separator resolves against the URL's root, which is the deploy
+        /// machine's, not the build machine's; and `?`/`#` make the tail a query
+        /// or fragment rather than part of the path. What is left is resolved
+        /// against the importing module's own directory, exactly as the runtime
+        /// would, and must EXIST as a file — a specifier naming something that is
+        /// not there yet is a path the program WRITES, not one it ships.
+        fn embed_target(&self, spec: &str) -> Option<PathBuf> {
+            if spec.is_empty() || spec.starts_with(['/', '\\']) || spec.contains(['?', '#']) {
+                return None;
+            }
+            if has_url_scheme(spec) {
+                return None;
+            }
+            let path = self.dir.join(percent_decode(spec)?);
+            path.is_file().then_some(path)
+        }
+    }
+
+    let mut visitor = Visitor {
+        dir,
+        found: Vec::new(),
+    };
+    visitor.visit_program(&parsed.program);
+    visitor.found.sort_by_key(|e| e.start);
+    visitor.found
+}
+
+/// `import.meta.url`, exactly — the only base whose resolution nub can predict.
+fn is_import_meta_url(expr: &Expression<'_>) -> bool {
+    let Expression::StaticMemberExpression(member) = expr else {
+        return false;
+    };
+    member.property.name == "url"
+        && matches!(&member.object, Expression::MetaProperty(meta)
+            if meta.meta.name == "import" && meta.property.name == "meta")
+}
+
+/// Does this module declare its own top-level `URL`?
+///
+/// A module that does is not talking about the global constructor, so rewriting
+/// its argument could change what the program means. Two deliberate boundaries:
+///
+/// - **Value declarations only.** An `import { URL } from "node:url"` binds the
+///   SAME constructor, so treating it as a shadow would silently exclude a
+///   perfectly ordinary way to write this.
+/// - **Top level only.** A `URL` bound in an inner scope — a function parameter,
+///   a block-scoped class — is NOT seen, and such a module IS rewritten. Catching
+///   it needs real scope analysis, which does not earn an `oxc_semantic`
+///   dependency for a name nothing legitimately rebinds.
+///
+/// The `export` wrappers are unwrapped rather than skipped: without that the
+/// guard turned on whether the shadow happened to be exported, honoring
+/// `class URL {}` while rewriting `export class URL {}` three characters later.
+fn binds_url(program: &Program<'_>) -> bool {
+    use oxc_ast::ast::{BindingPattern, Declaration, ExportDefaultDeclarationKind, Statement};
+
+    fn declares_url(decl: &Declaration<'_>) -> bool {
+        match decl {
+            Declaration::VariableDeclaration(d) => d.declarations.iter().any(
+                |d| matches!(&d.id, BindingPattern::BindingIdentifier(id) if id.name == "URL"),
+            ),
+            Declaration::ClassDeclaration(c) => c.id.as_ref().is_some_and(|id| id.name == "URL"),
+            Declaration::FunctionDeclaration(f) => f.id.as_ref().is_some_and(|id| id.name == "URL"),
+            _ => false,
+        }
+    }
+
+    program.body.iter().any(|stmt| match stmt {
+        Statement::ExportNamedDeclaration(e) => e.declaration.as_ref().is_some_and(declares_url),
+        Statement::ExportDefaultDeclaration(e) => match &e.declaration {
+            ExportDefaultDeclarationKind::ClassDeclaration(c) => {
+                c.id.as_ref().is_some_and(|id| id.name == "URL")
+            }
+            ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
+                f.id.as_ref().is_some_and(|id| id.name == "URL")
+            }
+            _ => false,
+        },
+        other => other.as_declaration().is_some_and(declares_url),
+    })
+}
+
+/// Resolve a URL specifier's `%XX` escapes into the path bytes the RUNTIME will
+/// open, or `None` when the result is not a usable path.
+///
+/// Skipping this does not merely miss a file — it opens the WRONG one. The
+/// specifier is URL text, so `./my%20file.bin` names `my file.bin`; joining the
+/// raw string instead looks for a literal `my%20file.bin`, which usually does not
+/// exist (so every filename containing a space silently stopped being embeddable)
+/// and, when it does, embeds a different file than the program reads, with
+/// nothing failing at build time.
+///
+/// An invalid escape is left verbatim, matching the WHATWG URL parser. Bytes that
+/// do not reassemble into UTF-8 yield `None` rather than a lossy path.
+fn percent_decode(spec: &str) -> Option<String> {
+    if !spec.contains('%') {
+        return Some(spec.to_string());
+    }
+    let raw = spec.as_bytes();
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        let hex = (i + 2 < raw.len())
+            .then(|| std::str::from_utf8(&raw[i + 1..i + 3]).ok())
+            .flatten()
+            .filter(|_| raw[i] == b'%')
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match hex {
+            Some(byte) => {
+                out.push(byte);
+                i += 3;
+            }
+            None => {
+                out.push(raw[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// An RFC 3986 `scheme:` — ALPHA then alphanumerics/`+-.` — which makes a
+/// specifier an absolute URL rather than a reference resolved against the base.
+fn has_url_scheme(spec: &str) -> bool {
+    let mut chars = spec.chars();
+    if !chars.next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    for c in chars {
+        if c == ':' {
+            return true;
+        }
+        if !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) {
+            return false;
+        }
+    }
+    false
+}
+
+/// A template literal with no interpolation is as static as a string literal —
+/// Rolldown resolves both, so both are analyzable here.
+fn static_specifier(expr: &Expression<'_>) -> Option<String> {
+    match expr {
+        Expression::StringLiteral(s) => Some(s.value.to_string()),
+        Expression::TemplateLiteral(t) if t.expressions.is_empty() => t
+            .quasis
+            .first()
+            .map(|q| q.value.cooked.as_ref().unwrap_or(&q.value.raw).to_string()),
+        _ => None,
+    }
 }
 
 // ---- jsx --------------------------------------------------------------------
@@ -722,7 +1085,7 @@ fn scan_unresolvable(id: &str, source: &str) -> Vec<DynamicSite> {
 
         fn visit_expression(&mut self, expr: &Expression<'a>) {
             if let Expression::ImportExpression(imp) = expr
-                && !is_static_specifier(&imp.source)
+                && static_specifier(&imp.source).is_none()
             {
                 self.found.push((SiteKind::Dynamic, imp.span));
             }
@@ -741,23 +1104,6 @@ fn scan_unresolvable(id: &str, source: &str) -> Vec<DynamicSite> {
         params.items.iter().any(
             |p| matches!(&p.pattern, BindingPattern::BindingIdentifier(id) if id.name == "require"),
         )
-    }
-
-    /// A template literal with no interpolation is as static as a string
-    /// literal — Rolldown resolves both.
-    fn static_specifier(expr: &Expression<'_>) -> Option<String> {
-        match expr {
-            Expression::StringLiteral(s) => Some(s.value.to_string()),
-            Expression::TemplateLiteral(t) if t.expressions.is_empty() => t
-                .quasis
-                .first()
-                .map(|q| q.value.cooked.as_ref().unwrap_or(&q.value.raw).to_string()),
-            _ => None,
-        }
-    }
-
-    fn is_static_specifier(expr: &Expression<'_>) -> bool {
-        static_specifier(expr).is_some()
     }
 
     let source_type = SourceType::from_path(id).unwrap_or_else(|_| SourceType::mjs());
@@ -1334,6 +1680,218 @@ mod tests {
             );
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// A fixture dir unique to this call, so parallel test threads never share a
+    /// path (the bundler keys diagnostics on it, and asset names on content).
+    fn fixture_dir(tag: &str) -> PathBuf {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let seq = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("nub-{tag}-{}-{seq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // The whole contract of the `new URL` rewrite, against a REAL bundle: the
+    // referenced file's bytes ship, the chunk names the embedded copy instead of
+    // the source-tree path, and the base stays `import.meta.url` — which is what
+    // makes the compiled binary read the right file from any cwd. Until this
+    // existed the same source compiled clean and threw ENOENT on first run.
+    #[test]
+    fn a_new_url_beside_a_module_ships_its_bytes_and_keeps_the_module_relative_base() {
+        let dir = fixture_dir("newurl");
+        std::fs::write(dir.join("data.json"), br#"{"k":"NEWURLBYTES"}"#).unwrap();
+        std::fs::write(
+            dir.join("entry.ts"),
+            b"import { readFileSync } from 'node:fs';\n\
+              globalThis.OUT = readFileSync(new URL('./data.json', import.meta.url), 'utf8');\n",
+        )
+        .unwrap();
+
+        let mut o = opts();
+        o.minify = false;
+        let res = bundle(&dir.join("entry.ts"), &o).expect("a new URL asset must compile");
+
+        assert_eq!(res.assets.len(), 1, "the referenced file must ship");
+        assert_eq!(res.assets[0].bytes, br#"{"k":"NEWURLBYTES"}"#);
+        assert!(
+            !res.assets[0].name.contains('/'),
+            "the asset must be a flat sibling of the chunks: {}",
+            res.assets[0].name
+        );
+        let code = String::from_utf8(res.files[0].bytes.clone()).unwrap();
+        assert!(
+            code.contains(&res.assets[0].name),
+            "the chunk must name the embedded copy, got:\n{code}"
+        );
+        assert!(
+            !code.contains("\"./data.json\"") && !code.contains("'./data.json'"),
+            "the source-tree path must not survive — it does not exist where the \
+             binary runs, got:\n{code}"
+        );
+        assert!(
+            code.contains("import.meta.url"),
+            "the base must stay module-relative, not cwd-relative, got:\n{code}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The honest scope of the fix, and the control for the test above. A computed
+    // URL cannot be embedded, and must NOT become a new build failure: the same
+    // expression is how a program names a file it will WRITE, and a specifier
+    // pointing at nothing on the build machine is that same case spelled
+    // statically. Both still compile, and neither ships bytes.
+    #[test]
+    fn a_url_this_build_cannot_follow_still_compiles_and_ships_nothing() {
+        for (tag, src) in [
+            (
+                "computed",
+                "const name = globalThis.PICK;\n\
+                 globalThis.OUT = new URL(name, import.meta.url);\n",
+            ),
+            (
+                "absent",
+                "globalThis.OUT = new URL('./written-at-runtime.log', import.meta.url);\n",
+            ),
+            (
+                "scheme",
+                "globalThis.OUT = [\n\
+                 \x20\x20new URL('https://example.com/x.json', import.meta.url),\n\
+                 \x20\x20new URL('data:text/plain,hi', import.meta.url),\n\
+                 \x20\x20new URL('/data.json', import.meta.url),\n\
+                 ];\n",
+            ),
+            // A module's own URL is not the global one. The `export` spelling is
+            // listed because missing it made the guard depend on whether the
+            // shadow happened to be exported.
+            (
+                "shadowed",
+                "class URL { constructor(a, b) { this.a = a; this.b = b; } }\n\
+                 globalThis.OUT = new URL('./data.json', import.meta.url);\n",
+            ),
+            (
+                "shadowed-export",
+                "export class URL { constructor(a, b) { this.a = a; } }\n\
+                 globalThis.OUT = new URL('./data.json', import.meta.url);\n",
+            ),
+            (
+                "shadowed-export-const",
+                "export const URL = class { constructor(a, b) { this.a = a; } };\n\
+                 globalThis.OUT = new URL('./data.json', import.meta.url);\n",
+            ),
+        ] {
+            let dir = fixture_dir(&format!("newurl-{tag}"));
+            // Present on disk for every case, so "nothing shipped" can only be the
+            // rule under test and never a missing fixture.
+            std::fs::write(dir.join("data.json"), b"{}").unwrap();
+            std::fs::write(dir.join("entry.ts"), src).unwrap();
+
+            let mut o = opts();
+            o.minify = false;
+            let res = bundle(&dir.join("entry.ts"), &o)
+                .unwrap_or_else(|e| panic!("{tag} must still compile, got: {e:#}"));
+            assert!(
+                res.assets.is_empty(),
+                "{tag} must ship no asset, got {:?}",
+                res.assets.iter().map(|a| &a.name).collect::<Vec<_>>()
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    // Resolution is PER MODULE, not per entry: a dependency in a subdirectory
+    // names its own sibling, and after bundling both modules share one chunk at
+    // the app root. Getting this wrong resolves against the entry's directory and
+    // silently embeds the wrong file — or none.
+    #[test]
+    fn a_new_url_in_a_nested_module_resolves_against_that_module() {
+        let dir = fixture_dir("newurl-nested");
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        std::fs::write(dir.join("lib/table.bin"), b"NESTEDBYTES").unwrap();
+        std::fs::write(
+            dir.join("lib/load.ts"),
+            b"export const at = new URL('./table.bin', import.meta.url);\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("entry.ts"),
+            b"import { at } from './lib/load.ts';\nglobalThis.OUT = at;\n",
+        )
+        .unwrap();
+
+        let mut o = opts();
+        o.minify = false;
+        let res = bundle(&dir.join("entry.ts"), &o).expect("compiles");
+        assert_eq!(res.assets.len(), 1, "the nested sibling must ship");
+        assert_eq!(res.assets[0].bytes, b"NESTEDBYTES");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A specifier is URL text, so its escapes have to be resolved before it names
+    // a path. Skipping that does not merely miss the file — with both spellings on
+    // disk it embeds the OTHER one, and the compiled binary then reads bytes the
+    // same source reads differently under plain Node.
+    #[test]
+    fn a_percent_escaped_specifier_names_the_file_the_runtime_would_open() {
+        let dir = fixture_dir("newurl-pct");
+        std::fs::write(dir.join("my file.bin"), b"DECODED").unwrap();
+        std::fs::write(dir.join("my%20file.bin"), b"LITERAL").unwrap();
+        std::fs::write(
+            dir.join("entry.ts"),
+            b"globalThis.OUT = new URL('./my%20file.bin', import.meta.url);\n",
+        )
+        .unwrap();
+
+        let mut o = opts();
+        o.minify = false;
+        let res = bundle(&dir.join("entry.ts"), &o).expect("compiles");
+        assert_eq!(res.assets.len(), 1, "the referenced file must ship");
+        assert_eq!(
+            res.assets[0].bytes, b"DECODED",
+            "%20 is a space, so the space-named file is the one the URL resolves to"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn percent_decoding_follows_the_url_parser() {
+        assert_eq!(percent_decode("./a.bin").as_deref(), Some("./a.bin"));
+        assert_eq!(
+            percent_decode("./my%20f.bin").as_deref(),
+            Some("./my f.bin")
+        );
+        assert_eq!(percent_decode("./%C3%A9.bin").as_deref(), Some("./é.bin"));
+        // An invalid or truncated escape is left verbatim, as the URL parser does.
+        assert_eq!(percent_decode("./100%.bin").as_deref(), Some("./100%.bin"));
+        assert_eq!(percent_decode("./a%zz.bin").as_deref(), Some("./a%zz.bin"));
+        // Bytes that are not UTF-8 have no path spelling to resolve to.
+        assert_eq!(percent_decode("./%FF.bin"), None);
+    }
+
+    // The invariant behind `map: HookTransformOutputMap::Null` — the transform
+    // does not move positions, so every line must still begin where it did. A
+    // no-substitution template literal is the one specifier form that can span
+    // lines, so its newlines have to come back.
+    #[test]
+    fn the_rewrite_preserves_the_sources_line_structure() {
+        let source = "const a = new URL(`./one\n.json`, import.meta.url);\nconst b = 2;\n";
+        let edits = vec![(
+            NewUrlEdit {
+                start: source.find('`').unwrap(),
+                end: source.rfind('`').unwrap() + 1,
+                source: PathBuf::from("/p/one\n.json"),
+            },
+            "one-a1b2c3d4.json".to_string(),
+        )];
+        let out = rewrite_new_urls(source, &edits);
+        assert_eq!(
+            out.matches('\n').count(),
+            source.matches('\n').count(),
+            "line count must survive the splice, got:\n{out}"
+        );
+        assert!(out.contains("\"./one-a1b2c3d4.json\""), "{out}");
+        assert!(out.ends_with("const b = 2;\n"), "{out}");
     }
 
     #[test]
