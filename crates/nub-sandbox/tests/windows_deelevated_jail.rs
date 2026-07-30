@@ -1581,6 +1581,138 @@ mod win {
         nub_sandbox::realpath_shim_node_options(&roots)
     }
 
+    /// Run npm's own entry point under the realpath preload PLUS [`refusal_tracer_term`], with the
+    /// ancestor repair left ON, and print whatever the child managed to record. The elevated arm's
+    /// trace is the reference the de-elevated one is read against.
+    fn npm_cli_refusal_trace(
+        f: &Fixture,
+        exe: &Path,
+        root: &Path,
+        dir: &Path,
+        npm_cli: &Path,
+        realpath: &str,
+    ) {
+        let trace = dir.join("npmcli.trace");
+        let _ = std::fs::remove_file(&trace);
+        let policy = build_jail_with_env(
+            f,
+            exe,
+            root,
+            &[(
+                "NODE_OPTIONS",
+                format!("{realpath} {}", refusal_tracer_term(&trace)),
+            )],
+        );
+        confined_exec(
+            f,
+            &policy,
+            "trace-npmcli",
+            60,
+            exe,
+            &[
+                npm_cli.to_string_lossy().into_owned(),
+                "--version".to_string(),
+            ],
+        );
+        match std::fs::read_to_string(&trace) {
+            Ok(text) => {
+                for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                    println!("  fact:anc-npmcli-trace| {line}");
+                }
+            }
+            Err(e) => println!("  fact:anc-npmcli-trace-unreadable={e}"),
+        }
+    }
+
+    /// A second `--import` term that makes the confined child NAME its own refusals.
+    ///
+    /// WHY IT IS NEEDED AT ALL. npm's entry point dies `-4048` with an EMPTY transcript, which is
+    /// the one failure shape that carries no information: npm buffers every log and output event
+    /// until `Display.load` calls `log.resume()`, so anything that throws before that line exits
+    /// with `err.errno` as the status (`getExitCodeFromError`, `lib/utils/error-message.js`) and
+    /// prints nothing at all. The stack has to be taken from inside the child.
+    ///
+    /// Stamped AFTER the realpath term, so the `fs.realpathSync` it wraps is already the shim's
+    /// walk and a refusal the shim declined to tolerate is recorded with the shim's own frames.
+    /// Delivered as a `data:` URL for the same reason the shim is — it needs no grant.
+    fn refusal_tracer_term(trace: &Path) -> String {
+        use base64::Engine as _;
+        let js = REFUSAL_TRACER.replace("__NUB_TRACE_OUT__", &js_literal(trace));
+        format!(
+            "--import data:text/javascript;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(js)
+        )
+    }
+
+    const REFUSAL_TRACER: &str = r#"
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+const OUT = __NUB_TRACE_OUT__;
+const lines = [];
+const push = (s) => { if (lines.length < 300) lines.push(String(s).replace(/[\r\n]+/g, " ")); };
+const rawWrite = fs.writeFileSync;
+const flush = () => { try { rawWrite(OUT, lines.join("\n") + "\n"); } catch {} };
+const frames = (e) => String((e && e.stack) || "")
+  .split("\n").slice(1, 7)
+  .map((l) => l.trim().replace(/data:text\/javascript;base64,[A-Za-z0-9+/=]+/g, "<preload>"))
+  .join(" << ");
+// DEDUPED, and the dedupe is what makes the trace readable rather than merely bounded: the
+// realpath shim itself throws once per TOLERATED ancestor, so an undeduped trace is hundreds of
+// copies of the same three components and the one refusal that was not tolerated is buried.
+const seen = new Set();
+const note = (ns, name, args, e) => {
+  const a = args && args[0];
+  const spelled = typeof a === "string" ? a : a && a.href ? a.href : String(a);
+  const target = e.path ?? spelled;
+  const key = `${ns}.${name}|${e.code}|${target}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+  push(`REFUSED ${ns}.${name} code=${e.code} errno=${e.errno} syscall=${e.syscall} path=${target} | ${frames(e)}`);
+  flush();
+};
+const refused = (e) => e && (e.code === "EPERM" || e.code === "EACCES");
+const wrapSync = (ns, tag, keys) => {
+  for (const k of keys) {
+    const orig = ns[k];
+    if (typeof orig !== "function") continue;
+    const wrapped = function (...a) {
+      try { return orig.apply(this, a); }
+      catch (e) { if (refused(e)) note(tag, k, a, e); throw e; }
+    };
+    if (orig.native) wrapped.native = orig.native;
+    ns[k] = wrapped;
+  }
+};
+const wrapAsync = (ns, tag, keys) => {
+  for (const k of keys) {
+    const orig = ns[k];
+    if (typeof orig !== "function") continue;
+    ns[k] = function (...a) {
+      return Promise.resolve(orig.apply(this, a)).catch((e) => {
+        if (refused(e)) note(tag, k, a, e);
+        throw e;
+      });
+    };
+  }
+};
+wrapSync(fs, "fs", ["statSync","lstatSync","readFileSync","readdirSync","realpathSync","openSync","mkdirSync","accessSync","readlinkSync","opendirSync","writeFileSync"]);
+wrapAsync(fsp, "fsp", ["stat","lstat","readFile","readdir","realpath","open","mkdir","access","readlink","opendir","writeFile"]);
+const realExit = process.exit.bind(process);
+process.exit = (code) => { push(`EXIT code=${code} | ${frames(new Error("exit"))}`); flush(); return realExit(code); };
+process.on("exit", (c) => { push(`ONEXIT code=${c} exitCode=${process.exitCode}`); flush(); });
+process.on("uncaughtException", (e) => { push(`UNCAUGHT ${e && e.stack}`); flush(); });
+process.on("unhandledRejection", (e) => { push(`UNHANDLED ${e && (e.stack || e)}`); flush(); });
+for (const s of ["stdout", "stderr"]) {
+  const stream = process[s];
+  const orig = stream.write.bind(stream);
+  stream.write = (chunk, ...rest) => { push(`${s.toUpperCase()} ${String(chunk).slice(0, 300)}`); return orig(chunk, ...rest); };
+}
+let cwd = "<uv_cwd refused>";
+try { cwd = process.cwd(); } catch (e) { cwd = `<${e.code}>`; }
+push(`START execPath=${process.execPath} cwd=${cwd} argv=${process.argv.slice(1).join(" ")}`);
+flush();
+"#;
+
     /// One confined NESTED launch: the probe child (already inside the AppContainer) spawns
     /// `program` on a deadline and writes both the launch outcome and the program's stdio where
     /// the parent can read them. Returns `(child_rc, outcome, sink)`.
@@ -2025,6 +2157,13 @@ mod win {
         let long_roots =
             without_ancestor_repair(|| node_cells(f, &long_policy, "lng", exe, &dir, &npm_cli));
         println!("  fact:anc-longform={}", long_roots.detail());
+
+        // ── DIAGNOSTIC: what npm's own entry point cannot reach. Reported as facts, never gated —
+        //    it names a cause, it does not decide anything. Runs in BOTH principals, which is the
+        //    whole point: the elevated arm succeeds and the de-elevated one does not, so the two
+        //    traces DIFF down to the operation the ancestor repair is standing in for.
+        println!("── anc diagnostic: npm entry under the refusal tracer ──");
+        npm_cli_refusal_trace(f, exe, root, &dir, &npm_cli, &realpath);
 
         // ── the gates. No arm counts as evidence unless these pass.
         r.record(

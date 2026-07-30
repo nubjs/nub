@@ -16,7 +16,7 @@ name: win-deelevated-jail-probe
 
 on:
   push:
-    branches: [sandbox/win-deelevated-jail, sandbox/win-ancestor-necessity]
+    branches: [sandbox/win-deelevated-jail, sandbox/win-ancestor-necessity, sandbox/win-npm-grant]
   workflow_dispatch:
 
 permissions:
