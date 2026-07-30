@@ -958,6 +958,13 @@ pub enum Command {
         #[arg(long, value_name = "PKG", action = ArgAction::Append, help_heading = COMPILE_ADVANCED)]
         external: Vec<String>,
 
+        /// Keep a dynamic `import()` whose specifier the program computes at run
+        /// time — a plugin loader, a config module. Such an import is refused by
+        /// default: the binary resolves it from the directory it is run in, so
+        /// what it loads depends on the machine you ship to.
+        #[arg(long = "allow-dynamic-import", help_heading = COMPILE_ADVANCED)]
+        allow_dynamic_import: bool,
+
         /// Use this tsconfig.json instead of the one discovered from the entry.
         #[arg(long, value_name = "PATH", help_heading = COMPILE_ADVANCED)]
         tsconfig: Option<String>,
@@ -2584,6 +2591,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             loader,
             conditions,
             external,
+            allow_dynamic_import,
             tsconfig,
             sourcemap_exclude_sources,
         }) => crate::compile::run(crate::compile::CompileOptions {
@@ -2612,6 +2620,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 alias,
                 conditions,
                 external,
+                allow_dynamic_import,
                 tsconfig: tsconfig.map(PathBuf::from),
                 loaders: loader,
             },

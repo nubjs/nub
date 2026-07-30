@@ -9,15 +9,20 @@
 //! pipeline's own state, so `nub build` can drive it unchanged.
 //!
 //! One deliberate non-delegation: an unresolvable dynamic `import(expr)` FAILS
-//! the build rather than warning, and there is no flag to opt out. A compiled
-//! artifact carries no `node_modules`, so a specifier that cannot be resolved at
-//! build time is a guaranteed `ERR_MODULE_NOT_FOUND` on the deploy machine —
-//! with no stack-trace clue and nothing the operator can install to fix it. The
-//! only fix is to make the specifier statically analyzable, so an escape hatch
-//! would just defer the same crash to the user's machine. `--external` is the
-//! one sanctioned way past it, and it works by REMOVING the package from the
-//! graph — an external is matched on its raw specifier before resolution, so
-//! its source is never loaded and its unanalyzable sites are never scanned.
+//! the build rather than warning. A compiled artifact carries no `node_modules`,
+//! so a specifier that cannot be resolved at build time is an
+//! `ERR_MODULE_NOT_FOUND` on the deploy machine — with no stack-trace clue and
+//! nothing obvious for the operator to install.
+//!
+//! There are two ways past it, and neither is the default, because a binary
+//! whose plugin loads fail on the target machine must be something the author
+//! chose. `--external` REMOVES a named package from the graph (matched on its
+//! raw specifier before resolution, so its source is never loaded and its
+//! unanalyzable sites are never scanned). `--allow-dynamic-import` keeps the
+//! `import(expr)` in the output and lets the artifact's runtime hook resolve it
+//! against the launch directory — the case `--external` structurally cannot
+//! serve, since a plugin path the user supplies has no package to name. See
+//! [`crate::compile::external`] for the hook.
 //!
 //! The same reasoning drives the two gates that bracket the bundle. BEFORE it,
 //! [`jsx_override`] refuses to let a tsconfig `jsx: "preserve"` through, because
@@ -102,6 +107,9 @@ pub struct BundleOptions {
     /// `prettier/plugins/babel`, which is what makes the flag usable on a
     /// package whose subpaths are imported separately.
     pub external: Vec<String>,
+    /// Let a dynamic `import()` whose specifier is not statically analyzable
+    /// survive into the output instead of failing the build. Off by default.
+    pub allow_dynamic_import: bool,
     /// Explicit tsconfig; `None` keeps Rolldown's auto-discovery.
     pub tsconfig: Option<PathBuf>,
     /// `EXT=TYPE` from `--loader`, applied over nub's defaults. See
@@ -127,6 +135,14 @@ pub struct BundleResult {
     /// are re-parsed as JavaScript by [`reject_invalid_chunks`], which a `.wasm`
     /// would rightly fail.
     pub assets: Vec<BundledFile>,
+    /// Computed `import()` sites `--allow-dynamic-import` let through. Zero
+    /// unless the flag is set; the build would otherwise have failed. This is
+    /// what decides whether the artifact needs a runtime resolve hook at all.
+    ///
+    /// Counted as the graph LOADED, so a site in a module tree-shaking later
+    /// empties still counts. The over-approximation can only ship a hook nothing
+    /// uses; it can never omit one something needs.
+    pub dynamic_import_sites: usize,
 }
 
 pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
@@ -258,7 +274,13 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
         }
     })?;
 
-    reject_unresolved(&scan.take(), &output.warnings)?;
+    let sites = scan.take();
+    reject_unresolved(&sites, &output.warnings, opts.allow_dynamic_import)?;
+    let dynamic_import_sites = if opts.allow_dynamic_import {
+        sites.iter().filter(|s| s.kind == SiteKind::Dynamic).count()
+    } else {
+        0
+    };
 
     let mut entry = None;
     let mut files = Vec::new();
@@ -346,6 +368,7 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
         files,
         detached_maps,
         assets,
+        dynamic_import_sites,
     })
 }
 
@@ -1513,10 +1536,26 @@ fn render_diagnostics(err: &rolldown_error::BatchedBuildDiagnostic) -> String {
 /// Fail the build on any import the bundler could not resolve — the
 /// `import(expr)` / `require(…)` sites the scan found, plus Rolldown's own
 /// UNRESOLVED_IMPORT warnings for named specifiers that resolved to nothing.
-fn reject_unresolved(sites: &[DynamicSite], warnings: &[BuildDiagnostic]) -> Result<()> {
+///
+/// `allow_dynamic` excuses the `import(expr)` sites ONLY. An indirect `require`
+/// is a different defect with a different fix (the resolver picked a UMD build),
+/// and an UNRESOLVED_IMPORT is a static specifier that resolved to nothing —
+/// neither is served by a runtime resolve hook, so neither is opted out of.
+fn reject_unresolved(
+    sites: &[DynamicSite],
+    warnings: &[BuildDiagnostic],
+    allow_dynamic: bool,
+) -> Result<()> {
     let mut lines = Vec::new();
     let mut any_indirect = false;
+    let mut any_dynamic = false;
     for site in sites {
+        if site.kind == SiteKind::Dynamic {
+            if allow_dynamic {
+                continue;
+            }
+            any_dynamic = true;
+        }
         any_indirect |= site.kind == SiteKind::Indirect;
         lines.push(format!(
             "\x20\x20{}:{}:{}\n\x20\x20\x20\x20{}",
@@ -1544,14 +1583,26 @@ fn reject_unresolved(sites: &[DynamicSite], warnings: &[BuildDiagnostic]) -> Res
     } else {
         ""
     };
+    // The flag is named only where it would actually help. Offering it against
+    // an indirect require or an UNRESOLVED_IMPORT would send the user to a
+    // switch that changes nothing about their failure.
+    let dynamic_hint = if any_dynamic {
+        "\n\x20\x20A specifier your program computes at run time — a plugin path, a config\n\
+         \x20\x20module — cannot be made static. Pass --allow-dynamic-import to keep it, and\n\
+         \x20\x20the binary will resolve it from the directory it is started in. What it\n\
+         \x20\x20loads then depends on the machine you ship to."
+    } else {
+        ""
+    };
     bail!(
         "{} import{} could not be resolved at build time:\n{}\n\n\
          \x20\x20A compiled binary carries no node_modules, so an unresolved import fails at\n\
          \x20\x20runtime on the machine you ship to. Make the specifier a static string so\n\
-         \x20\x20the bundler can follow it.{}",
+         \x20\x20the bundler can follow it.{}{}",
         lines.len(),
         if lines.len() == 1 { "" } else { "s" },
         lines.join("\n"),
+        dynamic_hint,
         indirect_hint
     );
 }
@@ -1631,6 +1682,7 @@ mod tests {
             alias: Vec::new(),
             conditions: Vec::new(),
             external: Vec::new(),
+            allow_dynamic_import: false,
             tsconfig: None,
             loaders: Vec::new(),
         }
@@ -2440,25 +2492,63 @@ const pkg = require("./package.json");
         assert!(sites[0].snippet.contains("./package.json"), "{sites:?}");
     }
 
-    // Rejection is unconditional — there is no opt-out — so the error has to
-    // carry everything needed to fix the source, and point at the only fix.
-    #[test]
-    fn rejection_names_the_site_and_the_fix() {
-        let sites = vec![DynamicSite {
+    fn dynamic_site() -> DynamicSite {
+        DynamicSite {
             kind: SiteKind::Dynamic,
             module: "/p/src/plugins.ts".into(),
             line: 12,
             column: 20,
             snippet: "import(pluginPath)".into(),
-        }];
-        let err = reject_unresolved(&sites, &[]).expect_err("must fail");
+        }
+    }
+
+    // The default is refusal, so the error has to carry everything needed to fix
+    // the source AND name the flag that accepts it as written — a build that
+    // fails with no way forward is what drove users to hide the site from the
+    // scanner instead.
+    #[test]
+    fn rejection_names_the_site_the_fix_and_the_flag() {
+        let err = reject_unresolved(&[dynamic_site()], &[], false).expect_err("must fail");
         let msg = err.to_string();
         assert!(msg.contains("/p/src/plugins.ts:12:20"), "got: {msg}");
         assert!(msg.contains("import(pluginPath)"), "got: {msg}");
         assert!(msg.contains("static string"), "got: {msg}");
+        assert!(msg.contains("--allow-dynamic-import"), "got: {msg}");
         assert!(
             !msg.contains("UMD"),
             "the indirect-require hint must not show for a dynamic-specifier site: {msg}"
+        );
+    }
+
+    // The flag excuses a computed `import()` and nothing else. An indirect
+    // require is a different defect that no runtime resolve hook can serve, so it
+    // must still fail — and must not advertise a flag that would not help it.
+    #[test]
+    fn the_flag_excuses_only_the_computed_import() {
+        assert!(
+            reject_unresolved(&[dynamic_site()], &[], true).is_ok(),
+            "a permitted dynamic site must not fail the build"
+        );
+
+        let indirect = DynamicSite {
+            kind: SiteKind::Indirect,
+            module: "/p/node_modules/jsonc-parser/umd.js".into(),
+            line: 4,
+            column: 15,
+            snippet: r#"require("./impl/format")"#.into(),
+        };
+        let err = reject_unresolved(&[dynamic_site(), indirect], &[], true)
+            .expect_err("an indirect require must still fail");
+        let msg = err.to_string();
+        assert!(msg.contains("umd.js:4:15"), "got: {msg}");
+        assert!(
+            !msg.contains("plugins.ts"),
+            "the permitted dynamic site must be gone from the list: {msg}"
+        );
+        assert!(msg.contains("1 import could not"), "got: {msg}");
+        assert!(
+            !msg.contains("--allow-dynamic-import"),
+            "a flag that cannot help this site must not be offered: {msg}"
         );
     }
 

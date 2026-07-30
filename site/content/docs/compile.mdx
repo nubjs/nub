@@ -345,6 +345,10 @@ Error: 1 import could not be resolved at build time:
   A compiled binary carries no node_modules, so an unresolved import fails at
   runtime on the machine you ship to. Make the specifier a static string so
   the bundler can follow it.
+  A specifier your program computes at run time — a plugin path, a config
+  module — cannot be made static. Pass --allow-dynamic-import to keep it, and
+  the binary will resolve it from the directory it is started in. What it
+  loads then depends on the machine you ship to.
 ```
 
 Almost always the culprit is a dynamic import whose specifier is a variable. Make it a literal and the bundler can follow it:
@@ -354,9 +358,11 @@ const mod = await import(pluginName);     // cannot be resolved
 const mod = await import("./plugins/csv.js");  // bundled
 ```
 
-There is no flag to ship an unresolved import anyway. Deferring the failure would only move the same crash to the machine you ship to, where it is far harder to diagnose.
+The build fails by default because deferring it moves the same crash to the machine you ship to, where it is far harder to diagnose. Two flags override that, and both trade self-containment for it.
 
-When the offending import is inside a dependency you cannot edit, take the whole package out of the bundle with [`--external`](#--external) instead. Its source is never read, so its unanalyzable imports never enter the build — at the cost of that package having to exist on the machine you ship to.
+When the offending import is inside a dependency you cannot edit, take the whole package out of the bundle with [`--external`](#--external). Its source is never read, so its unanalyzable imports never enter the build — at the cost of that package having to exist on the machine you ship to.
+
+When the specifier genuinely cannot be a literal — a plugin loader importing a path the user supplies — [`--allow-dynamic-import`](#--allow-dynamic-import) keeps the import and resolves it when the binary runs.
 
 A `require()` the bundler cannot rewrite fails the same way. The usual source is a package whose `main` is a UMD build: the factory takes `require` as a parameter, so the calls inside are ordinary function calls that survive into the bundle and resolve against the extracted app directory at runtime.
 
@@ -485,6 +491,51 @@ Error: Cannot find prettier.
 ```
 
 Externals need Node 22.15 or newer, since the executable redirects them with a resolve hook added in that release. The build fails when the version it resolves is older, whether that came from `--target` or the project's pin.
+
+### `--allow-dynamic-import`
+
+Keep a dynamic `import()` whose specifier the program computes while it runs, instead of [failing the build](#unresolved-imports-fail-the-build):
+
+```bash
+nub compile app.ts --allow-dynamic-import
+```
+
+This exists for plugin systems. A loader that imports a path the user supplies has no literal to write down and no package to name, so neither a static specifier nor `--external` can serve it:
+
+```ts
+// the user chooses the file; the build cannot know it
+const plugin = await import(pathToFileURL(userPath).href);
+```
+
+A computed specifier is resolved against two places: the executable's own contents, and the directory the executable was started in. Which one is consulted first depends on the specifier, and the rule falls out of what each shape can mean:
+
+| Specifier | Resolved first from | Then |
+|---|---|---|
+| `./plugin.mjs`, `../x/y.js`, `#internal` | the executable's own contents | the launch directory |
+| `my-plugin`, `@scope/plugin` | the launch directory | the executable's own contents |
+| `/abs/path.mjs`, `file://…`, `node:fs` | unaffected — the same thing everywhere | |
+
+A path-like specifier belongs to whoever wrote it, and the executable's own chunks import each other exactly that way, so the executable answers first. A bare specifier can only come from a `node_modules` tree, and the executable carries none — so the launch directory answers first, which also keeps a stray `node_modules` in some parent of the runtime cache from quietly winning.
+
+The trade is real, and it is why the flag exists rather than the behavior being the default: a binary built with it is not self-contained the way a compiled binary usually is. What its plugin loads resolve to depends on the machine it runs on, and a specifier that resolves in neither place fails at the import:
+
+```console
+$ ./app ./plugins/csv.mjs
+Error: Cannot find ./plugins/csv.mjs.
+
+  This executable was compiled with --allow-dynamic-import, so a specifier
+  it computes at run time is resolved against the executable's own contents
+  and the directory the executable was started in.
+
+  Started in: /srv/app
+  Put it there, or run this from a directory that already has it.
+```
+
+That error keeps Node's own `ERR_MODULE_NOT_FOUND` code, so a plugin loader written the usual way — `catch (e) { if (e.code !== "ERR_MODULE_NOT_FOUND") throw e; }` — treats an absent plugin as absent rather than crashing.
+
+The flag excuses an `import()` and nothing else. A `require()` the bundler cannot rewrite still fails the build, because a resolve hook does not fix a UMD factory.
+
+Like externals, this needs Node 22.15 or newer — but only when a computed import actually survives the bundle. A build that passes the flag and turns out not to need it carries no hook and no version floor.
 
 ### `--tsconfig`
 

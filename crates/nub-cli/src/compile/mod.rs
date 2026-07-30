@@ -100,27 +100,43 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     //    branch dead-code-eliminates for the machine the artifact will run on,
     //    not the one it was built on.
     opts.bundle.auto_define = target_defines(&target);
-    opts.bundle
-        .auto_define
-        .extend(external::entry_defines(&opts.bundle.external));
+    opts.bundle.auto_define.extend(external::entry_defines(
+        !opts.bundle.external.is_empty() || opts.bundle.allow_dynamic_import,
+    ));
     eprintln!("Bundling {} …", opts.entry);
     let bundled = bundle::bundle(&entry_abs, &opts.bundle)?;
     let mut entry_name = layout.bundle_path(&bundled.entry);
     let mut app_files = assemble_app(&bundled, &layout, &target)?;
-    if !opts.bundle.external.is_empty() {
+    // The runtime resolve hook is decided AFTER the bundle: `--external` always
+    // needs it, but `--allow-dynamic-import` only earns it if a computed
+    // `import()` actually survived — the flag is cheap to pass defensively and a
+    // build that never uses it should ship no wrapper.
+    let shim_plan = external::ShimPlan {
+        external: &opts.bundle.external,
+        dynamic: bundled.dynamic_import_sites > 0,
+    };
+    if shim_plan.needed() {
         // These land AFTER assemble_app's payload-name and collision gates. Safe
         // for the NAME gate because both are fixed constants legal on every
         // target; a shim name derived from user input would have to move it here.
         // The COLLISION gate is a weaker story: `external::shim` refuses a bundle
         // file of the same name, but only exact-case, so an `--include` differing
         // from a shim name in case alone still overwrites on a folding target.
-        let shim = external::shim(&app_files, &entry_name, &opts.bundle.external)?;
+        let shim = external::shim(&app_files, &entry_name, &shim_plan)?;
         entry_name = shim.entry;
         app_files.extend(shim.files);
-        eprintln!(
-            "External (must be installed where the binary runs): {}",
-            opts.bundle.external.join(", ")
-        );
+        if !opts.bundle.external.is_empty() {
+            eprintln!(
+                "External (must be installed where the binary runs): {}",
+                opts.bundle.external.join(", ")
+            );
+        }
+        if shim_plan.dynamic {
+            eprintln!(
+                "Dynamic import: {} site(s) resolved where the binary runs, not at build time",
+                bundled.dynamic_import_sites
+            );
+        }
     }
     let app_sha = sha256_of_app(&app_files);
     if !layout.assets.is_empty() {
@@ -145,7 +161,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         // carried into the artifact, so the raw spec is echoed here for the
         // compiling user and goes no further.
         let floor = version_management::pin_floor(&pin, &cache_root)?;
-        external::check_node_support(&floor, &source, &opts.bundle.external)?;
+        external::check_node_support(&floor, &source, &shim_plan)?;
         eprintln!(
             "Using Node.js {} (resolved from {source}; satisfied at runtime)",
             non_exact_spec(&pin, &raw).unwrap_or_else(|| floor.to_string())
@@ -159,7 +175,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         let (os, arch, musl) = dist_platform(&target);
         let exact =
             version_management::resolve_pin_for_platform(&pin, os, arch, musl, &cache_root)?;
-        external::check_node_support(&exact, &source, &opts.bundle.external)?;
+        external::check_node_support(&exact, &source, &shim_plan)?;
         let (blob, sha) = build_node_blob(&exact, &target, &cache_root, &source)?;
         (exact, blob, sha)
     };
@@ -934,6 +950,7 @@ mod tests {
                 alias: Vec::new(),
                 conditions: Vec::new(),
                 external: Vec::new(),
+                allow_dynamic_import: false,
                 tsconfig: None,
                 loaders: Vec::new(),
             },
@@ -1062,6 +1079,7 @@ mod tests {
             }],
             detached_maps: Vec::new(),
             assets: Vec::new(),
+            dynamic_import_sites: 0,
         };
         let layout = assets::Layout {
             entry_prefix: String::new(),
@@ -1098,6 +1116,7 @@ mod tests {
                 }],
                 detached_maps: Vec::new(),
                 assets: Vec::new(),
+                dynamic_import_sites: 0,
             },
             assets::Layout {
                 entry_prefix: String::new(),
