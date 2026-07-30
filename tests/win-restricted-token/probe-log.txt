@@ -1,0 +1,227 @@
+# Raw measurement log — Windows build jail via restricted token + low integrity.
+# Appended as each fact lands. Machine: disposable GCE nub-win-rtok,
+# Windows Server 2025 (windows-2025 image family), e2-standard-4 x86_64.
+#
+# SETUP FACTS (cost time; recorded so the next run does not repeat them):
+# - MEASURED: the GCE guest agent does NOT wire Windows SSH on windows-2025.
+#   Serial log: 'Could not determine if openssh version is compatible: could not
+#   find version: service image path "SYSTEM\CurrentControlSet\Services\sshd"'.
+#   enable-windows-ssh=TRUE is not sufficient; a windows-startup-script-ps1 must
+#   start sshd and place authorized_keys itself.
+# - MEASURED: `powershell -Command -` over SSH silently produced NO output for a
+#   script containing Start-Process -Credential. scp the file + `powershell -File`
+#   is reliable. Use that.
+# - MEASURED: appending SyslogFacility/LogLevel to the END of the Windows
+#   sshd_config lands them INSIDE the trailing `Match Group administrators` block,
+#   which is invalid -> sshd fails to start -> you are locked out. Insert before
+#   the first Match line.
+
+================================================================
+Q_LAUNCH — ANSWERED (MEASURED, Windows Server 2025, de-elevated)
+================================================================
+Arm identity (proves de-elevation, not asserted):
+  user_sid=S-1-5-21-...-1004  integrity=S-1-16-8192 (Medium)
+  elevated=False  in_admins=False  logon_sids=1
+  privileges(2)= SeChangeNotifyPrivilege, SeIncreaseWorkingSetPrivilege
+  -> NO SeAssignPrimaryToken, NO SeIncreaseQuota, NO SeImpersonate.
+
+CreateProcessAsUserW  : LAUNCHED at il=none / medium / low / untrusted.  rc=0.
+CreateProcessWithTokenW: FAILED err=1314 (ERROR_PRIVILEGE_NOT_HELD) at ALL ILs.
+  -> CreateProcessWithTokenW needs SeImpersonatePrivilege; a standard user lacks
+     it. CreateProcessAsUserW is the API to use; the documented
+     CreateRestrictedToken exemption from SE_ASSIGNPRIMARYTOKEN holds, and the
+     baseline (--il none, a plain DuplicateTokenEx of our own token) also
+     launches, so no privilege is needed for a self-derived primary token.
+
+Child token verified in situ by `whoami /groups` INSIDE the child:
+  il=low   -> "Mandatory Label\Low Mandatory Level  S-1-16-4096"
+  il=medium-> "Mandatory Label\Medium Mandatory Level S-1-16-8192"
+
+*** SSH/session-0 LIMITATION DOES NOT APPLY. *** AppContainer returns
+0xC0000142 over SSH because a LowBox token cannot attach the services-session
+window station. A restricted + LOW-IL child LAUNCHED FINE over SSH with the
+INHERITED station (Service-0x0-7958e$). Untrusted IL launched too. So this
+mechanism is fully measurable over SSH -- no ci-adhoc-test workflow needed.
+Optional (unnecessary) belt-and-braces that also works: CreateDesktopW + a
+low-IL label on the new desktop; needs WRITE_OWNER in the CreateDesktopW access
+mask (0x1FF alone -> SetUserObjectSecurity ERROR_ACCESS_DENIED=5).
+
+HARNESS BUG CAUGHT BY THE BASELINE (recording per discipline): all six arms
+first failed identically with `CreateFileW(NUL) err=2`, which reads exactly like
+"mechanism unavailable". The --il none BASELINE failing too localized it to the
+harness: the CreateFileW P/Invoke lacked CharSet=CharSet.Unicode, so the ANSI
+default marshalled the name into a UTF-16 API. Without the baseline arm this
+would have been reported as a launch failure.
+
+================================================================
+LOW-IL HAZARD PROBE — ANSWERED (MEASURED). TLS IS *NOT* BROKEN.
+================================================================
+Three arms, same script, same box, de-elevated standard user. il=none is the
+BASELINE control.
+
+operation                        il=none   il=medium  il=low
+-------------------------------- --------  ---------  ------------------------
+TLS https://registry.npmjs.org   OK 200    OK 200     OK 200  TLSv1.2 ECDHE-ECDSA-AES128-GCM-SHA256 (2B)
+TLS https://nodejs.org           OK 200    OK 200     OK 200  TLSv1.3 TLS_AES_256_GCM_SHA384 (327277B)
+TLS https://github.com           OK 200    OK 200     OK 200  TLSv1.3 TLS_AES_128_GCM_SHA384 (591653B)
+dns.lookup                       OK        OK         OK
+named pipe round trip            OK        OK         OK
+spawn child process (node -e)    OK        OK         OK
+cmd.exe /c echo                  OK        OK         OK
+whoami /groups (LSA lookup)      OK        OK         OK
+os.userInfo()                    OK        OK         OK
+reg query HKCU\Environment       OK        OK         OK
+reg query HKLM\...\CurrentVer    OK        OK         OK
+reg ADD HKCU (write)             OK        OK         DENIED (write-up blocked)
+write %TEMP% (os.tmpdir)         OK        OK         DENIED EPERM
+
+=> srt's stated reason for choosing Medium ("Schannel / LSA / registry edge cases
+   that fire at Low IL") does NOT reproduce for Schannel or LSA on Server 2025 +
+   Node 24. Byte counts at low IL match the baseline arm (github differs by 1
+   byte because the page is dynamic). TLS 1.3 negotiated. This does not kill the
+   route.
+=> The two Low-IL failures are BOTH write-ups, i.e. the mechanism working:
+   (a) HKCU registry WRITE denied -- HKCU carries a Medium label. Real but
+       narrow compat exposure (postinstall scripts that write registry keys).
+   (b) %TEMP% WRITE denied -- %LOCALAPPDATA%\Temp is Medium-labeled. This is the
+       BIG one: node-gyp, npm, tarball extraction and prebuild-install all use
+       TEMP. MUST be granted. Windows already has the
+       %LOCALAPPDATA%\Temp\Low convention for exactly this (measured absent on
+       this image: lowtemp-exists=False, so nub must create + label it, or
+       relabel/redirect TEMP for the child).
+
+================================================================
+Q_WRITE — ANSWERED (MEASURED). YES, UNPRIVILEGED, AND CHEAP.
+================================================================
+As the de-elevated standard user probe2 (elevated=False, in_admins=False,
+2 privileges), SetNamedSecurityInfoW(..., LABEL_SECURITY_INFORMATION, ...) with
+SDDL S:(ML;OICI;NW;;;LW):
+
+  C:\Users\probe2\jail\project              rc=0  OK
+  C:\Users\probe2\AppData\Local\nub\store   rc=0  OK
+  C:\Users\probe2\AppData\Local\nub\cache   rc=0  OK
+
+Read back: label=[type=17 flags=0x3 policy=0x1 sid=S-1-16-4096]
+  type 17  = SYSTEM_MANDATORY_LABEL_ACE_TYPE
+  flags 0x3= OBJECT_INHERIT_ACE|CONTAINER_INHERIT_ACE  (so NEW files inherit Low)
+  policy 1 = SYSTEM_MANDATORY_LABEL_NO_WRITE_UP
+  sid      = Low
+Owner of all three = probe2's own SID, which is why WRITE_OWNER is held.
+
+NEGATIVE CONTROL (this is what makes the positive result mean something):
+  label C:\        -> ERR=5 ACCESS_DENIED
+  label C:\Windows -> ERR=5 ACCESS_DENIED
+=> the capability is owner/DACL-derived, NOT a blanket privilege. An unprivileged
+   process can only relabel what it already owns, which is exactly the grant
+   scope we want and no more.
+
+COST: recursive relabel of the project tree = 11 entries, errors=0, 77 ms.
+
+END-TO-END DIFFERENTIAL, low-IL child, native cmd.exe redirection:
+  write into relabeled project dir   -> WROTE_PROJ
+  write into %USERPROFILE%           -> "Access is denied." DENIED_PROFILE
+  write into C:\                     -> "Access is denied." DENIED_C
+=> the write allowlist is real: granted where labeled, refused everywhere else,
+   with the process still able to READ everything.
+
+================================================================
+OPERATIONS TABLE — the ops that killed the AppContainer route
+================================================================
+`node ops.js` was the ENTRY POINT, so resolveMainPath's realpath ran before user
+code in every arm. il=none is the BASELINE.
+
+operation                                  il=none  il=medium  il=low
+------------------------------------------ -------  ---------  ------
+CONTROL readFileSync granted leaf           PASS     PASS       PASS
+CONTROL writeFileSync granted dir           PASS     PASS       PASS
+process.cwd()                               PASS     PASS       PASS
+realpathSync granted leaf                   PASS     PASS       PASS
+realpathSync granted dir                    PASS     PASS       PASS
+statSync C:\                                PASS     PASS       PASS
+statSync C:\Users                           PASS     PASS       PASS
+statSync %USERPROFILE%                      PASS     PASS       PASS
+readdirSync %USERPROFILE% (33 entries)      PASS     PASS       PASS
+readdirSync C:\ (17 entries)                PASS     PASS       PASS
+find-up walk to filesystem root             PASS     PASS       PASS
+bare require from nested dir                PASS     PASS       PASS
+require.resolve ancestor walk               PASS     PASS       PASS
+read a file in %USERPROFILE% (recon)        PASS     PASS       PASS
+NEGCONTROL write %USERPROFILE%              PASS(!)  PASS(!)    DENIED EPERM
+NEGCONTROL write C:\                        DENIED   DENIED     DENIED EPERM
+
+(!) = the negative control SUCCEEDING at none/medium is the evidence that
+MEDIUM IL IS NOT A JAIL: it permits the entire user profile. Only il=low denies
+it. Reads are unaffected at every level.
+
+================================================================
+REAL PACKAGES — 12 laid out with --ignore-scripts, then each real
+lifecycle script run under the jail. Baseline arm = il=none.
+================================================================
+package            hook                script                                    none  low
+------------------ ------------------- ----------------------------------------- ----  ----
+esbuild            postinstall         node install.js                           0     0
+sqlite3            install             prebuild-install -r napi || node-gyp ...   0     0
+keytar             install             prebuild-install || npm run build         0     0
+@sentry/cli        postinstall         node ./scripts/install.js                 0     0*
+simple-git-hooks   postinstall         node ./postinstall.js                     0     0
+yorkie             install             node bin/install.js                       0     0
+core-js            postinstall         node -e "try{require('./postinstall')}..." 0     0
+bufferutil         install             node-gyp-build                            0     0
+msgpackr-extract   install             node-gyp-build-optional-packages          0     0
+@parcel/watcher    install             node scripts/build-from-source.js         0     0
+cpu-features       install             node buildcheck.js > ... && node-gyp ...   1     1
+better-sqlite3     (none)              NOOP -- no lifecycle script, no binding.gyp
+=> 10/11 rc=0 in BOTH arms. cpu-features fails IDENTICALLY in both (no MSVC on
+   this box) -- a baseline failure, NOT a jail failure. Zero jail-attributable
+   exit-code regressions.
+   * @sentry/cli exits 0 with EMPTY output and NO binary in BOTH arms -- the
+     SILENT class. Identical in both arms, so uninformative as a jail test; not
+     counted as a pass.
+
+ARTIFACTS PROVING REAL WORK UNDER THE JAIL (not a silent skip):
+  sqlite3   build\  1,980,416 B   prebuild downloaded + extracted
+  keytar    keytar.node 707,584 B prebuild downloaded from github.com
+  bufferutil prebuilds 341,880 B
+  esbuild   esbuild.exe 11,670,528 B
+  yorkie    .git\hooks\pre-commit 854 B  <-- WRITTEN OUTSIDE ITS PACKAGE DIR,
+            into the host project's .git, covered by the project-root grant.
+            Content confirmed ("#!/bin/sh / #yorkie 2.0.0").
+
+CONFOUND CAUGHT (record it -- it initially read as "the jail broke core-js"):
+core-js printed its funding banner at il=none and NOTHING at il=low. A
+one-variable control (same tree, back to back, none -> low -> none) showed the
+THIRD arm, back at il=none, ALSO printed nothing. So the silence is a persistent
+"already shown" marker living OUTSIDE the wiped tree, not the jail. Without the
+repeat-baseline arm this would have shipped as a false jail regression.
+
+================================================================
+THE ONE REAL COMPAT BREAK, ITS CAUSE, AND ITS REMEDY (MEASURED)
+================================================================
+With a COLD prebuild cache, `prebuild-install` FAILS at low IL:
+  prebuild-install warn install ENOENT: no such file or directory, open
+  'C:\Users\probe2\AppData\Roaming\npm-cache\_prebuilds\bc594a-sqlite3-v6.0.1-
+   napi-v6-win32-x64.tar.gz.<pid>-<rand>.tmp'
+It stages the download into %APPDATA%\npm-cache\_prebuilds, which is
+Medium-labeled, so the low-IL process cannot create/write it.
+
+THREE-ARM DIFFERENTIAL, one variable changed per arm, trees + cache reset between:
+  ARM 1  cold cache, il=none                 sqlite3 rc=0 1,980,416 B | keytar rc=0 707,584 B
+  ARM 2  cold cache, il=low, cache NOT granted  sqlite3 rc=1 absent   | keytar rc=1 absent
+  ARM 3  cold cache, il=low, cache GRANTED (labeled low)
+                                             sqlite3 rc=0 1,980,416 B | keytar rc=0 707,584 B
+=> ARM 1 rules out "the cold cache is the problem". ARM 2 attributes the break to
+   the jail. ARM 3 proves granting the cache dir is a COMPLETE remedy -- artifact
+   sizes byte-identical to ARM 1.
+=> Because the cache was cold, ARM 3's bytes came over the wire from github.com
+   INSIDE the low-IL jail. That is real-package HTTPS under the jail, confirmed
+   by byte count, not by exit code.
+
+REQUIRED WRITE GRANTS (each measured, not guessed):
+  1. the package dir / project root (recursive relabel; 77 ms for 11 entries,
+     3,878 entries for the largest fixture, errors=0)
+  2. %TEMP%  -- else node-gyp/npm/tarball extraction die (measured EPERM)
+  3. the PM cache dir that lifecycle scripts inherit via npm_config_cache
+     -- else prebuild-install/node-pre-gyp die on a cold cache (measured above)
+  4. HKCU is NOT writable at low IL (measured). Narrow exposure: postinstalls
+     that write registry keys. No file-label remedy; would need a registry
+     label, which is the same API on a different object type.
