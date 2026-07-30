@@ -45,6 +45,30 @@ pub(super) enum Source {
     Npmrc,
     /// nub's own built-in value — nothing in the project asked for it.
     Default,
+    /// Running in CI, where the global virtual store is off by default. A
+    /// different default rather than anything the project asked for, but the
+    /// reader still needs it named: the same checkout lays out one way on their
+    /// machine and another on the runner, and nothing in the repo explains why.
+    Ci,
+    /// A declared package matches `disableGlobalVirtualStoreForPackages`, which
+    /// forces the whole install project-local. Carries the package that matched
+    /// because otherwise this is the one layout the reader cannot account for
+    /// from their own config — nothing in it asked, and the trigger is a
+    /// transitive fact about something they depend on.
+    IncompatiblePackage(String),
+}
+
+/// The toolchain's own name for the package that triggered the opt-out. The two
+/// nub seeds are frameworks whose proper names are not their package ids, and
+/// the row is prose the reader is meant to recognize — "react-native projects"
+/// reads as a typo for the thing they actually use. Anything else is a pattern
+/// someone configured themselves, where their own spelling is the right answer.
+fn toolchain_display_name(package: &str) -> &str {
+    match package {
+        "next" => "Next",
+        "react-native" => "React Native",
+        other => other,
+    }
 }
 
 impl Source {
@@ -55,6 +79,11 @@ impl Source {
             Source::WorkspaceYaml => "pnpm-workspace.yaml".to_string(),
             Source::Npmrc => ".npmrc".to_string(),
             Source::Default => "default".to_string(),
+            Source::Ci => "global virtual store auto-disabled in CI".to_string(),
+            Source::IncompatiblePackage(name) => format!(
+                "global virtual store auto-disabled in {} projects",
+                toolchain_display_name(name)
+            ),
         }
     }
 
@@ -406,8 +435,10 @@ const RESOLUTION_SETTINGS: &[(&str, &str, &str)] = &[
 /// `next` and `react-native`, so a stock Next.js project with no config at all
 /// takes this route — is a fact about the MANIFEST, not about any setting: it
 /// reads as unset here while `resolve_global_virtual_store_override` turns it
-/// into a whole-install opt-out. Neither carries a parenthetical, because
-/// neither is a value the reader can find in a config file.
+/// into a whole-install opt-out. Those two get their own [`Source`] variants
+/// rather than no parenthetical at all: they are precisely the layouts a reader
+/// cannot account for by opening their config, so leaving them bare showed a
+/// value that contradicts the documented default with nothing to explain it.
 fn layout_row(index: &SourceIndex) -> (String, Option<Source>) {
     let (linker, linker_source) = index
         .resolve("nodeLinker")
@@ -418,38 +449,47 @@ fn layout_row(index: &SourceIndex) -> (String, Option<Source>) {
     match index.resolve("enableGlobalVirtualStore") {
         Some((shared, source)) if shared == "true" => ("global-virtual-store".to_string(), source),
         Some((_, source)) => ("isolated".to_string(), source),
-        None if aube_util::env::is_ci() => ("isolated".to_string(), None),
+        None if aube_util::env::is_ci() => ("isolated".to_string(), Some(Source::Ci)),
         None => match index.resolve("hoist") {
             Some((hoist, source)) if hoist == "true" => ("isolated".to_string(), source),
-            _ if gvs_incompatible_package(index) => ("isolated".to_string(), None),
-            _ => ("global-virtual-store".to_string(), None),
+            _ => match gvs_incompatible_package(index) {
+                Some(name) => (
+                    "isolated".to_string(),
+                    Some(Source::IncompatiblePackage(name)),
+                ),
+                None => ("global-virtual-store".to_string(), None),
+            },
         },
     }
 }
 
-/// Whether a declared package matches `disableGlobalVirtualStoreForPackages`,
+/// The declared package that matches `disableGlobalVirtualStoreForPackages`,
 /// the whole-install opt-out `resolve_global_virtual_store_override` applies
 /// when nothing set the store bit explicitly. Mirrors that function's guards:
 /// `virtualStoreOnly` suppresses the opt-out, and the CI case is already
 /// decided by the caller before this is reached.
-fn gvs_incompatible_package(index: &SourceIndex) -> bool {
+///
+/// Returns the PACKAGE, not the pattern that caught it: `next` is the name the
+/// reader recognizes from their own manifest, where a glob out of nub's seeded
+/// list is one more thing to go look up. The first match wins — the opt-out is
+/// whole-install, so a second one changes nothing about the layout.
+fn gvs_incompatible_package(index: &SourceIndex) -> Option<String> {
     if index
         .resolve("virtualStoreOnly")
         .is_some_and(|(value, _)| value == "true")
     {
-        return false;
+        return None;
     }
-    let Some((raw, _)) = index.resolve("disableGlobalVirtualStoreForPackages") else {
-        return false;
-    };
+    let (raw, _) = index.resolve("disableGlobalVirtualStoreForPackages")?;
     raw.split(',')
         .map(str::trim)
         .filter(|pattern| !pattern.is_empty())
-        .any(|pattern| {
+        .find_map(|pattern| {
             index
                 .declared_packages
                 .iter()
-                .any(|name| aube_linker::package_name_matches(pattern, name))
+                .find(|name| aube_linker::package_name_matches(pattern, name))
+                .cloned()
         })
 }
 
@@ -925,7 +965,16 @@ mod tests {
             branded_layout_ignored: false,
         };
         if !aube_util::env::is_ci() {
-            assert_eq!(layout_row(&index), ("isolated".to_string(), None));
+            // Named, not bare: `next` is the whole reason this project reads
+            // `isolated` where the documented default is the shared store, and
+            // it appears in no config file the reader could check.
+            assert_eq!(
+                layout_row(&index),
+                (
+                    "isolated".to_string(),
+                    Some(Source::IncompatiblePackage("next".to_string()))
+                )
+            );
         }
 
         // Only a DECLARED name triggers it; the seed on its own must not drag
@@ -1123,7 +1172,9 @@ mod tests {
 
     /// Provenance names the surface the reader can act on: the `nub.jsonc` field
     /// they wrote, the file they edited, the variable they exported, or nub's own
-    /// default.
+    /// default. The last two name no surface at all, because there is none —
+    /// they answer the question a bare value leaves open when the layout was
+    /// decided by the environment or by something the project merely depends on.
     #[test]
     fn provenance_names_the_authored_surface() {
         assert_eq!(
@@ -1137,6 +1188,40 @@ mod tests {
             Source::Env("npm_config_node_linker".to_string()).render(),
             "npm_config_node_linker"
         );
+        assert_eq!(
+            Source::Ci.render(),
+            "global virtual store auto-disabled in CI"
+        );
+        assert_eq!(
+            Source::IncompatiblePackage("next".to_string()).render(),
+            "global virtual store auto-disabled in Next projects"
+        );
+    }
+
+    /// The seeded triggers are frameworks whose proper names are not their
+    /// package ids; a user-configured pattern has no proper name to know, so it
+    /// renders as whatever they wrote.
+    #[test]
+    fn a_seeded_trigger_renders_the_toolchains_own_name() {
+        assert_eq!(
+            Source::IncompatiblePackage("react-native".to_string()).render(),
+            "global virtual store auto-disabled in React Native projects"
+        );
+        assert_eq!(
+            Source::IncompatiblePackage("some-local-pkg".to_string()).render(),
+            "global virtual store auto-disabled in some-local-pkg projects"
+        );
+    }
+
+    /// Neither derived source is an authored surface, so a project that wrote a
+    /// layout key somewhere nub no longer reads still gets pointed at the file
+    /// that would work. The pointer displaces the reason deliberately: knowing
+    /// where to set it is what the reader can act on, and setting it explicitly
+    /// wins over both routes anyway.
+    #[test]
+    fn a_derived_layout_source_is_not_an_authored_surface() {
+        assert!(!Source::Ci.is_authored_layout_surface());
+        assert!(!Source::IncompatiblePackage("next".to_string()).is_authored_layout_surface());
     }
 
     /// Every setting attributable to `nub.jsonc` must map to a field that exists
