@@ -32,6 +32,7 @@ mod assets;
 pub mod bundle;
 mod external;
 mod inject;
+mod loaders;
 
 pub use bundle::{BundleOptions, SourcemapMode};
 
@@ -315,6 +316,7 @@ fn assemble_app(
     let mut files: AppFiles = bundled
         .files
         .iter()
+        .chain(&bundled.assets)
         .map(|f| (layout.bundle_path(&f.name), f.bytes.clone()))
         .collect();
 
@@ -323,8 +325,8 @@ fn assemble_app(
         // pointed at — always a mistake, and silent until the binary runs.
         if files.iter().any(|(name, _)| *name == asset.rel) {
             bail!(
-                "--include would overwrite compiled output: {} is also a bundle chunk. \
-                 Rename the file or drop it from --include.",
+                "--include would overwrite compiled output: {} is also a bundle chunk \
+                 or a loader-emitted asset. Rename the file or drop it from --include.",
                 asset.rel
             );
         }
@@ -838,6 +840,7 @@ mod tests {
                 conditions: Vec::new(),
                 external: Vec::new(),
                 tsconfig: None,
+                loaders: Vec::new(),
             },
         }
     }

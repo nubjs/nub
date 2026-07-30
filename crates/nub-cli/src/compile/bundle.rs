@@ -48,6 +48,8 @@ use rolldown_common::{
 use rolldown_error::{BuildDiagnostic, DiagnosticOptions, EventKind};
 use rolldown_utils::indexmap::FxIndexMap;
 
+use super::loaders;
+
 /// Where the source map goes. `Linked` and `External` both emit a real `.map`;
 /// they differ only in whether the bundle references it — which for a compiled
 /// artifact also decides whether the map ships INSIDE the executable or lands
@@ -97,6 +99,9 @@ pub struct BundleOptions {
     pub external: Vec<String>,
     /// Explicit tsconfig; `None` keeps Rolldown's auto-discovery.
     pub tsconfig: Option<PathBuf>,
+    /// `EXT=TYPE` from `--loader`, applied over nub's defaults. See
+    /// [`crate::compile::loaders`].
+    pub loaders: Vec<String>,
 }
 
 /// One emitted file: a chunk, or a source map that travels with it.
@@ -112,6 +117,11 @@ pub struct BundleResult {
     pub files: Vec<BundledFile>,
     /// `--sourcemap=external` maps: emitted, unreferenced, not shipped.
     pub detached_maps: Vec<BundledFile>,
+    /// Loader-emitted assets — the `file` loader's payload, plus anything
+    /// Rolldown emitted for a `new URL(…, import.meta.url)` reference. Kept
+    /// APART from [`Self::files`] because those are re-parsed as JavaScript by
+    /// [`reject_invalid_chunks`], which a `.wasm` would rightly fail.
+    pub assets: Vec<BundledFile>,
 }
 
 pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
@@ -128,11 +138,20 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "main".into());
 
+    let loader_plan = loaders::plan(&opts.loaders)?;
+
     let options = BundlerOptions {
         input: Some(vec![InputItem {
             name: Some(stem),
             import,
         }]),
+        module_types: (!loader_plan.module_types.is_empty()).then(|| {
+            loader_plan
+                .module_types
+                .iter()
+                .map(|(ext, ty)| (ext.clone(), ty.clone()))
+                .collect()
+        }),
         cwd: Some(cwd),
         format: Some(OutputFormat::Esm),
         platform: Some(Platform::Node),
@@ -174,7 +193,11 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
     };
 
     let scan = std::sync::Arc::new(DynamicImportScan::default());
-    let plugins: Vec<SharedPluginable> = vec![std::sync::Arc::clone(&scan) as SharedPluginable];
+    let files_plugin = std::sync::Arc::new(loaders::FilePlugin::new(&loader_plan));
+    let plugins: Vec<SharedPluginable> = vec![
+        std::sync::Arc::clone(&scan) as SharedPluginable,
+        std::sync::Arc::clone(&files_plugin) as SharedPluginable,
+    ];
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -197,6 +220,14 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
     let mut entry = None;
     let mut files = Vec::new();
     let mut maps = Vec::new();
+    let mut assets: Vec<BundledFile> = files_plugin
+        .take()
+        .into_iter()
+        .map(|a| BundledFile {
+            name: a.name,
+            bytes: a.bytes,
+        })
+        .collect();
     for asset in &output.assets {
         match asset {
             Output::Chunk(c) => {
@@ -208,18 +239,28 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
                     bytes: c.code.as_bytes().to_vec(),
                 });
             }
-            // Only source maps are collected. Nothing configures a loader that
-            // emits other assets, and `--include` never routes through the
-            // bundler at all — it embeds bytes straight from disk, which is what
-            // makes it verbatim.
-            Output::Asset(a) if a.filename.ends_with(".map") => maps.push(BundledFile {
-                name: a.filename.to_string(),
-                bytes: match &a.source {
+            Output::Asset(a) => {
+                let bytes = match &a.source {
                     StrOrBytes::Str(s) => s.as_bytes().to_vec(),
                     StrOrBytes::Bytes(b) => b.clone(),
-                },
-            }),
-            Output::Asset(_) => {}
+                };
+                let file = BundledFile {
+                    name: a.filename.to_string(),
+                    bytes,
+                };
+                // Everything Rolldown emits that is NOT a source map is an asset
+                // the chunks reference by name — today, the file a `new URL(…,
+                // import.meta.url)` points at. Dropping it (as this arm did
+                // before loaders existed) ships a chunk naming a file that is not
+                // in the payload: a runtime ENOENT with nothing failing at build
+                // time. `--include` still never routes through here — it embeds
+                // bytes straight from disk, which is what makes it verbatim.
+                if a.filename.ends_with(".map") {
+                    maps.push(file);
+                } else {
+                    assets.push(file);
+                }
+            }
         }
     }
     let entry = entry.context("the bundler emitted no entry chunk")?;
@@ -239,11 +280,54 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
     };
     files.extend(maps);
 
+    reject_nested_chunks(&files, &assets)?;
+
     Ok(BundleResult {
         entry,
         files,
         detached_maps,
+        assets,
     })
+}
+
+/// Assert the flat-output invariant the `file` loader rests on.
+///
+/// A `file` import evaluates to `new URL("./<name>", import.meta.url)`, resolved
+/// against whichever CHUNK the importing module was bundled into. That is only
+/// the asset's location while every chunk and every nub-emitted asset sit in one
+/// directory. Rolldown's defaults do put them there, but `chunkFileNames` is
+/// configurable and a future flag could nest them — at which point every `file`
+/// import would silently resolve to a path that does not exist, on the deploy
+/// machine, with no build-time signal. Checking is a string scan; the failure it
+/// prevents is a shipped-broken binary.
+///
+/// Rolldown's OWN assets are exempt: it rewrites those references itself
+/// (`compute_relative_path`), so a nested `assets/x-HASH.png` stays correct.
+fn reject_nested_chunks(chunks: &[BundledFile], assets: &[BundledFile]) -> Result<()> {
+    let nested: Vec<&str> = chunks
+        .iter()
+        .map(|f| f.name.as_str())
+        .filter(|n| n.contains('/'))
+        .collect();
+    if !nested.is_empty() {
+        bail!(
+            "the bundler emitted chunks in a subdirectory ({}), which breaks the \
+             path a `file` import resolves to — assets are emitted as siblings of \
+             the chunks and located relative to them.",
+            nested.join(", ")
+        );
+    }
+    // nub's own asset names are single components by construction; anything else
+    // here came from a code path that bypassed `loaders::asset_name`.
+    for a in assets {
+        if !nub_core::compile::is_safe_relative_name(&a.name) {
+            bail!(
+                "the bundler emitted an asset with an unusable name: {:?}",
+                a.name
+            );
+        }
+    }
+    Ok(())
 }
 
 fn absolutize(path: &Path) -> PathBuf {
@@ -846,6 +930,7 @@ mod tests {
             conditions: Vec::new(),
             external: Vec::new(),
             tsconfig: None,
+            loaders: Vec::new(),
         }
     }
 
@@ -977,6 +1062,125 @@ mod tests {
         bundle(&dir.join("entry.ts"), &o)
             .expect("externalizing the package removes its unanalyzable site from the graph");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The `file` loader's whole contract, asserted against a REAL bundle: the
+    // asset leaves the graph as bytes in `assets` (never in `files`, which are
+    // re-parsed as JS), and the module it leaves behind resolves its path
+    // against `import.meta.url` rather than the cwd. A relative path — what
+    // Rolldown's built-in asset loader yields — would read from wherever the
+    // binary was launched, which works only in the directory it was tested from.
+    #[test]
+    fn the_file_loader_emits_bytes_and_a_cwd_independent_path() {
+        let dir = std::env::temp_dir().join(format!("nub-file-loader-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("blob.bin"), b"\x00\x01BINARY").unwrap();
+        std::fs::write(
+            dir.join("entry.ts"),
+            b"import p from './blob.bin';\nglobalThis.OUT = p;\n",
+        )
+        .unwrap();
+
+        let mut o = opts();
+        o.minify = false;
+        let res = bundle(&dir.join("entry.ts"), &o).expect("a .bin import must compile");
+
+        assert_eq!(res.assets.len(), 1, "the bytes must ship as an asset");
+        assert_eq!(
+            res.assets[0].bytes, b"\x00\x01BINARY",
+            "the asset must be embedded verbatim"
+        );
+        assert!(
+            res.assets.iter().all(|a| !a.name.contains('/')),
+            "an asset must be a flat sibling of the chunks: {:?}",
+            res.assets.iter().map(|a| &a.name).collect::<Vec<_>>()
+        );
+        let code = String::from_utf8(res.files[0].bytes.clone()).unwrap();
+        assert!(
+            code.contains("import.meta.url"),
+            "the path must be resolved against the module, got:\n{code}"
+        );
+        assert!(
+            code.contains(&res.assets[0].name),
+            "the chunk must name the asset it ships, got:\n{code}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Control for the test above: without the `file` mapping, the SAME source
+    // ships no bytes. Without this the positive test proves nothing — "the .bin
+    // import compiled" is equally true of an import that was quietly ignored.
+    //
+    // The pre-loader outcome is deliberately asserted as "no asset", not "build
+    // error", because it is BOTH depending on the bytes: content that fails to
+    // parse as JavaScript errors, while content that happens to parse (a binary
+    // whose bytes read as identifiers) builds clean and leaves the import
+    // `undefined` at runtime. That second case is the silent one this loader
+    // exists to eliminate, and a control demanding an error would miss it.
+    #[test]
+    fn without_the_file_loader_no_bytes_are_shipped() {
+        let dir = std::env::temp_dir().join(format!("nub-file-ctl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("blob.bin"), b"\x00\x01BINARY").unwrap();
+        std::fs::write(
+            dir.join("entry.ts"),
+            b"import p from './blob.bin';\nglobalThis.OUT = p;\n",
+        )
+        .unwrap();
+
+        let mut o = opts();
+        o.minify = false;
+        o.loaders = vec![".bin=js".to_string()];
+        if let Ok(res) = bundle(&dir.join("entry.ts"), &o) {
+            assert!(
+                res.assets.is_empty(),
+                "only the file loader may emit asset bytes, got {:?}",
+                res.assets.iter().map(|a| &a.name).collect::<Vec<_>>()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // `.md` is the text half. Both spellings must land on the same string: the
+    // bare import, and the standards-track attribute — which Rolldown 1.2.0
+    // ignores entirely, so it must not contradict the extension map either.
+    #[test]
+    fn markdown_loads_as_text_with_or_without_the_import_attribute() {
+        for spec in [
+            "import t from './doc.md';",
+            "import t from './doc.md' with { type: 'text' };",
+        ] {
+            let dir = std::env::temp_dir().join(format!(
+                "nub-text-{}-{}",
+                std::process::id(),
+                spec.len()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("doc.md"), "# Title\n").unwrap();
+            std::fs::write(
+                dir.join("entry.ts"),
+                format!("{spec}\nglobalThis.OUT = t;\n"),
+            )
+            .unwrap();
+
+            let mut o = opts();
+            o.minify = false;
+            let res = bundle(&dir.join("entry.ts"), &o)
+                .unwrap_or_else(|e| panic!("{spec} must compile, got: {e:#}"));
+            let code = String::from_utf8(res.files[0].bytes.clone()).unwrap();
+            assert!(
+                code.contains("# Title"),
+                "{spec} must inline the file's text, got:\n{code}"
+            );
+            assert!(
+                res.assets.is_empty(),
+                "text is inlined, so nothing should be emitted beside the chunk"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]
