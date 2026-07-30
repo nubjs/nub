@@ -24,6 +24,7 @@ pub const ERR_AUBE_LOCKFILE_AMBIGUOUS: &str = "ERR_AUBE_LOCKFILE_AMBIGUOUS";
 // ── resolver ─────────────────────────────────────────────────────────
 pub const ERR_AUBE_NO_MATCHING_VERSION: &str = "ERR_AUBE_NO_MATCHING_VERSION";
 pub const ERR_AUBE_NO_MATURE_MATCHING_VERSION: &str = "ERR_AUBE_NO_MATURE_MATCHING_VERSION";
+pub const ERR_AUBE_RELEASE_AGE_MISSING_TIME: &str = "ERR_AUBE_RELEASE_AGE_MISSING_TIME";
 pub const ERR_AUBE_REGISTRY_ERROR: &str = "ERR_AUBE_REGISTRY_ERROR";
 pub const ERR_AUBE_UNKNOWN_CATALOG: &str = "ERR_AUBE_UNKNOWN_CATALOG";
 pub const ERR_AUBE_UNKNOWN_CATALOG_ENTRY: &str = "ERR_AUBE_UNKNOWN_CATALOG_ENTRY";
@@ -215,6 +216,12 @@ pub const ALL: &[CodeMeta] = &[
         category: category::RESOLVER,
         description: "A version satisfying the range exists but every candidate was younger than `minimumReleaseAge` and `minimumReleaseAgeStrict=true`.",
         exit_code: Some(21),
+    },
+    CodeMeta {
+        name: ERR_AUBE_RELEASE_AGE_MISSING_TIME,
+        category: category::RESOLVER,
+        description: "The registry served no publish time for any version satisfying the range, so `minimumReleaseAge` could not be evaluated (`minimumReleaseAgeStrict=true`). Distinct from `ERR_AUBE_NO_MATURE_MATCHING_VERSION` so CI tooling can tell a registry serving no `time` metadata from a genuinely too-new release.",
+        exit_code: Some(28),
     },
     CodeMeta {
         name: ERR_AUBE_BLOCKED_EXOTIC_SUBDEP,

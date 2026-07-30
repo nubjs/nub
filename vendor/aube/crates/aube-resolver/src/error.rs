@@ -8,8 +8,16 @@ use aube_registry::Packument;
 pub enum Error {
     #[error("no version of {} matches range `{}`", .0.name, .0.range)]
     NoMatch(Box<NoMatchDetails>),
-    #[error("{}", .0.headline())]
+    #[error(
+        "no version of {} matching {} is older than {} minute(s) (minimumReleaseAgeStrict=true)",
+        .0.name, .0.range, .0.minutes
+    )]
     AgeGate(Box<AgeGateDetails>),
+    #[error(
+        "cannot check the publish age of {}@{} — the registry served no publish time for any matching version",
+        .0.name, .0.range
+    )]
+    ReleaseAgeMissingTime(Box<UndatedDetails>),
     #[error("registry error for {0}: {1}")]
     Registry(String, String),
     #[error(
@@ -79,37 +87,29 @@ pub struct AgeGateDetails {
     pub minutes: u64,
     pub importer: String,
     pub ancestors: Vec<(String, String)>,
-    /// Version strings that satisfied the range but were blocked by
-    /// the age gate, sorted newest-first. Empty when the cutoff was
-    /// tighter than every published version.
+    /// Version strings that satisfied the range, carried a publish time,
+    /// and were blocked for being newer than the cutoff — sorted
+    /// newest-first. Undated versions are excluded: they were blocked for
+    /// a different reason and listing them here would claim evidence the
+    /// registry never served.
     pub gated: Vec<String>,
-    /// The packument carried no publish time for ANY satisfying version,
-    /// so nothing was blocked for being too new — every candidate was
-    /// blocked for having an undeterminable age (#581). That is a
-    /// different operator problem with different remedies, and reporting
-    /// it as an ordinary age gate sends people to widen a window that was
-    /// never the cause.
-    pub publish_times_missing: bool,
 }
 
-impl AgeGateDetails {
-    /// The headline. Splitting on `publish_times_missing` keeps one error
-    /// variant and one code while still telling the truth: "nothing is old
-    /// enough" and "nothing's age can be established" are the same refusal
-    /// for opposite reasons.
-    pub(crate) fn headline(&self) -> String {
-        if self.publish_times_missing {
-            format!(
-                "cannot establish the publish age of any version of {} matching `{}` — the registry served no publish times",
-                self.name, self.range
-            )
-        } else {
-            format!(
-                "no version of {} matching {} is older than {} minute(s) (minimumReleaseAgeStrict=true)",
-                self.name, self.range, self.minutes
-            )
-        }
-    }
+/// Context for `ReleaseAgeMissingTime`: the gate could not be evaluated at
+/// all because the registry dated none of the candidates (#581). A separate
+/// error from `AgeGate` because the remedies are disjoint — no window would
+/// ever have admitted these versions, so the ordinary "loosen
+/// `minimumReleaseAge`" advice is wrong here.
+#[derive(Debug)]
+pub struct UndatedDetails {
+    pub name: String,
+    pub range: String,
+    pub importer: String,
+    pub ancestors: Vec<(String, String)>,
+    /// Range-satisfying versions the packument carries no publish time for,
+    /// sorted newest-first. Shown so the reader can see the range itself
+    /// matched.
+    pub undated: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -144,6 +144,7 @@ impl miette::Diagnostic for Error {
         Some(Box::new(match self {
             Self::NoMatch(_) => ERR_AUBE_NO_MATCHING_VERSION,
             Self::AgeGate(_) => ERR_AUBE_NO_MATURE_MATCHING_VERSION,
+            Self::ReleaseAgeMissingTime(_) => ERR_AUBE_RELEASE_AGE_MISSING_TIME,
             Self::Registry(_, _) => ERR_AUBE_REGISTRY_ERROR,
             Self::UnknownCatalog(_) => ERR_AUBE_UNKNOWN_CATALOG,
             Self::UnknownCatalogEntry(_) => ERR_AUBE_UNKNOWN_CATALOG_ENTRY,
@@ -158,6 +159,7 @@ impl miette::Diagnostic for Error {
         match self {
             Self::NoMatch(d) => Some(Box::new(format_no_match_help(d))),
             Self::AgeGate(d) => Some(Box::new(format_age_gate_help(d))),
+            Self::ReleaseAgeMissingTime(d) => Some(Box::new(format_undated_help(d))),
             Self::Registry(name, msg) => Some(Box::new(format_registry_help(name, msg))),
             Self::UnknownCatalog(d) => Some(Box::new(format_unknown_catalog_help(d))),
             Self::UnknownCatalogEntry(d) => Some(Box::new(format_unknown_catalog_entry_help(d))),
@@ -274,47 +276,64 @@ fn resolve_dist_tag_range(packument: &Packument, range_str: &str) -> String {
     }
 }
 
+/// Range-satisfying versions, newest-first, partitioned by whether the
+/// packument dates them. `pick_version` has already decided which of the two
+/// age failures happened; this recovers the version lists for the message.
+/// Recomputed from the packument rather than threaded out of the pick because
+/// both age-gate paths are uncommon and the recompute is dwarfed by resolution.
+///
+/// Mirrors `pick_version`'s dist-tag handling: a `task.range` that is a tag
+/// name (`"latest"`, `"next"`) resolves to its concrete version before
+/// parsing. Without it the semver parse fails silently and the diagnostic
+/// drops its version list entirely.
+fn satisfying_versions(task: &ResolveTask, packument: &Packument) -> (Vec<String>, Vec<String>) {
+    let effective = resolve_dist_tag_range(packument, &task.range);
+    let Ok(range) = node_semver::Range::parse(&effective) else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut matching: Vec<(node_semver::Version, String)> = Vec::new();
+    for ver in packument.versions.keys() {
+        let Ok(v) = node_semver::Version::parse(ver) else {
+            continue;
+        };
+        if v.satisfies(&range) {
+            matching.push((v, ver.clone()));
+        }
+    }
+    matching.sort_by(|a, b| b.0.cmp(&a.0));
+    matching
+        .into_iter()
+        .map(|(_, s)| s)
+        .partition(|ver| packument.time.contains_key(ver))
+}
+
 pub(crate) fn build_age_gate(
     task: &ResolveTask,
     packument: &Packument,
     minutes: u64,
 ) -> AgeGateDetails {
-    // Mirror `pick_version`'s dist-tag handling: if `task.range` is a
-    // tag name (e.g. `"latest"`, `"next"`), resolve it to the concrete
-    // version string before parsing. Without this the semver parse
-    // fails silently and the help text drops the "blocked by age gate"
-    // line entirely, losing the most useful diagnostic.
-    let effective = resolve_dist_tag_range(packument, &task.range);
-    let range = node_semver::Range::parse(&effective).ok();
-    let mut gated: Vec<(node_semver::Version, String)> = Vec::new();
-    if let Some(r) = range {
-        for ver in packument.versions.keys() {
-            let Ok(v) = node_semver::Version::parse(ver) else {
-                continue;
-            };
-            if !v.satisfies(&r) {
-                continue;
-            }
-            gated.push((v, ver.clone()));
-        }
-    }
-    gated.sort_by(|a, b| b.0.cmp(&a.0));
-    // No satisfying version carries a publish time => nothing was blocked for
-    // being too new; the whole range was blocked for being undateable. A
-    // populated map with a hole in it is NOT this case — there the rest of the
-    // document dates fine and the hole is the anomaly worth reporting as one.
-    let publish_times_missing = !gated.is_empty()
-        && !gated
-            .iter()
-            .any(|(_, ver)| packument.time.contains_key(ver));
+    let (dated, _) = satisfying_versions(task, packument);
     AgeGateDetails {
         name: task.name.clone(),
         range: task.range.clone(),
         minutes,
         importer: task.importer.clone(),
         ancestors: task.ancestors.to_vec(),
-        gated: gated.into_iter().map(|(_, s)| s).collect(),
-        publish_times_missing,
+        gated: dated,
+    }
+}
+
+pub(crate) fn build_release_age_missing_time(
+    task: &ResolveTask,
+    packument: &Packument,
+) -> UndatedDetails {
+    let (_, undated) = satisfying_versions(task, packument);
+    UndatedDetails {
+        name: task.name.clone(),
+        range: task.range.clone(),
+        importer: task.importer.clone(),
+        ancestors: task.ancestors.to_vec(),
+        undated,
     }
 }
 
@@ -356,20 +375,6 @@ fn format_age_gate_help(d: &AgeGateDetails) -> String {
     let mut s = String::new();
     push_importer(&mut s, &d.importer);
     push_chain(&mut s, &d.ancestors, &d.name);
-    if d.publish_times_missing {
-        s.push_str(
-            "the registry served no `time` data for this package, so no version's age can be \
-             checked against the cutoff\n",
-        );
-        s.push_str("to proceed: add `");
-        s.push_str(&d.name);
-        s.push_str(
-            "` to `minimumReleaseAgeExclude`, set `minimumReleaseAgeStrict=false` to fall back \
-             to the lowest satisfying version, or set `minimumReleaseAge=0` to turn the window \
-             off for this project",
-        );
-        return s;
-    }
     if !d.gated.is_empty() {
         s.push_str(&format!(
             "blocked by age gate: {}\n",
@@ -384,6 +389,41 @@ fn format_age_gate_help(d: &AgeGateDetails) -> String {
     s.push_str("to bypass: loosen `minimumReleaseAge` in .npmrc, set `minimumReleaseAgeStrict=false` to fall back to the lowest satisfying version, or add `");
     s.push_str(&d.name);
     s.push_str("` to `minimumReleaseAgeExclude`");
+    s
+}
+
+/// Deliberately omits `minimumReleaseAgeStrict=false`. Loosening strictness
+/// here does not produce a mature pick — it produces the newest matching
+/// version with no age evidence at all, which is the silent bypass #581
+/// closed. The remedies offered are the ones that leave the gate meaningful.
+fn format_undated_help(d: &UndatedDetails) -> String {
+    let mut s = String::new();
+    push_importer(&mut s, &d.importer);
+    push_chain(&mut s, &d.ancestors, &d.name);
+    if !d.undated.is_empty() {
+        s.push_str(&format!(
+            "undated matching versions: {}\n",
+            d.undated
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    s.push_str(
+        "the minimumReleaseAge window is checked against the registry's `time` metadata, which \
+         omits these versions — no window would admit them\n",
+    );
+    s.push_str(
+        "to proceed: unset `registry-supports-time-field` if it is on (it suppresses the \
+         full-packument fetch that carries `time`), check the registry config in .npmrc, add `",
+    );
+    s.push_str(&d.name);
+    s.push_str(
+        "` to `minimumReleaseAgeExclude`, or set `minimumReleaseAge=0` to turn the window off \
+         for this project",
+    );
     s
 }
 

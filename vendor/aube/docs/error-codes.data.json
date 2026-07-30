@@ -61,6 +61,12 @@
       "exit_code": 21
     },
     {
+      "name": "ERR_AUBE_RELEASE_AGE_MISSING_TIME",
+      "category": "Resolver",
+      "description": "The registry served no publish time for any version satisfying the range, so `minimumReleaseAge` could not be evaluated (`minimumReleaseAgeStrict=true`). Distinct from `ERR_AUBE_NO_MATURE_MATCHING_VERSION` so CI tooling can tell a registry serving no `time` metadata from a genuinely too-new release.",
+      "exit_code": 28
+    },
+    {
       "name": "ERR_AUBE_BLOCKED_EXOTIC_SUBDEP",
       "category": "Resolver",
       "description": "Transitive dep used a `git:` / `file:` / `tarball` specifier and `blockExoticSubdeps=true`.",
@@ -924,6 +930,12 @@
       "name": "WARN_AUBE_UNSUPPORTED_PLATFORM_INSTALL",
       "category": "Resolver",
       "description": "A required (non-optional) dep declared a platform aube doesn't satisfy; installing anyway.",
+      "exit_code": null
+    },
+    {
+      "name": "WARN_AUBE_SKIPPED_OPTIONAL_NO_MATCHING_VERSION",
+      "category": "Resolver",
+      "description": "No version of an optional dep matched its range, so the dep was skipped instead of failing the install.",
       "exit_code": null
     },
     {

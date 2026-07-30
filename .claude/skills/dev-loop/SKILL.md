@@ -93,6 +93,19 @@ cargo test -p nub-core
 # in the napi-free nub-cache-key crate, covered by `cargo test -p nub-cache-key`.)
 (cd crates/nub-native && cargo test)
 
+# The VENDORED AUBE crates are their own workspace too, and here the CWD is
+# load-bearing for correctness, not just resolution. `vendor/aube/.cargo/config.toml`
+# pins `RUST_TEST_THREADS = "1"` for the whole aube workspace — a deliberate choice
+# over per-test mutexes, because several aube-util tests mutate the process
+# environment and setenv/getenv are not thread-safe. Cargo discovers config from the
+# CWD, NOT from `--manifest-path`, so running from the repo root SILENTLY BYPASSES
+# the pin and runs those tests in parallel. You then get failures that CI never
+# sees (`set_allow_builds_*`, `pnpmfile::tests::detect_*`) and that look like real
+# bugs. CI gets this right via `working-directory: vendor/aube`; do the same:
+(cd vendor/aube && cargo test -p aube-resolver)   # RIGHT — inherits the serial pin
+# cargo test --manifest-path vendor/aube/Cargo.toml -p aube-resolver
+#   ^ WRONG from the repo root: resolves the crate but drops the pin.
+
 # Everything (slow):
 cargo test          # or `make test`
 ```

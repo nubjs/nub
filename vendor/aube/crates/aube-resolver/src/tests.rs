@@ -59,7 +59,12 @@ fn no_match_help_flags_prerelease_only_packument() {
 
 #[test]
 fn build_age_gate_resolves_dist_tag_range() {
-    let packument = make_packument("foo", &["1.0.0", "2.0.0", "3.0.0"], "3.0.0");
+    let mut packument = make_packument("foo", &["1.0.0", "2.0.0", "3.0.0"], "3.0.0");
+    // Dated, because `gated` reports only versions the registry actually
+    // dated — an undated one is the separate `ReleaseAgeMissingTime` failure.
+    packument
+        .time
+        .insert("3.0.0".to_string(), "2026-07-01T00:00:00.000Z".to_string());
     let task = ResolveTask {
         name: "foo".into(),
         range: "latest".into(),
@@ -199,7 +204,6 @@ fn age_gate_help_lists_gated_versions_and_bypass() {
         importer: "packages/app".into(),
         ancestors: vec![("parent".into(), "1.0.0".into())],
         gated: vec!["4.17.21".into(), "4.17.20".into()],
-        publish_times_missing: false,
     }));
     let help = err.help().expect("help set").to_string();
     assert!(help.contains("importer: packages/app"));
@@ -212,21 +216,26 @@ fn age_gate_help_lists_gated_versions_and_bypass() {
 /// A registry that publishes no `time` data blocks the whole range, but for a
 /// reason the ordinary age-gate wording actively misleads on: it would list a
 /// years-old version as "blocked by age gate" and offer a wider window as the
-/// remedy, when no window would ever have helped.
+/// remedy, when no window would ever have helped. Loosening strictness is
+/// likewise not offered — it installs the newest match with no age evidence.
 #[test]
-fn age_gate_names_missing_publish_times_as_the_cause() {
-    let err = Error::AgeGate(Box::new(AgeGateDetails {
+fn release_age_missing_time_names_the_registry_as_the_cause() {
+    let err = Error::ReleaseAgeMissingTime(Box::new(UndatedDetails {
         name: "lodash".into(),
         range: "^4".into(),
-        minutes: 1440,
         importer: ".".into(),
         ancestors: vec![],
-        gated: vec!["4.17.21".into(), "4.17.20".into()],
-        publish_times_missing: true,
+        undated: vec!["4.17.21".into(), "4.17.20".into()],
     }));
+    assert_eq!(
+        err.code().expect("code set").to_string(),
+        "ERR_AUBE_RELEASE_AGE_MISSING_TIME",
+        "the two age failures must be branchable by code, not just by wording"
+    );
+    let headline = err.to_string();
     assert!(
-        err.to_string().contains("served no publish times"),
-        "headline must name the real cause, got: {err}"
+        headline.contains("lodash") && headline.contains("served no publish time"),
+        "headline must name the package and the real cause, got: {headline}"
     );
     let help = err.help().expect("help set").to_string();
     assert!(
@@ -234,18 +243,20 @@ fn age_gate_names_missing_publish_times_as_the_cause() {
         "must not imply the versions were too new: {help}"
     );
     assert!(
-        !help.contains("loosen `minimumReleaseAge`"),
-        "widening the window is not a remedy here: {help}"
+        !help.contains("minimumReleaseAgeStrict"),
+        "loosening strictness picks an undated version, so it is not a remedy: {help}"
     );
-    assert!(help.contains("minimumReleaseAgeExclude"));
+    assert!(help.contains("undated matching versions: 4.17.21, 4.17.20"));
+    assert!(help.contains("`lodash` to `minimumReleaseAgeExclude`"));
     assert!(help.contains("minimumReleaseAge=0"));
 }
 
 /// The mixed case stays an ordinary age gate: a populated `time` map with a
 /// hole for one version dates the rest fine, so the missing-times wording
-/// would be wrong.
+/// would be wrong. The gated list carries only the dated version — claiming
+/// the undated one was "blocked by age gate" asserts evidence we never had.
 #[test]
-fn age_gate_with_a_partially_dated_packument_is_not_the_missing_times_case() {
+fn age_gate_lists_only_versions_the_registry_dated() {
     let mut packument = make_packument("lodash", &["4.17.20", "4.17.21"], "4.17.21");
     packument.time.insert(
         "4.17.20".to_string(),
@@ -263,10 +274,10 @@ fn age_gate_with_a_partially_dated_packument_is_not_the_missing_times_case() {
         ancestors: Arc::from([]),
         range_from_override: false,
     };
-    let d = build_age_gate(&task, &packument, 1440);
-    assert!(
-        !d.publish_times_missing,
-        "one dated version is enough to make this an ordinary age gate"
+    assert_eq!(build_age_gate(&task, &packument, 1440).gated, ["4.17.20"]);
+    assert_eq!(
+        build_release_age_missing_time(&task, &packument).undated,
+        ["4.17.21"]
     );
 }
 
@@ -951,7 +962,7 @@ fn test_pick_version_strict_distinguishes_age_gate_from_no_match() {
         true,
         |_, _| false,
     );
-    assert!(matches!(result, PickResult::AgeGated));
+    assert!(matches!(result, PickResult::AgeGated(AgeGateCause::TooNew)));
 
     // No version satisfies the range at all → still NoMatch even
     // in strict mode.
@@ -1189,7 +1200,7 @@ fn test_pick_version_strict_returns_age_gated_when_cutoff_excludes_all() {
         true,
         |_, _| false,
     );
-    assert!(matches!(result, PickResult::AgeGated));
+    assert!(matches!(result, PickResult::AgeGated(AgeGateCause::TooNew)));
 }
 
 #[test]
@@ -1273,7 +1284,7 @@ fn test_pick_version_age_exempt_time_cutoff_age_gates_in_strict_mode() {
         true,
         |_, _| true,
     );
-    assert!(matches!(result, PickResult::AgeGated));
+    assert!(matches!(result, PickResult::AgeGated(AgeGateCause::TooNew)));
 }
 
 #[test]
@@ -1302,7 +1313,7 @@ fn test_pick_version_lenient_fallback_respects_time_cutoff() {
         false,
         |_, _| true,
     );
-    assert!(matches!(result, PickResult::AgeGated));
+    assert!(matches!(result, PickResult::AgeGated(AgeGateCause::TooNew)));
 }
 
 #[test]
@@ -1365,7 +1376,7 @@ fn test_pick_version_minimum_release_age_exclude_version_union() {
         is_age_exempt,
     );
     assert!(
-        matches!(result, PickResult::AgeGated),
+        matches!(result, PickResult::AgeGated(AgeGateCause::TooNew)),
         "a version not on the exclude list stays age-gated"
     );
 }
@@ -2699,7 +2710,10 @@ fn pick_version_missing_time_fails_closed_unless_modified_proves_maturity() {
     // old enough, so both are gated rather than waved through.
     let bare = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
     assert!(
-        matches!(pick(&bare), PickResult::AgeGated),
+        matches!(
+            pick(&bare),
+            PickResult::AgeGated(AgeGateCause::Undeterminable)
+        ),
         "a packument with no time data at all must not clear the cutoff"
     );
 
@@ -2718,7 +2732,10 @@ fn pick_version_missing_time_fails_closed_unless_modified_proves_maturity() {
     let mut churning = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
     churning.modified = Some("2026-06-01T00:00:00.000Z".to_string());
     assert!(
-        matches!(pick(&churning), PickResult::AgeGated),
+        matches!(
+            pick(&churning),
+            PickResult::AgeGated(AgeGateCause::Undeterminable)
+        ),
         "modified > cutoff leaves each version's age undeterminable"
     );
 
@@ -2735,6 +2752,35 @@ fn pick_version_missing_time_fails_closed_unless_modified_proves_maturity() {
         "1.0.0",
         "an undated version in a dated map is excluded, not admitted"
     );
+}
+
+/// When both refusals are in play, the provably-too-new one is what gets
+/// reported: waiting or widening the window is a real remedy for it, and the
+/// undateable wording would hide that. Only an all-undated range reports as
+/// undeterminable.
+#[test]
+fn pick_version_reports_a_dated_too_new_candidate_over_an_undated_one() {
+    const CUTOFF: &str = "2020-01-01T00:00:00.000Z";
+    let mut mixed = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
+    mixed.modified = Some("2026-06-01T00:00:00.000Z".to_string());
+    // 1.0.0 is dated and too new; 1.1.0 is undated in a map the `created` /
+    // `modified` bookkeeping keys do not populate, so its age is unprovable.
+    mixed
+        .time
+        .insert("1.0.0".to_string(), "2024-01-01T00:00:00.000Z".to_string());
+    assert!(matches!(
+        pick_version(
+            &mixed,
+            "^1.0.0",
+            None,
+            false,
+            Some(CUTOFF),
+            None,
+            true,
+            |_, _| false,
+        ),
+        PickResult::AgeGated(AgeGateCause::TooNew)
+    ));
 }
 
 /// Lenient mode keeps upstream aube's default: an undeterminable publish age
@@ -5653,7 +5699,7 @@ fn pick_version_for_add_strict_refuses_gated_pick() {
     let gate = mra(1440, true, &[]);
     assert!(matches!(
         pick_version_for_add(&packument, "foo", "1.1.0", Some(&gate)),
-        PickResult::AgeGated
+        PickResult::AgeGated(AgeGateCause::TooNew)
     ));
 }
 

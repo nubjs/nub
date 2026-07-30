@@ -21,7 +21,9 @@ mod trust;
 mod types;
 
 pub use direct_dep_info::DirectDepInfo;
-pub use error::{AgeGateDetails, CatalogDetails, Error, ExoticSubdepDetails, NoMatchDetails};
+pub use error::{
+    AgeGateDetails, CatalogDetails, Error, ExoticSubdepDetails, NoMatchDetails, UndatedDetails,
+};
 pub use local_source::resolve_exec_script_path;
 pub use package_ext::is_deprecation_allowed;
 pub use peer_context::{
@@ -32,7 +34,7 @@ pub use platform::{SupportedArchitectures, is_supported};
 pub use primer::{
     PruneStats as PrimerPruneStats, popular_package_names, prune_cache as prune_primer_cache,
 };
-pub use semver_util::{PickResult, pick_version_for_add};
+pub use semver_util::{AgeGateCause, PickResult, pick_version_for_add};
 pub use trust::{
     MissingTimeDetails as MissingTrustTimeDetails, PriorTrustEvidence, TrustCheckError,
     TrustDowngradeDetails, check_no_downgrade, evidence_for, strongest_prior_evidence,
@@ -65,8 +67,8 @@ use aube_lockfile::{DirectDep, LocalSource, LockedPackage, LockfileGraph};
 use aube_manifest::PackageJson;
 #[cfg(test)]
 use error::{
-    RegistryErrorKind, build_age_gate, build_no_match, classify_registry_error,
-    format_registry_help,
+    RegistryErrorKind, build_age_gate, build_no_match, build_release_age_missing_time,
+    classify_registry_error, format_registry_help,
 };
 #[cfg(test)]
 use local_source::{dep_path_for, should_block_exotic_subdep};

@@ -28,7 +28,7 @@ use crate::package_ext::{
     apply_package_extensions, apply_package_extensions_to_deps, pick_override_spec,
 };
 use crate::semver_util::{
-    PickResult, Regime, classify_regime, pick_version, range_resolves_via_dist_tag,
+    AgeGateCause, PickResult, Regime, classify_regime, pick_version, range_resolves_via_dist_tag,
     version_satisfies,
 };
 use crate::{
@@ -963,7 +963,7 @@ impl<'a> ResolveDriver<'a> {
                     self.resolver.cache.insert(registry_name.clone(), live);
                 }
                 PickResult::Found(meta) => break meta.clone(),
-                PickResult::AgeGated | PickResult::NoMatch
+                PickResult::AgeGated(_) | PickResult::NoMatch
                     if self.fetcher.take_primer_seeded(&registry_name) =>
                 {
                     let fetch_start = std::time::Instant::now();
@@ -1008,20 +1008,32 @@ impl<'a> ResolveDriver<'a> {
                 // never opted into the supply-chain age gate, so
                 // the failure should report as a plain no-match
                 // instead of a misleading "older than 0 minutes".
-                PickResult::AgeGated => match self.resolver.minimum_release_age.as_ref() {
-                    Some(mra) => {
-                        return Err(Error::AgeGate(Box::new(error::build_age_gate(
-                            &task,
-                            packument,
-                            mra.minutes,
-                        ))));
+                PickResult::AgeGated(cause) => {
+                    match (self.resolver.minimum_release_age.as_ref(), cause) {
+                        // An undeterminable age is a different refusal with
+                        // disjoint remedies (#581): no window would have
+                        // admitted these versions, so it carries its own code
+                        // and message rather than an age gate the reader is
+                        // told to widen.
+                        (Some(_), AgeGateCause::Undeterminable) => {
+                            return Err(Error::ReleaseAgeMissingTime(Box::new(
+                                error::build_release_age_missing_time(&task, packument),
+                            )));
+                        }
+                        (Some(mra), AgeGateCause::TooNew) => {
+                            return Err(Error::AgeGate(Box::new(error::build_age_gate(
+                                &task,
+                                packument,
+                                mra.minutes,
+                            ))));
+                        }
+                        (None, _) => {
+                            return Err(Error::NoMatch(Box::new(error::build_no_match(
+                                &task, packument,
+                            ))));
+                        }
                     }
-                    None => {
-                        return Err(Error::NoMatch(Box::new(error::build_no_match(
-                            &task, packument,
-                        ))));
-                    }
-                },
+                }
                 // An optional dep whose range matches nothing is skipped
                 // rather than fatal, matching the fetch-failure and
                 // platform-mismatch paths. A registry carrying only some
