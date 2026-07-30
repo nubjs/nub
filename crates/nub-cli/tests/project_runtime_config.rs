@@ -265,6 +265,89 @@ console.log(JSON.stringify({
             "--node must suppress the runtime snapshot on the dlx-fallback path: {compat}"
         );
     }
+
+    /// The `dlx` / `x` spellings of the same ephemeral runner. They reach the
+    /// engine verb instead of `nubx`'s clap surface, so `--node` gets its own
+    /// argv handling there — and dlx's positional is `trailing_var_arg` +
+    /// `allow_hyphen_values`, which used to make an unrecognized `--node` the
+    /// package name rather than a usage error.
+    fn assert_dlx_verb_node_flag(&self) {
+        let pkg_dir = self._temp.path().join("dlx-verb-pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            r#"{ "name": "rtc-dlx-verb-probe", "version": "1.0.0", "bin": { "rtc-dlx-verb-probe": "./bin.js" } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pkg_dir.join("bin.js"),
+            "#!/usr/bin/env node\nconsole.log(JSON.stringify({ stack: Error.stackTraceLimit, snapshot: process.env.__NUB_RUNTIME_CONFIG || null, argv: process.argv.slice(2) }));\n",
+        )
+        .unwrap();
+
+        let package_spec = format!("file:{}", pkg_dir.display());
+        // `[pre] <verb> [post] -p <spec> rtc-dlx-verb-probe [tail]` — `pre`
+        // covers `nub --node dlx`, `post` covers `nub dlx --node`, and `tail`
+        // is the fetched tool's own argv.
+        let run = |pre: &[&str], verb: &str, post: &[&str], tail: &[&str]| {
+            let mut args: Vec<&str> = pre.to_vec();
+            args.push(verb);
+            args.extend(post);
+            args.extend(["-p", package_spec.as_str(), "rtc-dlx-verb-probe"]);
+            args.extend(tail);
+            let output = self.command().args(&args).output().unwrap();
+            assert!(
+                output.status.success(),
+                "nub {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let line = stdout
+                .lines()
+                .find(|l| l.starts_with('{'))
+                .unwrap_or_else(|| panic!("no JSON line in: {stdout}"));
+            serde_json::from_str::<serde_json::Value>(line).unwrap()
+        };
+
+        let augmented = run(&[], "dlx", &[], &[]);
+        assert_eq!(
+            augmented["stack"], 23,
+            "a dlx-fetched bin is augmented by default: {augmented}"
+        );
+        assert!(
+            !augmented["snapshot"].is_null(),
+            "a dlx-fetched bin sees the runtime snapshot by default: {augmented}"
+        );
+
+        for (verb, pre, post) in [
+            ("dlx", &["--node"][..], &[][..]),
+            ("dlx", &[][..], &["--node"][..]),
+            ("x", &["--node"][..], &[][..]),
+            ("x", &[][..], &["--node"][..]),
+        ] {
+            let compat = run(pre, verb, post, &[]);
+            assert_eq!(
+                compat["stack"], 10,
+                "nub {pre:?} {verb} {post:?} must reach the fetched bin's node shim: {compat}"
+            );
+            assert!(
+                compat["snapshot"].is_null(),
+                "nub {pre:?} {verb} {post:?} must suppress the runtime snapshot: {compat}"
+            );
+        }
+
+        // Three-position rule: past the tool name the flag is the tool's.
+        let forwarded = run(&[], "dlx", &[], &["--node"]);
+        assert_eq!(
+            forwarded["argv"],
+            serde_json::json!(["--node"]),
+            "a post-tool --node forwards verbatim: {forwarded}"
+        );
+        assert_eq!(
+            forwarded["stack"], 23,
+            "a post-tool --node must not disable augmentation: {forwarded}"
+        );
+    }
 }
 
 #[test]
@@ -287,6 +370,15 @@ fn runtime_snapshot_reaches_file_script_node_argv0_exec_and_nubx() {
 fn nubx_node_flag_reaches_the_dlx_fallback_fetch_path() {
     let fixture = Fixture::new();
     fixture.assert_nubx_dlx_fallback_node_flag();
+}
+
+/// `nubx`, `nub dlx`, and `nub x` are the same command, so `--node` must work
+/// on all three — in either flag order, and without being stolen from the
+/// fetched tool when it appears after the tool name.
+#[test]
+fn node_flag_works_on_the_dlx_and_x_spellings_in_either_order() {
+    let fixture = Fixture::new();
+    fixture.assert_dlx_verb_node_flag();
 }
 
 #[test]

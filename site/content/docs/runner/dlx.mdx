@@ -29,6 +29,16 @@ Run a shell one-liner with the fetched package's bin on `PATH`:
 nub dlx -p cowsay -c 'cowsay hi | tr a-z A-Z'
 ```
 
+## `--node`
+
+Run the fetched tool with runtime augmentation disabled — see [the runtime overview](/docs/runtime#--node) for the full contract. The fetch, the cache, and the project's Node pin all still apply; only the augmentation is off.
+
+```bash
+nub dlx --node prisma generate
+nub --node dlx prisma generate  # either side of the verb
+nub dlx prisma generate --node  # past the tool name it's Prisma's flag, not Nub's
+```
+
 ## Lifecycle scripts
 
 A fetched package's `preinstall`/`install`/`postinstall` scripts stay skipped — downloading a tool is not consent to run its dependencies' build scripts. Approve a package with `--allow-build=<pkg>`, the same allowlist [`nub install`](/docs/install) uses.

@@ -537,8 +537,62 @@ fn run_ignored_builds(typed: &str, args: &[String]) -> Result<i32> {
     )
 }
 
+/// `dlx` flags whose value is a SEPARATE token (`-p left-pad`), so
+/// [`take_dlx_node_flag`]'s scan does not mistake a flag's value for the
+/// command positional. Mirrors `DlxArgs` plus its flattened network args;
+/// `--allow-build` is `require_equals` and needs no entry.
+const DLX_VALUE_FLAGS: &[&str] = &[
+    "-p",
+    "--package",
+    "--registry",
+    "--fetch-retries",
+    "--fetch-retry-factor",
+    "--fetch-retry-maxtimeout",
+    "--fetch-retry-mintimeout",
+    "--fetch-timeout",
+];
+
+/// Split nub's own `--node` off a `dlx`/`x` argv → `(compat_mode, rest)`.
+///
+/// It has to come off BEFORE clap: `DlxArgs.params` is `trailing_var_arg` +
+/// `allow_hyphen_values`, so an unrecognized leading flag does not error — it
+/// becomes the command positional and dlx asks the registry for a package
+/// named `--node` (and swallows any `-p` behind it). Only a `--node` in the
+/// flag region, before the command, is nub's; after the command the token is
+/// the fetched tool's and forwards verbatim — the three-position rule
+/// `split_subcommand_argv` already applies to `nubx`, this command's other
+/// spelling.
+fn take_dlx_node_flag(args: &[String]) -> (bool, Vec<String>) {
+    let mut compat = false;
+    let mut kept = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--node" {
+            compat = true;
+            i += 1;
+            continue;
+        }
+        if !arg.starts_with('-') || arg == "--" {
+            break;
+        }
+        kept.push(arg.clone());
+        i += 1;
+        if DLX_VALUE_FLAGS.contains(&arg.as_str()) && i < args.len() {
+            kept.push(args[i].clone());
+            i += 1;
+        }
+    }
+    kept.extend(args[i..].iter().cloned());
+    (compat, kept)
+}
+
 fn run_dlx(typed: &str, args: &[String]) -> Result<i32> {
-    let (globals, verb): (_, aube::commands::dlx::DlxArgs) = parse_or_return!(typed, args);
+    // `nub --node dlx <tool>` and `nub dlx --node <tool>` both land here as
+    // `--node` in the flag region: the leading-flag normalizer in cli.rs moves a
+    // pre-verb run-flag to just after the verb.
+    let (compat_mode, args) = take_dlx_node_flag(args);
+    let (globals, verb): (_, aube::commands::dlx::DlxArgs) = parse_or_return!(typed, &args);
     // Bare `nub dlx` / leading `--help`: the trailing var-arg swallowed the
     // flag, and the engine's internal help path would print *aube's* CLI
     // help. Render nub's own (the same surface we just parsed), rewritten.
@@ -548,7 +602,19 @@ fn run_dlx(typed: &str, args: &[String]) -> Result<i32> {
             None | Some("--help" | "-h")
         )
     {
-        let help = verb_command::<aube::commands::dlx::DlxArgs>(typed).render_long_help();
+        // `--node` is nub's, not the engine's: it comes off argv before clap
+        // (`take_dlx_node_flag`) and so has no derive-level home on `DlxArgs`.
+        // Declared here purely so the documented surface matches the real one —
+        // giving it to the PARSE command instead would let clap claim a
+        // post-command `--node` that belongs to the fetched tool.
+        let help = verb_command::<aube::commands::dlx::DlxArgs>(typed)
+            .arg(
+                clap::Arg::new("node")
+                    .long("node")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Disable Nub's runtime augmentation for this invocation."),
+            )
+            .render_long_help();
         println!("{}", present::rewrite_help(help.to_string().trim_end()));
         return Ok(0);
     }
@@ -563,9 +629,7 @@ fn run_dlx(typed: &str, args: &[String]) -> Result<i32> {
     finish_code_quieted(
         &globals.output,
         &session,
-        // `nub dlx` has no `--node` flag of its own; an ambient `NODE_COMPAT`
-        // already reaches the fetched bin via normal env inheritance.
-        aube::commands::dlx::run_in(verb, None, crate::cli::dlx_child_env(false)),
+        aube::commands::dlx::run_in(verb, None, crate::cli::dlx_child_env(compat_mode)),
     )
 }
 

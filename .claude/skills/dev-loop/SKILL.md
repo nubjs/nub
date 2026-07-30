@@ -99,6 +99,30 @@ cargo test          # or `make test`
 
 The `nub-cli` integration suite lives in `crates/nub-cli/tests/*.rs` — e.g. `pm_verbs`, `install_engine`, `info_engine`, `cli_grammar_parity`, `pm_identity`, `pm_two_mode`, `resolution_compat`, `node_compat`, `version_tiers`, `workspace_run`, the `pm_shim*` / `*_config` files. Use the file stem as `--test <stem>`.
 
+### NEVER judge pass/fail from a piped `cargo test`
+
+```bash
+cargo test 2>&1 | tail -80        # ← the pipe's status is tail's, not cargo's
+echo $?                           # 0, even with failures above
+```
+
+A pipeline reports the LAST command's status, so `| tail`, `| grep`, `| head` all
+report success while tests were failing. The failure lines scroll past the window
+you kept, and a green-looking `$?` is what you act on. This has produced a
+confident "all green" on a red suite in this repo more than once.
+
+Judge from the process itself:
+
+```bash
+cargo test; echo "EXIT=$?"                      # status is cargo's
+cargo test > /tmp/t.log 2>&1; echo "EXIT=$?"    # then grep the file at leisure
+set -o pipefail                                 # if you must pipe
+```
+
+Same trap for `clippy` and any gate whose verdict is its exit code. Grepping the
+output for `FAILED` is not equivalent either: a suite that fails to COMPILE prints
+`error[E…]` and no `FAILED` line at all, so a grep-based check reads it as clean.
+
 ## Step 4 — Before pushing: the exact CI cheap gates
 
 Match `.github/workflows/ci.yml` exactly — a scoped `-p` without `--all-targets` misses test-code lints:
