@@ -114,7 +114,7 @@ json5 = "0.4"
 # Reads (`serde`) + comment/order-preserving read-modify-write (`cst`) of JSONC —
 # the transpiler's tsconfig parsing and nub's own global config file
 # (~/.config/nub/nub.jsonc).
-jsonc-parser = { version = "0.24", features = ["serde", "cst"] }
+jsonc-parser = { version = "0.32.4", features = ["serde", "cst"] }
 # napi 3 (not 2): oxc_napi 0.132.0 and oxc_sourcemap[napi] are built against
 # napi 3, and a single cdylib cannot mix napi-2 and napi-3 `#[napi]` derives
 # (the OxcError / SourceMap return types would fail to bridge). napi 3 is the

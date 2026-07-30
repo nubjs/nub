@@ -39,7 +39,7 @@ repository = "https://github.com/nubjs/nub"
 # header comment). Only the subset nub-native actually uses is duplicated here.
 [workspace.dependencies]
 json5 = "0.4"
-jsonc-parser = { version = "0.24", features = ["serde"] }
+jsonc-parser = { version = "0.32.4", features = ["serde"] }
 # napi 3 (not 2): oxc_napi 0.132.0 and oxc_sourcemap[napi] are built against
 # napi 3, and a single cdylib cannot mix napi-2 and napi-3 `#[napi]` derives
 # (the OxcError / SourceMap return types would fail to bridge). napi 3 is the

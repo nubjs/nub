@@ -32,7 +32,20 @@ pub(crate) const MAX_NESTING_DEPTH: usize = 64;
 /// to wrap in its own error type.
 pub(crate) fn parse_to_value(text: &str) -> Result<Option<Value>, String> {
     check_nesting_depth(text)?;
-    jsonc_parser::parse_to_serde_value(text, &ParseOptions::default()).map_err(|e| e.to_string())
+    let parsed: Option<Value> = jsonc_parser::parse_to_serde_value(text, &ParseOptions::default())
+        .map_err(|e| e.to_string())?;
+    if parsed.is_some() {
+        return Ok(parsed);
+    }
+    // Deserializing into `Option<T>` maps a literal `null` document to `None`,
+    // which is indistinguishable from the empty one — and the callers treat an
+    // empty document as a valid EMPTY CONFIG, so collapsing the two would turn a
+    // file nub must reject into one it silently accepts, dropping every setting
+    // in it (`dlx.consent` included). The AST reports presence, not value.
+    let present = jsonc_parser::parse_to_value(text, &ParseOptions::default())
+        .map_err(|e| e.to_string())?
+        .is_some();
+    Ok(present.then_some(Value::Null))
 }
 
 /// Largest externally-authored file read into memory. A fully-populated
@@ -75,6 +88,15 @@ pub(crate) fn read_guarded(path: &Path) -> std::io::Result<String> {
             ),
         ));
     }
+    // Windows editors and PowerShell's `Out-File` write a UTF-8 BOM by default,
+    // and the JSONC parser reports one as a syntax error at line 1 column 1 —
+    // pointing at a file that looks perfectly correct in the editor that wrote
+    // it. Stripping it here covers every reader and the CST writer alike, so a
+    // BOM'd file round-trips instead of being rejected wholesale.
+    let bytes = bytes
+        .strip_prefix(&[0xEF, 0xBB, 0xBF][..])
+        .map_or(bytes.as_slice(), |rest| rest)
+        .to_vec();
     String::from_utf8(bytes)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.utf8_error()))
 }
@@ -83,7 +105,12 @@ pub(crate) fn read_guarded(path: &Path) -> std::io::Result<String> {
 /// and comments. Bytes are safe to scan directly: every delimiter is ASCII and
 /// UTF-8 continuation bytes are all >= 0x80, so no multi-byte character can be
 /// mistaken for one.
-fn check_nesting_depth(text: &str) -> Result<(), String> {
+///
+/// Callable on its own because the CST writer in [`crate::config`] hands the same
+/// externally-authored text to `jsonc_parser::cst`, whose descent is unbounded in
+/// exactly the same way — the guard belongs to the text, not to one parser entry
+/// point.
+pub(crate) fn check_nesting_depth(text: &str) -> Result<(), String> {
     #[derive(Clone, Copy)]
     enum State {
         Code,
@@ -170,6 +197,23 @@ mod tests {
         assert!(
             parse_to_value(&nest(2000)).is_err(),
             "the CI-crashing input"
+        );
+    }
+
+    /// `Ok(None)` means "the document held no value", never "the value was
+    /// null" — the callers read the first as a valid EMPTY config, so merging
+    /// the two would make a `null` file silently drop every setting instead of
+    /// being rejected. `parse_to_serde_value`'s `Option<T>` target collapses
+    /// them, which is why this is asserted rather than assumed.
+    #[test]
+    fn a_null_document_is_a_value_and_an_empty_one_is_not() {
+        assert_eq!(parse_to_value("null").unwrap(), Some(Value::Null));
+        for empty in ["", "   \n\t ", "// just a comment\n", "/* block */"] {
+            assert_eq!(parse_to_value(empty).unwrap(), None, "{empty:?}");
+        }
+        assert_eq!(
+            parse_to_value(r#"{ "a": null }"#).unwrap(),
+            Some(serde_json::json!({ "a": null }))
         );
     }
 

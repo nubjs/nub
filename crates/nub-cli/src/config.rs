@@ -35,6 +35,8 @@ use std::path::{Path, PathBuf};
 use jsonc_parser::ParseOptions;
 use jsonc_parser::cst::{CstInputValue, CstObject, CstRootNode};
 
+use crate::project_config::ConfigError;
+
 /// The `exec` object name and the key within it. One `const` pair so the reader,
 /// the writer, and the config-verb interception can't drift.
 const TABLE: &str = "exec";
@@ -120,19 +122,54 @@ pub fn implicit_dlx() -> ImplicitDlx {
         .unwrap_or(ImplicitDlx::Prompt)
 }
 
-/// Get the root object of `text`, creating a fresh `{}` when the file is
-/// absent/empty/unparseable or its root value is not an object. The returned
-/// `CstObject` borrows into `root`, so the caller MUST keep `root` alive for the
-/// whole edit (the CST panics if the root is dropped while a descendant is used).
-fn root_object(text: &str) -> (CstRootNode, CstObject) {
-    let parse = |t: &str| {
-        CstRootNode::parse(t, &ParseOptions::default())
-            .ok()
-            .and_then(|root| root.ensure_object_value().map(|obj| (root, obj)))
+/// Get the root object of the file at `path`, creating a fresh `{}` only when
+/// there is genuinely nothing to preserve — an absent, empty, or comment-only
+/// file.
+///
+/// Every other failure is an ERROR, never a blank slate. The caller writes this
+/// document back OVER `path`, so treating a file nub cannot read or parse as
+/// empty silently replaces a hand-authored, commented config with the single key
+/// being set. Reads already refuse these same files, and a `set` that destroys
+/// what a `get` declined to read is the worst outcome this surface can produce.
+///
+/// The returned `CstObject` borrows into `root`, so the caller MUST keep `root`
+/// alive for the whole edit (the CST panics if the root is dropped while a
+/// descendant is used).
+fn root_object(path: &Path) -> std::io::Result<(CstRootNode, CstObject)> {
+    let refuse = |e: ConfigError| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "{}\n\x20\x20nothing was written — fix the file, or delete it, and retry",
+                e.in_file(path)
+            ),
+        )
     };
-    // Best-effort: a malformed or non-object existing file is replaced by a fresh
-    // object rather than surfacing a parse error on a `set`.
-    parse(text).unwrap_or_else(|| parse("{}").expect("`{}` parses to an object"))
+    let text = match crate::jsonc::read_guarded(path) {
+        Ok(text) => text,
+        // Absence is the one blank slate — the file is about to be created.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(refuse(ConfigError::Io(e))),
+    };
+
+    // Bounded before the CST parser sees it, for the same reason the value
+    // reader is: an over-nested document overflows the stack, which aborts the
+    // process instead of failing. It also keeps the writer from accepting a file
+    // the next read would refuse.
+    crate::jsonc::check_nesting_depth(&text).map_err(|e| refuse(ConfigError::Parse(e)))?;
+    let root = CstRootNode::parse(&text, &ParseOptions::default())
+        .map_err(|e| refuse(ConfigError::Parse(e.to_string())))?;
+    // `_or_create`, never `_or_set`: it creates the object only when there is NO
+    // root value (the empty/comment-only document, where creating it is right and
+    // the comments survive) and returns `None` for a root that exists and is not
+    // an object, rather than overwriting it.
+    let obj = root.object_value_or_create().ok_or_else(|| {
+        refuse(ConfigError::Type {
+            path: "<root>".into(),
+            expected: "an object",
+        })
+    })?;
+    Ok((root, obj))
 }
 
 /// Get-or-create the object property `name` of `obj`.
@@ -143,12 +180,12 @@ fn root_object(text: &str) -> (CstRootNode, CstObject) {
 /// FIRST prop by name, so a stray non-object one must be removed before the
 /// append or the re-fetch would still find it and be `None`.
 fn ensure_object(obj: &CstObject, name: &str) -> CstObject {
-    obj.get_object(name).unwrap_or_else(|| {
+    obj.object_value(name).unwrap_or_else(|| {
         if let Some(stray) = obj.get(name) {
             stray.remove();
         }
         obj.append(name, CstInputValue::Object(Vec::new()));
-        obj.get_object(name)
+        obj.object_value(name)
             .expect("just-appended object is present")
     })
 }
@@ -167,8 +204,7 @@ pub(crate) fn set_json_path(
     segments: &[&str],
     value: CstInputValue,
 ) -> std::io::Result<()> {
-    let text = crate::jsonc::read_guarded(path).unwrap_or_default();
-    let (root, obj) = root_object(&text);
+    let (root, obj) = root_object(path)?;
 
     let (leaf, parents) = segments.split_last().expect("a setting path has a leaf");
     let mut cursor = obj;
@@ -177,10 +213,31 @@ pub(crate) fn set_json_path(
     }
     match cursor.get(leaf) {
         Some(prop) => prop.set_value(value),
-        None => cursor.append(leaf, value),
+        None => {
+            cursor.append(leaf, value);
+        }
     }
 
-    aube_util::fs_atomic::atomic_write(path, root.to_string().as_bytes())
+    write_preserving_mode(path, &root.to_string())
+}
+
+/// Write through the atomic temp-and-rename, then restore the mode the file had.
+///
+/// The rename installs a NEW inode carrying the temp file's default permissions,
+/// so a config the user had narrowed — `600` on a file they consider private —
+/// would silently come back `644`. Widening someone's permissions is not ours to
+/// do as a side effect of setting a key. A brand-new file keeps the default;
+/// there is no prior mode to restore, and inventing a narrower one would be its
+/// own surprise.
+fn write_preserving_mode(path: &Path, text: &str) -> std::io::Result<()> {
+    let prior = std::fs::metadata(path).ok().map(|m| m.permissions());
+    aube_util::fs_atomic::atomic_write(path, text.as_bytes())?;
+    if let Some(mode) = prior {
+        // Best effort: the bytes are already committed, and failing the whole
+        // write because the mode could not be restored would be the worse trade.
+        let _ = std::fs::set_permissions(path, mode);
+    }
+    Ok(())
 }
 
 /// Remove the key at `segments`, preserving the rest of the file. An absent
@@ -191,17 +248,23 @@ pub(crate) fn unset_json_path(path: &Path, segments: &[&str]) -> std::io::Result
     let Ok(text) = crate::jsonc::read_guarded(path) else {
         return Ok(false);
     };
+    // Same stack-overflow guard the setter applies: an unbounded CST descent
+    // aborts the process rather than failing, so it must not be reached even on
+    // the path whose every other failure is a benign "nothing to remove".
+    if crate::jsonc::check_nesting_depth(&text).is_err() {
+        return Ok(false);
+    }
     let Ok(root) = CstRootNode::parse(&text, &ParseOptions::default()) else {
         return Ok(false);
     };
-    let Some(obj) = root.root_value().and_then(|v| v.as_object()) else {
+    let Some(obj) = root.value().and_then(|v| v.as_object()) else {
         return Ok(false);
     };
 
     let (leaf, parents) = segments.split_last().expect("a setting path has a leaf");
     let mut cursor = obj;
     for name in parents {
-        let Some(next) = cursor.get_object(name) else {
+        let Some(next) = cursor.object_value(name) else {
             return Ok(false);
         };
         cursor = next;
@@ -211,7 +274,7 @@ pub(crate) fn unset_json_path(path: &Path, segments: &[&str]) -> std::io::Result
     };
     prop.remove();
 
-    aube_util::fs_atomic::atomic_write(path, root.to_string().as_bytes())?;
+    write_preserving_mode(path, &root.to_string())?;
     Ok(true)
 }
 
@@ -443,6 +506,123 @@ mod tests {
             assert_eq!(loaded.values.preload, Some(Vec::new()));
             assert_eq!(implicit_dlx(), ImplicitDlx::Never);
         });
+    }
+
+    /// The write path must never treat a file it cannot read or parse as a blank
+    /// slate: it writes its document back OVER the file, so doing so replaces a
+    /// hand-authored config with the one key being set. Each input here destroyed
+    /// the whole file before the guard existed.
+    #[test]
+    fn set_refuses_a_file_it_cannot_read_or_parse_and_leaves_it_byte_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nub.jsonc");
+        let over_depth = format!("{{\"a\": {}1{}}}", "[".repeat(70), "]".repeat(70));
+        let cases: [&[u8]; 4] = [
+            // Malformed: a brace the author forgot to close.
+            b"{\n  // hand-authored\n  \"preload\": [\"./a.ts\"],\n",
+            // Parses, but the root is not an object.
+            b"[\"not an object\"]",
+            // Not UTF-8 at all: unreadable, which is not the same as absent.
+            b"{ \"tsconfig\": \"caf\xe9.json\" }",
+            over_depth.as_bytes(),
+        ];
+        for original in cases {
+            std::fs::write(&path, original).unwrap();
+            let err = set_json_path(&path, &["nodeCompat"], CstInputValue::Bool(true))
+                .expect_err("a file that cannot be parsed is not a blank slate");
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                original,
+                "left the file byte-identical: {err}"
+            );
+        }
+
+        // A UTF-8 BOM is NOT one of these. Windows editors write one by default,
+        // so refusing it would reject a file that looks correct to its author;
+        // the reader strips it, and the write edits through it and keeps the
+        // rest of the document intact.
+        std::fs::write(
+            &path,
+            b"\xef\xbb\xbf{\n  // kept\n  \"nodeCompat\": false\n}\n",
+        )
+        .unwrap();
+        set_json_path(&path, &["preload"], CstInputValue::Array(Vec::new()))
+            .expect("a BOM is stripped, not a parse failure");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("// kept"), "kept the comment: {after}");
+        assert!(after.contains("\"preload\""), "applied the edit: {after}");
+
+        // The blank slates that legitimately remain: absent, empty, and
+        // comment-only, the last of which keeps its comment.
+        std::fs::remove_file(&path).unwrap();
+        for (blank, keeps) in [("", ""), ("{}", ""), ("// keep me\n", "// keep me")] {
+            if !blank.is_empty() {
+                std::fs::write(&path, blank).unwrap();
+            }
+            set_json_path(&path, &["nodeCompat"], CstInputValue::Bool(true)).unwrap();
+            let body = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                body.contains("\"nodeCompat\": true"),
+                "wrote into {blank:?}"
+            );
+            assert!(
+                body.contains(keeps),
+                "kept {keeps:?} from {blank:?}: {body}"
+            );
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+
+    /// A CRLF file is what a Windows editor writes. It panicked the CST writer
+    /// until the `jsonc-parser` bump, so this pins both that the edit succeeds
+    /// and that it does not convert the author's line endings to LF.
+    #[test]
+    fn set_handles_crlf_files_and_keeps_their_line_endings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nub.jsonc");
+        std::fs::write(
+            &path,
+            "{\r\n  // note\r\n  \"tsconfig\": \"./a.json\"\r\n}\r\n",
+        )
+        .unwrap();
+
+        set_json_path(&path, &["nodeCompat"], CstInputValue::Bool(true)).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("\"nodeCompat\": true"), "{body}");
+        assert!(body.contains("// note"), "{body}");
+        assert_eq!(
+            body.matches('\n').count(),
+            body.matches("\r\n").count(),
+            "every newline stayed CRLF: {body:?}"
+        );
+    }
+
+    /// A string value is escaped by the writer, so a Windows path or a quote
+    /// cannot produce a file nub itself can no longer parse.
+    #[test]
+    fn set_escapes_values_that_would_otherwise_break_the_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nub.jsonc");
+        for value in [
+            r"C:\Users\dev\tsconfig.json",
+            r"ends-with-a-backslash\",
+            "a\"b",
+            "a\nb",
+        ] {
+            std::fs::write(&path, "{}").unwrap();
+            set_json_path(
+                &path,
+                &["tsconfig"],
+                CstInputValue::String(value.to_string()),
+            )
+            .unwrap();
+            let body = std::fs::read_to_string(&path).unwrap();
+            let parsed = crate::jsonc::parse_to_value(&body)
+                .unwrap_or_else(|e| panic!("wrote a document it cannot parse ({e}): {body}"))
+                .expect("a document with one key");
+            assert_eq!(parsed["tsconfig"], serde_json::json!(value), "{body}");
+        }
     }
 
     #[test]

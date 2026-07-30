@@ -300,10 +300,14 @@ fn global_file(field: &Field) -> anyhow::Result<PathBuf> {
 
 /// Read one field's raw value out of `path`. A file that does not parse is an
 /// error rather than an absence: reporting `undefined` for a file nub would
-/// refuse to run would be a wrong answer, not a missing one.
+/// refuse to run would be a wrong answer, not a missing one. A file that exists
+/// but cannot be READ (over the size cap, not UTF-8, not a regular file) fails
+/// the same run for the same reason, so only genuine absence is an absence.
 fn read_at(path: &Path, field: &Field) -> anyhow::Result<Option<Value>> {
-    let Ok(text) = crate::jsonc::read_guarded(path) else {
-        return Ok(None);
+    let text = match crate::jsonc::read_guarded(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(anyhow::anyhow!("{}", ConfigError::Io(e).in_file(path))),
     };
     let value = crate::jsonc::parse_to_value(&text)
         .map_err(|e| anyhow::anyhow!("{}", ConfigError::Parse(e).in_file(path)))?;

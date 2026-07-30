@@ -58,7 +58,9 @@ pub fn parse_json5(source: String) -> napi::Result<serde_json::Value> {
 /// Parse JSONC (JSON with comments) source into a JS value.
 #[napi]
 pub fn parse_jsonc(source: String) -> napi::Result<serde_json::Value> {
-    jsonc_parser::parse_to_serde_value(&source, &Default::default())
+    // The `Option` is the deserialization target, not a wrapper the parser adds:
+    // it is `None` for the empty document.
+    jsonc_parser::parse_to_serde_value::<Option<serde_json::Value>>(&source, &Default::default())
         .map_err(|e| napi::Error::from_reason(format!("JSONC parse error: {e}")))?
         .ok_or_else(|| napi::Error::from_reason("JSONC: empty document".to_string()))
 }
