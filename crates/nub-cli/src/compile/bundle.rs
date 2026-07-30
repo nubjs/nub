@@ -38,8 +38,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use oxc_ast::ast::{Expression, NewExpression, Program};
 use rolldown::plugin::__inner::SharedPluginable;
 use rolldown::plugin::{
-    HookTransformArgs, HookTransformOutput, HookTransformOutputMap, HookTransformReturn, HookUsage,
-    Plugin, SharedTransformPluginContext,
+    HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput,
+    HookResolveIdReturn, HookTransformArgs, HookTransformOutput, HookTransformOutputMap,
+    HookTransformReturn, HookUsage, Plugin, PluginContext, SharedLoadPluginContext,
+    SharedTransformPluginContext,
 };
 use rolldown::{BundlerBuilder, BundlerOptions, InputItem};
 use rolldown_common::bundler_options::{BundlerTransformOptions, Either, JsxOptions};
@@ -156,6 +158,14 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
                 .collect()
         }),
         cwd: Some(cwd),
+        // THESE TWO ARE A PRECONDITION, NOT A DEFAULT. Two things below assume
+        // `Esm` + `Node` and would go quietly wrong if `nub build` makes either a
+        // knob. [`reject_invalid_chunks`] parses every emitted chunk as `mjs`, so a
+        // CJS chunk would go UNVALIDATED — key its `SourceType` on the format.
+        // [`CjsPathGlobals`] splices `import.meta.url`, which Rolldown polyfills
+        // ONLY for `(Node, Cjs)` and leaves verbatim everywhere else — and under a
+        // CJS format Rolldown already declares both globals, so the plugin is
+        // redundant there and should simply be skipped.
         format: Some(OutputFormat::Esm),
         platform: Some(Platform::Node),
         minify: Some(RawMinifyOptions::Bool(opts.minify)),
@@ -207,10 +217,16 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
         collected: Arc::clone(&collected),
         files: Arc::clone(&files_plugin),
     });
+    // `CjsPathGlobals` runs LAST so the scanners ahead of it see the module as its
+    // author wrote it. Rolldown feeds each transform the previous one's output, so
+    // every hook's spans are self-consistent either way — what running last buys is
+    // that `DynamicImportScan` reports the line:column the USER can find, and never
+    // has to reason about the synthetic `require` this splices in.
     let plugins: Vec<SharedPluginable> = vec![
         Arc::clone(&scan) as SharedPluginable,
         Arc::clone(&files_plugin) as SharedPluginable,
         Arc::clone(&new_urls) as SharedPluginable,
+        Arc::new(CjsPathGlobals) as SharedPluginable,
     ];
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -412,6 +428,290 @@ fn absolutize(path: &Path) -> PathBuf {
         return path.to_path_buf();
     }
     std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
+}
+
+// ---- CommonJS `__dirname` / `__filename` ---------------------------------------
+
+/// Gives a bundled CommonJS module the `__dirname` / `__filename` it had on plain
+/// Node, anchored — like every other path this compiler emits — on
+/// `import.meta.url`.
+///
+/// THE DEFECT. The output format is ESM, and Rolldown pre-declares
+/// `module`/`require`/`__filename`/`__dirname` only for a CJS *output* format
+/// (`rolldown::utils::renamer`). A CJS dependency wrapped into an ESM bundle
+/// therefore keeps `exports` and `module` but loses the two path globals, and
+/// dies on first use with `ReferenceError: __dirname is not defined in ES module
+/// scope` — a runtime failure, inside a frozen binary, in third-party code the app
+/// author cannot edit. A large share of real CJS packages reference `__dirname`,
+/// so this silently broke ordinary dependencies.
+///
+/// WHY A PER-MODULE TRANSFORM AND NOT `inject` OR A BANNER. Rolldown's `inject`
+/// option rewrites free references bundle-wide, so it cannot tell a CJS dependency
+/// apart from a genuine ES module — and an ES module has no `__dirname` on Node,
+/// so handing it one would make nub run code that plain Node rejects. A chunk
+/// `banner` is worse: its declarations are raw text the renamer never sees, so a
+/// user module with its own top-level `__dirname` would emit a duplicate `const`
+/// and fail to parse. The transform hook is the only one of the three that can
+/// scope the shim to CJS-origin code.
+///
+/// WHAT THE VALUE IS, AND WHY THAT IS THE HONEST ANSWER. `__dirname` resolves to
+/// the directory of the running chunk — the extracted app dir — not to the
+/// module's old `node_modules` path. Bundling fuses every module into one chunk,
+/// so a per-module directory no longer exists at runtime, and the entry's own
+/// directory is the one every other runtime path here already resolves against —
+/// `import.meta.dirname` in bundled code lands in exactly the same place. Deriving
+/// it from `import.meta.url` rather than `process.cwd()` is what keeps it correct
+/// from any cwd and inside a content-hashed cache dir, exactly as the `file` loader
+/// and [`NewUrlAssets`] already do.
+///
+/// WHY THE URL COMES FROM A VIRTUAL MODULE INSTEAD OF `import.meta.url` INLINE.
+/// Rolldown parses a `.cjs`/`.cts` module with `with_commonjs(true)`
+/// (`rolldown::utils::parse_to_ecma_ast`), and `import.meta` is a SYNTAX ERROR in a
+/// non-module source — so splicing it straight into the module turns a build that
+/// used to succeed into a hard failure, on the very extension that most reliably
+/// means CommonJS. `.js` hid this, because an unknown or `type: "commonjs"` format
+/// is parsed `with_module(true)`. Reading the URL out of an ES module that the CJS
+/// module `require`s puts `import.meta` where it is legal and leaves a plain call
+/// behind, which parses under either source type — one path for every CJS shape.
+///
+/// ESM-OUTPUT-ONLY, and [`bundle`]'s `format`/`platform` fields carry the note for
+/// whoever makes either a knob. The shim is merely REDUNDANT under a CJS format
+/// rather than wrong — Rolldown declares both names there, the splice shadows them
+/// inside the `__commonJS` closure, and the shadowed value is identical because the
+/// virtual module's `import.meta.url` becomes `pathToFileURL(__filename).href`,
+/// which `fileURLToPath` turns straight back into `__filename`. That module is
+/// emitted at chunk ROOT, outside every closure, so its own `__filename` is always
+/// Rolldown's and never a shadow — there is no cycle.
+#[derive(Debug)]
+struct CjsPathGlobals;
+
+/// The module both spliced declarations read from. Rollup's `\0` prefix marks an id
+/// as plugin-owned, so it can never collide with a package a user could install.
+const PATH_GLOBALS_ID: &str = "\0nub-path-globals";
+
+/// Its source. An ES module, so `import.meta` is legal HERE — which is the whole
+/// point. It carries neither `__dirname` nor `__filename` as text, so the transform
+/// hook's own cheap reject skips it.
+const PATH_GLOBALS_SOURCE: &str = concat!(
+    "import { fileURLToPath as __nubToPath } from \"node:url\";\n",
+    "import { dirname as __nubDirname } from \"node:path\";\n",
+    "export const file = __nubToPath(import.meta.url);\n",
+    "export const dir = __nubDirname(file);\n",
+);
+
+impl Plugin for CjsPathGlobals {
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("nub:cjs-path-globals")
+    }
+
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::ResolveId | HookUsage::Load | HookUsage::Transform
+    }
+
+    fn resolve_id(
+        &self,
+        _ctx: &PluginContext,
+        args: &HookResolveIdArgs<'_>,
+    ) -> impl std::future::Future<Output = HookResolveIdReturn> + Send {
+        let claimed = args.specifier == PATH_GLOBALS_ID;
+        async move { Ok(claimed.then(|| HookResolveIdOutput::from_id(PATH_GLOBALS_ID))) }
+    }
+
+    fn load(
+        &self,
+        _ctx: SharedLoadPluginContext,
+        args: &HookLoadArgs<'_>,
+    ) -> impl std::future::Future<Output = HookLoadReturn> + Send {
+        let ours = args.id == PATH_GLOBALS_ID;
+        async move {
+            Ok(ours.then(|| HookLoadOutput {
+                code: PATH_GLOBALS_SOURCE.into(),
+                module_type: Some(ModuleType::Js),
+                ..Default::default()
+            }))
+        }
+    }
+
+    fn transform(
+        &self,
+        _ctx: SharedTransformPluginContext,
+        args: &HookTransformArgs<'_>,
+    ) -> impl std::future::Future<Output = HookTransformReturn> + Send {
+        let scannable = matches!(
+            args.module_type,
+            ModuleType::Js | ModuleType::Jsx | ModuleType::Ts | ModuleType::Tsx
+        );
+        let edit = scannable
+            .then(|| cjs_path_globals_edit(clean_url(args.id), args.code))
+            .flatten();
+        let source = edit.as_ref().map(|_| args.code.to_string());
+        async move {
+            let (Some((at, decls)), Some(source)) = (edit, source) else {
+                return Ok(None);
+            };
+            Ok(Some(HookTransformOutput {
+                // Spliced WITHOUT a newline, so every line of the module still
+                // starts on the line it started on and `Null` stays honest about
+                // line positions — the same bargain [`rewrite_new_urls`] makes, and
+                // for the same reason: `Omitted` would make Rolldown drop the
+                // module's mapping entirely and warn on every build. Only the
+                // columns after the splice, on its one line, shift.
+                code: Some(format!("{}{decls}{}", &source[..at], &source[at..])),
+                map: HookTransformOutputMap::Null,
+                ..Default::default()
+            }))
+        }
+    }
+}
+
+/// Where to splice the declarations a CJS-origin module needs, and what they are —
+/// or `None` to leave the module alone.
+///
+/// `require` rather than an `import`: adding an import statement to a module that
+/// uses `module.exports` flips Rolldown's own ESM/CommonJS classification and
+/// breaks its exports. `import.meta.url` survives verbatim because Rolldown
+/// rewrites it only for a CJS output format, and is NOT one of the signals that
+/// classification reads — both confirmed against a compiled binary.
+fn cjs_path_globals_edit(path: &str, source: &str) -> Option<(usize, String)> {
+    use oxc_allocator::Allocator;
+    use oxc_ast_visit::Visit;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    // Cheap reject first: this hook sees every module in the graph and almost none
+    // of them name either global.
+    if !source.contains("__dirname") && !source.contains("__filename") {
+        return None;
+    }
+    // Node settles these by extension before looking at anything else, and so does
+    // Rolldown (`ModuleDefFormat::from_path`).
+    let ext = Path::new(path).extension().and_then(|e| e.to_str());
+    if matches!(ext, Some("mjs" | "mts")) {
+        return None;
+    }
+    let extension_is_commonjs = matches!(ext, Some("cjs" | "cts"));
+
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::mjs());
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    if parsed.panicked || has_esm_syntax(&parsed.program) {
+        return None;
+    }
+
+    let mut scan = PathGlobalScan::default();
+    scan.visit_program(&parsed.program);
+    // A module that binds either name owns it — a UMD wrapper declaring its own
+    // `var __dirname` is the common shape — and prepending a `const` of the same
+    // name would be a redeclaration the chunk cannot parse. Skipping on a binding
+    // ANYWHERE, not just at the top level, costs only the exotic module that
+    // shadows the name in an inner scope while relying on the global outside it.
+    if scan.binds {
+        return None;
+    }
+    // POSITIVE evidence of CommonJS is required, never merely the absence of ESM
+    // keywords. Absence is not enough because Rolldown's last classification step
+    // reads the package's `"type"` field, which no transform-hook argument carries
+    // — so a `"type": "module"` file with no imports, no exports and no
+    // `module`/`exports` is a genuine ES module that "has no ESM syntax", and
+    // shimming it handed `__dirname` to code plain Node answers with a
+    // `ReferenceError`. The cost of requiring evidence is the mirror-image miss: a
+    // bare `.js` SCRIPT in a CommonJS package that reads `__dirname` and touches
+    // nothing else is left alone. That direction is safe — it is exactly what this
+    // compiler did before — while the other direction invents behavior Node does
+    // not have.
+    if !scan.commonjs && !extension_is_commonjs {
+        return None;
+    }
+    let bindings = match (scan.filename, scan.dirname) {
+        (true, true) => "{ file: __filename, dir: __dirname }",
+        (true, false) => "{ file: __filename }",
+        (false, true) => "{ dir: __dirname }",
+        (false, false) => return None,
+    };
+    let decls = format!(
+        ";const {bindings} = require(\"\\0{}\");",
+        &PATH_GLOBALS_ID[1..]
+    );
+    Some((splice_point(&parsed.program, source), decls))
+}
+
+/// The byte offset at which the declarations may be spliced without changing what
+/// the module means or which line anything is on.
+///
+/// Byte 0 is WRONG in two shapes that real packages have. A `"use strict"`
+/// directive only counts while it is still in the directive prologue, so text in
+/// front of it silently makes a strict module sloppy; and a hashbang is only a
+/// hashbang at byte 0, so text in front of THAT is a parse error. Splicing after
+/// the prologue fixes both. It also has to land after the last directive rather
+/// than on the next line, because `const` has a temporal dead zone — a module with
+/// `"use strict"; …__dirname…` all on one line would otherwise reference the
+/// binding above its own declaration. The leading `;` makes the splice correct
+/// whether or not the directive's own span already covered its semicolon.
+fn splice_point(program: &Program<'_>, source: &str) -> usize {
+    if let Some(last) = program.directives.last() {
+        return last.span.end as usize;
+    }
+    let Some(hashbang) = program.hashbang.as_ref() else {
+        return 0;
+    };
+    // A hashbang runs to end of line and would swallow anything appended to it, so
+    // this is the one case that starts the next line instead.
+    let end = hashbang.span.end as usize;
+    source[end..]
+        .find('\n')
+        .map_or(source.len(), |i| end + i + 1)
+}
+
+/// Whether the module carries ESM syntax, mirroring the two keyword signals
+/// Rolldown's own scanner reads (`ast_scanner`: an `export` keyword forces ESM, an
+/// `import` keyword decides an otherwise-unclassified module). A module with
+/// neither is CommonJS or a bare script, and on Node both have `__dirname`.
+fn has_esm_syntax(program: &Program<'_>) -> bool {
+    use oxc_ast::ast::Statement;
+
+    program.body.iter().any(|stmt| {
+        matches!(
+            stmt,
+            Statement::ImportDeclaration(_)
+                | Statement::ExportNamedDeclaration(_)
+                | Statement::ExportDefaultDeclaration(_)
+                | Statement::ExportAllDeclaration(_)
+        )
+    })
+}
+
+/// Which of the two globals a module reads, whether it binds any of the three names
+/// the splice depends on, and whether it shows evidence of being CommonJS.
+#[derive(Default)]
+struct PathGlobalScan {
+    dirname: bool,
+    filename: bool,
+    binds: bool,
+    /// Reads `module`, `exports` or `require` — the same identifiers Rolldown's own
+    /// classifier treats as proof of CommonJS, one rung above the package `"type"`
+    /// field that a transform hook cannot see.
+    commonjs: bool,
+}
+
+impl<'a> oxc_ast_visit::Visit<'a> for PathGlobalScan {
+    fn visit_identifier_reference(&mut self, it: &oxc_ast::ast::IdentifierReference<'a>) {
+        match it.name.as_str() {
+            "__dirname" => self.dirname = true,
+            "__filename" => self.filename = true,
+            "module" | "exports" | "require" => self.commonjs = true,
+            _ => {}
+        }
+    }
+
+    fn visit_binding_identifier(&mut self, it: &oxc_ast::ast::BindingIdentifier<'a>) {
+        // `require` joins the two globals here because the splice CALLS it. A UMD
+        // factory takes `require` as a parameter, so inside one the name is the
+        // caller's function, not the module loader — splicing a call to it would
+        // hand a browser shim an id it has never heard of.
+        if matches!(it.name.as_str(), "__dirname" | "__filename" | "require") {
+            self.binds = true;
+        }
+    }
 }
 
 // ---- `new URL(…, import.meta.url)` asset embedding -----------------------------
@@ -1464,6 +1764,165 @@ mod tests {
         bundle(&dir.join("entry.ts"), &o)
             .expect("externalizing the package removes its unanalyzable site from the graph");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A dependency in `node_modules` whose entry file is `body`, imported by a TS
+    /// entry. Returns the emitted entry chunk. `main` carries the EXTENSION, which
+    /// is what decides the source type Rolldown parses the dependency with.
+    fn bundle_with_dep(tag: &str, main: &str, pkg_json: &str, body: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("nub-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let pkg = dir.join("node_modules").join("dep");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("package.json"), pkg_json.as_bytes()).unwrap();
+        std::fs::write(pkg.join(main), body.as_bytes()).unwrap();
+        std::fs::write(
+            dir.join("entry.ts"),
+            b"import * as dep from 'dep';\nglobalThis.OUT = dep;\n",
+        )
+        .unwrap();
+        let mut o = opts();
+        // The shim declares ordinary function-scoped bindings, which the minifier
+        // is free to rename — so read the unminified chunk and assert on the shape
+        // rather than on names minify does not promise to keep.
+        o.minify = false;
+        let res = bundle(&dir.join("entry.ts"), &o).expect("the fixture bundles");
+        let code = String::from_utf8(res.files[0].bytes.clone()).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        code
+    }
+
+    // The shim's contract, against a REAL bundle rather than by reading Rolldown:
+    // a CommonJS dependency keeps the two path globals it had on Node, and both
+    // derive from `import.meta.url` so the value follows the artifact into
+    // whatever directory it is extracted to. Without this the chunk carries a bare
+    // `__dirname`, which is a `ReferenceError` in ES module scope.
+    #[test]
+    fn a_bundled_commonjs_dependency_gets_its_path_globals_from_import_meta_url() {
+        let code = bundle_with_dep(
+            "cjs-dirname",
+            "index.js",
+            r#"{"name":"dep","version":"1.0.0","main":"index.js"}"#,
+            "module.exports.dir = () => __dirname;\nmodule.exports.file = () => __filename;\n",
+        );
+        assert!(
+            code.contains("import.meta.url") && code.contains("fileURLToPath"),
+            "the CJS dependency's __dirname/__filename must be derived from \
+             import.meta.url, got:\n{code}"
+        );
+    }
+
+    // `.cjs` and `.cts` are parsed `with_commonjs(true)`, where `import.meta` is a
+    // SYNTAX ERROR — so reading the URL inline would fail the BUILD on the two
+    // extensions that most reliably mean CommonJS, turning a working compile into a
+    // hard error. Bundling at all is therefore most of this assertion. The bodies
+    // name neither `module` nor `exports`, so the EXTENSION is the only thing
+    // marking them CommonJS — which is the half of the rule these two cover.
+    #[test]
+    fn the_commonjs_only_extensions_still_bundle_and_still_get_the_shim() {
+        for (tag, main) in [("cjs-ext", "index.cjs"), ("cts-ext", "index.cts")] {
+            let code = bundle_with_dep(
+                tag,
+                main,
+                &format!(r#"{{"name":"dep","version":"1.0.0","main":"{main}"}}"#),
+                "globalThis.dir = () => __dirname;\n",
+            );
+            assert!(
+                code.contains("import.meta.url") && code.contains("fileURLToPath"),
+                "{main} must bundle with the shim applied, got:\n{code}"
+            );
+        }
+    }
+
+    // Where the declarations land, for the two module shapes where byte 0 would
+    // change what the module means: a directive prologue that stops being one, and
+    // a hashbang that stops being at byte 0. Asserted on the spliced TEXT rather
+    // than on an offset, because the offset alone would not show that the prologue
+    // and the hashbang each still come first.
+    #[test]
+    fn the_declarations_splice_after_a_directive_prologue_and_after_a_hashbang() {
+        let splice = |src: &str| {
+            let (at, decls) = cjs_path_globals_edit("dep.js", src).expect("a CJS shim applies");
+            format!("{}{decls}{}", &src[..at], &src[at..])
+        };
+
+        let strict = splice("\"use strict\";\nmodule.exports = () => __dirname;\n");
+        assert!(
+            strict.starts_with("\"use strict\";;const {"),
+            "the directive must stay in the prologue, got:\n{strict}"
+        );
+
+        let hashbang = splice("#!/usr/bin/env node\nmodule.exports = () => __dirname;\n");
+        assert!(
+            hashbang.starts_with("#!/usr/bin/env node\n;const {"),
+            "a hashbang is only a hashbang at byte 0, got:\n{hashbang}"
+        );
+
+        // Every line still starts on the line it started on — what makes the
+        // transform's `Null` sourcemap honest.
+        for (before, after) in [
+            (
+                "\"use strict\";\nmodule.exports = () => __dirname;\n",
+                strict,
+            ),
+            (
+                "#!/usr/bin/env node\nmodule.exports = () => __dirname;\n",
+                hashbang,
+            ),
+        ] {
+            assert_eq!(
+                before.lines().count(),
+                after.lines().count(),
+                "the splice must not add a line"
+            );
+        }
+    }
+
+    // The three cases that must NOT be shimmed, and they fail differently. An ES
+    // module has no `__dirname` on Node, so handing it one would make nub run code
+    // plain Node rejects. A module that declares the name itself already owns it,
+    // and a second `const` of the same name would not parse. A UMD factory takes
+    // `require` as a PARAMETER, so the splice's own call would land on the caller's
+    // function rather than the loader. In all three a successful bundle is itself
+    // half the assertion, since `reject_invalid_chunks` re-parses what is emitted.
+    #[test]
+    fn the_path_global_shim_skips_esm_and_modules_that_bind_the_names_it_uses() {
+        let cases = [
+            (
+                "esm-dirname",
+                r#"{"name":"dep","version":"1.0.0","main":"index.js","type":"module"}"#,
+                "export const dir = () => __dirname;\n",
+                "an ES module's __dirname must stay unresolved, as it is on Node",
+            ),
+            (
+                "own-dirname",
+                r#"{"name":"dep","version":"1.0.0","main":"index.js"}"#,
+                "var __dirname = '/baked';\nmodule.exports.dir = () => __dirname;\n",
+                "a module that declares __dirname itself must be left alone",
+            ),
+            (
+                "own-require",
+                r#"{"name":"dep","version":"1.0.0","main":"index.js"}"#,
+                "(function (require) { module.exports.dir = () => __dirname; })(null);\n",
+                "a module that shadows require must not have a require call spliced in",
+            ),
+            // The case that proves the rule needs POSITIVE CommonJS evidence rather
+            // than merely the absence of ESM keywords: a `"type": "module"` file
+            // with no imports, no exports and no `module`/`exports` is a genuine ES
+            // module, and the package `"type"` is invisible to a transform hook.
+            // Detecting CommonJS by absence shimmed it, so the binary answered a
+            // `__dirname` that plain Node answers with a ReferenceError.
+            (
+                "esm-no-keywords",
+                r#"{"name":"dep","version":"1.0.0","main":"index.js","type":"module"}"#,
+                "globalThis.dir = () => __dirname;\n",
+                "an ES module with no ESM keywords is still an ES module",
+            ),
+        ];
+        for (tag, pkg_json, body, why) in cases {
+            let code = bundle_with_dep(tag, "index.js", pkg_json, body);
+            assert!(!code.contains("fileURLToPath"), "{why}, got:\n{code}");
+        }
     }
 
     // The `file` loader's whole contract, asserted against a REAL bundle: the

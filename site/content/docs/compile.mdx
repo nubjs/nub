@@ -284,6 +284,19 @@ join(import.meta.dirname, "..", "..", "assets", "icons.xml")  // from the helper
 
 The helper's path is right until it is bundled into the entry, one directory up. Computing asset paths in the entry, or from a single exported base directory, keeps both forms working.
 
+## CommonJS dependencies keep `__dirname`
+
+The output is an ES module, but a CommonJS dependency bundled into it still has `__dirname` and `__filename`. Both follow the rule above — they resolve against the entry's directory, not the package's original location under `node_modules`:
+
+```js
+// node_modules/legacy/index.js, a CommonJS package
+module.exports.config = () => join(__dirname, "config.json");
+```
+
+That path resolves beside the entry rather than inside the package. Reading it gives `ENOENT` unless [`--include`](#--include) embeds the file — an error the code can catch, rather than the crash it used to be.
+
+An ES module is left alone. Node gives ESM no `__dirname`, so code that throws `ReferenceError` under `node` throws the same error in the compiled binary.
+
 ## `--install-message`
 
 The first run sets itself up before the app starts — extracting the embedded Node, or downloading one under `--smol`. On a terminal the launcher shows a centered box with a spinner while that runs:
