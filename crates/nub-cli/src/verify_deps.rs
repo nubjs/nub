@@ -141,11 +141,17 @@ pub(crate) fn gate(cwd: &Path, compat_mode: bool) -> Option<i32> {
     }
 }
 
-/// Resolve the policy from nub's OWN surfaces: the `NUB_*` env override, then
-/// the incumbent's real config home, else nub's `warn` default. Deliberately
-/// does NOT call the engine's `resolve_verify_deps_before_run` — that carries
-/// the engine's `install` default, and reusing it would either leak that
-/// default under nub or force a fork-side edit.
+/// Resolve the policy from nub's OWN surfaces: the config snapshot, then the
+/// incumbent's real config home, else nub's `warn` default. Deliberately does
+/// NOT call the engine's `resolve_verify_deps_before_run` — that carries the
+/// engine's `install` default, and reusing it would either leak that default
+/// under nub or force a fork-side edit.
+///
+/// The `NUB_VERIFY_DEPS` env override (and its pre-rename spelling) is NOT read
+/// here: `cli::verify_deps_env_setting` parses both into the snapshot's
+/// environment overlay, which the merge ranks above every file layer. A second
+/// read below the snapshot branch would rank the variable BELOW a project
+/// `nub.jsonc`, which is the precedence inversion this consolidation removes.
 ///
 /// The incumbent's home is per-major (mirrors the pnpm-version-aware routing
 /// `pm_engine::store_config_family` already established for scalar config, per
@@ -165,25 +171,6 @@ fn resolve_policy(project: &Project) -> Policy {
     }) {
         return project_config_policy(value);
     }
-    if let Some(p) = std::env::var("NUB_VERIFY_DEPS")
-        .ok()
-        .and_then(|v| parse_policy(&v))
-    {
-        return p;
-    }
-    // `NUB_VERIFY_DEPS_BEFORE_RUN` was this variable's name until the config
-    // field it mirrors became `verifyDeps`. Honoring it silently would keep two
-    // spellings alive forever; ignoring it silently would revert someone's CI to
-    // the default policy with no signal — the exact quiet no-op this config
-    // surface is fail-loud to avoid. So: say it moved, then apply it.
-    if let Ok(raw) = std::env::var("NUB_VERIFY_DEPS_BEFORE_RUN")
-        && let Some(p) = parse_policy(&raw)
-    {
-        eprintln!(
-            "nub: NUB_VERIFY_DEPS_BEFORE_RUN is now NUB_VERIFY_DEPS; rename it to silence this."
-        );
-        return p;
-    }
     let workspace_root = project.workspace_root.as_deref().unwrap_or(&project.root);
     if let PnpmIncumbency::Major(major) = pnpm_incumbency(workspace_root)
         && major >= 11
@@ -202,9 +189,11 @@ fn resolve_policy(project: &Project) -> Policy {
     Policy::Warn
 }
 
-/// `Install`/`Prompt` no longer reach here from a `nub.jsonc` — that parser
-/// rejects them — but they still arrive from the `NUB_VERIFY_DEPS` env layer,
-/// which mirrors pnpm's full value space.
+/// Total, and infallible by construction: every layer that can reach the
+/// snapshot — `nub.jsonc`, the `NUB_VERIFY_DEPS` overlay, the built-in defaults
+/// — parses into [`crate::project_config::VerifyDeps`] first, and pnpm's
+/// `install`/`prompt` are not representable there. Those two survive only on the
+/// pnpm-mirroring surfaces, which resolve through [`parse_policy`] instead.
 fn project_config_policy(value: &crate::project_config::VerifyDeps) -> Policy {
     use crate::project_config::VerifyDeps;
     match value {
@@ -265,7 +254,8 @@ fn workspace_yaml_policy(workspace_root: &Path) -> Option<Policy> {
     yaml.get("verifyDepsBeforeRun").and_then(parse_policy_value)
 }
 
-/// Map a config/env value to a policy. Unknown/empty → `None` (fall through to
+/// Map a pnpm-mirroring surface's textual value (`.npmrc`, and the strings in
+/// `pnpm-workspace.yaml`) to a policy. Unknown/empty → `None` (fall through to
 /// the next source, ultimately the `warn` default).
 ///
 /// `install`/`true` map to `warn`: nub deliberately does NOT auto-install before

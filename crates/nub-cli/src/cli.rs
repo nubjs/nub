@@ -2852,22 +2852,67 @@ fn node_compat_env_setting() -> Option<bool> {
     }
 }
 
+/// The `verifyDeps` environment override, for the overlay that outranks both
+/// `nub.jsonc` layers. BOTH spellings resolve here rather than deeper in
+/// [`crate::verify_deps`], because a value that does not reach this overlay
+/// ranks BELOW the project file instead of above it.
+///
+/// The pre-rename spelling `NUB_VERIFY_DEPS_BEFORE_RUN` is still exported by CI
+/// jobs pinned to a released binary. Honoring it silently would keep two
+/// spellings alive forever; ignoring it silently would revert such a job to the
+/// default policy with no signal — the quiet no-op this config surface is
+/// fail-loud to avoid. So: say it moved, then apply it.
 fn verify_deps_env_setting() -> Option<crate::project_config::VerifyDeps> {
+    let (setting, renamed) = verify_deps_env_choice(
+        env::var_os("NUB_VERIFY_DEPS").as_deref(),
+        env::var_os("NUB_VERIFY_DEPS_BEFORE_RUN").as_deref(),
+    )?;
+    if renamed {
+        warn_verify_deps_env_renamed();
+    }
+    Some(setting)
+}
+
+/// Returns `(setting, came from the pre-rename name)`. The old name is read
+/// only when the current one is ABSENT — a present-but-unparseable
+/// `NUB_VERIFY_DEPS` is still the user naming the current variable, so it must
+/// not silently hand the decision to a stale one.
+fn verify_deps_env_choice(
+    current: Option<&std::ffi::OsStr>,
+    legacy: Option<&std::ffi::OsStr>,
+) -> Option<(crate::project_config::VerifyDeps, bool)> {
+    match current {
+        Some(value) => Some((parse_verify_deps_env(value.to_str()?)?, false)),
+        None => Some((parse_verify_deps_env(legacy?.to_str()?)?, true)),
+    }
+}
+
+/// nub's OWN value space, deliberately a subset of pnpm's: `install` and
+/// `prompt` are absent because they exist only on the pnpm-mirroring surfaces
+/// (`.npmrc`, `pnpm-workspace.yaml`), where accepting what the incumbent accepts
+/// is the point. Neither is implemented, so accepting one here would do
+/// something other than what it says — what `nub.jsonc` rejects them for.
+fn parse_verify_deps_env(raw: &str) -> Option<crate::project_config::VerifyDeps> {
     use crate::project_config::VerifyDeps;
 
-    let value = env::var("NUB_VERIFY_DEPS").ok()?;
-    match value.trim().to_ascii_lowercase().as_str() {
+    match raw.trim().to_ascii_lowercase().as_str() {
         "off" | "false" | "0" | "no" | "none" | "skip" => Some(VerifyDeps::Enabled(false)),
         "true" => Some(VerifyDeps::Enabled(true)),
         "warn" => Some(VerifyDeps::Warn),
         "error" => Some(VerifyDeps::Error),
-        // `install` and `prompt` are absent deliberately. They exist only on
-        // the pnpm-mirroring surfaces (`.npmrc`, `pnpm-workspace.yaml`), where
-        // accepting what the incumbent accepts is the point. This variable is
-        // nub's own, and neither is implemented — accepting one here would do
-        // something other than what it says, which is what `nub.jsonc` rejects
-        // them for.
         _ => None,
+    }
+}
+
+/// Once per process: the snapshot is initialized from several entrypoints (a PM
+/// verb re-initializes after a runtime path already has), and each would
+/// otherwise repeat the line.
+fn warn_verify_deps_env_renamed() {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "nub: NUB_VERIFY_DEPS_BEFORE_RUN is now NUB_VERIFY_DEPS; rename it to silence this."
+        );
     }
 }
 
@@ -5507,9 +5552,15 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
             effective_node_options.push(' ');
             effective_node_options.push_str(token);
         }
+        // Watch composes NODE_OPTIONS here instead of going through `spawn.rs`,
+        // so every quoting rule that file enforces has to be repeated at these
+        // two sites or it regresses on this surface alone — which is how it
+        // regressed. The CLI validator rejects whitespace and NUL but NOT a
+        // double quote, so an entry like `--title=a"b` reaches Node's tokenizer
+        // unbalanced and aborts startup (rc=9) before the watcher exists.
         for option in &runtime_node_options {
             effective_node_options.push(' ');
-            effective_node_options.push_str(option);
+            effective_node_options.push_str(&nub_core::node::spawn::node_options_token(option));
         }
         cmd.env("NODE_OPTIONS", effective_node_options);
     } else {
@@ -5522,7 +5573,12 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         if let Some(token) = nub_preload_token {
             parts.push(token);
         }
-        parts.extend(runtime_node_options.iter().cloned());
+        // Quoted for the same reason as the branch above.
+        parts.extend(
+            runtime_node_options
+                .iter()
+                .map(|opt| nub_core::node::spawn::node_options_token(opt)),
+        );
         if !parts.is_empty() {
             cmd.env("NODE_OPTIONS", parts.join(" "));
         }
@@ -12231,5 +12287,76 @@ mod tests {
                 && ps_args.contains(&OsStr::new("Bypass")),
             "a .ps1 runs via powershell -NoProfile -ExecutionPolicy Bypass -File <path> <args>, got {ps_args:?}"
         );
+    }
+
+    /// A CI job exporting the pre-rename name keeps the policy it asked for, and
+    /// is told once that the name moved — while the current name, once present,
+    /// decides alone. Asserted on the pure seam so no process env is mutated;
+    /// the notice itself is a process-global latch and not observable here.
+    #[test]
+    fn the_pre_rename_verify_deps_variable_is_honored_only_while_the_current_one_is_absent() {
+        use crate::project_config::VerifyDeps;
+        let choose = |current: Option<&str>, legacy: Option<&str>| {
+            verify_deps_env_choice(
+                current.map(std::ffi::OsStr::new),
+                legacy.map(std::ffi::OsStr::new),
+            )
+        };
+
+        assert_eq!(
+            choose(None, Some("off")),
+            Some((VerifyDeps::Enabled(false), true)),
+            "the old name must still supply a policy, flagged as renamed"
+        );
+        assert_eq!(
+            choose(Some("error"), None),
+            Some((VerifyDeps::Error, false)),
+            "the current name supplies a policy with no rename notice"
+        );
+        assert_eq!(
+            choose(Some("error"), Some("off")),
+            Some((VerifyDeps::Error, false)),
+            "with both set the current name wins outright and the notice stays silent"
+        );
+        assert_eq!(
+            choose(Some("nonsense"), Some("off")),
+            None,
+            "a present-but-unparseable current name must not hand the decision to a stale one"
+        );
+        assert_eq!(
+            choose(None, Some("nonsense")),
+            None,
+            "an unparseable old value supplies nothing, so there is no rename to announce"
+        );
+        assert_eq!(choose(None, None), None);
+    }
+
+    /// nub's own environment variable accepts only values nub implements — the
+    /// same subset `nub.jsonc` takes. pnpm's `install`/`prompt` reach the policy
+    /// solely through the pnpm-mirroring surfaces.
+    #[test]
+    fn the_verify_deps_variable_accepts_only_the_values_nub_implements() {
+        use crate::project_config::VerifyDeps;
+        assert_eq!(parse_verify_deps_env("  ERROR "), Some(VerifyDeps::Error));
+        assert_eq!(parse_verify_deps_env("warn"), Some(VerifyDeps::Warn));
+        assert_eq!(
+            parse_verify_deps_env("true"),
+            Some(VerifyDeps::Enabled(true))
+        );
+        for off in ["off", "false", "0", "no", "none", "skip"] {
+            assert_eq!(
+                parse_verify_deps_env(off),
+                Some(VerifyDeps::Enabled(false)),
+                "`{off}` disables the gate"
+            );
+        }
+        for unimplemented in ["install", "prompt"] {
+            assert_eq!(
+                parse_verify_deps_env(unimplemented),
+                None,
+                "`{unimplemented}` is pnpm-only; accepting it would do something other than what it says"
+            );
+        }
+        assert_eq!(parse_verify_deps_env(""), None);
     }
 }

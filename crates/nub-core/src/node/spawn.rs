@@ -1092,7 +1092,16 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         if let Some(ref inj) = injection {
             node_opts_parts.push(inj.node_options_token());
         }
-        node_opts_parts.extend(config.runtime_node_options.iter().cloned());
+        // Project-config `nodeOptions`/`v8Flags` entries are quoted like every other
+        // value nub writes here. The CLI-side validator rejects whitespace and NUL
+        // but NOT a double quote, so an entry such as `--title=a"b` would otherwise
+        // reach Node's tokenizer with an unmatched quote and abort startup.
+        node_opts_parts.extend(
+            config
+                .runtime_node_options
+                .iter()
+                .map(|opt| node_options_token(opt)),
+        );
         // Coverage-exclude nub's own runtime (R9) — via NODE_OPTIONS, not just argv.
         // The CLI-arg form at the `cmd.arg(glob)` site above only reaches the DIRECT
         // child nub spawns. But the test-runner coverage fixtures spawn the actual
@@ -1871,7 +1880,13 @@ pub fn compute_augmentation_env_with_options(
         ));
     }
     node_opts_parts.push(injection.node_options_token());
-    node_opts_parts.extend(runtime_node_options.iter().cloned());
+    // Quoted for the same reason as the direct-spawn site: the CLI validator lets a
+    // double quote through, and an unmatched one aborts Node's NODE_OPTIONS parse.
+    node_opts_parts.extend(
+        runtime_node_options
+            .iter()
+            .map(|opt| node_options_token(opt)),
+    );
     // Web Storage (mirrors `spawn_node`): always inject
     // `--experimental-webstorage` on the flag-needed band (22.4–24.x) so a
     // script-run child shell's `node` has `sessionStorage` out of the box, with no
@@ -2832,22 +2847,27 @@ mod tests {
 
     #[test]
     fn node_options_token_round_trips_as_one_real_node_option() {
-        let title = r#"hello "quoted" C:\tmp"#;
-        let output = std::process::Command::new("node")
-            .arg("-e")
-            .arg("process.stdout.write(process.title)")
-            .env(
-                "NODE_OPTIONS",
-                node_options_token(&format!("--title={title}")),
-            )
-            .output()
-            .expect("host Node must run");
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(String::from_utf8(output.stdout).unwrap(), title);
+        // The second case is the shape a project `nub.jsonc` can actually deliver:
+        // the CLI validator rejects whitespace and NUL but not a double quote, and
+        // `--title` is in Node's allowedNodeEnvironmentFlags — so an unquoted
+        // `--title=a"b` would reach the tokenizer with an unmatched quote.
+        for title in [r#"hello "quoted" C:\tmp"#, r#"a"b"#] {
+            let output = std::process::Command::new("node")
+                .arg("-e")
+                .arg("process.stdout.write(process.title)")
+                .env(
+                    "NODE_OPTIONS",
+                    node_options_token(&format!("--title={title}")),
+                )
+                .output()
+                .expect("host Node must run");
+            assert!(
+                output.status.success(),
+                "node rejected NODE_OPTIONS for title {title:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), title);
+        }
     }
 
     #[test]
