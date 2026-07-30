@@ -693,10 +693,7 @@ pub fn build_jail_stdio_preload_js() -> String {
 /// rather than only where the stamp is used.
 #[cfg(any(windows, test))]
 fn stdio_shim_import_term() -> String {
-    format!(
-        "--import data:text/javascript,{}",
-        percent_encode_strict(&strip_js_comments(WINDOWS_STDIO_SHIM))
-    )
+    data_url_import(&strip_js_comments(WINDOWS_STDIO_SHIM))
 }
 
 /// The `NODE_OPTIONS` the Windows build jail STAMPS over any ambient value, delivering the
@@ -738,7 +735,7 @@ pub fn windows_build_jail_node_options(package_name: Option<&str>) -> String {
 pub fn build_jail_node_options(package_name: Option<&str>) -> String {
     format!(
         "{} {}",
-        data_url_import(WINDOWS_STDIO_SHIM),
+        data_url_import(&strip_js_comments(WINDOWS_STDIO_SHIM)),
         net_gate_node_options(package_name)
     )
 }
