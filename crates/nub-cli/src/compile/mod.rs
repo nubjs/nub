@@ -32,6 +32,7 @@ mod assets;
 pub mod bundle;
 mod external;
 mod inject;
+mod launcher;
 mod loaders;
 mod native;
 
@@ -68,15 +69,21 @@ type AppFiles = Vec<(String, Vec<u8>)>;
 
 pub fn run(mut opts: CompileOptions) -> Result<i32> {
     let target = resolve_platform(opts.platform.as_deref())?;
-    // Resolved BEFORE any work: a cross-compile whose launcher template is missing
-    // must fail in the first second, not after downloading and recompressing a
-    // ~100 MB Node for the target.
-    let template_path = locate_launcher_template(&target)?;
 
+    // A typo'd entry costs one stat, so it is checked before anything that can
+    // touch the network — a foreign target's launcher fetch would otherwise
+    // download a template only to report the entry does not exist.
     let entry_path = Path::new(&opts.entry);
     if !entry_path.is_file() {
         bail!("entry file not found: {}", opts.entry);
     }
+
+    // Resolved AND verified before any real work: a cross-compile whose launcher
+    // template is missing, or is not that platform's executable, must fail in the
+    // first second — not after downloading and recompressing a ~100 MB Node for
+    // the target. For a foreign target this may fetch the template from this
+    // release, a few hundred KB, still the cheapest step to fail on.
+    let template = launcher::locate(&target)?;
     let entry_abs =
         fs::canonicalize(entry_path).with_context(|| format!("resolving entry {}", opts.entry))?;
     let stem = entry_abs
@@ -204,8 +211,6 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     let payload = encode(&manifest, &app_files, &node_blob);
 
     // 5. Inject the payload into the target's launcher template.
-    let template = fs::read(&template_path)
-        .with_context(|| format!("reading launcher template {}", template_path.display()))?;
     inject::inject(&target, &template, &payload, &out_path)
         .with_context(|| format!("writing {}", out_path.display()))?;
     set_executable(&out_path)?;
@@ -697,89 +702,7 @@ fn node_runs(node: &Path) -> bool {
         .unwrap_or(false)
 }
 
-// ---- launcher template --------------------------------------------------------
-
-/// Find the `nub-launcher` template built FOR `target`. A launcher is
-/// target-specific twice over — it is that platform's executable format, and it
-/// carries the container-format reader and nub-core runtime logic the payload
-/// depends on — so a foreign target needs that triple's own prebuilt template and
-/// there is nothing to fall back to.
-///
-/// Lookup order: the `NUB_LAUNCHER_TEMPLATE` override, then a `nub-launcher-<triple>`
-/// sibling of the running `nub`, then a plain `nub-launcher` sibling for the host
-/// target.
-///
-/// SIBLING-OF-`nub` IS THE DISTRIBUTION CONTRACT. Every release channel puts the
-/// host's template in the same directory as the binary it shipped with — the npm
-/// platform package's `bin/`, the release archive's `bin/` (so `~/.nub/bin` and the
-/// Windows install dir), and the Homebrew keg's `bin`. `--platform` for a FOREIGN
-/// triple still needs `NUB_LAUNCHER_TEMPLATE`: a package carries one platform's
-/// launcher, not all eight.
-///
-/// The exe path is canonicalized first so a channel that exposes `nub` through a
-/// symlink (winget's portable command alias) still anchors the sibling lookup to
-/// the real install dir. `current_exe` resolves symlinks on Linux
-/// (`/proc/self/exe`) but NOT on macOS, where it returns the path used to exec.
-fn locate_launcher_template(target: &TargetPlatform) -> Result<PathBuf> {
-    let exe = std::env::current_exe()
-        .ok()
-        .map(|p| fs::canonicalize(&p).unwrap_or(p));
-    locate_launcher_template_in(
-        target,
-        std::env::var_os("NUB_LAUNCHER_TEMPLATE").map(PathBuf::from),
-        exe.as_deref().and_then(Path::parent),
-    )
-}
-
-/// [`locate_launcher_template`] with the environment made explicit — the seam the
-/// tests drive, so they never mutate process-global env or depend on where the
-/// test binary happens to live.
-fn locate_launcher_template_in(
-    target: &TargetPlatform,
-    override_path: Option<PathBuf>,
-    nub_dir: Option<&Path>,
-) -> Result<PathBuf> {
-    if let Some(p) = override_path {
-        if p.is_file() {
-            return Ok(p);
-        }
-        bail!(
-            "NUB_LAUNCHER_TEMPLATE points at a missing file: {}",
-            p.display()
-        );
-    }
-
-    // Both the suffixed and bare spellings, because a Windows template may be
-    // published either way; on a non-Windows target they coincide, so dedupe.
-    let triple = target.triple();
-    let suffix = target.exe_suffix();
-    let mut names = vec![format!("nub-launcher-{triple}{suffix}")];
-    if !suffix.is_empty() {
-        names.push(format!("nub-launcher-{triple}"));
-    }
-    if target.is_host() {
-        names.push(format!("nub-launcher{suffix}"));
-        if !suffix.is_empty() {
-            names.push("nub-launcher".to_string());
-        }
-    }
-
-    if let Some(dir) = nub_dir {
-        for name in &names {
-            let cand = dir.join(name);
-            if cand.is_file() {
-                return Ok(cand);
-            }
-        }
-    }
-
-    bail!(
-        "no nub-launcher template for --platform {triple}.\n\
-         \x20\x20Expected one of {} next to the nub binary, or NUB_LAUNCHER_TEMPLATE\n\
-         \x20\x20pointing at a launcher built for {triple}.",
-        names.join(", ")
-    )
-}
+// ---- artifact verification ----------------------------------------------------
 
 /// Check the artifact before handing it to the user. Two layers, the second
 /// available only natively:
@@ -1051,26 +974,6 @@ mod tests {
         assert_eq!(at("darwin-arm64"), dir.join("bin").join("node"));
     }
 
-    /// A release ships only the HOST's template, so this error is still the whole
-    /// cross-compile UX — it must name the triple and the exact filenames.
-    #[test]
-    fn a_missing_foreign_template_names_what_is_missing() {
-        let dir = fresh_dir("no-template");
-        let target = TargetPlatform::parse("win32-arm64").unwrap();
-        let err = locate_launcher_template_in(&target, None, Some(&dir)).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("win32-arm64"), "should name the triple: {msg}");
-        assert!(
-            msg.contains("nub-launcher-win32-arm64.exe"),
-            "should name the file it looked for: {msg}"
-        );
-        assert!(
-            msg.contains("NUB_LAUNCHER_TEMPLATE"),
-            "should name the override: {msg}"
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
-
     /// The name gate must read the TARGET's path rules, not the build host's.
     /// `a\..\..\x` is one ordinary filename on Unix, so a host-parsed gate lets a
     /// Unix→win32 cross-compile bake an escaping name — which only surfaces as an
@@ -1197,61 +1100,6 @@ mod tests {
                 "{triple}: each side must be named by where it came from: {msg}"
             );
         }
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// Pins the Rust half of the release↔lookup contract: the name
-    /// `.github/workflows/release.yml` must copy the template to. Renaming it here
-    /// fails this test; renaming it in the workflow does not, so the two have to be
-    /// changed together.
-    #[test]
-    fn the_release_shipped_filename_is_what_the_host_lookup_accepts() {
-        let dir = fresh_dir("shipped");
-        let host = TargetPlatform::host().unwrap();
-        let shipped = dir.join(format!(
-            "nub-launcher-{}{}",
-            host.triple(),
-            host.exe_suffix()
-        ));
-        fs::write(&shipped, b"template").unwrap();
-        assert_eq!(
-            locate_launcher_template_in(&host, None, Some(&dir)).unwrap(),
-            shipped
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// A foreign target resolves its OWN triple's template. The unsuffixed
-    /// `nub-launcher` sibling is the HOST's — substituting it for a foreign target
-    /// would inject into the wrong format, so only the host may fall back to it.
-    #[test]
-    fn only_the_host_falls_back_to_the_unsuffixed_template() {
-        let dir = fresh_dir("templates");
-        fs::write(dir.join("nub-launcher"), b"host").unwrap();
-        let foreign = SUPPORTED_TRIPLES
-            .iter()
-            .map(|t| TargetPlatform::parse(t).unwrap())
-            .find(|t| !t.is_host())
-            .unwrap();
-
-        assert_eq!(
-            locate_launcher_template_in(&TargetPlatform::host().unwrap(), None, Some(&dir))
-                .unwrap(),
-            dir.join("nub-launcher")
-        );
-        assert!(
-            locate_launcher_template_in(&foreign, None, Some(&dir)).is_err(),
-            "{} must not borrow the host's template",
-            foreign.triple()
-        );
-
-        // Its own triple-suffixed template IS accepted.
-        let own = dir.join(format!("nub-launcher-{}", foreign.triple()));
-        fs::write(&own, b"foreign").unwrap();
-        assert_eq!(
-            locate_launcher_template_in(&foreign, None, Some(&dir)).unwrap(),
-            own
-        );
         let _ = fs::remove_dir_all(&dir);
     }
 }
