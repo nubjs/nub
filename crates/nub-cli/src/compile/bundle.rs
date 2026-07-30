@@ -117,10 +117,10 @@ pub struct BundleResult {
     pub files: Vec<BundledFile>,
     /// `--sourcemap=external` maps: emitted, unreferenced, not shipped.
     pub detached_maps: Vec<BundledFile>,
-    /// Loader-emitted assets — the `file` loader's payload, plus anything
-    /// Rolldown emitted for a `new URL(…, import.meta.url)` reference. Kept
-    /// APART from [`Self::files`] because those are re-parsed as JavaScript by
-    /// [`reject_invalid_chunks`], which a `.wasm` would rightly fail.
+    /// Loader-emitted assets — in practice the `file` loader's payload, since
+    /// nothing else in nub's configuration makes Rolldown emit a non-map asset.
+    /// Kept APART from [`Self::files`] because those are re-parsed as JavaScript
+    /// by [`reject_invalid_chunks`], which a `.wasm` would rightly fail.
     pub assets: Vec<BundledFile>,
 }
 
@@ -248,13 +248,22 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
                     name: a.filename.to_string(),
                     bytes,
                 };
-                // Everything Rolldown emits that is NOT a source map is an asset
-                // the chunks reference by name — today, the file a `new URL(…,
-                // import.meta.url)` points at. Dropping it (as this arm did
-                // before loaders existed) ships a chunk naming a file that is not
-                // in the payload: a runtime ENOENT with nothing failing at build
-                // time. `--include` still never routes through here — it embeds
-                // bytes straight from disk, which is what makes it verbatim.
+                // Everything Rolldown emits that is NOT a source map is a file
+                // the chunks reference by name, so dropping it (as this arm did
+                // before loaders existed) would ship a chunk naming a file that
+                // is not in the payload — a runtime ENOENT with nothing failing
+                // at build time.
+                //
+                // Nothing reaches this branch today: nub's `file` loader collects
+                // its own bytes, and Rolldown's asset path is gated on
+                // `experimental.resolve_new_url_to_asset`, which defaults off and
+                // nub never sets — so a `new URL(…, import.meta.url)` is left as
+                // a literal and emits nothing. This is kept as the correct
+                // handling rather than a silent drop, so enabling that flag (or
+                // any future emitting plugin) cannot quietly produce a broken
+                // artifact. `--include` never routes through here at all — it
+                // embeds bytes straight from disk, which is what makes it
+                // verbatim.
                 if a.filename.ends_with(".map") {
                     maps.push(file);
                 } else {
@@ -280,6 +289,7 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
     };
     files.extend(maps);
 
+    retain_referenced(&files, &mut assets);
     reject_nested_chunks(&files, &assets)?;
 
     Ok(BundleResult {
@@ -288,6 +298,33 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
         detached_maps,
         assets,
     })
+}
+
+/// Drop assets that no emitted chunk names.
+///
+/// The `file` loader reads and records an asset in its `load` hook, which runs
+/// while the graph is being built — before anything is tree-shaken. So an import
+/// whose binding goes unused still collects its bytes, and without this pass a
+/// stray `import splash from "./splash.mp4"` would embed the file in every
+/// artifact forever. (This is entry-language-dependent and therefore easy to
+/// miss: a `.ts` entry never reaches the hook at all, because the TypeScript
+/// transform elides an unused import as possibly-type-only, while the identical
+/// `.js` entry does. The payload should not depend on which one you wrote.)
+///
+/// Reachability is decided by a substring scan for the asset's name, which is
+/// exact here rather than approximate: the name carries an 8-hex content hash,
+/// and the only way user code can reach the file is through the path string the
+/// loader emitted — a name absent from every chunk is unreachable by
+/// construction. Minification preserves it, since it lives in a string literal.
+fn retain_referenced(chunks: &[BundledFile], assets: &mut Vec<BundledFile>) {
+    if assets.is_empty() {
+        return;
+    }
+    let code: Vec<String> = chunks
+        .iter()
+        .map(|c| String::from_utf8_lossy(&c.bytes).into_owned())
+        .collect();
+    assets.retain(|asset| code.iter().any(|c| c.contains(&asset.name)));
 }
 
 /// Assert the flat-output invariant the `file` loader rests on.
@@ -1141,6 +1178,68 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // An asset the emitted code never names must not ship, and the payload must
+    // NOT depend on whether the entry was written in TypeScript or JavaScript.
+    //
+    // This is the case that made the loader look correct when it was not: the
+    // `load` hook collects bytes during graph construction, before tree-shaking,
+    // so an unused import embeds its file — but only from a `.js` entry, because
+    // the TypeScript transform elides an unused import as possibly-type-only and
+    // the hook never runs. Testing only the `.ts` spelling reports success.
+    #[test]
+    fn an_asset_no_chunk_names_is_not_shipped_from_either_entry_language() {
+        for ext in ["ts", "js"] {
+            let dir = std::env::temp_dir().join(format!("nub-unused-{}-{ext}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("logo.png"), b"UNUSEDPNGBYTES").unwrap();
+            std::fs::write(
+                dir.join(format!("entry.{ext}")),
+                b"import p from './logo.png';\nglobalThis.OUT = 'hi';\n",
+            )
+            .unwrap();
+
+            let mut o = opts();
+            o.minify = false;
+            let res = bundle(&dir.join(format!("entry.{ext}")), &o).expect("compiles");
+            assert!(
+                res.assets.is_empty(),
+                "a .{ext} entry shipped an asset nothing references: {:?}",
+                res.assets.iter().map(|a| &a.name).collect::<Vec<_>>()
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    // The control for the test above: the SAME asset, actually used, still ships
+    // from both entry languages. Without it, "no assets" would also be satisfied
+    // by a loader that silently stopped working.
+    #[test]
+    fn a_used_asset_ships_from_either_entry_language() {
+        for ext in ["ts", "js"] {
+            let dir = std::env::temp_dir().join(format!("nub-used-{}-{ext}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("logo.png"), b"USEDPNGBYTES").unwrap();
+            std::fs::write(
+                dir.join(format!("entry.{ext}")),
+                b"import p from './logo.png';\nglobalThis.OUT = p;\n",
+            )
+            .unwrap();
+
+            let mut o = opts();
+            o.minify = false;
+            let res = bundle(&dir.join(format!("entry.{ext}")), &o).expect("compiles");
+            assert_eq!(
+                res.assets.len(),
+                1,
+                "a used asset must ship from a .{ext} entry"
+            );
+            assert_eq!(res.assets[0].bytes, b"USEDPNGBYTES");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     // `.md` is the text half. Both spellings must land on the same string: the

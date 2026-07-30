@@ -100,19 +100,35 @@ pub fn plan(raw: &[String]) -> Result<Loaders> {
                  \x20\x20For example: --loader .html=file --loader .md=text"
             )
         })?;
-        let ext = ext.trim().trim_start_matches('.');
+        // Lowercased because a filesystem hands back whatever case the file was
+        // created with, and `.PNG`/`.JPG` are routine on macOS and Windows.
+        // Matching case-exactly failed the build on them, which reads as the
+        // loader being broken rather than as a spelling rule.
+        let ext = ext.trim().trim_start_matches('.').to_ascii_lowercase();
         if ext.is_empty() {
             bail!("--loader expects an extension before the `=`, got {token:?}");
         }
-        // Rejected rather than silently mapped: `from_str_with_fallback` would
-        // hand back `Custom(_)`, which Rolldown fails on much later with a
-        // message that names neither the flag nor the extension.
         if name == "file" {
-            module_types.remove(ext);
-            if !file.iter().any(|e| e == ext) {
-                file.push(ext.to_string());
+            module_types.remove(&ext);
+            if !file.contains(&ext) {
+                file.push(ext);
             }
             continue;
+        }
+        // `from_known_str` ALSO accepts `asset`, `copy`, and `css`, none of which
+        // may reach Rolldown from this flag. Two of them build clean and produce
+        // an artifact that dies on first run: `copy` leaves a literal
+        // `import p from "./x.png"` in the chunk (valid JavaScript, so the
+        // emitted-chunk gate passes it) which throws
+        // ERR_UNKNOWN_FILE_EXTENSION, and `asset` yields the chunk-relative path
+        // that this module's `file` loader exists to avoid. `css` merely errors,
+        // but from inside Rolldown rather than from the flag the user typed.
+        if matches!(name, "asset" | "copy" | "css") {
+            bail!(
+                "--loader {token:?}: {name:?} is not a loader nub supports\n\
+                 \x20\x20For a file that should ship beside the executable and be opened by \
+                 path, use: --loader .{ext}=file"
+            );
         }
         let module_type = ModuleType::from_known_str(name).map_err(|_| {
             anyhow::anyhow!(
@@ -120,8 +136,8 @@ pub fn plan(raw: &[String]) -> Result<Loaders> {
                  \x20\x20Available: file, text, json, base64, dataurl, binary, empty, js, jsx, ts, tsx"
             )
         })?;
-        file.retain(|e| e != ext);
-        module_types.insert(ext.to_string(), module_type);
+        file.retain(|e| *e != ext);
+        module_types.insert(ext, module_type);
     }
 
     file.sort();
@@ -197,6 +213,7 @@ impl FilePlugin {
     /// `.tar.gz=text` had claimed — the loser being decided by hook order rather
     /// than by specificity.
     fn claims(&self, id: &str) -> bool {
+        let id = id.to_ascii_lowercase();
         id.match_indices('.')
             .find_map(|(i, _)| self.by_ext.get(&id[i + 1..]))
             .copied()
@@ -279,23 +296,25 @@ impl Plugin for FilePlugin {
                 .map_err(|e| anyhow::anyhow!("reading the imported asset {id}: {e}"))?;
             let name = asset_name(Path::new(&id), &bytes);
             let code = file_module(&name);
-            if let Ok(mut collected) = self.collected.lock() {
-                collected.insert(name, bytes);
-            }
+            // A silent drop here would ship a chunk naming a file that is not in
+            // the payload — a runtime ENOENT with nothing to attribute it to.
+            self.collected
+                .lock()
+                .map_err(|_| {
+                    anyhow::anyhow!("the asset collector was poisoned by an earlier panic")
+                })?
+                .insert(name, bytes);
             Ok(Some(HookLoadOutput {
                 code: code.into(),
                 module_type: Some(ModuleType::Js),
                 // The emitted module observes nothing, so it must not anchor
                 // anything that would otherwise be shaken out.
                 //
-                // Payload bloat is handled a step EARLIER and not by this flag:
-                // under tree-shaking Rolldown elides an import whose bindings
-                // all go unused before it ever loads the module, so this hook
-                // does not run and the bytes are never collected. Verified by
-                // making an imported-but-unused asset unreadable — the build
-                // still succeeds, which it could not if `load` had fired.
-                // (`--no-treeshake` therefore does ship such an asset, which is
-                // exactly what disabling tree-shaking asks for.)
+                // This does NOT keep unused assets out of the payload — this
+                // hook runs during graph construction, before anything is
+                // shaken, so the bytes are already collected by then. Dropping
+                // the ones no chunk ends up naming is a separate pass over the
+                // emitted output; see `retain_referenced` in `compile::bundle`.
                 side_effects: Some(HookSideEffects::False),
                 ..Default::default()
             }))
@@ -377,6 +396,41 @@ mod tests {
         let p = FilePlugin::new(&plan(&[]).expect("valid"));
         assert!(p.claims("/home/user.v2/app/icon.png"));
         assert!(!p.claims("/home/user.v2/app/main.ts"));
+    }
+
+    // `from_known_str` accepts these, and two of them BUILD CLEAN and produce an
+    // artifact that dies on first run — `copy` leaves a literal `import p from
+    // "./x.png"` (valid JavaScript, so the emitted-chunk gate passes it), and
+    // `asset` yields the chunk-relative path the file loader exists to avoid.
+    #[test]
+    fn the_rolldown_loaders_that_would_ship_a_broken_binary_are_refused() {
+        for bad in ["asset", "copy", "css"] {
+            let err = plan(&[format!(".png={bad}")])
+                .err()
+                .unwrap_or_else(|| panic!("--loader .png={bad} must be refused"));
+            let msg = format!("{err:#}");
+            assert!(msg.contains(bad), "the error must name the value: {msg}");
+            assert!(
+                msg.contains("--loader .png=file"),
+                "and point at what to use instead: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn extensions_match_case_insensitively() {
+        let p = FilePlugin::new(&plan(&[]).expect("valid"));
+        assert!(
+            p.claims("/proj/PHOTO.PNG"),
+            "a screenshot named .PNG is routine"
+        );
+        assert!(p.claims("/proj/photo.png"));
+
+        let upper = plan(&[".HTML=file".into()]).expect("valid");
+        assert!(
+            upper.file.iter().any(|e| e == "html"),
+            "a flag spelled in caps must map the same extension"
+        );
     }
 
     #[test]
