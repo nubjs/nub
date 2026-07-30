@@ -488,10 +488,16 @@ public static class Probe
     static List<string> armNames = new List<string>();
     static List<IntPtr> armTokens = new List<IntPtr>();
 
+    /// A construction that REFUSES is a measurement, not a harness failure — several arms here exist
+    /// precisely to find out what the OS rejects — so this reports without touching `fails`.
     static void Add(string name, Func<IntPtr> mk)
     {
-        try { IntPtr t = mk(); armTokens.Add(t); armNames.Add(name); Prop("token-built-" + name, true, ""); }
-        catch (Exception e) { Prop("token-built-" + name, false, e.Message); }
+        try
+        {
+            IntPtr t = mk(); armTokens.Add(t); armNames.Add(name);
+            W("  built:" + name + "=OK");
+        }
+        catch (Exception e) { W("  built:" + name + "=REFUSED  " + e.Message); }
     }
 
     public static int Run()
@@ -712,6 +718,16 @@ public static class Probe
         Add("A11-lowbox-on-restricted-low-ALL", delegate {
             IntPtr b = RestrictedToken("S-1-16-4096", null);
             try { return LowBoxToken(b, pkg, all); } finally { CloseHandle(b); } });
+        // A wildcard worth one line: use a HARVESTED capability sid as the PACKAGE sid rather than as
+        // a capability. If NtCreateLowBoxToken's package-sid validation (RtlIsPackageSid, i.e.
+        // S-1-15-2-*) lets it through, the sid the disk grants would sit in the one slot the second
+        // gate always consults. Expected to be refused; cheap to find out rather than assume.
+        if (harvestedCaps.Count > 0)
+            Add("A12-harvested-sid-AS-package-sid", delegate {
+                IntPtr b = OwnToken();
+                IntPtr fake = StrSid(hc[0]);
+                try { return LowBoxToken(b, fake, null); }
+                finally { LocalFree(fake); CloseHandle(b); } });
 
         // The other direction: restricting sids, which add a SECOND check of the same shape as the
         // LowBox gate but against sids that already appear in real DACLs. If a socket's descriptor
@@ -733,6 +749,38 @@ public static class Probe
             return RestrictedToken("S-1-16-4096", new string[] { "S-1-5-11" }); });
         Add("R8-restrict-users-authusers-self", delegate {
             return RestrictedToken("S-1-16-4096", new string[] { "S-1-5-32-545", "S-1-5-11", meSid }); });
+
+        // The remaining construction paths, reported as facts rather than arms because they either
+        // produce no token or produce one already covered above.
+        //
+        //   SetTokenInformation(TokenAppContainerSid)  — asked for explicitly; measured here rather
+        //       than assumed query-only. If it were settable, a restricted token could be turned into
+        //       an AppContainer in place, keeping its unrestricted-read behaviour.
+        //   Chromium's AddCapabilitySddl shape          — already exercised: it is
+        //       ConvertStringSidToSid over an arbitrary SDDL string, which is exactly what every
+        //       LowBox arm above does, so raw-SDDL capabilities are covered by A4/A5.
+        //   CreateProcessW SECURITY_CAPABILITIES        — the path that previously returned
+        //       ERROR_INVALID_PARAMETER; not reachable without a launch, and the Nt layer above is
+        //       the looser alternative it was worth testing.
+        W("");
+        W("SECTION 3b  other construction paths");
+        try
+        {
+            IntPtr rt = RestrictedToken("S-1-16-4096", null);
+            IntPtr sidBuf = StrSid(harvestedCaps.Count > 0 ? harvestedCaps[0] : "S-1-15-2-1-1-1-1-1-1-1-1-1");
+            int sz = Marshal.SizeOf(typeof(SID_AND_ATTRIBUTES));
+            IntPtr buf = Marshal.AllocHGlobal(sz);
+            SID_AND_ATTRIBUTES sa = new SID_AND_ATTRIBUTES();
+            sa.Sid = sidBuf; sa.Attributes = 0;
+            Marshal.StructureToPtr(sa, buf, false);
+            bool ok = SetTokenInformation(rt, TokenAppContainerSid, buf, (uint)sz);
+            Fact("SetTokenInformation(TokenAppContainerSid)",
+                ok ? "ACCEPTED" : ("refused err=" + Marshal.GetLastWin32Error()));
+            Marshal.FreeHGlobal(buf); LocalFree(sidBuf); CloseHandle(rt);
+        }
+        catch (Exception e) { Fact("SetTokenInformation(TokenAppContainerSid)", "threw " + e.Message); }
+        Fact("AddCapabilitySddl-shape", "covered — every LowBox arm passes raw SDDL sids through " +
+            "ConvertStringSidToSid into NtCreateLowBoxToken's capability array");
 
         // ═══ 4 — the objects, including what a socket actually opens ═══
         W("");
@@ -773,20 +821,35 @@ public static class Probe
             W("  obj reg:HKLM\\" + regs[i] + (r == null ? "  UNREADABLE " + n : "  " + Sddl(r)));
         }
 
-        // ═══ 5 — the matrix ═══
+        // ═══ 5 — the matrix, broken down BY MASK ═══
+        //
+        // Per-mask rather than one composite verdict, because the composite hides the finding. The
+        // capability ace on `C:\Users` is `0x100021` — LIST|TRAVERSE|SYNCHRONIZE with NO
+        // FILE_READ_ATTRIBUTES — so a token whose capability is working perfectly still fails a
+        // READ_SET check that asks for READ_ATTRIBUTES. Collapsing that to "DENIED" would read
+        // identically to the capability doing nothing at all, which is the difference this whole
+        // probe exists to measure. `attr` matters because `lstat` needs it.
         W("");
-        W("SECTION 5  the matrix");
+        W("SECTION 5  the matrix (per-mask: trav=TRAVERSE list=LIST_DIRECTORY attr=READ_ATTRIBUTES");
+        W("           read=all three  write=WRITE_DATA|ADD_FILE)");
         for (int a = 0; a < armNames.Count; a++)
         {
             W("  arm " + armNames[a] + "   " + TokenShape(armTokens[a]));
             for (int o = 0; o < objNames.Count; o++)
             {
                 if (objSds[o] == null) continue;
-                bool isFs = objNames[o].StartsWith("fs:");
-                uint rdMask = isFs ? READ_SET : (FILE_READ_DATA | FILE_WRITE_DATA);
-                string rd = Check(armTokens[a], objSds[o], rdMask);
-                string wr = isFs ? Check(armTokens[a], objSds[o], WRITE_SET) : "-";
-                W(string.Format("    {0,-52} use={1,-22} write={2}", objNames[o], rd, wr));
+                if (objNames[o].StartsWith("fs:"))
+                    W(string.Format("    {0,-46} trav={1,-8} list={2,-8} attr={3,-8} read={4,-20} write={5}",
+                        objNames[o],
+                        Check(armTokens[a], objSds[o], FILE_TRAVERSE),
+                        Check(armTokens[a], objSds[o], FILE_READ_DATA),
+                        Check(armTokens[a], objSds[o], FILE_READ_ATTRIBUTES),
+                        Check(armTokens[a], objSds[o], READ_SET),
+                        Check(armTokens[a], objSds[o], WRITE_SET)));
+                else
+                    W(string.Format("    {0,-46} use={1,-20} rw={2}", objNames[o],
+                        Check(armTokens[a], objSds[o], FILE_READ_DATA),
+                        Check(armTokens[a], objSds[o], FILE_READ_DATA | FILE_WRITE_DATA)));
             }
         }
 
@@ -801,10 +864,12 @@ public static class Probe
         int iSys32 = objNames.IndexOf(@"fs:C:\Windows\System32");
         if (iBase >= 0)
         {
+            string[] mustName = new string[] { @"fs:C:\", @"fs:C:\Users", "fs:" + projRoot };
             int[] must = new int[] { iCRoot, iCUsers, iProj };
             for (int i = 0; i < must.Length; i++)
-                Prop("baseline-reads-" + objNames[must[i]],
-                    must[i] >= 0 && Check(armTokens[iBase], objSds[must[i]], READ_SET) == "GRANTED",
+                Prop("baseline-reads-" + mustName[i],
+                    must[i] >= 0 && objSds[must[i]] != null
+                        && Check(armTokens[iBase], objSds[must[i]], READ_SET) == "GRANTED",
                     "an unrestricted token must read this, or AccessCheck is being misused here");
         }
         else Prop("baseline-arm-exists", false, "no baseline; the whole table is unattributable");

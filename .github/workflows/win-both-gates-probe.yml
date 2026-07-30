@@ -71,7 +71,7 @@ jobs:
             else echo "note $p not emitted (may be conditional)"; fi
           done
           echo "---- token construction ----"
-          grep -E '^  prop:token-built-' probe.log || true
+          grep -E "^  built:" probe.log || true
           echo "---- identification ----"
           grep -E 'IDENTIFIED|appsilo-class|harvested-sids-identified|capability-names-derived' probe.log || true
           echo "---- the matrix ----"
