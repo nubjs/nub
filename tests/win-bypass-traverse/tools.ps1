@@ -201,7 +201,12 @@ function Invoke-Tool {
     [bool]$AppContainer,
     [bool]$GrantCRoot = $false,
     [bool]$HostTemp = $false,
-    [int]$TimeoutMs = 20000
+    # 8s, not 20s. RUN 1 (30512557906) blew its 45-minute job timeout and lost its whole table:
+    # ~66 arms against a 20s ceiling is 22 minutes of pure waiting before any per-arm ACL work.
+    # A tool that starts at all does so in well under two seconds, and an arm that consumes the
+    # full ceiling is a hang — which is completely diagnosed by the fact that it hung, so a longer
+    # ceiling buys no information.
+    [int]$TimeoutMs = 8000
   )
   if (-not $Exe -or -not (Test-Path -LiteralPath $Exe)) {
     if (-not $cells.ContainsKey($Tool)) { $cells[$Tool] = @{} }
@@ -345,6 +350,20 @@ W ''
 W '== APPCONTAINER arms (zero capabilities; C:\ and C:\Users untouched; TEMP granted) =='
 foreach ($m in $matrix) { Invoke-Tool -Tool $m[0] -Arm 'ac' -Exe $m[1] -Cmdline $m[2] -Marker $m[3] -AppContainer $true }
 
+# THE DECISIVE ANSWER, PRINTED BEFORE THE OPTIONAL PHASES. Run 1 was killed by a job timeout with
+# every arm measured and nothing summarised, so the go/no-go was unreadable from a partial log. The
+# %TEMP% and attribution phases below refine the answer; they do not change it, so the summary they
+# refine goes to the log first.
+W ''
+W '== INTERIM ANSWER (plain vs ac, before the refining phases) =='
+foreach ($m in $matrix) {
+  $t = $m[0]
+  if (-not $cells.ContainsKey($t)) { continue }
+  $p = if ($cells[$t].ContainsKey('plain')) { if ($cells[$t]['plain'].marker) { 'STARTED' } elseif ($cells[$t]['plain'].rc -eq 'TOOL-ABSENT') { 'ABSENT' } elseif ($cells[$t]['plain'].rc -match 'TIMED-OUT') { 'HUNG' } else { 'FAILED' } } else { '-' }
+  $a = if ($cells[$t].ContainsKey('ac')) { if ($cells[$t]['ac'].marker) { 'STARTED' } elseif ($cells[$t]['ac'].rc -eq 'TOOL-ABSENT') { 'ABSENT' } elseif ($cells[$t]['ac'].rc -match 'TIMED-OUT') { 'HUNG' } else { 'FAILED' } } else { '-' }
+  W ("  interim {0,-20} plain={1,-9} ac={2,-9} ac-rc={3}" -f $t, $p, $a, $(if ($cells[$t].ContainsKey('ac')) { "$($cells[$t]['ac'].rc) $($cells[$t]['ac'].decode)" } else { '' }))
+}
+
 W ''
 W '== %TEMP% CONFOUND arm (AppContainer, host TEMP left ungranted — one variable off the `ac` arm) =='
 foreach ($t in @('cmd-echo', 'powershell-echo', 'busybox-echo')) {
@@ -366,7 +385,14 @@ foreach ($m in $matrix) {
   }
 }
 Fact 'tools-failing-under-appcontainer' $(if ($failedTools.Count) { ($failedTools -join ' ') } else { '(none)' })
+# Attribution only for the tools whose answer CHANGES a decision — the four candidate script
+# shells plus the two Node shapes. Each diag arm costs four DACL writes on `C:\` and `C:\Users`,
+# and run 1 lost its table partly to running this for every failing row; attributing `curl` buys
+# nothing that attributing `cmd.exe` does not already tell us.
+$diagWorthy = @('cmd-echo', 'cmd-node', 'cmd-lifecycle', 'powershell-echo', 'pwsh-echo',
+  'busybox-echo', 'busybox-node', 'busybox-lifecycle', 'node-file-noflags', 'node-dash-e')
 foreach ($t in $failedTools) {
+  if ($diagWorthy -notcontains $t) { W "  (diag skipped for $t — not decision-relevant)"; continue }
   $m = $matrix | Where-Object { $_[0] -eq $t } | Select-Object -First 1
   if ($m) { Invoke-Tool -Tool $m[0] -Arm 'diag-croot' -Exe $m[1] -Cmdline $m[2] -Marker $m[3] -AppContainer $true -GrantCRoot $true }
 }
