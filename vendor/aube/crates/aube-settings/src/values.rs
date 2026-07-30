@@ -2000,6 +2000,24 @@ mod tests {
             resolved::store_dir(&ctx(&project, &ws, &cfg, &[], &[])),
             Some("/tmp/from-project-config".to_string())
         );
+
+        // The adjacent edge, and the one this test used to leave open by
+        // passing an EMPTY workspace map: `projectConfig` is pushed ahead of
+        // `workspaceYaml` in build.rs, and nothing failed if that order moved.
+        // It is live under a pnpm incumbent, where a `pnpm-workspace.yaml` and
+        // a `nub.jsonc` can both supply a value and the loser decides what
+        // lands in the tree.
+        let populated_ws = raw_yaml("storeDir: /tmp/from-workspace-yaml\n");
+        assert_eq!(
+            resolved::store_dir(&ctx(&project, &populated_ws, &cfg, &[], &[])),
+            Some("/tmp/from-project-config".to_string()),
+            "nub.jsonc outranks pnpm-workspace.yaml"
+        );
+        assert_eq!(
+            resolved::store_dir(&ctx(&entries(&[]), &populated_ws, &cfg, &[], &[])),
+            Some("/tmp/from-workspace-yaml".to_string()),
+            "and the control: with no project config, the yaml is what wins"
+        );
         assert_eq!(
             resolved::store_dir(&ctx(&project, &ws, &cfg, &env, &[])),
             Some("/tmp/from-env".to_string())

@@ -1049,9 +1049,16 @@ enum ConfigScope {
     Global,
 }
 
-/// Sections only the global file may carry. Also the source of truth the
-/// published schema is checked against — the schema describes the PROJECT file,
-/// so every key here must be absent from it.
+/// Sections only the global file may carry; a project file naming one is an
+/// error.
+///
+/// This does NOT mean the key is absent from the published schema. The schema
+/// describes the field surface of `nub.jsonc` as a format — both files use that
+/// name and `$schema` points at the same document — so it carries `dlx` too,
+/// and `published_schema_exposes_every_parser_key` requires it to. Scope is
+/// enforced by the parser at read time, not by omission from the schema; an
+/// earlier revision of this comment claimed the opposite and contradicted the
+/// test directly below it.
 pub(crate) const GLOBAL_ONLY_KEYS: &[&str] = &["dlx"];
 
 /// Validate a whole document object exactly as the file readers do.
@@ -1356,6 +1363,14 @@ fn parse_duration(s: &str, path: &str) -> Result<Duration> {
     let digits = &s[..s.len() - unit.len_utf8()];
     if digits.is_empty() {
         return Err(invalid("missing the integer amount"));
+    }
+    // Digits only. `u64::from_str` also accepts a leading `+`, which the
+    // published schema's `^[0-9]+[smhdw]$` rejects — so `"+3d"` parsed here
+    // while failing validation in any editor reading the schema. Parser and
+    // schema have to agree on what is accepted; the schema is the stricter and
+    // the documented one, so this matches it rather than the other way round.
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(invalid("the amount must be a non-negative integer"));
     }
     let amount: u64 = digits
         .parse()
@@ -1781,7 +1796,11 @@ mod tests {
             );
         }
         // Bare unit-less numbers are the days-vs-minutes trap — rejected.
-        for bad in ["3", "3y", "d", "-1d", "3 d"] {
+        // `+3d` is here because `u64::from_str` accepts a leading `+` while the
+        // published schema's `^[0-9]+[smhdw]$` does not: it parsed fine but any
+        // editor reading the schema flagged it, which is the parser and the
+        // documented grammar disagreeing about what is valid.
+        for bad in ["3", "3y", "d", "-1d", "3 d", "+3d", "3_0d"] {
             assert!(
                 matches!(
                     parse_project_config(&format!(
@@ -2152,6 +2171,14 @@ mod tests {
     #[test]
     fn unreadable_project_file_fails_loud() {
         use std::os::unix::fs::PermissionsExt;
+
+        // Root ignores the mode bits, so the file stays readable and the
+        // `unwrap_err` below would panic on a successful load. Not theoretical:
+        // AGENTS.md routes config and global-cache behaviour through
+        // `docker run --rm`, whose default user is root.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE_NAME);
