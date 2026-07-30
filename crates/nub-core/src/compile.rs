@@ -190,18 +190,27 @@ fn is_safe_windows_component(part: &str) -> bool {
 }
 
 fn is_dos_device(stem: &str) -> bool {
-    let upper = stem.to_ascii_uppercase();
+    // Win32's device matcher strips trailing spaces off the segment before
+    // comparing, so `con .txt` is the console as much as `CON.txt` is — and the
+    // whole-component trailing-space rule above cannot see a space that sits
+    // before the extension.
+    let upper = stem.trim_end_matches(' ').to_ascii_uppercase();
     if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
         return true;
     }
-    // COM1-9 and LPT1-9 only; `COM0` is an ordinary name.
-    let Some(digit) = upper
+    // Microsoft's reserved list in full, superscripts included. Erring wide costs
+    // nothing — no real project names a file `COM0` — while erring narrow ships a
+    // binary that writes to a device.
+    let Some(rest) = upper
         .strip_prefix("COM")
         .or_else(|| upper.strip_prefix("LPT"))
     else {
         return false;
     };
-    matches!(digit.as_bytes(), [b'1'..=b'9'])
+    matches!(
+        rest,
+        "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+    )
 }
 
 /// Encode a payload into the container blob written to the Mach-O section.
@@ -649,7 +658,12 @@ mod tests {
             "con",
             "assets/CON.txt",
             "com1",
+            "COM0",
             "LPT9.dat",
+            // Win32 strips the trailing space off the segment before matching
+            // the device, so the space does not make this an ordinary file.
+            "con .txt",
+            "aux/data.json",
         ] {
             assert!(
                 is_safe_relative_name_for(Unix, win_only),
@@ -660,9 +674,15 @@ mod tests {
                 "{win_only:?} must not be embedded for a Windows target"
             );
         }
-        // Not devices: the digit range is 1-9, and a longer name merely starts
-        // with the prefix.
-        for ok in ["COM0", "COM10", "console.js", "nulls.json"] {
+        // Not devices: a longer name merely starts with the prefix.
+        for ok in [
+            "COM10",
+            "console.js",
+            "nulls.json",
+            "PROGRA~1",
+            "..a",
+            "a..b",
+        ] {
             assert!(is_safe_relative_name_for(Windows, ok), "{ok:?}");
         }
     }

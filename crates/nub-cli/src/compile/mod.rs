@@ -107,6 +107,9 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     let mut entry_name = layout.bundle_path(&bundled.entry);
     let mut app_files = assemble_app(&bundled, &layout, &target)?;
     if !opts.bundle.external.is_empty() {
+        // These land AFTER assemble_app's payload-name gate. Safe because both are
+        // fixed constants legal on every target — a shim name derived from user
+        // input would have to move the gate here.
         let shim = external::shim(&app_files, &entry_name, &opts.bundle.external)?;
         entry_name = shim.entry;
         app_files.extend(shim.files);
@@ -358,14 +361,22 @@ fn assemble_app(
     // `a\..\..\x` is one ordinary filename on Linux and a traversal on Windows, so
     // a host-parsed gate lets a cross-compile bake a name its own launcher refuses.
     let rules = target.name_rules();
+    // A chunk's name carries `layout.entry_prefix`, so a rejection is not always
+    // an --include's fault — an entry under `src/aux/` trips the Windows device
+    // rule on the directory the source tree already has.
+    let windows_rules = if rules == nub_core::compile::NameRules::Windows {
+        "\n\x20\x20On Windows that rules out `\\`, `<>:\"|?*`, a trailing dot or space, and the \
+         reserved\n\x20\x20device names (CON, PRN, AUX, NUL, COM0-9, LPT0-9) — including as a \
+         directory\n\x20\x20component, or before an extension."
+    } else {
+        ""
+    };
     for (name, _) in &files {
         if !nub_core::compile::is_safe_relative_name_for(rules, name) {
             bail!(
-                "this path cannot be embedded for {}: {name:?}. An --include'd path must \
-                 sit inside the tree that holds the entry, and its name must be a plain \
-                 relative path that is also legal on the target — on Windows that rules \
-                 out `\\`, `<>:\"|?*`, a trailing dot or space, and the reserved device \
-                 names (CON, PRN, AUX, NUL, COM1-9, LPT1-9).",
+                "this path cannot be embedded for {}: {name:?}.\n\
+                 \x20\x20Every file in a compiled binary needs a plain relative name the target \
+                 can create.{windows_rules}",
                 target.triple()
             );
         }
@@ -969,7 +980,8 @@ mod tests {
 
         // The same name on a Unix target is a legal single-component filename.
         let linux = TargetPlatform::parse("linux-x64").unwrap();
-        assert!(assemble_app(&bundled, &layout, &linux).is_ok());
+        assemble_app(&bundled, &layout, &linux)
+            .expect("a backslash name is one legal component on a Unix target");
         let _ = fs::remove_dir_all(&dir);
     }
 

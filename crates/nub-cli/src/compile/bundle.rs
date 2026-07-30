@@ -687,16 +687,22 @@ fn snippet(source: &str, start: usize, end: usize) -> String {
 /// `BuildDiagnostic`'s `Debug` prints only severity/kind/message, so `{e:?}` gave
 /// a `PARSE_ERROR` with no indication of WHICH file failed — undebuggable on a
 /// real migration without reproducing each failure standalone. Rolldown carries
-/// the location already; `to_diagnostic_with` is what materializes it (the
-/// message alone never has it, and for plugin-wrapped events it is empty).
+/// the location already; `to_diagnostic_with` is what materializes it.
 fn render_diagnostics(err: &rolldown_error::BatchedBuildDiagnostic) -> String {
     let opts = DiagnosticOptions::default();
     err.iter()
         .map(|d| {
+            let diagnostic = d.to_diagnostic_with(&opts);
             let message = d.to_message_with(&opts);
+            // A plugin-wrapped event's own `message()` is deliberately empty — its
+            // real text is injected by `on_diagnostic` — so fall back to the full
+            // rendered report, which carries its own location.
+            if message.is_empty() {
+                return diagnostic.to_string();
+            }
             // Columns are 0-based here and 1-based in every other diagnostic nub
             // prints, so they are converted rather than passed through.
-            match d.to_diagnostic_with(&opts).get_primary_location() {
+            match diagnostic.get_primary_location() {
                 Some((file, line, column, _)) => {
                     format!(
                         "\x20\x20{file}:{line}:{}\n\x20\x20\x20\x20{message}",
