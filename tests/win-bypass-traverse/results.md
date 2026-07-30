@@ -160,6 +160,55 @@ The hang's cause is a NAME: libuv spells every stdio pipe `\\?\pipe\uv\%llu-%lu`
 
 The two things a host run cannot answer, and the arms that do: whether a LowBox process can **connect** to a private name it created (`pipe-connect-local` — creating was already measured, connecting was not), and whether the `UV_INHERIT_STREAM` handoff really escapes the hang (`spawn-wrap-local`). Arms `obj-*-localpipe` and `obj-*-shimfork`, each with an unconfined control; `obj-ac-shimfork` also forks **nested**, because a fix that works one level down and not two is not a fix — node-gyp and jest both fork from forked children.
 
+### Measured: it works, on both images, with the blocker reproducing in the same run
+
+Run **`30516750145`**, real AppContainer launch, **windows-latest (Server 2025 10.0.26100)** and **windows-11-arm (Win 11 Enterprise 10.0.26200)**, Node 22.
+
+| confined arm | launch | cells |
+| --- | --- | --- |
+| `obj-ac-fork` — as shipped | `TIMED-OUT cpu_ms=29859` / `29906` of 30 s | `fork-ipc` **absent — spins** |
+| `obj-ac-localpipe` — physics | **`rc=0` in 116 ms / 210 ms** | `pipe-connect-local=OK duplex="echo:rt"`; `spawn-wrap-local=OK streamed="wrapmarker" eof=yes` |
+| `obj-ac-shimfork` — the fix | **`rc=0` in 256 ms / 461 ms** | `shim-active=OK`; `shim-fork-roundtrip=OK reply={"pong":"p1","connected":true}`; `shim-fork-nested=OK reply={"relayed":"p2"}` |
+
+**One variable — the `--import` preload — turns a 30,002 ms busy spin into a 256 ms clean exit**, and the differential is *within one run*: `obj-ac-baseline` still timed out at `cpu_ms=44625` and `obj-ac-fork` at `cpu_ms=29859` in the same job, so the shimmed arm's `rc=0` is attributable rather than a quiet machine. All four unconfined controls green, and `shim-preload-was-active` green on both halves of both images, so neither "the preload never loaded" nor "the harness died" is available as an explanation. Every one of the six new properties PASSed on both images; the run's only red properties are §5i's already-closed device findings (`npfs-repair-fixes-the-piped-hang`, the `WRITE_DAC` pair, and arm64's already-open `\Device\Null`).
+
+Two results are worth separating out because they are bigger than the `fork` cell:
+
+- **`pipe-connect-local=OK` closes the one open question about the namespace.** Creating a `LOCAL\` name was known; *connecting duplex to it* was not, and a published report exists of exactly that failing (`ERROR_FILE_NOT_FOUND`) in some AppContainer configurations. It works here, both images, so an emulated channel between two processes in one container is sound.
+- **`spawn-wrap-local=OK … eof=yes` means the file-backed stdio rewrite can be upgraded to real streaming.** A pre-created pipe end passed as a `stdio` entry takes `UV_INHERIT_STREAM`, arrives as the child's fd 1, and EOF propagates once the parent drops its duplicate. That removes the current shim's "output arrives at child exit" caveat *and* its writable-scratch-dir precondition. Not implemented here — this arm measures only that it is available. `spawnSync` cannot use it (`ParseStdioOption` reaches `UNREACHABLE()` on a `wrap` entry, and a blocked loop cannot drain a pipe), so files remain correct for the sync family.
+
+### Upstream: already found, analysed identically, fixed, merged — and unreleased
+
+- **[libuv#5178](https://github.com/libuv/libuv/issues/5178)** (opened 2026-07-01, closed 2026-07-13) reaches nub's conclusion independently and in the same terms: *"The only real incompatibilty is a detail in the use of named pipes… `uv__unique_pipe_name` generates pipe names using the pattern `\\?\pipe\uv\X-Y`. Changing that pattern to `\\?\pipe\LOCAL\uv\X-Y` fixes essentially all tests."*
+- **[libuv#5181](https://github.com/libuv/libuv/pull/5181)** is the fix, **merged into `v1.x` 2026-07-13** (`2cadaa40`). It inserts `LOCAL\` only under AppContainer, detected once via `GetTokenInformation(TokenIsAppContainer)` behind a `uv_once`, so non-container behaviour is byte-identical. It also adds `test/appcontainer.c` (+610) and a CI leg that runs libuv's Windows suite *inside* an AppContainer.
+- **No release carries it.** libuv's newest release is **v1.52.1, 2026-03-06** — four months before the merge. Node's `main` at 2026-07-22 still vendors 1.52.1 and its `pipe.c` has no `LOCAL` on the name path, and searching nodejs/node for "AppContainer" returns only [node#63590](https://github.com/nodejs/node/issues/63590) (the unrelated MSI-ACE defect) and a 2017 Electron issue. The author said on [libuv#5185](https://github.com/libuv/libuv/issues/5185) (2026-07-15) that he hopes to upstream it and will otherwise suggest Node cherry-pick it.
+
+⇒ nub is **not** first to the bug, and the mechanism is corroborated by the person who fixed it. But the fix is behind libuv-release → Node-float → Node-release → user-upgrade, so it does nothing for any currently installed Node, which is what the userland repair is for. Note also that #5181 fixes only libuv's *auto-generated* names; a package that hard-codes `\\.\pipe\foo` still fails inside a container even on a fixed libuv.
+
+### Interposing `CreateNamedPipeA` from the N-API addon: assessed, do not build
+
+Mechanically available and strictly more capable than the preload — `nub-native.node` is already loaded into every augmented Node process from `preload.mjs`, out of a runtime-cache dir the jail already grants, so an IAT detour on `CreateNamedPipeA` would fix the name libuv actually generates and thereby restore *real* Node IPC: handle passing, `serialization: 'advanced'`, and pipe-backed `spawnSync`, none of which a userland channel can reproduce. It is still the wrong trade:
+
+- **In-process IAT patching of a `kernel32` import is a textbook EDR/AV injection heuristic**, on a signed binary shipped to users' machines. That support cost is hard to bound and easy to avoid.
+- **Silent fragility.** libuv is statically linked into `node.exe` and calls `CreateNamedPipeA`, which may be imported through `kernel32.dll` or an api-set forwarder, with or without a bound-import table, differing across Node builds. A miss does not error — it reproduces the original unkillable spin.
+- **It is a bridge whose far end is already built.** [libuv#5181](https://github.com/libuv/libuv/pull/5181) is merged; the hook becomes dead weight on the first Node that floats it.
+- **The residual it closes is small and measured.** Of 84 real extracted tarballs exactly one uses `child_process.fork`; handle passing and `advanced` serialization are rarer still. The preload's `ERR_NUB_SANDBOX_NO_IPC`, naming the `dependenciesMeta.<pkg>.sandbox:false` opt-out, is the right answer for that tail.
+
+Keep it named as the escalation if a package that genuinely needs handle passing turns up; do not build it speculatively.
+
+### Integration shape, for whoever lands this in `compiler/defaults.rs`
+
+The prototype patches `cp.ChildProcess.prototype.spawn` — the **same seam** `windows_stdio_shim.js` patches, and the last shim installed is the outermost. The IPC handling must be outermost, since the existing shim's `if (stdio.includes('ipc')) throw ipcError(…)` would otherwise fire first and the channel would never be reached. Two ways to guarantee that, in preference order:
+
+1. **Merge it into `windows_stdio_shim.js`**, replacing that `throw` with the channel setup. One file, one patch, no ordering hazard. Recommended.
+2. Keep it separate and place its `--import` **after** the stdio shim's in `NODE_OPTIONS` (Node evaluates `--import` in order). Verified to compose in that order: once the `'ipc'` slot is rewritten to `'ignore'`, the stdio shim's `isPipe` check passes it through untouched, and `UV_IGNORE` above fd 2 opens no device.
+
+One production detail the prototype already handles and a merge must keep: when a caller rebuilds `env` from scratch the child's `NODE_OPTIONS` has to be re-synthesised from **the parent's own value**, not from this module's URL — otherwise a fix for `fork` silently drops the egress gate and the other preloads from every descendant.
+
+### There is no configuration seam, so those were the only two options
+
+`uv__unique_pipe_name` has exactly one caller (`uv__pipe_server`), which has exactly one caller (`uv__create_stdio_pipe_pair`), and no environment variable or option reaches any of them — the only `GetEnvironmentVariableW` calls anywhere in libuv's Windows pipe/process path are for `SystemRoot`-class required vars and `PATH` resolution. The name is a compile-time format string plus a pid and a counter. So the fix is either a libuv change or a userland substitution; there is no third, cheaper lever.
+
 ## What this does not establish
 
 - **Which mechanism performs the traverse skip.** `crates/nub-sandbox/src/backend/windows.rs` credits `SeChangeNotifyPrivilege` and `FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL` on the volume device. Both predict this observable and this probe cannot separate them.
