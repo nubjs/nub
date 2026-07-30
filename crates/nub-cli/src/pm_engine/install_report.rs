@@ -1168,7 +1168,11 @@ mod tests {
     /// A project that wrote its layout into another tool's config file gets one
     /// pointer at the file that would work — and only where nothing it wrote on
     /// a surface nub still reads supplied the layout, since naming that surface
-    /// is the more useful answer.
+    /// is the more useful answer. A layout the ENVIRONMENT derived — CI, or a
+    /// dependency the shared store cannot serve — is not such a surface, so the
+    /// pointer survives it: the pointer displaces the reason deliberately,
+    /// because knowing where to set the layout is what the reader can act on and
+    /// setting it explicitly wins over either derived route anyway.
     #[test]
     fn a_dropped_branded_layout_points_at_nub_jsonc() {
         let dropped = SourceIndex {
@@ -1221,6 +1225,39 @@ mod tests {
             ..via_nub_jsonc
         };
         assert_eq!(note(&via_npmrc).as_deref(), Some("(.npmrc)"));
+
+        // Neither derived route is a surface the reader authored, so both keep
+        // the pointer rather than reporting the reason they came from.
+        let in_ci = SourceIndex {
+            project_npmrc: Vec::new(),
+            ci: true,
+            ..via_npmrc
+        };
+        assert_eq!(layout_row(&in_ci).1, Some(Source::Ci));
+        assert_eq!(
+            note(&in_ci).as_deref(),
+            Some("(configurable via nub.jsonc)"),
+            "a CI-derived layout is nothing the project wrote"
+        );
+
+        let incompatible = SourceIndex {
+            ci: false,
+            embedder_defaults: vec![(
+                "disableGlobalVirtualStoreForPackages".to_string(),
+                "next".to_string(),
+            )],
+            declared_packages: vec!["next".to_string()],
+            ..in_ci
+        };
+        assert_eq!(
+            layout_row(&incompatible).1,
+            Some(Source::IncompatiblePackage("next".to_string()))
+        );
+        assert_eq!(
+            note(&incompatible).as_deref(),
+            Some("(configurable via nub.jsonc)"),
+            "a dependency-derived layout is nothing the project wrote either"
+        );
     }
 
     /// The three branded files layout was taken back from, each detected in the
@@ -1301,6 +1338,10 @@ mod tests {
     /// default. The last two name no surface at all, because there is none —
     /// they answer the question a bare value leaves open when the layout was
     /// decided by the environment or by something the project merely depends on.
+    ///
+    /// The seeded triggers additionally render the toolchain's own name, which is
+    /// not its package id; a user-configured pattern has no proper name to know,
+    /// so it renders as whatever they wrote.
     #[test]
     fn provenance_names_the_authored_surface() {
         assert_eq!(
@@ -1322,13 +1363,6 @@ mod tests {
             Source::IncompatiblePackage("next".to_string()).render(),
             "global virtual store auto-disabled in Next projects"
         );
-    }
-
-    /// The seeded triggers are frameworks whose proper names are not their
-    /// package ids; a user-configured pattern has no proper name to know, so it
-    /// renders as whatever they wrote.
-    #[test]
-    fn a_seeded_trigger_renders_the_toolchains_own_name() {
         assert_eq!(
             Source::IncompatiblePackage("react-native".to_string()).render(),
             "global virtual store auto-disabled in React Native projects"
@@ -1337,17 +1371,6 @@ mod tests {
             Source::IncompatiblePackage("some-local-pkg".to_string()).render(),
             "global virtual store auto-disabled in some-local-pkg projects"
         );
-    }
-
-    /// Neither derived source is an authored surface, so a project that wrote a
-    /// layout key somewhere nub no longer reads still gets pointed at the file
-    /// that would work. The pointer displaces the reason deliberately: knowing
-    /// where to set it is what the reader can act on, and setting it explicitly
-    /// wins over both routes anyway.
-    #[test]
-    fn a_derived_layout_source_is_not_an_authored_surface() {
-        assert!(!Source::Ci.is_authored_layout_surface());
-        assert!(!Source::IncompatiblePackage("next".to_string()).is_authored_layout_surface());
     }
 
     /// Every setting attributable to `nub.jsonc` must map to a field that exists
