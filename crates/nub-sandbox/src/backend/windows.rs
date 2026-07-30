@@ -1243,7 +1243,7 @@ pub(super) mod launch {
     /// propagation before they return, so swapping the named writer for the handle-based one
     /// narrowed nothing: run 30493913027's watchdog pinned the remaining stall to the FIRST
     /// launch that writes these aces, and the only WRITE in that window is this function
-    /// (`verify_clean_root` and `harvest_capability_sids` merely read DACLs). The chain includes
+    /// (`verify_clean_root` merely reads DACLs). The chain includes
     /// `%TEMP%`, which on a CI runner is enormous, so the walk took minutes and varied run to
     /// run. `SetKernelObjectSecurity` goes straight to `NtSetSecurityObject`: it writes the
     /// object's own descriptor and there is no propagation pass to skip. Measured on

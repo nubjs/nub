@@ -1622,6 +1622,62 @@ mod win {
             }
             Err(e) => println!("  fact:anc-npmcli-trace-unreadable={e}"),
         }
+
+        // THE BISECT, and it is what the tracer alone cannot give. npm's own CLI swallows the
+        // error: `Npm.load` routes every failure through `#handleError`, which sets the exit code
+        // from `err.errno` and re-throws into an exit handler whose only reporting channel is a
+        // log stream `Display.load` had not yet resumed. Driving `Npm.load()` DIRECTLY from `-e`
+        // runs the identical code with the rejection caught by the probe instead, so the cause
+        // arrives on stderr with a stack.
+        let plain = build_jail_with_env(f, exe, root, &[("NODE_OPTIONS", realpath.to_string())]);
+        let npm_root = npm_cli
+            .parent()
+            .and_then(Path::parent)
+            .expect("npm-cli.js sits at <npm>/bin/npm-cli.js");
+        for (tag, body) in [
+            (
+                "bisect-require",
+                format!(
+                    "require({p});console.log('REQUIRE-OK')",
+                    p = js_literal(&npm_root.join("lib/npm.js"))
+                ),
+            ),
+            (
+                "bisect-load-version",
+                bisect_load(&npm_root.join("lib/npm.js"), "'npm','--version'"),
+            ),
+            // The same load WITHOUT `--version`, which is the arm that reaches everything the
+            // early return skips — the cache mkdir, the logs dir, the log file. That is the shape
+            // a real lifecycle `npm run build` takes, so a refusal there matters even though the
+            // measured cell does not reach it.
+            (
+                "bisect-load-full",
+                bisect_load(&npm_root.join("lib/npm.js"), "'npm','ls'"),
+            ),
+        ] {
+            let (_, _, sink) = confined_exec(f, &plain, tag, 60, exe, &["-e".to_string(), body]);
+            // Printed WHOLE rather than through `one_line`, which truncates at 240 characters —
+            // the cause of this failure lives in the stack, which is longer than that.
+            for line in sink.lines().filter(|l| !l.trim().is_empty()) {
+                println!("  fact:anc-{tag}| {}", line.trim());
+            }
+        }
+    }
+
+    /// The `-e` body that drives `Npm.load()` directly and REPORTS the rejection.
+    ///
+    /// `argv` is spelled as a JS list because `@npmcli/config` reads `process.argv.slice(2)` —
+    /// under `-e` `process.argv` is `[execPath]` alone, so a bare `'--version'` lands at index 1
+    /// and is silently dropped. The leading `'npm'` is the placeholder that puts the real flag
+    /// where the parser looks.
+    fn bisect_load(npm_js: &Path, argv: &str) -> String {
+        format!(
+            "const N=require({p});const n=new N({{argv:[{argv}]}});\
+             n.load().then(r=>console.log('LOAD-OK '+JSON.stringify(r)),\
+             e=>console.log('LOAD-ERR code='+e.code+' errno='+e.errno+' syscall='+e.syscall\
+             +' path='+e.path+' :: '+(e.stack||e)))",
+            p = js_literal(npm_js)
+        )
     }
 
     /// A second `--import` term that makes the confined child NAME its own refusals.
