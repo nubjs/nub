@@ -236,6 +236,66 @@ for (const [label, hosts, target, expect] of [
   console.log(`  ${pad(label, 30)} hosts=${pad(JSON.stringify(hosts), 20)} target=${pad(target, 18)} ${got === expect ? "PASS" : "**FAIL**"}  (${out})`);
 }
 
+// ── do listed packages actually get the hosts they need? ────────────────────────────────
+//
+// Evaluated as a batch inside one child so the whole real catalog can be checked cheaply. The
+// discriminator is `err.nubReason`, never whether DNS then resolves — most of these are
+// unresolvable from a CI runner and that must not be read as a gate decision.
+console.log("\n--- real catalog hosts against a listed package's allowlist ---");
+{
+  // The LOW/MEDIUM tiers from .fray/sandbox-buildjail-trusted-download-hosts.md.
+  const catalog = [
+    "nodejs.org", "binaries.prisma.sh", "cdn.playwright.dev",
+    "playwright.download.prss.microsoft.com", "download.cypress.io", "cdn.cypress.io",
+    "downloads.sentry-cdn.com", "downloads.snyk.io",
+    "objects.githubusercontent.com", "release-assets.githubusercontent.com", "codeload.github.com",
+  ];
+  // Must be DENIED even for a listed package: the POST/write/arbitrary-content channels the
+  // catalog doc marks "never allow".
+  const mustDeny = ["api.github.com", "github.com", "gist.github.com",
+                    "raw.githubusercontent.com", "evil.example.com"];
+  const env = { ...process.env, NODE_OPTIONS: nodeOptionsFor({ package: "playwright", allow: true, hosts: catalog }) };
+  const r = await runChild(
+    `const dns=require("node:dns");const hosts=${JSON.stringify([...catalog, ...mustDeny])};
+     let n=0;const out=[];
+     for(const h of hosts){dns.lookup(h,(e)=>{out.push(h+"="+(e&&e.nubReason==="ERR_NUB_JAIL_NET_DENIED"?"DENIED":"ALLOWED"));if(++n===hosts.length)console.log(out.join(" "));});}`,
+    env, 20000);
+  const seen = Object.fromEntries((r.stdout || "").split(/\s+/).filter(Boolean).map((s) => s.split("=")));
+  const bad = [...catalog.filter((h) => seen[h] !== "ALLOWED"), ...mustDeny.filter((h) => seen[h] !== "DENIED")];
+  console.log(`  ${catalog.length} catalog hosts admitted: ${catalog.every((h) => seen[h] === "ALLOWED") ? "all PASS" : "FAIL " + catalog.filter((h) => seen[h] !== "ALLOWED")}`);
+  console.log(`  ${mustDeny.length} never-allow hosts denied: ${mustDeny.every((h) => seen[h] === "DENIED") ? "all PASS" : "FAIL " + mustDeny.filter((h) => seen[h] !== "DENIED")}`);
+  if (bad.length) console.log(`  raw: ${JSON.stringify(r.stdout.slice(0, 400))}`);
+}
+
+// ── the redirect trap: a host allowlist must name the REDIRECT TARGET, not the origin ────
+//
+// This is the operationally sharp edge for a listed package. `github.com/.../releases/download/…`
+// 302s to `release-assets.githubusercontent.com`, and `raw.github.com` 301s to
+// `raw.githubusercontent.com` — the client opens a SECOND connection to the target host, so an
+// allowlist naming only the origin denies the download at the second hop. Demonstrated live with
+// two distinct local addresses, and `loopback:false` so the redirect target is not exempt.
+console.log("\n--- redirect chains (a second connection to a second host) ---");
+{
+  const redirector = http.createServer((req, res) => {
+    res.writeHead(302, { Location: `http://127.0.0.1:${PORT}/redirect-final` });
+    res.end();
+  });
+  await new Promise((r) => redirector.listen(0, HOST, r));
+  const rport = redirector.address().port;
+  for (const [label, hosts] of [
+    ["origin only (the trap)", [HOST]],
+    ["origin + redirect target", [HOST, "127.0.0.1"]],
+  ]) {
+    const env = { ...process.env, NODE_OPTIONS: nodeOptionsFor({ package: "electron", allow: true, hosts, loopback: false }) };
+    const r = await runChild(
+      `fetch("http://${HOST}:${rport}/dl").then(x=>console.log("FOLLOWED-TO-END "+x.status),
+        e=>console.log((e.cause?.nubReason==="ERR_NUB_JAIL_NET_DENIED")?"BLOCKED-AT-REDIRECT-HOP":"other:"+(e.cause?.code||e.message)))`,
+      env, 12000);
+    console.log(`  ${pad(label, 26)} hosts=${pad(JSON.stringify(hosts), 26)} -> ${(r.stdout || r.stderr).split("\n").pop()}`);
+  }
+  redirector.close();
+}
+
 // ── Windows-only arms ───────────────────────────────────────────────────────────────────
 // Three things cannot be measured off Windows: whether the gate works on win32 Node at all,
 // whether the payload fits Windows' single-env-var cap, and whether PowerShell — the one non-Node
