@@ -124,6 +124,28 @@ That run also isolated the gate to the **namespace** rather than to any flag: el
 
 **Consequence for the `\Device\Null` candidate:** it is predicted to fix `stdio: 'ignore'` and *not* the hang, because the piped path never opens the device. The `obj-*` arms assert those separately rather than as one "the repair works" cell, and the selftest's `obj-nul-fixes-the-hang-too` world exists so a broader-than-predicted effect would be loud rather than absorbed.
 
+### What the `obj-*` arms measured
+
+Runs `30512950258` and `30513433808`, both images. Run 2 is the complete one — run 1's unconfined control was red from a harness bug it was built to catch, and its NPFS arm never applied its repair.
+
+**The prediction held exactly.** Granting the arm's own AppContainer SID on `\Device\Null` (Codex's mask, `FILE_GENERIC_READ|WRITE|EXECUTE`), one variable, on Server 2025:
+
+| cell | as shipped | `\Device\Null` granted |
+| --- | --- | --- |
+| `nul-open-read` / `nul-open-write` | ERR / ERR | **OK / OK** |
+| `spawn-ignore` | ERR | **OK** |
+| `spawn-piped` | absent — spins | **absent — still spins.** `TIMED-OUT cpu_ms=44625` of 45,013 ms |
+
+with the device's own DACL read back **present** where granted and **none** in the baseline, the revoke verified by re-reading it, and the as-shipped arm **re-run last** reproducing itself.
+
+**The repair needs admin.** De-elevated (`Administrators` deny-only, privileges dropped, Medium integrity), `READ_CONTROL` on `\Device\Null` → **OK**; `WRITE_DAC` → **`err=5`**, both images. Elevated, both succeed. The descriptor agrees: owner `BA`, and `WD`/Everyone holds `0x1201bf`, which does not contain `WRITE_DAC`. Since the kernel resets the descriptor at every boot, a working repair means admin *per boot* — so the candidate is disqualified for nub whatever it fixes.
+
+**The two images diverge, and the descriptor predicts each.** Server 2025's `\Device\Null` names no AppContainer trustee and the confined child is refused it; Windows 11 arm64's names both `AC` and `S-1-15-2-2`, and the confined child opens it with no repair. A Server-only reproduction of this defect must not be generalised to "Windows".
+
+**The NPFS-root lever does not exist.** `GetSecurityInfo` → 87, `NtQuerySecurityObject` → `STATUS_INVALID_PARAMETER`, both images, while the same calls succeed on `\Device\Null` in the same process. There is no descriptor to grant on. The `WRITE_DAC` *open* on `\\.\pipe\` succeeds even de-elevated, which is **not** a capability — an object with no queryable descriptor is one whose DACL was never consulted on open either.
+
+**`child_process.fork` hangs too.** Its IPC channel is a `uv_pipe` with `ipc=1` through the same path, and no `stdio` option removes it: confined `TIMED-OUT cpu_ms=29812`/`29890` at a 30 s bound, unconfined `rc=0`. So the file-descriptor mitigation has a hole that is now measured rather than suspected.
+
 ## What this does not establish
 
 - **Which mechanism performs the traverse skip.** `crates/nub-sandbox/src/backend/windows.rs` credits `SeChangeNotifyPrivilege` and `FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL` on the volume device. Both predict this observable and this probe cannot separate them.

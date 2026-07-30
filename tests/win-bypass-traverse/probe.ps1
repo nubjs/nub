@@ -773,8 +773,15 @@ if ($script:HaveSec) {
     "the de-elevated impersonation must still obtain READ_CONTROL on both devices, or a WRITE_DAC refusal below is about the harness rather than about privilege: null=$nullRcDe npfs=$npfsRcDe"
   Prop 'unprivileged-write-dac-on-null-device' ($nullWdDe -eq 'OK') `
     "THE question mxc and Codex disagree about — can a standard user rewrite \Device\Null's DACL: $nullWdDe"
-  Prop 'unprivileged-write-dac-on-npfs-root' ($npfsWdDe -eq 'OK') `
-    "the same question for the named-pipe root, where a yes would fix the piped-spawn hang with no libuv change: $npfsWdDe"
+  # CORRECTED after run 30513433808, because the bare open is MISLEADING. The de-elevated
+  # `WRITE_DAC` open on `\\.\pipe\` SUCCEEDS on both images — and the object serves no security
+  # descriptor at all: `GetSecurityInfo` returns 87 and `NtQuerySecurityObject` returns
+  # STATUS_INVALID_PARAMETER (0xC000000D). An object whose descriptor cannot be queried is one whose
+  # DACL was never consulted on open either (the `\Device\Afd` lesson, §5d/§5f), so reporting that
+  # open alone as "a standard user can rewrite the NPFS root" would be flatly wrong. The property
+  # therefore requires the descriptor to be REACHABLE as well as the access to be granted.
+  Prop 'unprivileged-write-dac-on-npfs-root' (($npfsWdDe -eq 'OK') -and ($npfsSddl -notlike 'ERR*')) `
+    "a yes would fix the piped-spawn hang with no libuv change, and it needs BOTH halves: de-elevated WRITE_DAC open=$npfsWdDe, descriptor reachable=$npfsSddl. An open that succeeds against an object with no queryable descriptor is not a writable DACL, it is a DACL that is never consulted."
 
   # A THROWAWAY AppContainer sid, so the grant/revoke round trip is exercised against the same kind
   # of trustee the arms use — and revoked immediately, since a device DACL is machine-global.
