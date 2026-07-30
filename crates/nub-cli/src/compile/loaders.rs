@@ -310,6 +310,14 @@ fn loader_name(ty: &ModuleType) -> &'static str {
 /// Content-hashed, not path-hashed, so two imports of the same bytes dedupe to
 /// one payload entry while two different files that merely share a basename
 /// (`icons/logo.png` and `brand/logo.png`) cannot collide.
+///
+/// LOWERCASED, so a generated name can never collide with another one on a
+/// filesystem that folds case. `a/Logo.bin` and `b/logo.bin` otherwise yield two
+/// payload names differing only in case: identical bytes, one file on Windows or
+/// on default APFS, and the build fails a collision check the user cannot act on
+/// because neither name is one they wrote. Folding here makes the pair dedupe to
+/// a single entry — correct, since a shared content hash means shared bytes —
+/// while different content still separates on the hash.
 fn asset_name(source: &Path, bytes: &[u8]) -> String {
     let stem: String = source
         .file_stem()
@@ -318,7 +326,7 @@ fn asset_name(source: &Path, bytes: &[u8]) -> String {
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
+                c.to_ascii_lowercase()
             } else {
                 '-'
             }
@@ -331,7 +339,7 @@ fn asset_name(source: &Path, bytes: &[u8]) -> String {
     };
     let hash = format!("{:x}", Sha256::digest(bytes));
     match source.extension().and_then(|e| e.to_str()) {
-        Some(ext) => format!("{stem}-{}.{ext}", &hash[..8]),
+        Some(ext) => format!("{stem}-{}.{}", &hash[..8], ext.to_lowercase()),
         None => format!("{stem}-{}", &hash[..8]),
     }
 }
@@ -595,6 +603,25 @@ mod tests {
         assert_ne!(a, b, "same basename, different bytes must not collide");
         assert_eq!(a, c, "identical bytes must dedupe to one payload entry");
         assert!(a.starts_with("logo-") && a.ends_with(".png"), "{a}");
+    }
+
+    // A generated name must be safe on a filesystem that folds case, or two
+    // assets nub named itself can collide — and the collision error would tell
+    // the user to rename a file they never wrote.
+    #[test]
+    fn generated_names_cannot_differ_only_in_case() {
+        let upper = asset_name(Path::new("/p/a/Logo.BIN"), b"SAME");
+        let lower = asset_name(Path::new("/p/b/logo.bin"), b"SAME");
+        assert_eq!(
+            upper, lower,
+            "identical bytes must collapse to one entry rather than to a case-variant pair"
+        );
+        assert_eq!(upper, upper.to_lowercase(), "{upper} must be lowercase");
+        assert_ne!(
+            asset_name(Path::new("/p/a/Logo.bin"), b"ONE"),
+            asset_name(Path::new("/p/b/logo.bin"), b"TWO"),
+            "different bytes must still separate on the hash"
+        );
     }
 
     #[test]

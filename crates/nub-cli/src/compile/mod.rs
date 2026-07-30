@@ -108,9 +108,12 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     let mut entry_name = layout.bundle_path(&bundled.entry);
     let mut app_files = assemble_app(&bundled, &layout, &target)?;
     if !opts.bundle.external.is_empty() {
-        // These land AFTER assemble_app's payload-name gate. Safe because both are
-        // fixed constants legal on every target — a shim name derived from user
-        // input would have to move the gate here.
+        // These land AFTER assemble_app's payload-name and collision gates. Safe
+        // for the NAME gate because both are fixed constants legal on every
+        // target; a shim name derived from user input would have to move it here.
+        // The COLLISION gate is a weaker story: `external::shim` refuses a bundle
+        // file of the same name, but only exact-case, so an `--include` differing
+        // from a shim name in case alone still overwrites on a folding target.
         let shim = external::shim(&app_files, &entry_name, &opts.bundle.external)?;
         entry_name = shim.entry;
         app_files.extend(shim.files);
@@ -320,16 +323,17 @@ fn assemble_app(
         .map(|f| (layout.bundle_path(&f.name), f.bytes.clone()))
         .collect();
 
-    let embedded: std::collections::HashSet<String> = bundled
-        .assets
-        .iter()
-        .map(|f| layout.bundle_path(&f.name))
-        .chain(layout.assets.iter().map(|a| a.rel.clone()))
-        .collect();
+    // Tracked POSITIONALLY, not by looking a name up in a set: in a collision the
+    // two sides share a name, so a name-keyed lookup labels both of them the same
+    // and the message loses the one thing that makes it actionable — which side is
+    // the file the user can rename.
+    let mut origins: Vec<Origin> = vec![Origin::Compiled; bundled.files.len()];
+    origins.resize(files.len(), Origin::Generated);
     for asset in &layout.assets {
         let bytes = fs::read(&asset.source)
             .with_context(|| format!("reading {}", asset.source.display()))?;
         files.push((asset.rel.clone(), bytes));
+        origins.push(Origin::Included);
     }
 
     let pkg = layout.bundle_path("package.json");
@@ -350,10 +354,13 @@ fn assemble_app(
                 );
             }
         }
-        None => files.push((pkg, br#"{"type":"module"}"#.to_vec())),
+        None => {
+            files.push((pkg, br#"{"type":"module"}"#.to_vec()));
+            origins.push(Origin::Manifest);
+        }
     }
 
-    reject_colliding_names(&files, &embedded, target)?;
+    reject_colliding_names(&files, &origins, target)?;
 
     // The launcher refuses any payload name that could escape its extraction dir.
     // Names are partly user-derived since `--include`, so check the SAME predicate
@@ -385,6 +392,31 @@ fn assemble_app(
     Ok(files)
 }
 
+/// Where a payload entry came from. Carried alongside the names so a collision
+/// can say which of the two the user is able to change.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Origin {
+    /// A bundle chunk, or a source map shipped with one.
+    Compiled,
+    /// Bytes the bundler embedded for a `file` import or a `new URL(…)`.
+    Generated,
+    /// A file the user named with `--include`.
+    Included,
+    /// The `package.json` nub synthesizes when the app ships none.
+    Manifest,
+}
+
+impl Origin {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Compiled => "compiled output",
+            Self::Generated => "an embedded asset",
+            Self::Included => "an --included file",
+            Self::Manifest => "the generated package.json",
+        }
+    }
+}
+
 /// Refuse two payload entries the target's filesystem cannot keep apart.
 ///
 /// The launcher writes entries in payload order, so a later one with the same
@@ -399,32 +431,29 @@ fn assemble_app(
 /// always, and macOS because APFS is formatted case-insensitive by default. On
 /// Linux the two names are genuinely two files, so nothing is rejected and no
 /// working build is broken.
+///
+/// Nub's OWN generated names cannot reach here as a fold-collision: `asset_name`
+/// lowercases them, so a case-variant pair either dedupes (same bytes) or
+/// separates on the content hash. Every collision this reports therefore has a
+/// name the user wrote on at least one side.
 fn reject_colliding_names(
     files: &AppFiles,
-    embedded: &std::collections::HashSet<String>,
+    origins: &[Origin],
     target: &TargetPlatform,
 ) -> Result<()> {
     let folds = matches!(target.os, TargetOs::Win32 | TargetOs::Darwin);
-    let mut seen: std::collections::HashMap<String, &str> =
+    let mut seen: std::collections::HashMap<String, usize> =
         std::collections::HashMap::with_capacity(files.len());
-    for (name, _) in files {
+    for (i, (name, _)) in files.iter().enumerate() {
         let key = if folds {
             name.to_lowercase()
         } else {
             name.clone()
         };
-        let Some(prev) = seen.insert(key, name.as_str()) else {
+        let Some(first) = seen.insert(key, i) else {
             continue;
         };
-        // Which side is the user's file is the whole fix: the other side is a
-        // chunk or the generated manifest, and neither has a spelling to change.
-        let describe = |n: &str| {
-            if embedded.contains(n) {
-                "an embedded file"
-            } else {
-                "compiled output"
-            }
-        };
+        let (prev, prev_origin) = (&files[first].0, origins[first]);
         let why = if prev == name {
             String::new()
         } else {
@@ -434,12 +463,19 @@ fn reject_colliding_names(
                 target.triple()
             )
         };
+        // Only an --include has a spelling the user chose; a chunk name follows the
+        // entry's, so pointing at --include when neither side is one would send
+        // them to a flag they never passed.
+        let fix = if [prev_origin, origins[i]].contains(&Origin::Included) {
+            "\x20\x20Rename the file, or drop it from --include."
+        } else {
+            "\x20\x20Rename the source file one of them is named after."
+        };
         bail!(
             "two files would collide in the compiled binary: {prev:?} ({}) and {name:?} ({}), \
-             so one would overwrite the other where it is extracted.{why}\n\
-             \x20\x20Rename one of them, or drop it from --include.",
-            describe(prev),
-            describe(name)
+             so one would overwrite the other where it is extracted.{why}\n{fix}",
+            prev_origin.label(),
+            origins[i].label()
         );
     }
     Ok(())
@@ -1094,7 +1130,7 @@ mod tests {
                 "{triple}: both colliding paths must be named: {msg}"
             );
             assert!(
-                msg.contains("an embedded file") && msg.contains("compiled output"),
+                msg.contains("an --included file") && msg.contains("compiled output"),
                 "{triple}: the message must say which side is the asset: {msg}"
             );
             assert!(
@@ -1120,7 +1156,14 @@ mod tests {
             let Err(err) = assemble_app(&bundled, &layout, &target) else {
                 panic!("{triple} must refuse an exact duplicate");
             };
-            assert!(format!("{err:#}").contains("collide"), "{triple}: {err:#}");
+            // Both sides share the name here, so a name-keyed lookup would label
+            // them identically and lose the only fact that makes the message
+            // actionable — which of the two the user can rename.
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("compiled output") && msg.contains("an --included file"),
+                "{triple}: each side must be named by where it came from: {msg}"
+            );
         }
         let _ = fs::remove_dir_all(&dir);
     }

@@ -339,7 +339,13 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
 /// `file` loader in `load`, [`NewUrlAssets`] in `transform` — which is before
 /// anything is tree-shaken. So a reference whose result goes unused still
 /// collects its bytes, and without this pass a stray `import splash from
-/// "./splash.mp4"` would embed the file in every artifact forever. (This is entry-language-dependent and therefore easy to
+/// "./splash.mp4"` would embed the file in every artifact forever.
+///
+/// It prunes what the SHAKER left, so how much it recovers differs by path. The
+/// `file` loader marks its synthesized module side-effect-free, so an unused
+/// import is shaken and its asset dropped. A `new URL(…)` is a constructor call
+/// Rolldown cannot prove pure, so an unused binding in a REACHED module keeps its
+/// bytes; only an unreachable module drops them. (This is entry-language-dependent and therefore easy to
 /// miss: a `.ts` entry never reaches the hook at all, because the TypeScript
 /// transform elides an unused import as possibly-type-only, while the identical
 /// `.js` entry does. The payload should not depend on which one you wrote.)
@@ -611,7 +617,7 @@ fn scan_new_urls(id: &str, source: &str) -> Vec<NewUrlEdit> {
             if has_url_scheme(spec) {
                 return None;
             }
-            let path = self.dir.join(spec);
+            let path = self.dir.join(percent_decode(spec)?);
             path.is_file().then_some(path)
         }
     }
@@ -635,23 +641,88 @@ fn is_import_meta_url(expr: &Expression<'_>) -> bool {
             if meta.meta.name == "import" && meta.property.name == "meta")
 }
 
-/// Does this module define its own `URL` at the top level?
+/// Does this module declare its own top-level `URL`?
 ///
 /// A module that does is not talking about the global constructor, so rewriting
-/// its argument could change what the program means. Value declarations only:
-/// an `import { URL } from "node:url"` binds the SAME constructor, and skipping
-/// those would silently exclude a perfectly ordinary way to write this.
+/// its argument could change what the program means. Two deliberate boundaries:
+///
+/// - **Value declarations only.** An `import { URL } from "node:url"` binds the
+///   SAME constructor, so treating it as a shadow would silently exclude a
+///   perfectly ordinary way to write this.
+/// - **Top level only.** A `URL` bound in an inner scope — a function parameter,
+///   a block-scoped class — is NOT seen, and such a module IS rewritten. Catching
+///   it needs real scope analysis, which does not earn an `oxc_semantic`
+///   dependency for a name nothing legitimately rebinds.
+///
+/// The `export` wrappers are unwrapped rather than skipped: without that the
+/// guard turned on whether the shadow happened to be exported, honoring
+/// `class URL {}` while rewriting `export class URL {}` three characters later.
 fn binds_url(program: &Program<'_>) -> bool {
-    use oxc_ast::ast::{BindingPattern, Statement};
+    use oxc_ast::ast::{BindingPattern, Declaration, ExportDefaultDeclarationKind, Statement};
+
+    fn declares_url(decl: &Declaration<'_>) -> bool {
+        match decl {
+            Declaration::VariableDeclaration(d) => d.declarations.iter().any(
+                |d| matches!(&d.id, BindingPattern::BindingIdentifier(id) if id.name == "URL"),
+            ),
+            Declaration::ClassDeclaration(c) => c.id.as_ref().is_some_and(|id| id.name == "URL"),
+            Declaration::FunctionDeclaration(f) => f.id.as_ref().is_some_and(|id| id.name == "URL"),
+            _ => false,
+        }
+    }
 
     program.body.iter().any(|stmt| match stmt {
-        Statement::VariableDeclaration(d) => d.declarations.iter().any(
-            |decl| matches!(&decl.id, BindingPattern::BindingIdentifier(id) if id.name == "URL"),
-        ),
-        Statement::ClassDeclaration(c) => c.id.as_ref().is_some_and(|id| id.name == "URL"),
-        Statement::FunctionDeclaration(f) => f.id.as_ref().is_some_and(|id| id.name == "URL"),
-        _ => false,
+        Statement::ExportNamedDeclaration(e) => e.declaration.as_ref().is_some_and(declares_url),
+        Statement::ExportDefaultDeclaration(e) => match &e.declaration {
+            ExportDefaultDeclarationKind::ClassDeclaration(c) => {
+                c.id.as_ref().is_some_and(|id| id.name == "URL")
+            }
+            ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
+                f.id.as_ref().is_some_and(|id| id.name == "URL")
+            }
+            _ => false,
+        },
+        other => other.as_declaration().is_some_and(declares_url),
     })
+}
+
+/// Resolve a URL specifier's `%XX` escapes into the path bytes the RUNTIME will
+/// open, or `None` when the result is not a usable path.
+///
+/// Skipping this does not merely miss a file — it opens the WRONG one. The
+/// specifier is URL text, so `./my%20file.bin` names `my file.bin`; joining the
+/// raw string instead looks for a literal `my%20file.bin`, which usually does not
+/// exist (so every filename containing a space silently stopped being embeddable)
+/// and, when it does, embeds a different file than the program reads, with
+/// nothing failing at build time.
+///
+/// An invalid escape is left verbatim, matching the WHATWG URL parser. Bytes that
+/// do not reassemble into UTF-8 yield `None` rather than a lossy path.
+fn percent_decode(spec: &str) -> Option<String> {
+    if !spec.contains('%') {
+        return Some(spec.to_string());
+    }
+    let raw = spec.as_bytes();
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        let hex = (i + 2 < raw.len())
+            .then(|| std::str::from_utf8(&raw[i + 1..i + 3]).ok())
+            .flatten()
+            .filter(|_| raw[i] == b'%')
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match hex {
+            Some(byte) => {
+                out.push(byte);
+                i += 3;
+            }
+            None => {
+                out.push(raw[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// An RFC 3986 `scheme:` — ALPHA then alphanumerics/`+-.` — which makes a
@@ -1691,9 +1762,22 @@ mod tests {
                  \x20\x20new URL('/data.json', import.meta.url),\n\
                  ];\n",
             ),
+            // A module's own URL is not the global one. The `export` spelling is
+            // listed because missing it made the guard depend on whether the
+            // shadow happened to be exported.
             (
                 "shadowed",
                 "class URL { constructor(a, b) { this.a = a; this.b = b; } }\n\
+                 globalThis.OUT = new URL('./data.json', import.meta.url);\n",
+            ),
+            (
+                "shadowed-export",
+                "export class URL { constructor(a, b) { this.a = a; } }\n\
+                 globalThis.OUT = new URL('./data.json', import.meta.url);\n",
+            ),
+            (
+                "shadowed-export-const",
+                "export const URL = class { constructor(a, b) { this.a = a; } };\n\
                  globalThis.OUT = new URL('./data.json', import.meta.url);\n",
             ),
         ] {
@@ -1742,6 +1826,47 @@ mod tests {
         assert_eq!(res.assets.len(), 1, "the nested sibling must ship");
         assert_eq!(res.assets[0].bytes, b"NESTEDBYTES");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A specifier is URL text, so its escapes have to be resolved before it names
+    // a path. Skipping that does not merely miss the file — with both spellings on
+    // disk it embeds the OTHER one, and the compiled binary then reads bytes the
+    // same source reads differently under plain Node.
+    #[test]
+    fn a_percent_escaped_specifier_names_the_file_the_runtime_would_open() {
+        let dir = fixture_dir("newurl-pct");
+        std::fs::write(dir.join("my file.bin"), b"DECODED").unwrap();
+        std::fs::write(dir.join("my%20file.bin"), b"LITERAL").unwrap();
+        std::fs::write(
+            dir.join("entry.ts"),
+            b"globalThis.OUT = new URL('./my%20file.bin', import.meta.url);\n",
+        )
+        .unwrap();
+
+        let mut o = opts();
+        o.minify = false;
+        let res = bundle(&dir.join("entry.ts"), &o).expect("compiles");
+        assert_eq!(res.assets.len(), 1, "the referenced file must ship");
+        assert_eq!(
+            res.assets[0].bytes, b"DECODED",
+            "%20 is a space, so the space-named file is the one the URL resolves to"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn percent_decoding_follows_the_url_parser() {
+        assert_eq!(percent_decode("./a.bin").as_deref(), Some("./a.bin"));
+        assert_eq!(
+            percent_decode("./my%20f.bin").as_deref(),
+            Some("./my f.bin")
+        );
+        assert_eq!(percent_decode("./%C3%A9.bin").as_deref(), Some("./é.bin"));
+        // An invalid or truncated escape is left verbatim, as the URL parser does.
+        assert_eq!(percent_decode("./100%.bin").as_deref(), Some("./100%.bin"));
+        assert_eq!(percent_decode("./a%zz.bin").as_deref(), Some("./a%zz.bin"));
+        // Bytes that are not UTF-8 have no path spelling to resolve to.
+        assert_eq!(percent_decode("./%FF.bin"), None);
     }
 
     // The invariant behind `map: HookTransformOutputMap::Null` — the transform
