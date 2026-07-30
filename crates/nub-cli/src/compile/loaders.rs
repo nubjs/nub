@@ -261,9 +261,17 @@ impl Plugin for FilePlugin {
             Ok(Some(HookLoadOutput {
                 code: code.into(),
                 module_type: Some(ModuleType::Js),
-                // Nothing in the emitted module observes anything, so an import
-                // whose binding goes unused should take the asset out of the
-                // payload with it rather than bloating every artifact.
+                // The emitted module observes nothing, so it must not anchor
+                // anything that would otherwise be shaken out.
+                //
+                // Payload bloat is handled a step EARLIER and not by this flag:
+                // under tree-shaking Rolldown elides an import whose bindings
+                // all go unused before it ever loads the module, so this hook
+                // does not run and the bytes are never collected. Verified by
+                // making an imported-but-unused asset unreadable — the build
+                // still succeeds, which it could not if `load` had fired.
+                // (`--no-treeshake` therefore does ship such an asset, which is
+                // exactly what disabling tree-shaking asks for.)
                 side_effects: Some(HookSideEffects::False),
                 ..Default::default()
             }))
