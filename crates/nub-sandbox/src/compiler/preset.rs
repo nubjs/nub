@@ -208,6 +208,76 @@ fn private_home_dir(homes: &Homes, package_dir: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Materialize and resolve the node-gyp DEVDIR — the header/dev-files cache a from-source
+/// native build writes — for a Windows child; `None` anywhere else.
+///
+/// WINDOWS-ONLY, and not a platform special-case. node-gyp places the devdir with
+/// `env-paths`, whose POSIX and macOS branches anchor on `os.homedir()`, and
+/// [`compile_build_jail`] redirects the child's `HOME`/`USERPROFILE` to the granted private
+/// jail home — so there the devdir already lands inside a write grant. The Windows branch
+/// reads `%LOCALAPPDATA%` instead, which is deliberately NOT redirected (the LowBox launch
+/// resolves its AppContainer profile dir from it), so Windows alone leaves the devdir outside
+/// every grant. Keyed on the ambient CARRYING `LOCALAPPDATA` rather than on `cfg!(windows)`,
+/// the same discipline as the home redirect in [`compile_build_jail`]: a POSIX child never
+/// has one, so the arm is inert there and stays unit-testable on any host. Bailing when it is
+/// absent loses nothing even on Windows — `env-paths` then falls back to
+/// `os.homedir()/AppData/Local`, and `os.homedir()` reads the REDIRECTED `USERPROFILE`, so the
+/// devdir lands in the private home just as it does on POSIX.
+///
+/// Load-bearing only on a COLD header cache — which a fresh machine always is. Measured with
+/// a one-variable control on Windows Server 2022 + VS Build Tools 17.14 (2026-07-29):
+/// withheld, a from-source `cpu-features` dies `EPERM … mkdir
+/// '…\AppData\Local\node-gyp\Cache'`; granted, the `.node` is byte-identical to the
+/// unconfined baseline. A WARM cache needs no grant, in `install.js`'s source as well as in
+/// the measurement — `--ensure` STATs `<devdir>/<version>` and returns before any write.
+/// Normally node-gyp never reaches here at all: nub sets `npm_config_nodedir`, and
+/// `configure` skips `install()` outright whenever it is set, so this covers the fallback
+/// (no prefetched headers, a script running `node-gyp install` itself). On Windows it is only
+/// the FILESYSTEM half of that fallback — the jail's net axis is deny-all there, so a cold
+/// fetch stays refused until per-host egress lands.
+///
+/// Granted on `node-gyp`, NEVER on `%LOCALAPPDATA%`, which IS `$cache` on Windows: one level
+/// up would hand every jailed script nub's own PM store plus every other application's local
+/// data. CREATED here because it is absent on a machine that has never compiled an addon and
+/// the Windows backend SKIPS a speculative grant whose source is missing, which would
+/// reinstate the `EPERM` above; node-gyp's `Cache/<version>` tree then inherits the ACE at
+/// creation (`OICI`). The leaf is refused rather than followed when it is anything but a real
+/// directory, for the reason spelled out on [`private_home_dir`] — it is write-granted, so a
+/// jailed script can replace it with a link and have the NEXT compile grant the target.
+fn node_gyp_devdir(ambient_env: &BTreeMap<String, String>) -> Option<PathBuf> {
+    let local_app_data = ambient_env
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("LOCALAPPDATA"))
+        .map(|(_, v)| PathBuf::from(v))?;
+    if !local_app_data.is_dir() {
+        return None;
+    }
+    let dir = local_app_data.join("node-gyp");
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.is_dir() => Some(dir),
+        Ok(_) => None,
+        Err(_) => std::fs::create_dir_all(&dir).is_ok().then_some(dir),
+    }
+}
+
+/// Front-insert the node-gyp devdir WRITE grant (see [`node_gyp_devdir`]). Placed with the
+/// other base allows so the `package_dir` rw entry stays last and keeps winning; the devdir
+/// nests inside no other rule, so the position is safe either way.
+fn grant_build_jail_node_gyp_devdir(policy: &mut SandboxPolicy, devdir: &Path) {
+    let grants: Vec<FsRule> = defaults::subtree_globs(&devdir.to_string_lossy())
+        .iter()
+        .map(|glob| FsRule {
+            matcher: CanonGlob(canonicalize_glob_prefix(glob)),
+            effect: Effect::Allow,
+            access: FsAccess::ReadWrite,
+            // Speculative for the same reason every other supplementary jail grant is: the
+            // Windows backend FAILS a launch on a missing AUTHORED source.
+            origin: FsOrigin::Speculative,
+        })
+        .collect();
+    policy.fs.rules.entries.splice(0..0, grants);
+}
+
 /// Create `dir` owner-only. The home holds one package's install scratch; nothing else on
 /// the machine has business in it, and the umask default (0755) would publish it.
 fn create_private_dir(dir: &Path) -> std::io::Result<()> {
@@ -417,6 +487,15 @@ fn build_jail_surface(package_dir: Option<&Path>, private_home: Option<&Path>) -
         // a grant, and an allow-list introduces no deny. The deny-inside-allow form (grant
         // the dot-entries, refuse `.bin`) is what Windows cannot express and would fail
         // closed on every install there.
+        //
+        // AND ON WINDOWS THE SCOPE IS A PER-LAUNCH COST, not only a blast radius — the second
+        // reason not to widen it. The backend writes the grant as an inheritable ACE over the
+        // tree that already exists, measured at ~0.8–0.9 ms per entry and linear (124
+        // entries/122 ms … 1,451/1,293, errors=0, Windows Server 2022). Inheritance (`OICI`)
+        // is what keeps that bounded: MSBuild's hundreds of `build\` intermediates pick the
+        // ACE up at CREATION, so a large POST-build tree costs nothing and only pre-existing
+        // content is walked. Widen this to a project root and the same linearity bites — a
+        // 50k-entry monorepo root would spend ~45 s writing ACEs on every single spawn.
         fs.insert(dir.to_string_lossy().into_owned(), json!("rw"));
     }
     // NO `/etc/shadow` deny here any more. The build jail is a PURE ALLOWLIST — it emits no
@@ -500,6 +579,9 @@ pub fn compile_build_jail(
     grant_build_jail_dependency_reads("build-jail", &mut policy, &ctx, Some(package_dir));
     grant_build_jail_interpreter("build-jail", &mut policy, &ctx);
     grant_build_jail_extra_reads(&mut policy, &extra_reads);
+    if let Some(devdir) = node_gyp_devdir(&ambient_env) {
+        grant_build_jail_node_gyp_devdir(&mut policy, &devdir);
+    }
     // LAST of the grants, so a curated rw wins under last-match-wins over the
     // front-inserted dependency-tree READ it nests inside. `ctx.homes.project` is the
     // consumer's project root, which aube guarantees whenever it hands over a name.
@@ -771,6 +853,107 @@ mod tests {
             second.file_name(),
             "two packages must not resolve to the same home directory name"
         );
+    }
+
+    /// Compile the production jail with `local_app_data` standing in for the child's
+    /// `%LOCALAPPDATA%` — the one input node-gyp's `env-paths` reads to place its devdir. The
+    /// returned tempdir owns the cache home and must outlive the assertions.
+    fn devdir_policy(local_app_data: &Path) -> (SandboxPolicy, tempfile::TempDir) {
+        let cache = tempfile::tempdir().expect("cache home");
+        let project = PathBuf::from("/proj");
+        let package_dir = project.join("node_modules/somepkg");
+        let policy = compile_build_jail(
+            Homes {
+                home: PathBuf::from("/testhome"),
+                tmp: PathBuf::from("/testtmp"),
+                cache: std::fs::canonicalize(cache.path()).expect("canonical cache"),
+                project,
+            },
+            &package_dir,
+            None,
+            Vec::new(),
+            Vec::new(),
+            [(
+                "LOCALAPPDATA".to_string(),
+                local_app_data.to_string_lossy().into_owned(),
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .expect("build-jail compiles");
+        (policy, cache)
+    }
+
+    /// GRANT #5 of the Windows build-jail write set. One-variable control on Windows Server
+    /// 2022 + VS Build Tools 17.14 (2026-07-29): withhold the devdir and a from-source
+    /// `cpu-features` compile dies `EPERM … mkdir '…\AppData\Local\node-gyp\Cache'`; grant it
+    /// and the `.node` is byte-identical to the unconfined baseline. Pins BOTH halves of the
+    /// scope, because the widening is the real hazard: `%LOCALAPPDATA%` IS `$cache` on
+    /// Windows, so a grant one level up publishes nub's own PM store to every jailed script.
+    #[test]
+    fn a_cold_node_gyp_header_cache_needs_the_devdir_grant() {
+        let root = tempfile::tempdir().expect("root");
+        let local_app_data = std::fs::canonicalize(root.path())
+            .expect("canonical root")
+            .join("Local");
+        std::fs::create_dir_all(&local_app_data).expect("localappdata");
+        let (policy, _cache) = devdir_policy(&local_app_data);
+        let matcher = crate::matcher::PathMatcher::new(&policy.fs.rules);
+
+        // node-gyp's own layout: `env-paths` puts the devdir at
+        // `%LOCALAPPDATA%\node-gyp\Cache` and `install.js` mkdirs `<devdir>/<version>` there.
+        let decision = matcher.decide(&local_app_data.join("node-gyp/Cache/v26.5.0"));
+        assert_eq!(
+            (decision.effect, decision.access),
+            (Effect::Allow, FsAccess::ReadWrite),
+            "the node-gyp devdir must be writable — a cold from-source compile cannot mkdir it"
+        );
+        assert!(
+            local_app_data.join("node-gyp").is_dir(),
+            "the devdir must be materialized at compile time: the Windows backend SKIPS a \
+             speculative grant whose source is missing, which reinstates the mkdir EPERM"
+        );
+        assert_eq!(
+            matcher
+                .decide(&local_app_data.join("some-other-app"))
+                .effect,
+            Effect::Deny,
+            "the grant is the devdir alone, never %LOCALAPPDATA% (which IS $cache on Windows)"
+        );
+    }
+
+    /// Why exactly ONE devdir grant is enough, and why it keys on the ambient rather than on
+    /// `cfg!(windows)`: every OTHER devdir location node-gyp has ever used is anchored on
+    /// `os.homedir()`, and the jail redirects the child's `HOME`/`USERPROFILE` to the granted
+    /// private home — so all of them already land inside a write grant. `%LOCALAPPDATA%` is
+    /// the lone exception because it is the lone var left unredirected. This is also why
+    /// granting the user's real `~/.node-gyp` (node-gyp ≤ 8's location) would be a DEAD grant
+    /// on a path the child cannot name, rather than the free one it looks like.
+    #[test]
+    fn every_home_anchored_devdir_is_already_covered_without_a_grant() {
+        assert_eq!(
+            node_gyp_devdir(&BTreeMap::new()),
+            None,
+            "an ambient with no LOCALAPPDATA is a POSIX child; it must acquire no grant"
+        );
+        let case = home_case("somepkg");
+        let jail_home = only_jail_home(&case.cache);
+        let matcher = crate::matcher::PathMatcher::new(&case.policy.fs.rules);
+        // `env-paths`' home-anchored spellings (Linux/BSD `.cache`, macOS `Library/Caches`),
+        // plus node-gyp ≤ 8's `~/.node-gyp` and the Windows fallback when LOCALAPPDATA is unset.
+        for rel in [
+            ".cache/node-gyp/v26.5.0",
+            "Library/Caches/node-gyp/v26.5.0",
+            ".node-gyp/v26.5.0",
+            "AppData/Local/node-gyp/Cache/v26.5.0",
+        ] {
+            let decision = matcher.decide(&jail_home.join(rel));
+            assert_eq!(
+                (decision.effect, decision.access),
+                (Effect::Allow, FsAccess::ReadWrite),
+                "{rel}: a home-anchored devdir needs no grant — the private home covers it"
+            );
+        }
     }
 
     /// The escape the persistence choice opens if the leaf is trusted: a jailed script can
