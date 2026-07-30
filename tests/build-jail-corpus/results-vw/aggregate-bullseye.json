@@ -1,0 +1,2090 @@
+{
+  "tally": {
+    "admissible": 205,
+    "pass": 197,
+    "fail": 8,
+    "inadmissible": 132,
+    "unsignalled": 7,
+    "missing_arm": 0
+  },
+  "byClass": {
+    "SILENT-NO-EFFECT / exit 0, class effect absent, no diagnostic in the log": [
+      {
+        "pkg": "@arkweid/lefthook",
+        "class": "hook-installer",
+        "world": "DID-WORK-AND-FAILED",
+        "rc": 0,
+        "ev": ""
+      },
+      {
+        "pkg": "@evilmartians/lefthook",
+        "class": "hook-installer",
+        "world": "DID-WORK-AND-FAILED",
+        "rc": 0,
+        "ev": ""
+      },
+      {
+        "pkg": "go-ios",
+        "class": "binary-downloader",
+        "world": "DID-WORK-AND-FAILED",
+        "rc": 1,
+        "ev": ""
+      },
+      {
+        "pkg": "lefthook",
+        "class": "hook-installer",
+        "world": "DID-WORK-AND-FAILED",
+        "rc": 0,
+        "ev": ""
+      },
+      {
+        "pkg": "playwright-chromium",
+        "class": "binary-downloader",
+        "world": "DID-WORK-AND-FAILED",
+        "rc": 1,
+        "ev": ""
+      },
+      {
+        "pkg": "playwright-firefox",
+        "class": "binary-downloader",
+        "world": "DID-WORK-AND-FAILED",
+        "rc": 1,
+        "ev": ""
+      },
+      {
+        "pkg": "playwright-webkit",
+        "class": "binary-downloader",
+        "world": "DID-WORK-AND-FAILED",
+        "rc": 1,
+        "ev": ""
+      }
+    ],
+    "MISSING-BINARY-IN-WORLD / git": [
+      {
+        "pkg": "shared-git-hooks",
+        "class": "hook-installer",
+        "world": "DID-WORK-AND-FAILED",
+        "rc": 1,
+        "ev": " git: not found"
+      }
+    ]
+  },
+  "perPkg": [
+    {
+      "pkg": "@airbnb/node-memwatch",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@anthropic-ai/claude-code",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@apollo/protobufjs",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@appsignal/nodejs",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@arkweid/lefthook",
+      "class": "hook-installer",
+      "state": "FAIL",
+      "bucket": "SILENT-NO-EFFECT / exit 0, class effect absent, no diagnostic in the log",
+      "world": "DID-WORK-AND-FAILED",
+      "rc": 0,
+      "ev": ""
+    },
+    {
+      "pkg": "@aws-amplify/cli",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@bahmutov/add-typescript-to-cypress",
+      "class": "codegen",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@bazel/concatjs",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@bazel/cypress",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@bazel/esbuild",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@bazel/hide-bazel-files",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@bazel/jasmine",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@bazel/protractor",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@bazel/rollup",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@bazel/terser",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@bazel/typescript",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@bufbuild/buf",
+      "class": "binary-downloader",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@cdktf/node-pty-prebuilt-multiarch",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@cloudflare/wrangler",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@contrast/fn-inspect",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@cubejs-backend/cubestore",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@cubejs-backend/native",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@cypress/snapshot",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@danmarshall/deckgl-typings",
+      "class": "codegen",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@datadog/mobile-react-native",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@datadog/native-appsec",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@datadog/native-iast-taint-tracking",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@datadog/native-metrics",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@discordjs/opus",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@eversdk/lib-node",
+      "class": "binary-downloader",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@evilmartians/lefthook",
+      "class": "hook-installer",
+      "state": "FAIL",
+      "bucket": "SILENT-NO-EFFECT / exit 0, class effect absent, no diagnostic in the log",
+      "world": "DID-WORK-AND-FAILED",
+      "rc": 0,
+      "ev": ""
+    },
+    {
+      "pkg": "@ffmpeg-installer/darwin-arm64",
+      "class": "self-configuring",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@ffmpeg-installer/darwin-x64",
+      "class": "self-configuring",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@ffmpeg-installer/linux-arm",
+      "class": "self-configuring",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@ffmpeg-installer/linux-arm64",
+      "class": "self-configuring",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@ffmpeg-installer/linux-ia32",
+      "class": "self-configuring",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@ffmpeg-installer/linux-x64",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@ffprobe-installer/darwin-arm64",
+      "class": "self-configuring",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@ffprobe-installer/darwin-x64",
+      "class": "self-configuring",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@ffprobe-installer/linux-arm",
+      "class": "self-configuring",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@ffprobe-installer/linux-arm64",
+      "class": "self-configuring",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@ffprobe-installer/linux-ia32",
+      "class": "self-configuring",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@ffprobe-installer/linux-x64",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@fingerprintjs/fingerprintjs-pro-react",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@firebase/util",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@ghaiklor/x509",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@go-task/cli",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@google/genai",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@instana/autoprofile",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@intlify/vue-i18n-bridge",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@intlify/vue-router-bridge",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@matteodisabatino/gc_info",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@memlab/cli",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@microsoft.azure/autorest-core",
+      "class": "binary-downloader",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@microsoft/teamsfx-cli",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@microsoft/ts-command-line",
+      "class": "self-configuring",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@nativescript/core",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@netlify/esbuild",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@newrelic/native-metrics",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@notarize/qlc-cli",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@nx-dotnet/core",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@opensearch-project/oui",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@pact-foundation/pact-node",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@paloaltonetworks/postman-code-generators",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@parcel/watcher",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@pdftron/pdfnet-node",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@percy/core",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@pnpm/exe",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@prisma/client",
+      "class": "codegen",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@prisma/engines",
+      "class": "binary-downloader",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@progress/kendo-licensing",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@pulumi/aws-native",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@pulumi/command",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@pulumi/kubernetes",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@railway/cli",
+      "class": "binary-downloader",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@roots/bud-framework",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@sap/hana-client",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@sap/hana-theme-vscode",
+      "class": "self-configuring",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@scarf/scarf",
+      "class": "telemetry-nag",
+      "state": "UNSIGNALLED"
+    },
+    {
+      "pkg": "@sematext/gc-stats",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@sentry/capacitor",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@sentry/cli",
+      "class": "binary-downloader",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@serialport/bindings",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@serialport/bindings-cpp",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@shopify/ngrok",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@sitespeed.io/chromedriver",
+      "class": "binary-downloader",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@sitespeed.io/edgedriver",
+      "class": "binary-downloader",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@splunk/otel",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@swc/core",
+      "class": "binary-downloader",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@syncfusion/ej2-angular-base",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@tensorflow/tfjs-node",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@trufflesuite/bigint-buffer",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "@typescript-tools/rust-implementation",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "@vaadin/vaadin-usage-statistics",
+      "class": "telemetry-nag",
+      "state": "UNSIGNALLED"
+    },
+    {
+      "pkg": "@vscode/sqlite3",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "abstract-socket",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "applicationinsights-native-metrics",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "argon2",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "autorest",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "aws-crt",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "aws-sdk",
+      "class": "telemetry-nag",
+      "state": "UNSIGNALLED"
+    },
+    {
+      "pkg": "azure-functions-core-tools",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "azure-streamanalytics-cicd",
+      "class": "binary-downloader",
+      "state": "PASS"
+    },
+    {
+      "pkg": "backport",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "bcrypt",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "better-sqlite3",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "bigint-buffer",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "blake-hash",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "bs-platform",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "bufferutil",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "bun",
+      "class": "binary-downloader",
+      "state": "PASS"
+    },
+    {
+      "pkg": "canvas",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "cbor-extract",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "chromedriver",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "chromium",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "classic-level",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "cld",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "cldr-data",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "clientjs",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "cmark-gfm",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "compresion",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "contentlayer",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "contextify",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "cordova.plugins.diagnostic",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "core-js",
+      "class": "telemetry-nag",
+      "state": "UNSIGNALLED"
+    },
+    {
+      "pkg": "core-js-pure",
+      "class": "telemetry-nag",
+      "state": "UNSIGNALLED"
+    },
+    {
+      "pkg": "couchbase",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "cpu-features",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "cwebp-bin",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "cy2",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "cypress",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "deasync",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "detox",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "detox-recorder",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "diskusage",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "dotnet-2.0.0",
+      "class": "binary-downloader",
+      "state": "PASS"
+    },
+    {
+      "pkg": "dprint",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "drivelist",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "dtrace-provider",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "duckdb",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "dugite",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "eccrypto",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "edgedriver",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "egg-bin",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "egg-ci",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "electron-chromedriver",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "electron-prebuilt",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "electron-winstaller",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "elm",
+      "class": "binary-downloader",
+      "state": "PASS"
+    },
+    {
+      "pkg": "elm-format",
+      "class": "binary-downloader",
+      "state": "PASS"
+    },
+    {
+      "pkg": "es5-ext",
+      "class": "telemetry-nag",
+      "state": "UNSIGNALLED"
+    },
+    {
+      "pkg": "esbuild",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "esoftplay",
+      "class": "self-configuring",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "event-loop-stats",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "exifreader",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "fast-folder-size",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "faunadb",
+      "class": "telemetry-nag",
+      "state": "UNSIGNALLED"
+    },
+    {
+      "pkg": "ffi",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "ffi-napi",
+      "class": "self-configuring",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "ffmpeg-static",
+      "class": "binary-downloader",
+      "state": "PASS"
+    },
+    {
+      "pkg": "fibers",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "fmerge",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "free-email-domains",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "fs-xattr",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "fsevents",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "full-icu",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "gatsby",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "gc-stats",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "gcstats.js",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "geckodriver",
+      "class": "binary-downloader",
+      "state": "PASS"
+    },
+    {
+      "pkg": "gentype",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "ghooks",
+      "class": "hook-installer",
+      "state": "PASS"
+    },
+    {
+      "pkg": "gif2webp-bin",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "gifsicle",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "git-commit-msg-linter",
+      "class": "hook-installer",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "git-validate",
+      "class": "hook-installer",
+      "state": "PASS"
+    },
+    {
+      "pkg": "git-win",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "gl",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "go-ios",
+      "class": "binary-downloader",
+      "state": "FAIL",
+      "bucket": "SILENT-NO-EFFECT / exit 0, class effect absent, no diagnostic in the log",
+      "world": "DID-WORK-AND-FAILED",
+      "rc": 1,
+      "ev": ""
+    },
+    {
+      "pkg": "grpc",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "grpc-tools",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "handbrake-js",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "hasura-cli",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "heapdump",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "hiredis",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "hnswlib-node",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "hugo-bin",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "hummus",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "ibm_db",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "iconv",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "iedriver",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "iltorb",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "incremental-json-parser",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "install-peers",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "interruptor",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "iobroker.js-controller",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "iso-constants",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "isolated-vm",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "java",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "jpeg-recompress-bin",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "jpegtran-bin",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "keccak",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "kerberos",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "keytar",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "lefthook",
+      "class": "hook-installer",
+      "state": "FAIL",
+      "bucket": "SILENT-NO-EFFECT / exit 0, class effect absent, no diagnostic in the log",
+      "world": "DID-WORK-AND-FAILED",
+      "rc": 0,
+      "ev": ""
+    },
+    {
+      "pkg": "leveldown",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "libpq",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "libxmljs",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "libxmljs2",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "lightningcss-cli",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "lmdb",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "lmdb-store",
+      "class": "self-configuring",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "local-cypress",
+      "class": "self-configuring",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "lz4",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "lzma-native",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "lzo",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "macos-alias",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "mbt",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "memlab",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "microtime",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "minidump",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "mmmagic",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "modern-syslog",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "mongodb-client-encryption",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "mongodb-crypt-library-dummy",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "mongodb-crypt-library-version",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "mongodb-memory-server",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "mozjpeg",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "ms-chromium-edge-driver",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "msgpackr-extract",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "msnodesqlv8",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "msw",
+      "class": "codegen",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "muhammara",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "netlify-cli",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "ngrok",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "ngx-popperjs",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "nice-napi",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "node",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "node-expat",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "node-hid",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "node-jq",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "node-libcurl",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "node-mac-contacts",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "node-pty",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "node-rdkafka",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "node-sass",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "node-webcrypto-ossl",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "node-zopfli",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "node-zopfli-es",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "nodegit",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "nodejieba",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "nodent-runtime",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "nx",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "oniguruma",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "onnxruntime-node",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "opencode-ai",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "optipng-bin",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "oracledb",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "os-dns-native",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "parse-server",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "phantomjs",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "phantomjs-prebuilt",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "pkcs11js",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "playwright-chromium",
+      "class": "binary-downloader",
+      "state": "FAIL",
+      "bucket": "SILENT-NO-EFFECT / exit 0, class effect absent, no diagnostic in the log",
+      "world": "DID-WORK-AND-FAILED",
+      "rc": 1,
+      "ev": ""
+    },
+    {
+      "pkg": "playwright-firefox",
+      "class": "binary-downloader",
+      "state": "FAIL",
+      "bucket": "SILENT-NO-EFFECT / exit 0, class effect absent, no diagnostic in the log",
+      "world": "DID-WORK-AND-FAILED",
+      "rc": 1,
+      "ev": ""
+    },
+    {
+      "pkg": "playwright-webkit",
+      "class": "binary-downloader",
+      "state": "FAIL",
+      "bucket": "SILENT-NO-EFFECT / exit 0, class effect absent, no diagnostic in the log",
+      "world": "DID-WORK-AND-FAILED",
+      "rc": 1,
+      "ev": ""
+    },
+    {
+      "pkg": "pngout-bin",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "pngquant-bin",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "posix",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "pprof",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "pre-commit",
+      "class": "hook-installer",
+      "state": "PASS"
+    },
+    {
+      "pkg": "pre-push",
+      "class": "hook-installer",
+      "state": "PASS"
+    },
+    {
+      "pkg": "prisma",
+      "class": "codegen",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "protoc-gen-grpc-web",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "puppeteer",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "purescript",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "re2",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "react-particles",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "react-tsparticles",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "realm",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "redis-memory-server",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "ref",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "ref-napi",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "registry-js",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "robotjs",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "sauce-connect-launcher",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "saucectl",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "secp256k1",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "segfault-handler",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "shared-git-hooks",
+      "class": "hook-installer",
+      "state": "FAIL",
+      "bucket": "MISSING-BINARY-IN-WORLD / git",
+      "world": "DID-WORK-AND-FAILED",
+      "rc": 1,
+      "ev": " git: not found"
+    },
+    {
+      "pkg": "simple-git-hooks",
+      "class": "hook-installer",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "sleep",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "snyk",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "sockopt",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "sonar-scanner",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "spectron",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "spellchecker",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "sq-native",
+      "class": "binary-downloader",
+      "state": "PASS"
+    },
+    {
+      "pkg": "sqlite3",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "sse4_crc32",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "ssh2",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "storage-engine",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "subrequests",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "subrequests-express",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "subrequests-json-merger",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "svf-lib",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "swiftlint",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "taiko",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "tldjs",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "tree-sitter",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "tree-sitter-bash",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "tree-sitter-cli",
+      "class": "binary-downloader",
+      "state": "PASS"
+    },
+    {
+      "pkg": "tree-sitter-json",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "tree-sitter-kotlin",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "tree-sitter-typescript",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "tree-sitter-yaml",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "truffle",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "tsparticles-engine",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "ttag-cli",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "ttf2woff2",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "typemoq",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "union",
+      "class": "self-configuring",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "unix-dgram",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "unrs-resolver",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "ursa-optional",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "utf-8-validate",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "v8-profiler-next",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "vue-demi",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "vue-inbrowser-compiler-demi",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "wd",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "wdeasync",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "weak-napi",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "windows-build-tools",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "wix-style-react",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "wordpos",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "workerd",
+      "class": "binary-downloader",
+      "state": "PASS"
+    },
+    {
+      "pkg": "wrtc",
+      "class": "binary-downloader",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    },
+    {
+      "pkg": "xxhash",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "yarn",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "yo",
+      "class": "self-configuring",
+      "state": "PASS"
+    },
+    {
+      "pkg": "yorkie",
+      "class": "hook-installer",
+      "state": "PASS"
+    },
+    {
+      "pkg": "zeromq",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "zlib-sync",
+      "class": "native-build-prebuilt",
+      "state": "PASS"
+    },
+    {
+      "pkg": "zopflipng-bin",
+      "class": "native-build-prebuilt",
+      "state": "INADMISSIBLE",
+      "host": "DID-WORK-AND-FAILED",
+      "world": "INVALID-FIXTURE"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+lefthook	2.1.10	hook-installer	WORLD	DID-WORK-AND-SUCCEEDED	rc=0	3s
+@evilmartians/lefthook	2.1.10	hook-installer	WORLD	DID-WORK-AND-SUCCEEDED	rc=0	4s
+@arkweid/lefthook	0.7.7	hook-installer	WORLD	DID-WORK-AND-SUCCEEDED	rc=0	2s
+shared-git-hooks	1.2.1	hook-installer	WORLD	DID-WORK-AND-SUCCEEDED	rc=0	1s
+playwright-chromium	1.62.0	binary-downloader	WORLD	DID-WORK-AND-SUCCEEDED	rc=0	20s
+playwright-firefox	1.62.0	binary-downloader	WORLD	DID-WORK-AND-SUCCEEDED	rc=0	9s
+playwright-webkit	1.62.0	binary-downloader	WORLD	DID-WORK-AND-SUCCEEDED	rc=0	9s
+go-ios	1.2.0	binary-downloader	WORLD	DID-WORK-AND-FAILED	rc=1	4s
