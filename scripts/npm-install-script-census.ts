@@ -141,8 +141,19 @@ const num = (name: string, dflt: number): number => {
 const OUT = flag("--out") ?? ".fray/npm-census";
 const THRESHOLD = num("--threshold", 100_000);
 const TOP_N = num("--top-versions", 3);
-const ECO_FLOOR = num("--eco-floor", THRESHOLD);
-const MAX_PAGES = num("--max-pages", 800);
+// Floor in eco's REPORTED monthly. Set well under the threshold's monthly
+// equivalent because eco's reported value can understate the truth by ~100x; the
+// staleness gate, not this floor, is what decides which candidates cost an npm
+// lookup.
+const ECO_FLOOR = num("--eco-floor", 2000);
+// Sweep FAR deeper than the threshold's own rank. eco under-reports exactly the
+// packages that grew recently, pushing real threshold members down the ranking —
+// env-runner reports 484,445 monthly against a real 65,143,376, so it sits ~20,000
+// ranks below where it belongs. Pagination is the cheap half of this pipeline
+// (~80 pages/min, 6 KB cached per page), and the staleness gate is what keeps the
+// expensive npm half from scaling with the depth.
+const MAX_PAGES = num("--max-pages", 2000);
+const GATE_SAMPLE = num("--gate-sample", 600);
 const CONCURRENCY = num("--concurrency", 10);
 const MAX_AGE_MS = num("--max-age", 30) * 86_400_000;
 const STAGE = flag("--stage");
@@ -201,8 +212,16 @@ const paceOk = new Map<string, number>();
 // ~2,400 lookups/min (40/s) — so the useful delay range is TENS of milliseconds.
 // A first cut used a 120 ms floor and a 3,000 ms cap, which pinned throughput at
 // ~116/min: the cap alone was two orders of magnitude past what the host needed.
-const PACE_MIN_STEP = 15;
-const PACE_MAX = 400;
+// Tuned to what the host actually serves rather than to what makes 429s vanish.
+// The burst test showed api.npmjs.org happily serving ~7 requests/s at 2 workers
+// WHILE rejecting 37% of them — so a steady one-third rejection rate is the normal
+// operating point, not a failure, and the right response to a 429 is a short
+// retry rather than a wait that grows. An earlier cut paired a 400 ms pacing
+// ceiling with 429 waits that escalated to 1.5 s and stacked on top of it, which
+// cost ~1.3 s per twice-rejected request and pinned real throughput at 43/min.
+const PACE_MIN_STEP = 10;
+const PACE_MAX = 120;
+const THROTTLE_RETRY_MS = 150;
 
 // Per-host concurrency ceiling, measured not guessed. A burst test against
 // api.npmjs.org's per-package endpoint: 2 workers -> 37% of responses 429, 4
@@ -210,7 +229,7 @@ const PACE_MAX = 400;
 // in-flight request with pacing, and no amount of retrying buys throughput —
 // only spacing does. registry.npmjs.org is CDN-fronted and never throttled
 // across ~6,400 control requests, so it keeps the full concurrency budget.
-const HOST_CONCURRENCY: Record<string, number> = { "api.npmjs.org": 2 };
+const HOST_CONCURRENCY: Record<string, number> = { "api.npmjs.org": 3 };
 const hostInFlight = new Map<string, number>();
 
 const acquireHost = async (host: string): Promise<void> => {
@@ -276,8 +295,8 @@ const getJSON = async (
       // 30 s just parks a worker while the pacing gate already carries the fix —
       // and on a run of throttles the ladder is what collapses throughput. Cap the
       // per-attempt wait near the pacing ceiling and let the gate do the work.
-      const wait = lastWas429 ? Math.min(1500, 200 * attempt) : Math.min(20_000, 400 * 2 ** attempt);
-      await new Promise((r) => setTimeout(r, wait + Math.random() * 300));
+      const wait = lastWas429 ? THROTTLE_RETRY_MS : Math.min(20_000, 400 * 2 ** attempt);
+      await new Promise((r) => setTimeout(r, wait + Math.random() * 150));
     }
     lastWas429 = false;
     try {
@@ -341,7 +360,57 @@ const enc = (name: string): string => name.replace("/", "%2F");
 
 // ------------------------------------------------------------- stage 1: ranking
 
-type RankRow = { name: string; monthly: number; latest: string | null };
+type RankRow = { name: string; monthly: number; latest: string | null; synced: string | null };
+
+// ECOSYSTE.MS VALUES ARE STALE, AND `last_synced_at` BOUNDS HOW STALE.
+// Its downloads figure is npm's last-month, but only for entries it synced
+// recently; for the rest it reports whatever the package was doing when it was
+// last crawled. Measured against npm's own last-month over 849 paired unscoped
+// samples spread across ranks 100-200,000:
+//
+//   sync age   n    median err   MAX err
+//   <1d      240        1.017      3.1x
+//   1-3d     127        1.02       2.2x
+//   3-7d      63        1.025      3.6x
+//   7-14d     75        1.023      5.4x
+//   14-30d   135        1.069     24.7x
+//   30-90d   113        1.061    134.5x   (env-runner: eco 484,445 vs real 65,143,376)
+//
+// Two things follow, and the second is the one that is easy to get wrong:
+//
+//   1. The error TAIL grows monotonically with sync age, so age BOUNDS the error.
+//      That is what makes eco usable at all: a deep-ranked entry can only be a
+//      real threshold member if its age admits a large enough correction.
+//
+//   2. Freshness is NOT byte-exactness. Even under one day, 9 of 299 entries were
+//      off by more than 10% (worst 3.09x) and only 11.7% matched to the byte. A
+//      spot-check of top packages suggests otherwise only because the very top of
+//      the ranking is re-synced constantly — minimatch matching exactly is luck,
+//      not a property. So the age signal is used ONLY as a bound on how far a
+//      value can be wrong, never as licence to trust a value.
+//
+// The band maxima below are multiplied by ECO_ERROR_MARGIN because a max over 849
+// samples is an estimate of a tail, not a proven ceiling — treating an observed
+// maximum as a hard bound is exactly how a sweep silently loses its completeness
+// claim. Packages the gate excludes are still counted and reported, so the
+// completeness statement rests on a measured quantity rather than an assumption.
+const ECO_ERROR_BANDS: Array<[number, number]> = [
+  [1, 3.1],
+  [3, 2.2],
+  [7, 3.6],
+  [14, 5.4],
+  [30, 24.7],
+  [90, 134.5],
+  [Infinity, 134.5],
+];
+const ECO_ERROR_MARGIN = 3;
+
+const ecoErrorBound = (syncedAt: string | null, now: number): number => {
+  if (!syncedAt) return ECO_ERROR_BANDS[ECO_ERROR_BANDS.length - 1][1] * ECO_ERROR_MARGIN;
+  const ageDays = (now - Date.parse(syncedAt)) / 86_400_000;
+  for (const [maxAge, err] of ECO_ERROR_BANDS) if (ageDays < maxAge) return err * ECO_ERROR_MARGIN;
+  return ECO_ERROR_BANDS[ECO_ERROR_BANDS.length - 1][1] * ECO_ERROR_MARGIN;
+};
 
 const ECO = "https://packages.ecosyste.ms/api/v1/registries/npmjs.org/packages";
 
@@ -352,9 +421,11 @@ const ECO = "https://packages.ecosyste.ms/api/v1/registries/npmjs.org/packages";
 // its time parsing and rewriting 16 MB per page rather than on the network. The
 // wave shape preserves the adaptive stop: fetch `CONCURRENCY` pages at once, then
 // halt once a wave crosses the floor.
+// Cache stage is "rank2": the v1 distillation dropped last_synced_at, without
+// which the staleness gate cannot run, so those entries must not be reused.
 const fetchRankPage = async (page: number): Promise<RankRow[] | null> => {
-  const key = `page-${String(page).padStart(4, "0")}`;
-  const cached = readCache("rank", key) as RankRow[] | undefined;
+  const key = `page-${String(page).padStart(5, "0")}`;
+  const cached = readCache("rank2", key) as RankRow[] | undefined;
   if (Array.isArray(cached)) return cached;
   const r = await getJSON(`${ECO}?sort=downloads&order=desc&per_page=100&page=${page}`);
   if (!r.ok) return null;
@@ -364,8 +435,9 @@ const fetchRankPage = async (page: number): Promise<RankRow[] | null> => {
     name: String(p.name),
     monthly: Number(p.downloads ?? 0),
     latest: (p.latest_release_number as string | null) ?? null,
+    synced: (p.last_synced_at as string | null) ?? null,
   }));
-  writeCache("rank", key, rows);
+  writeCache("rank2", key, rows);
   return rows;
 };
 
@@ -666,12 +738,33 @@ const main = async (): Promise<void> => {
   // Names the ranking sweep surfaced, captured BEFORE seeds are merged in — the
   // difference is a direct measurement of the ranking source's recall.
   const fromSweep = new Set(byName.keys());
-  for (const n of seeds) if (!byName.has(n)) byName.set(n, { name: n, monthly: 0, latest: null });
+  for (const n of seeds) if (!byName.has(n)) byName.set(n, { name: n, monthly: 0, latest: null, synced: null });
 
-  const weekly = await stageWeekly([...byName.keys()], "weekly");
+  // WHERE THE EXPENSIVE BUDGET GOES. npm's per-package endpoint tolerates ~400
+  // lookups/min and scoped names cannot be batched, so asking it about every
+  // candidate in a deep sweep is hours of throttled traffic. Instead, ask only
+  // where eco's own staleness admits the package could clear the bar: a candidate
+  // is plausible if eco_monthly x errorBound(sync age) reaches the threshold's
+  // monthly equivalent. A freshly-synced entry deep in the ranking is genuinely
+  // small and can be excluded cheaply; a months-stale entry gets checked even at a
+  // low reported value, which is exactly the recently-grown case that matters.
+  const MONTHLY_PER_WEEKLY = 4;
+  const now = Date.now();
+  const thresholdMonthly = THRESHOLD * MONTHLY_PER_WEEKLY;
+  const plausible: string[] = [];
+  const excluded: RankRow[] = [];
+  for (const r of byName.values()) {
+    if (seeds.has(r.name) || r.monthly * ecoErrorBound(r.synced, now) >= thresholdMonthly) plausible.push(r.name);
+    else excluded.push(r);
+  }
+  console.error(
+    `[gate] ${plausible.length} plausible candidates to query npm; ${excluded.length} excluded by the staleness-scaled bound`,
+  );
+
+  const weekly = await stageWeekly(plausible, "weekly");
   if (STAGE === "weekly") return;
 
-  const above = [...byName.keys()].filter((n) => (weekly.get(n) ?? 0) >= THRESHOLD);
+  const above = plausible.filter((n) => (weekly.get(n) ?? 0) >= THRESHOLD);
   const seedBelow = [...seeds].filter((n) => (weekly.get(n) ?? 0) < THRESHOLD);
   console.error(`[gate] ${above.length} packages at or above ${THRESHOLD.toLocaleString()} weekly downloads`);
 
@@ -806,6 +899,21 @@ const main = async (): Promise<void> => {
     }
   }
 
+  // GATE CONTROL. The staleness bound rests on band maxima estimated from 849
+  // samples, so it is validated rather than trusted: draw a sample from the
+  // EXCLUDED set — biased toward the ones closest to passing, where a failure
+  // would surface first — and ask npm directly. Any excluded package found at or
+  // above the threshold is a real completeness breach, reported by name.
+  const gateSample = excluded
+    .map((r) => ({ name: r.name, headroom: r.monthly * ecoErrorBound(r.synced, now) }))
+    .sort((a, b) => b.headroom - a.headroom)
+    .slice(0, GATE_SAMPLE)
+    .map((x) => x.name);
+  const gateWeekly = gateSample.length > 0 ? await stageWeekly(gateSample, "gate-control") : new Map<string, number>();
+  const gateBreaches = gateSample
+    .filter((n) => (gateWeekly.get(n) ?? 0) >= THRESHOLD)
+    .map((n) => ({ name: n, weekly: gateWeekly.get(n) ?? 0, eco_monthly: byName.get(n)?.monthly ?? 0 }));
+
   const summary = {
     meta: {
       generated: RUN_AT,
@@ -903,6 +1011,25 @@ const main = async (): Promise<void> => {
       above_threshold_seed_only_names: inBand
         .filter((r) => !fromSweep.has(r.name))
         .map((r) => ({ name: r.name, weekly: r.package_weekly_downloads })),
+    },
+    // The completeness statement, resting on measured quantities: how many
+    // candidates the staleness gate excluded, and whether a sample of the ones
+    // closest to passing actually cleared the threshold.
+    staleness_gate: {
+      swept_candidates: byName.size,
+      queried_npm: plausible.length,
+      excluded: excluded.length,
+      error_margin_over_observed_band_max: ECO_ERROR_MARGIN,
+      observed_band_maxima: Object.fromEntries(ECO_ERROR_BANDS.map(([a, e]) => [`<${a}d`, e])),
+      control_sample_size: gateSample.length,
+      control_breaches: gateBreaches.length,
+      control_breach_names: gateBreaches,
+      verdict:
+        gateSample.length === 0
+          ? "not run"
+          : gateBreaches.length === 0
+            ? "no excluded package in the sample reached the threshold"
+            : "BREACH — the gate dropped real threshold members; widen the margin and re-run",
     },
     unverified: {
       manifest_status_counts: pkgRows.reduce<Record<string, number>>((acc, r) => {
