@@ -71,6 +71,7 @@ mod win {
     use std::collections::BTreeMap;
     use std::io::Write;
     use std::net::{SocketAddr, TcpStream};
+    use std::os::windows::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
@@ -1823,11 +1824,32 @@ mod win {
         .expect("dep manifest");
         let junction = f.package.join("node_modules").join("dep");
         std::fs::create_dir_all(f.package.join("node_modules")).expect("package node_modules");
-        let _ = std::process::Command::new(comspec_path())
-            .args(["/c", "mklink", "/J"])
-            .arg(&junction)
-            .arg(&store)
+        // `raw_arg`, and the mklink output is PRINTED. A first revision built the command line
+        // through `Command::arg` — Rust's own quoting, applied on the way to a shell that does
+        // not parse it that way — and discarded the output, so the junction was silently never
+        // created and the bare-specifier cell failed in all six arm-instances INCLUDING the
+        // control. Failing in the control is the tell that separated a harness defect from a
+        // finding; without the output there was nothing to read it off.
+        let mklink = std::process::Command::new(comspec_path())
+            .raw_arg(format!(
+                "/c mklink /J \"{}\" \"{}\"",
+                junction.display(),
+                store.display()
+            ))
             .output();
+        match &mklink {
+            Ok(o) => println!(
+                "  fact:anc-mklink status={:?} out={} err={}",
+                o.status.code(),
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .replace('\n', " | "),
+                String::from_utf8_lossy(&o.stderr)
+                    .trim()
+                    .replace('\n', " | ")
+            ),
+            Err(e) => println!("  fact:anc-mklink spawn-failed={e}"),
+        }
         println!("  fact:anc-junction-created={}", junction.is_dir());
 
         // ── the arm-local paths. Every marker is baked into the JS as an absolute LITERAL: the
