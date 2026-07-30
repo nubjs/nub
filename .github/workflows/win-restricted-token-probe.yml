@@ -63,7 +63,11 @@ jobs:
           grep -q "PROBE end" probe.log || { echo "MISS the probe did not run to completion"; fail=1; }
           # Controls only. Every `fact:` row is a measurement, and a DENIED there is the finding.
           echo "---- controls ----"
-          for p in token-built-baseline-own-token \
+          for p in lowbox-gate-is-modelled \
+                   package-sid-derived \
+                   token-built-lowbox-on-own-base \
+                   token-built-lowbox-on-restricted-base-low-il \
+                   token-built-baseline-own-token \
                    token-built-restricted-medium-il \
                    token-built-restricted-low-il \
                    baseline-reads-c-root \

@@ -125,7 +125,10 @@ features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization"
   # The de-elevation probe's administrative-authority oracle: OpenSCManagerW for
   # SC_MANAGER_CREATE_SERVICE succeeds only for an administrator and mutates nothing, which
   # is what lets the paired arms be gated on an access check rather than a token flag.
-  "Win32_System_Services"]
+  "Win32_System_Services",
+  # `NtCreateLowBoxToken` is resolved by name from ntdll: it is the only way to build a LowBox
+  # token from a chosen BASE token, which is the composed-token experiment's whole mechanism.
+  "Win32_System_LibraryLoader"]
 
 # The Windows enforcement probe self-reexecs as the AppContainer child, so it owns
 # `main` (dispatch on argv) rather than the libtest harness. windows-latest CI only; a

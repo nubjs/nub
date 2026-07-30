@@ -62,6 +62,7 @@ mod win {
         TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
         TokenImpersonation, TokenIntegrityLevel,
     };
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     // The two access shapes that decide the question. READ is what every failing operation needs
@@ -218,6 +219,155 @@ mod win {
         Ok(TokenGuard(dup))
     }
 
+    /// `OBJECT_ATTRIBUTES`, spelled locally rather than pulling a Wdk feature in for one struct.
+    #[repr(C)]
+    struct ObjectAttributes {
+        length: u32,
+        root_directory: HANDLE,
+        object_name: *mut std::ffi::c_void,
+        attributes: u32,
+        security_descriptor: *mut std::ffi::c_void,
+        security_quality_of_service: *mut std::ffi::c_void,
+    }
+
+    type NtCreateLowBoxTokenFn = unsafe extern "system" fn(
+        *mut HANDLE,
+        HANDLE,
+        u32,
+        *mut ObjectAttributes,
+        PSID,
+        u32,
+        *mut SID_AND_ATTRIBUTES,
+        u32,
+        *mut HANDLE,
+    ) -> i32;
+
+    /// Turn `base` into a LowBox (AppContainer) token carrying `package` and NO capabilities.
+    ///
+    /// `NtCreateLowBoxToken` is undocumented but it is the syscall `CreateProcessW` itself reaches
+    /// through when handed `SECURITY_CAPABILITIES`, and it is what makes the composition testable:
+    /// it takes the BASE token as a parameter, so a restricted token can be the base. Chromium does
+    /// exactly this (`app_container_base.cc` `BuildPrimaryToken`/`BuildImpersonationToken`, and
+    /// `app_container_unittest.cc` asserts the result keeps the base's User sid while still
+    /// reporting `IsAppContainer`).
+    ///
+    /// ZERO capabilities is deliberate and is half the design under test: no `internetClient` means
+    /// no egress. The other half is whether reads survive, which is what the caller measures.
+    fn lowbox_token(base: HANDLE, package: PSID) -> std::io::Result<TokenGuard> {
+        let ntdll: Vec<u16> = "ntdll.dll".encode_utf16().chain([0]).collect();
+        // SAFETY: resolves an exported symbol from an already-loaded module; the returned pointer
+        // is transmuted to the documented-by-reverse-engineering signature above.
+        let func: NtCreateLowBoxTokenFn = unsafe {
+            let module = GetModuleHandleW(ntdll.as_ptr());
+            if module.is_null() {
+                return Err(std::io::Error::other("ntdll not loaded"));
+            }
+            let sym = GetProcAddress(module, c"NtCreateLowBoxToken".as_ptr().cast());
+            match sym {
+                Some(p) => std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    NtCreateLowBoxTokenFn,
+                >(p),
+                None => return Err(std::io::Error::other("NtCreateLowBoxToken not exported")),
+            }
+        };
+        let mut attrs = ObjectAttributes {
+            length: std::mem::size_of::<ObjectAttributes>() as u32,
+            root_directory: std::ptr::null_mut(),
+            object_name: std::ptr::null_mut(),
+            attributes: 0,
+            security_descriptor: std::ptr::null_mut(),
+            security_quality_of_service: std::ptr::null_mut(),
+        };
+        let mut out: HANDLE = std::ptr::null_mut();
+        const TOKEN_ALL: u32 = 0xF01FF;
+        // SAFETY: `attrs` outlives the call; capability and handle lists are empty with zero counts.
+        let status = unsafe {
+            func(
+                &mut out,
+                base,
+                TOKEN_ALL,
+                &mut attrs,
+                package,
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        if status != 0 {
+            return Err(std::io::Error::other(format!(
+                "NtCreateLowBoxToken: NTSTATUS 0x{status:08x}"
+            )));
+        }
+        Ok(TokenGuard(out))
+    }
+
+    /// A package sid without creating any on-disk profile — the sid is a pure hash of the name, so
+    /// this leaves nothing to clean up and needs no privilege.
+    fn package_sid(name: &str) -> std::io::Result<PSID> {
+        use windows_sys::Win32::Security::Isolation::DeriveAppContainerSidFromAppContainerName;
+        let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        let mut sid: PSID = std::ptr::null_mut();
+        // SAFETY: derives a sid from a well-formed name; freed with FreeSid by the caller.
+        let hr = unsafe { DeriveAppContainerSidFromAppContainerName(wide.as_ptr(), &mut sid) };
+        if hr != 0 {
+            return Err(std::io::Error::other(format!(
+                "DeriveAppContainerSid: hr 0x{hr:08x}"
+            )));
+        }
+        Ok(sid)
+    }
+
+    /// `TokenIsAppContainer` and the capability count, so an arm's claim to BE an AppContainer with
+    /// no capabilities is read off the token rather than assumed from how it was built.
+    fn token_shape(token: HANDLE) -> String {
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, TokenCapabilities, TokenIsAppContainer,
+        };
+        let mut is_ac = 0u32;
+        let mut len = 0u32;
+        // SAFETY: fixed-size out-param sized exactly.
+        unsafe {
+            GetTokenInformation(
+                token,
+                TokenIsAppContainer,
+                std::ptr::from_mut(&mut is_ac).cast(),
+                4,
+                &mut len,
+            )
+        };
+        let mut needed = 0u32;
+        // SAFETY: size query with a null buffer, as documented.
+        unsafe {
+            GetTokenInformation(
+                token,
+                TokenCapabilities,
+                std::ptr::null_mut(),
+                0,
+                &mut needed,
+            )
+        };
+        let mut buf = vec![0u8; needed.max(4) as usize];
+        // SAFETY: buffer sized by the query above.
+        let ok = unsafe {
+            GetTokenInformation(
+                token,
+                TokenCapabilities,
+                buf.as_mut_ptr().cast(),
+                needed,
+                &mut needed,
+            )
+        };
+        let caps = if ok == 0 {
+            "?".to_string()
+        } else {
+            // TOKEN_GROUPS: a leading u32 count.
+            u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]).to_string()
+        };
+        format!("is-appcontainer={} capabilities={caps}", is_ac != 0)
+    }
+
     /// Whether `token` would be granted `desired` on `path`, decided by the OS.
     ///
     /// OWNER and GROUP are fetched alongside the DACL deliberately: `AccessCheck` rejects a
@@ -328,13 +478,84 @@ mod win {
             ("fixture-leaf", leaf.clone()),
         ];
 
-        // BASELINE first, and it is not decoration: `AccessCheck` models the check rather than
-        // performing it in situ, so an unrestricted token must come back GRANTED on these very
-        // paths or the harness is reporting its own error as a denial.
+        // FOUR ROWS, and the two known ones are what make the new one interpretable.
+        //
+        // `lowbox-on-own-base` is the CRITICAL CONTROL for this experiment specifically: a LowBox
+        // token built on an unrestricted base must come back DENIED on `C:\`, matching what the
+        // real confined launch measured. If it came back GRANTED, `AccessCheck` would not be
+        // modelling the AppContainer gate at all and the composed rows would mean nothing — the
+        // same class of false result as the `TOKEN_ADJUST_DEFAULT` mask bug, in the opposite
+        // direction.
+        //
+        // Both construction orders are measured rather than inferred. Chromium's helper takes the
+        // base token as a parameter, which suggests restrict-then-lowbox, but a suggestion is not
+        // a measurement.
+        let package = match package_sid("nub-probe-composed") {
+            Ok(p) => p,
+            Err(e) => {
+                report(&mut fails, "package-sid-derived", false, &e.to_string());
+                return 1;
+            }
+        };
+        report(&mut fails, "package-sid-derived", true, "");
+
+        let composed_restrict_then_lowbox = restricted_token("S-1-16-4096")
+            .and_then(|base| lowbox_token(base.0, package))
+            .and_then(|t| duplicate_for_check(t.0));
+        let composed_lowbox_then_restrict = own_token()
+            .and_then(|base| lowbox_token(base.0, package))
+            .and_then(|lb| {
+                // Restricting AFTER: the same deny-only Administrators reduction, applied to a
+                // token that is already an AppContainer.
+                let admins = sid_from("S-1-5-32-544")?;
+                let mut deny = [SID_AND_ATTRIBUTES {
+                    Sid: admins.0,
+                    Attributes: 0,
+                }];
+                let mut out: HANDLE = std::ptr::null_mut();
+                // SAFETY: `deny` outlives the call; other lists are empty.
+                let ok = unsafe {
+                    CreateRestrictedToken(
+                        lb.0,
+                        DISABLE_MAX_PRIVILEGE,
+                        deny.len() as u32,
+                        deny.as_mut_ptr(),
+                        0,
+                        std::ptr::null_mut(),
+                        0,
+                        std::ptr::null_mut(),
+                        &mut out,
+                    )
+                };
+                if ok == 0 {
+                    return Err(std::io::Error::other(format!(
+                        "CreateRestrictedToken(on lowbox): {}",
+                        std::io::Error::last_os_error()
+                    )));
+                }
+                let out = TokenGuard(out);
+                set_integrity(out.0, "S-1-16-4096")?;
+                duplicate_for_check(out.0)
+            });
+
         let arms: Vec<(&str, std::io::Result<TokenGuard>)> = vec![
             ("baseline-own-token", own_token()),
             ("restricted-medium-il", restricted_token("S-1-16-8192")),
             ("restricted-low-il", restricted_token("S-1-16-4096")),
+            (
+                "lowbox-on-own-base",
+                own_token()
+                    .and_then(|b| lowbox_token(b.0, package))
+                    .and_then(|t| duplicate_for_check(t.0)),
+            ),
+            (
+                "lowbox-on-restricted-base-low-il",
+                composed_restrict_then_lowbox,
+            ),
+            (
+                "restricted-after-lowbox-low-il",
+                composed_lowbox_then_restrict,
+            ),
         ];
 
         for (arm, token) in &arms {
@@ -351,6 +572,7 @@ mod win {
                 }
             };
             report(&mut fails, &format!("token-built-{arm}"), true, "");
+            println!("  fact:{arm} shape = {}", token_shape(token.0));
             for (label, path) in &paths {
                 for (kind, desired) in [("read", READ_SET), ("write", WRITE_SET)] {
                     let verdict = match access_check(token.0, path, desired) {
@@ -377,6 +599,35 @@ mod win {
             }
         }
 
+        // THE CONTROL THAT MAKES THIS EXPERIMENT INTERPRETABLE. A LowBox token on an unrestricted
+        // base must be DENIED on `C:\`, reproducing what the real confined launch measured. If it
+        // were GRANTED, `AccessCheck` would not be applying the AppContainer gate and every
+        // composed row above would be meaningless.
+        if let Some(Ok(lowbox)) = arms
+            .iter()
+            .find(|(a, _)| *a == "lowbox-on-own-base")
+            .map(|(_, t)| t.as_ref())
+        {
+            let denied = !access_check(lowbox.0, Path::new("C:\\"), READ_SET).unwrap_or(true);
+            report(
+                &mut fails,
+                "lowbox-gate-is-modelled",
+                denied,
+                "a LowBox token on an unrestricted base must be DENIED on C:\\, or AccessCheck \
+                 is not applying the AppContainer gate and the composed rows mean nothing",
+            );
+        } else {
+            report(
+                &mut fails,
+                "lowbox-gate-is-modelled",
+                false,
+                "the control arm did not build",
+            );
+        }
+
+        drop(arms);
+        // SAFETY: the sid came from DeriveAppContainerSidFromAppContainerName; last use.
+        unsafe { windows_sys::Win32::Security::FreeSid(package) };
         let _ = std::fs::remove_dir_all(&tmp);
         println!("PROBE end fails={fails}");
         i32::from(fails > 0)
