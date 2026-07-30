@@ -26,15 +26,16 @@
 //! NPFS namespace, which is closed to a LowBox token, and `uv__pipe_server` treats the refusal
 //! as a name collision and retries forever inside `uv_spawn` — so a confined piped spawn does
 //! not fail, it SPINS (measured: cpu_ms 14906 of 15059 wall). `windows_build_jail_node_options()`
-//! returns a `NODE_OPTIONS` carrying an `--import data:` preload that rewrites every `'pipe'`
-//! slot into a scratch FILE and hands the bytes back through stream objects. The five shapes a
-//! real lifecycle script uses are measured through it, plus `fork()`, which has no file
-//! analogue and must fail FAST rather than become an unkillable spin.
+//! returns a `NODE_OPTIONS` carrying an `--import data:` preload that creates the pipe ITSELF in
+//! the AppContainer-private namespace (`\\.\pipe\LOCAL\…`, which the same jail permits) and hands
+//! the child an already-connected end as a raw fd. The five shapes a real lifecycle script uses
+//! are measured through it, plus `fork()`, whose channel rides the same private namespace.
 //!
-//! `shim-spawn-stream-returns` is the one that can find a NEW bug rather than confirm an old
-//! fix: a raw `spawn()` gets its bytes at child exit, which means the shim has to hold `close`
-//! back until the synthesised streams have drained (`_closesNeeded`). If `close` fires first the
-//! marker comes back empty, and that is a real defect, reported as measured.
+//! `shim-spawn-stream-returns` is the one that can find a NEW bug rather than confirm an old fix:
+//! the shim has to hold `close` back until the streams it published have drained
+//! (`_closesNeeded`), and it drives that bookkeeping by hand because Node's own `maybeClose` does
+//! not count a slot the caller supplied. If `close` fires first the marker comes back empty, and
+//! that is a real defect, reported as measured.
 //!
 //! EVERY VERDICT IS A MARKER THE CHILD WROTE. Nothing is read off a status the harness reports
 //! about itself, and every path a child touches is baked into the JS as an absolute LITERAL —
@@ -1336,14 +1337,19 @@ child.on("close", (code) => fs.writeFileSync(M, "CLOSED code=" + code + " out=" 
             );
         }
 
-        fork_fails_fast(fails, &f, &shimmed, node, &dir);
+        fork_round_trips(fails, &f, &shimmed, node, &dir);
         unshimmed_control(fails, &f, &unshimmed, node, &dir);
     }
 
-    /// An IPC channel is a duplex pipe and a file cannot emulate one, so `fork()` must throw
-    /// SYNCHRONOUSLY with a diagnostic naming the opt-out. A hang here is a FAIL: the whole
-    /// point of failing fast is that it is strictly better than the unkillable spin.
-    fn fork_fails_fast(
+    /// `fork()` USED to throw here, because a scratch file cannot emulate a duplex pipe. It now
+    /// rides a channel over `\\.\pipe\LOCAL\…`, the AppContainer-private namespace, so the arm
+    /// asserts a real round trip — and NESTED, because the repair has to survive its own recursion:
+    /// the grandchild is forked BY a forked child, so a second private pipe must be creatable from
+    /// inside an already-confined descendant and the preload must reach two levels down.
+    ///
+    /// A hang is still a FAIL. That was the original point of failing fast, and it does not stop
+    /// being the bar just because the operation now succeeds.
+    fn fork_round_trips(
         fails: &mut u32,
         f: &Fixture,
         policy: &SandboxPolicy,
@@ -1351,35 +1357,70 @@ child.on("close", (code) => fs.writeFileSync(M, "CLOSED code=" + code + " out=" 
         dir: &Path,
     ) {
         let marker = dir.join("fork.marker");
-        let target = dir.join("fork-target.js");
-        std::fs::write(&target, "process.exit(0);\n").unwrap();
+        let leaf = dir.join("fork-leaf.js");
+        std::fs::write(
+            &leaf,
+            "process.on('message', (m) => process.send({ pong: m.ping, connected: process.connected }));\n",
+        )
+        .unwrap();
+        let relay = dir.join("fork-relay.js");
+        std::fs::write(
+            &relay,
+            format!(
+                "const cp = require('child_process');\n\
+                 const g = cp.fork({leaf});\n\
+                 g.on('message', (m) => {{ process.send({{ relayed: m.pong }}); g.kill(); }});\n\
+                 process.on('message', (m) => g.send({{ ping: m.ping }}));\n",
+                leaf = js_literal(&leaf),
+            ),
+        )
+        .unwrap();
         let _ = std::fs::remove_file(&marker);
         let body = format!(
             r#"const fs = require("fs"), cp = require("child_process");
 const M = {marker};
 fs.writeFileSync(M, "start");
+const done = (s) => {{ fs.writeFileSync(M, s); process.exit(0); }};
+const guard = setTimeout(() => done("HUNG no reply within 20s"), 20000);
 try {{
-  cp.fork({target});
-  fs.writeFileSync(M, "NO-THROW");
+  const direct = cp.fork({leaf});
+  direct.on("message", (m) => {{
+    direct.kill();
+    const nested = cp.fork({relay});
+    nested.on("message", (n) => {{
+      clearTimeout(guard);
+      nested.kill();
+      done("OK direct=" + JSON.stringify(m) + " nested=" + JSON.stringify(n));
+    }});
+    nested.send({{ ping: "p2" }});
+  }});
+  direct.send({{ ping: "p1" }});
 }} catch (e) {{
-  fs.writeFileSync(M, "THREW code=" + (e.code || "") + " msg=" + String(e.message));
+  clearTimeout(guard);
+  done("THREW code=" + (e.code || "") + " msg=" + String(e.message));
 }}
 "#,
             marker = js_literal(&marker),
-            target = js_literal(&target),
+            leaf = js_literal(&leaf),
+            relay = js_literal(&relay),
         );
         println!("  ---- shim shape fork ----");
-        let run = node_arm(f, policy, "fork", node, dir, 30, &body);
+        let run = node_arm(f, policy, "fork", node, dir, 40, &body);
         let inner = std::fs::read_to_string(&marker).unwrap_or_else(|_| "<no marker>".into());
         println!("  fact:fork-inner={inner}");
-        let _ = run.code;
         report(
             fails,
-            "shim-fork-fails-fast",
-            inner.contains("ERR_NUB_SANDBOX_NO_IPC")
-                && inner.contains("dependenciesMeta")
+            "shim-fork-roundtrip",
+            inner.contains(r#""pong":"p1""#)
+                && inner.contains(r#""connected":true"#)
                 && run.outer.starts_with("EXITED"),
             &format!("inner={inner} outer={}", run.outer),
+        );
+        report(
+            fails,
+            "shim-fork-nested",
+            inner.contains(r#""relayed":"p2""#),
+            &format!("inner={inner}"),
         );
     }
 

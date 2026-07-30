@@ -845,7 +845,10 @@ impl Linker {
             // symlink still serves. Four of the five call sites are warm
             // short-circuits that previously could not fail at all.
             if let Err(e) = self.materialize_nested_dep(pkg_nm_dir, dep_name, dep_pkg, stats) {
-                warn!("could not nest optional dep {dep_name} inside {}: {e}", pkg.name);
+                warn!(
+                    "could not nest optional dep {dep_name} inside {}: {e}",
+                    pkg.name
+                );
             }
         }
         Ok(())

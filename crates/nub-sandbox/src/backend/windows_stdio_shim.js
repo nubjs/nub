@@ -104,7 +104,11 @@ function install() {
   // with no writable directory anywhere still gets working async stdio and a working channel.
   // Neither candidate can be assumed — the temp dir is preferred but is not the jail's write
   // anchor and is often ungranted, and the cwd is the anchor but a script may have moved off it.
-  const scratchDir = writableScratchDir();
+  //
+  // The seam forces the no-writable-directory answer, because the property worth pinning — that
+  // the async path has no scratch precondition — cannot be staged with real permissions off
+  // Windows, where the address IS a filesystem path.
+  const scratchDir = process.env.__NUB_JAIL_NO_SCRATCH ? null : writableScratchDir();
 
   let seq = 0;
   const scratch = (tag) =>
@@ -263,6 +267,12 @@ function install() {
               closeServer(p);
               if (p.slot === 0) stream.pipe(socket);
               else socket.pipe(stream);
+              // In real Node the exposed stream IS the socket, so destroying it closes the pipe and
+              // settles the close accounting. Here they are two objects, and keeping that identity
+              // is load-bearing: `execFile`'s maxBuffer path calls `child.stdout.destroy()`, and if
+              // that left the socket open the count would never complete and the CALLBACK WOULD
+              // NEVER FIRE — silently, exit 0, which is what the file-backed path does today.
+              stream.once("close", () => socket.destroy());
               // Accounting rides the SOCKET, not the PassThrough: real pipes emit `close` whether
               // or not the caller ever read them, and gating on a PassThrough nobody drains would
               // hang the child's own completion instead.
@@ -630,7 +640,8 @@ function attachChannel(emitter, getSocket, onTeardown) {
     try {
       message = JSON.parse(line);
     } catch {
-      return; // A partial line at close is not a message; Node's parser drops it too.
+      // A partial line at close is not a message; Node's parser drops it too.
+      return;
     }
     // `cmd: 'NODE_…'` is Node's internal namespace (`isInternal`), never delivered as 'message'.
     // Nothing here emits one; the guard exists so a real Node peer on the other end cannot leak
