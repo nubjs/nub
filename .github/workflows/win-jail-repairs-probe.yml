@@ -271,12 +271,23 @@ jobs:
           grep -E 'fact:(deelev-)?shell-leafgrant-' probe.log || { echo "MISS the leafgrant facts"; fail=1; }
           grep -E 'fact:(deelev-)?shell-path-dropped-node-dirs=' probe.log || true
 
+          echo "---- does `node <absolute file>` resolve for each principal? ----"
+          # Repair 1's whole purpose. A FAIL in the de-elevated arm means the repair reaches the
+          # profile chain but not the volume root, so every absolute entry point still dies.
+          for arm in "" "deelev-"; do
+            p="${arm}shell-node-absolute-entry-resolves-repair-on"
+            grep -q "prop:$p=" probe.log || { echo "MISS $p (never measured)"; fail=1; }
+            grep -E "prop:$p=" probe.log || true
+          done
+          grep -E 'fact:(deelev-)?shell-node-entry-(off|on)=' probe.log || true
+
           echo "---- shells: the gates (no cell below counts as evidence without these) ----"
           for p in shell-gate-stdio-shim-live \
                    shell-gate-system-interpreter-reachable-ungranted \
                    shell-gate-repair-off-croot-refused \
                    shell-gate-repair-on-croot-permitted \
                    shell-gate-repair-off-profile-ancestor-refused \
+                   shell-gate-node-absolute-entry-refused-repair-off \
                    shell-gate-repair-on-profile-ancestor-permitted \
                    shell-gate-off-ungranted-read-refused \
                    shell-gate-on-ungranted-read-refused; do
@@ -342,6 +353,7 @@ jobs:
                    deelev-shell-gate-off-ungranted-read-refused \
                    deelev-shell-gate-on-ungranted-read-refused \
                    deelev-shell-gate-repair-off-profile-ancestor-refused \
+                   deelev-shell-gate-node-absolute-entry-refused-repair-off \
                    deelev-shell-gate-repair-on-profile-ancestor-permitted; do
             need_pass "$p"
           done

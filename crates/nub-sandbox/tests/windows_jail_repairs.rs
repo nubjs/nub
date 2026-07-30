@@ -2192,12 +2192,27 @@ try {{
             std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into()),
         )
         .join("nodejs");
+        // A REAL install is better evidence than a planted one, so when the image already has
+        // one it is used AS IS and nothing is written. Run 30535709104 took this branch and
+        // skipped the measurement, which is the defect this returns a path for.
         if root.exists() {
+            let exe = root.join("node.exe");
             println!(
-                "  fact:allusers-node=PRE-EXISTING-LEFT-ALONE {}",
-                root.display()
+                "  fact:allusers-node={} source=PRE-EXISTING-UNMODIFIED exists={}",
+                exe.display(),
+                exe.is_file()
             );
-            return None;
+            println!(
+                "  fact:allusers-node-dacl={}",
+                std::process::Command::new("icacls")
+                    .arg(&exe)
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout)
+                        .trim()
+                        .replace(['\r', '\n'], " | "))
+                    .unwrap_or_else(|e| format!("icacls-failed:{e}"))
+            );
+            return exe.is_file().then_some(exe);
         }
         if let Err(e) = std::fs::create_dir_all(&root) {
             println!("  fact:allusers-node=MKDIR-REFUSED {e}");
@@ -2595,7 +2610,18 @@ fs.writeFileSync({marker}, "sentinel=" + String(globalThis.__nubJailStdioShim) +
 "#,
             marker = js_literal(&shim_marker),
         );
-        let shim_run = node_arm(&f, &policy, "shellshim", node, &f.work, 30, &shim_body);
+        // The STAGED node, not the ambient one: the policy grants only user-owned paths, so a
+        // gate that launched `C:\hostedtoolcache\…\node.exe` measured its own ACCESS_DENIED
+        // instead of the shim (run 30535709104, `outer=spawn-refused raw=Some(5)` in BOTH arms).
+        let shim_run = node_arm(
+            &f,
+            &policy,
+            "shellshim",
+            &staged_node,
+            &f.work,
+            30,
+            &shim_body,
+        );
         let shim_text =
             std::fs::read_to_string(&shim_marker).unwrap_or_else(|_| "<no marker>".into());
         println!("  fact:shell-stdio-shim={shim_text}");
@@ -2719,6 +2745,77 @@ fs.writeFileSync({marker}, "sentinel=" + String(globalThis.__nubJailStdioShim) +
                     line(map, "ungranted")
                 ),
             );
+        }
+
+        // ── DOES `node <ABSOLUTE FILE>` STILL RESOLVE? ──────────────────────────────────
+        //
+        // This is what repair 1 EXISTS for, and it is the cell that says whether the repair
+        // delivers anything to a standard user. Node's `realpathSync` opens every prefix of the
+        // entry path as a TARGET starting at the volume root, so with `C:\` refused it dies in
+        // `resolveMainPath` before user code — and `croot-on` above already differs by principal.
+        // It also ATTRIBUTES the batteries' `nestedspawn` cell, which is this same operation
+        // reached through a shell and would otherwise read as a shell defect.
+        std::fs::write(f.work.join("dep.js"), "module.exports = 42;\n").unwrap();
+        let entry_marker = f.work.join("entryok.txt");
+        let entry_body = format!(
+            r#"
+const fs = require("node:fs");
+const dep = require({dep});
+fs.writeFileSync({marker}, "entry=ok require=" + String(dep));
+"#,
+            dep = js_literal(&f.work.join("dep.js")),
+            marker = js_literal(&entry_marker),
+        );
+        for arm in ["off", "on"] {
+            let _ = std::fs::remove_file(&entry_marker);
+            let go = || {
+                node_arm(
+                    &f,
+                    &policy,
+                    &format!("shellentry-{arm}"),
+                    &staged_node,
+                    &f.work,
+                    30,
+                    &entry_body,
+                )
+            };
+            let run = if arm == "off" {
+                without_ancestor_repair(go)
+            } else {
+                go()
+            };
+            let text =
+                std::fs::read_to_string(&entry_marker).unwrap_or_else(|_| "<no marker>".into());
+            println!(
+                "  fact:shell-node-entry-{arm}={} outer={}",
+                text.trim(),
+                run.outer
+            );
+            let resolved = text.contains("entry=ok");
+            if arm == "off" {
+                // THE CONTROL: unrepaired, this must still die, or the repaired cell beside it
+                // is measuring nothing.
+                report(
+                    fails,
+                    "shell-gate-node-absolute-entry-refused-repair-off",
+                    !resolved,
+                    &format!(
+                        "{} (the floor must still reproduce the realpath defect)",
+                        text.trim()
+                    ),
+                );
+            } else {
+                // A MEASUREMENT: whether repair 1 reaches far enough for THIS principal.
+                report(
+                    fails,
+                    "shell-node-absolute-entry-resolves-repair-on",
+                    resolved,
+                    &format!(
+                        "{} (repair on — a FAIL means repair 1 does not reach this token)",
+                        text.trim()
+                    ),
+                );
+            }
         }
 
         // ── the batteries ─────────────────────────────────────────────────────────────
@@ -3796,7 +3893,13 @@ p done=1
         // arms through the environment — the de-elevated child could not create it, and that is
         // the whole point: a standard user meets that path as an installer left it.
         step("plant_allusers_node");
+        let programfiles_nodejs_preexisted = PathBuf::from(
+            std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into()),
+        )
+        .join("nodejs")
+        .exists();
         let allusers = plant_allusers_node(node.as_path());
+        let planted_allusers = allusers.is_some() && !programfiles_nodejs_preexisted;
         if let Some(exe) = &allusers {
             // SAFETY: the probe is single-threaded here; the child inherits this block.
             unsafe { std::env::set_var("PROBE_ALLUSERS_NODE", exe) };
@@ -3842,6 +3945,7 @@ p done=1
         // PRE-EXISTING-LEFT-ALONE branch and silently skip the measurement.
         if let Some(exe) = &allusers
             && let Some(root) = exe.parent()
+            && planted_allusers
         {
             println!(
                 "  fact:allusers-node-cleanup={:?}",
