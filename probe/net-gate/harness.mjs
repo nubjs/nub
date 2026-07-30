@@ -236,4 +236,50 @@ for (const [label, hosts, target, expect] of [
   console.log(`  ${pad(label, 30)} hosts=${pad(JSON.stringify(hosts), 20)} target=${pad(target, 18)} ${got === expect ? "PASS" : "**FAIL**"}  (${out})`);
 }
 
+// ── Windows-only arms ───────────────────────────────────────────────────────────────────
+// Three things cannot be measured off Windows: whether the gate works on win32 Node at all,
+// whether the payload fits Windows' single-env-var cap, and whether PowerShell — the one non-Node
+// child a real postinstall plausibly reaches for — is covered by the blackhole proxy.
+if (process.platform === "win32") {
+  console.log("\n=== Windows-only arms ===");
+
+  // 1. The env-var cap. Documented as 32,767 characters per variable; if the combined payload
+  //    cannot be handed to a child at all, that is a hard shipping blocker, not a tuning note.
+  const stdioShim = fs.readFileSync(
+    path.join(here, "..", "..", "crates", "nub-sandbox", "src", "backend", "windows_stdio_shim.js"), "utf8");
+  const gateJs = fs.readFileSync(SHIM, "utf8").replace("__NUB_NET_POLICY_JSON__", JSON.stringify(DENIED));
+  const strip = (s) => s.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n").replace(/\n{2,}/g, "\n");
+  const b64 = (s) => Buffer.from(s, "utf8").toString("base64");
+
+  const variants = {
+    "percent, comments kept": `--import data:text/javascript,${encodeStrict(stdioShim)} --import data:text/javascript,${encodeStrict(gateJs)}`,
+    "base64, comments kept": `--import data:text/javascript;base64,${b64(stdioShim)} --import data:text/javascript;base64,${b64(gateJs)}`,
+    "base64, comments stripped": `--import data:text/javascript;base64,${b64(strip(stdioShim))} --import data:text/javascript;base64,${b64(strip(gateJs))}`,
+  };
+  for (const [label, value] of Object.entries(variants)) {
+    const r = await runChild(
+      `const net=require("node:net");const s=net.connect(80,${JSON.stringify(HOST)},()=>console.log("GATE-NOT-ARMED"));s.on("error",e=>console.log(e.nubReason==="ERR_NUB_JAIL_NET_DENIED"?"GATE-ARMED":"other:"+e.code))`,
+      { ...process.env, NODE_OPTIONS: value }, 10000);
+    console.log(`  ${pad(label, 28)} len=${String(value.length).padStart(6)}  rc=${r.status}  ${JSON.stringify((r.stdout || r.stderr).slice(0, 90))}`);
+  }
+
+  // 2. PowerShell. Docs say PS7+ HttpClient reads proxy env vars while Windows PowerShell 5.1
+  //    reads HKCU instead — so the two are expected to differ, and that difference is the point.
+  for (const exe of ["powershell", "pwsh"]) {
+    for (const [label, policy] of [["no jail (control)", null], ["allow:false", DENIED]]) {
+      const tag = `ps-${exe}-${label.replace(/\W/g, "")}`;
+      const env = { ...process.env, SINK: `http://${HOST}:${PORT}/${tag}` };
+      if (policy) env.NODE_OPTIONS = nodeOptionsFor(policy);
+      else delete env.NODE_OPTIONS;
+      const r = await runChild(
+        `const {spawnSync}=require("node:child_process");
+         const r=spawnSync(${JSON.stringify(exe)},["-NoProfile","-Command","try{$r=Invoke-WebRequest -Uri $env:SINK -UseBasicParsing -TimeoutSec 5;Write-Output ('REACHED '+$r.StatusCode)}catch{Write-Output ('BLOCKED '+$_.Exception.GetType().Name)}"],{encoding:"utf8"});
+         console.log((r.stdout||"").trim()||("spawn-failed rc="+r.status));`,
+        env, 25000);
+      await new Promise((res) => setTimeout(res, 300));
+      console.log(`  ${pad(exe + " " + label, 30)} sink=${hits.get(tag) || 0}  ${JSON.stringify((r.stdout || r.stderr).slice(0, 90))}`);
+    }
+  }
+}
+
 sink.close();
