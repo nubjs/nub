@@ -93,6 +93,13 @@ jobs:
           [ -s probe.log ] || { echo "MISS the probe produced no output at all"; exit 1; }
           grep -qF 'PROBE END' probe.log || { echo "MISS the probe did not run to completion"; fail=1; }
 
+          # THE ZERO-SETUP GATE FIRST: a route that works but needs a one-time setup command is
+          # worth less than a weaker route that needs none, so its answer is reported ahead of any
+          # capability result.
+          echo "── zero-setup gate (reported first: a route needing setup is disqualified) ──"
+          for p in zero-setup-profile-leaves-no-residue ace-residue-none-after-revoke; do need "$p"; done
+          grep -E '^  fact:zs/' probe.log || echo "(no zs/ facts — the gate did not run)"
+
           echo "── controls (a red one invalidates every other row) ──"
           for p in no-appcontainer-ace-on-test-tree baseline-plain-launched \
                    baseline-plain-reads-deep baseline-plain-reads-c-root \
@@ -102,12 +109,14 @@ jobs:
                    preserve-symlinks-flags-unblock-the-child \
                    control-ace-absent-denies-deep-read \
                    control-ungranted-sibling-under-profile-denies \
-                   control-ungranted-sibling-inside-root-denies; do need "$p"; done
+                   control-ungranted-sibling-inside-root-denies \
+                   secrets-baseline-plain-can-read-them; do need "$p"; done
 
           echo "── the decisive cells ──"
           for p in bypass-traverse-deep-read-root-grant bypass-traverse-deep-read-leaf-grants \
                    bypass-traverse-require-deep bypass-traverse-launch-cwd-deep \
                    bypass-traverse-child-chdir-deep bypass-traverse-node-entry-deep \
+                   secrets-under-profile-are-denied \
                    egress-denied-with-zero-capabilities; do need "$p"; done
 
           echo

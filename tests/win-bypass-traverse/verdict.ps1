@@ -49,16 +49,19 @@ $script:ProbeOps = @(
   'read-relative-after-chdir', 'lstat-c-root', 'realpath-c-root',
   'stat-c-root', 'readdir-c-root', 'stat-c-users', 'readdir-c-users',
   'stat-userprofile', 'readdir-userprofile', 'findup-walk', 'read-ungranted-sibling-inside-root',
-  'read-ungranted-sibling-under-profile', 'read-system32-hosts', 'readdir-system32',
-  'whoami-groups', 'dns-lookup-registry', 'net-connect-ip', 'net-connect-name',
-  'net-connect-loopback')
+  'read-ungranted-sibling-under-profile',
+  'read-ssh-private-key', 'readdir-dot-ssh', 'stat-ssh-private-key', 'read-npmrc',
+  'read-system32-hosts', 'readdir-system32',
+  'dns-lookup-registry', 'net-connect-ip', 'net-connect-name', 'net-connect-loopback',
+  'spawn-piped-whoami')
 $script:ProbeArms = @('plain', 'ac-root-grant', 'ac-leaf-grants', 'ac-data-ungranted', 'ac-cwd-deep',
-  'ac-noflags')
+  'ac-noflags', 'ac-derive-only')
 # `ac-noflags` and `ac-entry-deep` are excluded from the gate check below: the first emits no op
 # lines at all by design (it dies in Node's bootstrap), and the second reports the root cell under
 # a different op name.
 $script:ProbeAcArms = @('ac-root-grant', 'ac-leaf-grants', 'ac-data-ungranted', 'ac-cwd-deep',
   'ac-entry-deep')
+$script:SecretArms = @('ac-root-grant', 'ac-leaf-grants', 'ac-cwd-deep')
 
 function Invoke-Verdict {
   param([hashtable]$Cells)
@@ -162,6 +165,26 @@ function Invoke-Verdict {
   Prop 'control-ungranted-sibling-inside-root-denies' `
     ((Cell 'ac-leaf-grants' 'read-ungranted-sibling-inside-root') -eq 'ERR') `
     "leaf-grant arm: a sibling inside the test root but outside both grants must fail: $(Cell 'ac-leaf-grants' 'read-ungranted-sibling-inside-root')"
+
+  # ── THE PROPERTY THIS WHOLE EXERCISE EXISTS TO GET. A confined lifecycle script must not be
+  # able to read `%USERPROFILE%\.ssh\id_rsa` or `.npmrc`. Landlock and Seatbelt deliver this;
+  # Windows's current restricted-token design does NOT, because that token keeps the user's sid so
+  # every DACL granting the user still applies. Asserted on CONTENT and on metadata, and in every
+  # granting arm — including the one whose grant sits at a project root directly under the profile,
+  # which is the shape most likely to over-reach.
+  $secretsDenied = $true
+  $secretsWhy = @()
+  foreach ($a in $script:SecretArms) {
+    foreach ($o in @('read-ssh-private-key', 'read-npmrc', 'readdir-dot-ssh', 'stat-ssh-private-key')) {
+      $c = Cell $a $o
+      if ($c -ne 'ERR') { $secretsDenied = $false; $secretsWhy += "$a/$o=$c" }
+    }
+  }
+  Prop 'secrets-under-profile-are-denied' $secretsDenied `
+    "~/.ssh/id_rsa and ~/.npmrc must be unreachable — content, listing and metadata — in every granting arm$(if ($secretsWhy.Count) { ' VIOLATIONS: ' + ($secretsWhy -join ' ') } else { ' (all ERR)' })"
+  Prop 'secrets-baseline-plain-can-read-them' (((Cell 'plain' 'read-ssh-private-key') -eq 'OK') -and
+    ((Cell 'plain' 'read-npmrc') -eq 'OK')) `
+    "the differential's allow half: an UNCONFINED child must read both, or the denial above is about the files not existing rather than about the jail: ssh=$(Cell 'plain' 'read-ssh-private-key') npmrc=$(Cell 'plain' 'read-npmrc')"
 
   # ── EGRESS. Both halves must hold in the SAME token or the design does not exist.
   $egressDenied = $true

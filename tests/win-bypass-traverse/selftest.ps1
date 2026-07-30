@@ -42,9 +42,14 @@ $deepOps = @('read-deep-granted', 'require-deep-granted', 'realpath-deep-granted
   'cwd-after-chdir', 'read-relative-after-chdir')
 $rootOps = @('lstat-c-root', 'realpath-c-root', 'stat-c-root', 'readdir-c-root', 'stat-c-users',
   'readdir-c-users', 'stat-userprofile', 'readdir-userprofile')
-$ungrantedOps = @('read-ungranted-sibling-inside-root', 'read-ungranted-sibling-under-profile')
+# The $HOME secrets share the ungranted paths' semantics exactly: readable by an unconfined child,
+# refused by a confined one. Modelling them together is the point — if a world makes ungranted
+# paths readable it must also make the secrets readable, and the secrets property must then fail.
+$ungrantedOps = @('read-ungranted-sibling-inside-root', 'read-ungranted-sibling-under-profile',
+  'read-ssh-private-key', 'readdir-dot-ssh', 'stat-ssh-private-key', 'read-npmrc')
 $sysOps = @('read-system32-hosts', 'readdir-system32', 'whoami-groups')
-$netOps = @('dns-lookup-registry', 'net-connect-ip', 'net-connect-name', 'net-connect-loopback')
+$netOps = @('dns-lookup-registry', 'net-connect-ip', 'net-connect-name', 'net-connect-loopback',
+  'spawn-piped-whoami')
 $entryOps = @('entry-as-deep-file', 'entry-cwd', 'entry-realpath', 'entry-require-bare')
 
 function Ops([string]$deep, [string]$root, [string]$ungranted, [string]$sys, [string]$net,
@@ -137,6 +142,8 @@ $expect = @{
     'harness-grant-reached-decisive-target' = 'PASS'
     'realpath-defect-reproduces-without-flags' = 'PASS'
     'preserve-symlinks-flags-unblock-the-child' = 'PASS'
+    'secrets-under-profile-are-denied' = 'PASS'
+    'secrets-baseline-plain-can-read-them' = 'PASS'
     'control-ace-absent-denies-deep-read' = 'PASS'
     'control-ungranted-sibling-under-profile-denies' = 'PASS'
     'control-ungranted-sibling-inside-root-denies' = 'PASS'
@@ -193,6 +200,8 @@ $expect = @{
     'control-ace-absent-denies-deep-read' = 'FAIL'
     'control-ungranted-sibling-under-profile-denies' = 'FAIL'
     'control-ungranted-sibling-inside-root-denies' = 'FAIL'
+    # the whole point: a grant that scopes nothing leaks $HOME secrets, and that must be loud
+    'secrets-under-profile-are-denied' = 'FAIL'
   }
 }
 

@@ -103,6 +103,12 @@ public static class Bt
         IntPtr caps, uint capCount, out IntPtr sid);
     [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
     static extern int DeleteAppContainerProfile(string name);
+    // DERIVE, not CREATE: this computes the package sid from the name by hashing, touching no
+    // registry and no disk. It is the zero-persistent-state form of getting an AC sid, and the
+    // `ac-derive-only` arm exists to find out whether a launch works without ever registering a
+    // profile — which is the difference between "cleans up after itself" and "never writes".
+    [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
+    static extern int DeriveAppContainerSidFromAppContainerName(string name, out IntPtr sid);
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern bool ConvertSidToStringSidW(IntPtr sid, out IntPtr str);
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -157,6 +163,19 @@ public static class Bt
     {
         int hr = DeleteAppContainerProfile(name);
         return hr == 0 ? "OK" : "ERR hr=0x" + hr.ToString("x8");
+    }
+
+    public static string DeriveSid(string name)
+    {
+        IntPtr sid;
+        int hr = DeriveAppContainerSidFromAppContainerName(name, out sid);
+        if (hr != 0) return "ERR hr=0x" + hr.ToString("x8");
+        IntPtr str;
+        if (!ConvertSidToStringSidW(sid, out str)) return "ERR sidstring=" + Marshal.GetLastWin32Error();
+        string s = Marshal.PtrToStringUni(str);
+        LocalFree(str);
+        LocalFree(sid);
+        return s;
     }
 
     /// Launch `exe` with `cmdline` in `cwd`, stdout+stderr to `logPath`. When `acSidStr` is
@@ -347,6 +366,26 @@ $jailChild = Join-Path $runtimeDir 'child.js'
 Fact 'fixture-root' $root
 Fact 'deep-file' $deep
 
+# The secrets the whole exercise exists to keep unreachable. Real paths in the real profile, not a
+# stand-in: the claim is about `%USERPROFILE%\.ssh\id_rsa` and `.npmrc`, so those are the paths
+# measured. Only files this probe CREATED are removed at teardown — an `.npmrc` the runner image or
+# setup-node already wrote is read as-is and left alone.
+$sshDir = Join-Path $env:USERPROFILE '.ssh'
+$sshKey = Join-Path $sshDir 'id_rsa'
+$npmrc = Join-Path $env:USERPROFILE '.npmrc'
+New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
+$createdSshKey = -not (Test-Path -LiteralPath $sshKey)
+if ($createdSshKey) {
+  "-----BEGIN OPENSSH PRIVATE KEY-----`nSECRET-CANARY-DO-NOT-LEAK`n-----END OPENSSH PRIVATE KEY-----" |
+    Set-Content -LiteralPath $sshKey -Encoding ASCII
+}
+$createdNpmrc = -not (Test-Path -LiteralPath $npmrc)
+if ($createdNpmrc) { '//registry.npmjs.org/:_authToken=SECRET-CANARY-TOKEN' | Set-Content -LiteralPath $npmrc -Encoding ASCII }
+Fact 'ssh-key-path' "$sshKey (created-by-probe=$createdSshKey)"
+Fact 'npmrc-path' "$npmrc (created-by-probe=$createdNpmrc)"
+$env:BT_SSH_KEY = $sshKey
+$env:BT_NPMRC = $npmrc
+
 $env:BT_DEEP = $deep
 $env:BT_DEEPDIR = $deepDir
 $env:BT_DATA = $dataDir
@@ -423,6 +462,43 @@ function Revoke-Ace([string]$path, [string]$sid) {
   Set-Acl -LiteralPath $path -AclObject $acl
 }
 
+# ────────────────── THE ZERO-SETUP GATE (report this before any capability) ──────────────────
+# A mechanism is only acceptable if the VERY FIRST `nub install` on a fresh machine works as a
+# standard user with nothing registered and no prior command run. `CreateAppContainerProfile` is
+# the one call on this path that plausibly writes persistent machine state, so measure what it
+# leaves — before, after create, and after delete — rather than inferring ephemerality from the
+# fact that the shipping code calls Delete on drop.
+#
+# Two registries of AppContainer state: the profile MAPPING under HKCU (name <-> sid) and the
+# profile DIRECTORY under %LOCALAPPDATA%\Packages.
+$mapKey = 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings'
+function Map-Count { if (Test-Path $mapKey) { return @(Get-ChildItem $mapKey -ErrorAction SilentlyContinue).Count } else { return -1 } }
+function Map-Has([string]$sid) { if (-not $sid -or -not (Test-Path $mapKey)) { return $false } return (Test-Path (Join-Path $mapKey $sid)) }
+
+W ''
+W '== zero-setup gate =='
+$zsName = "nubbt_zs_$nonce"
+Fact 'zs/mappings-before' (Map-Count)
+$zsDerived = [Bt]::DeriveSid($zsName)
+Fact 'zs/derive-without-create' $zsDerived
+Fact 'zs/mapping-exists-after-derive-only' (Map-Has $zsDerived)
+$zsPkgDir = Join-Path $env:LOCALAPPDATA "Packages\$zsName"
+Fact 'zs/package-dir-after-derive-only' (Test-Path -LiteralPath $zsPkgDir)
+$zsCreated = [Bt]::CreateProfile($zsName)
+Fact 'zs/create-profile' $zsCreated
+Fact 'zs/derive-equals-create' ($zsCreated -eq $zsDerived)
+Fact 'zs/mappings-after-create' (Map-Count)
+Fact 'zs/mapping-exists-after-create' (Map-Has $zsCreated)
+Fact 'zs/package-dir-after-create' (Test-Path -LiteralPath $zsPkgDir)
+Fact 'zs/delete-profile' ([Bt]::DeleteProfile($zsName))
+$zsMapAfterDelete = Map-Has $zsCreated
+$zsDirAfterDelete = Test-Path -LiteralPath $zsPkgDir
+Fact 'zs/mappings-after-delete' (Map-Count)
+Fact 'zs/mapping-exists-after-delete' $zsMapAfterDelete
+Fact 'zs/package-dir-after-delete' $zsDirAfterDelete
+Prop 'zero-setup-profile-leaves-no-residue' ((-not $zsMapAfterDelete) -and (-not $zsDirAfterDelete)) `
+  "after DeleteAppContainerProfile: HKCU mapping present=$zsMapAfterDelete, %LOCALAPPDATA%\Packages dir present=$zsDirAfterDelete — both must be gone or the mechanism accumulates machine state"
+
 # ─────────────────────────────── the arms ───────────────────────────────
 
 $cells = @{}
@@ -441,17 +517,27 @@ function Invoke-Arm {
     # TARGET. These two flags are the seams that skip `toRealPath`, and they are what lets the
     # operations table run at all. Uniform across EVERY arm (the plain baseline included) so the
     # arms stay one variable apart; the `ac-noflags` arm withholds them as the differential.
-    [string[]]$NodeFlags = @('--preserve-symlinks-main', '--preserve-symlinks')
+    [string[]]$NodeFlags = @('--preserve-symlinks-main', '--preserve-symlinks'),
+    # Derive the package sid by hashing the name instead of registering a profile. If a launch
+    # works this way, the mechanism writes NO persistent state at all — a stronger zero-setup
+    # answer than "it cleans up after itself".
+    [switch]$DeriveOnly
   )
   W ''
   W "== arm $Name =="
   $sid = ''
   $profileName = ''
   if ($AppContainer) {
-    $profileName = "nubbt_${nonce}_$($Name -replace '[^A-Za-z0-9]','_')"
-    if ($profileName.Length -gt 60) { $profileName = $profileName.Substring(0, 60) }
-    $sid = [Bt]::CreateProfile($profileName)
-    Fact "$Name/profile" "$profileName -> $sid"
+    $nm = "nubbt_${nonce}_$($Name -replace '[^A-Za-z0-9]','_')"
+    if ($nm.Length -gt 60) { $nm = $nm.Substring(0, 60) }
+    if ($DeriveOnly) {
+      $sid = [Bt]::DeriveSid($nm)
+      Fact "$Name/derived-sid-no-profile" "$nm -> $sid"
+    } else {
+      $profileName = $nm
+      $sid = [Bt]::CreateProfile($profileName)
+      Fact "$Name/profile" "$profileName -> $sid"
+    }
     # No dynamic `prop:` name here — the workflow's verdict requires a FIXED list of property
     # names, and a name that only appears on failure cannot be required. A missing arm surfaces
     # as MISSING-ARM in the table and fails the decisive properties below, which is correct.
@@ -550,6 +636,21 @@ Invoke-Arm -Name 'ac-entry-deep' -AppContainer $true -GrantRX @($runtimeDir) `
 Invoke-Arm -Name 'ac-noflags' -AppContainer $true -GrantRX @($runtimeDir) `
   -GrantModify @($dataDir) -Cwd $runtimeDir -NodeFlags @()
 
+# 8. THE ZERO-SETUP ARM. Same as arm 3, but the package sid is DERIVED by hashing the name and no
+#    profile is ever registered. If this launches and reads, the mechanism writes no persistent
+#    machine state whatsoever — which is a stronger answer to "does the first `nub install` on a
+#    fresh machine work" than measuring that Delete cleans up after Create.
+Invoke-Arm -Name 'ac-derive-only' -AppContainer $true -DeriveOnly -GrantRX @($runtimeDir) `
+  -GrantModify @($dataDir) -Cwd $runtimeDir
+
+# ── ACE RESIDUE: what does a run leave behind on the project tree? ──
+# Every grant is revoked in each arm's `finally`, so a residual ace naming a now-dead sid would
+# mean the teardown is incomplete and repeated installs accumulate cruft on the user's project.
+$residueAfter = Count-AcAcesTree $root
+Fact 'ace-residue-after-all-arms' "$residueAfter S-1-15-* aces remain on the test tree"
+Prop 'ace-residue-none-after-revoke' ($residueAfter -eq 0) `
+  "revoke must leave no ace naming a dead per-run sid on the project tree: $residueAfter remain"
+
 # ─────────────────────────────── ACE cost ───────────────────────────────
 # The known hazard: grants are inheritable ACEs written per launch and revoked after, and
 # `SetNamedSecurityInfo` propagates them to every existing child. A broad grant previously blew a
@@ -603,5 +704,7 @@ if ($script:fails -eq 0) { W '  RESULT all properties PASS' } else { W "  RESULT
 # a reused machine, but a probe that cleans up is a probe that can be re-run in place.
 Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Split-Path $sibProfile) -Recurse -Force -ErrorAction SilentlyContinue
+if ($createdSshKey) { Remove-Item -LiteralPath $sshKey -Force -ErrorAction SilentlyContinue }
+if ($createdNpmrc) { Remove-Item -LiteralPath $npmrc -Force -ErrorAction SilentlyContinue }
 W ''
 W 'PROBE END'

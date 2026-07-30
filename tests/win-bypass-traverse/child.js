@@ -135,23 +135,22 @@ run('findup-walk', () => {
 run('read-ungranted-sibling-inside-root', () => fs.readFileSync(SIB_INSIDE, 'utf8'));
 run('read-ungranted-sibling-under-profile', () => fs.readFileSync(SIB_PROFILE, 'utf8'));
 
+// THE PROPERTY THE WHOLE EXERCISE EXISTS TO GET. On Linux (Landlock) and macOS (Seatbelt) a
+// confined lifecycle script cannot reach $HOME secrets; on Windows's current restricted-token
+// design it can, because the token keeps the user's sid and every DACL granting the user applies.
+// An AppContainer is deny-by-default, so these should be refused by construction — CONFIRMED here
+// rather than assumed, since it is the single cell that distinguishes the two designs.
+run('read-ssh-private-key', () => 'LEAKED ' + fs.readFileSync(process.env.BT_SSH_KEY, 'utf8').slice(0, 24));
+run('readdir-dot-ssh', () => fs.readdirSync(path.dirname(process.env.BT_SSH_KEY)).join(','));
+run('stat-ssh-private-key', () => 'size=' + fs.statSync(process.env.BT_SSH_KEY).size);
+run('read-npmrc', () => 'LEAKED ' + fs.readFileSync(process.env.BT_NPMRC, 'utf8').slice(0, 24));
+
 // ── in-child proof the token really IS a LowBox one ────────────────────────────────────
 // System32 carries an ALL APPLICATION PACKAGES ace, so an AppContainer reads it while being
 // denied C:\. "System32 OK + C:\ denied" cannot be produced by a non-AppContainer token, and
 // cannot be produced by a harness that is failing everything.
 run('read-system32-hosts', () => fs.readFileSync('C:\\Windows\\System32\\drivers\\etc\\hosts', 'utf8').length + 'B');
 run('readdir-system32', () => fs.readdirSync('C:\\Windows\\System32').length + ' entries');
-run('whoami-groups', () => {
-  const r = require('child_process').spawnSync('C:\\Windows\\System32\\whoami.exe', ['/groups'], {
-    encoding: 'utf8',
-  });
-  if (r.error) throw r.error;
-  const out = String(r.stdout || '') + String(r.stderr || '');
-  const label = (out.match(/Mandatory Label\\[^\s]+/) || ['(no label)'])[0];
-  const pkg = (out.match(/S-1-15-2-[0-9-]+/) || ['(no package sid)'])[0];
-  const caps = (out.match(/S-1-15-3-[0-9-]+/g) || []).join(',') || '(no capability sids)';
-  return 'rc=' + r.status + ' label=' + label + ' package=' + pkg + ' caps=' + caps;
-});
 
 // ── egress: must be DENIED in the AppContainer arms (internetClient withheld) ──────────
 function connectOnce(name, host, port) {
@@ -199,7 +198,25 @@ async function main() {
   await connectOnce('net-connect-ip', '1.1.1.1', 443);
   await connectOnce('net-connect-name', 'registry.npmjs.org', 443);
   await connectOnce('net-connect-loopback', '127.0.0.1', 135);
+  // `child:done` is emitted BEFORE the piped spawn below, deliberately: run 30506477831 measured
+  // that spawn HANGING INDEFINITELY under the AppContainer (libuv's named-pipe setup blocks before
+  // Node's own `timeout` can arm), which took every op after it — the whole egress table — down
+  // with it. So the marker that says "the table completed" must precede the op that can hang.
   one('child:done arm=' + ARM);
+  // Kept as the LAST op, and named for what it measures: a piped child_process spawn is what every
+  // npm lifecycle script does, and an indefinite hang is a worse failure mode than a refusal.
+  run('spawn-piped-whoami', () => {
+    const r = require('child_process').spawnSync('C:\\Windows\\System32\\whoami.exe', ['/groups'], {
+      encoding: 'utf8',
+    });
+    if (r.error) throw r.error;
+    const out = String(r.stdout || '') + String(r.stderr || '');
+    const label = (out.match(/Mandatory Label\\[^\s]+/) || ['(no label)'])[0];
+    const pkg = (out.match(/S-1-15-2-[0-9-]+/) || ['(no package sid)'])[0];
+    const caps = (out.match(/S-1-15-3-[0-9-]+/g) || []).join(',') || '(no capability sids)';
+    return 'rc=' + r.status + ' label=' + label + ' package=' + pkg + ' caps=' + caps;
+  });
+  one('child:spawn-op-returned arm=' + ARM);
 }
 
 if (require.main === module) {
