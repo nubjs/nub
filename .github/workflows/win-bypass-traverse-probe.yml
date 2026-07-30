@@ -97,7 +97,14 @@ jobs:
           for p in confined-cmd-behaves-identically confined-cmdspawn-behaves-identically \
                    confined-ps-behaves-identically confined-psspawn-behaves-identically \
                    confined-pwsh-behaves-identically confined-sh-behaves-identically \
-                   confined-shspawn-behaves-identically; do need "$p"; done
+                   confined-shspawn-behaves-identically \
+                   nul-redirection-works-confined devnull-redirection-works-confined; do need "$p"; done
+
+          echo
+          echo "── can an UNPRIVILEGED ancestor grant fix it, or is Microsoft's privileged C:\\ ace required? ──"
+          for p in ac-ancestors-makes-cmd-behave-identically ac-croot-makes-cmd-behave-identically \
+                   ac-ancestors-makes-ps-behave-identically ac-croot-makes-ps-behave-identically \
+                   ac-ancestors-makes-sh-behave-identically ac-croot-makes-sh-behave-identically; do need "$p"; done
 
           echo
           echo "── python ──"
@@ -107,7 +114,7 @@ jobs:
           echo "── the diff table ──"
           sed -n '/== the diff table/,/== verdict ==/p' works.log || true
           echo "── Microsoft's named APIs, and LPAC ──"
-          grep -E '^  fact:(ms-claim|lpac|py/)' works.log || echo "(none emitted)"
+          grep -E '^  fact:(ms-claim|lpac|py/|null-device|pwsh-version|winps-version|grant-cost|ancestor-grant-cost|revoke-cost)' works.log || echo "(none emitted)"
 
           echo
           echo "── result ──"

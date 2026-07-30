@@ -74,6 +74,22 @@ $pr = New-Object Security.Principal.WindowsPrincipal($id)
 Fact 'elevated' ($pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))
 Fact 'session-id' (Get-Process -Id $PID).SessionId
 Fact 'node-version' (& node --version 2>&1)
+# THE VERSION BOUNDARY, load-bearing for reading the PowerShell rows. PowerShell/PowerShell#27253
+# ("FileSystem PSDrives not mounted when PowerShell runs inside an AppContainer") is the filed
+# upstream form of Microsoft's host-prep claim, root-caused to `GetFileAttributesEx("C:\")`
+# returning ERROR_ACCESS_DENIED and .NET reporting that as "does not exist". Its fix (PR #27266,
+# `SafeDoesPathExist`) shipped ONLY in 7.7.0-preview.1 and the 7.6.2 backport — NOT 7.5.x, and NOT
+# the 7.4 LTS. So which pwsh a machine has decides which failure mode it gets, and a result read off
+# this runner is a result about THIS version.
+Fact 'pwsh-version' $(try { (& pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>&1) } catch { 'ABSENT' })
+Fact 'winps-version' $(try { (& powershell -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>&1) } catch { 'ABSENT' })
+# `\Device\Null`'s descriptor is the SECOND thing Microsoft ships a host-prep verb for
+# (`prepare-null-device`): on builds predating `Feature_AgenticAppContainerBfsSupport` an
+# AppContainer cannot open it, and it resets to that state at EVERY BOOT. Reported here because
+# `>NUL` / `>/dev/null` is the modal redirection in a lifecycle script.
+Fact 'null-device-sddl' $(try {
+  $sd = (Get-Acl -LiteralPath '\\.\NUL' -ErrorAction Stop); $sd.Sddl
+} catch { "unreadable: $($_.Exception.GetType().Name)" })
 
 # `C:\` and `C:\Users` are reported and NEVER written by this probe. The whole point is whether the
 # build jail can skip Microsoft's `prepare-system-drive`, so an ace here would beg the question.
@@ -123,12 +139,7 @@ if (Test-Path -LiteralPath $bbSrc) {
 }
 Fact 'busybox' $(if ($jailBusybox) { $jailBusybox } else { "MISSING $bbSrc" })
 
-[IO.File]::WriteAllText((Join-Path $workDir 'marker.txt'), "MARKER-CONTENT`n")
 [IO.File]::WriteAllText((Join-Path $ungranted 'secret.txt'), "SECRET`n")
-[IO.File]::WriteAllText((Join-Path $workDir 'hello.js'), "console.log('HELLO-JS');`n")
-[IO.File]::WriteAllText((Join-Path $deepDir 'deep.txt'), "DEEP-CONTENT`n")
-[IO.File]::WriteAllText((Join-Path $workDir 'fakebin.cmd'), "@echo off`r`necho FAKEBIN-CMD`r`n")
-[IO.File]::WriteAllText((Join-Path $workDir 'fakebin'), "echo FAKEBIN-SH`n")
 
 $sys32 = Join-Path $env:SystemRoot 'System32'
 
@@ -140,44 +151,45 @@ $sys32 = Join-Path $env:SystemRoot 'System32'
 # Microsoft says the shell cannot answer. A confined `cmd.exe` that prints `no` there has not
 # crashed — it has LIED about the filesystem and gone on to exit 0.
 
+#
+# `%ERRORLEVEL%` IS NOT USABLE HERE and reading it cost this probe a wrong reading of run 1. A cmd
+# BUILTIN that succeeds does not RESET errorlevel, so `echo x > file` followed by
+# `echo %ERRORLEVEL%` reports whatever the previous command left — which made a working redirect
+# look like a denial. Every op therefore uses the `(cmd) && ok || FAIL` form, which reads the
+# command's OWN result.
 $batCmd = @'
 @echo off
 echo op:echo=ok
 echo op:cwd=%CD%
 if exist "%BT_WORK%\marker.txt" (echo op:exist-granted-file=yes) else (echo op:exist-granted-file=no)
 if exist "%BT_WORK%" (echo op:exist-granted-dir=yes) else (echo op:exist-granted-dir=no)
+if exist "%BT_DEEP%" (echo op:exist-deep-dir-abs=yes) else (echo op:exist-deep-dir-abs=no)
+if exist deep (echo op:exist-deep-dir-rel=yes) else (echo op:exist-deep-dir-rel=no)
 if exist "%BT_UNGRANTED%\secret.txt" (echo op:exist-ungranted-file=yes) else (echo op:exist-ungranted-file=no)
 if exist "%BT_SYS32%\cmd.exe" (echo op:exist-system32=yes) else (echo op:exist-system32=no)
 if exist "C:\" (echo op:exist-croot=yes) else (echo op:exist-croot=no)
 if exist "C:\Windows" (echo op:exist-windows=yes) else (echo op:exist-windows=no)
+if exist "%ProgramFiles%" (echo op:exist-programfiles=yes) else (echo op:exist-programfiles=no)
 if exist "%USERPROFILE%\.ssh\id_rsa" (echo op:exist-ssh-key=yes) else (echo op:exist-ssh-key=no)
-cd /d "%BT_DEEP%"
-echo op:cd-deep-rc=%ERRORLEVEL%
+cd /d "%BT_DEEP%" && (echo op:cd-deep-abs=ok) || (echo op:cd-deep-abs=FAIL)
 echo op:cwd-after-cd=%CD%
-cd /d "%BT_WORK%"
-echo op:cd-back-rc=%ERRORLEVEL%
+cd /d "%BT_WORK%" && (echo op:cd-back-abs=ok) || (echo op:cd-back-abs=FAIL)
+cd deep && (echo op:cd-deep-rel=ok) || (echo op:cd-deep-rel=FAIL)
+cd .. && (echo op:cd-up-rel=ok) || (echo op:cd-up-rel=FAIL)
+echo op:cwd-final=%CD%
 for %%F in (*.js) do echo op:glob-js=%%F
 for %%F in (*.txt) do echo op:glob-txt=%%F
-dir /b /a-d "%BT_WORK%"
-echo op:dir-granted-rc=%ERRORLEVEL%
-dir /b /a-d "%BT_UNGRANTED%"
-echo op:dir-ungranted-rc=%ERRORLEVEL%
-type "%BT_WORK%\marker.txt"
-echo op:type-granted-rc=%ERRORLEVEL%
-type "%BT_UNGRANTED%\secret.txt"
-echo op:type-ungranted-rc=%ERRORLEVEL%
-echo REDIRECT-PAYLOAD>"%BT_WORK%\out_cmd.txt"
-echo op:redirect-rc=%ERRORLEVEL%
+(dir /b /a-d "%BT_WORK%" > "%BT_TMP%\d1.txt") && (echo op:dir-granted-abs=ok) || (echo op:dir-granted-abs=FAIL)
+(dir /b /a-d . > "%BT_TMP%\d2.txt") && (echo op:dir-granted-rel=ok) || (echo op:dir-granted-rel=FAIL)
+(dir /b /a-d "%BT_UNGRANTED%" > "%BT_TMP%\d3.txt") && (echo op:dir-ungranted=ok) || (echo op:dir-ungranted=FAIL)
+(type "%BT_WORK%\marker.txt" > "%BT_TMP%\t1.txt") && (echo op:type-granted=ok) || (echo op:type-granted=FAIL)
+(type "%BT_UNGRANTED%\secret.txt" > "%BT_TMP%\t2.txt") && (echo op:type-ungranted=ok) || (echo op:type-ungranted=FAIL)
+(echo REDIRECT-PAYLOAD>"%BT_WORK%\out_cmd.txt") && (echo op:redirect-abs=ok) || (echo op:redirect-abs=FAIL)
 type "%BT_WORK%\out_cmd.txt"
-echo NUL-PAYLOAD>NUL
-echo op:nul-redirect-rc=%ERRORLEVEL%
-type "%BT_UNGRANTED%\secret.txt" 2>NUL
-echo op:nul-stderr-rc=%ERRORLEVEL%
-mkdir "%BT_WORK%\sub_cmd"
-echo op:mkdir-rc=%ERRORLEVEL%
-copy /y "%BT_WORK%\marker.txt" "%BT_WORK%\copy_cmd.txt"
-echo op:copy-rc=%ERRORLEVEL%
-echo op:temp-is-granted=%TEMP%
+(echo NUL-PAYLOAD>NUL) && (echo op:nul-stdout-redirect=ok) || (echo op:nul-stdout-redirect=FAIL)
+(echo NUL-PAYLOAD 2>NUL) && (echo op:nul-stderr-redirect=ok) || (echo op:nul-stderr-redirect=FAIL)
+(mkdir "%BT_WORK%\sub_cmd") && (echo op:mkdir-abs=ok) || (echo op:mkdir-abs=FAIL)
+(copy /y "%BT_WORK%\marker.txt" "%BT_WORK%\copy_cmd.txt" > "%BT_TMP%\c1.txt") && (echo op:copy-abs=ok) || (echo op:copy-abs=FAIL)
 echo op:end=ok
 '@
 
@@ -346,13 +358,31 @@ except Exception as e:
 op('end', 'ok')
 '@
 
-[IO.File]::WriteAllText((Join-Path $workDir 'bat.cmd'), ($batCmd -replace "`r?`n", "`r`n"))
-[IO.File]::WriteAllText((Join-Path $workDir 'batspawn.cmd'), ($batCmdSpawn -replace "`r?`n", "`r`n"))
-[IO.File]::WriteAllText((Join-Path $workDir 'bat.ps1'), $batPs)
-[IO.File]::WriteAllText((Join-Path $workDir 'batspawn.ps1'), $batPsSpawn)
-[IO.File]::WriteAllText((Join-Path $workDir 'bat.sh'), ($batSh -replace "`r", ''))
-[IO.File]::WriteAllText((Join-Path $workDir 'batspawn.sh'), ($batShSpawn -replace "`r", ''))
-[IO.File]::WriteAllText((Join-Path $workDir 'bat.py'), $batPy)
+# RESET BEFORE EVERY ARM, not once. The batteries WRITE into `$workDir` (`out_cmd.txt`, `sub_cmd`,
+# a copy), so an arm that runs second sees the first arm's leftovers and every directory-listing and
+# glob op diffs for a reason that has nothing to do with the token. Run 1 of this probe reported ~20
+# such lines as findings before this existed — a diff is only evidence if the two arms started from
+# byte-identical trees.
+function Reset-Work {
+  Get-ChildItem -LiteralPath $workDir -Force -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+  Get-ChildItem -LiteralPath $tmpDir -Force -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+  New-Item -ItemType Directory -Force -Path $deepDir | Out-Null
+  [IO.File]::WriteAllText((Join-Path $workDir 'marker.txt'), "MARKER-CONTENT`n")
+  [IO.File]::WriteAllText((Join-Path $workDir 'hello.js'), "console.log('HELLO-JS');`n")
+  [IO.File]::WriteAllText((Join-Path $deepDir 'deep.txt'), "DEEP-CONTENT`n")
+  [IO.File]::WriteAllText((Join-Path $workDir 'fakebin.cmd'), "@echo off`r`necho FAKEBIN-CMD`r`n")
+  [IO.File]::WriteAllText((Join-Path $workDir 'fakebin'), "echo FAKEBIN-SH`n")
+  [IO.File]::WriteAllText((Join-Path $workDir 'bat.cmd'), ($batCmd -replace "`r?`n", "`r`n"))
+  [IO.File]::WriteAllText((Join-Path $workDir 'batspawn.cmd'), ($batCmdSpawn -replace "`r?`n", "`r`n"))
+  [IO.File]::WriteAllText((Join-Path $workDir 'bat.ps1'), $batPs)
+  [IO.File]::WriteAllText((Join-Path $workDir 'batspawn.ps1'), $batPsSpawn)
+  [IO.File]::WriteAllText((Join-Path $workDir 'bat.sh'), ($batSh -replace "`r", ''))
+  [IO.File]::WriteAllText((Join-Path $workDir 'batspawn.sh'), ($batShSpawn -replace "`r", ''))
+  [IO.File]::WriteAllText((Join-Path $workDir 'bat.py'), $batPy)
+}
+Reset-Work
 
 # ─────────────────────────────── ace plumbing ───────────────────────────────
 
@@ -389,9 +419,15 @@ function Invoke-Battery {
     [bool]$AppContainer,
     [bool]$Lpac = $false,
     [string[]]$ExtraGrants = @(),
+    # NON-INHERITABLE metadata+list aces on ancestor DIRECTORIES. Separate from `ExtraGrants`
+    # (inheritable, for a tool's install tree) because an inheritable ace on `C:\` would propagate
+    # across the whole volume. `$Privileged` marks the two that need WRITE_DAC on paths the user does
+    # not own — the disqualifying setup step, measured so its necessity is a fact and not a guess.
+    [string[]]$AncestorGrants = @(),
     [int]$TimeoutMs = 20000
   )
   if (-not $cells.ContainsKey($Battery)) { $cells[$Battery] = @{} }
+  Reset-Work
   if (-not $Exe -or -not (Test-Path -LiteralPath $Exe)) {
     $cells[$Battery][$Arm] = @{ rc = 'TOOL-ABSENT'; lines = @(); ms = 0 }
     return
@@ -417,6 +453,15 @@ function Invoke-Battery {
         $sw2.Stop()
         $granted += $g
         Fact "grant-cost-ms[$Battery/$Arm/$g]" $sw2.ElapsedMilliseconds
+      }
+      foreach ($g in $AncestorGrants) {
+        try {
+          $sw3 = [Diagnostics.Stopwatch]::StartNew()
+          Grant-Ace $g $sid 'ReadAndExecute' $false
+          $sw3.Stop()
+          $granted += $g
+          Fact "ancestor-grant-cost-ms[$Battery/$Arm/$g]" $sw3.ElapsedMilliseconds
+        } catch { W "    ancestor grant on $g FAILED (needs elevation?): $_" }
       }
     }
     # TEMP/TMP point at the granted dir in EVERY arm, plain included: making it a variable would
@@ -456,7 +501,7 @@ $pyExe   = ''; $c = Get-Command python -ErrorAction SilentlyContinue; if ($c) { 
 if (-not $pyExe) { $c = Get-Command python3 -ErrorAction SilentlyContinue; if ($c) { $pyExe = $c.Source } }
 
 $env:BT_WORK = $workDir; $env:BT_DEEP = $deepDir; $env:BT_UNGRANTED = $ungranted
-$env:BT_SYS32 = $sys32;  $env:BT_NODE = $jailNode
+$env:BT_SYS32 = $sys32;  $env:BT_NODE = $jailNode; $env:BT_TMP = $tmpDir
 
 ${q} = '"'
 $batteries = @(
@@ -494,6 +539,39 @@ W '== LPAC arms (ONE variable off `ac`: ALL_APPLICATION_PACKAGES_POLICY = OPT_OU
 foreach ($b in @('cmd', 'ps', 'sh')) {
   $m = $batteries | Where-Object { $_[0] -eq $b } | Select-Object -First 1
   if ($m) { Invoke-Battery -Battery $m[0] -Arm 'ac-lpac' -Exe $m[1] -Cmdline $m[2] -AppContainer $true -Lpac $true -TimeoutMs $m[3] }
+}
+
+# ── THE ATTRIBUTION THAT DECIDES THE PRODUCT QUESTION.
+# Run 1 measured a confined `cmd.exe` failing `cd` into a GRANTED directory, reporting a granted
+# DIRECTORY as nonexistent, and answering `if exist C:\Windows` with `no` — all while exiting 0.
+# Busybox's `cd` to the same path SUCCEEDED in the same run, so the cause is not a kernel traverse
+# limit; something cmd does reaches an ancestor as a TARGET, which bypass-traverse does not cover.
+# Which ancestors decides everything:
+#   `ac-ancestors` grants the chain nub OWNS — the fixture root and `%USERPROFILE%`. Both are
+#     ordinary owner DACL writes: NO elevation, so if this arm is clean the build jail needs no
+#     setup step and Microsoft's `prepare-system-drive` does not bind on nub.
+#   `ac-croot` additionally aces `C:\` and `C:\Users`, which DOES need WRITE_DAC on paths the user
+#     does not own — i.e. Microsoft's one-time host-wide step. If cmd only behaves in THIS arm, the
+#     AppContainer route requires a privileged setup and that is a disqualifying finding.
+# Non-inheritable throughout, and revoked in `finally`; the primary arms above never touch either.
+W ''
+W '== ANCESTOR-GRANT arms (unprivileged: the chain nub owns) =='
+foreach ($b in @('cmd', 'ps', 'sh')) {
+  $m = $batteries | Where-Object { $_[0] -eq $b } | Select-Object -First 1
+  if ($m) {
+    Invoke-Battery -Battery $m[0] -Arm 'ac-ancestors' -Exe $m[1] -Cmdline $m[2] -AppContainer $true `
+      -AncestorGrants @($root, $env:USERPROFILE) -TimeoutMs $m[3]
+  }
+}
+
+W ''
+W '== C-ROOT arms (PRIVILEGED: adds Microsoft`s prepare-system-drive shape on C:\ + C:\Users) =='
+foreach ($b in @('cmd', 'ps', 'sh')) {
+  $m = $batteries | Where-Object { $_[0] -eq $b } | Select-Object -First 1
+  if ($m) {
+    Invoke-Battery -Battery $m[0] -Arm 'ac-croot' -Exe $m[1] -Cmdline $m[2] -AppContainer $true `
+      -AncestorGrants @($root, $env:USERPROFILE, 'C:\Users', 'C:\') -TimeoutMs $m[3]
+  }
 }
 
 # ─────────────────────────────── PART 3: python ───────────────────────────────
@@ -595,7 +673,7 @@ function ShowDiff([string]$b, [string]$arm) {
 
 W ''
 W '== the diff table (0 = the confined log is byte-identical to the unconfined log) =='
-$armsToDiff = @('ac', 'ac-lpac', 'ac-pygrant')
+$armsToDiff = @('ac', 'ac-ancestors', 'ac-croot', 'ac-lpac', 'ac-pygrant')
 W ("  {0,-12} {1,-8} {2}" -f 'battery', 'plain-n', (($armsToDiff | ForEach-Object { '{0,-16}' -f $_ }) -join ''))
 foreach ($b in (@($batteries | ForEach-Object { $_[0] }) + @('py'))) {
   if (-not $cells.ContainsKey($b)) { continue }
@@ -650,6 +728,29 @@ foreach ($b in @('cmd', 'cmdspawn', 'ps', 'psspawn', 'pwsh', 'sh', 'shspawn')) {
   Prop "confined-$b-behaves-identically" ($d -eq 0) `
     "byte-diff vs the unconfined arm: $d differing lines (rc plain=$($cells[$b]['plain'].rc) ac=$($cells[$b]['ac'].rc))"
 }
+
+# ── THE DISQUALIFYING QUESTION, stated as one property per grant tier. A green `ac-ancestors` means
+# the confined-cmd defects are fixable with DACL writes nub can do UNPRIVILEGED, and Microsoft's
+# one-time host-wide `prepare-system-drive` does not bind on nub. A red `ac-ancestors` with a green
+# `ac-croot` is the opposite answer and would force a rethink of the whole Windows route.
+foreach ($b in @('cmd', 'ps', 'sh')) {
+  if (-not $cells.ContainsKey($b)) { continue }
+  foreach ($tier in @('ac-ancestors', 'ac-croot')) {
+    if (-not $cells[$b].ContainsKey($tier)) { continue }
+    Prop "$tier-makes-$b-behave-identically" ((DiffCount $b 'plain' $tier) -eq 0) `
+      "$tier byte-diff vs unconfined: $(DiffCount $b 'plain' $tier) (ac was $(DiffCount $b 'plain' 'ac'))"
+  }
+}
+
+# ── THE NULL DEVICE, which Microsoft ships a SECOND host-prep verb for and which resets at every
+# boot. `>NUL` and `>/dev/null` are the modal redirection in a lifecycle script, and under cmd a
+# denied `>NUL` does not even set a non-zero errorlevel — the shell just skips the command.
+$acSh = (ArmLines 'sh' 'ac') -join "`n"
+Prop 'nul-redirection-works-confined' `
+  (($acCmd -match 'op:nul-stdout-redirect=ok') -and ($acCmd -match 'op:nul-stderr-redirect=ok')) `
+  "cmd `>NUL` / `2>NUL`: $(($acCmd -split "`n" | Select-String -Pattern 'op:nul-' -SimpleMatch) -join ' ')"
+Prop 'devnull-redirection-works-confined' ($acSh -match 'op:devnull-redirect-rc=0') `
+  "busybox `>/dev/null`: $(($acSh -split "`n" | Select-String -Pattern 'op:devnull' -SimpleMatch) -join ' ')"
 
 # ── MICROSOFT'S NAMED APIS, measured directly rather than inferred from whether a shell started.
 $acPs = (ArmLines 'ps' 'ac') -join "`n"
