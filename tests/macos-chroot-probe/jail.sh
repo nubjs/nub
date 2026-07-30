@@ -223,8 +223,15 @@ sudo cp "$W/node.tar.xz" /dev/null 2>/dev/null || true
 run sudo chroot "$JAIL" /bin/sh -c '
   export PATH=/opt/node/bin:/usr/bin:/bin:/usr/sbin:/sbin
   export HOME=/home/build
+  # The per-user temp dir comes from a Mach service that chroot cannot scope, so confstr()
+  # fails and DARWIN_USER_TEMP_DIR is empty; give the toolchain a plain TMPDIR instead.
+  export TMPDIR=/tmp
+  # node-gyp probes for python by spawning bare "python3"/"python" and reads the path back;
+  # that handshake returns empty in the jail, so name the interpreter outright.
+  export PYTHON=/usr/bin/python3
   cd /work/addon
-  /opt/node/bin/node /opt/node/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js rebuild --nodedir=/work/nodedir 2>&1 | tail -30
+  /opt/node/bin/node /opt/node/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js rebuild \
+     --nodedir=/work/nodedir --python=/usr/bin/python3 2>&1 | tail -30
 '
 G=$?; note "node-gyp in jail: rc=$G"
 
