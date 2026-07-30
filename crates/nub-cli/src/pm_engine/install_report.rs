@@ -1268,7 +1268,22 @@ mod tests {
         let _guard = crate::pm_engine::ENGINE_GLOBAL_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let restore = aube_util::engine_context();
+
+        // Restored on DROP, not by a statement at the end. The context is a
+        // process global and the asserts below can panic, so a tail restore
+        // leaves every later test in this binary reading the postures this one
+        // set — and since every holder of the lock takes it with
+        // `unwrap_or_else(|e| e.into_inner())`, they proceed on that corrupted
+        // state rather than failing. One real failure would spray unrelated
+        // ones and bury which test actually broke.
+        struct Restore(aube_util::EngineContext);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                aube_util::set_engine_context(self.0.clone());
+            }
+        }
+        let _restore = Restore(aube_util::engine_context());
+
         aube_util::update_engine_context(|c| {
             c.read_branded_pnpm_config = true;
             c.read_layout_from_workspace_yaml = false;
@@ -1321,8 +1336,6 @@ mod tests {
         let bun_only = project(&[("bunfig.toml", "[install]\nlinker = \"hoisted\"\n")]);
         aube_util::update_engine_context(|c| c.read_bun_config = false);
         assert!(!detected(&bun_only));
-
-        aube_util::set_engine_context(restore);
     }
 
     /// Nothing materialized prints nothing: materialization is routine, and a
