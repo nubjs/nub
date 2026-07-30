@@ -1,0 +1,87 @@
+# Branch-scoped ad-hoc probe, no pull request required (.claude/skills/ci-adhoc-test/SKILL.md).
+#
+# Can ONE unprivileged Windows token get BOTH working filesystem reads AND denied network egress?
+#
+# The prior composed measurement concluded the AppContainer and restricted-token mechanisms do not
+# compose — but every arm in it ran with ZERO CAPABILITIES, and an empty capability array passes
+# nothing at the AppContainer second gate. Since `C:\` and `C:\Users` demonstrably carry ACEs for
+# `S-1-15-3-*` capability sids granting exactly the read+traverse masks the jail needs, those DENIEDs
+# may have been measuring the empty list rather than an inherent limit. This job builds LowBox tokens
+# that HOLD those sids and asks the OS.
+#
+# Both target images, because the claim has to hold on the two the earlier tables used:
+#   windows-latest  Server 2025
+#   windows-11-arm  Windows 11 Enterprise 25H2 (a client SKU, where Win32 App Isolation ACEs live)
+#
+# Cheap by construction: PowerShell + inline C#, no cargo, no Node, no AppContainer LAUNCH (which
+# cannot work over a non-interactive session anyway). Affordable to iterate on.
+name: win-both-gates-probe
+
+on:
+  push:
+    branches: [win-both-gates]
+    paths:
+      - 'tests/win-both-gates/**'
+      - '.github/workflows/win-both-gates-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Probe — capability-holding LowBox tokens vs the ancestor chain
+        if: always()
+        shell: pwsh
+        run: |
+          $rc = 0
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/win-both-gates/probe.ps1 `
+            *> probe.log
+          $rc = $LASTEXITCODE
+          Write-Host "probe exit=$rc"
+          Get-Content probe.log
+
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          fail=0
+          [ -s probe.log ] || { echo "MISS no output at all"; fail=1; }
+          grep -q "PROBE end" probe.log || { echo "MISS the probe did not run to completion"; fail=1; }
+          # CONTROLS ONLY. Every `fact:` row and every matrix cell is a measurement; a DENIED there
+          # is the finding, not a failure. These four are what make the table interpretable at all.
+          echo "---- controls ----"
+          for p in baseline-arm-exists \
+                   'baseline-reads-fs:C:\' \
+                   'baseline-reads-fs:C:\Users' \
+                   lowbox-gate-is-modelled \
+                   lowbox-second-gate-CAN-pass \
+                   harvest-found-appcontainer-aces; do
+            if grep -qF "prop:$p=PASS" probe.log; then echo "PASS $p"
+            elif grep -qF "prop:$p=FAIL" probe.log; then echo "FAIL $p"; fail=1
+            else echo "note $p not emitted (may be conditional)"; fi
+          done
+          echo "---- token construction ----"
+          grep -E '^  prop:token-built-' probe.log || true
+          echo "---- identification ----"
+          grep -E 'IDENTIFIED|appsilo-class|harvested-sids-identified|capability-names-derived' probe.log || true
+          echo "---- the matrix ----"
+          grep -E '^  arm |^    fs:|^    socket:|^    dev:|^    reg:' probe.log || true
+          exit $fail
+
+      - name: Upload probe log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-both-gates-${{ matrix.image }}
+          path: probe.log
+          if-no-files-found: warn
