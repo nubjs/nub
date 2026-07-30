@@ -856,6 +856,29 @@ pub fn windows_capability_fallbacks() -> u64 {
     launch::CAPABILITY_FALLBACKS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Place (`grant`) or remove the ancestor repair's non-inherited traverse ace on `dir` for
+/// `sddl`, so the probe can TIME the real writer against its own copy of the propagating one —
+/// same trustee, same path, same run. Nothing else attributes a cost difference to the primitive
+/// rather than to the machine, and the cost is the entire claim.
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub fn windows_object_traverse_ace(
+    dir: &std::path::Path,
+    sddl: &str,
+    grant: bool,
+) -> std::io::Result<()> {
+    launch::object_traverse_ace(dir, sddl, grant)
+}
+
+/// Whether `dir` already publishes read+execute to every AppContainer inheritably, i.e. whether
+/// a leaf read grant on it is a no-op. Which paths do is a property of the MACHINE's default
+/// ACLs, so the probe reports it rather than asserting it.
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub fn windows_leaf_grant_redundant(dir: &std::path::Path) -> bool {
+    launch::leaf_read_grant_redundant(dir)
+}
+
 // ── the FFI launcher ────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
@@ -1039,6 +1062,130 @@ pub(super) mod launch {
         Ok(())
     }
 
+    /// The FILE-object form of the generic rights the leaf grants are expressed in. Windows
+    /// applies this mapping itself when it evaluates an ace, and an effective-rights query
+    /// reports the RESULT — so a comparison against a generic mask has to map first or every
+    /// answer comes back "not granted". Bits that are already specific (`DELETE`) pass through.
+    fn file_specific_rights(generic: u32) -> u32 {
+        const FILE_GENERIC_READ: u32 = 0x0012_0089;
+        const FILE_GENERIC_WRITE: u32 = 0x0012_0116;
+        const FILE_GENERIC_EXECUTE: u32 = 0x0012_00a0;
+        let mut out = generic & !(GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE);
+        if generic & GENERIC_READ != 0 {
+            out |= FILE_GENERIC_READ;
+        }
+        if generic & GENERIC_WRITE != 0 {
+            out |= FILE_GENERIC_WRITE;
+        }
+        if generic & GENERIC_EXECUTE != 0 {
+            out |= FILE_GENERIC_EXECUTE;
+        }
+        out
+    }
+
+    /// Whether `path` ALREADY grants every right in `access` to AppContainers generally, through
+    /// an INHERITABLE ace — i.e. whether the ace [`grant_leaf_ace`] is about to write would
+    /// change nothing.
+    ///
+    /// This is worth a DACL read because the WRITE is the expensive half. An inheritable grant
+    /// legitimately propagates through the subtree, and a populated toolchain tree makes that
+    /// cost real: measured on windows-latest, granting the runner's `hostedtoolcache` python took
+    /// ~1000 ms against 3 ms on an empty directory, and a re-grant with the ace already present
+    /// cost the same as a fresh one — the signature of a tree walk, not a descriptor write.
+    /// Narrowing the grant is not an alternative: `Lib\` at 6,412 entries IS the tree, and a
+    /// narrow grant fails `0xc0000135 STATUS_DLL_NOT_FOUND` because `python3.dll`,
+    /// `python312.dll` and `vcruntime140*.dll` sit in the install ROOT beside the exe.
+    ///
+    /// It applies broadly, not just to python: `%ProgramFiles%` carries
+    /// `ALL APPLICATION PACKAGES: ReadAndExecute` inheritably on both Windows images (43 of the
+    /// 44 `C:\Program Files` children; `nodejs` is the known outlier), so an all-users python,
+    /// node, or Visual Studio install needs no grant at all. Only per-user layouts pay, which is
+    /// why `hostedtoolcache` — carrying none — is the one that measured.
+    ///
+    /// INHERITABLE is required rather than incidental: the ace being skipped covers the whole
+    /// subtree, so a this-directory-only AAP ace does not substitute for it. Same distinction
+    /// `verify_clean_root` draws above, for the same reason. Any failure to read the DACL answers
+    /// "no" and the grant is written — the skip is an optimisation and must never be the reason a
+    /// package cannot start.
+    ///
+    /// No conflict with `verify_clean_root`'s refusal to launch under an AAP-readable root: that
+    /// governs the working root's own chain, this governs granted paths OUTSIDE it. A toolchain
+    /// the OS already publishes to every AppContainer is not access nub is adding.
+    fn already_granted_to_appcontainers(path: &Path, access: u32) -> bool {
+        let sid_text = to_wide(ALL_APPLICATION_PACKAGES_SID);
+        let mut aap_sid: PSID = std::ptr::null_mut();
+        if unsafe { ConvertStringSidToSidW(sid_text.as_ptr(), &mut aap_sid) } == 0 {
+            return false;
+        }
+        let _sid = LocalFreeGuard(aap_sid.cast());
+
+        let wpath = to_wide_path(path);
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let rc = unsafe {
+            GetNamedSecurityInfoW(
+                wpath.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut sd,
+            )
+        };
+        if rc != 0 {
+            return false;
+        }
+        let _sd = LocalFreeGuard(sd);
+        if dacl.is_null() || !has_inheritable_ace(dacl, aap_sid) {
+            return false;
+        }
+
+        let trustee = TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_USER,
+            ptstrName: aap_sid.cast(),
+        };
+        let mut rights = 0u32;
+        if unsafe { GetEffectiveRightsFromAclW(dacl, &trustee, &mut rights) } != 0 {
+            return false;
+        }
+        let needed = file_specific_rights(access);
+        rights & needed == needed
+    }
+
+    /// Install one leaf allow-ace, reporting whether an ace was actually written.
+    ///
+    /// The return value is the ONLY thing the teardown list is driven from, which is what keeps
+    /// grant and revoke symmetric BY CONSTRUCTION: a skipped path is never recorded, so the
+    /// teardown cannot strip an ace this launch did not create. Two independent conditionals
+    /// would make that a coincidence instead of a property — and stripping
+    /// `ALL APPLICATION PACKAGES` off `%ProgramFiles%\nodejs` would be a lasting change to the
+    /// user's own machine.
+    fn grant_leaf_ace(path: &Path, sid: PSID, access: u32) -> io::Result<bool> {
+        if already_granted_to_appcontainers(path, access) {
+            return Ok(false);
+        }
+        set_ace(path, sid, access, GRANT_ACCESS, true).map(|()| true)
+    }
+
+    /// See [`super::windows_object_traverse_ace`].
+    #[doc(hidden)]
+    pub(super) fn object_traverse_ace(dir: &Path, sddl: &str, grant: bool) -> io::Result<()> {
+        let sid = CapSid::new(sddl)?;
+        let mode = if grant { GRANT_ACCESS } else { REVOKE_ACCESS };
+        set_ace_on_object(dir, sid.0, TRAVERSE_MASK, mode)
+    }
+
+    /// See [`super::windows_leaf_grant_redundant`].
+    #[doc(hidden)]
+    pub(super) fn leaf_read_grant_redundant(dir: &Path) -> bool {
+        already_granted_to_appcontainers(dir, GENERIC_READ | GENERIC_EXECUTE)
+    }
+
     /// Each granted path's STRICT ancestors, deduped and ordered shallowest-first. These are
     /// the directories Node's `realpathSync` opens as targets on its way to a granted leaf. A
     /// grant that is itself an ancestor of another grant is included, and simply takes the
@@ -1157,25 +1304,41 @@ pub(super) mod launch {
     ///
     /// `FILE_FLAG_BACKUP_SEMANTICS` is what lets `CreateFileW` open a DIRECTORY at all.
     ///
-    /// STILL NOT ENOUGH, measured — do not read the paragraph above as settled. Run
-    /// 30493913027's watchdog pinned the remaining stall to the FIRST launch that writes these
-    /// aces, and the only WRITE in that window is this function (`verify_clean_root` and
-    /// `harvest_capability_sids` merely read DACLs). For file objects `SetSecurityInfo` still
-    /// propagates inheritance to existing children, so trading the named writer for the
-    /// handle-based one narrowed nothing: the chain includes `%TEMP%`, which on a CI runner is
-    /// enormous, and the walk takes minutes and varies from run to run. The genuinely
-    /// non-propagating primitive is `SetKernelObjectSecurity`, which wants a hand-built
-    /// descriptor (`InitializeSecurityDescriptor` + `SetSecurityDescriptorDacl`) instead of
-    /// `SetEntriesInAclW`'s convenience — that is the next move, and nothing else about the
-    /// repair changes with it.
+    /// `SetSecurityInfo` WAS NOT ENOUGH EITHER, and that is why the writer below is the kernel
+    /// one. Both `Set*SecurityInfo` entry points run advapi32's user-mode inheritance
+    /// propagation before they return, so swapping the named writer for the handle-based one
+    /// narrowed nothing: run 30493913027's watchdog pinned the remaining stall to the FIRST
+    /// launch that writes these aces, and the only WRITE in that window is this function
+    /// (`verify_clean_root` and `harvest_capability_sids` merely read DACLs). The chain includes
+    /// `%TEMP%`, which on a CI runner is enormous, so the walk took minutes and varied run to
+    /// run. `SetKernelObjectSecurity` goes straight to `NtSetSecurityObject`: it writes the
+    /// object's own descriptor and there is no propagation pass to skip. Measured on
+    /// windows-latest, the `ace-cost` group of `tests/windows_jail_repairs.rs`, same trustee and
+    /// same path in the same run — see that group's own comment for the numbers.
+    ///
+    /// The price is that it wants a whole SECURITY_DESCRIPTOR rather than a bare ACL, hence the
+    /// hand-built one below. `SetEntriesInAclW` still does the MERGE — it only assembles an ACL
+    /// in memory and propagates nothing; the cost was never there.
+    ///
+    /// SE_DACL_AUTO_INHERITED and SE_DACL_PROTECTED are carried across DELIBERATELY. A
+    /// hand-built descriptor starts with a zero control word, and writing that back would clear
+    /// both bits on a directory nub does not own — changing how the user's own ACL edits later
+    /// propagate through their profile or temp dir. This repair is only ever allowed to add and
+    /// remove one traverse ace.
     fn set_ace_on_object(path: &Path, sid: PSID, access: u32, mode: i32) -> io::Result<()> {
-        use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SetSecurityInfo};
+        use windows_sys::Win32::Security::Authorization::GetSecurityInfo;
+        use windows_sys::Win32::Security::{
+            InitializeSecurityDescriptor, SE_DACL_AUTO_INHERITED, SECURITY_DESCRIPTOR,
+            SetKernelObjectSecurity, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
+        };
         use windows_sys::Win32::Storage::FileSystem::{
             CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
             FILE_SHARE_WRITE, OPEN_EXISTING,
         };
         const READ_CONTROL: u32 = 0x0002_0000;
         const WRITE_DAC: u32 = 0x0004_0000;
+        const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+        const CARRIED_CONTROL: u16 = SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED;
 
         let _lock: MutexGuard<'_, ()> = ACL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let wpath = to_wide_path(path);
@@ -1215,6 +1378,12 @@ pub(super) mod launch {
         }
         let _sd = LocalFreeGuard(sd);
 
+        let mut control = 0u16;
+        let mut revision = 0u32;
+        if unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut revision) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
         let mut ea: EXPLICIT_ACCESS_W = unsafe { std::mem::zeroed() };
         ea.grfAccessPermissions = access;
         ea.grfAccessMode = mode;
@@ -1226,25 +1395,29 @@ pub(super) mod launch {
             TrusteeType: TRUSTEE_IS_USER,
             ptstrName: sid.cast(),
         };
+        // Merges into the aces already there, INHERITED_ACE flags intact, so the descriptor
+        // written below differs from the one read above by exactly this one ace.
         let mut new_dacl: *mut ACL = std::ptr::null_mut();
         let rc = unsafe { SetEntriesInAclW(1, &ea, old_dacl, &mut new_dacl) };
         if rc != 0 {
             return Err(io::Error::from_raw_os_error(rc as i32));
         }
         let _new = LocalFreeGuard(new_dacl.cast());
-        let rc = unsafe {
-            SetSecurityInfo(
-                handle,
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                new_dacl,
-                std::ptr::null_mut(),
-            )
-        };
-        if rc != 0 {
-            return Err(io::Error::from_raw_os_error(rc as i32));
+
+        let mut fresh: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+        let psd: PSECURITY_DESCRIPTOR = std::ptr::from_mut(&mut fresh).cast();
+        // SAFETY: `fresh` is a stack SECURITY_DESCRIPTOR that does not move; `new_dacl` outlives
+        // the write (`_new` drops after it). The absolute form is what SetKernelObjectSecurity
+        // documents for this pattern.
+        unsafe {
+            if InitializeSecurityDescriptor(psd, SECURITY_DESCRIPTOR_REVISION) == 0
+                || SetSecurityDescriptorDacl(psd, 1, new_dacl, 0) == 0
+                || SetSecurityDescriptorControl(psd, CARRIED_CONTROL, control & CARRIED_CONTROL)
+                    == 0
+                || SetKernelObjectSecurity(handle, DACL_SECURITY_INFORMATION, psd) == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
         }
         Ok(())
     }
@@ -1499,50 +1672,37 @@ pub(super) mod launch {
             //    read/write grants are INHERITABLE (cover the subtree). Ancestors are
             //    handled separately, in step 2b. A REVOKE_ACCESS teardown on the unique SID
             //    removes exactly our ACEs from every path, whatever the access mask.
+            //
+            //    Both kinds run through ONE loop so the teardown list is populated from a
+            //    single decision — see [`grant_leaf_ace`], which may report that the path
+            //    already grants AppContainers what we were about to add.
             let mut _aces = AceGuard {
                 paths: Vec::new(),
                 objects: Vec::new(),
                 sid: sid_copy,
             };
-            for dir in &self.read_grants {
-                set_ace(
-                    dir,
-                    ac_sid,
-                    GENERIC_READ | GENERIC_EXECUTE,
-                    GRANT_ACCESS,
-                    true,
-                )
-                .map_err(|error| {
+            let leaves = self
+                .read_grants
+                .iter()
+                .map(|d| ("read", d, GENERIC_READ | GENERIC_EXECUTE))
+                .chain(self.write_grants.iter().map(|d| {
+                    (
+                        "write",
+                        d,
+                        GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE,
+                    )
+                }));
+            for (kind, dir, access) in leaves {
+                let installed = grant_leaf_ace(dir, ac_sid, access).map_err(|error| {
                     io::Error::new(
                         error.kind(),
                         format!(
-                            "sandbox: installing read grant ACE on {} failed: {error}",
+                            "sandbox: installing {kind} grant ACE on {} failed: {error}",
                             dir.display()
                         ),
                     )
                 })?;
-                if !_aces.paths.contains(dir) {
-                    _aces.paths.push(dir.clone());
-                }
-            }
-            for dir in &self.write_grants {
-                set_ace(
-                    dir,
-                    ac_sid,
-                    GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE,
-                    GRANT_ACCESS,
-                    true,
-                )
-                .map_err(|error| {
-                    io::Error::new(
-                        error.kind(),
-                        format!(
-                            "sandbox: installing write grant ACE on {} failed: {error}",
-                            dir.display()
-                        ),
-                    )
-                })?;
-                if !_aces.paths.contains(dir) {
+                if installed && !_aces.paths.contains(dir) {
                     _aces.paths.push(dir.clone());
                 }
             }

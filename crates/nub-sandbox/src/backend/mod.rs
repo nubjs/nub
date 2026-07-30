@@ -122,7 +122,10 @@ pub fn earliest_bootstrap() -> std::io::Result<RuntimeCapability> {
 mod windows;
 #[cfg(target_os = "windows")]
 #[doc(hidden)]
-pub use windows::{windows_ancestor_capability_sids, windows_capability_fallbacks};
+pub use windows::{
+    windows_ancestor_capability_sids, windows_capability_fallbacks, windows_leaf_grant_redundant,
+    windows_object_traverse_ace,
+};
 
 // The Windows dedicated-account + WFP backend (agent-sandbox). Same cfg as `windows` so its
 // OS-agnostic plan derivation and mode-selection are unit-tested on the macOS dev host.
