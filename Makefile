@@ -194,12 +194,20 @@ version-check: oxc-lockstep-check
 		const cm = cargo.match(/^version = \x22([^\x22]*)\x22/m); \
 		if (!cm) errors.push('Cargo.toml: workspace version line not found'); \
 		else if (cm[1] !== v) errors.push('Cargo.toml has ' + cm[1] + ', expected ' + v); \
+		for (const f of ['crates/nub-core/Cargo.toml', 'crates/nub-native/Cargo.toml']) { \
+			try { \
+				const t = fs.readFileSync(f, 'utf8'); \
+				const im = t.match(/^version = \x22([^\x22]*)\x22/m); \
+				if (!im) errors.push(f + ': inlined version line not found'); \
+				else if (im[1] !== v) errors.push(f + ' has ' + im[1] + ', expected ' + v); \
+			} catch { errors.push('missing or unreadable ' + f); } \
+		} \
 		const version = fs.readFileSync('runtime/version.mjs', 'utf8'); \
 		const pm = version.match(/export const NUB_VERSION = \x22([^\x22]*)\x22/); \
 		if (!pm) errors.push('runtime/version.mjs: NUB_VERSION not found'); \
 		else if (pm[1] !== v) errors.push('runtime/version.mjs NUB_VERSION is ' + pm[1] + ', expected ' + v); \
 		if (errors.length) { console.error('Version mismatch:\\n  ' + errors.join('\\n  ')); process.exit(1); } \
-		else { console.log('✓ All npm packages, Cargo.toml, runtime/version.mjs at v' + v); }"
+		else { console.log('✓ All npm packages, Cargo.toml (incl. the inlined nub-core/nub-native manifests), runtime/version.mjs at v' + v); }"
 
 npm-build: build
 	./npm/build-local.sh

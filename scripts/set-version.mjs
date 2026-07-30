@@ -47,6 +47,14 @@ const replaceOrDie = (file, re, replacement) => {
 };
 replaceOrDie("Cargo.toml", /^version = .*/m, `version = "${v}"`);
 replaceOrDie("crates/nub-native/Cargo.toml", /^version = .*/m, `version = "${v}"`);
+// nub-core inlines its version instead of inheriting: it is a cross-workspace path
+// dependency of crates/nub-launcher, whose release `cross` build mounts only that
+// workspace, so a `.workspace = true` field here fails to parse (the #132 failure).
+// The inlining is deliberate; keeping it in lockstep is this line's job. It is also
+// load-bearing beyond packaging — spawn.rs hands `env!("CARGO_PKG_VERSION")` to the
+// preload as `process.versions.nub`, so a stale value here silently makes the runtime
+// misreport the binary's version, which is exactly how it was caught.
+replaceOrDie("crates/nub-core/Cargo.toml", /^version = .*/m, `version = "${v}"`);
 replaceOrDie(
   "runtime/version.mjs",
   /export const NUB_VERSION = .*/,
