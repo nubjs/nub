@@ -162,10 +162,12 @@ jobs:
             need_pass "$p"
           done
 
-          # The env-block ceiling is a HARD one and the payload sits inside it by ~8.7k characters:
-          # a CreateProcessW environment block holds 32767 in total, and the stamped NODE_OPTIONS is
-          # 23995 of that. `tiny` carries a flag-sized value and `full` the real one, so a launch
-          # failure caused by SIZE separates itself from anything the shim does.
+          # The env-block ceiling is a HARD one and the margin is thinner than the payload alone
+          # suggests: a CreateProcessW environment block holds 32767 characters IN TOTAL, the
+          # stamped NODE_OPTIONS is 23995 of them, and the whole block measured 27557 on this runner
+          # — about 5.2k spare, which PATH and npm_config_* have to fit inside. `tiny` carries a
+          # flag-sized value and `full` the real one, so a launch failure caused by SIZE separates
+          # itself from anything the shim does.
           echo "---- NODE_OPTIONS delivery size ----"
           for p in node-options-tiny-launches \
                    node-options-full-launches; do
