@@ -162,7 +162,7 @@ The two things a host run cannot answer, and the arms that do: whether a LowBox 
 
 ### Measured: it works, on both images, with the blocker reproducing in the same run
 
-Run **`30516750145`**, real AppContainer launch, **windows-latest (Server 2025 10.0.26100)** and **windows-11-arm (Win 11 Enterprise 10.0.26200)**, Node 22.
+Runs **`30516750145`** and **`30517115980`**, real AppContainer launch, **windows-latest (Server 2025 10.0.26100)** and **windows-11-arm (Win 11 Enterprise 10.0.26200)**, Node 22. Two runs because one green run does not establish anything about a defect whose symptom is a timeout; the second reproduces the first cell-for-cell on both images (`obj-ac-fork` `cpu_ms=29828`/`29906`, `obj-ac-shimfork` `rc=0` in 247 ms/463 ms).
 
 | confined arm | launch | cells |
 | --- | --- | --- |
