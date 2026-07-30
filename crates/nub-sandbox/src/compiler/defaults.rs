@@ -842,14 +842,11 @@ fn with_alternate_spellings(roots: &[std::path::PathBuf]) -> Vec<std::path::Path
             if !out.contains(root) {
                 out.push(root.clone());
             }
-            // A root that does not exist yet has no canonical spelling; the original stands.
-            let Ok(canonical) = std::fs::canonicalize(root) else {
-                continue;
-            };
-            let canonical = match canonical.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
-                Some(rest) if !rest.starts_with("UNC\\") => std::path::PathBuf::from(rest),
-                _ => canonical,
-            };
+            // A root under a not-yet-created directory is the COMMON case for a build, and bare
+            // `canonicalize` errs on it — keeping only the as-built spelling, so a walk that meets
+            // the other spelling of an existing ancestor still refuses. Resolve the longest
+            // existing prefix and re-apply the tail lexically instead; the same shape Bazel uses.
+            let canonical = crate::matcher::path::canonicalize_including_nonexistent(root);
             if !out.contains(&canonical) {
                 out.push(canonical);
             }
