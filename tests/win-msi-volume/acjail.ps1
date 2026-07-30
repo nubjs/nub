@@ -30,6 +30,21 @@
 #                                 volume root, which returns the device Characteristics bitmask the
 #                                 volume-flag hypothesis is ABOUT. Measuring the premise directly is
 #                                 worth more than inferring it from behaviour.
+#   Launch(..., envLf)            ADDED for the jail-bin probe. A SANITIZED ENVIRONMENT BLOCK. Every
+#                                 existing call passes `IntPtr.Zero` for `lpEnvironment`, so the child
+#                                 INHERITS the runner's `PATH` — under which a `node`/`npm` cell says
+#                                 nothing about where the tool was resolved FROM. The jail-bin design
+#                                 is a PATH rewrite, so measuring it requires handing the child an
+#                                 environment rather than letting it inherit one. The 8-argument
+#                                 overload is retained and forwards `null`, so every existing arm's
+#                                 launch is byte-identical to before this edit.
+#
+#                                 `CREATE_UNICODE_ENVIRONMENT` is mandatory with it: the block is
+#                                 UTF-16 (`StringToHGlobalUni`) and without the flag Windows parses
+#                                 those bytes as ANSI, which yields a child whose environment is one
+#                                 truncated variable. That failure looks like "the tool is missing"
+#                                 rather than "the block is malformed" — the same class as the
+#                                 `CharSet.Unicode` bug in §5e.
 
 $acJailSrc = @'
 using System;
@@ -118,6 +133,19 @@ public static class AcJail
     static extern bool CreateProcessAsUserW(IntPtr token, string app, StringBuilder cmdline,
         IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string cwd,
         ref STARTUPINFOEXW si, out PROCESS_INFORMATION pi);
+    // ADDED for the jail-bin probe's hardlink cell. An NTFS hard link is a second directory entry
+    // pointing at the SAME MFT record, and the security descriptor lives on the record — so an ACE
+    // written "on the link" is an ACE on the original path too. That is a grant-leak hazard for any
+    // design that populates a nub-owned dir by linking instead of copying, and it has to be measured
+    // rather than recalled from documentation.
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool CreateHardLinkW(string newFile, string existingFile, IntPtr sa);
+    public static string HardLink(string newFile, string existingFile)
+    {
+        if (CreateHardLinkW(newFile, existingFile, IntPtr.Zero)) return "OK";
+        return "ERR err=" + Marshal.GetLastWin32Error();
+    }
+
     [DllImport("kernel32.dll", SetLastError = true)] static extern uint WaitForSingleObject(IntPtr h, uint ms);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetExitCodeProcess(IntPtr h, out uint code);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool TerminateProcess(IntPtr h, uint code);
@@ -143,6 +171,7 @@ public static class AcJail
     const uint CREATE_ALWAYS = 2, OPEN_EXISTING = 3, FILE_ATTRIBUTE_NORMAL = 0x80;
     const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
     const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
+    const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
     const uint STARTF_USESTDHANDLES = 0x00000100;
     static readonly IntPtr PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES = new IntPtr(0x00020009);
     const uint WAIT_TIMEOUT = 0x00000102;
@@ -343,6 +372,21 @@ public static class AcJail
     public static string Launch(string acSidStr, string exe, string cmdline, string cwd,
         string logPath, uint timeoutMs, string capSidCsv, string deletePrivCsv)
     {
+        return Launch(acSidStr, exe, cmdline, cwd, logPath, timeoutMs, capSidCsv, deletePrivCsv, null);
+    }
+
+    /// As above, plus `envLf`: a SANITIZED environment block given as LF-separated `NAME=VALUE`
+    /// lines. Null or empty => `lpEnvironment = NULL` => the child inherits ours, which is what
+    /// every pre-existing arm does and must keep doing. Non-empty => the lines become a UTF-16
+    /// double-NUL-terminated block and `CREATE_UNICODE_ENVIRONMENT` is set.
+    ///
+    /// This exists because the jail-bin design IS a `PATH` rewrite: a `node`/`npm` cell measured
+    /// with the runner's inherited `PATH` cannot distinguish "resolved from the nub-owned dir" from
+    /// "resolved from the ambient install", so it would confirm whatever the reader expected.
+    public static string Launch(string acSidStr, string exe, string cmdline, string cwd,
+        string logPath, uint timeoutMs, string capSidCsv, string deletePrivCsv, string envLf)
+    {
+        IntPtr envBlock = IntPtr.Zero;
         IntPtr acSid = IntPtr.Zero;
         IntPtr attrList = IntPtr.Zero;
         IntPtr capsBuf = IntPtr.Zero;
@@ -369,6 +413,20 @@ public static class AcJail
 
             bool confined = !string.IsNullOrEmpty(acSidStr);
             bool asUser = !string.IsNullOrEmpty(deletePrivCsv);
+            if (!string.IsNullOrEmpty(envLf))
+            {
+                var sb = new StringBuilder();
+                foreach (string line in envLf.Replace("\r", "").Split('\n'))
+                {
+                    if (line.Length == 0) continue;
+                    sb.Append(line);
+                    sb.Append('\0');
+                }
+                // StringToHGlobalUni appends ONE terminating NUL, so the managed string must already
+                // end in a NUL to produce the required DOUBLE terminator.
+                sb.Append('\0');
+                envBlock = Marshal.StringToHGlobalUni(sb.ToString());
+            }
             STARTUPINFOEXW si = new STARTUPINFOEXW();
             si.StartupInfo.cb = (uint)Marshal.SizeOf(confined ? typeof(STARTUPINFOEXW) : typeof(STARTUPINFOW));
             si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -460,13 +518,15 @@ public static class AcJail
                     return "launch-error CreateRestrictedToken err=" + Marshal.GetLastWin32Error();
             }
 
+            if (envBlock != IntPtr.Zero) flags |= CREATE_UNICODE_ENVIRONMENT;
+
             PROCESS_INFORMATION pi;
             StringBuilder cl = new StringBuilder(cmdline, cmdline.Length + 64);
             bool ok = asUser
                 ? CreateProcessAsUserW(restricted, exe, cl, IntPtr.Zero, IntPtr.Zero, true, flags,
-                    IntPtr.Zero, cwd, ref si, out pi)
+                    envBlock, cwd, ref si, out pi)
                 : CreateProcessW(exe, cl, IntPtr.Zero, IntPtr.Zero, true, flags,
-                    IntPtr.Zero, cwd, ref si, out pi);
+                    envBlock, cwd, ref si, out pi);
             if (!ok)
                 return (asUser ? "launch-error CreateProcessAsUserW err=" : "launch-error CreateProcessW err=")
                     + Marshal.GetLastWin32Error();
@@ -498,6 +558,7 @@ public static class AcJail
             if (capsBuf != IntPtr.Zero) Marshal.FreeHGlobal(capsBuf);
             if (capArray != IntPtr.Zero) Marshal.FreeHGlobal(capArray);
             if (privBuf != IntPtr.Zero) Marshal.FreeHGlobal(privBuf);
+            if (envBlock != IntPtr.Zero) Marshal.FreeHGlobal(envBlock);
             foreach (IntPtr cs in capSids) LocalFree(cs);
             if (restricted != IntPtr.Zero) CloseHandle(restricted);
             if (srcToken != IntPtr.Zero) CloseHandle(srcToken);

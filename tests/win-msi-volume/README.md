@@ -1,4 +1,4 @@
-# `tests/win-msi-volume` — two measurements that can each invalidate the AppContainer build jail
+# `tests/win-msi-volume` — three measurements against the AppContainer build jail
 
 Both questions here are premised on `.fray/sandbox-MECHANISM-FACTS.md` §5h's bypass-traverse result
 holding in conditions nobody had tested. Read §5h §5d–§5h first; nothing below re-derives it.
@@ -7,6 +7,7 @@ holding in conditions nobody had tested. Read §5h §5d–§5h first; nothing be
 | --- | --- | --- |
 | 1 | Can an AppContainer child EXEC `node.exe` on a stock **MSI-installed** Node? | [`nodejs/node#63590`](https://github.com/nodejs/node/issues/63590): the MSI's `SetInstallDirPermission` writes a **protected** DACL on `C:\Program Files\nodejs` naming only Users / Authenticated Users / Administrators / SYSTEM. If no `S-1-15-2-*` sid holds rights there, the jail cannot start the user's Node at all and every §5h property is moot for that user. |
 | 2 | Does the traverse skip hold on a **non-local volume**? | §5h measured only local `C:` NTFS and left the mechanism unresolved between `SeChangeNotifyPrivilege` and `FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL`. The volume-flag reading predicts traverse **would** be enforced on a device lacking the flag — a mounted VHD, a mapped drive, a UNC path — which is where developers keep projects. |
+| 3 | Does a **nub-owned, ACE-able bin dir plus a sanitized `PATH`** close the gap question 1 found? | Questions 1 and 2 are *can this invalidate the route*. Question 3 is the first one here that proposes a **fix**. §5j settled that the jail execs the MSI `node.exe` but cannot read that tree, so the bundled `npm` is unusable and `C:\Program Files\nodejs` cannot be ACE'd unprivileged. If a directory nub owns can hold what a jailed script needs and `PATH` can point only there, the gap closes on nub's side with no elevation and no upstream fix. |
 
 ## Why §5h could not have caught question 1
 
@@ -25,8 +26,10 @@ executed an ambient Node under the jail. The question was side-stepped, not answ
 | `child.js` | The in-child operations table for both probes, driven entirely by `AJ_TARGETS` (`name\|kind\|path` triples). Never spawns and never touches the network — a piped spawn under an AppContainer hangs indefinitely (§5h) and has already destroyed a run. |
 | `msi-node-acl.ps1` | Question 1. Surveys every Node on the image, installs a real arch-correct MSI from `nodejs.org`, reads the DACL it writes, then runs the exec and read arms. |
 | `volume-traverse.ps1` | Question 2. Provisions a VHD volume, a `subst` drive and an SMB share, runs the identical deep-read shape on each plus local `C:`, reads each volume's device Characteristics, and runs the privilege differential. |
-| `msi-verdict.ps1` / `vol-verdict.ps1` | The verdicts, factored out so the selftest can drive them with synthetic cells. |
-| `selftest.ps1` | Fourteen synthetic worlds, each asserting the **exact** set of failing property names. Runs anywhere `pwsh` does, and gates both Windows jobs. |
+| `jail-bin.ps1` | Question 3. Installs a real MSI to get a genuinely un-ACE-able ambient tree, grants an `S-1-15-2-1` ace on an EMPTY nub-owned dir and then populates it (so children inherit at creation), and runs thirteen arms over a **sanitized environment block** — which is the one thing `acjail.ps1` gained for this probe, behind a new `Launch` overload so every pre-existing arm's launch is byte-identical. |
+| `msi-verdict.ps1` / `vol-verdict.ps1` / `jailbin-verdict.ps1` | The verdicts, factored out so the selftests can drive them with synthetic cells. |
+| `selftest.ps1` | Fourteen synthetic worlds for questions 1 and 2, each asserting the **exact** set of failing property names. Runs anywhere `pwsh` does. |
+| `jailbin-selftest.ps1` | Five synthetic worlds for question 3, including one where every decisive cell is green **and** the negative control is green too — the world a verdict without attribution waves through. |
 
 ## The controls, and what each rules out
 
@@ -55,21 +58,47 @@ A table of failures is only interpretable because of these. Every one is require
 - **Question 2's privilege differential control** (`cn-kept`) — the identical
   `CreateProcessAsUserW` + `CreateRestrictedToken` path deleting nothing, plus a read-back of the
   privilege list off the process that actually ran.
+- **Question 3's mechanism attribution** (`ac-jailbin-ungranted`) — the *identical* command line and
+  `PATH` with the jail-bin ace **revoked**, and the revoke read back at both the directory and the
+  five-levels-down target. Without it a green jail-bin arm could be bypass-traverse, an inherited ace,
+  or the runner image. Its sibling `ac-ambient` re-measures §5j's own failure inside the same run.
+- **Question 3's interpreter read-back** — the hybrid arm differs from the jail-bin arm only in `PATH`
+  ORDER, so the child reports `process.execPath` and the two must DISAGREE. Otherwise "the ambient
+  `node.exe` ran" is an assumption and the arm says nothing about whether the binary needs copying.
+- **Question 3's environment control** — the child reports its own `PATH` and it must equal the block
+  handed to it exactly. Every pre-existing arm in this directory passes `lpEnvironment = NULL` and so
+  INHERITS the runner's `PATH`; a cell measured that way cannot tell "resolved from the nub-owned dir"
+  from "resolved from the ambient install", and would confirm whatever the reader expected.
+- **Question 3's inverted properties are gated on a real `ERR`, never on `-ne 'OK'`** — which would
+  accept `MISSING-ARM`/`MISSING-OP` and report a treatment arm that never executed the operation as a
+  clean negative. That is the bug §5k's run 1 shipped.
 - **Elevation is reported per run** (`fact:admin`, the access check — never `TokenIsElevated`, which
-  `CreateRestrictedToken` copies). Creating a VHD and an SMB share need admin; `subst` needs nothing.
-  That is a fact about provisioning a test volume, not about nub's own setup requirement.
+  `CreateRestrictedToken` copies). Creating a VHD and an SMB share need admin; `subst` needs nothing;
+  installing the MSI needs it and a user consents to the same thing. Question 3's *own* setup claim is
+  measured separately, under an impersonated token whose privileges are DELETED rather than disabled —
+  `DISABLE_MAX_PRIVILEGE` leaves them held and .NET's `Set-Acl` re-enables what it needs, which
+  produced a false positive in `msi-node-acl.ps1`'s run 1.
 
 ## Reading the badge
 
 Several properties are named for the **claim they measure**, not for the outcome anyone wanted, so a
 clean and fully-controlled informative run still exits non-zero:
-`msi-node-cannot-be-executed-by-an-appcontainer` PASSing means the route is broken for MSI users, and
-`<vol>-bypass-traverse-holds` FAILing is the compat finding. Read the table, not the badge.
+`msi-node-cannot-be-executed-by-an-appcontainer` PASSing means the route is broken for MSI users,
+`<vol>-bypass-traverse-holds` FAILing is the compat finding, and
+`jb-hardlink-ace-leaks-to-the-original-path` PASSing means hard-linking is DISQUALIFIED as a way to
+populate the nub-owned dir. Read the table, not the badge.
 
 ## Running it
 
-Branch-scoped, no pull request (`.claude/skills/ci-adhoc-test/SKILL.md`): push to
-`sandbox/win-msi-acl-volumes` and `.github/workflows/win-msi-volume-probe.yml` fires. AppContainer
-cannot launch over OpenSSH (session 0 has no window station; every launch returns `0xC0000142`, §5e),
-so CI is the only venue. Locally, `pwsh -File tests/win-msi-volume/selftest.ps1` validates both
-verdicts on any platform.
+Branch-scoped, no pull request (`.claude/skills/ci-adhoc-test/SKILL.md`). Questions 1 and 2: push to
+`sandbox/win-msi-acl-volumes` and `.github/workflows/win-msi-volume-probe.yml` fires. Question 3: push
+to `sandbox/win-jail-bin` and `.github/workflows/win-jail-bin-probe.yml` fires. AppContainer cannot
+launch over OpenSSH (session 0 has no window station; every launch returns `0xC0000142`, §5e), so CI is
+the only venue.
+
+Locally, on any platform:
+
+```sh
+pwsh -File tests/win-msi-volume/selftest.ps1          # questions 1 and 2
+pwsh -File tests/win-msi-volume/jailbin-selftest.ps1  # question 3
+```
