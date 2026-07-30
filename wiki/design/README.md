@@ -11,3 +11,5 @@ The first three describe Nub's **build jail** — the confinement applied to dep
 | [Windows](build-jail-windows.md) | an AppContainer (LowBox) token |
 
 Each is a ledger with one heading per approach tried: a status (ADOPTED, DEAD, OPEN, REJECTED), what the approach would have bought, the measurement that settled it, and what would have to change for it to become viable again. The dead ends are recorded deliberately — most were expensive to reach, and several were re-proposed after already being refuted.
+
+A fourth document sits above those three. [Architecture](build-jail-architecture.md) asks whether the shape they share — a per-package allowlist pre-granted from a catalog — is the right one at all, judged against how BuildXL, Bazel, Chromium, Nix, Portage and the package managers themselves confine a build. It uses the same ledger form, one heading per candidate architecture.

@@ -1,0 +1,269 @@
+# Build jail architecture — is the shape right?
+
+The three sibling documents record every mechanism tried on one operating system. This one asks the question above them: **the build jail pre-grants each package a set of filesystem paths, executables and network hosts from a catalog, and denies everything else — is that the right architecture, or is the steady stream of defects a symptom of the wrong one?**
+
+It exists because the patch rate invited that question. Five path-spelling defects, a mechanism carried for weeks that measured inert, a preload that cannot reach one of Node's two resolvers, and two harness defects that made runs read green — all inside one subsystem, all in one stretch of work. The shape of the complaint is that Nub keeps reconstructing in userland what the operating system already knows: is this path that path, is this path under that root, did this process do the work.
+
+## The verdict
+
+**The architecture is correct, and the patch stream is mostly the price of being the only one of its kind that pays no privilege.** Every alternative shape surveyed is either unavailable at zero privilege on at least one of the three platforms, or is not a boundary at all — and the two mature implementations closest to this problem, Chromium's Windows sandbox and Microsoft's BuildXL, have the same two-layer structure Nub converged on independently: **a kernel-enforced token or ruleset is the boundary, and a userland compatibility layer sits above it whose job is to keep programs working, not to keep them contained.** Chromium states that split in its own design document. That layer is where the spelling defects were, and a compatibility layer that accretes per-API fixes is what every implementation of this shape looks like — Chromium's Windows sandbox is 56 non-test C++ source files of it.
+
+**But a bounded part of the stream was avoidable, and it has one name: a canonical path is carried as an untyped string and then handed to matchers with different grammars.** One `canonical()` call returning the Windows verbatim `\\?\` form produced four defects at once, because four consumers each read that string under a different set of rules — one of them a glob matcher, where the `?` re-read as a metacharacter and silently dropped a grant. That is a type error wearing the costume of an architecture problem, and the prior art fixes it with a type: BuildXL's canonical path is a distinct immutable class, and its allowlist is a trie of path components rather than a string with a prefix test, so a boundary condition cannot be got wrong because there is no boundary to check.
+
+**The one materially different shape worth taking is narrower than the question implies:** build each package in a Nub-owned scratch tree rather than in place under the consumer's project. It needs a copy rather than a mount, so it works at zero privilege on all three platforms, Nub already does it for git dependencies, and it collapses the read set from "the whole consuming project plus the machine-global store" to "this package and its declared dependencies." It does not fix the Windows blockers.
+
+---
+
+## How to use this document
+
+Each candidate architecture carries a status, what it would buy, the evidence, and what would have to change for the verdict to move. The statuses match the sibling ledgers.
+
+| status | meaning |
+| --- | --- |
+| **ADOPTED** | in the shipping design |
+| **DEAD (mechanism)** | the primitive cannot do it; no privilege or tuning helps |
+| **DEAD (privilege)** | works, but needs root, admin, or a setup command — disqualifying for the build jail |
+| **REJECTED (design)** | technically available and deliberately not used |
+| **WORTH RECONSIDERING** | available, not adopted, and the reason it was not adopted no longer holds or was never established |
+| **OPEN** | unresolved, or a candidate whose deciding measurement has not been run |
+
+The constraints every candidate is judged against are the build jail's, not the separate `nub sandbox` product's: **totally unprivileged with no setup command ever, including inside a container**; **packages breaking is the failure mode to avoid, and a residual is acceptable**; and the load-bearing defense is **package identity**, since a package with no catalog entry gets no network at all.
+
+---
+
+# What the patch stream actually is
+
+Before asking whether a different architecture would have avoided the defects, it is worth establishing which axis they were on. The answer decides the rest of the document.
+
+## Every defect but a handful lands on the read axis
+
+Counted across all three sibling ledgers, the filesystem **read** axis carries the overwhelming majority of both the adopted mechanisms and the open defects. The write axis produced two items, one of which is a package-manager linker bug reproducible with confinement entirely off. The network axis produced capability findings — a host allowlist that is inert on Linux, per-host enforcement that holds only on macOS — rather than compatibility breaks.
+
+| axis | representative items | count of ledger sections |
+| --- | --- | --- |
+| **read / exec** | the `/etc` enumeration and its distro-shaped TLS correction, the `EACCES`-versus-`ENOENT` compatibility cost, read-must-render-as-read-plus-execute, resolved-leaf grants, the grant explosion under `ARG_MAX`, the `$HOME` over-grant through a symlink hop, the `posix_spawnp` PATH-search abort, pyenv's Python, the whole Windows bypass-traverse and ancestor-repair and canonicalization apparatus, blockers 1 and 3 | dominant |
+| **write** | the metadata-write residual on Linux, node-gyp's sibling-store write | 2 |
+| **network** | the inert `$downloads` list on Linux, the userland net gate on Windows, the netns bridge readiness race | 3 |
+| **neither** | the piped-stdio hang (object namespace), the descriptor sweeps, environment keys containing `=` | 4 |
+
+This is the single most useful fact in the document, because it means the architecture question reduces almost entirely to one narrower question: **is denying reads by default the right posture, and could it have been avoided?** The rest of the ledger below answers no on both platforms where it matters.
+
+## The Windows read-repair layer is where the spelling defects live
+
+Node's `realpathSync` walks a path component by component and, on Windows, `lstat`s the volume root first. Bypass-traverse exempts *intermediate* components of a single open; it does not make an ancestor openable as a *target*. So a confined `node` dies before user code runs, and Nub ships a preload that tolerates a refused component when it is a strict ancestor of a granted root.
+
+**That repair is a compatibility layer and its own document says so:** the tolerance rule never grants access, it only asserts that a component the operating system refused to interrogate is a plain directory so the userland walk can continue, and the open that follows is still checked by the kernel against the LowBox token. A tolerance decision wrong in the permissive direction produces a walk that continues to an open that is then denied. Every one of the spelling defects failed in the *restrictive* direction — `EPERM` on a path the jail granted.
+
+**The defect is not Nub's and long predates AppContainer.** Node's ancestor realpath walk has broken under restricted principals since at least the v0.x era, and the same failure was reported against ASP.NET's Node integration for IIS deployments, where the application account holds read on its own directory and below but not on `C:\Users\<name>` ([nodejs/node-v0.x-archive#3977](https://github.com/nodejs/node-v0.x-archive/issues/3977), [aspnet/JavaScriptServices#1101](https://github.com/aspnet/JavaScriptServices/issues/1101)). The second states the mechanism exactly: *"Node tries to walk along the file path to the module, starting from the disk root, reading the attributes of each directory to see whether or not it's a symlink."* Neither was ever fixed upstream.
+
+## One root cause produced four of the spelling defects
+
+The batch that fixed them names it directly: `build_jail.rs`'s `canonical()` returned Windows verbatim paths, and four consumers were wrong — node-gyp parsed `\\?\` as a plain path, a grant's `?` re-read as a glob metacharacter and was **silently dropped**, and two containment checks (`ProbeScope::allows` and the refusal of a grant at or above `$HOME`) could never fire because one side was canonicalized and the other was not.
+
+That is one bug with four blast radii, not four bugs. The fix routed the call through `canonicalize_including_nonexistent`, the single canonicalizer Nub already ships and that the Linux and macOS backends already used — which is also what the Windows canonicalization survey had independently recommended. **The remaining exposure is structural: nothing in the type system stops the next path from taking the same trip**, and the two moves that would close it are in [what the mature implementations do](#what-the-mature-implementations-do-that-nub-does-not).
+
+## The inert mechanism was a measurement gap, not a design gap
+
+The ancestor repair was carried while every matrix that varied it either ran with no preload, or stamped the preload only in the repaired arm. The cell that decides the question — repair off *with* the preload, beside repair on with the same preload, one fixture, one run — had never been run. When it was, every de-elevated outcome was identical and the non-Node transcript was byte-identical across all seven cells.
+
+The generalizable rule is not architectural. **A mechanism that carries a disable seam must have the arm where it is disabled in the matrix that claims to measure the shipping configuration**, and Nub already had the seam (`NUB_SANDBOX_WIN_NO_ANCESTOR_REPAIR`). The same round also found why the repair still *looked* load-bearing: the preload's roots and the walked components arrived in different Windows spellings, so its tolerance rule silently never fired — a compensating defect masking an inert mechanism, which is the specific reason it survived as long as it did.
+
+---
+
+# The candidate architectures
+
+## A path allowlist as the primitive — ADOPTED, and the enforcement is not string-based
+
+**The objection.** Every spelling defect was a string comparison that should have been an identity comparison, so a path allowlist looks like the wrong primitive.
+
+**The premise does not hold for the enforcement layer, on any of the three platforms.** Landlock rules are attached through a file descriptor — `rust-landlock` takes an `AsFd`, and the Linux backend deliberately opens each leaf with `O_PATH` so the rule keys on the target inode rather than the name — and the kernel documentation ties a rule to a *file hierarchy* with `LANDLOCK_ACCESS_FS_REFER` governing what happens when a file is reparented. Seatbelt canonicalizes before matching, which is why hardlink, symlink, `cp`, `mv`, `..`, `//` and the `/tmp` alias are all measured closed. A LowBox token is checked against the object's own security descriptor, which is why an NTFS hard link shares one descriptor with its original and why the interpreter is copied rather than linked. **All three are object-identity checks. Nub compiles a policy from paths and hands it to a kernel that resolves them to objects once, at rule-installation time.**
+
+The string comparisons are all in the layer above: the policy compiler, and the Windows realpath repair. Both are outside the boundary, and the repair's own errors are compatibility failures that fail closed.
+
+**Where a path-string allowlist genuinely is the boundary, it leaks — and Node's own permission model is the demonstration.** It is a radix tree over resolved path strings, its documented limitation is that *"Symbolic links will be followed even to locations outside of the set of paths that access has been granted to"*, its policy build adds a wildcard only when the directory exists at that moment (`WildcardIfDir`, `src/permission/fs_permission.cc`), it describes itself as a *"seat belt"* that *"Malicious code can bypass"*, and CVE-2026-21715 is precisely a missing check on `fs.realpathSync.native` letting confined code enumerate outside its grants. That is the failure mode of a userland path allowlist as a boundary, and it is not the one Nub is in.
+
+**What would change the verdict.** Nothing available. Handle-based enforcement is what the three kernels already do.
+
+## Pre-granting from a catalog keyed on package identity — ADOPTED
+
+**What it is.** Each package is granted, in advance, the paths, executables and hosts it needs; no catalog entry means no network at all.
+
+**It is the ecosystem's converged answer, and Nub adds enforcement to it rather than replacing it.** The pnpm 10 release flipped the default in January 2025, and pnpm 11 replaced the five older settings with a single `allowBuilds` map, which additionally requires a **trusted package identity** before a name-keyed rule may approve a script — a registry-shaped dependency path — so git, tarball and directory artifacts must be approved by their lockfile path instead. Version 12 of npm flips the same default in July 2026: `allowScripts` off, with `--allow-git=none` and `--allow-remote=none` beside it. LavaMoat's `allow-scripts` is the same shape as a standalone tool, with an `auto` mode that populates the allowlist. None of these confines an allowed package at all — an approved script runs with the user's full privileges.
+
+**So the catalog is not the novel part; the confinement of an approved package is.** That also settles a recurring worry: granting a catalogued package full network is not a weakening relative to the ecosystem baseline, because the baseline is full network *and* full filesystem *and* full environment.
+
+**What would change the verdict.** A registry-side attestation strong enough to make identity itself the boundary. Nothing on that path is close.
+
+## Observing instead of pre-granting — REJECTED (design) as a boundary, WORTH RECONSIDERING as a policy generator
+
+**What it is.** BuildXL's model: interpose on filesystem operations, report every access to the engine, and compare the report against the pip's declared manifest. Its `FileAccessPolicy` carries report bits beside allow bits — `ReportAccessIfExistent`, `ReportAccessIfNonexistent`, `ReportDirectoryEnumerationAccess` — and one policy is explicit that enforcement is post-hoc: *"Observe that sandboxing never blocks in this case, denying the access is surfaced as a DFA after the write happened."*
+
+**As a boundary it is a non-starter here, and the reason is that BuildXL is not a security sandbox.** Its blocking exists to keep builds deterministic — the spec says the capability is used *"to block access to disallowed paths, e.g. paths that are known to have been created by other pips that have not been declared as dependencies"* — and Bazel says the same thing about its own more plainly: *"Sandboxing doesn't hide the host environment in any way. Processes can freely access all files on the file system."* Gentoo's `sandbox`, the closest distro analogue, opens its README with *"This is used as a QA measure."* An architecture that reports an exfiltration after it happened does not answer the threat model.
+
+**As a policy generator it is the strongest unadopted idea in this document.** BuildXL ships a `JavaScriptDependencyFixer` analyzer that reads violations out of the execution log and writes the missing entries back into the offending `package.json`. The identical loop applies to the catalog: run the corpus with the jail off and an observer attached, and derive the grant set from what packages actually touched, instead of iterating jail-on failures one denial at a time. Observation is available unprivileged on two platforms — `strace` on Linux is already how the `/etc` set was measured, and a `--import` preload sees every Node-level access on all three. It is not a boundary and would not be presented as one.
+
+**What would change the verdict on the boundary half.** Nothing. The report arrives after the access.
+
+**One route checked and closed.** Seatbelt's `(trace "<path>")` directive would have been the unprivileged macOS observer. Measured on darwin 25.5: a profile of `(version 1) (allow default) (trace "<writable path>")` produces no trace file, while the same profile shape with `(deny file-read* (literal "/private/etc/hosts"))` under `(allow default)` **does** deny the read — so the profile is loaded and its rules take effect, and only `trace` is inert. Use `strace` and the preload instead. (That control also reproduced the canonicalization trap the macOS ledger warns about: the identical deny written against `/etc/hosts` rather than `/private/etc/hosts` matches nothing and the read succeeds.)
+
+## Generous read minus secrets — DEAD (mechanism) at zero privilege
+
+**What it is.** The shape every comparable tool uses: allow reads broadly, deny a named set of secrets inside the allowed region, and confine writes and egress. Trail of Bits' `build-wrap`, the closest sibling in another ecosystem — it re-links Cargo build scripts to run under a sandbox — defaults to exactly five bubblewrap flags: `--ro-bind / /`, `--dev-bind /dev /dev`, a write bind on `OUT_DIR`, a write bind on `/tmp`, and `--unshare-net`. Anthropic's `sandbox-runtime` emits `(allow file-read*)` as its read base and carves denies out of it (`src/sandbox/macos-sandbox-utils.ts`, annotated *"default: allow everything"*).
+
+**It is enormously attractive, because it would delete most of the read axis** — and the read axis is where nearly every defect in this subsystem lives. No `/etc` enumeration, no distro-shaped TLS correction, no grant explosion, no PATH-search abort, no pyenv problem, and no ancestor problem on Linux or macOS.
+
+**It is not expressible at zero privilege on two of the three platforms, and both are measured.** Landlock rules union and there is no deny primitive at any ABI through 10 — `allowed_access = 0` returns `ENOMSG`, and execute-only and write-only rules are accepted with zero restricting effect. On Windows a per-file deny ACE naming the per-run AppContainer SID is **inert against that AppContainer's own child**, measured 9 of 9 cells including LPAC, because access is checked at handle-open and the granted mask is cached in the handle. Neither is a tuning problem.
+
+**And the privilege cost is visible in the prior art rather than inferred.** Trail of Bits' tool supports Linux and macOS only, and its own installation instructions require `sudo` to install an AppArmor profile on Ubuntu 24.04. The Windows backend of `sandbox-runtime` requires `npx … windows-install` once per machine with admin, creating a local group and installing Windows Filtering Platform filters, and its README states the result *"is not a security boundary against a deliberately adversarial sandboxed process"*, lists Task Scheduler and parent-process re-parenting as unfixable same-user escapes, and records that `filesystem.allowWrite` and `filesystem.allowRead` are **not supported on Windows at all**. Its stated fix is a separate sandbox user account — which is the `nub sandbox` route, and is dead on privilege for the build jail.
+
+**On Windows the pure allowlist is not even a choice.** A LowBox token reaches an object only where that object's ACL names its AppContainer SID, a held capability, or `ALL APPLICATION PACKAGES`. Granting broad read means writing ACEs on roots no unprivileged user holds `WRITE_DAC` on, and the six recorded attempts to reach `C:\` and `C:\Users` are all dead. Allow-polarity is the primitive.
+
+**What would change the verdict.** A Landlock ABI with a deny or precedence primitive, and a Windows mechanism that denies inside an AppContainer grant. Upstream Landlock's union semantics are deliberate and there is no sign of either.
+
+## Hermetic isolation, the Nix and Guix model — DEAD (privilege), and its content-addressed half is already ADOPTED
+
+**What it is.** Do not allowlist at all: give the build a fresh filesystem view containing only its declared inputs, and the question of what it may read does not arise. Nix builds in a chroot with private mount, PID, IPC and network namespaces, and adds `CLONE_NEWNET` whenever `derivationType.isSandboxed()` (`src/libstore/linux/build/linux-derivation-builder.cc`). Guix does the same.
+
+**It needs a mount namespace, which needs the user namespace the build jail cannot rely on.** That is the same wall bubblewrap hits, for the same reasons: denied by default on Ubuntu 23.10 through 25.04 with `apparmor_restrict_unprivileged_userns=1` and no shipped exemption profile on 24.04, and impossible inside Docker because `cap_sys_admin` is absent so even root cannot create the namespace. Nix's unprivileged daemon mode still uses user namespaces; its `--disable-chroot` escape produces builds that *"will not be isolated from one another or from the rest of the system."* There is no Windows analogue at zero privilege.
+
+**Its network model is the part that transferred, and it already has.** Nix forbids network in a build outright and provides one escape hatch: a fixed-output derivation, which may reach the network precisely because its output hash is declared in advance. Nub's prefetch is that shape — pre-place the artifact so the lifecycle script never opens a socket — and the Linux ledger already treats it as structural rather than a convenience, because it is what lets a package that would need network run with network off. Of 230 corpus packages read at source, 85 need no network at all and five hosts cover 92% of the rest.
+
+**Portage's escape from the same corner is also worth recording**, because it is the design Nub's Linux egress bridge independently arrived at: with `network-sandbox` on, `network-sandbox-proxy` spawns a SOCKSv5 proxy on a UNIX socket and exports its address into the sandbox, so a build that genuinely needs the host's network crosses the namespace wall through one audited channel. Nub's bridge is the same shape and is unavailable for the same reason the namespace is.
+
+**What would change the verdict.** Universal unprivileged user namespaces — every distribution shipping an exemption profile and containers granting `cap_sys_admin`. Neither is coming.
+
+## Building in a Nub-owned scratch tree — WORTH RECONSIDERING
+
+**What it is.** Copy the package into a Nub-owned scratch directory, run its lifecycle script there against a grant set consisting of that tree plus its declared dependencies, and move the results back. It is hermetic isolation's *shape* obtained with a copy instead of a mount, which is what makes it available at zero privilege on all three platforms.
+
+**Nub already does this on one path.** Git dependencies are copied into a temporary directory and built there (`prepare_scratch_copy`, `install/git_prepare.rs`). Registry dependencies are not, and the difference has never been deliberate.
+
+**What it buys.** The grant set today gives a dependency's install script read on the **whole consuming project** and on the machine-global package store, so a script can read every package any project on that machine installed. A scratch tree collapses both. On Windows it has a second effect: every directory in the grant tree becomes Nub-owned, which is the one condition under which a leaf grant reliably installs — the ledger already records that a Nub-owned program's leaf grant always installs while a System32 binary's never does de-elevated.
+
+**What it costs.** A copy per built package, on top of the measured grant-then-populate ordering (24 ms to grant an empty directory against 426 ms to re-grant a populated tree). A behavior change for any package that writes into the consumer's tree and expects it to persist. And an unmeasured compatibility risk: the read-ladder study that narrowed the macOS read set found that dropping the project read outright fails 27 of 33 packages, so the scratch tree must carry the dependency closure the script resolves through, not merely the package.
+
+**What it does not buy.** It does not fix the Windows blockers. The scratch tree still has ancestors, and `C:\` is always one of them.
+
+**What would change the verdict.** A measurement: the corpus run with registry packages built in a scratch copy, against the same corpus built in place.
+
+## Userland interposition — ADOPTED as a compatibility layer, never as a boundary
+
+**The question.** Nub's preloads already hit a wall Node put there: the ESM resolver destructures `realpathSync` out of `fs` when `internal/modules/esm/resolve.js` is first required, which happens before any `--import` preload evaluates, so the shim is never seen on that path. Is userland interposition structurally doomed?
+
+**As a boundary, yes, and every implementation says so in its own words.** Chromium's Windows sandbox is the sharpest: *"The interception + IPC mechanism does not provide security; it is designed to provide compatibility when code inside the sandbox cannot be modified to cope with sandbox restrictions."* Gentoo's `sandbox` is a QA measure whose README records that statically linked programs run unmonitored and that setuid binaries have to be handled by `ptrace` instead. BuildXL is migrating its Linux sandbox off `LD_PRELOAD` to eBPF for exactly this reason: interposed accesses *"can only be detected when executables are dynamically linked and the corresponding libc wrapper is used"*, and `io_uring` is named as the API that broke it.
+
+**As a compatibility layer it is correct, and Nub's is used exactly that way.** The token or ruleset is the boundary; the preload repairs programs that cannot cope with it. That is Chromium's architecture, and Chromium has been paying the per-API cost of it for eighteen years — `sandbox/win/src` is 56 non-test C++ source files, with a policy, an interception and a dispatcher module for each intercepted API family. **The patch stream is not evidence of a wrong architecture; in this shape it is the architecture.**
+
+**The honest cost, stated plainly.** A compatibility shim delivered through a language runtime's extension surface reaches only what that surface reaches, and the ESM destructure is the demonstration. Node's source varies across the support band — `const { realpathSync } = require('fs')` on v18.19, v20.19, v22.15, v22.23, v23.11 and v25.9, and `const fs = require('fs')` on v24.17 and current `main` — so it flip-flopped and a version check is not a fix. The `--require` channel would reach it and cannot be used: `--require` takes a specifier the CJS resolver must resolve, and that resolution realpaths, under a jail where realpath is the thing that is broken.
+
+**What would change the verdict.** Node reading `fs.realpathSync` through the namespace on every supported line, which is already true on `main`; or a decided design for the `module.registerHooks` fallback, which lands in v22.15 and therefore leaves the compat tier uncovered.
+
+## Kernel-side interposition — DEAD (privilege) on Linux, DEAD (posture) on Windows
+
+**What it is.** Interpose below the language runtime, where the ESM destructure and a static binary are both invisible. BuildXL's two answers are Detours on Windows and, replacing `LD_PRELOAD`, eBPF on Linux.
+
+**On Linux, eBPF needs privilege.** BuildXL's own architecture loads its programs once per build through a daemon. That is a setup command by another name.
+
+**On Windows, Detours is unprivileged and out of scope for a different reason.** Nub is an augmenter whose mechanism is restricted to Node's own extension surfaces; a DLL-injection interception layer is not one of them. BuildXL's short-name handling is the concrete thing being given up — it detours the `FindFirstFile` family and zeroes the alternate name outright, with the rationale stated in its source: *"We want to hide short file names, since they are not deterministic, not always present, and we don't canonicalize them for enforcement."* Nub cannot intercept discovery, but the design position transfers and is [adopted below](#the-confined-process-never-sees-the-ambient-temp-directory): decide one spelling and stop the others entering the child.
+
+**What would change the verdict.** Nothing on Linux. On Windows, a change to the augmenter posture, which is a project-level architecture decision and not a jail one.
+
+## Brokering every operation — REJECTED (design)
+
+**What it is.** Chromium's answer to the same allow-polarity Windows problem: the confined process gets essentially no filesystem access, and *"almost all resources that the renderer process uses have been acquired by the Browser and their handles duplicated into the renderer process."*
+
+**It works because Chromium controls the confined code.** A renderer is written to ask its broker. A dependency's install script is arbitrary third-party code running arbitrary tools, and the only seam Nub could broker through is the same Node extension surface whose reach is bounded above. Nub already ships the one broker whose cost is justified: the loopback egress proxy on macOS, where the profile permits exactly the proxy's port so every packet must traverse it and a raw socket cannot bypass it.
+
+**What would change the verdict.** Nothing. The premise — that the confined code cooperates — is false here by construction.
+
+## Not running the script at all — the baseline, and now the ecosystem default
+
+**What it is.** Refuse dependency lifecycle scripts unless the project names the package. This is what pnpm 10 did in January 2025 and what npm v12 ships in July 2026.
+
+**It is the correct floor and Nub already sits on it.** A package with no catalog entry runs no script. The build jail's whole contribution is what happens to the packages that *are* approved: under npm and pnpm they run with the user's complete access, and under Nub they run confined. Framing the jail as a *reduction* from that baseline is not a rhetorical device — it is why granting more never requires elevation, and why a generous carve-out for a popular package is the right move rather than a compromise.
+
+**What would change the verdict.** Nothing; it is not a competing architecture but the layer beneath this one.
+
+## A Windows silo with per-silo bind links — DEAD (privilege), already probed
+
+**What it is.** Promote a job object with `JobObjectCreateSilo` and attach per-silo bind-filter mappings, giving the child a private filesystem view under a normal token.
+
+**Measured on Windows Server 2022 across four primary tokens, and it works.** Unflagged `node <deep file>` reaches user code inside the silo, `realpathSync('C:\')` resolves, and piped `spawnSync` returns in 80 ms rather than hanging — so it closes blockers 1 and 2 outright. Bind-linked paths realpath to the virtual path, and `\\?\` and `\\?\GLOBALROOT` device paths are redirected rather than escaping the mapping.
+
+**And it is disqualified.** Silo creation needs no privilege, but the bind mapping needs Administrators membership; `SeTcbPrivilege` is neither necessary nor sufficient. An elevated helper can create the silo and duplicate the job handle to an unprivileged process, making the privileged step one-time rather than per-install — which is precisely the currency `nub sandbox` spends and the build jail cannot.
+
+**What would change the verdict.** An unprivileged bind-filter mapping. It is the single most valuable Windows capability that does not exist.
+
+## Mapping the scratch tree to a drive letter — OPEN, unverified
+
+**What it would buy.** The Windows blockers are both `lstat 'C:\'` — an ancestor opened as a target, above every grant, on a root no unprivileged user can re-ACE. A build directory reached through its own drive letter has one ancestor instead of four, and that ancestor is an object-manager symbolic link to a directory Nub owns and has already granted.
+
+**Why it is worth a probe rather than a paragraph.** The `DefineDosDevice` call creates the link in the calling user's own DOS-device directory, which a normal low-privileged account can write, so the mechanism itself needs no privilege. If the link resolves for the confined child, blockers 1 and 3 both close with no preload at all, which would also retire the tolerance rule and the entire spelling class with it.
+
+**Why it may not work, stated so the probe is designed against the risks.** A LowBox token has its own object namespace and it is not established that a device link created by the launcher is visible inside it. Nub's own record already shows `\\.\pipe\LOCAL\…` resolving where `\\.\pipe\…` is refused, which is the same namespace split in a different subsystem. And Windows resolves a `subst` drive back through to the underlying volume for canonicalization, so the walk may meet `C:\` anyway.
+
+**The probe that settles it.** One arm of the existing de-elevated jail workflow: define the device, launch the AppContainer with the entry point on the mapped letter, and report whether `lstat` of the drive root succeeds and whether an unflagged `node` reaches user code — beside the current arm as the control. Windows AppContainer work cannot run over SSH, so this goes through the branch-scoped workflow like every other Windows measurement here.
+
+---
+
+# What the mature implementations do that Nub does not
+
+Four transferable practices, each from a system that solved the same problem at larger scale, and each cheap.
+
+## A canonical path is a distinct type
+
+BuildXL's in-sandbox enforcement path canonicalizes with `GetFullPathNameW` and nothing else, and wraps the result in a class whose header states the contract: *"Immutable, typed, and canonical path string. The represented path is absolute, free of .. and . traversals, redundant path separators, etc."* (`Public/Src/Sandbox/Windows/DetoursServices/CanonicalizedPath.cpp` in `microsoft/BuildXL`). Bazel makes normalization a property of the interned path object rather than a property of each comparison.
+
+**Nub carries canonical paths as `PathBuf` and `String` and relies on every consumer knowing which spelling it received.** That is what let one `canonical()` return reach a glob matcher. A newtype around the output of `canonicalize_including_nonexistent`, with the compiler's matchers accepting only that type, would have made all four of those defects compile errors. It is the highest-value change in this document per unit of work.
+
+## The allowlist is a component trie, not a string prefix test
+
+BuildXL's policy lives in a trie of path components searched one component at a time (`PolicySearch.cpp`), and its subtree test walks both paths element by element, tolerating duplicate separators and either separator flavor (`IsPathWithinTree`, `StringOperations.cpp`). **The boundary condition then cannot be got wrong, because there is no boundary to check** — the comparison never sees a partial component.
+
+Nub's Windows tolerance predicate is a string prefix test with an explicit boundary check, and it was measured correct against an adversarial table including sibling prefixes, verbatim and UNC roots, case, and dot segments. The recommendation is to keep it — it is cheaper than splitting on every probe — with the boundary check documented as the thing that makes it equivalent, so nobody removes it as redundant. The trie is the right answer if the rule ever moves into a per-operation layer.
+
+## The confined process never sees the ambient temp directory
+
+BuildXL lists `TEMP` and `TMP` on a `DisallowedTempVariables` set annotated *"these environment variables should not be read from config, since they refer to temporary directories that we reserve the right to redirect"*, and overrides both to a build-owned directory on top of a nine-name inherited allowlist (`Public/Src/Engine/ProcessPipExecutor/PipEnvironment.cs`).
+
+**Nub's Windows environment floor passes the ambient `TEMP` and `TMP` through verbatim, and on a hosted runner that value is 8.3-short.** That is where the short spelling entered the child, and it reached the policy a second way through `std::env::temp_dir()`. Owning both removes the only spelling Nub does not choose — a smaller and more durable surface than reconciling spellings at the comparison, and the general form of the same discipline that already overwrites `NODE_OPTIONS` unconditionally.
+
+## Outputs are declared, so nothing has to be reconstructed
+
+Neither BuildXL nor Bazel infers whether a process did its work. A pip declares its outputs; the engine hashes them and stores them against a two-phase fingerprint. Bazel moves *"the known output artifacts out of the sandbox into the execroot"* — known, because they were declared.
+
+**The npm ecosystem declares nothing, so reconstruction is forced**, and that is the honest reason the corpus harness diffs a path set and digests content: there is no manifest to compare against. The harness has already converged on the only sound substitute — a validity gate requiring the same package to reach its class effect with the jail off, so a package whose inputs were missing cannot score a pass by exiting 0. The two harness defects were mechanical rather than modelling errors: a `\r` from CRLF landing on a field so a class lookup missed, and backslash paths defeating attribution so 338 packages read as not-installed while installing fine. **The durable fix is provenance, not a different model** — every result artifact stamping the commit, the arm, and whether the curated grants were compiled in, which is already recorded as a defect because a run's configuration had to be inferred from file mtimes after the fact.
+
+---
+
+# Which patches were unavoidable, and which were not
+
+| defect | axis | avoidable? | why |
+| --- | --- | --- | --- |
+| Windows verbatim `\\?\` reaching four consumers, one of them a glob matcher | read | **yes** | a typed canonical path makes it a compile error; the fix landed by routing to the one canonicalizer already shipped |
+| Realpath-shim roots and walked components in different 8.3 spellings | read | **partly** | unavoidable given an ambient short `TEMP`; avoidable by owning `TEMP` and `TMP`, which is the recorded root cause |
+| Roots that do not exist yet keeping only their as-built spelling | read | **partly** | same class as above, and the fix was again to use the existing canonicalizer |
+| Ancestor repair carried while inert | — | **yes** | the deciding arm was never run, and the disable seam already existed |
+| Preload cannot reach Node's ESM resolver | read | **no** | Node binds the function before any `--import` preload evaluates, and the one channel that would reach it needs the resolution the jail breaks |
+| Node's realpath walk opening ancestors as targets | read | **no** | a Node defect since the v0.x era, reproduced against IIS long before AppContainer existed |
+| The `EACCES` versus `ENOENT` compatibility cost | read | **no** | Landlock has no stat right to withhold, so it cannot present `ENOENT` |
+| Distro-shaped TLS layout under an enumerated `/etc` | read | **no** | the corpus that measured the set ran on one distribution family; the correction is the cost of enumerating rather than granting wholesale |
+| The `posix_spawnp` PATH-search abort on an ungranted symlinked entry | read | **no** | libuv treats `EPERM` as fatal to the whole search; the fix is to canonicalize the child's PATH |
+| Piped `child_process` stdio hanging | — | **no** | global NPFS is closed to a LowBox token and libuv spells only that namespace; no filesystem rule reaches it |
+| CRLF and backslash defects in the corpus harness | — | **yes** | ordinary harness bugs; the structural fix is stamping provenance on every artifact |
+
+**Read as a whole: four of eleven were avoidable, three of those four by one change (a typed canonical path plus owning the temp directory), and the unavoidable ones are Node and kernel behaviors that no architecture on offer removes.**
+
+---
+
+## What could not be verified
+
+- **The drive-letter candidate is unverified in both directions.** Whether a device link created by the launcher resolves inside a LowBox token's object namespace was not measured, and Windows AppContainer launches cannot run over SSH.
+- **The scratch-tree recommendation has no compatibility measurement.** The read-ladder study established that packages need the consumer's `node_modules`, not that a scratch copy carrying the resolved dependency closure would satisfy them.
+- **Ringfence**, reported as a package-manager-native wrapper that shims npm, pnpm, yarn and bun into a bubblewrap sandbox with the home directory replaced by a tmpfs, could not be located as a primary source. The same architecture is verified in `build-wrap` and `sandbox-runtime`, which is what the generous-read section rests on.
+- **BuildXL's short-name and temp handling were read from source, not run.** Nothing here was reproduced against a BuildXL build.
+- **Landlock's ABI ceiling moved during this survey.** The sibling Linux ledger records ABI 7 as current; the kernel documentation now describes ABI 10 with `LANDLOCK_ADD_RULE_QUIET`. No deny primitive appears at any of them, so no verdict changes, but the ceiling in that document is stale.
+
+## Changelog
+
+- 2026-07-30 — Initial write-up. Surveyed BuildXL, Bazel, Chromium's Windows sandbox, Nix, Guix, Portage, Gentoo's `sandbox`, `build-wrap`, `sandbox-runtime`, LavaMoat, Node's own permission model, and the npm/pnpm install-script defaults, against the question of whether the build jail's pre-granted per-package allowlist is the right architecture. Verdict: it is, the two-layer split it converged on is Chromium's, and the avoidable share of the patch stream reduces to an untyped canonical path plus an ambient temp directory. Measured that Seatbelt's `(trace …)` directive is inert on darwin 25.5 with a positive control on the same profile shape.
