@@ -2021,6 +2021,37 @@ try {{
     // battery reports through `[IO.File]::AppendAllText` and tests the FileSystem PROVIDER as
     // one op among many, so provider breakage degrades one cell instead of erasing the table.
     //
+    // WHAT IT MEASURED — windows-latest, Windows Server 2025 10.0.26100, Node 22.23.1,
+    // pwsh 7.6.3, busybox-w32 FRP-6075. Runs 30531385502 (harness defects), 30532139228,
+    // 30532759630. All gates green in the last two: `sentinel=true`, `croot` refused OFF and
+    // permitted ON, ungranted canary refused in both arms.
+    //
+    //  - `cmd.exe` with the repair ON is BYTE-IDENTICAL to unconfined on every functional cell —
+    //    `if exist` (with and without a trailing separator), `if exist %SystemRoot%`,
+    //    `if exist %ProgramFiles%`, `cd` into a granted dir, `dir`, glob, `type`, `>`,
+    //    `where.exe node.exe`, a bare-name `node --version`, `> NUL`, a nested `node <granted.js>`,
+    //    a `.cmd` shim, and `%ERRORLEVEL%` propagation. The only divergence is the ungranted
+    //    sibling, which must diverge. With the repair OFF cmd writes NOTHING and its stderr is
+    //    `Access is denied.` — so the ancestor ACE is what makes cmd work AT ALL, and every
+    //    earlier "cmd is broken under the jail" cell was measuring its absence.
+    //  - `busybox sh` matches unconfined on its OWN operations with the repair OFF. It needs the
+    //    repair only for the PROGRAMS it spawns (`node`, `cmd.exe`).
+    //  - `pwsh 7.6.3` with the repair ON matches unconfined everywhere except the null device.
+    //    That build already carries the fix for `PowerShell/PowerShell#27253`, so this is a
+    //    statement about a FIXED PowerShell, not about PowerShell.
+    //  - `/dev/null` is REFUSED (`can't create /dev/null: Permission denied`) while cmd's `> NUL`
+    //    succeeds, on the same build in the same run — so the two spellings do not reach the same
+    //    thing, and the earlier `>NUL` retraction was right.
+    //  - **Windows PowerShell 5.1's whole FileSystem-provider surface is UNAVAILABLE in every
+    //    configuration measured**, and the ancestor repair does not touch it: `Test-Path`,
+    //    `Get-ChildItem`, `Get-Content`, `Set-Content`, `Set-Location` all raise
+    //    `CommandNotFoundException` — the cmdlets are MISSING, not refused — while `Get-Command`
+    //    (`Microsoft.PowerShell.Core`, always loaded) works and, with the repair on, external
+    //    invocation and `$LASTEXITCODE` are correct. A read grant on `$PSHOME` was measured as a
+    //    one-variable arm and is **NOT** the cause: `psmodules` is cell-identical to `on`. The
+    //    mechanism is NOT established. 5.1 also costs ~21 s per invocation confined, against
+    //    0.9 s for pwsh and 0.5 s for busybox.
+    //
     // ⚠️ THE ELEVATION CAVEAT, MEASURED RATHER THAN ASSUMED. `C:\` and `C:\Users` are not
     // DACL-writable by a standard user, so on a real user's machine the repair cannot reach
     // them and only `%USERPROFILE%` and below get the traverse ACE. A GitHub runner is
