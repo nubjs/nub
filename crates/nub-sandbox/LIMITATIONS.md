@@ -482,13 +482,24 @@ OPENABLE under an ORDINARY `%TEMP%`/profile tree with no `C:\`-owned store (VM-v
   because the runner was ELEVATED and could write the DACLs on `C:\` and `C:\Users` directly.
   A standard non-elevated user can write neither, so the reachability of those two roots off an
   elevated machine remains an open question.
-- **The ancestor ACE write is not yet affordable (OPEN).** Any DACL write on a large shared
-  ancestor propagates inheritance across its subtree, and `%TEMP%` is on the chain. Measured on
-  windows-latest the write stalls for minutes with a duration that varies run to run, which is
-  what keeps the piped-stdio measurements from running at all. `SetKernelObjectSecurity` is the
-  non-propagating primitive this wants; until then the repair works and costs too much per
-  lifecycle spawn to turn on. **Secondary to the blocker below** — cost only matters for a
+- **The ancestor ACE write is affordable now: 630 µs on the runner's own `%TEMP%`, where it used
+  to stall for minutes.** Any DACL write through `Set*SecurityInfo` runs advapi32's inheritance
+  propagation over the object's existing subtree before returning, and `%TEMP%` is on the chain,
+  so the write took minutes with a duration that varied run to run — which is what kept the
+  piped-stdio measurements from running at all. `SetKernelObjectSecurity` goes straight to
+  `NtSetSecurityObject`, where there is no propagation pass. Measured against the writer it
+  replaced on the same path with the same trustee in the same run (`ace-cost` in
+  `tests/windows_jail_repairs.rs`, run 30528232196): 131 µs versus 534,378 µs on a 4,000-entry
+  tree, and a re-grant with the ace already present costs the same as a fresh one — a descriptor
+  write, not a tree walk. **Still secondary to the blocker below** — cost only matters for a
   mechanism that is available, and above the user profile this one is not.
+- **A leaf grant still propagates, because it is inheritable by design — so it is SKIPPED where
+  the target already publishes it.** `%ProgramFiles%` carries `ALL APPLICATION PACKAGES:
+  ReadAndExecute` inheritably (`aap-readable-programfiles=true`, with `nodejs` the measured
+  outlier), so an all-users python or node needs no ace at all; per-user layouts such as the
+  runner's `hostedtoolcache` carry none and still pay. Narrowing the grant instead is not
+  available: a narrow python grant fails `0xc0000135 STATUS_DLL_NOT_FOUND` because
+  `python3.dll`, `python312.dll` and `vcruntime140*.dll` sit in the install root beside the exe.
 
 - **BLOCKER: `C:\` and `C:\Users` are unreachable to an unprivileged AppContainer, on every image
   measured.** Surveyed read-only across three runner images, each labelled, `Get-Acl` only:
