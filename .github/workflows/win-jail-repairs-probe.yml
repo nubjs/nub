@@ -23,13 +23,23 @@
 # through `SetKernelObjectSecurity`. `ace-cost-named-writer-scales-with-tree` is that group's
 # control — a run where the propagating writer did NOT slow down on the populated tree measured
 # nothing, so it is gated as a PASS alongside the kernel cells rather than reported as a fact.
+#
+# THE SHELL GROUP. `aube-scripts` runs a lifecycle script through a SHELL, so whether the jail is
+# usable is a question about `cmd.exe` before it is a question about `node`. Two earlier rounds
+# measured the shells on a bare AppContainer with zero capabilities, no ancestor ACE and no
+# stamped NODE_OPTIONS, and both conclusions were retracted. This group runs the real `apply`
+# launch with all three repairs in force — gated on `shell-gate-stdio-shim-live`, which asserts
+# the preload arrived from INSIDE the confined child — and judges every cell against an
+# UNCONFINED twin of the same script in the same run rather than against an exit code. The
+# per-cell props are MEASUREMENTS: a FAIL is the finding, so only absence is an error.
 name: win-jail-repairs-probe
 
 on:
   push:
     # Path-filtered so a change to a SIBLING probe does not spend ~25 minutes of Windows runner
     # on this one. Shared capacity: every push here costs the full matrix.
-    branches: [sandbox/win-jail-caps, sandbox/win-ace-kernel]
+    branches:
+      [sandbox/win-jail-caps, sandbox/win-ace-kernel, sandbox/win-shell-jail]
     paths:
       - 'crates/nub-sandbox/**'
       - '.github/workflows/win-jail-repairs-probe.yml'
@@ -76,10 +86,25 @@ jobs:
         shell: bash
         run: cargo test -p nub-sandbox --test windows_jail_repairs --no-run
 
+      # Which shells the image actually has is a FACT the probe reports; this names them here too
+      # so a MISSING interpreter is distinguishable from one the probe failed to launch.
+      - name: Interpreter inventory
+        if: always()
+        shell: bash
+        run: |
+          ls -l "$SYSTEMROOT/System32/cmd.exe" || true
+          ls -l "$SYSTEMROOT/System32/WindowsPowerShell/v1.0/powershell.exe" || true
+          command -v pwsh && pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' || true
+          ls -l vendor/busybox-w32/busybox64.exe || true
+
       - name: Probe — jail repairs, both directions
         if: always()
         timeout-minutes: 30
         shell: bash
+        env:
+          # The vendored busybox, supplied without the release-packaging step — the same seam
+          # `resolve_bundled_busybox` documents for the Rust suite.
+          PROBE_BUSYBOX_EXE: ${{ github.workspace }}\vendor\busybox-w32\busybox64.exe
         run: |
           rc=0
           timeout -k 30 1200 cargo test -p nub-sandbox --test windows_jail_repairs > probe.log 2>&1 || rc=$?
@@ -196,6 +221,43 @@ jobs:
                    unshimmed-piped-hangs; do
             need_pass "$p"
           done
+
+          echo "---- shells: the gates (no cell below counts as evidence without these) ----"
+          for p in shell-gate-stdio-shim-live \
+                   shell-gate-repair-off-croot-refused \
+                   shell-gate-repair-on-croot-permitted \
+                   shell-gate-off-ungranted-read-refused \
+                   shell-gate-on-ungranted-read-refused; do
+            need_pass "$p"
+          done
+          # The elevation caveat, on the record: `C:\` and `C:\Users` are not DACL-writable by a
+          # standard user, so a repaired cell here is a CEILING unless these say otherwise.
+          need "  fact:probe-elevated="
+          grep -E 'fact:shell-ace-writable\[' probe.log || { echo "MISS the per-ancestor ACE-writability facts"; fail=1; }
+          need "  fact:shell-capability-fallbacks="
+          grep -E 'fact:shell-present-' probe.log || { echo "MISS the interpreter inventory"; fail=1; }
+
+          echo "---- shells: what each interpreter DOES (measurements — a FAIL is the finding) ----"
+          for sh in cmd powershell pwsh busybox; do
+            grep -qF "fact:shell-present-$sh=true" probe.log || { echo "SKIP $sh (absent on this image)"; continue; }
+            need_pass "shell-$sh-unconfined-completes"
+            for p in shell-$sh-off-matches-unconfined \
+                     shell-$sh-on-matches-unconfined \
+                     shell-$sh-on-ungranted-cd-refused; do
+              grep -q "prop:$p=" probe.log || { echo "MISS $p (never measured)"; fail=1; }
+              grep -E "prop:$p=" probe.log || true
+            done
+            grep -E "diag:shell-$sh-(off|on)-diff=" probe.log || true
+          done
+
+          echo "---- shells: cmd.exe AS the confined program (the production process shape) ----"
+          grep -q "prop:shell-direct-cmd-is-the-confined-program=" probe.log \
+            || { echo "MISS shell-direct-cmd-is-the-confined-program (never measured — a watchdog exit means it HUNG)"; fail=1; }
+          grep -E "prop:shell-direct-cmd-is-the-confined-program=" probe.log || true
+          grep -E "fact:shell-direct-" probe.log || true
+
+          echo "---- shells: every cell, all three arms ----"
+          grep -E '^  fact:shell-(cmd|powershell|pwsh|busybox)-' probe.log || true
 
           echo "---- the facts ----"
           grep -E '^  (fact|diag):' probe.log || true

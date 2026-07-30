@@ -128,6 +128,9 @@ mod win {
             }
             // node <marker> <deadline_secs> <node.exe> <script.js> <sink>
             Some("node") => run_node_bounded(&a[1], &a[2], &a[3], &a[4], &a[5]),
+            // exec <marker> <deadline_secs> <sink> <exe> [argv…] — the same bounded,
+            // file-backed spawn as `node`, for an arbitrary interpreter.
+            Some("exec") => run_exe_bounded(&a[1], &a[2], &a[3], &a[4], &a[5..]),
             Some("privs") => report_privileges(Path::new(&a[1])),
             _ => 2,
         }
@@ -214,6 +217,26 @@ mod win {
     /// of the things under test), wait with a deadline, and report CPU-vs-wall before killing.
     /// A spin reads as CPU ≈ wall; a blocking wait reads as CPU ≈ 0.
     fn run_node_bounded(marker: &str, secs: &str, node: &str, script: &str, sink: &str) -> i32 {
+        // `-e:<code>` runs Node with NO MAIN FILE, which is the only way to get past
+        // `resolveMainPath` without a flag and therefore the only way to ask what a REQUIRE
+        // costs separately from what the entry point costs.
+        match script.strip_prefix("-e:") {
+            Some(code) => run_exe_bounded(
+                marker,
+                secs,
+                sink,
+                node,
+                &["-e".to_string(), code.to_string()],
+            ),
+            None => run_exe_bounded(marker, secs, sink, node, &[script.to_string()]),
+        }
+    }
+
+    /// Spawn `exe` from INSIDE the jail with FILE-backed stdio, wait with a deadline, and
+    /// report CPU-vs-wall before killing. A spin reads as CPU ≈ wall; a blocking wait reads as
+    /// CPU ≈ 0. File-backed rather than piped deliberately: a pipe is one of the things under
+    /// test elsewhere, and an unbounded launch cannot be measured at all.
+    fn run_exe_bounded(marker: &str, secs: &str, sink: &str, exe: &str, args: &[String]) -> i32 {
         use std::os::windows::io::AsRawHandle;
         let marker = Path::new(marker);
         let out = match std::fs::File::create(sink) {
@@ -230,14 +253,8 @@ mod win {
                 return 9;
             }
         };
-        // `-e:<code>` runs Node with NO MAIN FILE, which is the only way to get past
-        // `resolveMainPath` without a flag and therefore the only way to ask what a REQUIRE
-        // costs separately from what the entry point costs.
-        let mut command = std::process::Command::new(node);
-        match script.strip_prefix("-e:") {
-            Some(code) => command.arg("-e").arg(code),
-            None => command.arg(script),
-        };
+        let mut command = std::process::Command::new(exe);
+        command.args(args);
         let spawned = command
             .stdout(std::process::Stdio::from(out))
             .stderr(std::process::Stdio::from(err))
@@ -1975,6 +1992,839 @@ try {{
         );
     }
 
+    // ── group 3: do the SHELLS do their JOB inside the jail? ─────────────────────────
+    //
+    // WHY THIS GROUP EXISTS AND WHY EVERY EARLIER ANSWER WAS VOID. `aube-scripts` runs a
+    // dependency's lifecycle script through a SHELL, not through `node` — so whether the jail
+    // is usable is a question about `cmd.exe` first and Node second. Two prior rounds measured
+    // the shells on a bare AppContainer that reproduced NONE of the production repairs: zero
+    // capabilities requested, no ancestor ACE, no stamped `NODE_OPTIONS`. The first concluded
+    // everything worked (it only measured STARTUP — `cmd /c echo`), the second that cmd and
+    // PowerShell were badly broken. Neither transferred, and both were retracted.
+    //
+    // THE THREE THINGS THAT MAKE THIS FAITHFUL. (1) The launch goes through `apply`, i.e. the
+    // real `backend/windows.rs`, so the ancestor traverse ACE, the harvested capability SIDs
+    // and the leaf grants are the product's own. (2) `NODE_OPTIONS` carries the production
+    // stdio shim through the policy's constructed env, exactly as `pm_engine/build_jail.rs`
+    // stamps it — and `shell-gate-stdio-shim-live` proves it ARRIVED, from inside the confined
+    // child, rather than assuming the env plumbing worked. (3) Every arm has an UNCONFINED twin
+    // in the same run on the same fixture, so a cell is judged by a byte-for-byte diff against
+    // what the shell does with no jail at all — never by an exit code.
+    //
+    // STARTING IS NOT WORKING, so no op here is a startup check. Each shell resolves paths,
+    // `cd`s into a granted and an ungranted directory, enumerates, expands a glob, reads,
+    // writes, searches `%PATH%` twice (`where.exe` and a bare-name spawn), redirects to a file
+    // and to the NULL DEVICE, spawns a nested `node` on a granted entry point, calls a `.cmd`
+    // shim, and checks that an exit code propagates. A tool that exits 0 having silently done
+    // nothing is the failure class this whole effort cares most about, which is why the verdict
+    // is a value comparison and the transport is separated from the measurement: the PowerShell
+    // battery reports through `[IO.File]::AppendAllText` and tests the FileSystem PROVIDER as
+    // one op among many, so provider breakage degrades one cell instead of erasing the table.
+    //
+    // ⚠️ THE ELEVATION CAVEAT, MEASURED RATHER THAN ASSUMED. `C:\` and `C:\Users` are not
+    // DACL-writable by a standard user, so on a real user's machine the repair cannot reach
+    // them and only `%USERPROFILE%` and below get the traverse ACE. A GitHub runner is
+    // `runneradmin`, which CAN write them — so the repaired arm here is a CEILING, not the
+    // shipping configuration. `shell-ace-writable[…]` reports per-ancestor whether that write
+    // succeeds and `probe-elevated` reports the token, so no cell can be misread as unprivileged
+    // evidence. The repair-OFF arm is the matching FLOOR (it also drops the grants the profile
+    // WOULD get unprivileged). A genuinely de-elevated arm needs a second logon and is not
+    // attempted here.
+
+    /// One interpreter, and how to hand it the battery. `invoke` receives the script path and
+    /// the output path and returns the argv AFTER the executable.
+    struct ShellPlan {
+        name: &'static str,
+        exe: PathBuf,
+        script: PathBuf,
+        invoke: fn(&Path, &Path) -> Vec<String>,
+    }
+
+    /// Every label the battery emits, in the order it emits them. A label ABSENT from an arm is
+    /// reported as `<absent>`, which is a finding rather than a skip: it means the shell stopped
+    /// there.
+    const SHELL_LABELS: &[&str] = &[
+        "alive",
+        "cwd",
+        "existdir",
+        "existdirslash",
+        "existfile",
+        "existwin",
+        "existpf",
+        "cdgranted",
+        "cwdafter",
+        "cdungranted",
+        "list",
+        "glob",
+        "read",
+        "write",
+        "whereexe",
+        "pathspawn",
+        "nullredir",
+        "nestedspawn",
+        "cmdshim",
+        "exitprop",
+        "done",
+    ];
+
+    /// A `key=value` transcript, with the repeated `listitem`/`globitem` lines folded into one
+    /// sorted `list`/`glob` value so an arm's whole result is a flat label→value map.
+    fn shell_results(text: &str) -> BTreeMap<String, String> {
+        let mut out: BTreeMap<String, String> = BTreeMap::new();
+        let mut items: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+        for raw in text.lines() {
+            let line = raw.trim_end_matches(['\r', '\n']).trim();
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
+            match k {
+                "listitem" => items.entry("list").or_default().push(v.to_string()),
+                "globitem" => items.entry("glob").or_default().push(v.to_string()),
+                _ => {
+                    out.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
+        for (key, mut values) in items {
+            values.sort();
+            out.insert(key.to_string(), values.join(","));
+        }
+        out
+    }
+
+    /// Whether this process's token reports elevated. Reported as a FACT because it decides
+    /// whether the repaired arm's `C:\` cells are unprivileged evidence or a ceiling.
+    fn probe_elevated() -> bool {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        // SAFETY: out-params are initialised before use and the handle is closed on both paths.
+        unsafe {
+            let mut token = std::ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return false;
+            }
+            let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+            let mut len = 0u32;
+            let ok = GetTokenInformation(
+                token,
+                TokenElevation,
+                std::ptr::from_mut(&mut elevation).cast(),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut len,
+            );
+            CloseHandle(token);
+            ok != 0 && elevation.TokenIsElevated != 0
+        }
+    }
+
+    /// Can the ancestor repair's traverse ACE actually be WRITTEN on `dir` by this token? Uses
+    /// the product's own writer with a synthetic capability SID that names nothing on this
+    /// machine, granted and immediately revoked — so the answer is the real `WRITE_DAC` verdict
+    /// on the real path, and nothing is left behind. The SID is deliberately not one the
+    /// backend harvests: a residue would then be indistinguishable from a real grant.
+    fn ace_writable(dir: &Path) -> String {
+        const SYNTHETIC: &str = "S-1-15-3-1024-1-2-3-4-5-6-7-8";
+        match nub_sandbox::windows_object_traverse_ace(dir, SYNTHETIC, true) {
+            Ok(()) => {
+                let revoked = nub_sandbox::windows_object_traverse_ace(dir, SYNTHETIC, false);
+                match revoked {
+                    Ok(()) => "writable".to_string(),
+                    Err(e) => format!("writable-BUT-REVOKE-FAILED:{:?}", e.raw_os_error()),
+                }
+            }
+            Err(e) => format!("refused:{:?}", e.raw_os_error()),
+        }
+    }
+
+    /// The whole shell group. One fixture, one policy, one interpreter set; three arms per
+    /// interpreter (unconfined reference, repair-off floor, repair-on ceiling).
+    fn shell_tools(fails: &mut u32, node: &Path) {
+        let f = Fixture::new("sh");
+        println!("  fact:shell-fixture-root={}", f.root.display());
+        println!("  fact:probe-elevated={}", probe_elevated());
+
+        // Battery targets, all inside the granted work dir except `f.sibling`.
+        let sub = f.work.join("sub");
+        let globdir = f.work.join("globdir");
+        let outroot = f.work.join("out");
+        for d in [&sub, &globdir, &outroot] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(f.work.join("granted.txt"), "granted-content\n").unwrap();
+        std::fs::write(globdir.join("one.txt"), "1\n").unwrap();
+        std::fs::write(globdir.join("two.txt"), "2\n").unwrap();
+        std::fs::write(globdir.join("three.dat"), "3\n").unwrap();
+        // argv[2] rather than a fixed path: each arm passes its own scratch token, so a stale
+        // file from a previous arm can never satisfy one whose spawn never ran.
+        std::fs::write(
+            f.work.join("spawned.js"),
+            "require('fs').writeFileSync(process.argv[2], 'spawned-ok');\n",
+        )
+        .unwrap();
+        std::fs::write(f.work.join("shim.cmd"), "@echo off\r\necho shim-ran\r\n").unwrap();
+        seed_package(&f.work);
+
+        let cmd_exe =
+            PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()))
+                .join(r"System32\cmd.exe");
+        let ps_exe =
+            PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()))
+                .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+        let pwsh_exe = std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+            .map(|d| d.join("pwsh.exe"))
+            .find(|c| c.is_file());
+        let busybox = std::env::var_os("PROBE_BUSYBOX_EXE")
+            .map(PathBuf::from)
+            .filter(|p| p.is_file());
+
+        // Every shell gets its own copy inside the fixture where it is not already a system
+        // binary, so the policy grants a real leaf rather than relying on the image's DACLs.
+        let staged_busybox = busybox.as_ref().map(|src| {
+            let dst = f.root.join("bin").join("busybox.exe");
+            std::fs::copy(src, &dst).expect("stage busybox into the fixture");
+            dst
+        });
+
+        let mut plans: Vec<ShellPlan> = Vec::new();
+        if cmd_exe.is_file() {
+            std::fs::write(f.work.join("probe.cmd"), cmd_battery(&f, &sub, &globdir)).unwrap();
+            plans.push(ShellPlan {
+                name: "cmd",
+                exe: cmd_exe.clone(),
+                script: f.work.join("probe.cmd"),
+                // Production's own shape: `cmd.exe /d /s /c "<one command string>"`.
+                invoke: |script, out| {
+                    vec![
+                        "/d".into(),
+                        "/s".into(),
+                        "/c".into(),
+                        format!("\"{}\" \"{}\"", script.display(), out.display()),
+                    ]
+                },
+            });
+        }
+        let ps_argv: fn(&Path, &Path) -> Vec<String> = |script, out| {
+            vec![
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-File".into(),
+                script.display().to_string(),
+                out.display().to_string(),
+            ]
+        };
+        if ps_exe.is_file() {
+            std::fs::write(
+                f.work.join("probe.ps1"),
+                ps_battery(&f, &sub, &globdir, &cmd_exe),
+            )
+            .unwrap();
+            plans.push(ShellPlan {
+                name: "powershell",
+                exe: ps_exe.clone(),
+                script: f.work.join("probe.ps1"),
+                invoke: ps_argv,
+            });
+        }
+        if let Some(pwsh) = &pwsh_exe {
+            plans.push(ShellPlan {
+                name: "pwsh",
+                exe: pwsh.clone(),
+                script: f.work.join("probe.ps1"),
+                invoke: ps_argv,
+            });
+        }
+        if let Some(bb) = &staged_busybox {
+            std::fs::write(
+                f.work.join("probe.sh"),
+                sh_battery(&f, &sub, &globdir, &cmd_exe),
+            )
+            .unwrap();
+            plans.push(ShellPlan {
+                name: "busybox",
+                exe: bb.clone(),
+                script: f.work.join("probe.sh"),
+                invoke: |script, out| {
+                    vec![
+                        "sh".into(),
+                        script.display().to_string(),
+                        out.display().to_string(),
+                    ]
+                },
+            });
+        }
+        for name in ["cmd", "powershell", "pwsh", "busybox"] {
+            println!(
+                "  fact:shell-present-{name}={}",
+                plans.iter().any(|p| p.name == name)
+            );
+        }
+
+        // The policy: build-jail shaped, granting node + every shell binary, with the
+        // PRODUCTION `NODE_OPTIONS` stamped through the constructed env.
+        let node_options = nub_sandbox::windows_build_jail_node_options();
+        let mut grants = vec![read_rule(node)];
+        for dir in [
+            node.parent().map(Path::to_path_buf),
+            Some(cmd_exe.clone()),
+            Some(ps_exe.clone()),
+            pwsh_exe
+                .clone()
+                .and_then(|p| p.parent().map(Path::to_path_buf)),
+            staged_busybox.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            grants.push(read_rule(&dir));
+        }
+        let policy = jail_shaped(&f, grants, &[("NODE_OPTIONS", node_options.clone())]);
+        println!("  fact:shell-node-options-bytes={}", node_options.len());
+
+        // ── the gates. No arm below counts as evidence unless these pass. ───────────────
+        let chain: Vec<PathBuf> = {
+            let mut v: Vec<PathBuf> = f.work.ancestors().map(Path::to_path_buf).collect();
+            v.reverse();
+            v
+        };
+        for sid in nub_sandbox::windows_ancestor_capability_sids(&chain) {
+            println!("  fact:shell-capability-sid={sid}");
+        }
+        for dir in &chain {
+            println!(
+                "  fact:shell-ace-writable[{}]={}",
+                dir.display(),
+                ace_writable(dir)
+            );
+        }
+
+        // GATE 1: the stdio shim really arrived, asserted from inside the confined child on the
+        // SAME policy the shells run under. Without this the shell arms could be measuring a
+        // launch whose `NODE_OPTIONS` never took effect.
+        let shim_marker = f.work.join("shimlive.txt");
+        let shim_body = format!(
+            r#"
+const fs = require("node:fs");
+fs.writeFileSync({marker}, "sentinel=" + String(globalThis.__nubJailStdioShim) +
+  " nodeopts=" + String(process.env.NODE_OPTIONS || "").length);
+"#,
+            marker = js_literal(&shim_marker),
+        );
+        let shim_run = node_arm(&f, &policy, "shellshim", node, &f.work, 30, &shim_body);
+        let shim_text =
+            std::fs::read_to_string(&shim_marker).unwrap_or_else(|_| "<no marker>".into());
+        println!("  fact:shell-stdio-shim={shim_text}");
+        report(
+            fails,
+            "shell-gate-stdio-shim-live",
+            shim_text.contains("sentinel=true"),
+            &format!(
+                "{shim_text} outer={} (the production NODE_OPTIONS must be in force before any shell cell counts)",
+                shim_run.outer
+            ),
+        );
+
+        // GATE 2 + 3: the repair state differs between arms, and confinement holds in both. One
+        // fsprobe per arm, on the same paths, so the arms are separated by exactly the seam.
+        let gate_ops: Vec<(String, &str, String)> = vec![
+            ("croot".into(), "lstat", r"C:\".into()),
+            (
+                "ungranted".into(),
+                "read",
+                f.ungranted.to_string_lossy().into_owned(),
+            ),
+            (
+                "sibling".into(),
+                "read",
+                f.sibling_file.to_string_lossy().into_owned(),
+            ),
+        ];
+        let gate_off = without_ancestor_repair(|| fsprobe(&f, &policy, "shgate-off", &gate_ops));
+        let fallbacks_before = nub_sandbox::windows_capability_fallbacks();
+        let gate_on = fsprobe(&f, &policy, "shgate-on", &gate_ops);
+        println!(
+            "  fact:shell-capability-fallbacks={}",
+            nub_sandbox::windows_capability_fallbacks() - fallbacks_before
+        );
+        println!("  fact:shell-croot-off={}", line(&gate_off, "croot"));
+        println!("  fact:shell-croot-on={}", line(&gate_on, "croot"));
+        report(
+            fails,
+            "shell-gate-repair-off-croot-refused",
+            denied(&line(&gate_off, "croot")),
+            &format!(
+                "{} (THE CONTROL: the floor arm must still reproduce the defect)",
+                line(&gate_off, "croot")
+            ),
+        );
+        report(
+            fails,
+            "shell-gate-repair-on-croot-permitted",
+            line(&gate_on, "croot").starts_with("ok:"),
+            &format!(
+                "{} (the ceiling arm's repair must be live — see shell-ace-writable if this fails)",
+                line(&gate_on, "croot")
+            ),
+        );
+        for (arm, map) in [("off", &gate_off), ("on", &gate_on)] {
+            report(
+                fails,
+                &format!("shell-gate-{arm}-ungranted-read-refused"),
+                denied(&line(map, "ungranted")),
+                &format!(
+                    "{} (a NotFound would mean this arm tested nothing)",
+                    line(map, "ungranted")
+                ),
+            );
+        }
+
+        // ── the batteries ─────────────────────────────────────────────────────────────
+        for plan in &plans {
+            println!("  ---- shell {} ----", plan.name);
+            println!(
+                "  fact:shell-{}-leaf-grant-redundant={}",
+                plan.name,
+                nub_sandbox::windows_leaf_grant_redundant(&plan.exe)
+            );
+            let reference = shell_arm_unconfined(&f, plan, &outroot, &policy);
+            let floor =
+                without_ancestor_repair(|| shell_arm_confined(&f, &policy, plan, &outroot, "off"));
+            let ceiling = shell_arm_confined(&f, &policy, plan, &outroot, "on");
+
+            for (arm, map) in [
+                ("unconfined", &reference),
+                ("off", &floor),
+                ("on", &ceiling),
+            ] {
+                for label in SHELL_LABELS {
+                    println!(
+                        "  fact:shell-{}-{arm}-{label}={}",
+                        plan.name,
+                        line(map, label)
+                    );
+                }
+            }
+
+            // The reference is the only GATE here: a shell that cannot complete the battery
+            // UNCONFINED means the fixture or the script is wrong, and every confined cell
+            // beside it would be uninterpretable.
+            let complete = line(&reference, "alive") == "1" && line(&reference, "done") == "1";
+            report(
+                fails,
+                &format!("shell-{}-unconfined-completes", plan.name),
+                complete,
+                "the unconfined reference must run the whole battery or the confined arms mean nothing",
+            );
+
+            // MEASUREMENTS, NOT REQUIREMENTS. A divergence here is the finding this group
+            // exists to produce, so it is reported as a property whose FAIL is informative and
+            // gated only on being PRESENT.
+            for (arm, map) in [("off", &floor), ("on", &ceiling)] {
+                // `cwd`/`cwdafter` are excluded from the diff because `%TEMP%` reaches the child
+                // 8.3-shortened (`RUNNER~1`) on one arm and long on another; they are reported as
+                // facts instead. Every other cell must match byte for byte.
+                let diffs: Vec<String> = SHELL_LABELS
+                    .iter()
+                    .copied()
+                    .filter(|l| *l != "cwd" && *l != "cwdafter" && *l != "cdungranted")
+                    .filter(|l| line(map, l) != line(&reference, l))
+                    .map(|l| format!("{l}:{}!={}", line(map, l), line(&reference, l)))
+                    .collect();
+                println!(
+                    "  diag:shell-{}-{arm}-diff={}",
+                    plan.name,
+                    if diffs.is_empty() {
+                        "none".to_string()
+                    } else {
+                        diffs.join(" | ")
+                    }
+                );
+                report(
+                    fails,
+                    &format!("shell-{}-{arm}-matches-unconfined", plan.name),
+                    diffs.is_empty(),
+                    &format!("{} diverging cell(s)", diffs.len()),
+                );
+            }
+            // `cd` into an UNGRANTED directory is the one cell whose CORRECT confined answer
+            // differs from unconfined: it must fail. Asserted separately so the diff above is
+            // not permanently one cell dirty, and so a shell that lets it through is caught.
+            report(
+                fails,
+                &format!("shell-{}-on-ungranted-cd-refused", plan.name),
+                line(&ceiling, "cdungranted") == "FAIL",
+                &format!(
+                    "cdungranted={} (unconfined={})",
+                    line(&ceiling, "cdungranted"),
+                    line(&reference, "cdungranted")
+                ),
+            );
+        }
+    }
+
+    /// The battery with NO jail at all: same script, same cwd, same constructed env, same
+    /// bound. This is what every confined cell is judged against.
+    fn shell_arm_unconfined(
+        f: &Fixture,
+        plan: &ShellPlan,
+        outroot: &Path,
+        policy: &SandboxPolicy,
+    ) -> BTreeMap<String, String> {
+        let dir = outroot.join(format!("{}-unconfined", plan.name));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("battery.txt");
+        let sink = dir.join("stdio.txt");
+        let argv = (plan.invoke)(&plan.script, &out);
+        breadcrumb(&format!("shell_arm_unconfined {}", plan.name));
+        flush();
+        let handle = std::fs::File::create(&sink).unwrap();
+        let status = std::process::Command::new(&plan.exe)
+            .args(&argv)
+            .current_dir(&f.work)
+            .env_clear()
+            .envs(&policy.env.constructed)
+            .stderr(std::process::Stdio::from(handle.try_clone().unwrap()))
+            .stdout(std::process::Stdio::from(handle))
+            .status();
+        println!(
+            "  fact:shell-{}-unconfined-outer={}",
+            plan.name,
+            match &status {
+                Ok(s) => format!("EXITED code={:?}", s.code()),
+                Err(e) => format!("SPAWN-FAILED {e:?}"),
+            }
+        );
+        shell_report(plan.name, "unconfined", &out, &sink)
+    }
+
+    /// The battery CONFINED. The shell is a grandchild of the launch rather than the launch's
+    /// own program, purely so the wait can be BOUNDED: `apply` owns spawn+wait synchronously, so
+    /// a hang there can only be caught by the 120-second watchdog, which ends the whole run. The
+    /// token is identical either way — it is inherited — and a direct-launch arm runs last in
+    /// `probe_main` for the production process shape.
+    fn shell_arm_confined(
+        f: &Fixture,
+        policy: &SandboxPolicy,
+        plan: &ShellPlan,
+        outroot: &Path,
+        arm: &str,
+    ) -> BTreeMap<String, String> {
+        let dir = outroot.join(format!("{}-{arm}", plan.name));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("battery.txt");
+        let sink = dir.join("stdio.txt");
+        let outer = dir.join("outer.txt");
+        let mut argv = vec![
+            "30".to_string(),
+            sink.to_string_lossy().into_owned(),
+            plan.exe.to_string_lossy().into_owned(),
+        ];
+        argv.extend((plan.invoke)(&plan.script, &out));
+        let (code, outer_text) = run_jailed(f, policy, &f.work, "exec", &outer, &argv);
+        println!(
+            "  fact:shell-{}-{arm}-outer={outer_text} launch={code}",
+            plan.name
+        );
+        shell_report(plan.name, arm, &out, &sink)
+    }
+
+    /// Read one arm's transcript, echoing its interpreter stdio as a diagnostic — a shell that
+    /// wrote nothing has its reason there and nowhere else.
+    fn shell_report(name: &str, arm: &str, out: &Path, sink: &Path) -> BTreeMap<String, String> {
+        let text = std::fs::read_to_string(out).unwrap_or_default();
+        let stdio = std::fs::read_to_string(sink).unwrap_or_default();
+        if text.trim().is_empty() {
+            println!("  fact:shell-{name}-{arm}-transcript=EMPTY");
+        }
+        if !stdio.trim().is_empty() {
+            println!(
+                "  diag:shell-{name}-{arm}-stdio={}",
+                stdio.trim().replace(['\r', '\n'], " | ")
+            );
+        }
+        shell_results(&text)
+    }
+
+    /// `cmd.exe` battery. Written as separate top-level statements rather than `&&` chains
+    /// because a parenthesised block is expanded BEFORE the command inside it runs, so `%CD%`
+    /// after a `cd` would report the old directory. `(call )` resets `%errorlevel%` to 0 ahead
+    /// of each op: a SUCCESSFUL builtin does not reset it, which is the staleness artifact that
+    /// produced a retracted `>NUL` finding in an earlier round.
+    fn cmd_battery(f: &Fixture, sub: &Path, globdir: &Path) -> String {
+        let w = f.work.display().to_string();
+        let sib = f.sibling.display().to_string();
+        let g = globdir.display().to_string();
+        let s = sub.display().to_string();
+        format!(
+            "@echo off\r\n\
+             setlocal enableextensions\r\n\
+             set \"OUT=%~1\"\r\n\
+             for %%i in (\"%OUT%\") do set \"SC=%%~dpi\"\r\n\
+             >>\"%OUT%\" echo alive=1\r\n\
+             >>\"%OUT%\" echo cwd=%CD%\r\n\
+             if exist \"{w}\" (>>\"%OUT%\" echo existdir=yes) else (>>\"%OUT%\" echo existdir=no)\r\n\
+             if exist \"{w}\\\" (>>\"%OUT%\" echo existdirslash=yes) else (>>\"%OUT%\" echo existdirslash=no)\r\n\
+             if exist \"{w}\\granted.txt\" (>>\"%OUT%\" echo existfile=yes) else (>>\"%OUT%\" echo existfile=no)\r\n\
+             if exist \"%SystemRoot%\" (>>\"%OUT%\" echo existwin=yes) else (>>\"%OUT%\" echo existwin=no)\r\n\
+             if exist \"%ProgramFiles%\" (>>\"%OUT%\" echo existpf=yes) else (>>\"%OUT%\" echo existpf=no)\r\n\
+             (call )\r\n\
+             cd /d \"{s}\"\r\n\
+             set \"RC=%errorlevel%\"\r\n\
+             if \"%RC%\"==\"0\" (>>\"%OUT%\" echo cdgranted=OK) else (>>\"%OUT%\" echo cdgranted=FAIL)\r\n\
+             >>\"%OUT%\" echo cwdafter=%CD%\r\n\
+             (call )\r\n\
+             cd /d \"{sib}\"\r\n\
+             set \"RC=%errorlevel%\"\r\n\
+             if \"%RC%\"==\"0\" (>>\"%OUT%\" echo cdungranted=OK-BAD) else (>>\"%OUT%\" echo cdungranted=FAIL)\r\n\
+             cd /d \"{w}\"\r\n\
+             (call )\r\n\
+             dir /b \"{g}\" > \"%SC%ls.tmp\" 2>&1\r\n\
+             set \"RC=%errorlevel%\"\r\n\
+             if \"%RC%\"==\"0\" (for /f \"usebackq delims=\" %%l in (\"%SC%ls.tmp\") do >>\"%OUT%\" echo listitem=%%l) else (>>\"%OUT%\" echo listitem=FAIL)\r\n\
+             (call )\r\n\
+             for %%f in (\"{g}\\*.txt\") do >>\"%OUT%\" echo globitem=%%~nxf\r\n\
+             (call )\r\n\
+             type \"{w}\\granted.txt\" > \"%SC%rd.tmp\" 2>&1\r\n\
+             set \"RC=%errorlevel%\"\r\n\
+             set \"V=\"\r\n\
+             for /f \"usebackq delims=\" %%l in (\"%SC%rd.tmp\") do if not defined V set \"V=%%l\"\r\n\
+             if \"%RC%\"==\"0\" (>>\"%OUT%\" echo read=%V%) else (>>\"%OUT%\" echo read=FAIL rc=%RC%)\r\n\
+             (call )\r\n\
+             >\"%SC%wr.tmp\" echo wrote-ok\r\n\
+             set \"RC=%errorlevel%\"\r\n\
+             set \"V=\"\r\n\
+             for /f \"usebackq delims=\" %%l in (\"%SC%wr.tmp\") do if not defined V set \"V=%%l\"\r\n\
+             if \"%RC%\"==\"0\" (>>\"%OUT%\" echo write=%V%) else (>>\"%OUT%\" echo write=FAIL rc=%RC%)\r\n\
+             (call )\r\n\
+             where.exe node.exe > \"%SC%wh.tmp\" 2>&1\r\n\
+             set \"RC=%errorlevel%\"\r\n\
+             set \"V=\"\r\n\
+             for /f \"usebackq delims=\" %%l in (\"%SC%wh.tmp\") do if not defined V set \"V=%%~nxl\"\r\n\
+             if \"%RC%\"==\"0\" (>>\"%OUT%\" echo whereexe=%V%) else (>>\"%OUT%\" echo whereexe=FAIL rc=%RC%)\r\n\
+             (call )\r\n\
+             node --version > \"%SC%nv.tmp\" 2>&1\r\n\
+             set \"RC=%errorlevel%\"\r\n\
+             set \"V=\"\r\n\
+             for /f \"usebackq delims=\" %%l in (\"%SC%nv.tmp\") do if not defined V set \"V=%%l\"\r\n\
+             if \"%RC%\"==\"0\" (>>\"%OUT%\" echo pathspawn=%V%) else (>>\"%OUT%\" echo pathspawn=FAIL rc=%RC%)\r\n\
+             (call )\r\n\
+             echo nulltest > NUL\r\n\
+             set \"RC=%errorlevel%\"\r\n\
+             if \"%RC%\"==\"0\" (>>\"%OUT%\" echo nullredir=OK) else (>>\"%OUT%\" echo nullredir=FAIL rc=%RC%)\r\n\
+             (call )\r\n\
+             if exist \"%SC%token\" del /q \"%SC%token\"\r\n\
+             node \"{w}\\spawned.js\" \"%SC%token\" > \"%SC%sp.tmp\" 2>&1\r\n\
+             set \"RC=%errorlevel%\"\r\n\
+             set \"V=\"\r\n\
+             for /f \"usebackq delims=\" %%l in (\"%SC%token\") do if not defined V set \"V=%%l\"\r\n\
+             if not \"%RC%\"==\"0\" (>>\"%OUT%\" echo nestedspawn=FAIL rc=%RC%) else if defined V (>>\"%OUT%\" echo nestedspawn=%V%) else (>>\"%OUT%\" echo nestedspawn=NO-TOKEN)\r\n\
+             (call )\r\n\
+             call \"{w}\\shim.cmd\" > \"%SC%sh.tmp\" 2>&1\r\n\
+             set \"RC=%errorlevel%\"\r\n\
+             set \"V=\"\r\n\
+             for /f \"usebackq delims=\" %%l in (\"%SC%sh.tmp\") do if not defined V set \"V=%%l\"\r\n\
+             if \"%RC%\"==\"0\" (>>\"%OUT%\" echo cmdshim=%V%) else (>>\"%OUT%\" echo cmdshim=FAIL rc=%RC%)\r\n\
+             (call )\r\n\
+             cmd.exe /d /s /c \"exit /b 3\"\r\n\
+             set \"RC=%errorlevel%\"\r\n\
+             if \"%RC%\"==\"3\" (>>\"%OUT%\" echo exitprop=OK) else (>>\"%OUT%\" echo exitprop=FAIL rc=%RC%)\r\n\
+             >>\"%OUT%\" echo done=1\r\n"
+        )
+    }
+
+    /// PowerShell battery, run by both Windows PowerShell 5.1 and pwsh 7.
+    ///
+    /// THE TRANSPORT IS SEPARATED FROM THE MEASUREMENT, deliberately. `L` writes through
+    /// `[IO.File]::AppendAllText`, which is a raw .NET call and not a FileSystem PROVIDER
+    /// operation — the exact surface `PowerShell/PowerShell#27253` breaks when
+    /// `GetFileAttributesEx("C:\")` returns ACCESS_DENIED. Reporting through the provider would
+    /// mean provider breakage erased the whole table instead of failing one cell; `write` is
+    /// the cell that measures the provider, on purpose.
+    fn ps_battery(f: &Fixture, sub: &Path, globdir: &Path, cmd_exe: &Path) -> String {
+        let w = f.work.display().to_string();
+        let sib = f.sibling.display().to_string();
+        let g = globdir.display().to_string();
+        let s = sub.display().to_string();
+        let c = cmd_exe.display().to_string();
+        // Substituted rather than read from `$env:SystemRoot`: with `$ErrorActionPreference =
+        // 'Continue'` a null argument makes `Test-Path` emit a non-terminating error and return
+        // NOTHING, which the `if` reads as `no` — a missing env var would be indistinguishable
+        // from a refused path. Caught in a dry run on a host where those vars do not exist.
+        let winroot = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let progfiles =
+            std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
+        format!(
+            r#"param([string]$Out)
+$ErrorActionPreference = 'Continue'
+function L([string]$s) {{ [System.IO.File]::AppendAllText($Out, $s + "`r`n") }}
+$SC = [System.IO.Path]::GetDirectoryName($Out)
+L 'alive=1'
+try {{ L ('cwd=' + (Get-Location).Path) }} catch {{ L 'cwd=THREW' }}
+foreach ($pair in @(,@('existdir','{w}')) + @(,@('existdirslash','{w}\')) + @(,@('existfile','{w}\granted.txt')) + @(,@('existwin','{winroot}')) + @(,@('existpf','{progfiles}'))) {{
+  try {{ L ($pair[0] + '=' + $(if (Test-Path -LiteralPath $pair[1]) {{'yes'}} else {{'no'}})) }} catch {{ L ($pair[0] + '=THREW') }}
+}}
+try {{ Set-Location -LiteralPath '{s}' -ErrorAction Stop; L 'cdgranted=OK' }} catch {{ L 'cdgranted=FAIL' }}
+try {{ L ('cwdafter=' + (Get-Location).Path) }} catch {{ L 'cwdafter=THREW' }}
+try {{ Set-Location -LiteralPath '{sib}' -ErrorAction Stop; L 'cdungranted=OK-BAD' }} catch {{ L 'cdungranted=FAIL' }}
+try {{ Set-Location -LiteralPath '{w}' -ErrorAction Stop }} catch {{ }}
+try {{ foreach ($e in @(Get-ChildItem -LiteralPath '{g}' -ErrorAction Stop)) {{ L ('listitem=' + $e.Name) }} }} catch {{ L 'listitem=FAIL' }}
+try {{ foreach ($e in @(Get-ChildItem -Path '{g}\*.txt' -ErrorAction Stop)) {{ L ('globitem=' + $e.Name) }} }} catch {{ L 'globitem=FAIL' }}
+try {{ L ('read=' + ((Get-Content -LiteralPath '{w}\granted.txt' -Raw -ErrorAction Stop).Trim())) }} catch {{ L 'read=FAIL' }}
+try {{ Set-Content -LiteralPath ([System.IO.Path]::Combine($SC,'ps-wr.tmp')) -Value 'wrote-ok' -ErrorAction Stop
+       L ('write=' + ((Get-Content -LiteralPath ([System.IO.Path]::Combine($SC,'ps-wr.tmp')) -Raw -ErrorAction Stop).Trim())) }} catch {{ L 'write=FAIL' }}
+try {{ $cn = @(Get-Command node -CommandType Application -ErrorAction Stop)[0]; L ('whereexe=' + [System.IO.Path]::GetFileName($cn.Source)) }} catch {{ L 'whereexe=FAIL' }}
+try {{ $v = @(& node --version 2>&1); if ($LASTEXITCODE -eq 0 -and $v.Count -gt 0) {{ L ('pathspawn=' + [string]$v[0]) }} else {{ L ('pathspawn=FAIL last=[' + [string]$LASTEXITCODE + '] out=[' + ([string]::Join(' ', $v)) + ']') }} }} catch {{ L 'pathspawn=THREW' }}
+try {{ [System.IO.File]::AppendAllText('\\.\NUL', 'nulltest'); L 'nullredir=OK' }} catch {{ L 'nullredir=FAIL' }}
+try {{ $tk = [System.IO.Path]::Combine($SC,'token'); if (Test-Path -LiteralPath $tk) {{ Remove-Item -LiteralPath $tk -Force }} }} catch {{ }}
+try {{ $null = @(& node '{w}\spawned.js' $tk 2>&1)
+       if ($LASTEXITCODE -ne 0) {{ L ('nestedspawn=FAIL last=[' + [string]$LASTEXITCODE + ']') }}
+       elseif (Test-Path -LiteralPath $tk) {{ L ('nestedspawn=' + (([System.IO.File]::ReadAllText($tk)).Trim())) }}
+       else {{ L 'nestedspawn=NO-TOKEN' }} }} catch {{ L 'nestedspawn=THREW' }}
+try {{ $o = @(& '{c}' /d /s /c ('"' + '{w}\shim.cmd' + '"') 2>&1); if ($LASTEXITCODE -eq 0 -and $o.Count -gt 0) {{ L ('cmdshim=' + ([string]$o[0]).Trim()) }} else {{ L ('cmdshim=FAIL last=[' + [string]$LASTEXITCODE + ']') }} }} catch {{ L 'cmdshim=THREW' }}
+try {{ $null = @(& '{c}' /d /s /c 'exit /b 3' 2>&1); L ('exitprop=' + $(if ($LASTEXITCODE -eq 3) {{'OK'}} else {{'FAIL last=[' + [string]$LASTEXITCODE + ']'}})) }} catch {{ L 'exitprop=THREW' }}
+L 'done=1'
+"#
+        )
+    }
+
+    /// busybox-w32 `sh` battery. Forward-slash paths throughout: busybox resolves those against
+    /// the Windows namespace, and a backslash is an escape to it.
+    fn sh_battery(f: &Fixture, sub: &Path, globdir: &Path, cmd_exe: &Path) -> String {
+        let fwd = |p: &Path| p.to_string_lossy().replace('\\', "/");
+        let w = fwd(&f.work);
+        let sib = fwd(&f.sibling);
+        let g = fwd(globdir);
+        let s = fwd(sub);
+        let c = fwd(cmd_exe);
+        // The system paths are substituted from Rust rather than read out of `$SystemRoot`,
+        // whose value is BACKSLASHED — busybox reads a backslash as an escape, so an env-var
+        // spelling would make `[ -d ]` report absent for a reason that is not the jail.
+        let winroot = fwd(Path::new(
+            &std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()),
+        ));
+        let progfiles = fwd(Path::new(
+            &std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into()),
+        ));
+        // The `.cmd` shim's path is handed to `cmd.exe`, which reads a leading `/` as a switch,
+        // so that one argument stays backslashed while everything busybox itself resolves is
+        // forward-slashed.
+        let shim_win = f.work.join("shim.cmd").display().to_string();
+        format!(
+            r#"OUT="$1"
+SC=$(dirname "$OUT")
+p() {{ printf '%s\n' "$1" >> "$OUT"; }}
+p alive=1
+p "cwd=$(pwd)"
+if [ -d "{w}" ]; then p existdir=yes; else p existdir=no; fi
+if [ -d "{w}/" ]; then p existdirslash=yes; else p existdirslash=no; fi
+if [ -f "{w}/granted.txt" ]; then p existfile=yes; else p existfile=no; fi
+if [ -d "{winroot}" ]; then p existwin=yes; else p existwin=no; fi
+if [ -d "{progfiles}" ]; then p existpf=yes; else p existpf=no; fi
+if cd "{s}" 2>/dev/null; then p cdgranted=OK; else p cdgranted=FAIL; fi
+p "cwdafter=$(pwd)"
+if cd "{sib}" 2>/dev/null; then p cdungranted=OK-BAD; else p cdungranted=FAIL; fi
+cd "{w}" 2>/dev/null
+if ls -1 "{g}" > "$SC/ls.tmp" 2>/dev/null; then while read -r n; do p "listitem=$n"; done < "$SC/ls.tmp"; else p listitem=FAIL; fi
+for x in "{g}"/*.txt; do if [ -e "$x" ]; then p "globitem=$(basename "$x")"; else p globitem=FAIL; fi; done
+if cat "{w}/granted.txt" > "$SC/rd.tmp" 2>/dev/null; then p "read=$(cat "$SC/rd.tmp")"; else p read=FAIL; fi
+if printf 'wrote-ok\n' > "$SC/wr.tmp" 2>/dev/null; then p "write=$(cat "$SC/wr.tmp")"; else p write=FAIL; fi
+if wexe=$(command -v node 2>/dev/null); then p "whereexe=$(basename "$wexe")"; else p whereexe=FAIL; fi
+if node --version > "$SC/nv.tmp" 2>/dev/null; then p "pathspawn=$(cat "$SC/nv.tmp")"; else p pathspawn=FAIL; fi
+if printf 'nulltest\n' > /dev/null 2>/dev/null; then p nullredir=OK; else p nullredir=FAIL; fi
+rm -f "$SC/token"
+if node "{w}/spawned.js" "$SC/token" > "$SC/sp.tmp" 2>&1; then
+  if [ -f "$SC/token" ]; then p "nestedspawn=$(cat "$SC/token")"; else p nestedspawn=NO-TOKEN; fi
+else p "nestedspawn=FAIL rc=$?"; fi
+if "{c}" /d /s /c "\"{shim_win}\"" > "$SC/sh.tmp" 2>&1; then p "cmdshim=$(head -n 1 "$SC/sh.tmp" | tr -d '\r')"; else p cmdshim=FAIL; fi
+"{c}" /d /s /c "exit /b 3" > /dev/null 2>&1
+rc=$?
+if [ "$rc" = 3 ]; then p exitprop=OK; else p "exitprop=FAIL rc=$rc"; fi
+p done=1
+"#
+        )
+    }
+
+    /// `cmd.exe` as the AppContainer child ITSELF — the production process shape
+    /// (`aube-scripts` runs `cmd.exe /d /s /c "<script body>"`). The grandchild arms above
+    /// answer WHAT the shell can do; this one answers whether the shell can be the confined
+    /// program at all, which is a different question and the one production actually asks.
+    ///
+    /// UNBOUNDED BY CONSTRUCTION, hence last: `apply` spawns and waits synchronously in this
+    /// process, so a hang is only visible as the watchdog's `watchdog-stalled-at` line.
+    fn shell_direct_launch(fails: &mut u32) {
+        let f = Fixture::new("shd");
+        let cmd_exe =
+            PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()))
+                .join(r"System32\cmd.exe");
+        if !cmd_exe.is_file() {
+            println!("  fact:shell-direct-cmd-present=false");
+            return;
+        }
+        let out = f.work.join("direct.txt");
+        std::fs::write(
+            f.work.join("direct.cmd"),
+            "@echo off\r\n>>\"%~1\" echo alive=1\r\n>>\"%~1\" echo cwd=%CD%\r\n>>\"%~1\" echo done=1\r\n",
+        )
+        .unwrap();
+        let policy = jail_shaped(
+            &f,
+            vec![read_rule(&cmd_exe)],
+            &[(
+                "NODE_OPTIONS",
+                nub_sandbox::windows_build_jail_node_options(),
+            )],
+        );
+        let argv = vec![
+            "/d".to_string(),
+            "/s".to_string(),
+            "/c".to_string(),
+            format!(
+                "\"{}\" \"{}\"",
+                f.work.join("direct.cmd").display(),
+                out.display()
+            ),
+        ];
+        breadcrumb("shell_direct_launch");
+        flush();
+        let spec = CommandSpec::new(cmd_exe.as_os_str())
+            .args(argv)
+            .cwd(f.work.as_path());
+        let outcome = apply(&policy, spec).map(|p| p.status());
+        let code = match outcome {
+            Ok(Ok(status)) => format!("EXITED code={:?}", status.code()),
+            Ok(Err(error)) => format!("LAUNCH-FAILED {error}"),
+            Err(degradation) => format!("POLICY-REJECTED {degradation:?}"),
+        };
+        let transcript = std::fs::read_to_string(&out).unwrap_or_default();
+        println!("  fact:shell-direct-outer={code}");
+        println!(
+            "  fact:shell-direct-transcript={}",
+            if transcript.trim().is_empty() {
+                "EMPTY".to_string()
+            } else {
+                transcript.trim().replace(['\r', '\n'], " | ")
+            }
+        );
+        let results = shell_results(&transcript);
+        report(
+            fails,
+            "shell-direct-cmd-is-the-confined-program",
+            line(&results, "alive") == "1" && line(&results, "done") == "1",
+            &format!(
+                "alive={} done={} cwd={} outer={code}",
+                line(&results, "alive"),
+                line(&results, "done"),
+                line(&results, "cwd")
+            ),
+        );
+    }
+
     // ── the probe ────────────────────────────────────────────────────────────────────
 
     pub fn probe_main() -> i32 {
@@ -2028,6 +2878,18 @@ try {{
 
         step("stdio_shim");
         stdio_shim(&mut fails, node.as_path());
+
+        // THE SHELLS. Placed after everything that can be answered without them, because a
+        // shell that hangs can only be caught by the watchdog, which ends the run — so an
+        // earlier group must never sit behind this one.
+        step("shell_tools");
+        shell_tools(&mut fails, node.as_path());
+
+        // LAST, deliberately: `cmd.exe` as the AppContainer child ITSELF, which is the shape
+        // `aube-scripts` uses. `apply` owns spawn+wait, so a hang here is a watchdog exit — and
+        // nothing after it would be measured.
+        step("shell_direct_launch");
+        shell_direct_launch(&mut fails);
         step("done");
 
         if fails == 0 {
