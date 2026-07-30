@@ -36,7 +36,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail};
 use rolldown::plugin::{
@@ -154,6 +154,43 @@ pub struct FileAsset {
     pub bytes: Vec<u8>,
 }
 
+/// The assets one build collected, keyed by the payload name each takes.
+///
+/// SHARED by every path that embeds a file — this module's `file` loader and the
+/// `new URL(…, import.meta.url)` rewrite in [`crate::compile::bundle`] — so one
+/// file reached both ways dedupes to a single payload entry instead of shipping
+/// twice, and both paths inherit the same naming and the same flat layout.
+#[derive(Debug, Default)]
+pub struct Assets(Mutex<BTreeMap<String, Vec<u8>>>);
+
+impl Assets {
+    /// Record `bytes` under the payload name `source` earns, and return that name
+    /// for the emitting code to reference.
+    pub fn add(&self, source: &Path, bytes: Vec<u8>) -> Result<String> {
+        let name = asset_name(source, &bytes);
+        // A silent drop here would ship a chunk naming a file that is not in the
+        // payload — a runtime ENOENT with nothing to attribute it to.
+        self.0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the asset collector was poisoned by an earlier panic"))?
+            .insert(name.clone(), bytes);
+        Ok(name)
+    }
+
+    /// Every asset this build emitted, in a deterministic order — `app_sha256`
+    /// hashes the payload in order, so a nondeterministic one would re-key the
+    /// extraction dir on every compile of identical inputs.
+    pub fn take(&self) -> Vec<FileAsset> {
+        self.0
+            .lock()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, bytes)| FileAsset { name, bytes })
+            .collect()
+    }
+}
+
 /// Rolldown plugin implementing `file`: emit the bytes as a sibling of the
 /// chunks, and evaluate the import to that sibling's ABSOLUTE path at runtime.
 ///
@@ -169,14 +206,14 @@ pub struct FilePlugin {
     /// its doc comment. The loader's NAME is kept, not just which family it is
     /// in, so [`FilePlugin::case_mismatch`] can suggest the flag verbatim.
     by_ext: BTreeMap<String, &'static str>,
-    collected: Mutex<BTreeMap<String, Vec<u8>>>,
+    collected: Arc<Assets>,
     /// Hints for imports whose extension is mapped only in another case. Kept
     /// here rather than raised from the hook — see the `load` implementation.
     case_hints: Mutex<std::collections::BTreeSet<String>>,
 }
 
 impl FilePlugin {
-    pub fn new(loaders: &Loaders) -> Self {
+    pub fn new(loaders: &Loaders, collected: Arc<Assets>) -> Self {
         let mut by_ext: BTreeMap<String, &'static str> = loaders
             .module_types
             .iter()
@@ -185,7 +222,7 @@ impl FilePlugin {
         by_ext.extend(loaders.file.iter().map(|ext| (ext.clone(), "file")));
         Self {
             by_ext,
-            collected: Mutex::new(BTreeMap::new()),
+            collected,
             case_hints: Mutex::new(std::collections::BTreeSet::new()),
         }
     }
@@ -197,19 +234,6 @@ impl FilePlugin {
             .lock()
             .map(|h| h.iter().cloned().collect())
             .unwrap_or_default()
-    }
-
-    /// Every asset this build emitted, in a deterministic order — `app_sha256`
-    /// hashes the payload in order, so a nondeterministic one would re-key the
-    /// extraction dir on every compile of identical inputs.
-    pub fn take(&self) -> Vec<FileAsset> {
-        self.collected
-            .lock()
-            .map(|mut g| std::mem::take(&mut *g))
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(name, bytes)| FileAsset { name, bytes })
-            .collect()
     }
 
     /// Whether the `file` loader owns `id`.
@@ -239,7 +263,7 @@ impl FilePlugin {
     /// byte-oriented loaders (`base64`, `binary`, `dataurl`) need bytes. One rule
     /// for both families is worth more than a convenience that holds in one;
     /// an uppercase extension is spelled `--loader .PNG=file`.
-    fn claims(&self, id: &str) -> bool {
+    pub fn claims(&self, id: &str) -> bool {
         id.match_indices('.')
             .find_map(|(i, _)| self.by_ext.get(&id[i + 1..]))
             .is_some_and(|loader| *loader == "file")
@@ -378,16 +402,7 @@ impl Plugin for FilePlugin {
             }
             let bytes = std::fs::read(&id)
                 .map_err(|e| anyhow::anyhow!("reading the imported asset {id}: {e}"))?;
-            let name = asset_name(Path::new(&id), &bytes);
-            let code = file_module(&name);
-            // A silent drop here would ship a chunk naming a file that is not in
-            // the payload — a runtime ENOENT with nothing to attribute it to.
-            self.collected
-                .lock()
-                .map_err(|_| {
-                    anyhow::anyhow!("the asset collector was poisoned by an earlier panic")
-                })?
-                .insert(name, bytes);
+            let code = file_module(&self.collected.add(Path::new(&id), bytes)?);
             Ok(Some(HookLoadOutput {
                 code: code.into(),
                 module_type: Some(ModuleType::Js),
@@ -454,7 +469,7 @@ mod tests {
     // depending on which loader family the value named.
     #[test]
     fn a_multi_dot_extension_is_claimed_the_way_rolldown_matches_it() {
-        let p = FilePlugin::new(&plan(&[".tar.gz=file".into()]).expect("valid"));
+        let p = FilePlugin::new(&plan(&[".tar.gz=file".into()]).expect("valid"), Arc::default());
         assert!(p.claims("/proj/bundle.tar.gz"));
         assert!(!p.claims("/proj/notes.gz"), "only .tar.gz was mapped");
     }
@@ -466,7 +481,7 @@ mod tests {
     #[test]
     fn the_more_specific_mapping_wins_across_loader_families() {
         let loaders = plan(&[".gz=file".into(), ".tar.gz=text".into()]).expect("valid");
-        let p = FilePlugin::new(&loaders);
+        let p = FilePlugin::new(&loaders, Arc::default());
         assert!(
             !p.claims("/proj/bundle.tar.gz"),
             "the text mapping is more specific and must win"
@@ -477,7 +492,7 @@ mod tests {
     // A path component containing a dot must not be read as an extension.
     #[test]
     fn a_dot_in_a_directory_name_does_not_decide_the_loader() {
-        let p = FilePlugin::new(&plan(&[]).expect("valid"));
+        let p = FilePlugin::new(&plan(&[]).expect("valid"), Arc::default());
         assert!(p.claims("/home/user.v2/app/icon.png"));
         assert!(!p.claims("/home/user.v2/app/main.ts"));
     }
@@ -508,7 +523,7 @@ mod tests {
     // the mapped extension is in.
     #[test]
     fn a_case_mismatched_extension_names_the_flag_that_fixes_it() {
-        let p = FilePlugin::new(&plan(&[]).expect("valid"));
+        let p = FilePlugin::new(&plan(&[]).expect("valid"), Arc::default());
         assert_eq!(p.case_mismatch("/proj/PHOTO.PNG"), Some(("png", "file")));
         assert_eq!(p.case_mismatch("/proj/PROMPT.MD"), Some(("md", "text")));
         assert_eq!(
@@ -531,7 +546,7 @@ mod tests {
 
     #[test]
     fn extension_matching_is_case_sensitive_in_both_families() {
-        let d = FilePlugin::new(&plan(&[]).expect("valid"));
+        let d = FilePlugin::new(&plan(&[]).expect("valid"), Arc::default());
         assert!(d.claims("/proj/photo.png"));
         assert!(
             !d.claims("/proj/PHOTO.PNG"),
@@ -542,7 +557,7 @@ mod tests {
 
         let upper = plan(&[".PNG=file".into()]).expect("valid");
         assert!(
-            FilePlugin::new(&upper).claims("/proj/PHOTO.PNG"),
+            FilePlugin::new(&upper, Arc::default()).claims("/proj/PHOTO.PNG"),
             "naming the extension as written is how an uppercase one is mapped"
         );
     }

@@ -320,16 +320,13 @@ fn assemble_app(
         .map(|f| (layout.bundle_path(&f.name), f.bytes.clone()))
         .collect();
 
+    let embedded: std::collections::HashSet<String> = bundled
+        .assets
+        .iter()
+        .map(|f| layout.bundle_path(&f.name))
+        .chain(layout.assets.iter().map(|a| a.rel.clone()))
+        .collect();
     for asset in &layout.assets {
-        // Overwriting a chunk would replace compiled code with whatever the user
-        // pointed at — always a mistake, and silent until the binary runs.
-        if files.iter().any(|(name, _)| *name == asset.rel) {
-            bail!(
-                "--include would overwrite compiled output: {} is also a bundle chunk \
-                 or a loader-emitted asset. Rename the file or drop it from --include.",
-                asset.rel
-            );
-        }
         let bytes = fs::read(&asset.source)
             .with_context(|| format!("reading {}", asset.source.display()))?;
         files.push((asset.rel.clone(), bytes));
@@ -355,6 +352,8 @@ fn assemble_app(
         }
         None => files.push((pkg, br#"{"type":"module"}"#.to_vec())),
     }
+
+    reject_colliding_names(&files, &embedded, target)?;
 
     // The launcher refuses any payload name that could escape its extraction dir.
     // Names are partly user-derived since `--include`, so check the SAME predicate
@@ -384,6 +383,62 @@ fn assemble_app(
         }
     }
     Ok(files)
+}
+
+/// Refuse two payload entries the target's filesystem cannot keep apart.
+///
+/// The launcher writes entries in payload order, so a later one with the same
+/// name silently REPLACES an earlier one — and on a case-insensitive filesystem
+/// "the same name" includes a case variant. `--include Main.js` alongside an
+/// emitted chunk `main.js` therefore ships a binary whose compiled code has been
+/// overwritten by the asset, with nothing failing at build time. Same class as
+/// the trailing dot/space that Win32 strips (see `is_safe_windows_component` in
+/// nub-core), one level up: there the NAME is unusable, here the PAIR is.
+///
+/// Case folding is applied only where the TARGET folds, never the host — Win32
+/// always, and macOS because APFS is formatted case-insensitive by default. On
+/// Linux the two names are genuinely two files, so nothing is rejected and no
+/// working build is broken.
+fn reject_colliding_names(
+    files: &AppFiles,
+    embedded: &std::collections::HashSet<String>,
+    target: &TargetPlatform,
+) -> Result<()> {
+    let folds = matches!(target.os, TargetOs::Win32 | TargetOs::Darwin);
+    let mut seen: std::collections::HashMap<String, &str> =
+        std::collections::HashMap::with_capacity(files.len());
+    for (name, _) in files {
+        let key = if folds { name.to_lowercase() } else { name.clone() };
+        let Some(prev) = seen.insert(key, name.as_str()) else {
+            continue;
+        };
+        // Which side is the user's file is the whole fix: the other side is a
+        // chunk or the generated manifest, and neither has a spelling to change.
+        let describe = |n: &str| {
+            if embedded.contains(n) {
+                "an embedded file"
+            } else {
+                "compiled output"
+            }
+        };
+        let why = if prev == name {
+            String::new()
+        } else {
+            format!(
+                "\n\x20\x20The names differ only in case, and {}'s filesystem does not \
+                 distinguish them.",
+                target.triple()
+            )
+        };
+        bail!(
+            "two files would collide in the compiled binary: {prev:?} ({}) and {name:?} ({}), \
+             so one would overwrite the other where it is extracted.{why}\n\
+             \x20\x20Rename one of them, or drop it from --include.",
+            describe(prev),
+            describe(name)
+        );
+    }
+    Ok(())
 }
 
 /// `--sourcemap=external` maps land BESIDE the executable, deliberately outside
@@ -986,6 +1041,83 @@ mod tests {
         let linux = TargetPlatform::parse("linux-x64").unwrap();
         assemble_app(&bundled, &layout, &linux)
             .expect("a backslash name is one legal component on a Unix target");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A one-chunk bundle plus one `--include`d file named `rel`, which is the
+    /// whole setup both collision tests need.
+    fn app_with_included(dir: &Path, rel: &str) -> (bundle::BundleResult, assets::Layout) {
+        let source = dir.join("included");
+        fs::write(&source, b"asset").unwrap();
+        (
+            bundle::BundleResult {
+                entry: "main.js".into(),
+                files: vec![bundle::BundledFile {
+                    name: "main.js".into(),
+                    bytes: b"export {}".to_vec(),
+                }],
+                detached_maps: Vec::new(),
+                assets: Vec::new(),
+            },
+            assets::Layout {
+                entry_prefix: String::new(),
+                assets: vec![assets::Asset {
+                    source,
+                    rel: rel.to_string(),
+                }],
+            },
+        )
+    }
+
+    /// A case-only collision is invisible on the build host and destroys the
+    /// binary on a machine whose filesystem folds: the asset lands ON the chunk at
+    /// extraction and the compiled code is simply gone. Refused where the TARGET
+    /// folds — Win32 always, macOS because APFS defaults to case-insensitive —
+    /// and allowed on Linux, where the two names really are two files.
+    #[test]
+    fn a_case_only_collision_is_refused_exactly_where_the_target_folds() {
+        let dir = fresh_dir("casefold");
+        let (bundled, layout) = app_with_included(&dir, "Main.js");
+
+        for triple in ["win32-x64", "darwin-arm64"] {
+            let target = TargetPlatform::parse(triple).unwrap();
+            let Err(err) = assemble_app(&bundled, &layout, &target) else {
+                panic!("{triple} folds case and must refuse the pair");
+            };
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("\"Main.js\"") && msg.contains("\"main.js\""),
+                "{triple}: both colliding paths must be named: {msg}"
+            );
+            assert!(
+                msg.contains("an embedded file") && msg.contains("compiled output"),
+                "{triple}: the message must say which side is the asset: {msg}"
+            );
+            assert!(
+                msg.contains(triple),
+                "{triple}: the target whose filesystem folds must be named: {msg}"
+            );
+        }
+
+        let linux = TargetPlatform::parse("linux-x64").unwrap();
+        assemble_app(&bundled, &layout, &linux)
+            .expect("Main.js and main.js are two distinct files on Linux");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The exact-name case predates the fold-aware one and must survive it: an
+    /// `--include` whose name IS a chunk's replaces compiled code on every target.
+    #[test]
+    fn an_include_that_shadows_a_chunk_is_refused_on_every_target() {
+        let dir = fresh_dir("exactdup");
+        let (bundled, layout) = app_with_included(&dir, "main.js");
+        for triple in ["linux-x64", "win32-x64", "darwin-arm64"] {
+            let target = TargetPlatform::parse(triple).unwrap();
+            let Err(err) = assemble_app(&bundled, &layout, &target) else {
+                panic!("{triple} must refuse an exact duplicate");
+            };
+            assert!(format!("{err:#}").contains("collide"), "{triple}: {err:#}");
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 
