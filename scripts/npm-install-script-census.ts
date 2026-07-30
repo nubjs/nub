@@ -192,6 +192,7 @@ const writeCache = (stage: string, key: string, value: unknown): void => {
 let fetchCount = 0;
 let retryCount = 0;
 let throttleCount = 0;
+let affirmativeNoData = 0;
 const failures: Array<{ url: string; status: number | string }> = [];
 
 // ADAPTIVE PER-HOST PACING. api.npmjs.org 429s hard at concurrency 10 — measured
@@ -554,10 +555,18 @@ const stageWeekly = async (names: string[], label: string): Promise<Map<string, 
   await pmap(batches, CONCURRENCY, async (batch) => {
     const r = await getJSON(POINT + batch.join(","));
     if (r.ok) {
+      // A `null` entry inside a SUCCESSFUL bulk response is npm affirmatively
+      // reporting no data for that name — categorically different from a failed
+      // request, which must never be cached (see the zero-caching note below).
+      // Verified: of 14 sampled names cached as 0, all 14 came back 404 or a real
+      // 0 on an individual query, with the sweep paused so the probe was not
+      // contending with it. They are unpublished or removed packages that
+      // ecosyste.ms still indexes — largely typosquat spam in the deep tail.
       const body = r.body as Record<string, { downloads?: number } | null>;
       for (const n of batch) {
         const e = body[n];
         if (e) noteWindow(e);
+        else affirmativeNoData++;
         record(n, e && typeof e.downloads === "number" ? e.downloads : 0);
       }
     } else if (r.status === 404 || (typeof r.status === "number" && r.status < 500)) {
@@ -990,6 +999,7 @@ const main = async (): Promise<void> => {
       requests: fetchCount,
       retries: retryCount,
       throttle_429s: throttleCount,
+      affirmative_no_data_entries: affirmativeNoData,
       final_host_pacing_ms: Object.fromEntries(paceDelay),
       fetch_failures: failures.length,
       fetch_failure_sample: failures.slice(0, 40),
