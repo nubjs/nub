@@ -100,9 +100,39 @@ pub struct PayloadView<'a> {
     pub node_blob: &'a [u8],
 }
 
-/// Whether a payload file name is safe to join under the extraction dir: every
-/// component a plain name — no root/prefix, no `..`, no leading separator, no `.`.
-/// Nested `a/b.js` is allowed; anything that could escape is not.
+/// Whose path rules a payload name has to survive.
+///
+/// The machine that BUILDS an artifact and the machine that RUNS it are different
+/// platforms under `--platform`, and `std::path` only ever parses the rules of the
+/// platform it was compiled for. `a\..\..\x` is one ordinary filename on Unix and
+/// a traversal on Windows, so a Unix host cross-compiling `win32-*` must judge
+/// names by the TARGET's rules or it bakes a name its own launcher will refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameRules {
+    Unix,
+    Windows,
+}
+
+impl NameRules {
+    /// The rules of the platform this binary runs on — what the launcher uses,
+    /// since a launcher only ever executes on the target it was built for.
+    pub const HOST: Self = if cfg!(windows) {
+        Self::Windows
+    } else {
+        Self::Unix
+    };
+}
+
+/// Whether a payload file name is safe to join under the extraction dir on the
+/// HOST. See [`is_safe_relative_name_for`]; this is the launcher's spelling.
+pub fn is_safe_relative_name(name: &str) -> bool {
+    is_safe_relative_name_for(NameRules::HOST, name)
+}
+
+/// Whether a payload file name is safe to join under the extraction dir under
+/// `rules`: every component a plain name — no root/prefix, no `..`, no `.`, no
+/// leading/trailing/doubled separator. Nested `a/b.js` is allowed; anything that
+/// could escape, name a device, or collide after the platform normalizes it is not.
 ///
 /// Lives here because BOTH sides of the container must agree. The launcher
 /// enforces it while extracting (a corrupted or hostile section must not write
@@ -110,12 +140,77 @@ pub struct PayloadView<'a> {
 /// `--include` derives payload names from user-supplied paths, a name the
 /// launcher would reject has to fail the BUILD rather than ship an executable
 /// that aborts on the user's machine.
-pub fn is_safe_relative_name(name: &str) -> bool {
-    use std::path::{Component, Path};
-    !name.is_empty()
-        && Path::new(name)
-            .components()
-            .all(|c| matches!(c, Component::Normal(_)))
+///
+/// Parsed by hand rather than through `std::path` precisely because `std::path`
+/// is fixed to the host at compile time; see [`NameRules`].
+pub fn is_safe_relative_name_for(rules: NameRules, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let separators: &[char] = match rules {
+        NameRules::Unix => &['/'],
+        // Win32 resolves `\` and `/` identically, so a name is split on both
+        // before any component is judged — this is the whole cross-compile hole.
+        NameRules::Windows => &['/', '\\'],
+    };
+    for part in name.split(separators) {
+        // Empty = a leading, trailing, or doubled separator: an absolute path, a
+        // UNC prefix, or a spelling the two platforms disagree about.
+        if part.is_empty() || part == "." || part == ".." || part.contains('\0') {
+            return false;
+        }
+        if rules == NameRules::Windows && !is_safe_windows_component(part) {
+            return false;
+        }
+    }
+    true
+}
+
+/// The Win32-only half: names that are not traversals but still do not denote the
+/// file the payload says they do.
+fn is_safe_windows_component(part: &str) -> bool {
+    // Win32 strips trailing dots and spaces, so `main.js. ` and `main.js` open the
+    // SAME file. Two payload entries differing only there pass the build's
+    // distinct-name check and then overwrite each other at extraction — including
+    // an `--include`d file landing on top of a compiled chunk.
+    if part.ends_with('.') || part.ends_with(' ') {
+        return false;
+    }
+    // `:` opens a drive or an NTFS alternate data stream; the rest are outright
+    // illegal in a Win32 name, so the launcher's write fails on the user's machine
+    // with nothing pointing back at the build that caused it.
+    if part.contains(|c: char| {
+        matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') || (c as u32) < 0x20
+    }) {
+        return false;
+    }
+    // A reserved DOS device resolves to the device at ANY directory depth and
+    // through any extension — writing `CON.txt` writes to the console.
+    !is_dos_device(part.split('.').next().unwrap_or(part))
+}
+
+fn is_dos_device(stem: &str) -> bool {
+    // Win32's device matcher strips trailing spaces off the segment before
+    // comparing, so `con .txt` is the console as much as `CON.txt` is — and the
+    // whole-component trailing-space rule above cannot see a space that sits
+    // before the extension.
+    let upper = stem.trim_end_matches(' ').to_ascii_uppercase();
+    if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
+        return true;
+    }
+    // Microsoft's reserved list in full, superscripts included. Erring wide costs
+    // nothing — no real project names a file `COM0` — while erring narrow ships a
+    // binary that writes to a device.
+    let Some(rest) = upper
+        .strip_prefix("COM")
+        .or_else(|| upper.strip_prefix("LPT"))
+    else {
+        return false;
+    };
+    matches!(
+        rest,
+        "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+    )
 }
 
 /// Encode a payload into the container blob written to the Mach-O section.
@@ -358,6 +453,14 @@ impl TargetPlatform {
         }
     }
 
+    /// The path rules a payload name must survive once this target extracts it.
+    pub fn name_rules(&self) -> NameRules {
+        match self.os {
+            TargetOs::Win32 => NameRules::Windows,
+            _ => NameRules::Unix,
+        }
+    }
+
     /// The executable suffix for this target (`.exe` on Windows).
     pub fn exe_suffix(&self) -> &'static str {
         match self.os {
@@ -502,5 +605,94 @@ mod tests {
         let host = TargetPlatform::host().expect("a dev/CI host is always a supported platform");
         assert!(SUPPORTED_TRIPLES.contains(&host.triple().as_str()));
         assert!(host.is_host());
+    }
+
+    /// The gate runs on the BUILD machine, so both target families must be
+    /// judgeable from either host — these cases all run on every CI platform.
+    #[test]
+    fn a_payload_name_is_judged_by_the_targets_path_rules_not_the_hosts() {
+        use NameRules::{Unix, Windows};
+
+        for rules in [Unix, Windows] {
+            for ok in ["main.js", "chunk-abc.js", "src/nested/chunk.js", "a.b.c"] {
+                assert!(is_safe_relative_name_for(rules, ok), "{rules:?} {ok:?}");
+            }
+            for bad in [
+                "",
+                ".",
+                "..",
+                "./main.js",
+                "../evil",
+                "a/../../evil",
+                "/etc/passwd",
+                "a//b",
+                "a/",
+                "a/\0b",
+            ] {
+                assert!(!is_safe_relative_name_for(rules, bad), "{rules:?} {bad:?}");
+            }
+        }
+
+        // The cross-compile hole: ordinary Unix filenames, traversals on Windows.
+        for backslash in ["a\\..\\..\\x", "..\\evil", "C:\\Windows\\x", "\\etc\\x"] {
+            assert!(
+                is_safe_relative_name_for(Unix, backslash),
+                "{backslash:?} is a legal single-component Unix filename"
+            );
+            assert!(
+                !is_safe_relative_name_for(Windows, backslash),
+                "{backslash:?} escapes under Win32 path rules"
+            );
+        }
+
+        // Win32-only hazards that are not traversals: a name Win32 normalizes
+        // onto another payload entry, an illegal character, a drive/ADS colon,
+        // and a reserved device at any depth or extension.
+        for win_only in [
+            "main.js. ",
+            "main.js.",
+            "main.js ",
+            "a<b",
+            "a|b",
+            "C:x",
+            "con",
+            "assets/CON.txt",
+            "com1",
+            "COM0",
+            "LPT9.dat",
+            // Win32 strips the trailing space off the segment before matching
+            // the device, so the space does not make this an ordinary file.
+            "con .txt",
+            "aux/data.json",
+        ] {
+            assert!(
+                is_safe_relative_name_for(Unix, win_only),
+                "{win_only:?} is an ordinary name on a Unix target"
+            );
+            assert!(
+                !is_safe_relative_name_for(Windows, win_only),
+                "{win_only:?} must not be embedded for a Windows target"
+            );
+        }
+        // Not devices: a longer name merely starts with the prefix.
+        for ok in [
+            "COM10",
+            "console.js",
+            "nulls.json",
+            "PROGRA~1",
+            "..a",
+            "a..b",
+        ] {
+            assert!(is_safe_relative_name_for(Windows, ok), "{ok:?}");
+        }
+    }
+
+    #[test]
+    fn the_target_platform_selects_the_rules() {
+        let rules = |t: &str| TargetPlatform::parse(t).unwrap().name_rules();
+        assert_eq!(rules("win32-x64"), NameRules::Windows);
+        assert_eq!(rules("win32-arm64"), NameRules::Windows);
+        assert_eq!(rules("linux-x64-musl"), NameRules::Unix);
+        assert_eq!(rules("darwin-arm64"), NameRules::Unix);
     }
 }
