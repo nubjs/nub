@@ -1,0 +1,16 @@
+[package]
+name = "silo-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Own workspace root: this is a throwaway probe, not a nub crate, and it must not
+# inherit the repo's profiles or be dragged into `cargo build` at the root.
+[workspace]
+
+[[bin]]
+name = "silo-probe"
+path = "src/main.rs"
+
+[profile.release]
+debug = false
