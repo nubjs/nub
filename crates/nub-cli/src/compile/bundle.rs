@@ -29,6 +29,7 @@
 //! successfully" mean the output is at least loadable.
 
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -46,12 +47,13 @@ use rolldown::plugin::{
 use rolldown::{BundlerBuilder, BundlerOptions, InputItem};
 use rolldown_common::bundler_options::{BundlerTransformOptions, Either, JsxOptions};
 use rolldown_common::{
-    InnerOptions, IsExternal, ModuleType, Output, OutputFormat, Platform, RawMinifyOptions,
-    ResolveOptions, SourceMapType, StrOrBytes, TreeshakeOptions, TsConfig,
+    EmittedChunk, InnerOptions, IsExternal, ModuleType, Output, OutputFormat, Platform,
+    RawMinifyOptions, ResolveOptions, SourceMapType, StrOrBytes, TreeshakeOptions, TsConfig,
 };
 use rolldown_error::{BuildDiagnostic, DiagnosticOptions, EventKind};
 use rolldown_utils::indexmap::FxIndexMap;
 use rolldown_utils::url::clean_url;
+use sha2::{Digest, Sha256};
 
 use super::loaders;
 
@@ -216,6 +218,7 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
     let new_urls = Arc::new(NewUrlAssets {
         collected: Arc::clone(&collected),
         files: Arc::clone(&files_plugin),
+        workers: Mutex::new(BTreeSet::new()),
     });
     // `CjsPathGlobals` runs LAST so the scanners ahead of it see the module as its
     // author wrote it. Rolldown feeds each transform the previous one's output, so
@@ -271,10 +274,13 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
             bytes: a.bytes,
         })
         .collect();
+    // Rolldown marks an emitted worker chunk `is_entry` exactly like the program's
+    // own, so the filenames are the only thing telling them apart here.
+    let worker_names = new_urls.worker_names();
     for asset in &output.assets {
         match asset {
             Output::Chunk(c) => {
-                if c.is_entry {
+                if c.is_entry && !worker_names.contains(c.filename.as_str()) {
                     entry = Some(c.filename.to_string());
                 }
                 files.push(BundledFile {
@@ -743,6 +749,19 @@ impl<'a> oxc_ast_visit::Visit<'a> for PathGlobalScan {
 /// over: the same expression is how a program names a file it intends to WRITE,
 /// and a computed URL is routinely on a branch the artifact never takes. The same
 /// reasoning covers a specifier resolving to nothing on the build machine.
+///
+/// A `new Worker(new URL(…), …)` is the ONE shape that must NOT be embedded
+/// verbatim, and it is handled here rather than in a plugin of its own because
+/// the two are the same scan: the worker's URL is an ordinary asset reference
+/// syntactically, and only its enclosing `new Worker` tells them apart. What the
+/// runtime does with the two differs completely — an asset is opened as DATA,
+/// while a worker entry is EXECUTED — so a verbatim copy of a worker entry is
+/// never right: it arrives untranspiled if it was TypeScript, and its imports
+/// resolve against the extracted app dir, where neither the source tree's
+/// `node_modules` nor its tsconfig path aliases exist. That failure is invisible
+/// at build time and lands as `ERR_MODULE_NOT_FOUND` inside the worker thread on
+/// the user's machine. Emitting it as a real CHUNK is what makes the worker carry
+/// its own dependency graph, and it is the behavior Bun and Vite already have.
 #[derive(Debug)]
 struct NewUrlAssets {
     collected: Arc<loaders::Assets>,
@@ -751,9 +770,14 @@ struct NewUrlAssets {
     /// one would re-resolve an already-hashed asset name against the original
     /// file's directory.
     files: Arc<loaders::FilePlugin>,
+    /// Filenames of the worker chunks this build emitted. Read back after the
+    /// bundle to keep them out of entry detection — Rolldown marks an emitted
+    /// chunk `is_entry`, so without this a worker would be mistaken for the
+    /// program's own entry and the launcher would boot the wrong module.
+    workers: Mutex<BTreeSet<String>>,
 }
 
-/// One `new URL(<literal>, import.meta.url)` whose file this build can embed.
+/// One `new URL(<literal>, import.meta.url)` this build can act on.
 #[derive(Debug, Clone)]
 struct NewUrlEdit {
     /// Byte range of the FIRST argument within the module's own source.
@@ -761,6 +785,67 @@ struct NewUrlEdit {
     end: usize,
     /// The file on the build machine the URL names.
     source: PathBuf,
+    /// This URL is the first argument of a `new Worker(…)`, so the file is a
+    /// module to BUNDLE, not data to copy.
+    worker: bool,
+}
+
+impl NewUrlAssets {
+    /// Bundle `source` as its own entry chunk and return the filename to point
+    /// the `new URL(…)` at.
+    ///
+    /// The name is pinned rather than left to Rolldown's hash so it is known HERE,
+    /// while the referencing module is still being transformed — `get_file_name`
+    /// can only answer once chunks exist, which is after every rewrite has already
+    /// had to happen. Hashing the absolute path keeps two same-named workers from
+    /// different directories apart, and makes repeat compiles of identical input
+    /// name the chunk identically, which `app_sha256` needs to key the extraction
+    /// dir stably.
+    fn emit_worker(&self, ctx: &PluginContext, source: &Path) -> Result<String> {
+        let stem: String = source
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let stem = if stem.is_empty() {
+            "worker".to_string()
+        } else {
+            stem
+        };
+        let hash = format!("{:x}", Sha256::digest(source.to_string_lossy().as_bytes()));
+        let name = format!("{stem}-{}.js", &hash[..8]);
+        // Idempotent by name: one worker referenced from two modules must emit
+        // once, or Rolldown sees two chunks claiming the same filename.
+        let fresh = self
+            .workers
+            .lock()
+            .map_err(|_| anyhow!("the worker collector was poisoned by an earlier panic"))?
+            .insert(name.clone());
+        if fresh {
+            ctx.emit_chunk(EmittedChunk {
+                name: None,
+                file_name: Some(name.as_str().into()),
+                id: source.to_string_lossy().into_owned(),
+                importer: None,
+                preserve_entry_signatures: None,
+            })
+            .map_err(|e| anyhow!("bundling the worker entry {}: {e}", source.display()))?;
+        }
+        Ok(name)
+    }
+
+    /// The worker chunk filenames this build emitted.
+    fn worker_names(&self) -> BTreeSet<String> {
+        self.workers.lock().map(|g| g.clone()).unwrap_or_default()
+    }
 }
 
 impl Plugin for NewUrlAssets {
@@ -774,7 +859,7 @@ impl Plugin for NewUrlAssets {
 
     fn transform(
         &self,
-        _ctx: SharedTransformPluginContext,
+        ctx: SharedTransformPluginContext,
         args: &HookTransformArgs<'_>,
     ) -> impl std::future::Future<Output = HookTransformReturn> + Send {
         // Real JavaScript sources only. A `text`/`json` module's "code" IS the
@@ -798,9 +883,14 @@ impl Plugin for NewUrlAssets {
             };
             let mut named = Vec::with_capacity(edits.len());
             for edit in edits {
-                let bytes = std::fs::read(&edit.source)
-                    .map_err(|e| anyhow!("reading {} for new URL(): {e}", edit.source.display()))?;
-                let name = self.collected.add(&edit.source, bytes)?;
+                let name = if edit.worker {
+                    self.emit_worker(&ctx, &edit.source)?
+                } else {
+                    let bytes = std::fs::read(&edit.source).map_err(|e| {
+                        anyhow!("reading {} for new URL(): {e}", edit.source.display())
+                    })?;
+                    self.collected.add(&edit.source, bytes)?
+                };
                 named.push((edit, name));
             }
             Ok(Some(HookTransformOutput {
@@ -865,11 +955,24 @@ fn scan_new_urls(id: &str, source: &str) -> Vec<NewUrlEdit> {
     struct Visitor {
         dir: PathBuf,
         found: Vec<NewUrlEdit>,
+        /// Starts of the `new URL(…)` spans an enclosing `new Worker(…)` already
+        /// took. The walk reaches the outer expression first, so claiming there is
+        /// what stops the inner one from ALSO being recorded as a data asset — and
+        /// embedding it both ways would put the same file in the payload twice
+        /// under two names, one of them unrunnable.
+        claimed: std::collections::HashSet<u32>,
     }
 
     impl<'a> Visit<'a> for Visitor {
         fn visit_new_expression(&mut self, it: &NewExpression<'a>) {
-            if let Some(edit) = self.embeddable(it) {
+            if let Some(url) = worker_url_argument(it) {
+                if let Some(edit) = self.embeddable(url, true) {
+                    self.claimed.insert(url.span().start);
+                    self.found.push(edit);
+                }
+            } else if !self.claimed.contains(&it.span().start)
+                && let Some(edit) = self.embeddable(it, false)
+            {
                 self.found.push(edit);
             }
             walk::walk_new_expression(self, it);
@@ -877,7 +980,7 @@ fn scan_new_urls(id: &str, source: &str) -> Vec<NewUrlEdit> {
     }
 
     impl Visitor {
-        fn embeddable(&self, expr: &NewExpression<'_>) -> Option<NewUrlEdit> {
+        fn embeddable(&self, expr: &NewExpression<'_>, worker: bool) -> Option<NewUrlEdit> {
             let Expression::Identifier(callee) = &expr.callee else {
                 return None;
             };
@@ -894,6 +997,7 @@ fn scan_new_urls(id: &str, source: &str) -> Vec<NewUrlEdit> {
                 start: span.start as usize,
                 end: span.end as usize,
                 source,
+                worker,
             })
         }
 
@@ -925,10 +1029,32 @@ fn scan_new_urls(id: &str, source: &str) -> Vec<NewUrlEdit> {
     let mut visitor = Visitor {
         dir,
         found: Vec::new(),
+        claimed: std::collections::HashSet::new(),
     };
     visitor.visit_program(&parsed.program);
     visitor.found.sort_by_key(|e| e.start);
     visitor.found
+}
+
+/// The `new URL(…)` a `new Worker(…)` is constructed from, if that is the shape.
+///
+/// Only the INLINE form is recognized — `new Worker(new URL("./w.ts",
+/// import.meta.url))`. A worker whose URL was computed into a variable first is
+/// left alone, on the same reasoning the rest of this scan follows: nub rewrites
+/// what it can prove, and proving a variable's value needs data flow this pass
+/// deliberately does not do. That is the shape every bundler with worker support
+/// requires too, and it is what opencode, Vite's docs, and MDN all write.
+fn worker_url_argument<'a>(expr: &'a NewExpression<'a>) -> Option<&'a NewExpression<'a>> {
+    let Expression::Identifier(callee) = &expr.callee else {
+        return None;
+    };
+    if callee.name != "Worker" {
+        return None;
+    }
+    match expr.arguments.first()?.as_expression()? {
+        Expression::NewExpression(inner) => Some(inner),
+        _ => None,
+    }
 }
 
 /// `import.meta.url`, exactly — the only base whose resolution nub can predict.
