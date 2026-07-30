@@ -41,6 +41,9 @@ public static class Bt
     [StructLayout(LayoutKind.Sequential)]
     struct SECURITY_ATTRIBUTES { public int nLength; public IntPtr lpSecurityDescriptor; public int bInheritHandle; }
 
+    [StructLayout(LayoutKind.Sequential)]
+    struct SID_AND_ATTRIBUTES { public IntPtr Sid; public uint Attributes; }
+
     [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
     static extern int CreateAppContainerProfile(string name, string display, string desc,
         IntPtr caps, uint capCount, out IntPtr sid);
@@ -144,6 +147,19 @@ public static class Bt
     /// the two existing probes keep the byte-identical six-argument call they were measured with.
     public static string LaunchEx(string acSidStr, string exe, string cmdline, string cwd,
         string logPath, uint timeoutMs, bool lpac)
+    {
+        return LaunchCaps(acSidStr, exe, cmdline, cwd, logPath, timeoutMs, lpac, null);
+    }
+
+    /// As `LaunchEx`, plus REQUESTED CAPABILITY SIDS — the half of nub's production launch that no
+    /// arm in this directory reproduced, and the reason a zero-capability arm measures a strictly
+    /// WEAKER jail than the product's. `crates/nub-sandbox/src/backend/windows.rs` writes a
+    /// non-inherited traverse ace where the user holds `WRITE_DAC`, and where it does not (`C:\`,
+    /// `C:\Users`) it REQUESTS the capability Windows already granted on that exact path — `C:\`
+    /// carries `(A;;0x1000a1;;;S-1-15-3-65536-…)`, the same traverse+read-attributes mask. Holding
+    /// the capability buys that access with no ace write and NO ELEVATION.
+    public static string LaunchCaps(string acSidStr, string exe, string cmdline, string cwd,
+        string logPath, uint timeoutMs, bool lpac, string[] capabilitySids)
     {
         IntPtr acSid = IntPtr.Zero;
         IntPtr attrList = IntPtr.Zero;

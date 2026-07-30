@@ -29,12 +29,95 @@ permissions:
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────────────────────
+  # REPRODUCE NUB'S ACTUAL LAUNCH. Every earlier job here launched a BARE AppContainer — zero
+  # capabilities, no ancestor repair, no preload — so their results are facts about raw AppContainer
+  # physics, not about nub. `prod.ps1` adds the three repairs production ships (the harvested
+  # capability sids + the 0x001000a1 traverse aces from `windows.rs`, and the stdio shim as
+  # `--import data:…;base64` on a stamped `NODE_OPTIONS` from `defaults.rs`) and keeps a bare arm in
+  # the same run so a green repaired arm is a measurement rather than an assertion.
+  prod:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Probe — nub's real launch vs a bare AppContainer
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          pwsh -NoLogo -NonInteractive -File tests/win-bypass-traverse/prod.ps1 *>&1 |
+            Tee-Object -FilePath prod.log
+          exit 0
+
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          fail=0
+          need() {
+            if grep -qF "prop:$1=PASS" prod.log 2>/dev/null; then echo "OK   $1"
+            elif grep -qF "prop:$1=FAIL" prod.log 2>/dev/null; then echo "FAIL $1"; fail=1
+            else echo "MISS $1  (property absent)"; fail=1; fi
+          }
+          [ -s prod.log ] || { echo "MISS no output"; exit 1; }
+          grep -qF 'PROD PROBE END' prod.log || { echo "MISS did not run to completion"; fail=1; }
+
+          echo "── the preload gate (nothing below is readable without it) ──"
+          for p in shim-was-active-in-the-prod-arm shim-was-absent-in-the-bare-arm; do need "$p"; done
+
+          echo
+          echo "── controls, and the defects reproducing in the BARE arm ──"
+          for p in baseline-cmd-plain baseline-ps-plain baseline-node-spawn-plain \
+                   bare-arm-reproduces-cmd-defect bare-arm-reproduces-piped-spawn-hang; do need "$p"; done
+
+          echo
+          echo "── does nub's ACTUAL launch repair them, unprivileged? ──"
+          for p in prod-launch-repairs-cmd prod-launch-repairs-cmd-croot prod-launch-repairs-cmd-cd \
+                   prod-launch-repairs-powershell-spawn prod-launch-repairs-piped-spawn \
+                   prod-launch-runs-gyp-configure; do need "$p"; done
+
+          echo
+          echo "── the capability sids the chain offered ──"
+          grep -E '^  fact:(chain|shim/)' prod.log || echo "(none)"
+          echo "── per-op comparison ──"
+          sed -n '/== per-op comparison ==/,/== verdict ==/p' prod.log || true
+
+          echo
+          if [ "$fail" -ne 0 ]; then
+            echo "at least one property did not hold — read the per-op comparison"
+            exit 1
+          fi
+          echo "nub's production launch repairs the confined shells and the piped spawn, unprivileged"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: win-appcontainer-prod-${{ matrix.os }}
+          path: |
+            prod.log
+            prod-logs/
+          if-no-files-found: warn
+
+  # ─────────────────────────────────────────────────────────────────────────────────────────────
   # THE REMAINING BLOCKER: node-gyp shells `powershell.exe` for Visual-Studio detection
   # (`lib/find-visualstudio.js`, three distinct commands), a confined PowerShell cannot spawn an
   # external program at all (`works.ps1`), and node-gyp is on the path for 121 of the 344 corpus
   # packages. Also settles what python's grant COSTS — 3.7s+0.7s per launch is not shippable, so four
   # cheaper shapes are timed against an empty-directory O(1) control.
   gyp:
+    # SUPERSEDED for product claims: these launch a BARE AppContainer (zero capabilities, no
+    # ancestor repair, no preload), so their results describe raw OS physics rather than nub. Kept
+    # for that purpose and held off `push`; flip to `if: always()` to re-measure the physics.
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     strategy:
       fail-fast: false
       matrix:
@@ -117,6 +200,10 @@ jobs:
   # (the one launch-shape difference that could account for Microsoft's list), and settles python's
   # `STATUS_DLL_NOT_FOUND` with a grant differential.
   works:
+    # SUPERSEDED for product claims: these launch a BARE AppContainer (zero capabilities, no
+    # ancestor repair, no preload), so their results describe raw OS physics rather than nub. Kept
+    # for that purpose and held off `push`; flip to `if: always()` to re-measure the physics.
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     strategy:
       fail-fast: false
       matrix:
