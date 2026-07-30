@@ -130,9 +130,20 @@ try {
   canaryRead = "refused:" + ((err && err.code) || "unknown");
 }
 
+// The MSVC trio is recorded from INSIDE the jail because that is the only place the
+// question is meaningful: nub resolving Visual Studio in the parent proves nothing if the
+// env allowlist then drops the answer on the way in. A build that succeeds without these
+// would mean node-gyp found MSVC some other way and the injection is not what fixed it.
 fs.writeFileSync(
   path.join(__dirname, "probe-marker.json"),
-  JSON.stringify({ canary: CANARY, canaryRead, nodedir: process.env.npm_config_nodedir || "" }, null, 2),
+  JSON.stringify({
+    canary: CANARY,
+    canaryRead,
+    nodedir: process.env.npm_config_nodedir || "",
+    vcInstallDir: process.env.VCINSTALLDIR || "",
+    vscmdVer: process.env.VSCMD_VER || "",
+    sdkVersion: process.env.WindowsSDKVersion || "",
+  }, null, 2),
 );
 `,
 );
@@ -228,6 +239,23 @@ for (const shape of shapes) {
     `canaryRead=${canaryRead} (a pass needs exactly one of ${denials.map((c) => `refused:${c}`).join(", ")})`,
   );
   console.log(`observed ${shape.name} npm_config_nodedir=${markerData?.nodedir ?? "<no marker>"}`);
+
+  // WHICH TOOLCHAIN, not merely whether something built. `config.gypi` is node-gyp's own
+  // record of the installation it selected, written by `configure` before any compile — so
+  // it survives a failed build and is the one place the answer is not inferred. A build that
+  // succeeds against an unexpected compiler is a worse outcome than a clean failure, and
+  // these lines are what make the two distinguishable.
+  const gypi = join(installed, "build", "config.gypi");
+  let selected = "<no config.gypi>";
+  if (existsSync(gypi)) {
+    const text = readFileSync(gypi, "utf8");
+    const field = (key) => (text.match(new RegExp(`"${key}":\\s*"([^"]*)"`)) ?? [, ""])[1];
+    selected = `msbuild=${field("msbuild_path")} toolset=${field("msbuild_toolset")} sdk=${field("msvs_windows_target_platform_version")}`;
+  }
+  console.log(`observed ${shape.name} toolchain-selected ${selected}`);
+  console.log(
+    `observed ${shape.name} child-msvc-env VCINSTALLDIR=${markerData?.vcInstallDir ?? "<no marker>"} VSCMD_VER=${markerData?.vscmdVer ?? "<no marker>"} WindowsSDKVersion=${markerData?.sdkVersion ?? "<no marker>"}`,
+  );
 
   const artifactSize = existsSync(artifact) ? statSync(artifact).size : -1;
   record(`${shape.name}/addon-artifact`, artifactSize > 0, `path=${artifact} size=${artifactSize}`);

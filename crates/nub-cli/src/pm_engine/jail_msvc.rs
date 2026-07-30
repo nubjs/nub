@@ -104,6 +104,13 @@ pub(super) fn resolve(
     spawn: &aube_util::LifecycleSandboxSpawn,
     probe: &super::build_jail::ProbeScope,
 ) -> Option<MsvcToolchain> {
+    // THE SEAM, and it exists for the same reason as the backend's two: a green repaired arm
+    // measures nothing without an arm where the defect still reproduces, and rebuilding the
+    // binary twice does not fit a bounded Windows job. It only ever WITHHOLDS a stamp and a
+    // grant, so it cannot widen anything.
+    if std::env::var_os("NUB_SANDBOX_WIN_NO_MSVC_INJECT").is_some() {
+        return None;
+    }
     // Same gate, and the same reason, as the Python pre-resolution: resolving spends two
     // process spawns, and only a package node-gyp will configure can spend them usefully.
     if !spawn.package_dir.join("binding.gyp").exists() {
