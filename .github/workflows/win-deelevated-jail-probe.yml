@@ -4,11 +4,19 @@
 # station, so every launch returns 0xC0000142 STATUS_DLL_INIT_FAILED), which also rules out
 # the standing nub-win VM. Delete once the de-elevated arm joins sandbox-conformance's
 # windows leg on main.
+#
+# THE ANCESTOR-NECESSITY GROUP rides this workflow because it needs the same two principals.
+# It asks whether the backend's ancestor repair is necessary AT ALL now that the realpath
+# preload ships: the decisive cell is repair-OFF **with** the preload, next to repair-ON with
+# the same preload, on one fixture in one run — the arm every previous matrix left out. Its
+# gates (`anc-gate-*`) are what make the answer admissible: a stamped NODE_OPTIONS is not
+# evidence that Node saw it, so the confined child reports the shims' own `globalThis`
+# sentinels itself.
 name: win-deelevated-jail-probe
 
 on:
   push:
-    branches: [sandbox/win-deelevated-jail]
+    branches: [sandbox/win-deelevated-jail, sandbox/win-ancestor-necessity]
   workflow_dispatch:
 
 permissions:
@@ -17,6 +25,9 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
+    # A cancelled job loses its log entirely, and this probe's whole product IS the log, so
+    # the job bound sits above the step bound rather than at it.
+    timeout-minutes: 55
     env:
       # Matches sandbox-conformance's windows leg: crt-static makes the self-reexec probe
       # child self-contained, so it starts cleanly under the LowBox token.
@@ -25,6 +36,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Runner baseline
         shell: powershell
@@ -35,28 +49,89 @@ jobs:
           Write-Host "BASELINE runner user=$($id.Name) IsElevated=$admin"
           Write-Host "EnableLUA=$((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name EnableLUA -ErrorAction SilentlyContinue).EnableLUA)"
 
-      - name: Paired elevated / de-elevated build-jail differential
+      # Separate from the run so a compile error reads as a compile error rather than as a
+      # probe that measured nothing.
+      - name: Build the probe
         shell: bash
-        run: cargo test -p nub-sandbox --test windows_deelevated_jail 2>&1 | tee probe.log
+        run: cargo test -p nub-sandbox --test windows_deelevated_jail --no-run
+
+      - name: Paired elevated / de-elevated build-jail differential
+        if: always()
+        timeout-minutes: 40
+        shell: bash
+        run: |
+          rc=0
+          timeout -k 30 2100 cargo test -p nub-sandbox --test windows_deelevated_jail > probe.log 2>&1 || rc=$?
+          echo "cargo test exit=$rc"
+          cat probe.log
 
       # The guard this study keeps needing: a job that exits 0 having measured nothing is
       # worse than a red one. The harness gates on these itself; asserting them again here
       # means a future change that softens an in-binary check still cannot go quietly green.
       - name: Assert BOTH arms actually ran, and that arm B was really de-elevated
+        if: always()
         shell: bash
         run: |
           fail=0
+          [ -s probe.log ] || { echo "MISSING: the probe produced no output at all"; exit 1; }
           # `admin=` is the access-checked verdict, not the TokenIsElevated flag: the
           # fallback de-elevation route leaves that flag stale, so it cannot be the gate.
           grep -q 'ARM .*admin=1' probe.log || { echo "MISSING: no arm held administrative authority — the arms did not differ"; fail=1; }
           grep -q 'ARM .*admin=0' probe.log || { echo "MISSING: the DE-ELEVATED arm never reported — nothing was measured"; fail=1; }
           grep -q '^DEELEV route='  probe.log || { echo "MISSING: no de-elevation route was recorded"; fail=1; }
-          grep -q 'WINDOWS BUILD JAIL HOLDS WITH NO ELEVATION' probe.log || { echo "MISSING: the differential did not conclude"; fail=1; }
-          # Every property must carry a verdict in the de-elevated arm; a silently dropped
-          # one would otherwise leave the table looking complete.
+          # Every pre-existing property must PASS. This replaces the older
+          # `WINDOWS BUILD JAIL HOLDS WITH NO ELEVATION` conclusion-line check, which asserted
+          # ZERO failures across the whole binary — and the ancestor-necessity group below can
+          # legitimately record a FAIL as its ANSWER, which would have conflated a finding with
+          # a broken jail. Gating each pre-existing property directly is strictly stronger for
+          # those properties and does not conflate.
           for p in profile-create-and-launch acl-grant-allow acl-grant-deny teardown job-reap egress-deny production-jail-launch production-jail-egress; do
-            grep -q "prop:$p=" probe.log || { echo "MISSING: property $p never reported"; fail=1; }
+            if grep -qF "prop:$p=PASS" probe.log; then echo "PASS $p"
+            elif grep -qF "prop:$p=FAIL" probe.log; then echo "FAIL $p"; fail=1
+            else echo "MISSING: property $p never reported"; fail=1
+            fi
           done
+
+          # ── the ancestor-necessity group ──────────────────────────────────────────────
+          # ABSENCE is the error here; a FAIL is a FINDING. The group asks whether removing
+          # the ancestor repair CHANGES anything, so gating its verdict cells on PASS would
+          # turn "the repair is load-bearing after all" into a red build instead of an answer.
+          # The GATES are different and DO bind: without them no arm is admissible evidence.
+          echo "---- ancestor-necessity: gates (these bind) ----"
+          for p in anc-gate-preload-installs-the-realpath-shim \
+                   anc-gate-no-preload-leaves-the-shim-absent \
+                   anc-control-absolute-require-fails-unpreloaded-unrepaired; do
+            if grep -qF "prop:$p=PASS" probe.log; then
+              echo "PASS $p"
+            elif grep -qF "prop:$p=FAIL" probe.log; then
+              echo "FAIL $p — the group's evidence is INADMISSIBLE, not merely negative"
+              fail=1
+            else
+              echo "MISS $p (never measured)"
+              fail=1
+            fi
+          done
+          echo "---- ancestor-necessity: the verdict (a FAIL here is the finding) ----"
+          for p in anc-node-absolute-require-works-preloaded-with-repair-off \
+                   anc-node-bare-through-junction-works-preloaded-with-repair-off \
+                   anc-node-npm-cli-entry-works-preloaded-with-repair-off \
+                   anc-repair-changes-no-node-cell-under-the-preload \
+                   anc-nonnode-tools-identical-with-repair-off \
+                   anc-production-stamp-reaches-node; do
+            grep -q "prop:$p=" probe.log || { echo "MISS $p (never measured)"; fail=1; }
+            grep -E "prop:$p=" probe.log || true
+          done
+
+          echo "── the facts ──"
+          grep -E '^  fact:' probe.log || true
           echo "── recorded verdicts ──"
           grep -E '^(ARM |DEELEV |  prop:)' probe.log
           exit $fail
+
+      - name: Upload probe log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-deelevated-jail-probe
+          path: probe.log
+          if-no-files-found: warn

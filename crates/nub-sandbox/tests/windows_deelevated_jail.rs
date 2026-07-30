@@ -91,6 +91,12 @@ mod win {
                 Err(_) => 9,
             },
             Some("connect") => connect(&a[1], a[2].parse().unwrap_or(0)),
+            // exec <marker> <deadline_secs> <sink> <program> [args…] — a NESTED spawn from
+            // inside the AppContainer, which is the real lifecycle shape, with a deadline the
+            // jail cannot outlive. The bound lives HERE rather than in the parent because a
+            // parent-side `status()` is a blocking wait with nothing to interrupt it: a cell
+            // that hangs would burn the whole job and CI discards a cancelled job's log.
+            Some("exec") => run_bounded(&a[1], &a[2], &a[3], &a[4], &a[5..]),
             Some("token") => token_check(),
             Some("spawnchild") => spawn_grandchild(&a[1]),
             Some("sleep") => {
@@ -115,6 +121,65 @@ mod win {
             Err(e) if e.raw_os_error() == Some(10013) => 5,
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => 6,
             Err(_) => 9,
+        }
+    }
+
+    /// Spawn `program` with FILE-backed stdio (a pipe under the AppContainer hangs in libuv's
+    /// named-pipe retry — a separate defect with a separate repair, and including one here
+    /// would make a hang indistinguishable from a refused image open), wait to a deadline, and
+    /// record the outcome as the marker's first line. `spawn-refused` is kept distinct from
+    /// every exit code: a program the jail will not let the child open is a DIFFERENT finding
+    /// from one that ran and failed.
+    fn run_bounded(marker: &str, secs: &str, sink: &str, program: &str, args: &[String]) -> i32 {
+        let marker = Path::new(marker);
+        let Ok(out) = std::fs::File::create(sink) else {
+            let _ = std::fs::write(marker, "sink-create-failed");
+            return 9;
+        };
+        let Ok(err) = out.try_clone() else {
+            let _ = std::fs::write(marker, "sink-clone-failed");
+            return 9;
+        };
+        let spawned = std::process::Command::new(program)
+            .args(args)
+            .stdout(std::process::Stdio::from(out))
+            .stderr(std::process::Stdio::from(err))
+            .spawn();
+        let mut child = match spawned {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = std::fs::write(
+                    marker,
+                    format!(
+                        "spawn-refused kind={:?} raw={:?}",
+                        e.kind(),
+                        e.raw_os_error()
+                    ),
+                );
+                return 5;
+            }
+        };
+        let start = Instant::now();
+        let deadline = Duration::from_secs(secs.parse().unwrap_or(30));
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let _ = std::fs::write(marker, format!("exit={:?}", status.code()));
+                    return 0;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = std::fs::write(marker, format!("waiterr {e:?}"));
+                    return 9;
+                }
+            }
+            if start.elapsed() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::write(marker, "HUNG");
+                return 7;
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 
@@ -1025,7 +1090,19 @@ mod win {
 
         // (7) …and with the REAL interpreter rather than the probe binary, which is the one
         // variable (6) cannot vary and the one that carried the showstopper.
-        interpreter_group(&mut r, &f);
+        let staged = interpreter_group(&mut r, &f);
+
+        // (8) IS THE ANCESTOR REPAIR NECESSARY AT ALL — the deletion question. Runs on the
+        //     STAGED interpreter because that is the only one usable de-elevated, so it cannot
+        //     run without (7) having produced one.
+        match &staged {
+            Some((exe, root)) => ancestor_necessity(&mut r, &f, exe, root),
+            None => {
+                for prop in NECESSITY_PROPS {
+                    r.record(prop, false, "(no staged interpreter — nothing measured)");
+                }
+            }
+        }
 
         println!(
             "ARM done elevated={} failures={}",
@@ -1165,7 +1242,7 @@ mod win {
     /// It calls the same engine entry the product does
     /// (`windows_jail_bin::stage_appcontainer_readable_copy`) rather than re-implementing the
     /// staging, because a probe that re-implements the mechanism measures the probe.
-    fn interpreter_group(r: &mut Report, f: &Fixture) {
+    fn interpreter_group(r: &mut Report, f: &Fixture) -> Option<(PathBuf, PathBuf)> {
         let Some(source_exe) = ambient_node() else {
             for prop in INTERPRETER_PROPS {
                 r.record(
@@ -1174,7 +1251,7 @@ mod win {
                     "(no ambient node.exe found — nothing measured)",
                 );
             }
-            return;
+            return None;
         };
         let source_root = source_exe
             .parent()
@@ -1393,6 +1470,587 @@ mod win {
                 &format!("({soft_cells}/{} cells total)", CMD_CELLS.len()),
             );
         }
+        if staged_exe.is_file() {
+            Some((staged_exe, staged_dir))
+        } else {
+            None
+        }
+    }
+
+    // ── is the ancestor repair NECESSARY? ─────────────────────────────────────────────
+    //
+    // THE QUESTION, and it is a DELETION question. The backend repairs the ancestor chain in
+    // two halves, and only one of them has ever been in doubt:
+    //
+    //  - The CAPABILITY half harvests the `S-1-15-3-65536-…` AppSilo SIDs off `C:\` and
+    //    `C:\Users` and requests them. The kernel refuses that RID class outright
+    //    (`0xc000000d` from `NtCreateLowBoxToken`, `ERROR_INVALID_PARAMETER` at launch), so the
+    //    launch always falls back — `capability-fallbacks=1` in BOTH principals. It is measured
+    //    dead and is not what this group is about.
+    //  - The ACE half writes a non-inherited traverse ace where nub holds `WRITE_DAC`, which
+    //    de-elevated is `%USERPROFILE%` and below only. Whether THAT is load-bearing is the
+    //    open question, and this group is the arm that answers it.
+    //
+    // WHY IT IS PLAUSIBLY DEAD TOO. The repair exists for exactly one defect: Node's
+    // `realpathSync` opens every path prefix as a TARGET starting at the volume root, and
+    // bypass-traverse does not make an ancestor openable as a target. But `C:\` is owned by
+    // TrustedInstaller and `C:\Users` by SYSTEM, and neither grants a standard group
+    // `WRITE_DAC` — so de-elevated the walk still dies on its FIRST component whatever the
+    // repair did further down. Meanwhile `realpath_shim_node_options` ships a userland walk that
+    // TOLERATES a refused component when it is a strict ancestor of a granted root, which covers
+    // the same defect and covers `C:\` too.
+    //
+    // THE ARM NOBODY HAD RUN. Every previous matrix varied the repair with NO preload, or
+    // stamped the preload only in the repaired arm. The cell that decides deletion is
+    // repair-OFF **with** the preload, next to repair-ON with the same preload, on one fixture
+    // in one run. That is this group.
+    //
+    // THE GATE, and no arm counts as evidence without it. Two rounds of Windows conclusions
+    // were retracted because they were measured on launches reproducing none of nub's repairs.
+    // So every preload arm asserts the shim's own `globalThis` sentinel FROM INSIDE the confined
+    // child, and every no-preload arm asserts its ABSENCE — a pair of cells that fails in either
+    // direction invalidates the group rather than quietly passing it.
+    //
+    // THE NON-NODE RESIDUAL, which is the one argument that could save the ace half: the shim
+    // is a Node shim and cannot help a tool that walks paths itself. The executable set is
+    // closed and small — by PATH-resolved head across the corpus, `node`, `node-gyp` (nub's
+    // own), `npm` and `npx`, all of which ARE Node — leaving `python`, MSVC/`MSBuild`, `git` and
+    // the shells as the second-order set. Those are measured here as a repair-ON vs repair-OFF
+    // differential with no preload involved, because for them the preload is irrelevant either
+    // way.
+
+    /// Every property this group reports, so the parent can require the SAME set from both arms
+    /// and a silently-vanished cell reads as missing rather than as a pass.
+    const NECESSITY_PROPS: &[&str] = &[
+        "anc-gate-preload-installs-the-realpath-shim",
+        "anc-gate-no-preload-leaves-the-shim-absent",
+        "anc-production-stamp-reaches-node",
+        "anc-control-absolute-require-fails-unpreloaded-unrepaired",
+        "anc-node-absolute-require-works-preloaded-with-repair-off",
+        "anc-node-bare-through-junction-works-preloaded-with-repair-off",
+        "anc-node-npm-cli-entry-works-preloaded-with-repair-off",
+        "anc-repair-changes-no-node-cell-under-the-preload",
+        "anc-nonnode-tools-identical-with-repair-off",
+    ];
+
+    /// The realpath preload term, with the SAME roots `build_jail.rs` passes in production: the
+    /// project root, the package dir, and the interpreter. Scoping the tolerance to the jail's
+    /// own anchors is what keeps it from being `--preserve-symlinks` — a component at or below a
+    /// root is still `lstat`'d for real, so a store-cell link still decides which version
+    /// resolves.
+    fn realpath_term(f: &Fixture, exe: &Path) -> String {
+        nub_sandbox::realpath_shim_node_options(&[
+            f.project.clone(),
+            f.package.clone(),
+            exe.to_path_buf(),
+        ])
+    }
+
+    /// One confined NESTED launch: the probe child (already inside the AppContainer) spawns
+    /// `program` on a deadline and writes both the launch outcome and the program's stdio where
+    /// the parent can read them. Returns `(child_rc, outcome, sink)`.
+    fn confined_exec(
+        f: &Fixture,
+        policy: &SandboxPolicy,
+        tag: &str,
+        secs: u32,
+        program: &Path,
+        args: &[String],
+    ) -> (i32, String, String) {
+        let marker = f.package.join(format!("nx-{tag}.out"));
+        let sink = f.package.join(format!("nx-{tag}.sink"));
+        let _ = std::fs::remove_file(&marker);
+        let _ = std::fs::remove_file(&sink);
+        let mut argv: Vec<String> = vec![
+            "__sbxchild__".into(),
+            "exec".into(),
+            marker.to_string_lossy().into_owned(),
+            secs.to_string(),
+            sink.to_string_lossy().into_owned(),
+            program.to_string_lossy().into_owned(),
+        ];
+        argv.extend(args.iter().cloned());
+        let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let rc = code(policy, f, &f.package, &borrowed);
+        let outcome = std::fs::read_to_string(&marker).unwrap_or_else(|_| "<no marker>".into());
+        let sink_text = std::fs::read_to_string(&sink).unwrap_or_default();
+        println!(
+            "    anc:{tag} rc={rc} outcome={outcome} sink={}",
+            one_line(&sink_text)
+        );
+        (rc, outcome, sink_text)
+    }
+
+    /// A Windows path as a DOUBLE-quoted JS literal. Distinct from [`js_string`], which exists
+    /// for text that has to survive cmd's own quoting; nothing here goes through a shell.
+    fn js_literal(p: &Path) -> String {
+        format!("\"{}\"", p.to_string_lossy().replace('\\', "\\\\"))
+    }
+
+    /// The four Node cells, run under one policy. Each writes its own marker from inside the
+    /// confined child, so a verdict is something the child DID rather than something the harness
+    /// inferred from an exit code.
+    struct NodeCells {
+        /// `globalThis` sentinels the child observed: `(realpath_shim, stdio_shim)`.
+        sentinels: (bool, bool),
+        /// `node <absolute entry>` whose body `require()`s a second file by absolute path.
+        absolute_require: bool,
+        /// A bare specifier resolved through a junction — nub's own `Isolated` layout.
+        bare_through_junction: bool,
+        /// The distribution's own `npm-cli.js` as an absolute entry point, which is the
+        /// realpath-heaviest thing a real lifecycle script reaches for.
+        npm_cli: bool,
+    }
+
+    impl NodeCells {
+        fn detail(&self) -> String {
+            format!(
+                "(shim {} stdio {} | abs-require {} bare-junction {} npm-cli {})",
+                self.sentinels.0,
+                self.sentinels.1,
+                self.absolute_require,
+                self.bare_through_junction,
+                self.npm_cli
+            )
+        }
+        /// The three OUTCOME cells, without the sentinels — this is what a repair-ON vs
+        /// repair-OFF comparison is over.
+        fn outcomes(&self) -> (bool, bool, bool) {
+            (
+                self.absolute_require,
+                self.bare_through_junction,
+                self.npm_cli,
+            )
+        }
+    }
+
+    /// Which preloads actually reached the confined Node — `(realpath, stdio, netgate)`, read off
+    /// `globalThis` FROM INSIDE the jail. This is the gate the whole group rests on: two earlier
+    /// rounds of Windows conclusions were retracted because they were measured on launches that
+    /// reproduced none of nub's repairs, and a stamped string is not evidence that Node saw it.
+    ///
+    /// `-e` deliberately, because it has NO main module and therefore never touches
+    /// `resolveMainPath` — the only shape that can read the shim state in an arm where the entry
+    /// point itself would be refused. `--import` preloads are awaited before the eval body, so a
+    /// FALSE here means the preload genuinely did not install.
+    fn sentinel_probe(
+        f: &Fixture,
+        policy: &SandboxPolicy,
+        tag: &str,
+        exe: &Path,
+        dir: &Path,
+    ) -> (bool, bool, bool) {
+        let marker = dir.join(format!("{tag}.sentinel"));
+        let _ = std::fs::remove_file(&marker);
+        confined_exec(
+            f,
+            policy,
+            &format!("{tag}-sentinel"),
+            30,
+            exe,
+            &[
+                "-e".into(),
+                format!(
+                    "require('fs').writeFileSync({m},['__nubJailRealpathShim',\
+                     '__nubJailStdioShim','__nubJailNetGate'].map(k=>String(!!globalThis[k]))\
+                     .join(' '))",
+                    m = js_literal(&marker)
+                ),
+            ],
+        );
+        let text = std::fs::read_to_string(&marker).unwrap_or_default();
+        println!("  fact:anc-{tag}-sentinels={text:?}");
+        let flags: Vec<bool> = text.split_whitespace().map(|w| w == "true").collect();
+        let at = |i: usize| flags.get(i).copied().unwrap_or(false);
+        (at(0), at(1), at(2))
+    }
+
+    fn node_cells(
+        f: &Fixture,
+        policy: &SandboxPolicy,
+        tag: &str,
+        exe: &Path,
+        dir: &Path,
+        npm_cli: &Path,
+    ) -> NodeCells {
+        let markers = ["mainran", "deploaded", "bare"].map(|n| dir.join(format!("{tag}.{n}")));
+        for m in &markers {
+            let _ = std::fs::remove_file(m);
+        }
+        let [mainran, deploaded, bare] = &markers;
+
+        let sentinels3 = sentinel_probe(f, policy, tag, exe, dir);
+        let sentinels = (sentinels3.0, sentinels3.1);
+        confined_exec(
+            f,
+            policy,
+            &format!("{tag}-absreq"),
+            30,
+            exe,
+            &[dir.join("main.js").to_string_lossy().into_owned()],
+        );
+        confined_exec(
+            f,
+            policy,
+            &format!("{tag}-bare"),
+            30,
+            exe,
+            &[
+                "-e".into(),
+                format!(
+                    "require('dep');require('fs').writeFileSync({m},'bare')",
+                    m = js_literal(bare)
+                ),
+            ],
+        );
+        confined_exec(
+            f,
+            policy,
+            &format!("{tag}-npmcli"),
+            45,
+            exe,
+            &[
+                npm_cli.to_string_lossy().into_owned(),
+                "--version".into(),
+                // `npm --version` writes to stdout, which lands in the sink; the marker is what
+                // the parent gates on, so the cell writes one itself via `--userconfig`-free
+                // plumbing is not available — instead the sink is checked for a version line.
+            ],
+        );
+        let npm_sink = std::fs::read_to_string(f.package.join(format!("nx-{tag}-npmcli.sink")))
+            .unwrap_or_default();
+        NodeCells {
+            sentinels,
+            absolute_require: mainran.is_file() && deploaded.is_file(),
+            bare_through_junction: bare.is_file(),
+            // A version line, not an exit code: npm exits 0 on some failures and the sink is the
+            // only place its own answer appears.
+            npm_cli: npm_sink.lines().any(|l| {
+                let t = l.trim();
+                !t.is_empty() && t.chars().next().is_some_and(|c| c.is_ascii_digit())
+            }),
+        }
+    }
+
+    /// The non-Node second-order executable set, run through one policy and reported as ONE
+    /// transcript so two arms can be diffed rather than eyeballed cell by cell.
+    fn nonnode_transcript(f: &Fixture, policy: &SandboxPolicy, tag: &str) -> String {
+        let mut out = String::new();
+        let system32 =
+            PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into()))
+                .join("System32");
+        let mut cells: Vec<(&str, PathBuf, Vec<String>)> = vec![
+            (
+                "cmd-dir",
+                system32.join("cmd.exe"),
+                vec!["/c".into(), "dir /b".into()],
+            ),
+            (
+                "cmd-cd",
+                system32.join("cmd.exe"),
+                vec!["/c".into(), "cd".into()],
+            ),
+            (
+                "where-node",
+                system32.join("where.exe"),
+                vec!["node".into()],
+            ),
+            (
+                "powershell",
+                system32.join("WindowsPowerShell/v1.0/powershell.exe"),
+                vec![
+                    "-NoProfile".into(),
+                    "-Command".into(),
+                    "Write-Output ps-ok".into(),
+                ],
+            ),
+        ];
+        // `git` and `python` are located rather than assumed: a machine without them yields an
+        // ABSENT cell in BOTH arms, which is honest, where a hardcoded path would yield a
+        // spawn-refused pair that looks like a measurement.
+        for (label, exe_name, args) in [
+            ("git-version", "git.exe", vec!["--version".to_string()]),
+            (
+                "git-toplevel",
+                "git.exe",
+                vec!["rev-parse".into(), "--show-toplevel".into()],
+            ),
+            ("python", "python.exe", vec!["-c".into(), "print(1)".into()]),
+        ] {
+            if let Some(p) = which(exe_name) {
+                cells.push((label, p, args));
+            }
+        }
+        for (label, program, args) in &cells {
+            let (rc, outcome, sink) =
+                confined_exec(f, policy, &format!("{tag}-{label}"), 20, program, args);
+            out.push_str(&format!(
+                "{label} rc={rc} outcome={outcome} sink={}\n",
+                one_line(&sink)
+            ));
+        }
+        out
+    }
+
+    fn which(exe_name: &str) -> Option<PathBuf> {
+        std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+            .map(|d| d.join(exe_name))
+            .find(|c| c.is_file())
+    }
+
+    /// THE GROUP. One fixture, one run, the preload stamped in every arm that claims to measure
+    /// the shipping configuration, and `NUB_SANDBOX_WIN_NO_ANCESTOR_REPAIR` as the only variable
+    /// between the two arms being compared.
+    fn ancestor_necessity(r: &mut Report, f: &Fixture, exe: &Path, root: &Path) {
+        // ── the fixture: an absolute entry that requires an absolute dep, plus a bare
+        //    specifier reached through a JUNCTION, which is nub's default `Isolated` shape and
+        //    the one that forces a realpath even where a plain directory might not. `mklink /J`
+        //    needs no privilege, which keeps the fixture representative of a real install.
+        let dir = f.package.join("anc");
+        let store = dir.join("store").join("dep@1.0.0");
+        std::fs::create_dir_all(&store).expect("fixture store");
+        std::fs::write(
+            dir.join("package.json"),
+            b"{\"name\":\"anc-fixture\",\"version\":\"0.0.0\"}\n",
+        )
+        .expect("fixture manifest");
+        std::fs::write(
+            store.join("package.json"),
+            b"{\"name\":\"dep\",\"version\":\"1.0.0\",\"main\":\"index.js\"}\n",
+        )
+        .expect("dep manifest");
+        let junction = f.package.join("node_modules").join("dep");
+        std::fs::create_dir_all(f.package.join("node_modules")).expect("package node_modules");
+        let _ = std::process::Command::new(comspec_path())
+            .args(["/c", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&store)
+            .output();
+        println!("  fact:anc-junction-created={}", junction.is_dir());
+
+        // ── the arm-local paths. Every marker is baked into the JS as an absolute LITERAL: the
+        //    jail resolves the child's whole environment, so a path arriving through an env var
+        //    would make a control vacuous.
+        let npm_cli = root.join("node_modules/npm/bin/npm-cli.js");
+        println!("  fact:anc-npm-cli-present={}", npm_cli.is_file());
+
+        // ── coverage: which ancestors can this principal repair AT ALL. The ace half needs
+        //    `WRITE_DAC`, so this is the ceiling on everything it could ever buy — reported as a
+        //    fact, because the verdict below is a differential and must not rest on a proxy.
+        let mut chain: Vec<PathBuf> = Vec::new();
+        let anchors = [f.package.clone(), root.to_path_buf(), std::env::temp_dir()];
+        for leafp in &anchors {
+            for a in leafp.ancestors().skip(1) {
+                let a = a.to_path_buf();
+                if !chain.contains(&a) {
+                    chain.push(a);
+                }
+            }
+        }
+        let writable = chain.iter().filter(|d| can_write_dacl(d)).count();
+        println!(
+            "  fact:anc-repairable-ancestors={writable}/{} [{}]",
+            chain.len(),
+            chain
+                .iter()
+                .map(|d| format!("{}={}", d.display(), u8::from(can_write_dacl(d))))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+
+        std::fs::write(store.join("index.js"), b"module.exports=1;\n").expect("store index");
+
+        // ── the NODE_OPTIONS values. THE ARMS CARRY THE REALPATH TERM ALONE, deliberately:
+        //    the question is whether the ancestor repair earns its place GIVEN the realpath
+        //    preload, and the stdio shim and the net gate are orthogonal to it. Stamping all
+        //    three would put ~55k characters into an environment block and make every arm a
+        //    measurement of the block ceiling instead of of the repair — one variable, not three.
+        let realpath = realpath_term(f, exe);
+        // …and the PRODUCTION stamp is still built and launched once, as its own fact, because
+        // its SIZE is the thing that forced the arms to be scoped and a reader will otherwise
+        // assume the arms ran what ships.
+        let production = format!(
+            "{} {realpath}",
+            nub_sandbox::windows_build_jail_node_options(Some("anc-fixture"))
+        )
+        .trim_end()
+        .to_string();
+        println!(
+            "  fact:anc-node-options-chars realpath_only={} production={} (a CreateProcessW \
+             environment block holds 32767 characters IN TOTAL)",
+            realpath.len(),
+            production.len()
+        );
+
+        let preloaded = build_jail_with_env(f, exe, root, &[("NODE_OPTIONS", realpath.clone())]);
+        let unpreloaded = build_jail_with_env(
+            f,
+            exe,
+            root,
+            &[("NODE_OPTIONS", "--title=nub-anc-control".to_string())],
+        );
+        let prod_policy =
+            build_jail_with_env(f, exe, root, &[("NODE_OPTIONS", production.clone())]);
+        for (label, p) in [
+            ("realpath_only", &preloaded),
+            ("none", &unpreloaded),
+            ("production", &prod_policy),
+        ] {
+            println!(
+                "  fact:anc-env-block-chars-{label}={}",
+                p.env
+                    .constructed
+                    .iter()
+                    .map(|(k, v)| k.chars().count() + v.chars().count() + 2)
+                    .sum::<usize>()
+                    + 1
+            );
+        }
+
+        // THE PRODUCTION-STAMP GATE, asked of the launch rather than of the code that built the
+        // string: the confined child reports all three `globalThis` sentinels itself, so a stamp
+        // that never reached Node cannot read as one that did.
+        let prod_sentinels = sentinel_probe(f, &prod_policy, "prod", exe, &dir);
+        println!("  fact:anc-production-stamp-sentinels={prod_sentinels:?}");
+        r.record(
+            "anc-production-stamp-reaches-node",
+            prod_sentinels.1,
+            &format!(
+                "(the PRODUCTION stamp's stdio shim, observed from inside the confined child: \
+                 {prod_sentinels:?}; production stamp {} chars)",
+                production.len()
+            ),
+        );
+
+        // ── ARM 1: repair ON, preload ON. The shipping configuration for the realpath axis.
+        println!("── anc arm: repair ON + preload ──");
+        write_entry(&dir, "on");
+        let on = node_cells(f, &preloaded, "on", exe, &dir, &npm_cli);
+        println!("  fact:anc-on={}", on.detail());
+
+        // ── ARM 2: repair OFF, preload ON. THE DECISIVE ARM, and the one nobody had run.
+        println!("── anc arm: repair OFF + preload (THE DECISIVE ARM) ──");
+        write_entry(&dir, "off");
+        let off = without_ancestor_repair(|| node_cells(f, &preloaded, "off", exe, &dir, &npm_cli));
+        println!("  fact:anc-off={}", off.detail());
+
+        // ── ARM 3: repair OFF, NO preload. The control: without an arm where the defect still
+        //    reproduces, a green decisive arm is measuring nothing.
+        println!("── anc arm: repair OFF, no preload (THE CONTROL) ──");
+        write_entry(&dir, "ctl");
+        let control =
+            without_ancestor_repair(|| node_cells(f, &unpreloaded, "ctl", exe, &dir, &npm_cli));
+        println!("  fact:anc-control={}", control.detail());
+
+        // ── the gates. No arm counts as evidence unless these pass.
+        r.record(
+            "anc-gate-preload-installs-the-realpath-shim",
+            on.sentinels.0 && off.sentinels.0,
+            &format!(
+                "(repair-on {} repair-off {}; both preload arms must observe the shim FROM \
+                 INSIDE the confined child)",
+                on.sentinels.0, off.sentinels.0
+            ),
+        );
+        r.record(
+            "anc-gate-no-preload-leaves-the-shim-absent",
+            !control.sentinels.0,
+            &format!(
+                "(control sentinel {}; if the shim were present here the differential would be \
+                 vacuous)",
+                control.sentinels.0
+            ),
+        );
+        r.record(
+            "anc-control-absolute-require-fails-unpreloaded-unrepaired",
+            !control.absolute_require,
+            &format!(
+                "(THE CONTROL: {}; without the defect reproducing, the decisive arm proves \
+                 nothing)",
+                control.detail()
+            ),
+        );
+
+        // ── the verdict cells.
+        r.record(
+            "anc-node-absolute-require-works-preloaded-with-repair-off",
+            off.absolute_require,
+            &off.detail(),
+        );
+        r.record(
+            "anc-node-bare-through-junction-works-preloaded-with-repair-off",
+            off.bare_through_junction,
+            &off.detail(),
+        );
+        r.record(
+            "anc-node-npm-cli-entry-works-preloaded-with-repair-off",
+            off.npm_cli,
+            &off.detail(),
+        );
+        // THE DELETION VERDICT for the Node half, stated as an EQUALITY rather than as three
+        // greens: what settles whether the repair earns its place is whether removing it CHANGES
+        // anything, not whether the jail happens to work with it on.
+        r.record(
+            "anc-repair-changes-no-node-cell-under-the-preload",
+            on.outcomes() == off.outcomes(),
+            &format!(
+                "(repair-on {:?} vs repair-off {:?})",
+                on.outcomes(),
+                off.outcomes()
+            ),
+        );
+
+        // ── the non-Node residual, which the preload cannot help by construction.
+        println!("── anc non-Node tools: repair ON ──");
+        let tools_on = nonnode_transcript(f, &preloaded, "ton");
+        println!("── anc non-Node tools: repair OFF ──");
+        let tools_off = without_ancestor_repair(|| nonnode_transcript(f, &preloaded, "tof"));
+        // Compared with the arm TAG stripped, which is the only thing that legitimately differs
+        // between the two transcripts — every other byte is a real outcome.
+        let normalize = |s: &str, tag: &str| s.replace(tag, "T");
+        let identical = normalize(&tools_on, "ton") == normalize(&tools_off, "tof");
+        println!("  fact:anc-tools-on=\n{}", indent_lines(&tools_on));
+        println!("  fact:anc-tools-off=\n{}", indent_lines(&tools_off));
+        r.record(
+            "anc-nonnode-tools-identical-with-repair-off",
+            identical,
+            &format!(
+                "(a difference here is the ONE argument that keeps the ace half; identical \
+                 {identical})"
+            ),
+        );
+    }
+
+    /// The absolute entry point for one arm: it writes its own marker and then `require()`s a
+    /// second file by ABSOLUTE path, so a green cell means the whole resolution walk survived
+    /// rather than that the interpreter merely started.
+    fn write_entry(dir: &Path, tag: &str) {
+        std::fs::write(
+            dir.join("dep.js"),
+            format!(
+                "require('fs').writeFileSync({m},'dep');module.exports=1;\n",
+                m = js_literal(&dir.join(format!("{tag}.deploaded")))
+            ),
+        )
+        .expect("dep.js");
+        std::fs::write(
+            dir.join("main.js"),
+            format!(
+                "require('fs').writeFileSync({m},'main');\nrequire({d});\n",
+                m = js_literal(&dir.join(format!("{tag}.mainran"))),
+                d = js_literal(&dir.join("dep.js"))
+            ),
+        )
+        .expect("main.js");
+    }
+
+    fn indent_lines(s: &str) -> String {
+        s.lines()
+            .map(|l| format!("      {l}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Whether the launcher could install the leaf grant on the PROGRAM file — asked by launching a
@@ -1644,6 +2302,20 @@ mod win {
     /// env mirrors what the embedder constructs: both interpreter spellings named, and `PATH`
     /// carrying the distribution plus the OS floor.
     fn build_jail_for(f: &Fixture, exe: &Path, root: &Path) -> SandboxPolicy {
+        build_jail_with_env(f, exe, root, &[])
+    }
+
+    /// As [`build_jail_for`], plus `extra_env` folded into the ambient map BEFORE compilation —
+    /// which is how the production `NODE_OPTIONS` stamp arrives. `build_jail.rs` writes its own
+    /// value into `ambient` and the lifecycle env allowlist admits the key on Windows for
+    /// exactly that reason, so stamping it here reproduces the shipping delivery rather than
+    /// modelling it.
+    fn build_jail_with_env(
+        f: &Fixture,
+        exe: &Path,
+        root: &Path,
+        extra_env: &[(&str, String)],
+    ) -> SandboxPolicy {
         let system32 = format!(
             "{}\\System32",
             std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into())
@@ -1655,6 +2327,9 @@ mod win {
             exe.to_string_lossy().into_owned(),
         );
         ambient.insert("NODE".to_string(), exe.to_string_lossy().into_owned());
+        for (k, v) in extra_env {
+            ambient.insert((*k).to_string(), v.clone());
+        }
         let homes = nub_sandbox::Homes {
             home: f.home.clone(),
             tmp: std::env::temp_dir(),
@@ -1699,6 +2374,19 @@ mod win {
     /// Run `body` with the leaf-read-grant loop restored to its FAIL-CLOSED behaviour, so one arm
     /// of the same run carries the code a sibling lane measured `cmd.exe` under. Mirrors
     /// `windows_jail_repairs`'s `without_ancestor_repair`.
+    /// Run `body` with BOTH halves of the backend's ancestor repair disabled. The seam can only
+    /// ever REMOVE grants, so it is not a lever anything can be widened with — it exists so one
+    /// run measures both directions on one fixture.
+    fn without_ancestor_repair<T>(body: impl FnOnce() -> T) -> T {
+        const KEY: &str = "NUB_SANDBOX_WIN_NO_ANCESTOR_REPAIR";
+        // SAFETY: every launch in this group is sequential on the arm's own thread, and the
+        // variable is removed before returning.
+        unsafe { std::env::set_var(KEY, "1") };
+        let out = body();
+        unsafe { std::env::remove_var(KEY) };
+        out
+    }
+
     fn with_fail_closed_read_grants<T>(body: impl FnOnce() -> T) -> T {
         const KEY: &str = "NUB_SANDBOX_WIN_FAIL_CLOSED_READ_GRANTS";
         // SAFETY: the arm is single-threaded at this point (every launch in this group is
