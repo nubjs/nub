@@ -561,13 +561,15 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
 /// INTERMEDIATE components of a single open — it does not make an ancestor openable as a
 /// TARGET. So every `require()` of an absolute path dies on `EPERM: lstat 'C:\'`.
 ///
-/// WHAT SHIPS INSTEAD — the ancestor chain, made openable. The backend now reaches it without
-/// elevation from both ends: a non-inherited traverse ACE where the unprivileged user can
-/// write one, and the capability SIDs Windows already granted on `C:\` and `C:\Users` where
-/// they cannot (`ancestor_chain` / `harvest_capability_sids` in `backend/windows.rs`). The
-/// earlier reading of the de-elevated `WRITE_DAC` measurement — that a refusal on `C:\` ruled
-/// the whole route out — was too strong: it rules out WRITING there, not reaching it, and the
-/// capability ACE `C:\` already carries is reachable unprivileged.
+/// WHAT SHIPS INSTEAD — the ancestor chain, repaired as far as an unprivileged token reaches:
+/// a non-inherited traverse ACE, written wherever the user holds `WRITE_DAC`, which is
+/// `%USERPROFILE%` and below (`ancestor_chain` in `backend/windows.rs`). `C:\` and `C:\Users`
+/// stay UNREPAIRED — measured refused across three images including a genuine workstation.
+/// The second prong, requesting the capability SIDs those two roots already carry
+/// (`harvest_capability_sids`), is code that never takes effect: `CreateProcessW` refuses the
+/// pair with ERROR_INVALID_PARAMETER and the launch drops it (`CAPABILITY_FALLBACKS`). Raw
+/// capability SIDs are indeed requestable unprivileged — `internetClient` is — but not these,
+/// so do not read the privilege point as making those two roots reachable.
 ///
 /// WHY NOT REDIRECT REALPATH AT ITS NATIVE TWIN. That was the first candidate, and it is
 /// REFUTED by measurement: `fs.realpathSync.native` is refused under this jail too, with
