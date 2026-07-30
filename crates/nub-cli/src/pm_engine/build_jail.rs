@@ -230,7 +230,7 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         #[cfg(windows)]
         if let Some(msvc) = super::jail_msvc::resolve(&ambient, &spawn, &probe) {
             msvc.stamp(&mut ambient);
-            extra_reads.extend(msvc.reads.iter().cloned());
+            extra_reads.extend(msvc.reads);
         }
 
         // PREFETCH — the same move `npm_config_nodedir` makes above, applied to the

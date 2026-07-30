@@ -1215,6 +1215,21 @@ mod tests {
         }
     }
 
+    /// The MSVC trio is the one allowlist entry whose absence is SILENT: nub would resolve
+    /// Visual Studio, stamp the answer, and the scrub would drop it on the way into the child,
+    /// leaving node-gyp back on the COM server an AppContainer cannot activate — with no error
+    /// anywhere to say why. `WindowsSDKVersion` additionally has to survive
+    /// [`is_credential_env_key`], which rejects a `key`-shaped segment.
+    #[test]
+    fn the_msvc_trio_reaches_the_jailed_child() {
+        for key in ["VCINSTALLDIR", "VSCMD_VER", "WindowsSDKVersion"] {
+            assert!(
+                build_jail_env_allowed(key),
+                "{key} must reach node-gyp or the Visual Studio pre-resolution is inert"
+            );
+        }
+    }
+
     #[test]
     fn os_essential_floor_is_the_libuv_grounded_set() {
         // The exact per-OS floor NAME set — the contract from
