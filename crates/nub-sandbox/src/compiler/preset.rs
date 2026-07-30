@@ -436,8 +436,8 @@ fn build_jail_surface(
     })
 }
 
-/// The build-jail's net axis, gated on PACKAGE IDENTITY: a package the catalog names reaches
-/// the curated `$downloads` hosts, and a package it does not name reaches nothing.
+/// The build-jail's net axis, gated on PACKAGE IDENTITY: a package the catalog names may reach
+/// the network, and a package it does not name reaches nothing.
 ///
 /// NO ENTRY MEANS NO NETWORK, and that default is the point rather than a fallback. The
 /// attack this jail exists to blunt is the Shai-Hulud shape — an attacker publishes a new
@@ -451,24 +451,39 @@ fn build_jail_surface(
 ///
 /// The grant is therefore a BOOLEAN, deliberately. Both catalog shapes — an inverted host
 /// list and a `packageNetwork.full` entry — collapse to "this package was reviewed and
-/// admitted", so both resolve to the same `$downloads` set the jail has always used. Only
+/// admitted", so both resolve to the same grant. Only
 /// [`super::package_network::PackageNetwork::NoEntry`] denies, which is also where a package
 /// recorded in `notGranted.packages` lands: `build.rs` subtracts the refused from the
 /// generated table, so a refusal cannot be contradicted by an observation of what the package
 /// was seen fetching.
 ///
-/// WINDOWS keeps the deny-all. Its backend refuses a per-host policy outright because the
-/// available AppContainer exemption exposes every loopback listener, so a local forwarder
-/// could bypass the hostname gate — and an unappliable jail fails the install rather than
-/// degrading. Deny-all is the STRICTER posture, so the divergence loses a capability, never
-/// enforcement.
+/// THE GRANT IS SPELLED PER PLATFORM, because the coarseness is real and the IR states what the
+/// mechanism actually enforces rather than a uniform promise two of three backends would break.
+/// Denial is `false` everywhere; the admitted case splits:
+///
+/// - **macOS** and **Linux** get `["$downloads"]`. Seatbelt pins the child's egress to nub's
+///   proxy, so there the host list is genuinely enforced. The Linux build jail is Landlock-only
+///   (a netns needs an unprivileged user namespace, which this product cannot require), so
+///   `backend::linux::apply_landlock` reads the Allow as its coarse per-package permit and lifts
+///   `AF_INET`/`AF_INET6` out of the seccomp socket ceiling — the hosts are provenance there, not
+///   a gate. That backend owns the comment explaining why coarse is sound.
+/// - **Windows** gets `true`. Its unprivileged egress lever is the AppContainer `internetClient`
+///   capability, which the backend grants on exactly `!net.enforce` — so coarse-allow is the ONLY
+///   spelling that reaches it. `["$downloads"]` would instead select the per-host tier, which
+///   needs an admin-registered loopback exemption, so an ordinary `nub install` would fail closed
+///   (or divert to the dedicated-account backend) for every catalogued package. `true` is not
+///   "unrestricted host networking" there either: WFP refuses an AppContainer's loopback whatever
+///   its capabilities, and `privateNetworkClientServer` stays withheld, so the grant is public
+///   outbound only — tighter than the same spelling means on any other platform.
 fn build_jail_net(package_name: Option<&str>) -> Value {
     use super::package_network::{PackageNetwork, package_network};
-    let admitted = package_network(package_name) != PackageNetwork::NoEntry;
-    if admitted && !cfg!(windows) {
-        json!(["$downloads"])
+    if package_network(package_name) == PackageNetwork::NoEntry {
+        return json!(false);
+    }
+    if cfg!(windows) {
+        json!(true)
     } else {
-        json!(false)
+        json!(["$downloads"])
     }
 }
 

@@ -1174,6 +1174,22 @@ fn apply_inner(
     // is threaded into the backend deny-layer (which permits egress ONLY to the proxy
     // endpoint) before the child is prepared. The proxy is then stashed on `Prepared`
     // so it outlives the child (design.md §2.5).
+    // THE LANDLOCK ARM STARTS NO PROXY. It has no netns, so a child cannot be routed through one
+    // — its net axis is a coarse per-package seccomp family permit (`linux::apply_landlock`), and
+    // an Allow rule there is provenance rather than a host gate. Starting one anyway left a
+    // loopback listener nothing could use on every catalogued package's lifecycle spawn, and a
+    // bind failure is a HARD apply error, so the machinery could refuse an install it does not
+    // participate in. A broker still forces the proxy: it is the only thing that can perform the
+    // marker→secret swap, and skipping it would turn a grant into a silent failure rather than a
+    // saved listener. No build-jail policy has brokers (its env axis strips the credential
+    // family), so in production this predicate is just "the build jail".
+    #[cfg(target_os = "linux")]
+    let proxy = if linux_preflight.uses_landlock() && policy.net.brokers.is_empty() {
+        None
+    } else {
+        start_proxy_if_needed(policy, runtime_brokers)?
+    };
+    #[cfg(not(target_os = "linux"))]
     let proxy = start_proxy_if_needed(policy, runtime_brokers)?;
     let proxy_port = proxy.as_ref().map(EgressProxy::port);
     // The per-session egress-proxy token, delivered to the child via the proxy URL. Same

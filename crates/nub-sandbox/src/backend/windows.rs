@@ -665,7 +665,14 @@ pub(crate) fn apply(
                 .to_string()
         });
     }
-    if net_plan == WinNetPlan::Unconfined {
+    // NOT reported for the build jail, whose coarse-allow IS its contract. A `nub sandbox` scope
+    // that authored `net: true` asked for full host networking and got less, which is a real
+    // shortfall; a catalogued dependency asked for "may reach the network" and got exactly that,
+    // so a per-spawn "reduced mode" line on every one of the 181 granted packages would assert
+    // something false at install-time volume. `compiler::preset::build_jail_net` is what routes
+    // an admitted package here, and its doc records why this spelling is the only one Windows'
+    // unprivileged lever accepts.
+    if net_plan == WinNetPlan::Unconfined && !policy.build_jail {
         deg.lost.push("net-full".to_string());
         reason.get_or_insert_with(|| {
             "AppContainer internetClient permits public outbound connections but does not \

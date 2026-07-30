@@ -747,23 +747,38 @@ fn build_jail_interposition_gates_egress_on_package_identity() {
         .expect("compile build-jail")
     };
 
-    // GRANTED — both catalog shapes collapse to the same boolean. `canvas` carries an
-    // inverted host list (it fetches GitHub release assets); `node-libcurl` carries
-    // `packageNetwork.full`. Neither resolves to a narrower set than the other: per-host
-    // permissioning is not a capability here, so an admitted package reaches `$downloads`.
+    // GRANTED — both catalog shapes collapse to the same boolean. `canvas` carries an inverted
+    // host list (it fetches GitHub release assets); `node-libcurl` carries `packageNetwork.full`.
+    // Neither resolves to a narrower grant than the other: per-host permissioning is not a
+    // capability here.
+    //
+    // THE SPELLING IS PLATFORM-SPECIFIC and the assertion follows it, because that divergence is
+    // load-bearing rather than incidental (see `preset::build_jail_net`). Windows compiles to
+    // coarse-allow because its only unprivileged egress lever is the `internetClient` capability,
+    // which the backend grants on exactly `!net.enforce`; everywhere else the axis keeps enforcing
+    // and names the `$downloads` hosts. What must hold in BOTH spellings is the same product
+    // fact — a catalogued package can reach the network — so that is what is asserted, once per
+    // spelling, rather than a single shape that would be wrong on one platform.
     for admitted in ["canvas", "node-libcurl"] {
         let p = compile_for(Some(admitted));
-        assert!(p.net.enforce, "{admitted}: the net axis still enforces");
-        let hosts = nub_sandbox::matcher::HostMatcher::new(&p.net);
-        assert_eq!(
-            hosts.admits("nodejs.org"),
-            !cfg!(windows),
-            "{admitted} is catalogued, so it reaches $downloads off Windows"
-        );
-        assert!(
-            !hosts.admits("evil.test"),
-            "{admitted}: an admitted package still reaches only the curated set"
-        );
+        if cfg!(windows) {
+            assert!(
+                !p.net.enforce,
+                "{admitted}: Windows grants egress by not enforcing the axis, which is what \
+                 hands the AppContainer its internetClient capability"
+            );
+        } else {
+            assert!(p.net.enforce, "{admitted}: the net axis still enforces");
+            let hosts = nub_sandbox::matcher::HostMatcher::new(&p.net);
+            assert!(
+                hosts.admits("nodejs.org"),
+                "{admitted} is catalogued, so the compiled axis admits a $downloads host"
+            );
+            assert!(
+                !hosts.admits("evil.test"),
+                "{admitted}: the compiled axis still names only the curated set"
+            );
+        }
     }
 
     // DENIED — the default, and the case that matters. `left-pad` is an ordinary dependency
@@ -771,6 +786,9 @@ fn build_jail_interposition_gates_egress_on_package_identity() {
     // lifecycle script nobody reviewed. `None` is what aube hands over when the spawn root is
     // a checkout it fetched. `install-peers` is the third clause: it appears under
     // `registry.npmjs.org` in `fetchedBy` AND in `notGranted.packages`, and the refusal wins.
+    //
+    // UNIFORM ACROSS PLATFORMS, unlike the granted arm above: deny-all is expressible everywhere,
+    // so there is no spelling to branch on and no platform where this may weaken.
     for denied in [Some("left-pad"), None, Some("install-peers")] {
         let p = compile_for(denied);
         assert!(
