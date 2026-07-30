@@ -140,9 +140,27 @@ pub struct Shim {
 /// `app_files` is the payload the shim will be appended to — the launcher writes
 /// those files by name, so a collision would silently overwrite a bundle chunk.
 pub fn shim(app_files: &[(String, Vec<u8>)], entry: &str, plan: &ShimPlan<'_>) -> Result<Shim> {
-    if let Some((name, _)) = app_files.iter().find(|(n, _)| n == WRAPPER || n == HOOK) {
+    // Folded, not exact — the same class `reject_colliding_names` refuses in
+    // mod.rs, folded the same way: the launcher writes payload entries by name, so
+    // where the target's filesystem does not distinguish case, a shim and a bundle
+    // file differing only in case overwrite one another with nothing failing at
+    // build time. Folded on EVERY target rather than only the folding ones,
+    // because these two names are nub's own — reserving them outright is one rule,
+    // where narrowing it to the folding targets would mean threading a
+    // TargetPlatform through for a spelling no real build wants.
+    for (name, _) in app_files {
+        let folded = name.to_lowercase();
+        if folded != WRAPPER && folded != HOOK {
+            continue;
+        }
+        let cased = if folded == *name {
+            ""
+        } else {
+            "\n\x20\x20The names differ only in case, which a case-folding filesystem does not \
+             keep apart."
+        };
         bail!(
-            "the bundle already emits a file named {name}, which {} needs for its shim",
+            "the bundle already emits a file named {name}, which {} needs for its shim.{cased}",
             plan.flag()
         );
     }
@@ -506,5 +524,9 @@ mod tests {
         // Not the entry, but still a collision the launcher would resolve by
         // overwriting one of the two.
         assert!(shim(&app(&["app.js", "__nub_external.mjs"]), "app.js", &plan).is_err());
+        // A case variant is the same overwrite on any target whose filesystem
+        // folds, and it is invisible on a build host that folds too — which is
+        // every macOS and Windows machine nub is built on.
+        assert!(shim(&app(&["app.js", "__NUB_External.mjs"]), "app.js", &plan).is_err());
     }
 }

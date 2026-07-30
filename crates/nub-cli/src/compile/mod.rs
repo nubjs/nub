@@ -368,8 +368,8 @@ fn read_define_files(raw: &[String]) -> Result<Vec<String>> {
                      \x20\x20--define-file MODELS=./models.json"
                 )
             })?;
-        let bytes =
-            fs::read(path).with_context(|| format!("reading {path}, the --define-file for {key}"))?;
+        let bytes = fs::read(path)
+            .with_context(|| format!("reading {path}, the --define-file for {key}"))?;
         let mut value = String::from_utf8(bytes).map_err(|e| {
             anyhow!(
                 "{path}, the --define-file for {key}, is not valid UTF-8 (first bad byte at \
@@ -986,13 +986,13 @@ mod tests {
         let dir = fresh_dir("definefile-bad");
         let msg = |e: anyhow::Error| format!("{e:#}");
 
-        let m = msg(read_define_files(&["MODELS=./nope.json".into()]).unwrap_err());
+        let m = msg(read_define_files(&["MODELS=./nope.json".to_string()]).unwrap_err());
         assert!(
             m.contains("nope.json") && m.contains("MODELS"),
             "a missing file must name both the path and the key it was for: {m}"
         );
 
-        let m = msg(read_define_files(&["JUST_A_KEY".into()]).unwrap_err());
+        let m = msg(read_define_files(&["JUST_A_KEY".to_string()]).unwrap_err());
         assert!(
             m.contains("KEY=PATH"),
             "a malformed argument must show the expected form: {m}"

@@ -81,9 +81,14 @@ and the result was a binary labelled x64 containing arm64 code.
 
 `nub-launcher/src/main.rs::launch` is short and the order is deliberate:
 
-1. `cache::resolve()` — pick a writable, exec-capable cache root, once, and thread it through.
-   Candidates in order: `NUB_COMPILE_CACHE_DIR` (used verbatim, the documented escape hatch)
-   → `XDG_CACHE_HOME` → `HOME` → a per-uid dir under `TMPDIR`.
+1. `cache::resolve()` — pick an exec-capable cache root (writable too, unless this run's
+   artifacts are already extracted there), once, and thread it through. Candidates in order:
+   `NUB_COMPILE_CACHE_DIR` (used verbatim, the documented escape hatch) → `XDG_CACHE_HOME`
+   → `HOME` → a per-uid dir under `TMPDIR`.
+   The ownership and `noexec` gates ALWAYS run: the launcher execs Node out of this tree
+   whether or not it writes to it. Only the two steps that actually WRITE — the mkdir and a
+   zero-byte probe file — are skipped when the cache is already warm, which is what makes the
+   pre-warmed read-only image deployment (the one the error text recommends) actually work.
 2. `acquire_node` — use the embedded Node, or discover/provision one for `--smol`.
 3. `ensure_app` — extract the bundled JS and assets into the app dir.
 4. `compute_inject_flags` — version-appropriate flags only.

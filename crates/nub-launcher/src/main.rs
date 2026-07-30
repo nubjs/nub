@@ -185,17 +185,18 @@ fn long_path_remedy(node_path: &Path, e: &std::io::Error) -> Option<String> {
     const MAX_PATH: usize = 260;
     // `\compile-node\<version>-<hash>\node.exe`, appended to the cache root.
     const APPENDED: usize = 47;
+    // The limit is applied AFTER normalization — an 8.3-shortened or junction
+    // component expands — so the length measurable here is a floor and the
+    // classification claims a margin below the limit. Further down than this,
+    // ERROR_PATH_NOT_FOUND means what it says and keeps the generic message.
+    const MARGIN: usize = 16;
 
     if e.raw_os_error() != Some(ERROR_PATH_NOT_FOUND) {
         return None;
     }
-    // The limit counts UTF-16 code units and is applied AFTER normalization — an
-    // 8.3-shortened or junction component expands — so a measured length is a
-    // floor, and the classification takes a margin below the limit. Well under
-    // that margin, ERROR_PATH_NOT_FOUND means what it says and keeps the generic
-    // message.
+    // MAX_PATH counts UTF-16 code units, not bytes.
     let len = node_path.as_os_str().encode_wide().count();
-    if len + 16 < MAX_PATH {
+    if len + MARGIN < MAX_PATH {
         return None;
     }
     Some(format!(
