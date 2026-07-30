@@ -615,11 +615,13 @@ fn build_jail_gate_admits_the_download_set_and_refuses_everything_else() {
         }
     }
     for refused in [
-        // Never inherited from `$trusted`: `npm publish` is a PUT to the host that
-        // serves the read, so admitting it would hand a postinstall a publish route.
-        "registry.npmjs.org",
-        "api.github.com",
-        "storage.googleapis.com",
+        // Recorded REFUSALS, not omissions — the gate is what makes them real. A telemetry
+        // endpoint whose POST body IS the product, and the widest write-capable Google API
+        // hostname in the corpus. `registry.npmjs.org`, `api.github.com` and
+        // `storage.googleapis.com` used to sit in this list; catalog v2 admits all three with
+        // a declared residual, so they moved out of it rather than being dropped silently.
+        "www.google-analytics.com",
+        "www.googleapis.com",
         // Wildcard-free: an attacker-chosen label under a LISTED host is still refused,
         // which is what keeps a secret out of a DNS query.
         "leak.cdn.cypress.io",

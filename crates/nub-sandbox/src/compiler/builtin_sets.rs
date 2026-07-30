@@ -541,17 +541,25 @@ mod tests {
     /// cannot agree on the same bad parse — and ORDER-SENSITIVE, because the expansion in
     /// `download_net_rules` emits one rule per host in list order and the IR is compared
     /// byte-wise elsewhere.
+    ///
+    /// A PREFIX check, not equality. Catalog v2 APPENDS the source-read hosts, and order
+    /// matters, so asserting that the four original entries are still the first four in the
+    /// same sequence keeps exactly the property this test protected — the round-trip did not
+    /// reorder or drop them — while letting the set grow the way `data/README.md` says it
+    /// grows. An insert ahead of them, or a reorder among them, still fails.
     #[test]
-    fn the_catalog_reproduces_the_pre_catalog_host_list() {
+    fn the_catalog_still_leads_with_the_pre_catalog_host_list() {
+        const FROZEN: [&str; 4] = [
+            "nodejs.org",
+            "binaries.prisma.sh",
+            "download.cypress.io",
+            "cdn.cypress.io",
+        ];
         assert_eq!(
-            DOWNLOAD_HOSTS,
-            [
-                "nodejs.org",
-                "binaries.prisma.sh",
-                "download.cypress.io",
-                "cdn.cypress.io",
-            ],
-            "the generated $downloads set diverged from the hand-written one it replaced"
+            &DOWNLOAD_HOSTS[..FROZEN.len()],
+            &FROZEN[..],
+            "the generated $downloads set reordered or dropped the hand-written entries it \
+             replaced — new hosts APPEND, they do not insert"
         );
     }
 
@@ -574,31 +582,61 @@ mod tests {
         }
     }
 
+    /// The v1 form of this test BANNED every write-capable and multi-tenant host outright.
+    /// Catalog v2 reverses that for four of them, deliberately: `github.com` alone is 40 of
+    /// the 230 source-read packages and 26 points of network coverage, and a jail that breaks
+    /// a quarter of the native ecosystem gets turned off, which protects nothing. So the
+    /// invariant moves from "never admitted" to "never admitted SILENTLY" — a host in this
+    /// class must carry a named `residual` in the catalog saying what remains and what bounds
+    /// it. That is checkable, and it is what stops the list widening by accident.
     #[test]
-    fn no_write_capable_or_multi_tenant_host_leaked_into_downloads() {
-        // The set is meant to grow by PR as more install-time downloaders are covered.
-        // These are the shapes such a PR must never add: a host the confined script can
-        // upload to, and a namespace an attacker can rent under the same hostname and read
-        // back. The GitHub-release and object-store families are UNSOLVED here on purpose —
-        // they need pre-download brokering, not an allowlist entry.
-        for banned in [
+    fn no_undeclared_residual_host_reached_downloads() {
+        for host in [
+            "github.com",
+            "api.github.com",
+            "registry.npmjs.org",
             "storage.googleapis.com",
+        ] {
+            if DOWNLOAD_HOSTS.contains(&host) {
+                assert!(
+                    DOWNLOAD_HOSTS_WITH_RESIDUAL.contains(&host),
+                    "`{host}` carries a write route or a multi-tenant namespace under the same \
+                     hostname and is admitted anyway — it must declare a `residual` in \
+                     data/build-jail-catalog.json"
+                );
+            }
+        }
+        // The control: a residual declaration is not a blanket permit. These shapes stay
+        // refused whatever anyone writes in a `residual` field — a wildcard (DNS-label
+        // exfiltration), a container registry or a telemetry endpoint whose POST body IS the
+        // product. No corpus package needs any of them.
+        for banned in [
             "*.googleapis.com",
             "*.amazonaws.com",
             "*.blob.core.windows.net",
-            "github.com",
-            "api.github.com",
-            "codeload.github.com",
-            "objects.githubusercontent.com",
-            "raw.githubusercontent.com",
             "*.github.io",
-            "registry.npmjs.org",
             "ghcr.io",
             "sentry.io",
+            "www.google-analytics.com",
+            "www.googleapis.com",
         ] {
             assert!(
                 !DOWNLOAD_HOSTS.contains(&banned),
-                "`{banned}` accepts a write or is multi-tenant — it must not be in $downloads"
+                "`{banned}` is a wildcard, a registry write surface, or a telemetry sink — no \
+                 residual declaration admits it"
+            );
+        }
+    }
+
+    /// A residual declaration is only meaningful if it names a host that is actually admitted;
+    /// a stale entry left behind after a host is refused would read as an accepted exposure
+    /// that no longer exists.
+    #[test]
+    fn every_declared_residual_names_an_admitted_host() {
+        for host in DOWNLOAD_HOSTS_WITH_RESIDUAL {
+            assert!(
+                DOWNLOAD_HOSTS.contains(host),
+                "`{host}` declares a residual but is not in $downloads"
             );
         }
     }

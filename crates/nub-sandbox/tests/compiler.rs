@@ -524,10 +524,18 @@ fn build_jail_preset_expands() {
         !cfg!(windows),
         "build-jail admits a $downloads host off Windows, and nothing on Windows"
     );
-    assert!(
-        !hosts.admits("api.github.com") && !hosts.admits("storage.googleapis.com"),
-        "build-jail must not admit a write-capable or multi-tenant host"
-    );
+    // The negative is now an UNLISTED host rather than a write-capable one: catalog v2
+    // admits `github.com`, `api.github.com`, `registry.npmjs.org` and
+    // `storage.googleapis.com` with a named residual apiece, because refusing them cost 26
+    // points of ecosystem coverage. What the jail must still refuse is anything the catalog
+    // does not name — including a telemetry sink and a container registry, both of which are
+    // recorded refusals rather than omissions.
+    for unlisted in ["evil.test", "www.google-analytics.com", "ghcr.io"] {
+        assert!(
+            !hosts.admits(unlisted),
+            "build-jail must admit only hosts the catalog names: `{unlisted}` is not one"
+        );
+    }
     assert!(
         p.env.enforce && p.env.constructed.is_empty(),
         "static build-jail strips env"
@@ -816,8 +824,8 @@ fn build_jail_interposition_confines_write_grants_interpreter_and_scrubs_env() {
     let hosts = nub_sandbox::matcher::HostMatcher::new(&p.net);
     assert_eq!(hosts.admits("nodejs.org"), !cfg!(windows));
     assert!(
-        !hosts.admits("api.github.com"),
-        "a write-capable host is never admitted"
+        !hosts.admits("evil.test"),
+        "a host the catalog does not name is never admitted"
     );
     // Env: the constructed lifecycle env is KEPT minus credential-shaped keys.
     assert!(p.env.enforce);
@@ -2312,8 +2320,12 @@ fn trusted_set_expands_in_place_admitting_listed_and_denying_unlisted() {
 #[test]
 fn downloads_set_expands_to_the_install_time_hosts_only() {
     // `$downloads` is its own set, not an alias of `$trusted`: it admits the install-time
-    // artifact hosts and NOT the far broader agent surface `$trusted` carries — most
-    // pointedly `registry.npmjs.org`, whose publish route answers on the same hostname.
+    // artifact hosts and NOT the far broader agent surface `$trusted` carries — the whole
+    // package-index and language-toolchain sweep (crates.io, PyPI, the Anthropic API).
+    // The exemplar used to be `registry.npmjs.org`; catalog v2 ADMITS that host, because six
+    // corpus packages shell their own `npm install` from a lifecycle script and the lifecycle
+    // env scrub withholds the publish credential. So the exemplar moved to hosts `$trusted`
+    // retains and no install-time downloader in the corpus asks for.
     let ctx = common::ctx(true, &[]);
     let p = compile(&json!({ "net": ["$downloads"] }), &ctx).unwrap();
     let m = nub_sandbox::matcher::HostMatcher::new(&p.net);
@@ -2325,10 +2337,13 @@ fn downloads_set_expands_to_the_install_time_hosts_only() {
         m.admits("cdn.cypress.io"),
         "another listed host is admitted"
     );
-    assert!(
-        !m.admits("registry.npmjs.org"),
-        "$downloads must not inherit $trusted's write-capable retentions"
-    );
+    for trusted_only in ["index.crates.io", "pypi.org", "api.anthropic.com"] {
+        assert!(
+            !m.admits(trusted_only),
+            "$downloads must not inherit $trusted's breadth: `{trusted_only}` is an \
+             agent-browsing host, not an install-time artifact host"
+        );
+    }
     assert!(!m.admits("evil.test"), "an unlisted host is denied");
     assert!(
         !m.admits("secret.cdn.cypress.io"),

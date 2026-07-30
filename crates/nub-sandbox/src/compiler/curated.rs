@@ -48,16 +48,24 @@ use std::path::{Path, PathBuf};
 
 /// Where a package's project WRITE targets come from, when it has any.
 ///
-/// Only one shape exists because only one was needed: a dotted field path into the
-/// CONSUMER's root `package.json` whose value is a string or array of project-relative
-/// directories. nub owns the field NAME; the consumer owns the value, and every resolved
-/// path is clamped back inside the project root. This is the narrow alternative to
-/// granting the project tree for a package that imposes no directory convention of its
-/// own — the consumer already had to name the directory for the package to work at all.
+/// Two shapes, and which one applies is a fact about the PACKAGE rather than a choice:
+///
+/// - [`Literal`](ProjectWrites::Literal) — the package defines the directory itself, so nub
+///   can name it. `.git/hooks` for the git-hook installers, `snapshots.js` for
+///   `@cypress/snapshot`, `hooks` for `@nativescript/core`. This is the common case and the
+///   narrower one: the target is fixed at review time, so widening it needs a new
+///   measurement rather than a different value in someone's manifest.
+/// - [`ManifestField`](ProjectWrites::ManifestField) — the package imposes NO convention, so
+///   the only place the answer exists is the consumer's own root manifest (msw's
+///   `workerDirectory`). nub owns the field NAME; the consumer owns the value.
+///
+/// Either way every resolved path is clamped back inside the project root by
+/// [`contained`], so a `../../..` is dropped rather than granted.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ProjectWrites {
     None,
     ManifestField(&'static [&'static str]),
+    Literal(&'static [&'static str]),
 }
 
 /// One package's exception. Absent fields mean the jail's baseline already suffices.
@@ -73,6 +81,18 @@ struct CuratedGrant {
     /// the reason this is a separate field from `project_writes`: a generator needs its
     /// schema readable, not writable, and read is the smaller grant.
     project_reads: &'static [&'static str],
+    /// Project-relative DIRECTORY NODES it may read — the node alone, never `/**`.
+    ///
+    /// [`project_cwd`](Self::project_cwd) generalized to a named path, for a package that
+    /// PROBES for a directory rather than making it its cwd. The git-hook installers all
+    /// `existsSync` the project's `.git` (several then walk upward from it) before writing
+    /// `.git/hooks`, and a node-only read is what makes that probe succeed.
+    ///
+    /// Load-bearing that this is NOT a `project_reads` entry: `.git` as a SUBTREE would
+    /// expose `.git/config`, whose remote URL can carry an HTTPS credential — the same leak
+    /// that was reproduced under the real jail through nub's git-dependency cache and closed
+    /// by narrowing that grant. Naming the node grants the probe and nothing else.
+    project_nodes: &'static [&'static str],
     /// Project-relative subtrees it may WRITE.
     project_writes: ProjectWrites,
     /// Grant READ on the project root DIRECTORY NODE — the node alone, never `/**`.
@@ -115,6 +135,7 @@ impl CuratedGrant {
     const NONE: Self = Self {
         sibling_dirs: &[],
         project_reads: &[],
+        project_nodes: &[],
         project_writes: ProjectWrites::None,
         project_cwd: false,
     };
@@ -244,6 +265,12 @@ fn grant_from_table(
             }
         }
     }
+    for rel in grant.project_nodes {
+        // The NODE alone — no `subtree_globs`, exactly as the `project_cwd` arm above.
+        if let Some(path) = contained(project_root, rel) {
+            rules.push(rule(&path.to_string_lossy(), FsAccess::Read));
+        }
+    }
     for path in project_writes(grant.project_writes, project_root) {
         push_rw(&mut rules, &path);
     }
@@ -263,6 +290,7 @@ fn project_writes(writes: ProjectWrites, project_root: &Path) -> Vec<PathBuf> {
     let relatives = match writes {
         ProjectWrites::None => return Vec::new(),
         ProjectWrites::ManifestField(field) => manifest_field_paths(project_root, field),
+        ProjectWrites::Literal(paths) => paths.iter().map(|p| (*p).to_string()).collect(),
     };
     relatives
         .into_iter()
@@ -372,12 +400,24 @@ mod tests {
     /// they are. Compared against the frozen pre-catalog literal rather than against a
     /// re-read of the JSON, so this cannot pass by both sides agreeing on the same bad
     /// parse — the baseline predates the parser entirely.
+    ///
+    /// A SUBSET check, not equality. Catalog v2 appends grants the frozen baseline never had
+    /// (the git-hook cohort and two project-file writers), so equality would now fail on
+    /// every legitimate addition and the honest options were to freeze a second baseline —
+    /// which just moves the problem — or to assert the property this test actually protects:
+    /// that the JSON round-trip did not alter the three grants that predate it. New entries
+    /// are covered by the shape tests below and by `both_tables_compile_to_the_same_policy`.
     #[test]
-    fn the_catalog_reproduces_the_pre_catalog_table() {
-        assert_eq!(
-            CURATED_GRANTS, GOLDEN_PRE_CATALOG_GRANTS,
-            "the generated table diverged from the hand-written one it replaced"
-        );
+    fn the_catalog_still_reproduces_the_pre_catalog_grants() {
+        for (name, golden) in GOLDEN_PRE_CATALOG_GRANTS {
+            let from_catalog = lookup(CURATED_GRANTS, name)
+                .unwrap_or_else(|| panic!("{name} was dropped from the catalog"));
+            assert_eq!(
+                &from_catalog, golden,
+                "{name}: the catalog-generated grant diverged from the hand-written one it \
+                 replaced"
+            );
+        }
     }
 
     /// Equal tables are the input; equal POLICIES are the thing that actually has to hold.
@@ -428,6 +468,13 @@ mod tests {
     /// contributor a grant that appears present and does nothing.
     #[test]
     fn no_curated_path_escapes_the_subtree_that_bounds_it() {
+        fn stays_inside(rel: &str) -> bool {
+            let p = Path::new(rel);
+            !p.is_absolute()
+                && !p
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+        }
         for (name, grant) in CURATED_GRANTS {
             for dir in grant.sibling_dirs {
                 assert!(
@@ -435,15 +482,21 @@ mod tests {
                     "{name}: sibling `{dir}` must be one directory NAME"
                 );
             }
-            for rel in grant.project_reads {
-                let p = Path::new(rel);
-                assert!(
-                    !p.is_absolute()
-                        && !p
-                            .components()
-                            .any(|c| matches!(c, std::path::Component::ParentDir)),
-                    "{name}: project read `{rel}` must stay inside the project"
-                );
+            let literal_writes = match grant.project_writes {
+                ProjectWrites::Literal(paths) => paths,
+                _ => &[],
+            };
+            for (field, rels) in [
+                ("project read", grant.project_reads),
+                ("project node", grant.project_nodes),
+                ("literal project write", literal_writes),
+            ] {
+                for rel in rels {
+                    assert!(
+                        stays_inside(rel),
+                        "{name}: {field} `{rel}` must stay inside the project"
+                    );
+                }
             }
         }
     }

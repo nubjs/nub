@@ -34,6 +34,14 @@ fn main() {
     let out = Path::new(&out);
     emit(&out.join("download_hosts.rs"), &gen_hosts(&catalog));
     emit(&out.join("curated_grants.rs"), &gen_grants(&catalog));
+    emit(&out.join("system_paths.rs"), &gen_system_paths(&catalog));
+    // The documentation-only objects generate nothing, so nothing downstream would notice a
+    // malformed one. Checking them here is the only thing that stops the catalog's own record
+    // of what was REFUSED — the input to every later promotion decision — from rotting into
+    // free text. `notGranted.packages` in particular carries a verdict ("this break is
+    // correct") that a reader will act on.
+    check_refusals(&catalog);
+    check_coverage(&catalog);
 }
 
 fn emit(path: &Path, src: &str) {
@@ -46,12 +54,24 @@ fn emit(path: &Path, src: &str) {
 fn gen_hosts(catalog: &serde_json::Value) -> String {
     let entries = array(catalog, "networkHosts");
     let mut hosts = Vec::new();
+    let mut with_residual = Vec::new();
     let mut seen = BTreeSet::new();
 
     for (i, entry) in entries.iter().enumerate() {
         let at = format!("networkHosts[{i}]");
         let host = string(entry, "host", &at);
         require_provenance(entry, &at);
+
+        // A host admitted DESPITE a write-capable or multi-tenant exposure must say so, and
+        // the declaration is generated so a test can hold the two in agreement. v1 refused
+        // this class outright; v2 admits some of it on best-effort grounds, and the honest
+        // form of that reversal is a NAMED residual per host rather than a quietly wider
+        // list. `residual` is optional overall and REQUIRED for the shapes checked in
+        // `no_undeclared_residual_host_reached_downloads`.
+        if entry.get("residual").is_some() {
+            string(entry, "residual", &at);
+            with_residual.push(host.clone());
+        }
 
         // Wildcard-freedom is the set's structural anti-exfiltration property: the proxy
         // resolves the name itself, so a `*.suffix` member would let a confined script put
@@ -108,6 +128,14 @@ fn gen_hosts(catalog: &serde_json::Value) -> String {
         let _ = writeln!(src, "    {host:?},");
     }
     src.push_str("];\n");
+    let _ = write!(
+        src,
+        "/// The subset of [`DOWNLOAD_HOSTS`] admitted with a NAMED residual exposure — a write\n\
+         /// route or a multi-tenant namespace under the same hostname, accepted because the\n\
+         /// jail is defense in depth and refusing the host costs more than the residual. Each\n\
+         /// entry's `residual` field in the catalog states what remains and what bounds it.\n\
+         pub const DOWNLOAD_HOSTS_WITH_RESIDUAL: &[&str] = &{with_residual:?};\n"
+    );
     src
 }
 
@@ -154,34 +182,40 @@ fn gen_grants(catalog: &serde_json::Value) -> String {
             require_project_relative(rel, "projectReads", &at);
         }
 
+        let nodes = opt_strings(entry, "projectNodes", &at);
+        for rel in &nodes {
+            require_project_relative(rel, "projectNodes", &at);
+        }
+
         let writes = match entry.get("projectWrites") {
             None | Some(serde_json::Value::Null) => "ProjectWrites::None".to_string(),
             Some(w) => {
-                let field = w
-                    .get("manifestField")
-                    .and_then(serde_json::Value::as_array)
-                    .unwrap_or_else(|| {
-                        fail(&format!(
-                            "{at}: projectWrites must be {{\"manifestField\": [..]}} — the only \
-                             shape the compiler implements"
-                        ))
-                    });
-                if field.is_empty() {
-                    fail(&format!(
-                        "{at}: projectWrites.manifestField must name a field"
-                    ));
+                // Exactly one of the two shapes, never both: they resolve against different
+                // authorities (nub's literal vs the consumer's manifest) and a reader could not
+                // tell which one bounds the grant if an entry carried each.
+                let manifest = w.get("manifestField");
+                let literal = w.get("literal");
+                match (manifest, literal) {
+                    (Some(_), Some(_)) => fail(&format!(
+                        "{at}: projectWrites carries both `manifestField` and `literal` — pick the \
+                         one that bounds this package's write"
+                    )),
+                    (Some(field), None) => {
+                        let keys = string_array(field, "projectWrites.manifestField", &at);
+                        format!("ProjectWrites::ManifestField(&{keys:?})")
+                    }
+                    (None, Some(paths)) => {
+                        let paths = string_array(paths, "projectWrites.literal", &at);
+                        for rel in &paths {
+                            require_project_relative(rel, "projectWrites.literal", &at);
+                        }
+                        format!("ProjectWrites::Literal(&{paths:?})")
+                    }
+                    (None, None) => fail(&format!(
+                        "{at}: projectWrites must be {{\"manifestField\": [..]}} or \
+                         {{\"literal\": [..]}} — the only two shapes the compiler implements"
+                    )),
                 }
-                let keys: Vec<String> = field
-                    .iter()
-                    .map(|k| {
-                        k.as_str()
-                            .unwrap_or_else(|| {
-                                fail(&format!("{at}: manifestField entries must be strings"))
-                            })
-                            .to_string()
-                    })
-                    .collect();
-                format!("ProjectWrites::ManifestField(&{keys:?})")
             }
         };
 
@@ -193,16 +227,202 @@ fn gen_grants(catalog: &serde_json::Value) -> String {
             })
             .unwrap_or(false);
 
+        require_failure_mode(entry, &at);
+
         let _ = write!(
             src,
             "    (\n        {name:?},\n        CuratedGrant {{\n            \
              sibling_dirs: &{siblings:?},\n            project_reads: &{reads:?},\n            \
-             project_writes: {writes},\n            project_cwd: {cwd},\n        }},\n    ),\n"
+             project_nodes: &{nodes:?},\n            project_writes: {writes},\n            \
+             project_cwd: {cwd},\n        }},\n    ),\n"
         );
     }
 
     src.push_str("];\n");
     src
+}
+
+// ── systemPaths (recorded, not yet enforced) ───────────────────────────────────
+
+/// The per-platform system read paths. Generated even though nothing folds them into the jail
+/// surface yet: the alternative is that the recommendation lives only in prose, where it drifts
+/// from the evidence beside it and nobody notices. Codegen also enforces the shape now rather
+/// than at whatever later date the grant is wired in.
+fn gen_system_paths(catalog: &serde_json::Value) -> String {
+    let mut src = String::from(
+        "// @generated by build.rs from data/build-jail-catalog.json — do not edit.\n",
+    );
+    for (key, konst) in [
+        ("linux", "SYSTEM_READ_PATHS_LINUX"),
+        ("macos", "SYSTEM_READ_PATHS_MACOS"),
+        ("windows", "SYSTEM_READ_PATHS_WINDOWS"),
+    ] {
+        let entries = array_at(catalog, &["systemPaths", "platforms", key]);
+        if entries.is_empty() {
+            fail(&format!(
+                "systemPaths.platforms.{key} must be a non-empty array"
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        let mut paths = Vec::new();
+        for (i, entry) in entries.iter().enumerate() {
+            let at = format!("systemPaths.platforms.{key}[{i}]");
+            let path = string(entry, "path", &at);
+            // The `why` is the whole value of the entry — a bare path list would be
+            // indistinguishable from a guess a year from now.
+            string(entry, "why", &at);
+            require_system_path(&path, &at);
+            if !seen.insert(path.clone()) {
+                fail(&format!("{at}: `{path}` is listed twice"));
+            }
+            paths.push(path);
+        }
+        let _ = write!(
+            src,
+            "/// System library and header paths the build jail should grant READ on {key}.\n\
+             /// RECORDED, NOT YET ENFORCED — see `systemPaths.status` in the catalog.\n\
+             /// An entry may be `$NAME`- or `%NAME%`-anchored; the EMBEDDER resolves those.\n\
+             pub const {konst}: &[&str] = &{paths:?};\n"
+        );
+    }
+    src
+}
+
+/// A system path is absolute, or anchored on an env var the embedder resolves. Globs are
+/// rejected for the same reason a wildcard host is: `subtree_globs` adds the recursion, so a
+/// `*` here can only widen a rule past the directory the entry names.
+fn require_system_path(path: &str, at: &str) {
+    if path.contains('*') || path.contains('?') {
+        fail(&format!(
+            "{at}: `{path}` must not contain a glob — subtree recursion is added by the \
+             compiler, so a pattern here can only widen the grant"
+        ));
+    }
+    let anchored = path.starts_with('$') || path.starts_with('%');
+    let absolute = path.starts_with('/')
+        || path
+            .as_bytes()
+            .get(1)
+            .is_some_and(|b| *b == b':' && path.as_bytes()[0].is_ascii_alphabetic());
+    if !anchored && !absolute {
+        fail(&format!(
+            "{at}: `{path}` must be absolute, or anchored on `$VAR` / `%VAR%`"
+        ));
+    }
+}
+
+// ── the documentation-only objects ─────────────────────────────────────────────
+
+/// `notGranted.packages` records a VERDICT — that a measured break is the jail working — so it
+/// is held to the same provenance bar as a grant. A refusal a reader cannot re-check is worse
+/// than no entry, because it reads as settled while carrying nothing.
+fn check_refusals(catalog: &serde_json::Value) {
+    let granted: BTreeSet<String> = array(catalog, "packageGrants")
+        .iter()
+        .enumerate()
+        .map(|(i, e)| string(e, "package", &format!("packageGrants[{i}]")))
+        .collect();
+
+    for (i, entry) in array_at(catalog, &["notGranted", "packages"])
+        .iter()
+        .enumerate()
+    {
+        let at = format!("notGranted.packages[{i}]");
+        let name = string(entry, "package", &at);
+        string(entry, "reason", &at);
+        string(entry, "wants", &at);
+        string(entry, "detail", &at);
+        string(entry, "versions", &at);
+        require_provenance(entry, &at);
+        require_failure_mode(entry, &at);
+        if granted.contains(&name) {
+            fail(&format!(
+                "{at}: `{name}` is in packageGrants AND recorded as refused — one of the two is \
+                 wrong"
+            ));
+        }
+    }
+
+    for (i, entry) in array_at(catalog, &["notGranted", "deferred"])
+        .iter()
+        .enumerate()
+    {
+        let at = format!("notGranted.deferred[{i}]");
+        let name = string(entry, "package", &at);
+        string(entry, "scope", &at);
+        string(entry, "why", &at);
+        require_failure_mode(entry, &at);
+        if granted.contains(&name) {
+            fail(&format!(
+                "{at}: `{name}` is deferred AND granted — a grant supersedes a deferral, so \
+                 remove the deferral"
+            ));
+        }
+    }
+}
+
+/// The coverage table is DERIVED data in a hand-edited file, which is exactly the shape that
+/// drifts silently. Pinning each row's count to the host entry's own `fetchedBy` length is what
+/// keeps the percentages in `corpus` honest as hosts are added.
+fn check_coverage(catalog: &serde_json::Value) {
+    let mut counts = std::collections::BTreeMap::new();
+    for (i, entry) in array(catalog, "networkHosts").iter().enumerate() {
+        let at = format!("networkHosts[{i}]");
+        let host = string(entry, "host", &at);
+        string(entry, "artifact", &at);
+        let n = string_array(
+            entry
+                .get("fetchedBy")
+                .unwrap_or_else(|| fail(&format!("{at}: `fetchedBy` is required"))),
+            "fetchedBy",
+            &at,
+        )
+        .len();
+        counts.insert(host, n);
+    }
+    let refused: BTreeSet<String> = array_at(catalog, &["notGranted", "hosts"])
+        .iter()
+        .enumerate()
+        .map(|(i, e)| string(e, "host", &format!("notGranted.hosts[{i}]")))
+        .collect();
+
+    for (i, row) in array_at(catalog, &["corpus", "networkCoverage"])
+        .iter()
+        .enumerate()
+    {
+        let at = format!("corpus.networkCoverage[{i}]");
+        let host = string(row, "host", &at);
+        let claimed = row
+            .get("packages")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_else(|| fail(&format!("{at}: `packages` must be a number")));
+        match counts.get(&host) {
+            // A refused host has no `fetchedBy` to check against; its coverage row is the
+            // record of what the refusal COSTS, which is the point of keeping the row.
+            None if refused.contains(&host) => {}
+            None => fail(&format!(
+                "{at}: `{host}` is in neither networkHosts nor notGranted.hosts"
+            )),
+            Some(actual) if *actual as u64 != claimed => fail(&format!(
+                "{at}: `{host}` claims {claimed} packages but its networkHosts entry lists \
+                 {actual} in `fetchedBy`"
+            )),
+            Some(_) => {}
+        }
+    }
+}
+
+/// The failure a DENIAL produces. `SILENT` is why the field exists: an exit-code measurement
+/// cannot see it, so it has to be carried as data or it is lost.
+fn require_failure_mode(entry: &serde_json::Value, at: &str) {
+    const MODES: &[&str] = &["LOUD", "SILENT", "GRACEFUL", "UNDETERMINED"];
+    let mode = string(entry, "failureMode", at);
+    if !MODES.contains(&mode.as_str()) {
+        fail(&format!(
+            "{at}: failureMode `{mode}` is not one of {MODES:?} — normalize the prose onto the \
+             enum and keep the nuance in `observed`"
+        ));
+    }
 }
 
 /// A project-relative subtree, checked before the runtime clamp ever sees it. The clamp in
@@ -278,6 +498,28 @@ fn string(entry: &serde_json::Value, key: &str, at: &str) -> String {
                 "{at}: `{key}` is required and must be a non-empty string"
             ))
         })
+}
+
+/// A non-empty array of non-empty strings, checked at the VALUE rather than by key so it can
+/// serve both a named field and a nested one (`projectWrites.literal`).
+fn string_array(value: &serde_json::Value, what: &str, at: &str) -> Vec<String> {
+    let items = value
+        .as_array()
+        .unwrap_or_else(|| fail(&format!("{at}: `{what}` must be an array of strings")));
+    if items.is_empty() {
+        fail(&format!("{at}: `{what}` must not be empty"));
+    }
+    items
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| {
+                    fail(&format!("{at}: `{what}` entries must be non-empty strings"))
+                })
+                .to_string()
+        })
+        .collect()
 }
 
 fn opt_strings(entry: &serde_json::Value, key: &str, at: &str) -> Vec<String> {
