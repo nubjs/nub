@@ -1575,7 +1575,7 @@ examples = [
 
 [defaultLockfileFormat]
 description = "Lockfile format written when the project has no lockfile yet."
-type = '"aube" | "pnpm" | "npm" | "yarn" | "bun"'
+type = '"aube" | "nub" | "pnpm" | "npm" | "yarn" | "bun"'
 default = "\"aube\""
 docs = """
 When a project already has a lockfile, aube preserves its format in
@@ -3283,7 +3283,7 @@ unset, empty string, or arbitrary text) leaves the default
 """
 sources.cli = []
 sources.env = ["npm_config_aube_no_lock", "NPM_CONFIG_AUBE_NO_LOCK", "AUBE_NO_LOCK"]
-sources.npmrc = ["aubeNoLock", "aube-no-lock"]
+sources.npmrc = ["aubeNoLock", "aube-no-lock", "nubNoLock", "nub-no-lock"]
 sources.workspaceYaml = ["aubeNoLock"]
 examples = [
     "AUBE_NO_LOCK=1 aube install",
@@ -3316,7 +3316,7 @@ unset, empty string, or arbitrary text) leaves the default
 """
 sources.cli = ["no-install"]
 sources.env = ["npm_config_aube_no_auto_install", "NPM_CONFIG_AUBE_NO_AUTO_INSTALL", "AUBE_NO_AUTO_INSTALL"]
-sources.npmrc = ["aubeNoAutoInstall", "aube-no-auto-install"]
+sources.npmrc = ["aubeNoAutoInstall", "aube-no-auto-install", "nubNoAutoInstall", "nub-no-auto-install"]
 sources.workspaceYaml = ["aubeNoAutoInstall"]
 examples = [
     "AUBE_NO_AUTO_INSTALL=1 aube run dev",

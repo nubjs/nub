@@ -583,7 +583,11 @@ pub(crate) fn default_lockfile_kind(
 ) -> aube_lockfile::LockfileKind {
     use aube_settings::resolved::DefaultLockfileFormat as Format;
     match aube_settings::resolved::default_lockfile_format(ctx) {
-        Format::Aube => aube_lockfile::LockfileKind::Aube,
+        // One format, two spellings. An embedder that renames the engine's own
+        // lockfile needs a name for it that does not carry the engine's brand;
+        // the default and every existing config keep working because `aube` is
+        // still accepted and still the default.
+        Format::Aube | Format::Nub => aube_lockfile::LockfileKind::Aube,
         Format::Pnpm => aube_lockfile::LockfileKind::Pnpm,
         Format::Npm => aube_lockfile::LockfileKind::Npm,
         Format::Yarn => aube_lockfile::LockfileKind::Yarn,

@@ -2486,7 +2486,10 @@ fn nub_setting_defaults(
     cwd: &Path,
     store_locality: VirtualStoreLocality,
 ) -> Vec<(String, String)> {
-    let fresh_format = if truly_fresh { "aube" } else { "pnpm" };
+    // `nub`, not `aube`: same format, but the value is user-visible — `nub
+    // config` lists it — so the engine's brand must not be the answer to "what
+    // will the first install write". The engine accepts both spellings.
+    let fresh_format = if truly_fresh { "nub" } else { "pnpm" };
     // The phantom-adapter disk-materialize list is no longer hand-curated: the
     // dynamic per-version scanner (`dynamic_phantom` → `phantom_closure`, on by
     // default) detects undeclared-import phantoms per content-fingerprint and
@@ -3825,14 +3828,16 @@ mod tests {
     fn fresh_write_format_flips_with_truly_fresh() {
         let dir = tempfile::tempdir().unwrap();
         // A truly-fresh project writes nub's neutral `nub.lock`
-        // (`defaultLockfileFormat=aube`); every other surface keeps the
-        // pnpm-lock fresh-write default for drop-in interop.
+        // (`defaultLockfileFormat=nub`); every other surface keeps the
+        // pnpm-lock fresh-write default for drop-in interop. The value is
+        // spelled `nub`, not the engine's `aube`, because `nub config` lists
+        // it — both spellings select the same format.
         assert_eq!(
             get(
                 &nub_setting_defaults(None, true, dir.path(), VirtualStoreLocality::Default),
                 "defaultLockfileFormat"
             ),
-            Some("aube"),
+            Some("nub"),
             "truly-fresh must write nub's nub.lock"
         );
         assert_eq!(
