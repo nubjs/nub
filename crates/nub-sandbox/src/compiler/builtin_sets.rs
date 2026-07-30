@@ -596,6 +596,12 @@ mod tests {
             "api.github.com",
             "registry.npmjs.org",
             "storage.googleapis.com",
+            // Promoted in v3 on re-examination: v2 refused these two on reasoning the
+            // best-effort thesis rejects (an apex that also serves a web app; a broad API
+            // host). Both are needed by a real package, and a broken package is the worse
+            // outcome — so they join the class that must DECLARE what it costs.
+            "www.googleapis.com",
+            "saucelabs.com",
         ] {
             if DOWNLOAD_HOSTS.contains(&host) {
                 assert!(
@@ -617,13 +623,15 @@ mod tests {
             "*.github.io",
             "ghcr.io",
             "sentry.io",
+            // Refused because no package NEEDS it, not because of what it is: the one
+            // requester's beacon is fire-and-forget with an error handler attached, so
+            // denial breaks nothing. The security framing v2 used here was dropped.
             "www.google-analytics.com",
-            "www.googleapis.com",
         ] {
             assert!(
                 !DOWNLOAD_HOSTS.contains(&banned),
-                "`{banned}` is a wildcard, a registry write surface, or a telemetry sink — no \
-                 residual declaration admits it"
+                "`{banned}` is a wildcard, a registry write surface, or a host no package \
+                 needs — no residual declaration admits it"
             );
         }
     }

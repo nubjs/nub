@@ -14,27 +14,61 @@ here, with the evidence that earned it.
 **Not a small number, as it turns out.** v1 carried 4 hosts and 3 package grants from one
 measured install pass. Reading the published source of 230 lifecycle-script packages found
 that 146 of them contact a host, 67 touch the project filesystem, and 17 need system library
-paths the schema could not even express. v2 is that correction: 31 hosts, 14 package grants,
-a `systemPaths` axis, and a record of 9 packages whose access is refused on the merits.
+paths the schema could not even express. v2 and v3 are that correction: 33 hosts, 14 package
+grants, per-package network (including six packages granted the whole network), a
+`systemPaths` axis, and a record of 9 packages whose access is refused on the merits.
 
 This file is data, not code. `build.rs` bakes it into the crate as `static` Rust at
 compile time, so nothing is parsed at runtime and a malformed catalog fails the build.
 Adding an entry is a one-line pull request; you do not need to read any Rust.
 
+## The contract: a package that needs access files a PR against this file
+
+This is the mechanism the whole catalog exists to provide, so it comes first.
+
+**A dependency's lifecycle script gets network and out-of-package filesystem access only if
+it has an entry here.** No entry, nothing. Needing access means opening a pull request
+against `build-jail-catalog.json` and having it reviewed. That is what makes the surface
+**opt-in** rather than ambient, and it is the sentence to remember if you remember one.
+
+**Why that is the control, and not host granularity.** The attack this jail exists to blunt
+is the one Shai-Hulud used: an attacker publishes a new `preinstall` or `postinstall` into a
+package that *never had one*, and it runs with the user's complete access. The package is not
+one anybody vetted — it is whatever the worm reached. When someone bolts a postinstall onto
+`chalk`, `chalk` has no entry, so it cannot phone home *regardless of which host it wants*.
+
+The corollary matters for reviewing: **narrowing an already-admitted host buys very little.**
+It constrains a package a human already looked at and trusted, and does nothing about the
+unvetted one. So do not spend review effort shaving hosts, and do not treat a broad grant to
+a *listed* package as the problem. Granting a listed package the ability to fetch arbitrary
+code is a **known, accepted fact** of this design.
+
+> **Enforcement gap, stated up front.** The egress side of that contract is **not enforced
+> yet**: `preset::build_jail_net` compiles to `["$downloads"]` for every jailed spawn, so a
+> package with no entry still reaches all 33 admitted hosts. The per-package data now exists
+> (`packageNetwork`), the compiler can read it (`compiler::package_network()`), and nothing
+> consumes it. Closing that is tracked as `knownDefects: per-package-egress-not-enforced`
+> and is the highest-value change this catalog makes possible. The filesystem side of the
+> contract IS enforced — `packageGrants` is keyed on the installer-resolved name.
+
 ## The jail is best effort, and that decides what belongs here
 
-The build jail is **defense in depth, not a watertight boundary**. Its job is to stop the
-bulk of ecosystem supply-chain attacks and to break the virality of a self-propagating worm
-— not to withstand a determined attacker targeting you specifically. Two consequences that
-run through every decision below:
+The build jail is **defense in depth, not a watertight boundary** — and not a vital security
+boundary. Its job is to stop the bulk of ecosystem supply-chain attacks and to break the
+virality of a self-propagating worm, not to withstand a determined attacker targeting you
+specifically. Three consequences that run through every decision below:
 
 - **A residual exposure is not a failure. Packages breaking is the failure.** A coarse grant
   that keeps the ecosystem working beats a precise one that breaks half of it, because a jail
   that breaks installs gets turned off and then protects nothing. "Just grant the whole
-  directory read-only" is a legitimate answer and is often the right one.
+  directory read-only" is a legitimate answer and is often the right one — as is "grant this
+  package the whole network".
 - **Granting more never requires elevation.** Lifecycle scripts run with the user's full
   access by default, so *every* entry in this file is a **reduction** from the status quo, not
   a privilege being handed out. An entry cannot make things worse than not having the jail.
+- **If a package needs a host to work, grant it and record the residual.** "That host also
+  serves something sensitive" is not sufficient to refuse. Two hosts were refused on exactly
+  that reasoning in v2 and admitted in v3 once it was re-examined.
 
 What this does **not** license is a denylist inside an allowlist, or a wildcard. Those are
 structural properties the jail depends on and they are enforced at build time.
@@ -87,7 +121,7 @@ The hosts a confined lifecycle script may reach. Also exposed to policy authors 
 | --- | --- |
 | `host` | An exact hostname. Wildcards are rejected — see below. |
 | `artifact` | What is downloaded from it. |
-| `pathShape` | Optional. The URL path shape observed, e.g. `/<owner>/<repo>/releases/download/<tag>/<asset>`. |
+| `pathShape` | Optional **provenance** — the URL path shape observed, e.g. `/<owner>/<repo>/releases/download/<tag>/<asset>`. Nothing enforces it; see below. |
 | `fetchedBy` | The package(s) that fetch it. |
 | `residual` | Required for a host admitted *despite* a write route or multi-tenant namespace. States what exposure remains and what bounds it. |
 | `evidence` | How this was learned. One of `measured`, `vendor-documented`, `source-read`. |
@@ -109,28 +143,30 @@ postinstall at all, and the filesystem, environment and network confinement is w
 it. Do not cut an entry for being a supply-chain-integrity risk — that is a different
 criterion, and conflating the two has removed correct entries before.
 
-### `residual` — the v2 reversal, and the rule that replaced it
+### `residual` — a factual record, not a caveat
 
-v1 refused every write-capable and multi-tenant host outright. **v2 admits four of them**, and
-the reason is a count: `github.com` alone is the artifact host for **40 of the 230**
-source-read packages, and adding it moves network coverage from 55% to 79%. A jail that breaks
-a quarter of the native ecosystem is a jail someone turns off.
+v1 refused every write-capable and multi-tenant host outright. **v3 admits six of them** — the
+four ratified in v2 plus two more on re-examination — and a `residual` field records what
+remains. This is bookkeeping so a reviewer can see what an entry costs; it is **not** a
+disclaimer needing defence, and none of these entries is provisional.
 
-What makes the reversal defensible is a property of the jail rather than of the hosts. The
-lifecycle env is **scrubbed of the whole credential family** (`defaults::lifecycle_scrubbed_env`
-withholds registry auth and every key containing `TOKEN`, `SECRET` or `AUTH`), and `~/.ssh`,
-`~/.git-credentials`, `.npmrc` and the project's `.git` are all ungranted. A confined script
-therefore has **no credential** with which to use a write route: what is left is an
-unauthenticated push or publish, which the host rejects.
+Two things bound every residual, and both are properties of the jail rather than of the host.
+The lifecycle env is **scrubbed of the whole credential family**
+(`defaults::lifecycle_scrubbed_env` withholds registry auth and every key containing `TOKEN`,
+`SECRET` or `AUTH`), and `~/.ssh`, `~/.git-credentials`, `.npmrc` and the project's `.git` are
+all ungranted — so a confined script has no credential with which to use a write route. And
+**package identity** gates who reaches the host at all.
 
-So the invariant moved from *never admitted* to **never admitted silently**:
+The invariant is *never admitted silently*:
 
 | host | residual |
 | --- | --- |
 | `github.com` | `git-receive-pack` on the same hostname. Unauthenticated only, per the env scrub. |
 | `api.github.com` | The whole REST API, write included — and equally credential-gated. |
 | `registry.npmjs.org` | `npm publish` is a PUT to the host that serves the read. |
-| `storage.googleapis.com` | Genuinely multi-tenant: the bucket is in the *path*. An attacker can rent one. **This is a real accepted residual**, taken because refusing it breaks puppeteer. |
+| `storage.googleapis.com` | Genuinely multi-tenant: the bucket is in the *path*. An attacker can rent one. Accepted, because refusing it breaks puppeteer. |
+| `www.googleapis.com` | The broadest hostname in the set — fronts nearly every Google API. Promoted in v3; `chromium` needs it and its denial was SILENT. |
+| `saucelabs.com` | An apex that also serves an authenticated web app. Promoted in v3; refusing it broke the user who asked for a Sauce Connect tunnel. |
 
 `build.rs` generates `DOWNLOAD_HOSTS_WITH_RESIDUAL` from these declarations, and a unit test
 holds the two in agreement — so a future PR cannot admit a host of this class without saying
@@ -140,6 +176,13 @@ A **bucket-scoped hostname is not multi-tenant** and needs no residual, which is
 distinction to get right when reviewing: `hummus.s3-us-west-2.amazonaws.com` and a CloudFront
 distribution name identify *one* tenant, so an exact-host rule already pins it.
 `storage.googleapis.com` does not, because the tenant is a path segment.
+
+**`pathShape` is provenance, not a gate.** It records what a package was observed to fetch,
+so a reviewer can see what an entry was admitted *for*. Nothing enforces it and **nothing
+should be built to**: per the contract at the top, the control is package identity, so pinning
+a URL prefix would constrain a package somebody already reviewed while doing nothing about the
+unvetted package a worm just reached. The data was free to gather and is worth keeping; it is
+not a security mechanism.
 
 **Wildcards are still rejected, and no residual declaration admits one.** The egress proxy
 resolves the upstream name itself and gates both the CONNECT authority and the TLS SNI, so an
@@ -161,6 +204,47 @@ per-host policy outright (the available AppContainer exemption exposes every loo
 listener, so a local forwarder would bypass the hostname gate). They are recorded as the
 evidence a future Windows per-host gate would be written against — an allowlist that exists
 before the capability is what stops the capability shipping with a guessed one.
+
+## `packageNetwork` — per-package egress, and where the security argument lives
+
+The axis that carries the contract at the top of this file. `networkHosts` says which hosts
+exist; this says **which package may reach them**.
+
+**The host lists are not authored here.** `build.rs` inverts `networkHosts[].fetchedBy` — which
+already records, per host, the packages observed to fetch it — into a per-package map. Restating
+the same facts package-first would be two sources that drift. Only one thing is authored
+package-first:
+
+```json
+"packageNetwork": { "full": [ { "package": "node-libcurl", "reason": "unenumerable", ... } ] }
+```
+
+### `full` — unrestricted egress for one named package
+
+**This is the sanctioned design, not a compromise to minimise.** A package with an entry has
+been looked at; the thing that protects users is that an *unlisted* package gets nothing. So
+where a host list cannot describe a package, granting it the whole network is the honest answer
+and is preferred over an entry that is quietly wrong.
+
+`reason` must be one of three shapes, because "we did not finish the analysis" is a different
+thing and belongs in `notGranted.deferred`:
+
+| reason | meaning | example |
+| --- | --- | --- |
+| `unenumerable` | reaches a transitive host set nothing enumerates | `node-libcurl` clones vcpkg, then hits vcpkg's own per-port hosts |
+| `undetermined` | no literal host resolvable from the published source | `hasura-cli` — its `dist/` is not in the published tarball at all |
+| `runtime-selected` | the host is chosen at run time | `windows-build-tools` picks its Python mirror from a network probe |
+
+Six packages carry it today. A `full` grant **supersedes** any inverted host list for that
+package rather than adding to it, and `build.rs` refuses a `full` entry for a package listed in
+`notGranted.packages` — a package refused on the merits gets nothing on either axis.
+
+### The enforcement gap
+
+`compiler::package_network()` returns `NoEntry` / `Hosts(..)` / `Full`, and **nothing calls
+it**. The jail's net axis is still global `$downloads`, so an unlisted package reaches every
+admitted host. Until that changes, this section describes a contract the data supports and the
+compiler does not yet apply. See `knownDefects: per-package-egress-not-enforced`.
 
 ## `systemPaths` — system libraries and headers for a native build
 
@@ -440,52 +524,62 @@ pins the four pre-catalog hosts as the leading entries, so an insert ahead of th
 ## `knownDefects`
 
 The catalog records its own open defects rather than leaving them in a thread, because a reader
-acting on an entry needs to know which ones are not yet trustworthy. Four today, and the one
-that matters most: **`@prisma/client`'s grant is measured on macOS and is not known to work on
-Linux** — a differential there returned `DIFFERS` identically with and without it, so at least
-one more denial is in the way. Also recorded: two v1 grants whose later no-op measurement was
-never reconciled, `systemPaths` being generated but not enforced, and the source-read-not-
-measured status of most v2 entries.
+acting on an entry needs to know which ones are not yet trustworthy. Six today, in severity
+order:
+
+| id | severity | one line |
+| --- | --- | --- |
+| `per-package-egress-not-enforced` | high | the PR contract holds in the data, not in the runtime |
+| `prisma-macos-artifact-unreproduced` | low | the macOS nonce artifact does not reproduce on the version the entry names |
+| `literal-write-cannot-create-an-absent-dir` | medium | a `literal` grant cannot create `.git/hooks` if it is missing |
+| `noop-grants-unreconciled` | low | two v1 grants measured as no-ops even unjailed |
+| `system-paths-not-enforced` | medium | `systemPaths` is generated but not folded into the jail surface |
+| `source-read-not-measured` | medium | most v2/v3 entries rest on source reading, not a measured denial |
+
+**`prisma-grant-linux` is CLOSED.** It was the only `high` filesystem defect and v3 fixed it. A
+per-stage differential on a real kernel (6.17, Landlock ABI 7) found the blocker was the *first*
+of the grant's three needs: `landlock_add_rule` takes an `O_PATH` descriptor, so a rule for a
+path that does not exist cannot be attached, and `.prisma` is precisely a directory the
+postinstall creates — the grant evaporated at launch and `mkdir` was denied identically with and
+without it. `curated::materialize_sibling` now creates it during compilation, which adds no
+access (the subtree is already granted read-write) and only makes the access attachable.
+
+The three-arm artifact differential that closed it: **unconfined 26336 B ≡ granted 26336 B ≠
+ungranted 0 B**, the ungranted arm raising `EACCES … mkdir …/node_modules/.prisma` at
+`scripts/postinstall.js:248` **and exiting 0** — this entry's SILENT failure mode, observed
+rather than inferred. Granted being byte-identical to unconfined is the control that matters;
+artifact presence alone would not have been evidence.
 
 ## Known gaps
 
 Things the current schema cannot express. Each is unbuilt because no shipped entry has
 needed it yet; adding a field ahead of a real case would be guessing at its shape.
 
-- **Platform-conditional entries.** Every grant applies on every OS. A package that needs a
-  carve-out only on Windows currently gets it everywhere, which is wider than necessary. This
-  gap grew in v2: `systemPaths` *is* per-platform, so the two axes now disagree about whether
-  platform is expressible, and `@prisma/client`'s Linux defect is exactly a case where scoping
-  a grant to the platform it was measured on would state the truth more precisely than the
-  prose `platform` field does.
+- **Platform-conditional entries.** Every grant applies on every OS. `systemPaths` *is*
+  per-platform, so the two axes disagree about whether platform is expressible. v3 made the
+  case concrete: `@prisma/client`'s `projectCwd` is load-bearing on macOS (Seatbelt gates
+  `chdir`) and provably **inert on Linux** (`chdir` is not a Landlock-handled access), and
+  `windows-build-tools`' `full` network grant is a Windows-only need granted everywhere. Each
+  is wider or vaguer than what was measured.
 - **Version-conditional entries.** `versions` is prose, not a constraint that is enforced.
   `@prisma/client` 7.0.0 dropped its postinstall entirely, so its grant is dead weight on 7
   — harmless, since an unused grant confers nothing on a script that never runs, but not
   expressible.
-- **Path-scoped ENFORCEMENT — still the highest-value gap, though its argument changed shape in
-  v2.** The catalog now *records* a `pathShape` per host, but nothing enforces it: DNS-level
-  gating cannot see a path, so this depends on proxy work rather than a catalog change.
+- **PER-PACKAGE EGRESS — the one that matters, and it is an enforcement gap rather than a
+  schema one.** The data and the API exist (`packageNetwork`, `compiler::package_network()`);
+  the jail's net axis still compiles to a global `$downloads`. Until it is threaded through
+  `build_jail_surface`, the PR-submission contract this file opens with is true of the *data*
+  and not of the *runtime*. Tracked in `knownDefects`.
 
-  In v1 the argument was that path scoping would convert a permanently-refused `github.com`
-  into an admissible one. v2 admitted the host at the host level instead, on best-effort
-  grounds and with the residual named — so path scoping is no longer what unblocks the
-  ecosystem. What it now buys is **retiring the residuals**: `github.com` would narrow to
-  `/<owner>/<repo>/releases/download/` (plus `/archive/` for cldr-data), which is a plain GET
-  surface with `git-receive-pack` at a different path entirely; and `storage.googleapis.com`
-  would narrow to `/chrome-for-testing-public/` and `/chromium-browser-snapshots/`, which are
-  single-tenant prefixes even though the hostname is not. That turns two accepted exposures
-  into no exposure, which is worth doing — but the ecosystem is no longer waiting on it.
-
-  Both requirements it implies are real. The proxy must gate on the request path, not only the
-  CONNECT authority and SNI, which for HTTPS means terminating TLS for those hosts. And
-  redirects must be re-checked against the prefix, since a release download 302s to a
-  different host (`release-assets.githubusercontent.com`) whose asset paths are opaque signed
-  GUIDs — that second half is unsolved.
-
-  **One package would break** and it is recorded in `notGranted.deferred`: `node-libcurl`'s
-  Windows fallback `git clone`s `github.com/microsoft/vcpkg.git`, which is whole-repo access
-  under no admitted path shape. Whoever builds path gating has to decide about it explicitly
-  rather than discover it.
+- **Path-scoped enforcement — DELIBERATELY NOT PURSUED.** Earlier versions of this file called
+  it the highest-value gap. That was wrong, and the reason is the threat model: the defense is
+  package identity, so pinning `github.com` to `/<owner>/<repo>/releases/download/` would
+  constrain a package a human already reviewed and do nothing about the unvetted package a worm
+  just reached. It would also cost real compatibility — `node-libcurl` git-clones vcpkg, which
+  no release-asset prefix admits, and it would need TLS termination plus redirect re-checking
+  against hosts whose asset paths are opaque signed GUIDs
+  (`release-assets.githubusercontent.com`). The `pathShape` data stays as provenance. Do not
+  build a gate on it.
 
 ## Remote updates: designed, not built
 

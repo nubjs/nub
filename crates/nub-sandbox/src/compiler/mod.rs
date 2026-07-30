@@ -16,6 +16,7 @@ mod curated;
 mod defaults;
 mod env_grammar;
 mod fold;
+mod package_network;
 mod preset;
 mod resolve;
 mod reuse;
@@ -35,6 +36,13 @@ pub use resolve::{CommandRunner, ShellRunner};
 /// distinction: those are the hosts whose exposure is bounded by the lifecycle env scrub, so
 /// fetching them from a context that still HOLDS a credential is not equivalent.
 pub use builtin_sets::{DOWNLOAD_HOSTS, DOWNLOAD_HOSTS_WITH_RESIDUAL};
+
+/// Per-package egress. THE DEFENSE IS PACKAGE IDENTITY: no entry means no network, and a
+/// package needing it files a PR against the catalog. Read the module docs before using this
+/// — the jail's egress is still GLOBAL today, so this is data without an enforcer.
+pub use package_network::{
+    PACKAGE_NETWORK_FULL, PACKAGE_NETWORK_HOSTS, PackageNetwork, package_network,
+};
 
 /// The system library/header read paths the build jail SHOULD grant for a native compile.
 /// RECORDED, NOT YET FOLDED INTO THE JAIL SURFACE — the module docs and the catalog's

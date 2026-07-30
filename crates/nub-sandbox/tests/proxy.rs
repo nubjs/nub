@@ -615,13 +615,14 @@ fn build_jail_gate_admits_the_download_set_and_refuses_everything_else() {
         }
     }
     for refused in [
-        // Recorded REFUSALS, not omissions — the gate is what makes them real. A telemetry
-        // endpoint whose POST body IS the product, and the widest write-capable Google API
-        // hostname in the corpus. `registry.npmjs.org`, `api.github.com` and
-        // `storage.googleapis.com` used to sit in this list; catalog v2 admits all three with
-        // a declared residual, so they moved out of it rather than being dropped silently.
+        // A recorded REFUSAL, not an omission — the gate is what makes it real. It is here
+        // because no package NEEDS it: the one requester's analytics beacon is
+        // fire-and-forget with an error handler attached, so denial breaks nothing. Five
+        // hosts have left this list across v2 and v3 (`registry.npmjs.org`,
+        // `api.github.com`, `storage.googleapis.com`, then `www.googleapis.com` and
+        // `saucelabs.com`), each admitted with a declared residual rather than dropped
+        // quietly, because a broken package is a worse outcome than a named exposure.
         "www.google-analytics.com",
-        "www.googleapis.com",
         // Wildcard-free: an attacker-chosen label under a LISTED host is still refused,
         // which is what keeps a secret out of a DNS query.
         "leak.cdn.cypress.io",
