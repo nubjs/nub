@@ -1,0 +1,8 @@
+{
+  "name": "virgin-world-addon",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "install": "node-gyp rebuild"
+  }
+}
