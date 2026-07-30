@@ -517,6 +517,34 @@ OPENABLE under an ORDINARY `%TEMP%`/profile tree with no `C:\`-owned store (VM-v
   a narrower Windows jail, or not confining the operations that need the walk. A residual is
   acceptable here; requiring privilege is not.
 
+- **THE CAUSE IS DISCRETIONARY, AND A RESTRICTED TOKEN DOES NOT SHARE IT (measured).** Everything
+  above describes the AppContainer, and it is not a Windows limit — it is a consequence of the
+  PRINCIPAL. A per-run AppContainer profile gets a brand-new sid that appears in no existing DACL,
+  so nothing is readable until nub writes an ace. A restricted token keeps the user's OWN sid, so
+  the DACLs that already grant that user read still apply. Measured by `AccessCheck` on both a
+  Windows 11 Enterprise 25H2 workstation and Server 2025, identical, with an unmodified-token
+  baseline GRANTED throughout:
+
+  | token | read `C:\` / `C:\Users` / profile | write `C:\` | write profile | write project |
+  | --- | --- | --- | --- | --- |
+  | own token (baseline control) | GRANTED | GRANTED | GRANTED | GRANTED |
+  | restricted, medium integrity | GRANTED | DENIED | GRANTED | GRANTED |
+  | restricted, low integrity | GRANTED | DENIED | DENIED | DENIED |
+
+  Reads succeed with NO ace written anywhere, which dissolves the ancestor problem: `realpathSync`,
+  `process.cwd()`, the `find-up`/`cosmiconfig` upward walks and `_nodeModulePaths` probing are all
+  reads. Integrity then supplies the write fence that the AppContainer's DACL grants were doing.
+
+  Three things this does NOT establish, kept explicit because a green table invites over-reading:
+  low integrity denies EVERY write including the project dir, and since the mandatory check runs
+  BEFORE the DACL, a DACL ace cannot re-open one — the object's own label must come down, via
+  `LABEL_SECURITY_INFORMATION`, which needs WRITE_OWNER and is therefore plausibly unprivileged on
+  paths the user owns but is UNMEASURED. Whether such a child can be launched unprivileged is
+  likewise unmeasured. And egress is an open tension rather than a solved one: coarse deny is
+  unprivileged only by withholding an AppContainer capability, and a restricted token has no
+  capability set, so the two mechanisms may be mutually exclusive — the LowBox check that breaks
+  reads is exactly what being an AppContainer means.
+
 - **BLAST RADIUS: essentially every Node lifecycle script, and the boundary is "any file module
   at all".** Measured with the repair OFF, which is the shipping configuration above the profile.
   The builtin-only row is the control — without it a uniformly red group cannot be told from a
