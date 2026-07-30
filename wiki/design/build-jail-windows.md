@@ -179,7 +179,7 @@ Measured in both directions on one fixture (run 30569197328), which is what made
 
 **Corroborating fact, and a live demonstration of a known-unsound proxy.** `can_write_dacl` reports **0 of 13** sampled ancestors writable in BOTH principals, including `C:\`, `C:\Users` and `%USERPROFILE%`. It is wrong in both — the repair demonstrably lands in each. Same unsoundness above medium IL already recorded under [fail-soft leaf grants](#fail-soft-leaf-grants--adopted), now observed at medium IL too. **Key on the differential, never on the proxy.**
 
-**Still open, and it is the reason the elevated column is not empty.** `npm-cli.js` fails `-4048` (`UV_EPERM`) de-elevated in every preloaded arm, with an EMPTY stderr — so it is not a realpath refusal and the shim cannot help it. It is a missing grant somewhere in npm's own startup. Granting it is what would also close the elevated `where.exe` / `dir` cells and leave the repair inert in both principals.
+**Still open, and it is the reason the elevated column is not empty.** `npm-cli.js` fails `-4048` (`UV_EPERM`) de-elevated in every preloaded arm, with an EMPTY stderr. This section previously read that shape as "not a realpath refusal, therefore a missing grant in npm's own startup" — **that reading is REFUTED, and no grant closes it**: it is `lstat 'C:\'` again, on the one resolver the preload does not reach. Cause, evidence and consequence are one section down, under [the realpath shim does not reach Node's ESM resolver](#the-realpath-shim-does-not-reach-nodes-esm-resolver--open-and-it-is-blocker-3). Because that defect is real for every unprivileged user and the ancestor repair merely hides it on an elevated runner, it does not weaken the deletion case above — it is the clearest instance of it.
 
 **The capability half went unconditionally** — see [harvesting the AppSilo capability SID](#harvesting-the-appsilo-capability-sid-that-c-already-carries--dead-mechanism).
 
@@ -586,6 +586,35 @@ As a complete answer to this blocker it is closed: the ACE write needs `WRITE_DA
 
 **What would close it.** Either libuv learning to spell the AppContainer's private pipe namespace, or the stdio shim verified in-jail.
 
+## The realpath shim does not reach Node's ESM resolver — OPEN, and it is blocker 3
+
+**The defect.** Node's ESM resolver binds `realpathSync` by DESTRUCTURING it out of `fs` when `internal/modules/esm/resolve.js` is first required, and that happens before any `--import` preload evaluates. The realpath shim replaces the property `fs.realpathSync`. The CJS resolver reads that property at CALL time (`toRealPath` in `internal/modules/helpers.js`), so it picks the shim up; the ESM resolver holds the ORIGINAL and calls it forever. So every `import()` under the jail dies `EPERM … lstat 'C:\'` — the blocker-1 defect, on the one resolver the blocker-1 repair does not cover.
+
+**Node's own source, per version.** `lib/internal/modules/esm/resolve.js` — `const { realpathSync } = require('fs')` at v18.19.0:27, v20.19.0:27, v22.15.0:28, v22.23.1:28, v23.11.0:28 and v25.9.0:28; `const fs = require('fs')` with `fs.realpathSync(...)` at v24.17.0:28 and on current `main`. **It is destructured across the whole support band except v24 and the current line, and it flip-flopped, so a version check is not a fix.**
+
+**Measured, and the sequence is what proves the mechanism** — run 30574281568, `win-deelevated-jail-probe`, branch `sandbox/win-npm-grant`, Node 22 on `windows-latest`.
+
+| arm | outcome |
+| --- | --- |
+| `npm-cli.js --version`, de-elevated | `-4048`, **empty stdout and stderr** |
+| the same, driving `Npm.load()` from `-e` so the rejection is caught | `LOAD-ERR code=EPERM errno=-4048 syscall=lstat path=C:\` |
+| its stack | `realpathSync (node:fs:2749)` ← `finalizeResolution (node:internal/modules/esm/resolve:280)` ← `moduleResolve` ← `defaultResolve` ← `ModuleLoader.import` |
+| the same cells, elevated with the ancestor repair on | `10.9.8`, `LOAD-OK` |
+
+The frame is `realpathSync (node:fs:2749)`, NOT the shim's `Object.sync (<preload>)` — which is the direct evidence that the resolver is calling the unshimmed function. In the same run, an in-child refusal tracer recorded the CJS side reaching `lstatOrTolerate` in the preload and TOLERATING `C:\` and `C:\Users`, so both behaviours are observed side by side in one process.
+
+**Why the failure is silent, which is why it read as a missing grant for two rounds.** `Display.load` opens with `await Promise.all([import('chalk'), import('supports-color')])` and only afterwards calls `log.resume()` / `output.flush()`. npm buffers every log and output event until then, and `getExitCodeFromError` (`lib/utils/error-message.js`) takes the process status from `err.errno` — so an fs refusal anywhere before that line exits `-4048` having printed nothing at all. The empty transcript is npm's buffering, not evidence about the cause.
+
+**`--require` WOULD close it, and cannot be used.** Measured on Node 22.23.1 with one fixture and one variable — the same `fs.realpathSync` replacement delivered two ways, then `import('chalk')`: via `--require`, the ESM resolver calls the replacement (5 hits, the whole chalk graph); via `--import`, 0 hits. So `--require` runs before the destructure and `--import` after. But `--require` takes a specifier the CJS resolver must resolve, and `Module._findPath` realpaths any non-main resolution — under this jail that is `lstat 'C:\'` before the shim exists. The `data:` channel the shim ships on exists precisely because `defaultResolve` short-circuits `data:` without touching the filesystem, and `--require` has no such spelling. Chicken-and-egg, not an oversight.
+
+**No grant closes it.** The refused object is `C:\`. Every route to making it openable as a target is already recorded DEAD on privilege or mechanism — see [making `C:\` and `C:\Users` readable](#making-c-and-cusers-readable--six-attempts-all-dead). This is a defect in nub's own repair, not a gap in the grant catalog.
+
+**What a fix would have to look like, and why it is not taken here.** The one remaining public seam is `module.registerHooks()` — a synchronous `resolve` hook that catches the refusal from `nextResolve` and re-resolves through the CJS resolver, which realpaths via the shim. A forced-fallback prototype resolved chalk 5 (ESM-only, `"exports": {".": "./source/index.js"}`), its `#ansi-styles` / `#supports-color` internal-imports subpaths and its relative specifiers correctly on v22.23.1. Two things stop it being a drop-in: `registerHooks` lands in **v22.15.0**, so the compat tier (20.6–22.14) stays uncovered, and the same prototype hit `Maximum call stack size exceeded` on v24.17.0 and v26.5.0. It changes module resolution semantics inside a security boundary, on a tier-banded API, with a measured per-version divergence — a design call, not a repair to slip in alongside a deletion.
+
+**Consequence for the ancestor repair.** This is the whole of the elevated column in [is the ancestor repair necessary at all](#is-the-ancestor-repair-necessary-at-all--the-ace-half-is-inert-unprivileged-deletion-recommended-not-taken): elevated, the traverse ACE makes `lstat 'C:\'` succeed, so the ESM resolver never notices it is unshimmed and npm starts. Every unprivileged user hits the defect anyway. The repair is not fixing anything — it is hiding this from CI, which is the argument for removing it, not for keeping it.
+
+**What would change the verdict.** Any of: Node adopting the namespace read on every supported line (it is already there on `main`); a `--require`-equivalent that needs no filesystem resolution; or a decided `registerHooks` design with the v24 re-entrancy understood.
+
 ## A per-file deny ACE is inert against its own child — DEAD (mechanism), and it is a design constraint
 
 **What it was.** The original denylist design: grant broadly, then deny specific secrets with an explicit deny ACE.
@@ -682,6 +711,7 @@ Surfacing these is part of this document's job.
 
 ## Changelog
 
+- 2026-07-30 — **REVERSAL:** npm's `-4048` was recorded as a missing grant in npm's own startup; it is not, and no grant closes it. It is `EPERM lstat 'C:\'` raised by Node's ESM resolver, which destructures `realpathSync` out of `fs` before any `--import` preload evaluates and therefore never sees the realpath shim — new section, [blocker 3](#the-realpath-shim-does-not-reach-nodes-esm-resolver--open-and-it-is-blocker-3), with the per-version source survey, the `--require`-beats-`--import` differential, and why npm reports nothing. The probe grew two durable diagnostics that produced it: an in-child refusal tracer and a bisect that drives `Npm.load()` directly so the rejection is caught rather than buffered. The ancestor repair's ACE half is therefore NOT deleted — elevated it still resolves this cell, which is the mask the deletion argument is about.
 - 2026-07-30 — Ran the arm every previous matrix left out: repair-OFF **with** the realpath preload, beside repair-ON, both principals. Deleted the ancestor repair's capability half (kernel-refused, never once widened a launch). Found and fixed the reason the ACE half still looked load-bearing — the preload's roots and the walked components arrive in different Windows spellings (8.3 short vs long), so its tolerance rule silently never fired; roots are now stamped in both. With that fixed the ACE half is INERT de-elevated and deletion is recommended but not taken. Also refuted the 32,767 `CreateProcessW` environment-block ceiling: a 56,790-character block launches with every preload active.
 - 2026-07-30 — Moved into tracked `research/design/` so code comments can link here, and scrubbed of pointers into untracked documents. Recorded four newly settled approaches, all ADOPTED: the nub-owned staged interpreter copy, `SetKernelObjectSecurity` as the ancestor-ACE writer, fail-soft leaf grants, and bundled busybox as the Windows lifecycle shell. Corrected the capability-SID comments in `backend/windows.rs` and `compiler/defaults.rs`, which described the AppSilo capability as reachable unprivileged; both now state the measured kernel refusal.
 - 2026-07-29 — Initial consolidation.
