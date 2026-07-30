@@ -33,7 +33,7 @@
 use std::path::{Path, PathBuf};
 
 use jsonc_parser::ParseOptions;
-use jsonc_parser::cst::{CstInputValue, CstObject, CstRootNode};
+use jsonc_parser::cst::{CstInputValue, CstNode, CstObject, CstRootNode};
 
 use crate::project_config::ConfigError;
 
@@ -169,7 +169,61 @@ fn root_object(path: &Path) -> std::io::Result<(CstRootNode, CstObject)> {
             expected: "an object",
         })
     })?;
+    if let Some(key) = duplicate_key(&obj, "") {
+        return Err(refuse(ConfigError::Value {
+            path: key,
+            message: "appears twice — nub reads the last one, a write edits the first".into(),
+        }));
+    }
     Ok((root, obj))
+}
+
+/// The dotted path of the first key some object in `object` names twice.
+///
+/// A duplicate makes the reader and the writer disagree about which occurrence
+/// is authoritative: the value reader is `serde_json`, whose map visitor keeps
+/// the LAST, while every CST lookup here matches the FIRST. So a `set` edits an
+/// occurrence the next read ignores and reports success for a change with no
+/// effect, and a duplicated intermediate object defeats [`ensure_object`]'s
+/// remove-then-append entirely. Refusing is the same ground the rest of
+/// [`root_object`] stands on — a file whose meaning nub cannot pin down is not
+/// one to rewrite.
+///
+/// The whole document is walked rather than just the path being edited: the
+/// ambiguity belongs to the file, not to one edit, and a `set` that succeeds
+/// while leaving a differently-resolving sibling in place is the same trap one
+/// key over.
+fn duplicate_key(object: &CstObject, prefix: &str) -> Option<String> {
+    fn in_node(node: &CstNode, prefix: &str) -> Option<String> {
+        if let Some(object) = node.as_object() {
+            return duplicate_key(&object, prefix);
+        }
+        // Array elements inherit their parent's path. Nub's schema holds no
+        // object inside an array, so descending here is forward-compat cover and
+        // not worth naming an index for.
+        node.as_array()
+            .and_then(|array| array.elements().iter().find_map(|el| in_node(el, prefix)))
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    for prop in object.properties() {
+        // A name the parser cannot decode is skipped for the reason `get` skips
+        // it: no lookup can ever match it.
+        let Some(name) = prop.name().and_then(|n| n.decoded_value().ok()) else {
+            continue;
+        };
+        let path = match prefix.is_empty() {
+            true => name.clone(),
+            false => format!("{prefix}.{name}"),
+        };
+        if let Some(found) = prop.value().as_ref().and_then(|v| in_node(v, &path)) {
+            return Some(found);
+        }
+        if !seen.insert(name) {
+            return Some(path);
+        }
+    }
+    None
 }
 
 /// Get-or-create the object property `name` of `obj`.
@@ -179,6 +233,10 @@ fn root_object(path: &Path) -> std::io::Result<(CstRootNode, CstObject)> {
 /// rather than panicking or leaving a duplicate key. `get_object` matches the
 /// FIRST prop by name, so a stray non-object one must be removed before the
 /// append or the re-fetch would still find it and be `None`.
+///
+/// The re-fetch's `expect` holds only because [`root_object`] has already
+/// refused a document that names any key twice: a SECOND stray would still be
+/// matched first, leaving the freshly-appended object invisible.
 fn ensure_object(obj: &CstObject, name: &str) -> CstObject {
     obj.object_value(name).unwrap_or_else(|| {
         if let Some(stray) = obj.get(name) {
@@ -221,9 +279,9 @@ pub(crate) fn set_json_path(
     write_preserving_mode(path, &root.to_string())
 }
 
-/// Write through the atomic temp-and-rename, carrying across the two properties
-/// of the prior file that the new inode would otherwise lose: its mode, and a
-/// leading UTF-8 BOM.
+/// Write through the atomic temp-and-rename, verify the update landed, and carry
+/// across the two properties of the prior file that the new inode would
+/// otherwise lose: its mode, and a leading UTF-8 BOM.
 ///
 /// The rename installs a NEW inode carrying the temp file's default permissions,
 /// so a config the user had narrowed — `600` on a file they consider private —
@@ -247,7 +305,25 @@ fn write_preserving_mode(path: &Path, text: &str) -> std::io::Result<()> {
         true => [crate::jsonc::UTF8_BOM, text.as_bytes()].concat(),
         false => text.as_bytes().to_vec(),
     };
-    aube_util::fs_atomic::atomic_write_with_permissions(path, &bytes, prior)
+    aube_util::fs_atomic::atomic_write_with_permissions(path, &bytes, prior)?;
+
+    // `Ok(())` from the atomic write is not proof the write landed: its rename
+    // reports success whenever the destination exists, which is right for the
+    // content-addressed store it was built for (a racing writer committed
+    // bit-identical bytes) and wrong here, where the destination always exists
+    // and the bytes are unique — so a file that cannot be renamed over leaves
+    // `nub config set` printing its success line over unchanged content. Reading
+    // back is the only check that separates the two; a length-and-mtime stat
+    // cannot see the common case of a key set to a same-width value. The
+    // comparison runs through the guarded reader against `text`, so it asserts
+    // what the success line actually claims — that the next read sees this edit.
+    if crate::jsonc::read_guarded(path).is_ok_and(|on_disk| on_disk == text) {
+        return Ok(());
+    }
+    Err(std::io::Error::other(format!(
+        "{} does not hold the update after writing it — the file may be read-only or immutable",
+        path.display()
+    )))
 }
 
 /// Remove the key at `segments`, preserving the rest of the file. An absent
@@ -270,6 +346,14 @@ pub(crate) fn unset_json_path(path: &Path, segments: &[&str]) -> std::io::Result
     let Some(obj) = root.value().and_then(|v| v.as_object()) else {
         return Ok(false);
     };
+    // Removing the FIRST of two same-named props leaves the one the reader
+    // resolves — so the key survives while the caller reports it removed. This
+    // path has no error channel for a file it cannot act on faithfully, and
+    // "nothing was removed" is at least true; `set` refuses the same document
+    // loudly.
+    if duplicate_key(&obj, "").is_some() {
+        return Ok(false);
+    }
 
     let (leaf, parents) = segments.split_last().expect("a setting path has a leaf");
     let mut cursor = obj;
@@ -732,5 +816,123 @@ mod tests {
                 );
             }
         });
+    }
+
+    /// The atomic rename underneath reports success whenever the destination
+    /// already exists — correct for the content-addressed store it was built
+    /// for, and wrong here, where the destination always exists. Without the
+    /// read-back, a file that cannot be renamed over leaves `nub config set`
+    /// printing its success line while the user's policy is unchanged.
+    ///
+    /// A directory at the destination is the portable way to make that rename
+    /// fail: it needs neither an immutable flag nor root, and it fails on every
+    /// platform.
+    #[test]
+    fn a_write_that_cannot_land_is_an_error_not_a_silent_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let occupied = dir.path().join("nub.jsonc");
+        std::fs::create_dir(&occupied).unwrap();
+
+        let err = write_preserving_mode(&occupied, "{ \"nodeCompat\": true }\n")
+            .expect_err("a write that did not land must not report success");
+        assert!(
+            err.to_string().contains("does not hold the update"),
+            "says the update is not there: {err}"
+        );
+        assert!(occupied.is_dir(), "and the destination is untouched");
+    }
+
+    /// A duplicated key makes the reader and the writer disagree about which
+    /// occurrence is authoritative — `serde_json` keeps the LAST, the CST edits
+    /// the FIRST — so a `set` would report success for a change no later read
+    /// can see, and a duplicated intermediate object would panic the re-fetch in
+    /// `ensure_object`. Both are refused, naming the key, and the file is left
+    /// exactly as its author wrote it.
+    #[test]
+    fn set_refuses_a_duplicated_key_and_leaves_the_file_byte_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nub.jsonc");
+        let cases: [(&str, &[&str], &str); 4] = [
+            // The leaf being written: the edit lands on the first, every read
+            // resolves the second.
+            (
+                "{\n  // kept\n  \"nodeCompat\": false,\n  \"nodeCompat\": false\n}\n",
+                &["nodeCompat"],
+                "nodeCompat",
+            ),
+            // A duplicated intermediate object on the path being written — the
+            // input that reached `ensure_object`'s `expect` and panicked.
+            (
+                r#"{ "install": 1, "install": 2 }"#,
+                &["install", "linker"],
+                "install",
+            ),
+            // Nested, and named by its full path so the author is not sent
+            // hunting for which one.
+            (
+                r#"{ "exec": { "implicitDlx": "prompt", "implicitDlx": "never" } }"#,
+                &["nodeCompat"],
+                "exec.implicitDlx",
+            ),
+            // In a subtree this edit never touches: the ambiguity belongs to the
+            // file, not to one edit.
+            (
+                r#"{ "install": { "minimumReleaseAge": 1, "minimumReleaseAge": 2 } }"#,
+                &["nodeCompat"],
+                "install.minimumReleaseAge",
+            ),
+        ];
+        for (original, segments, named) in cases {
+            std::fs::write(&path, original).unwrap();
+            let err = set_json_path(&path, segments, CstInputValue::Bool(true))
+                .expect_err("a duplicated key gives a write no single place to land");
+            assert!(err.to_string().contains(named), "names `{named}`: {err}");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                original,
+                "left the file byte-identical: {err}"
+            );
+        }
+
+        // An object inside an array is walked too, so the refusal cannot be
+        // stepped around by nesting one level further out than the schema goes.
+        std::fs::write(&path, r#"{ "c": [{ "x": 1, "x": 2 }] }"#).unwrap();
+        set_json_path(&path, &["nodeCompat"], CstInputValue::Bool(true))
+            .expect_err("the walk descends into array elements");
+
+        // The same name in two DIFFERENT objects is not a duplicate. Without
+        // this the guard could reject every real config and the cases above
+        // would still pass.
+        let fine = r#"{ "a": { "x": 1 }, "b": { "x": 2 }, "c": [{ "x": 1 }, { "x": 2 }] }"#;
+        std::fs::write(&path, fine).unwrap();
+        set_json_path(&path, &["nodeCompat"], CstInputValue::Bool(true))
+            .expect("distinct objects may each carry the same key name");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains("\"nodeCompat\": true"),
+            "the edit lands: {body}"
+        );
+    }
+
+    /// `unset` matches the FIRST occurrence as well, so removing it would leave
+    /// the one the reader resolves while reporting the key gone. It declines
+    /// instead — this path has no error channel, and "nothing was removed" is at
+    /// least true.
+    #[test]
+    fn unset_declines_a_duplicated_key_rather_than_removing_the_wrong_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nub.jsonc");
+        let original = r#"{ "exec": { "implicitDlx": "never", "implicitDlx": "never" } }"#;
+        std::fs::write(&path, original).unwrap();
+
+        assert!(
+            !unset_json_path(&path, &[TABLE, KEY]).unwrap(),
+            "claimed no removal"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "and left the file alone"
+        );
     }
 }
