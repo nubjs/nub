@@ -18,6 +18,13 @@
 //! would force the eight parallel build jobs to rendezvous before any package
 //! could be assembled. The design record is `wiki/commands/compile.md`.
 //!
+//! The transport is `nub upgrade`'s — same base URL, same curl, same `.sha256`
+//! sidecar convention — because these are assets of the same release and one
+//! mechanism for all of them is one mechanism to keep correct. It also keeps the
+//! `file://` test seam working here: an in-process HTTP client cannot serve one,
+//! and its tests answer to the ambient proxy configuration, which is exactly the
+//! kind of environment dependence a hermetic suite must not have.
+//!
 //! THE FETCH IS VERSION-EXACT, NEVER "LATEST". The launcher and the `nub` that
 //! wrote the payload share a container format and the runtime half of every
 //! compile-time decision, so they must come from one release. A mismatch is
@@ -33,9 +40,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use nub_core::compile::TargetPlatform;
 use nub_core::node::discovery;
-use nub_core::version_management::download;
 
 use super::inject;
+use crate::cli::{curl_download, fetch_expected_sha256, sha256_hex};
 
 /// Explicit override, and the only path that works with no network.
 const TEMPLATE_ENV: &str = "NUB_LAUNCHER_TEMPLATE";
@@ -44,9 +51,18 @@ const TEMPLATE_ENV: &str = "NUB_LAUNCHER_TEMPLATE";
 /// version — the key is what makes a cache hit version-exact.
 const CACHE_DIR: &str = "compile-launchers";
 
-/// Find the launcher template for `target`, fetching + caching it when the target
-/// is foreign and the install carries only its own.
-pub fn locate(target: &TargetPlatform) -> Result<PathBuf> {
+/// Find the launcher template for `target` — fetching + caching it when the
+/// target is foreign and the install carries only its own — verify it really is
+/// that platform's executable, and return its bytes.
+///
+/// The verification is HERE rather than at injection time so every source — the
+/// override, a sibling, the cache, a fetch — fails in the first second. Injection
+/// happens after the target's ~100 MB Node has been downloaded and recompressed,
+/// which is a long time to wait to be told the template was for the wrong
+/// architecture. The bytes come back with it because injection needs them and
+/// reading the file twice to hand back a path would be silly; every message that
+/// names the template is raised here, where the path is still in scope.
+pub fn locate(target: &TargetPlatform) -> Result<Vec<u8>> {
     // Canonicalized so a channel that exposes `nub` through a symlink (winget's
     // portable command alias) anchors the sibling lookup to the real install dir.
     // `current_exe` resolves symlinks on Linux (`/proc/self/exe`) but NOT on
@@ -64,10 +80,17 @@ pub fn locate(target: &TargetPlatform) -> Result<PathBuf> {
         // without touching process-global env.
         base_url: crate::cli::release_download_base(),
     };
-    if let Some(found) = find_local(target, &sources)? {
-        return Ok(found);
-    }
-    fetch(target, &sources)
+    let path = match find_local(target, &sources)? {
+        Some(found) => found,
+        // The fetch verifies before it commits, so a cache entry is already
+        // known-good; re-checking it here costs one read and keeps the guarantee
+        // uniform across sources.
+        None => fetch(target, &sources)?,
+    };
+    let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    inject::verify_template(target, &bytes)
+        .with_context(|| format!("{} is not usable as a launcher template", path.display()))?;
+    Ok(bytes)
 }
 
 /// Where a template may already exist on this machine, plus where to get one that
@@ -132,9 +155,8 @@ fn fetch(target: &TargetPlatform, sources: &Sources) -> Result<PathBuf> {
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
 
     eprintln!("Fetching the {} launcher …", target.triple());
-    // Concurrent compiles for the same triple must not write each other's bytes;
-    // the rename at the end is atomic, so a loser simply overwrites with the
-    // identical verified artifact.
+    // PID-scoped, so two concurrent compiles for the same triple cannot write
+    // each other's bytes mid-download. They still race on the commit below.
     let staged = dir.join(format!(
         "{}.{}.part",
         asset_name(target),
@@ -142,14 +164,15 @@ fn fetch(target: &TargetPlatform, sources: &Sources) -> Result<PathBuf> {
     ));
     let _guard = FileGuard(staged.clone());
 
-    let actual = match download::download_to_file_auth(&url, &staged, None, |_, _| {}) {
+    if let Err(e) = curl_download(&url, &staged) {
+        return Err(unavailable(target, sources, &format!("{e:#}")));
+    }
+    let expected = match fetch_expected_sha256(&format!("{url}.sha256")) {
         Ok(sha) => sha,
         Err(e) => return Err(unavailable(target, sources, &format!("{e:#}"))),
     };
-    let expected = match published_sha256(&format!("{url}.sha256")) {
-        Ok(sha) => sha,
-        Err(e) => return Err(unavailable(target, sources, &format!("{e:#}"))),
-    };
+    let bytes = fs::read(&staged).with_context(|| format!("reading {}", staged.display()))?;
+    let actual = sha256_hex(&bytes);
     if !actual.eq_ignore_ascii_case(&expected) {
         bail!(
             "checksum mismatch for {url}\n  expected: {expected}\n  actual:   {actual}\n\
@@ -157,33 +180,25 @@ fn fetch(target: &TargetPlatform, sources: &Sources) -> Result<PathBuf> {
         );
     }
 
-    // Format gate BEFORE the artifact is committed. `inject` checks this too, but
-    // that is after the ~100 MB Node download for the target — and a bad cache
-    // entry would then be re-read by every later compile.
-    let bytes = fs::read(&staged).with_context(|| format!("reading {}", staged.display()))?;
-    let format = target.format();
-    if inject::detect_format(&bytes) != Some(format) {
-        bail!(
-            "{url} is not a {} — the release asset for {} is not the launcher it claims to be.",
-            inject::format_name(format),
-            target.triple()
-        );
+    // Format + architecture gate BEFORE the artifact is committed. `locate` runs
+    // the same check on whatever it resolves, but a bad cache entry would still
+    // be a bad cache entry — refuse it here so it never lands.
+    inject::verify_template(target, &bytes).with_context(|| {
+        format!("{url} is not the launcher the release claims to publish there")
+    })?;
+
+    // Losing the commit race is not a failure. Both racers verified the same
+    // published bytes, so whichever landed first is the artifact either would
+    // have installed. This is not merely tidiness on Windows: `MoveFileEx` takes
+    // a sharing violation when the winner's copy is open — which the very next
+    // pipeline step does, since it reads the template it just resolved.
+    if let Err(e) = fs::rename(&staged, &dest) {
+        if !dest.is_file() {
+            return Err(anyhow::Error::new(e)
+                .context(format!("installing the launcher at {}", dest.display())));
+        }
     }
-
-    fs::rename(&staged, &dest)
-        .with_context(|| format!("installing the launcher at {}", dest.display()))?;
     Ok(dest)
-}
-
-/// Read the published `.sha256` sidecar. Format is `sha256sum`'s
-/// `<hex>␠␠<filename>` — the same sidecar shape `nub upgrade` verifies archives
-/// against, published by the same release step.
-fn published_sha256(url: &str) -> Result<String> {
-    let body = download::fetch_text_auth(url, None).with_context(|| format!("fetching {url}"))?;
-    body.split_whitespace()
-        .next()
-        .map(str::to_string)
-        .ok_or_else(|| anyhow!("empty checksum file at {url}"))
 }
 
 // ---- names, paths, URLs -------------------------------------------------------
@@ -233,11 +248,14 @@ fn cache_path(cache_root: &Path, target: &TargetPlatform) -> PathBuf {
 /// `nub upgrade` makes, and a genuine incompatibility still fails closed at
 /// `decode`'s format-version gate.
 fn release_tag() -> String {
-    let version = env!("CARGO_PKG_VERSION");
-    if version.contains("-canary.") {
-        "canary".to_string()
+    // Both borrowed from the upgrade channel rather than restated: a change to
+    // the canary marker or the tag name there must move this with it, and a
+    // duplicated literal would instead point the fetch at a tag that does not
+    // exist.
+    if crate::cli::is_canary_build() {
+        crate::cli::CANARY_TAG.to_string()
     } else {
-        format!("v{version}")
+        format!("v{}", env!("CARGO_PKG_VERSION"))
     }
 }
 
@@ -301,7 +319,7 @@ mod tests {
             override_path: None,
             nub_dir: nub_dir.map(Path::to_path_buf),
             cache_root: None,
-            base_url: "http://127.0.0.1:1/unused".to_string(),
+            base_url: "file:///nonexistent".to_string(),
         }
     }
 
@@ -472,115 +490,68 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // ---- the fetch path, against a local release fixture ----------------------
+    // ---- the fetch path, against a file:// release fixture --------------------
+    //
+    // A real directory served over `file://` rather than a localhost HTTP server:
+    // curl reads it with no socket at all, so these tests cannot be perturbed by
+    // an ambient proxy, a busy port, or a firewall. Same seam the `nub upgrade`
+    // tests use against the same release layout.
 
-    /// A one-shot HTTP server serving a fixed URL→body map on 127.0.0.1. Enough
-    /// to stand in for the release-asset host: the fetch makes two plain GETs
-    /// (asset, `.sha256`) and needs a real 404 for the not-published case.
-    struct ReleaseFixture {
-        base: String,
-        _thread: std::thread::JoinHandle<()>,
-        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Lay out `<root>/<tag>/<asset>` + its `.sha256` sidecar and return the base
+    /// URL. `sha` is taken rather than computed so a test can publish a WRONG
+    /// digest, which is the whole point of one of them.
+    fn publish(root: &Path, name: &str, body: &[u8], sha: &str) -> String {
+        let dir = root.join(release_tag());
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(name), body).unwrap();
+        fs::write(
+            dir.join(format!("{name}.sha256")),
+            format!("{sha}  {name}\n"),
+        )
+        .unwrap();
+        format!("file://{}", root.display())
     }
 
-    impl ReleaseFixture {
-        fn start(routes: Vec<(String, Vec<u8>)>) -> Self {
-            use std::io::{Read, Write};
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.set_nonblocking(true).unwrap();
-            let base = format!("http://{}", listener.local_addr().unwrap());
-            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let flag = stop.clone();
-            let _thread = std::thread::spawn(move || {
-                while !flag.load(std::sync::atomic::Ordering::Relaxed) {
-                    let Ok((mut sock, _)) = listener.accept() else {
-                        std::thread::sleep(std::time::Duration::from_millis(5));
-                        continue;
-                    };
-                    let mut buf = [0u8; 2048];
-                    let n = sock.read(&mut buf).unwrap_or(0);
-                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
-                    let body = routes.iter().find(|(p, _)| *p == path).map(|(_, b)| b);
-                    let _ = match body {
-                        Some(b) => sock
-                            .write_all(
-                                &[
-                                    format!(
-                                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                                        b.len()
-                                    )
-                                    .into_bytes(),
-                                    b.clone(),
-                                ]
-                                .concat(),
-                            ),
-                        None => sock.write_all(
-                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                        ),
-                    };
-                }
-            });
-            Self {
-                base,
-                _thread,
-                stop,
-            }
-        }
-    }
-
-    impl Drop for ReleaseFixture {
-        fn drop(&mut self) {
-            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    /// A minimal ELF image — enough for `detect_format` to classify it, which is
-    /// the only thing the fetch inspects.
-    fn elf_bytes() -> Vec<u8> {
+    /// A minimal ELF image for `machine` (`e_machine`: 0x3e x86-64, 0xb7
+    /// aarch64) — the two header fields the template gate reads.
+    fn elf_bytes(machine: u16) -> Vec<u8> {
         let mut b = vec![0x7f, b'E', b'L', b'F'];
         b.resize(4096, 0);
+        b[18..20].copy_from_slice(&machine.to_le_bytes());
         b
     }
 
-    fn digest(bytes: &[u8]) -> String {
-        format!("{:x}", Sha256::digest(bytes))
-    }
+    const ELF_X64: u16 = 0x3e;
+    const ELF_ARM64: u16 = 0xb7;
 
-    fn fixture_sources(base: &str, cache: &Path) -> Sources {
+    fn sources_at(base: String, cache: &Path) -> Sources {
         Sources {
             override_path: None,
             nub_dir: None,
             cache_root: Some(cache.to_path_buf()),
-            base_url: base.to_string(),
+            base_url: base,
         }
-    }
-
-    fn routes(name: &str, body: &[u8], sha: &str) -> Vec<(String, Vec<u8>)> {
-        let path = format!("/{}/{name}", release_tag());
-        vec![
-            (path.clone(), body.to_vec()),
-            (
-                format!("{path}.sha256"),
-                format!("{sha}  {name}\n").into_bytes(),
-            ),
-        ]
     }
 
     /// The whole point of the feature: a foreign target with nothing local pulls
     /// its template from this release, verifies it, and lands it in the cache —
-    /// where the NEXT compile finds it with no network at all.
+    /// where the NEXT compile finds it with no fetch at all.
     #[test]
     fn a_foreign_template_is_fetched_verified_and_cached() {
         let dir = fresh_dir("fetch-ok");
         let target = TargetPlatform::parse("linux-x64").unwrap();
-        let body = elf_bytes();
-        let name = asset_name(&target);
-        let fixture = ReleaseFixture::start(routes(&name, &body, &digest(&body)));
-        let sources = fixture_sources(&fixture.base, &dir);
+        let body = elf_bytes(ELF_X64);
+        let base = publish(
+            &dir.join("rel"),
+            &asset_name(&target),
+            &body,
+            &sha256_hex(&body),
+        );
+        let cache = dir.join("cache");
+        let sources = sources_at(base, &cache);
 
         let path = fetch(&target, &sources).expect("the fixture publishes this template");
-        assert_eq!(path, cache_path(&dir, &target));
+        assert_eq!(path, cache_path(&cache, &target));
         assert_eq!(fs::read(&path).unwrap(), body);
         assert_eq!(
             find_local(&target, &sources).unwrap(),
@@ -590,21 +561,52 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Losing the commit race must not fail the compile. Exercised here through
+    /// the ordinary POSIX rename-over-existing; the Windows arm of the same
+    /// contract (a sharing violation while the winner reads its copy) needs a
+    /// Windows host and is covered by the fallback's own comment.
+    #[test]
+    fn a_racer_that_finds_the_template_already_installed_still_succeeds() {
+        let dir = fresh_dir("fetch-race");
+        let target = TargetPlatform::parse("linux-x64").unwrap();
+        let body = elf_bytes(ELF_X64);
+        let base = publish(
+            &dir.join("rel"),
+            &asset_name(&target),
+            &body,
+            &sha256_hex(&body),
+        );
+        let cache = dir.join("cache");
+        let sources = sources_at(base, &cache);
+
+        let dest = cache_path(&cache, &target);
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::write(&dest, &body).unwrap();
+
+        assert_eq!(fetch(&target, &sources).unwrap(), dest);
+        assert_eq!(fs::read(&dest).unwrap(), body);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// A tampered or truncated asset must never be injected into — and must never
     /// reach the cache, where every later compile would silently reuse it.
     #[test]
     fn a_checksum_mismatch_is_refused_and_leaves_the_cache_empty() {
         let dir = fresh_dir("fetch-badsha");
         let target = TargetPlatform::parse("linux-x64").unwrap();
-        let body = elf_bytes();
-        let name = asset_name(&target);
-        let fixture = ReleaseFixture::start(routes(&name, &body, &digest(b"other bytes")));
-        let sources = fixture_sources(&fixture.base, &dir);
+        let body = elf_bytes(ELF_X64);
+        let base = publish(
+            &dir.join("rel"),
+            &asset_name(&target),
+            &body,
+            &sha256_hex(b"other bytes"),
+        );
+        let cache = dir.join("cache");
 
-        let err = fetch(&target, &sources).unwrap_err();
+        let err = fetch(&target, &sources_at(base, &cache)).unwrap_err();
         assert!(format!("{err:#}").contains("checksum mismatch"), "{err:#}");
         assert!(
-            !cache_path(&dir, &target).exists(),
+            !cache_path(&cache, &target).exists(),
             "a failed verification must not leave a cache entry"
         );
         let _ = fs::remove_dir_all(&dir);
@@ -617,14 +619,50 @@ mod tests {
         let dir = fresh_dir("fetch-badfmt");
         let target = TargetPlatform::parse("linux-x64").unwrap();
         let body = b"<!doctype html>not an executable".to_vec();
-        let name = asset_name(&target);
-        let fixture = ReleaseFixture::start(routes(&name, &body, &digest(&body)));
-        let sources = fixture_sources(&fixture.base, &dir);
+        let base = publish(
+            &dir.join("rel"),
+            &asset_name(&target),
+            &body,
+            &sha256_hex(&body),
+        );
+        let cache = dir.join("cache");
 
-        let err = fetch(&target, &sources).unwrap_err();
-        let msg = format!("{err:#}");
+        let msg = format!(
+            "{:#}",
+            fetch(&target, &sources_at(base, &cache)).unwrap_err()
+        );
         assert!(msg.contains("ELF"), "should name the format wanted: {msg}");
-        assert!(!cache_path(&dir, &target).exists());
+        assert!(!cache_path(&cache, &target).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The silent one, and the reason the gate reads more than the magic bytes: a
+    /// same-format template for the OTHER architecture passes every other check —
+    /// the checksum is the publisher's own, the container parses, the payload
+    /// injects and decodes — and produces a binary that cannot run on the machine
+    /// it was built for. Caught here, or not at all until a user reports it.
+    #[test]
+    fn a_same_format_template_for_the_wrong_arch_is_refused() {
+        let dir = fresh_dir("fetch-badarch");
+        let target = TargetPlatform::parse("linux-x64").unwrap();
+        let body = elf_bytes(ELF_ARM64);
+        let base = publish(
+            &dir.join("rel"),
+            &asset_name(&target),
+            &body,
+            &sha256_hex(&body),
+        );
+        let cache = dir.join("cache");
+
+        let msg = format!(
+            "{:#}",
+            fetch(&target, &sources_at(base, &cache)).unwrap_err()
+        );
+        assert!(
+            msg.contains("arm64") && msg.contains("x64"),
+            "must name what it got and what it needed: {msg}"
+        );
+        assert!(!cache_path(&cache, &target).exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -635,16 +673,24 @@ mod tests {
     fn an_unpublished_template_produces_the_actionable_error() {
         let dir = fresh_dir("fetch-404");
         let target = TargetPlatform::parse("linux-arm64").unwrap();
-        let fixture = ReleaseFixture::start(Vec::new());
-        let sources = fixture_sources(&fixture.base, &dir);
+        let empty = dir.join("rel");
+        fs::create_dir_all(&empty).unwrap();
+        let cache = dir.join("cache");
 
-        let msg = format!("{:#}", fetch(&target, &sources).unwrap_err());
+        let msg = format!(
+            "{:#}",
+            fetch(
+                &target,
+                &sources_at(format!("file://{}", empty.display()), &cache)
+            )
+            .unwrap_err()
+        );
         assert!(msg.contains("linux-arm64"), "{msg}");
         assert!(
             msg.contains("NUB_LAUNCHER_TEMPLATE"),
             "the offline escape must be named: {msg}"
         );
-        assert!(!cache_path(&dir, &target).exists());
+        assert!(!cache_path(&cache, &target).exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }

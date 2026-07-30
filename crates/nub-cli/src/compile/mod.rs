@@ -68,12 +68,12 @@ type AppFiles = Vec<(String, Vec<u8>)>;
 
 pub fn run(mut opts: CompileOptions) -> Result<i32> {
     let target = resolve_platform(opts.platform.as_deref())?;
-    // Resolved BEFORE any work: a cross-compile whose launcher template is missing
-    // must fail in the first second, not after downloading and recompressing a
-    // ~100 MB Node for the target. For a foreign target this may fetch the
-    // template from this release — a few hundred KB, still the cheapest step to
-    // fail on.
-    let template_path = launcher::locate(&target)?;
+    // Resolved AND verified before any work: a cross-compile whose launcher
+    // template is missing, or is not that platform's executable, must fail in the
+    // first second — not after downloading and recompressing a ~100 MB Node for
+    // the target. For a foreign target this may fetch the template from this
+    // release, a few hundred KB, still the cheapest step to fail on.
+    let template = launcher::locate(&target)?;
 
     let entry_path = Path::new(&opts.entry);
     if !entry_path.is_file() {
@@ -181,8 +181,6 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     let payload = encode(&manifest, &app_files, &node_blob);
 
     // 5. Inject the payload into the target's launcher template.
-    let template = fs::read(&template_path)
-        .with_context(|| format!("reading launcher template {}", template_path.display()))?;
     inject::inject(&target, &template, &payload, &out_path)
         .with_context(|| format!("writing {}", out_path.display()))?;
     set_executable(&out_path)?;

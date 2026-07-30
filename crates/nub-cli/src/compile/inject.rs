@@ -18,7 +18,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
-use nub_core::compile::{ContainerFormat, TargetPlatform};
+use nub_core::compile::{ContainerFormat, TargetArch, TargetPlatform};
 
 /// Inject `payload` into a copy of `template`, writing the artifact to `out`.
 ///
@@ -29,7 +29,7 @@ use nub_core::compile::{ContainerFormat, TargetPlatform};
 /// deliberately out of scope (an unsigned PE runs; SmartScreen may warn).
 pub fn inject(target: &TargetPlatform, template: &[u8], payload: &[u8], out: &Path) -> Result<()> {
     let format = target.format();
-    verify_template_format(format, template, target)?;
+    verify_template(target, template)?;
 
     let mut file = fs::File::create(out).with_context(|| format!("creating {}", out.display()))?;
     match format {
@@ -74,17 +74,24 @@ pub fn detect_format(image: &[u8]) -> Option<ContainerFormat> {
     }
 }
 
-/// Reject a template that is not the target's format BEFORE libsui tries to parse
-/// it. Points at the real mistake (a `NUB_LAUNCHER_TEMPLATE` or a sibling
-/// template built for the wrong platform) instead of surfacing an opaque parse
-/// error from inside the injector.
-fn verify_template_format(
-    expected: ContainerFormat,
-    template: &[u8],
-    target: &TargetPlatform,
-) -> Result<()> {
+/// Reject a template that is not the target's executable BEFORE libsui parses it.
+/// Points at the real mistake (an override, a sibling, or a fetched asset built
+/// for the wrong platform) instead of an opaque parse error from the injector.
+///
+/// FORMAT ALONE IS NOT ENOUGH, and the gap is silent rather than loud: the three
+/// platforms nub targets are two architectures each, so a darwin-arm64 template
+/// is a perfectly well-formed Mach-O for a `--platform darwin-x64` build. The
+/// injection succeeds, every payload check passes, and the user ships an arm64
+/// binary labelled x64 that dies on the machine it was built for. Only the
+/// ARCHITECTURE field distinguishes them, so it is checked here.
+///
+/// What this still cannot see: glibc vs musl. Both are ELF with the same
+/// `e_machine`, so `linux-x64` and `linux-x64-musl` templates are
+/// indistinguishable from the header. Only the asset's NAME separates them.
+pub fn verify_template(target: &TargetPlatform, template: &[u8]) -> Result<()> {
+    let expected = target.format();
     match detect_format(template) {
-        Some(actual) if actual == expected => Ok(()),
+        Some(actual) if actual == expected => {}
         Some(actual) => bail!(
             "the launcher template is {} but --platform {} needs {}. \
              The template must be the launcher built FOR the target platform.",
@@ -99,6 +106,62 @@ fn verify_template_format(
             target.triple()
         ),
     }
+
+    match detect_arch(expected, template) {
+        Some(actual) if actual == target.arch => Ok(()),
+        Some(actual) => bail!(
+            "the launcher template is {} {} but --platform {} needs {}. \
+             The template must be the launcher built FOR the target platform.",
+            arch_name(actual),
+            format_name(expected),
+            target.triple(),
+            arch_name(target.arch)
+        ),
+        // An unreadable arch field means a truncated or exotic image. libsui is
+        // about to parse it properly; refusing here would turn a format nub
+        // simply cannot introspect into a hard failure.
+        None => Ok(()),
+    }
+}
+
+/// The architecture `image` is built for, read from the format's own machine
+/// field. `None` when the header is truncated or carries a machine nub has no
+/// target for (including a Mach-O fat binary, whose magic is not a thin header).
+fn detect_arch(format: ContainerFormat, image: &[u8]) -> Option<TargetArch> {
+    let le16 = |at: usize| -> Option<u16> {
+        Some(u16::from_le_bytes(image.get(at..at + 2)?.try_into().ok()?))
+    };
+    let le32 = |at: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(image.get(at..at + 4)?.try_into().ok()?))
+    };
+    match format {
+        // Mach-O `cputype`, the word after the magic. The high `CPU_ARCH_ABI64`
+        // bit (0x0100_0000) is masked off, leaving CPU_TYPE_X86 (7) / _ARM (12).
+        ContainerFormat::MachO => match le32(4)? & 0x00ff_ffff {
+            7 => Some(TargetArch::X64),
+            12 => Some(TargetArch::Arm64),
+            _ => None,
+        },
+        // ELF `e_machine`. Read little-endian: both architectures nub targets are
+        // little-endian, and a big-endian ELF is not one of them anyway.
+        ContainerFormat::Elf => match le16(18)? {
+            0x3e => Some(TargetArch::X64),
+            0xb7 => Some(TargetArch::Arm64),
+            _ => None,
+        },
+        // PE COFF `Machine`, reached through the `e_lfanew` offset at 0x3c.
+        ContainerFormat::Pe => {
+            let pe = le32(0x3c)? as usize;
+            if image.get(pe..pe + 4)? != b"PE\0\0" {
+                return None;
+            }
+            match le16(pe + 4)? {
+                0x8664 => Some(TargetArch::X64),
+                0xaa64 => Some(TargetArch::Arm64),
+                _ => None,
+            }
+        }
+    }
 }
 
 pub fn format_name(format: ContainerFormat) -> &'static str {
@@ -106,6 +169,13 @@ pub fn format_name(format: ContainerFormat) -> &'static str {
         ContainerFormat::MachO => "Mach-O (macOS)",
         ContainerFormat::Elf => "ELF (Linux)",
         ContainerFormat::Pe => "PE (Windows)",
+    }
+}
+
+fn arch_name(arch: TargetArch) -> &'static str {
+    match arch {
+        TargetArch::X64 => "x64",
+        TargetArch::Arm64 => "arm64",
     }
 }
 
@@ -486,7 +556,10 @@ mod tests {
         let Some(template) = fixtures::host_macho_template() else {
             return;
         };
-        round_trip("darwin-arm64", &template);
+        // The HOST's triple, not a hardcoded one: the template comes from this
+        // machine's own launcher, and the arch gate would (correctly) refuse an
+        // x64 template against a hardcoded darwin-arm64 on an Intel Mac.
+        round_trip(&TargetPlatform::host().unwrap().triple(), &template);
     }
 
     #[test]
@@ -517,6 +590,34 @@ mod tests {
             "should name what it needs: {msg}"
         );
         assert!(msg.contains("linux-x64"), "should name the target: {msg}");
+    }
+
+    /// Format alone would let this through, and nothing downstream would notice:
+    /// the container parses, the payload injects, the static scan finds it back.
+    /// The user ships an arm64 binary named x64 and hears about it from whoever
+    /// tries to run it, so the machine field has to be checked here.
+    #[test]
+    fn a_template_for_the_wrong_arch_is_rejected_even_though_the_format_matches() {
+        let mut arm = fixtures::elf();
+        arm[18..20].copy_from_slice(&0xb7u16.to_le_bytes()); // EM_AARCH64
+        let target = TargetPlatform::parse("linux-x64").unwrap();
+        let err = inject(&target, &arm, &payload("main.js"), &tmp("badarch")).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("arm64"), "should name what it got: {msg}");
+        assert!(msg.contains("x64"), "should name what it needs: {msg}");
+
+        // The matching arch is still accepted — the gate must not reject the
+        // template every ordinary build uses.
+        assert!(
+            inject(
+                &target,
+                &fixtures::elf(),
+                &payload("main.js"),
+                &tmp("okarch")
+            )
+            .is_ok(),
+            "an x86-64 ELF is what --platform linux-x64 wants"
+        );
     }
 
     #[test]

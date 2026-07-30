@@ -724,7 +724,7 @@ jobs:
             chmod +x "$PKG/bin/nub" "$PKG/bin/nubx"
           fi
           # The template ships NEXT TO nub under the exact name
-          # compile::locate_launcher_template looks for — that sibling relationship is
+          # compile::launcher::locate looks for — that sibling relationship is
           # the distribution contract, and it carries the template through every
           # channel for free: the npm platform package ships all of bin/
           # (`files: ["bin"]`), and github-release tars this same bin/ for install.sh
@@ -1091,7 +1091,10 @@ jobs:
             # `<release>/<tag>/nub-launcher-<platform><exe>` and verifies it against
             # the `.sha256` sidecar, so BOTH names are part of that contract.
             LEXE=""; [[ "$platform" == win32-* ]] && LEXE=".exe"
-            cp "$PKG/bin/nub-launcher-$platform$LEXE" "release-archives/"
+            LSRC="$PKG/bin/nub-launcher-$platform$LEXE"
+            test -f "$LSRC" \
+              || { echo "::error::missing nub-launcher template for $platform at $LSRC — 'nub compile --platform $platform' would have no launcher to fetch on this release."; exit 1; }
+            cp "$LSRC" "release-archives/"
             (cd release-archives && sha256sum "nub-launcher-$platform$LEXE" > "nub-launcher-$platform$LEXE.sha256")
           done
           ls -la release-archives
@@ -1371,7 +1374,10 @@ jobs:
             fi
             (cd release-archives && sha256sum "$archive" > "$archive.sha256")
             LEXE=""; [[ "$platform" == win32-* ]] && LEXE=".exe"
-            cp "$PKG/bin/nub-launcher-$platform$LEXE" "release-archives/"
+            LSRC="$PKG/bin/nub-launcher-$platform$LEXE"
+            test -f "$LSRC" \
+              || { echo "::error::missing nub-launcher template for $platform at $LSRC — 'nub compile --platform $platform' would have no launcher to fetch on this release."; exit 1; }
+            cp "$LSRC" "release-archives/"
             (cd release-archives && sha256sum "nub-launcher-$platform$LEXE" > "nub-launcher-$platform$LEXE.sha256")
           done
           ls -la release-archives

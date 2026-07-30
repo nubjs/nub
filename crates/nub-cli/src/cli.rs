@@ -879,8 +879,8 @@ pub enum Command {
 
         /// Target platform. Default: the host. One of `darwin-arm64`,
         /// `darwin-x64`, `linux-arm64`, `linux-arm64-musl`, `linux-x64`,
-        /// `linux-x64-musl`, `win32-arm64`, `win32-x64`. Cross-compiling needs
-        /// that platform's prebuilt launcher.
+        /// `linux-x64-musl`, `win32-arm64`, `win32-x64`. A foreign platform's
+        /// launcher is fetched from this release and cached.
         #[arg(long, value_name = "PLATFORM")]
         platform: Option<String>,
 
@@ -5668,7 +5668,7 @@ const RELEASE_LATEST_API_ENV: &str = "NUB_RELEASE_LATEST_URL";
 /// lives at `<base>/canary/nub-<target>.<ext>` with no `v` prefix (bun's exact
 /// layout). npm carries the same builds under the `canary` dist-tag; Homebrew
 /// and winget carry only stable releases.
-const CANARY_TAG: &str = "canary";
+pub(crate) const CANARY_TAG: &str = "canary";
 
 /// Internal, test-only override for the canary release-by-tag endpoint
 /// (default: GitHub's `…/releases/tags/canary`). Serves the JSON whose `name`
@@ -5706,7 +5706,7 @@ fn release_canary_api() -> String {
 /// set-version.mjs step), so the marker rides CARGO_PKG_VERSION. bun-mirror: a
 /// canary build's bare `nub upgrade` stays on the canary channel (see
 /// [`choose_release_channel`]).
-fn is_canary_build() -> bool {
+pub(crate) fn is_canary_build() -> bool {
     env!("CARGO_PKG_VERSION").contains("-canary.")
 }
 
@@ -6551,7 +6551,10 @@ fn extract_release_archive(archive: &Path, target: &str, dest: &Path) -> Result<
 
 /// Download `url` to `dest` via curl (the same tool install.sh uses — keeps Nub
 /// free of a bundled HTTP/TLS stack and inherits the user's CA + proxy config).
-fn curl_download(url: &str, dest: &Path) -> Result<()> {
+/// Shared with `compile::launcher`, which pulls launcher templates from the same
+/// release: one transport for every release asset, so the `file://` test seam
+/// works for both.
+pub(crate) fn curl_download(url: &str, dest: &Path) -> Result<()> {
     let status = std::process::Command::new("curl")
         .args([
             "--fail",
@@ -6572,7 +6575,7 @@ fn curl_download(url: &str, dest: &Path) -> Result<()> {
 
 /// Fetch the `.sha256` sidecar and parse out the hex digest. The sidecar is the
 /// `shasum`/`sha256sum` format: `<hex>␠␠<filename>`; we take the first field.
-fn fetch_expected_sha256(sha_url: &str) -> Result<String> {
+pub(crate) fn fetch_expected_sha256(sha_url: &str) -> Result<String> {
     let out = std::process::Command::new("curl")
         .args(["--fail", "--silent", "--show-error", "--location", sha_url])
         .output()
@@ -6589,7 +6592,7 @@ fn fetch_expected_sha256(sha_url: &str) -> Result<String> {
 }
 
 /// Lowercase hex SHA-256 of `bytes`.
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(bytes);
     let mut s = String::with_capacity(64);
