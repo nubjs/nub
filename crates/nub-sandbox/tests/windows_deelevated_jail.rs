@@ -1575,9 +1575,19 @@ mod win {
         let rc = code(policy, f, &f.package, &borrowed);
         let outcome = std::fs::read_to_string(&marker).unwrap_or_else(|_| "<no marker>".into());
         let sink_text = std::fs::read_to_string(&sink).unwrap_or_default();
+        // The `data:` frame is DROPPED before truncating. A preload delivered as a data URL puts
+        // ~15 kB of base64 at the head of any stack thrown inside it, so the first 240 characters
+        // of a shim-thrown error are pure payload and the message — the whole point of reading a
+        // sink — never appears. This is what turned "the shim threw" into a readable cause.
+        let salient: String = sink_text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("data:"))
+            .collect::<Vec<_>>()
+            .join(" / ");
         println!(
             "    anc:{tag} rc={rc} outcome={outcome} sink={}",
-            one_line(&sink_text)
+            one_line(&salient)
         );
         (rc, outcome, sink_text)
     }
