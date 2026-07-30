@@ -116,10 +116,7 @@ pub use backend::{
 };
 #[cfg(target_os = "windows")]
 #[doc(hidden)]
-pub use backend::{
-    windows_ancestor_capability_sids, windows_capability_fallbacks, windows_leaf_grant_redundant,
-    windows_object_traverse_ace,
-};
+pub use backend::{windows_leaf_grant_redundant, windows_object_traverse_ace};
 
 /// The Linux enforcement suites' skip gate, resolving Bubblewrap candidates the way
 /// production does. Test support, not an embedder API.

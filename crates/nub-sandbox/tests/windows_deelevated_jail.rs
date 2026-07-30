@@ -2339,6 +2339,9 @@ mod win {
         nub_sandbox::compile_build_jail(
             homes,
             &f.package,
+            // `None` mirrors the sibling `production_jail` call: this fixture is not a curated
+            // package, so it must draw no per-package exception.
+            None,
             vec![exe.to_path_buf()],
             vec![root.join("node_modules")],
             ambient,

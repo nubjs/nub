@@ -1317,15 +1317,10 @@ mod win {
 
         // -- repaired ------------------------------------------------------------------
         println!("  ---- arm repair-on ----");
-        // The repair's reach is a property of THIS machine — which capability SIDs its system
-        // roots carry, and whether the kernel accepts them — so both are reported alongside the
-        // arm. A repaired arm that FELL BACK is not the same finding as one whose capabilities
-        // were accepted and did not help, and the two call for opposite next moves;
-        // `capability-fallbacks` is what tells them apart.
-        let fallbacks_before = nub_sandbox::windows_capability_fallbacks();
-        for sid in nub_sandbox::windows_ancestor_capability_sids(&chain) {
-            println!("  fact:capability-sid={sid}");
-        }
+        // The repair's reach is a property of THIS machine: it is the ACE half alone now, so
+        // what bounds it is where this principal holds `WRITE_DAC`. The capability half that
+        // used to be reported here is GONE — the kernel refuses the AppSilo RID class outright,
+        // measured in both principals, so it never once widened a launch.
 
         let mut ops = base.clone();
         ops.push((
@@ -1356,11 +1351,6 @@ mod win {
         ));
         let on = fsprobe(&f, &policy, "on", &ops);
         println!("  fact:chain-ancestor-listing={}", line(&on, "chainlist"));
-        println!(
-            "  fact:capability-fallbacks={}",
-            nub_sandbox::windows_capability_fallbacks() - fallbacks_before
-        );
-
         report(
             fails,
             "repair-on-lstat-c-root-permitted",
