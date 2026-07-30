@@ -164,11 +164,10 @@ pub(crate) fn raise_nofile_limit() {}
 // Vercel/Lambda/K8s pod) the host still reports many cores, so the pools over-
 // subscribe the quota → CFS throttles the process (latency cliffs) and the attendant
 // thread growth feeds the SAME PID exhaustion. Sizing CPU-bound pools to the real
-// quota prevents both. Rust's `available_parallelism()` already reads cgroup-v2
-// `cpu.max` + affinity (since 1.61), but NOT cgroup-v1 quota, and silently drops the
-// v2 quota when `sched_getaffinity` is unreadable (sandbox) — `cpu_budget` closes
-// both gaps by reading the cgroup files directly, exactly as the PID detector does.
-// Default-preserving: an unconstrained box returns `None` and pools keep full cores.
+// quota prevents both — but note that std's `available_parallelism()` ALREADY does
+// almost all of this, so `cpu_budget` is close to inert in practice; see the gate
+// note on `cpu_budget` below before assuming it contributes. Default-preserving: an
+// unconstrained box returns `None` and pools keep full cores.
 //
 // AUTO-DETECT ONLY — no public user override. No neutral existing env var fits
 // (UV_THREADPOOL_SIZE is libuv-pool-specific; RAYON_NUM_THREADS is rayon-only + a
@@ -187,9 +186,24 @@ pub(crate) fn raise_nofile_limit() {}
 /// controller via `/proc/self/mountinfo` — and returns `min(ceil(quota/period),
 /// logical_cores)`. That is exactly the automaxprocs algorithm and the maintainer-
 /// chosen `max(1, ceil)` rounding (any positive quota ceils to ≥1; the `quota == 0`
-/// degenerate is guarded). It closes the two gaps in std's `available_parallelism()`
-/// that nub would otherwise inherit (no cgroup-v1 quota; the v2 quota is dropped when
-/// `sched_getaffinity` is unreadable under a sandbox).
+/// degenerate is guarded).
+///
+/// MEASURED 2026-07-30 — this gate is very nearly unfireable, and the two "gaps in
+/// std" it was written to close DO NOT EXIST. std reads the CFS quota for v1 too
+/// (`sys/thread/unix.rs` dispatches `Cgroup::V1 => quota_v1`), and it re-applies the
+/// quota when `sched_getaffinity` fails rather than dropping it (same file: the
+/// quota is computed BEFORE the affinity call, and the `sysconf` fallback path ends
+/// `count.min(quota)`). Both were confirmed against a shipped binary: on cgroup v1,
+/// `--cpus 0.5 --cpuset-cpus 0,1,2,3` gave `available_parallelism() == 1` with
+/// affinity left wide; on v2, blocking `sched_getaffinity` with a seccomp
+/// `SCMP_ACT_ERRNO` profile still applied the quota. Since std FLOORS the quota and
+/// `num_cpus` CEILS it, `detected >= cores` always holds wherever std sees the quota
+/// at all, so `effective < cores` below is false and this returns `None` — it did so
+/// in every constrained cell of a ~44-cell v2 sweep and all 9 v1 quota cells.
+/// The one case that can still fire is std's own documented uncovered case, cgroup
+/// v2 in a NON-STANDARD MOUNTPOINT, which `num_cpus` does resolve via
+/// `/proc/self/mountinfo`. Keep/reshape/remove is a live design question; the
+/// `Embedder::cpu_budget` hook means it is not a local decision.
 ///
 /// Returns a budget ONLY when it constrains BELOW the logical core count — at/above
 /// the cores it tightens nothing, so we return `None` and the caller keeps its
@@ -298,32 +312,87 @@ fn cgroup_v2_pids_max() -> Option<u64> {
 }
 
 /// cgroup v1: the `pids` controller is named in `/proc/self/cgroup` as a line
-/// `<id>:pids:<relpath>`; the limit lives at
-/// `/sys/fs/cgroup/pids/<relpath>/pids.max`.
+/// `<id>:pids:<cgroup-path>`; [`cgroup_v1_pids_path`] resolves where that
+/// cgroup's `pids.max` actually lives on this mount.
 ///
 /// Safe no-op on a pure cgroup v2 host: there the only line is `0::<path>`, whose
 /// middle (controller) field is EMPTY, so the `c == "pids"` match never fires and
 /// this returns `None` — the v2 probe already handled that host.
 #[cfg(target_os = "linux")]
 fn cgroup_v1_pids_max() -> Option<u64> {
-    let rel = std::fs::read_to_string("/proc/self/cgroup")
-        .ok()?
-        .lines()
-        .find_map(|l| {
-            // Format: `hierarchy-id:controller-list:cgroup-path`. Match the
-            // controller field containing `pids`.
-            let mut parts = l.splitn(3, ':');
-            let _id = parts.next()?;
-            let controllers = parts.next()?;
-            let path = parts.next()?;
-            controllers
-                .split(',')
-                .any(|c| c == "pids")
-                .then(|| path.to_string())
-        })?;
-    let rel = rel.trim_start_matches('/');
-    let raw = std::fs::read_to_string(format!("/sys/fs/cgroup/pids/{rel}/pids.max")).ok()?;
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    // An unreadable mountinfo degrades to the historical assumption (root `/`
+    // at `/sys/fs/cgroup/pids`) rather than losing detection entirely.
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    let raw = std::fs::read_to_string(cgroup_v1_pids_path(&cgroup, &mountinfo)?).ok()?;
     parse_pids_max(&raw)
+}
+
+/// Resolve the `pids.max` path for this process's cgroup-v1 `pids` controller
+/// from `/proc/self/cgroup` + `/proc/self/mountinfo`. Pure, so the container
+/// topologies below are unit-testable without a real cgroupfs.
+///
+/// The naive join — mount point + the path from `/proc/self/cgroup` — is WRONG
+/// inside a container, and fails in the dangerous direction. Docker's default
+/// `--cgroupns` is `host` on cgroup v1 (it is `private` only on v2), so
+/// `/proc/self/cgroup` reports the HOST-absolute `/docker/<id>` while the
+/// container's `/sys/fs/cgroup/pids` is a bind mount ALREADY rooted at that same
+/// cgroup. Joining the two yields `/sys/fs/cgroup/pids/docker/<id>/pids.max`,
+/// which does not exist, so the read fails open to "unconstrained" and nub sizes
+/// a 128-thread blocking pool inside a 64-PID container — the exact
+/// `clone(2)`-EAGAIN exhaustion this module exists to prevent.
+///
+/// The fix is the standard containerized-cgroup resolution: strip the mount ROOT
+/// (mountinfo field 4) off the cgroup path, then join the remainder onto the
+/// MOUNT POINT (field 5). `num_cpus` already does this for the cpu controller,
+/// which is why the CPU axis never exhibited this bug.
+///
+/// Deliberately NOT done: falling back to `<mountpoint>/pids.max` when the
+/// resolved path is unreadable. The root cgroup's `pids.max` is almost always
+/// `max`, so that would masquerade a constrained box as unconstrained — the same
+/// root-read hazard [`cgroup_v2_pids_max`] already refuses for v2.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn cgroup_v1_pids_path(cgroup: &str, mountinfo: &str) -> Option<std::path::PathBuf> {
+    let base = cgroup.lines().find_map(|l| {
+        // Format: `hierarchy-id:controller-list:cgroup-path`.
+        let mut parts = l.splitn(3, ':');
+        let _id = parts.next()?;
+        let controllers = parts.next()?;
+        let path = parts.next()?;
+        controllers.split(',').any(|c| c == "pids").then_some(path)
+    })?;
+
+    // mountinfo: `<id> <parent> <maj:min> <root> <mountpoint> <opts> [tags...] - <fstype> <src> <superopts>`.
+    // The optional tag list is variable-length and terminated by ` - `, hence the
+    // split rather than a fixed field index.
+    //
+    // Take the mount whose ROOT is the LONGEST PREFIX of our cgroup path, not merely the
+    // first `pids` mount listed. A host can expose several — nested container runtimes, a
+    // sidecar bind-mounting a different subtree — where "first" is a positional accident and
+    // a wrong pick silently resolves ANOTHER cgroup's limit. Longest-prefix makes "which
+    // mount governs me" a real answer rather than an ordering artifact.
+    let mount = mountinfo
+        .lines()
+        .filter_map(|l| {
+            let (pre, post) = l.split_once(" - ")?;
+            let mut post = post.split_whitespace();
+            (post.next()? == "cgroup").then_some(())?;
+            let _source = post.next()?;
+            post.next()?.split(',').any(|o| o == "pids").then_some(())?;
+            let mut pre = pre.split_whitespace().skip(3);
+            Some((pre.next()?, pre.next()?))
+        })
+        .filter(|(root, _)| std::path::Path::new(base).starts_with(root))
+        .max_by_key(|(root, _)| root.len());
+    let (root, mount_point) = mount.unwrap_or(("/", "/sys/fs/cgroup/pids"));
+
+    // The `starts_with` filter (or the `/` fallback) already guarantees this strip succeeds.
+    // The defensive arm only catches a malformed cgroup path, and degrades to the pre-fix
+    // mount-relative reading rather than losing detection outright.
+    let rel = std::path::Path::new(base)
+        .strip_prefix(root)
+        .unwrap_or_else(|_| std::path::Path::new(base.trim_start_matches('/')));
+    Some(std::path::Path::new(mount_point).join(rel).join("pids.max"))
 }
 
 /// Parse a `pids.max` value: a decimal count, or the literal `max` (= no limit
@@ -480,6 +549,95 @@ mod tests {
         assert_eq!(parse_pids_max("1024"), Some(1024));
         assert_eq!(parse_pids_max("  256\n"), Some(256));
         assert_eq!(parse_pids_max("garbage"), None);
+    }
+
+    // Real `/proc/self/mountinfo` shapes. The `pids` controller is identified by
+    // fstype `cgroup` + a `pids` super-option; the optional-tag field before ` - `
+    // is present in the host form and absent in the container form, which is why
+    // the parser splits on ` - ` instead of indexing a fixed field.
+    const MOUNTINFO_HOST: &str = "36 35 0:31 / /sys/fs/cgroup/pids rw,nosuid,nodev,noexec,relatime shared:16 - cgroup cgroup rw,pids\n\
+         30 25 0:26 / /sys/fs/cgroup/memory rw,nosuid,nodev,noexec,relatime - cgroup cgroup rw,memory\n";
+    const MOUNTINFO_DOCKER: &str = "666 665 0:31 /docker/abc123 /sys/fs/cgroup/pids ro,nosuid,nodev,noexec,relatime master:16 - cgroup cgroup rw,pids\n";
+
+    #[test]
+    fn cgroup_v1_pids_path_strips_the_bind_mount_root_inside_a_container() {
+        // THE REGRESSION. Docker defaults to `--cgroupns=host` on cgroup v1, so
+        // /proc/self/cgroup reports the HOST-absolute path while the pids hierarchy
+        // is bind-mounted at that very cgroup. Joining them naively produced
+        // `/sys/fs/cgroup/pids/docker/abc123/pids.max` — a path that does not exist,
+        // so detection failed open and a 64-PID container looked unconstrained.
+        let cgroup = "9:pids:/docker/abc123\n4:cpu,cpuacct:/docker/abc123\n";
+        assert_eq!(
+            cgroup_v1_pids_path(cgroup, MOUNTINFO_DOCKER),
+            Some(std::path::PathBuf::from("/sys/fs/cgroup/pids/pids.max"))
+        );
+    }
+
+    #[test]
+    fn cgroup_v1_pids_path_keeps_the_nested_path_on_a_host() {
+        // Mount root `/` — nothing to strip, so a nested systemd scope still
+        // resolves to its own cgroup rather than the (usually `max`) root.
+        let cgroup = "9:pids:/user.slice/user-1001.slice/session-3.scope\n";
+        assert_eq!(
+            cgroup_v1_pids_path(cgroup, MOUNTINFO_HOST),
+            Some(std::path::PathBuf::from(
+                "/sys/fs/cgroup/pids/user.slice/user-1001.slice/session-3.scope/pids.max"
+            ))
+        );
+    }
+
+    #[test]
+    fn cgroup_v1_pids_path_falls_back_when_mountinfo_is_unusable() {
+        // Degrade to the historical assumption rather than losing detection: an
+        // empty/unreadable mountinfo still resolves a host-shaped cgroup path.
+        let cgroup = "9:pids:/user.slice\n";
+        assert_eq!(
+            cgroup_v1_pids_path(cgroup, ""),
+            Some(std::path::PathBuf::from(
+                "/sys/fs/cgroup/pids/user.slice/pids.max"
+            ))
+        );
+    }
+
+    #[test]
+    fn cgroup_v1_pids_path_picks_the_longest_matching_mount_root() {
+        // Two `pids` mounts are visible and the OUTER one is listed first. Selecting
+        // positionally would resolve a different cgroup's limit entirely; longest-prefix
+        // picks the mount that actually governs this process.
+        let mountinfo = "20 19 0:31 / /host/sys/fs/cgroup/pids rw,relatime shared:9 - cgroup cgroup rw,pids\n\
+             99 20 0:31 /docker/abc123 /sys/fs/cgroup/pids ro,relatime master:22 - cgroup cgroup rw,pids\n";
+        let cgroup = "9:pids:/docker/abc123/nested\n";
+        assert_eq!(
+            cgroup_v1_pids_path(cgroup, mountinfo),
+            Some(std::path::PathBuf::from(
+                "/sys/fs/cgroup/pids/nested/pids.max"
+            ))
+        );
+    }
+
+    #[test]
+    fn cgroup_v1_pids_path_falls_back_when_the_mount_root_is_not_ours() {
+        // A hybrid host can expose more than one `pids` mount; if the one we match
+        // does not root our cgroup path, degrade to the pre-fix mount-relative
+        // reading rather than losing detection outright. Never worse than before.
+        let cgroup = "9:pids:/user.slice/session-3.scope\n";
+        assert_eq!(
+            cgroup_v1_pids_path(cgroup, MOUNTINFO_DOCKER),
+            Some(std::path::PathBuf::from(
+                "/sys/fs/cgroup/pids/user.slice/session-3.scope/pids.max"
+            ))
+        );
+    }
+
+    #[test]
+    fn cgroup_v1_pids_path_ignores_a_pure_v2_host() {
+        // A v2-only `/proc/self/cgroup` is a single `0::<path>` line whose
+        // controller field is empty, so the v1 probe must find nothing and let the
+        // v2 probe answer.
+        assert_eq!(
+            cgroup_v1_pids_path("0::/user.slice/x.scope\n", MOUNTINFO_HOST),
+            None
+        );
     }
 
     // ─────────────────────── CPU budget ───────────────────────
