@@ -581,8 +581,16 @@ Add-Type -TypeDefinition $acJailSrc -Language CSharp -ErrorAction Stop
 function Grant-AcAce([string]$path, [string]$sid, [string]$rights) {
   $acl = Get-Acl -LiteralPath $path -ErrorAction Stop
   $trustee = New-Object System.Security.Principal.SecurityIdentifier($sid)
-  $inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
-             [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+  # A LEAF may not carry inheritance flags — .NET throws `ArgumentException: This flag may not be set
+  # on a leaf object`, which PowerShell surfaces as a bare `MethodInvocationException` that reads
+  # exactly like "the write was refused". Measured: the jail-bin probe's hardlink cell reported
+  # `ace-write=ERR MethodInvocationException` on a FILE and would have been read as a privilege
+  # refusal. Directories keep `OICI` so new children inherit the grant at creation.
+  $inherit = [System.Security.AccessControl.InheritanceFlags]::None
+  if ((Get-Item -LiteralPath $path -Force).PSIsContainer) {
+    $inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
+               [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+  }
   $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
     $trustee, [System.Security.AccessControl.FileSystemRights]$rights, $inherit,
     [System.Security.AccessControl.PropagationFlags]::None,
@@ -603,8 +611,20 @@ function Revoke-AcAce([string]$path, [string]$sid) {
 # that makes a table of failures interpretable.
 function Get-AceRightsFor([string]$path, [string]$sid) {
   try {
-    $found = @((Get-Acl -LiteralPath $path).Access |
+    $acl = Get-Acl -LiteralPath $path -ErrorAction Stop
+    # ASK FOR SID-FORM IDENTITIES. `$acl.Access` hands back an `NTAccount` for every sid the machine
+    # can NAME, so matching `.Value` against a SID STRING silently misses those. A per-run
+    # AppContainer package sid has no name and so matched fine, which is why this went unnoticed —
+    # but `S-1-15-2-1` resolves to `APPLICATION PACKAGE AUTHORITY\ALL APPLICATION PACKAGES`, so
+    # every read-back of a WELL-KNOWN app-package ace returned `none` while the ace was present.
+    # MEASURED (run 30516752917): the same descriptor reported `perrun=ReadAndExecute, Synchronize`
+    # and `aap=none` in one line. This is the same class as the `Get-DaclSids` note below.
+    $found = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |
       Where-Object { $_.IdentityReference.Value -eq $sid } |
+      ForEach-Object { "$($_.FileSystemRights)" })
+    if ($found.Count) { return ($found -join ',') }
+    # Fallback on the name-translated view, so a host where the SID-form request throws still answers.
+    $found = @($acl.Access | Where-Object { $_.IdentityReference.Value -eq $sid } |
       ForEach-Object { "$($_.FileSystemRights)" })
     if ($found.Count) { return ($found -join ',') }
     return 'none'

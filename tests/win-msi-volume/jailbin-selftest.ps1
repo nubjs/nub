@@ -56,6 +56,8 @@ function New-WorkingCells {
   $cells['ac-cmd-floor'] = @{ 'cmd-runs' = C 'OK' ''; '__launch' = C 'rc=0 (0x00000000) isAC=1' ''; '__lines' = C 1 '' }
   $cells['ac-ambient'] = Arm @{ 'npm-version' = C 'ERR' 'MODULE_NOT_FOUND' } `
     @{ 'interp-execpath' = C 'OK' "$PF\node.exe"; 'path-seen' = C 'OK' 'jailbin=False progfiles=True' }
+  $cells['ac-ambient-on-path'] = Arm @{ 'npm-version' = C 'ERR' '' } `
+    @{ 'interp-execpath' = C 'OK' "$JB\node.exe"; 'path-seen' = C 'OK' 'jailbin=True progfiles=True' }
   $cells['ac-jailbin-ungranted'] = Arm @{ 'npm-direct' = C 'ERR' 'MODULE_NOT_FOUND' } $null
   $cells['ac-jailbin-node'] = Arm @{ 'node-version' = C 'OK' 'v24.18.1' } $null
   $cells['ac-jailbin-npm-direct'] = Arm @{ 'npm-direct' = C 'OK' '11.16.0' } $null
@@ -79,6 +81,7 @@ function New-WorkingFacts {
     'ungranted-arm-aap-ace'     = 'none'
     'ungranted-arm-deep-ace'    = 'none | perrun=none'
     'absent-tool-shape'         = 'not-recognized'
+    'ambient-on-path-shape'     = 'node-not-resolvable'
     'hardlink-create'           = 'OK'
     'hardlink-leak'             = $true
     'hardlink-original-ace'     = 'ReadAndExecute, Synchronize'
@@ -131,7 +134,8 @@ $worlds['5-harness-dead'] = @{ Cells = @{}; Facts = @{}; MustFail = @(
   'jb-control-ungranted-canary-exists', 'jb-control-grant-still-scopes',
   'jb-node-resolves-and-runs-from-jailbin', 'jb-npm-tree-is-readable-from-jailbin',
   'jb-ambient-node-plus-owned-npm-tree-works',
-  'jb-inheritance-at-creation-covered-the-deep-file') }
+  'jb-inheritance-at-creation-covered-the-deep-file',
+  'jb-ambient-install-dir-is-not-even-path-resolvable') }
 
 $selftestFails = 0
 foreach ($name in ($worlds.Keys | Sort-Object)) {

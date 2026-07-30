@@ -114,6 +114,7 @@ jobs:
           # premise the mechanism exists to fix and the negative that makes a green arm attributable.
           echo "-- attribution: the failures that must still be present in THIS run --"
           for p in jb-attribution-ambient-msi-npm-still-fails-confined \
+                   jb-ambient-install-dir-is-not-even-path-resolvable \
                    jb-attribution-ungranted-jailbin-is-denied; do need "$p"; done
 
           echo "-- the decisive cells --"

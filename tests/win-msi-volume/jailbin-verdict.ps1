@@ -58,7 +58,7 @@
 
 $script:JbArms = @(
   'plain-jailbin', 'plain-ambient',
-  'ac-cmd-floor', 'ac-ambient', 'ac-jailbin-ungranted',
+  'ac-cmd-floor', 'ac-ambient', 'ac-ambient-on-path', 'ac-jailbin-ungranted',
   'ac-jailbin-node', 'ac-jailbin-npm-direct', 'ac-hybrid-npm-direct', 'ac-aap-only',
   'ac-jailbin-npm-stock', 'ac-jailbin-npm-nubshim', 'ac-absent-python', 'ac-lifecycle',
   'ac-ungranted')
@@ -139,6 +139,17 @@ function Invoke-JailBinVerdict {
   Prop 'jb-control-ungranted-arm-really-had-no-ace' `
     (((F 'ungranted-arm-aap-ace') -eq 'none') -and ((F 'ungranted-arm-deep-ace') -eq 'none | perrun=none')) `
     "the arm above is only a differential if the revoke actually landed AND propagated down — read back from the descriptor, both levels: jailbin-aap=$(F 'ungranted-arm-aap-ace') deep-file=$(F 'ungranted-arm-deep-ace')"
+
+  # A SECOND, SHARPER FORM OF §5j, measured in run 30516752917 and not visible to §5j itself: with the
+  # MSI install dir on the sanitized PATH, a confined child cannot even RESOLVE `node` there. A PATH
+  # search is a directory PROBE and the un-ACE'd tree is not probeable, so the failure is cmd's
+  # `'node' is not recognized` rather than Node's `Cannot find module`. §5j named node.exe by absolute
+  # path and so never exercised it. INVERTED READING: PASS means the ambient dir on PATH is useless,
+  # which is why the hybrid arm must name the interpreter absolutely.
+  Prop 'jb-ambient-install-dir-is-not-even-path-resolvable' `
+    (((Cell 'ac-ambient-on-path' 'npm-version') -eq 'ERR') -and
+     ((F 'ambient-on-path-shape') -eq 'node-not-resolvable')) `
+    "PASS = a confined child cannot resolve node OUT of the un-ACE'd MSI dir at all: shape=$(F 'ambient-on-path-shape') cell=$(Cell 'ac-ambient-on-path' 'npm-version')"
 
   # ── THE DECISIVE CELLS ──────────────────────────────────────────────────────────────────────────
   Prop 'jb-node-resolves-and-runs-from-jailbin' ((Cell 'ac-jailbin-node' 'node-version') -eq 'OK') `

@@ -17,10 +17,13 @@
 # WHAT THIS PROBE HAS TO ESTABLISH, in the order the design depends on it:
 #
 #   1. WHETHER `node.exe` NEEDS COPYING AT ALL. §5j says the ambient image execs anyway, so the
-#      hybrid arm pairs the AMBIENT MSI `node.exe` with a nub-owned npm tree. If that runs, the copy
-#      payload is the ~12 MiB npm tree, not the ~88 MiB binary. The two arms differ ONLY in PATH
-#      ORDER, and the child reports `process.execPath`, so which interpreter ran is measured rather
-#      than assumed.
+#      hybrid arm pairs the AMBIENT MSI `node.exe` — named by ABSOLUTE path, which is how nub spawns
+#      (`npm_node_execpath` / `$NODE`) — with a nub-owned npm tree. If that runs, the copy payload is
+#      the ~12 MiB npm tree, not the ~88 MiB binary. The child reports `process.execPath`, so which
+#      interpreter ran is measured rather than assumed, and the two arms must DISAGREE on it.
+#      A separate arm puts the ambient dir on PATH instead, because run 30516752917 measured that a
+#      confined child cannot even RESOLVE `node` there — a PATH search is a directory probe, and the
+#      un-ACE'd install dir is not probeable. §5j named node.exe absolutely and never saw that.
 #
 #   2. THAT THE ACE IS WHAT DOES THE WORK. The ungranted arm runs first, before any grant exists, on
 #      the identical command line. Without it, a green jail-bin arm could be bypass-traverse, the
@@ -87,6 +90,16 @@ $progFiles = 'C:\Program Files\nodejs'
 $cmdExe = Join-Path $env:SystemRoot 'System32\cmd.exe'
 $AAP = 'S-1-15-2-1'    # ALL APPLICATION PACKAGES — a STABLE trustee, unlike a per-run package sid
 $ARAP = 'S-1-15-2-2'   # ALL RESTRICTED APPLICATION PACKAGES — used only as the de-elevated marker
+
+# THE FLAG PAIR IS AN INSTRUMENT, NOT A PROPOSED FIX. Run 30516752917 measured EVERY `node <file>`
+# arm here dying identically in `resolveMainPath` -> `realpathSync` -> `EPERM lstat 'C:\'` — §5h's
+# realpath blocker, which is ORTHOGONAL to the read question this probe is about and which jail-bin
+# does not claim to solve. `node --version` and `node -e` were unaffected, which is exactly §5h's
+# shape. Both sibling probes in this directory already pass the pair for the same reason. §5h
+# separately measured that `--preserve-symlinks` alone mis-resolves package versions under nub's
+# default Isolated linker, so the pair is DISQUALIFIED for shipping; here it stands in for whatever
+# eventually fixes realpath, so the jail-bin read cells can be measured at all.
+$flags = '--preserve-symlinks-main --preserve-symlinks'
 
 # ─────────────── install a REAL MSI, so the ambient tree is genuinely un-ACE-able ───────────────
 # Duplicated from `msi-node-acl.ps1` deliberately: this job must not depend on a sibling job's side
@@ -235,7 +248,7 @@ $controlJs = Join-Path $scriptsDir 'control.js'
 @ECHO OFF
 echo op:lc-start=OK
 node -e "process.stdout.write('op:lc-node-e=OK '+process.version+String.fromCharCode(10))"
-node "$deepNpmCli" --version
+node $flags "$deepNpmCli" --version
 if errorlevel 1 (echo op:lifecycle=ERR npm-cli-exited-nonzero) else (echo op:lifecycle=OK)
 "@ | Set-Content -LiteralPath (Join-Path $scriptsDir 'lifecycle.cmd') -Encoding ascii
 $lifecycleCmd = Join-Path $scriptsDir 'lifecycle.cmd'
@@ -294,6 +307,7 @@ function Invoke-JbArm {
     [switch]$NoControl,       # PATH has no node, so the control script cannot run
     [switch]$SkipJailBinAce,  # withhold the per-run package sid from jail-bin (AAP-only arm)
     [switch]$NoAceAtAll,      # jail-bin carries NO appcontainer ace at all (the attribution arm)
+    [string]$Interp = '',     # absolute interpreter for the control script (the hybrid arm's point)
     [int]$TimeoutMs = 90000
   )
   W ''
@@ -337,7 +351,11 @@ function Invoke-JbArm {
       }
     }
 
-    $inner = if ($NoControl) { $Tool } else { 'node "' + $controlJs + '" & ' + $Tool }
+    # The control runs on the SAME interpreter the arm is testing, so `interp-execpath` reports the
+    # binary that actually did the work rather than whatever `node` happened to resolve to.
+    $ctlInterp = if ($Interp) { '"' + $Interp + '"' } else { 'node' }
+    $inner = if ($NoControl) { $Tool }
+             else { $ctlInterp + ' ' + $flags + ' "' + $controlJs + '" & ' + $Tool }
     $cmdline = '"' + $cmdExe + '" /s /c "' + $inner + '"'
     $envLf = New-SanitizedEnv $PathValue
     $log = Join-Path (Join-Path $PWD 'jb-logs') "$Name.log"
@@ -389,7 +407,15 @@ $pathJailBinOnly = $jailBin
 $pathAmbient = "$progFiles;$osFloor"
 $pathHybrid = "$progFiles;$jailBin;$osFloor"
 $pathFloor = $osFloor
-$directNpm = T 'npm-direct' ('node "' + $deepNpmCli + '" --version')
+$directNpm = T 'npm-direct' ('node ' + $flags + ' "' + $deepNpmCli + '" --version')
+# THE HYBRID ARM INVOKES THE AMBIENT INTERPRETER BY ABSOLUTE PATH, not by PATH order. Run
+# 30516752917 established why, and it is a finding in its own right: with `C:\Program Files\nodejs`
+# on the sanitized PATH, the confined child reported `'node' is not recognized as an internal or
+# external command` — a PATH search is a directory PROBE, and the un-ACE'd install dir is not
+# probeable. §5j's cell named node.exe absolutely and so never exercised that. nub spawns the same
+# way (`npm_node_execpath` / `$NODE` name the real binary absolutely), so this is also the faithful
+# shape rather than a workaround.
+$hybridNpm = T 'npm-direct' ('"' + $ambientNode + '" ' + $flags + ' "' + $deepNpmCli + '" --version')
 
 # 1-2. UNCONFINED baselines. Same command lines, same sanitized env. If these fail the fixture is
 #      broken and nothing below is readable.
@@ -414,9 +440,20 @@ $null = Invoke-JbArm -Name 'ac-jailbin-node' -AppContainer $true -PathValue $pat
 # 7. THE READ CELL, isolated from the pipe question. This is what §5j measured FAILING on the MSI tree.
 $null = Invoke-JbArm -Name 'ac-jailbin-npm-direct' -AppContainer $true -PathValue $pathJailBin -Tool $directNpm
 
+# 7b. The ambient install dir ON the sanitized PATH, confined: measured as its own arm because
+#     "not recognized" and "Cannot find module" are different failures and the design depends on
+#     which one it is.
+$ambOut = Invoke-JbArm -Name 'ac-ambient-on-path' -AppContainer $true -PathValue $pathHybrid `
+  -Tool (T 'npm-version' 'npm --version')
+$facts['ambient-on-path-shape'] = 'other'
+if ($ambOut -match "'node' is not recognized") { $facts['ambient-on-path-shape'] = 'node-not-resolvable' }
+elseif ($ambOut -match 'Cannot find module') { $facts['ambient-on-path-shape'] = 'module-not-found' }
+Fact 'ambient-on-path-failure-shape' $facts['ambient-on-path-shape']
+
 # 8. ⭐ THE HYBRID: the AMBIENT MSI node.exe as interpreter (PATH order is the only variable vs arm 7)
 #    with a nub-owned npm tree. A pass here means the ~88 MiB binary does not need copying.
-$null = Invoke-JbArm -Name 'ac-hybrid-npm-direct' -AppContainer $true -PathValue $pathHybrid -Tool $directNpm
+$null = Invoke-JbArm -Name 'ac-hybrid-npm-direct' -AppContainer $true -PathValue $pathJailBin `
+  -Tool $hybridNpm -Interp $ambientNode
 
 # 9. The zero-per-launch-cost shape: the standing AAP ace only, per-run package sid WITHHELD.
 $null = Invoke-JbArm -Name 'ac-aap-only' -AppContainer $true -PathValue $pathJailBin -Tool $directNpm -SkipJailBinAce
