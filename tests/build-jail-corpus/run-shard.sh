@@ -295,6 +295,21 @@ GYP_ID="ran=${GYP_RAN:-DID-NOT-RUN} resolved=${GYP_RESOLVED:--} on_path=${GYP_ON
 
 node "$(wp "$HARNESS/lib/delta.mjs")" "$(wp "$OUT/pre.ndjson")" "$(wp "$OUT/post.ndjson")" \
   "$(wp "$OUT/delta.json")" 2>> "$LOG"
+
+# ── ATTRIBUTION CONTROL — zero attributed cells against a populated node_modules ──
+# Attribution is a PARSE of the store path, so it fails silently and totally when the
+# path shape is not the one the regexes expect: on Windows every rel path arrived with
+# backslashes, nothing matched, `installed_cells` came back empty, and all 338 packages
+# reported NOT-INSTALLED while being installed perfectly well. The run stayed green and
+# self-consistent — the arm effect was still `confirmed`, because that assertion only
+# proves nub RAN, never that the measurement PARSED. A wipeout must be inadmissible
+# rather than a catastrophic-looking result, which is the same rule the arm effect
+# already applies one level up.
+ATTRIBUTED=$(node -e 'try{const d=require(process.argv[1]);process.stdout.write(String((d.installed_cells||[]).length))}catch(e){process.stdout.write("0")}' "$(wp "$OUT/delta.json")")
+if [ "$INSTALLED_ANY" -gt 0 ] && [ "${ATTRIBUTED:-0}" -eq 0 ]; then
+  ARM_EFFECT="FAILED-attribution-wipeout(installed=$INSTALLED_ANY,cells=0)"
+fi
+echo "attributed_cells=$ATTRIBUTED installed_top_level=$INSTALLED_ANY" >> "$LOG"
 NONCE="$NONCE" SHARD="$SHARD" ARM="$ARM" RC_SCRIPT="$RC_SCRIPT" RC_INSTALL="$RC_INSTALL" \
   PROJ="$(wp "$PROJ")" STOREROOT="$(wp "$H")" \
   STORE_BASES="$(wp "$CACHE/store")

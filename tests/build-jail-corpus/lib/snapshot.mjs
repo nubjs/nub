@@ -53,8 +53,18 @@ function walk(root, rootName, out, budget) {
     }
     for (const ent of ents) {
       const abs = path.join(dir, ent.name);
-      const rel = path.relative(root, abs);
-      if ([...SKIP_DIR_NAMES].some((s) => rel === s || rel.startsWith(s + path.sep))) continue;
+      // POSIX SEPARATORS ARE THE WIRE FORMAT, and this line is what makes the probe
+      // measurable on Windows at all. `path.relative` yields backslashes there, while
+      // every downstream consumer matches on `/`: the store-cell and project-cell
+      // regexes in attribute.mjs, and every class predicate in classes.json
+      // (`^proj:\.git/hooks/`, `^pkg:(prebuilds|build/Release)/`, …). With backslashes
+      // nothing matched, so the whole Windows corpus attributed to nobody — 12,244
+      // entries landed as unattributed `home`, `installed_cells` came back EMPTY, and
+      // all 338 packages reported NOT-INSTALLED while being installed perfectly well.
+      // That reads as a catastrophic result rather than as an unparsed path, and it
+      // survived a green job, so normalise at the source rather than per consumer.
+      const rel = path.relative(root, abs).split(path.sep).join('/');
+      if ([...SKIP_DIR_NAMES].some((s) => rel === s || rel.startsWith(s + '/'))) continue;
       budget.n++;
       let st;
       try {
