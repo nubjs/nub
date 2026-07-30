@@ -196,7 +196,13 @@ const failures: Array<{ url: string; status: number | string }> = [];
 const paceDelay = new Map<string, number>();
 const paceNext = new Map<string, number>();
 const paceOk = new Map<string, number>();
-const PACE_MAX = 3000;
+// Calibrated, not guessed. Under pacing the ceiling is 1/delay requests per
+// second regardless of concurrency, and api.npmjs.org was measured sustaining
+// ~2,400 lookups/min (40/s) — so the useful delay range is TENS of milliseconds.
+// A first cut used a 120 ms floor and a 3,000 ms cap, which pinned throughput at
+// ~116/min: the cap alone was two orders of magnitude past what the host needed.
+const PACE_MIN_STEP = 15;
+const PACE_MAX = 400;
 
 const pace = async (host: string): Promise<void> => {
   const delay = paceDelay.get(host) ?? 0;
@@ -210,7 +216,7 @@ const pace = async (host: string): Promise<void> => {
 const paceThrottled = (host: string): void => {
   throttleCount++;
   paceOk.set(host, 0);
-  paceDelay.set(host, Math.min(PACE_MAX, Math.max(120, (paceDelay.get(host) ?? 0) * 2)));
+  paceDelay.set(host, Math.min(PACE_MAX, Math.max(PACE_MIN_STEP, (paceDelay.get(host) ?? 0) * 2)));
 };
 
 const paceSucceeded = (host: string): void => {
@@ -219,12 +225,12 @@ const paceSucceeded = (host: string): void => {
   const ok = (paceOk.get(host) ?? 0) + 1;
   // Decay only after a run of clean responses, so one lucky reply cannot undo a
   // backoff the host actually asked for.
-  if (ok < 40) {
+  if (ok < 20) {
     paceOk.set(host, ok);
     return;
   }
   paceOk.set(host, 0);
-  paceDelay.set(host, delay < 130 ? 0 : delay * 0.8);
+  paceDelay.set(host, delay <= PACE_MIN_STEP ? 0 : delay * 0.75);
 };
 
 // Retry only transient shapes (429, 5xx, network). A 404 is DATA — an unpublished
@@ -389,6 +395,7 @@ const stageWeekly = async (names: string[], label: string): Promise<Map<string, 
   console.error(`[${label}] ${weekly.size} cached, ${todo.length} to fetch`);
   if (todo.length === 0) return weekly;
 
+  const unresolved: string[] = [];
   const record = (n: string, d: number): void => {
     weekly.set(n, d);
     writeCache("weekly", n, { downloads: d });
@@ -408,12 +415,19 @@ const stageWeekly = async (names: string[], label: string): Promise<Map<string, 
         const e = body[n];
         record(n, e && typeof e.downloads === "number" ? e.downloads : 0);
       }
-    } else {
-      // Fall back to singles so one bad name cannot void 128 rows.
+    } else if (r.status === 404 || (typeof r.status === "number" && r.status < 500)) {
+      // Split to singles ONLY for a real per-name data problem (a 404 or a 4xx
+      // that is not throttling), so one bad name cannot void 128 rows. Never on a
+      // 429: exploding a throttled batch into 128 individual requests amplifies
+      // load 128x at exactly the moment the host asked for less, which is what
+      // drove sustained throughput from 2,400/min down to 116/min on the first
+      // attempt. A throttled batch is left uncached and picked up by the next run.
       for (const n of batch) {
         const s = await getJSON(POINT + enc(n));
         record(n, s.ok ? Number((s.body as { downloads?: number }).downloads ?? 0) : 0);
       }
+    } else {
+      unresolved.push(...batch);
     }
     bar(`${label} bulk`, ++done, batches.length);
   });
@@ -424,6 +438,29 @@ const stageWeekly = async (names: string[], label: string): Promise<Map<string, 
     record(n, r.ok ? Number((r.body as { downloads?: number }).downloads ?? 0) : 0);
     bar(`${label} scoped`, ++done, scoped.length);
   });
+
+  // One retry sweep over batches the host throttled, now that pacing has settled
+  // to a rate it accepts. Anything still unresolved stays uncached, so a later run
+  // picks it up rather than silently recording a zero.
+  if (unresolved.length > 0) {
+    console.error(`[${label}] retrying ${unresolved.length} throttled names at settled pacing`);
+    let retried = 0;
+    const rebatch: string[][] = [];
+    for (let i = 0; i < unresolved.length; i += 128) rebatch.push(unresolved.slice(i, i + 128));
+    await pmap(rebatch, Math.max(2, Math.floor(CONCURRENCY / 2)), async (batch) => {
+      const r = await getJSON(POINT + batch.join(","));
+      if (r.ok) {
+        const body = r.body as Record<string, { downloads?: number } | null>;
+        for (const n of batch) {
+          const e = body[n];
+          record(n, e && typeof e.downloads === "number" ? e.downloads : 0);
+        }
+      } else {
+        failures.push({ url: `weekly batch of ${batch.length}`, status: r.status });
+      }
+      bar(`${label} retry`, ++retried, rebatch.length);
+    });
+  }
 
   return weekly;
 };
