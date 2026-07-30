@@ -98,6 +98,12 @@ jobs:
         run: |
           icacls 'C:\' || true
           icacls 'C:\Users' || true
+          # The policy deliberately omits a leaf grant on the system interpreters, which is only
+          # sound if `C:\Windows` publishes read+execute to ALL APPLICATION PACKAGES. These dumps
+          # are the record of what it actually publishes on this image.
+          icacls 'C:\Windows' || true
+          icacls 'C:\Windows\System32\cmd.exe' || true
+          icacls 'C:\Program Files' || true
 
       # Separate from the run so a compile error reads as a compile error rather than as a
       # probe that measured nothing.
@@ -245,8 +251,29 @@ jobs:
             need_pass "$p"
           done
 
+          echo "════ WHICH INTERPRETER PATH CAN THE JAIL LAUNCH WITH AT ALL? ════"
+          # THE decisive group. `grant_build_jail_interpreter` grants the interpreter as a FILE,
+          # `grant_leaf_ace` is fail-CLOSED, and a FILE can never satisfy the AAP skip (that needs
+          # an INHERITABLE ace) — so a refused WRITE_DAC means no child and no lifecycle script.
+          # `allusers` is `C:\Program Files\nodejs\node.exe`, planted by the elevated parent so
+          # the MSI shape is measured and not extrapolated from `C:\hostedtoolcache`.
+          need "  fact:allusers-node="
+          grep -E 'fact:allusers-node-(dacl|icacls|cleanup)' probe.log || true
+          for arm in "" "deelev-"; do
+            for tag in staged ambient allusers; do
+              p="${arm}shell-interpreter-grant-launches-$tag"
+              grep -q "prop:$p=" probe.log || { echo "MISS $p (never measured)"; fail=1; }
+              grep -E "prop:$p=" probe.log || true
+            done
+            grep -E "fact:${arm}shell-interp-(staged|ambient|allusers)=" probe.log || true
+          done
+          echo "---- per-path: would nub SKIP the grant, and could it WRITE it? ----"
+          grep -E 'fact:(deelev-)?shell-leafgrant-' probe.log || { echo "MISS the leafgrant facts"; fail=1; }
+          grep -E 'fact:(deelev-)?shell-path-dropped-node-dirs=' probe.log || true
+
           echo "---- shells: the gates (no cell below counts as evidence without these) ----"
           for p in shell-gate-stdio-shim-live \
+                   shell-gate-system-interpreter-reachable-ungranted \
                    shell-gate-repair-off-croot-refused \
                    shell-gate-repair-on-croot-permitted \
                    shell-gate-repair-off-profile-ancestor-refused \
@@ -310,7 +337,8 @@ jobs:
           done
 
           echo "---- shipping arm: confinement + shim must still hold (gates) ----"
-          for p in deelev-shell-gate-stdio-shim-live \
+          for p in deelev-shell-gate-system-interpreter-reachable-ungranted \
+                   deelev-shell-gate-stdio-shim-live \
                    deelev-shell-gate-off-ungranted-read-refused \
                    deelev-shell-gate-on-ungranted-read-refused \
                    deelev-shell-gate-repair-off-profile-ancestor-refused \
@@ -327,6 +355,7 @@ jobs:
             grep -q "prop:$p=" probe.log || { echo "MISS $p (never measured)"; fail=1; }
             grep -E "prop:$p=" probe.log || true
           done
+          grep -E 'fact:(deelev-)?shell-cmdexe-(off|on)=' probe.log || true
           grep -E 'fact:deelev-shell-ace-writable\[' probe.log || { echo "MISS the de-elevated ACE-writability facts"; fail=1; }
           need "  fact:deelev-shell-capability-fallbacks="
           need "  fact:deelev-probe-admin-authority="

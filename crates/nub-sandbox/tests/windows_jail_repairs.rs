@@ -2174,6 +2174,103 @@ try {{
         }
     }
 
+    /// Plant a Node at the canonical ALL-USERS install path so the leaf-grant question can be
+    /// asked about the shape that SHIPS instead of about `C:\hostedtoolcache`, which exists only
+    /// on a runner. `pm_engine/build_jail.rs:120` derives the jail's interpreter from
+    /// `npm_node_execpath` / `NODE` in the AMBIENT env, so for an MSI all-users install it is
+    /// `C:\Program Files\nodejs\node.exe` — whatever `preset.rs`'s "nub provisions its own Node"
+    /// comment intends, the call site does not guarantee it.
+    ///
+    /// ADMIN-ONLY SETUP, run by the PARENT before it de-elevates. The owner reset is the
+    /// load-bearing step, not tidiness: without it the creating user picks up `%ProgramFiles%`'s
+    /// `CREATOR OWNER` full-control ACE, and the de-elevated token — which retains that user SID
+    /// — would hold `WRITE_DAC` for a reason no real installer grants, yielding a `writable`
+    /// verdict and the opposite conclusion. Skipped if the path already exists: overwriting a
+    /// real Node install is not this probe's business.
+    fn plant_allusers_node(node: &Path) -> Option<PathBuf> {
+        let root = PathBuf::from(
+            std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into()),
+        )
+        .join("nodejs");
+        if root.exists() {
+            println!(
+                "  fact:allusers-node=PRE-EXISTING-LEFT-ALONE {}",
+                root.display()
+            );
+            return None;
+        }
+        if let Err(e) = std::fs::create_dir_all(&root) {
+            println!("  fact:allusers-node=MKDIR-REFUSED {e}");
+            return None;
+        }
+        let exe = root.join("node.exe");
+        if let Err(e) = std::fs::copy(node, &exe) {
+            println!("  fact:allusers-node=COPY-FAILED {e}");
+            return None;
+        }
+        for args in [
+            ["/setowner", "BUILTIN\\Administrators", "/T", "/C"].as_slice(),
+            ["/reset", "/T", "/C"].as_slice(),
+        ] {
+            let ok = std::process::Command::new("icacls")
+                .arg(&root)
+                .args(args)
+                .output()
+                .map(|o| o.status.success().to_string())
+                .unwrap_or_else(|e| format!("spawn-failed:{e}"));
+            println!("  fact:allusers-node-icacls[{}]={ok}", args[0]);
+        }
+        println!(
+            "  fact:allusers-node-dacl={}",
+            std::process::Command::new("icacls")
+                .arg(&exe)
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .replace(['\r', '\n'], " | "))
+                .unwrap_or_else(|e| format!("icacls-failed:{e}"))
+        );
+        println!("  fact:allusers-node={}", exe.display());
+        Some(exe)
+    }
+
+    /// ONE `apply` launch whose only variable is which interpreter path carries the leaf read
+    /// grant. The verdict text is reported verbatim, because `grant_leaf_ace` is fail-CLOSED: a
+    /// refusal is not a degraded jail, it is no child and no lifecycle script at all.
+    fn launch_with_interpreter_grant(
+        f: &Fixture,
+        node_options: &str,
+        interp: &Path,
+        tag: &str,
+    ) -> String {
+        let mut grants = vec![read_rule(interp)];
+        if let Some(dir) = interp.parent() {
+            grants.push(read_rule(dir));
+        }
+        let policy = jail_shaped(f, grants, &[("NODE_OPTIONS", node_options.to_string())]);
+        let marker = f.work.join(format!("{tag}.interp"));
+        let _ = std::fs::remove_file(&marker);
+        let args = vec![
+            "fsprobe".to_string(),
+            marker.to_string_lossy().into_owned(),
+            format!("granted|read|{}", f.work.join("granted.txt").display()),
+        ];
+        breadcrumb(&format!("launch_with_interpreter_grant {tag}"));
+        flush();
+        match apply(&policy, spec(f, &f.work, &args)).map(|p| p.status()) {
+            Ok(Ok(status)) => format!(
+                "LAUNCHED code={:?} marker={}",
+                status.code(),
+                std::fs::read_to_string(&marker)
+                    .unwrap_or_else(|_| "<none>".into())
+                    .trim()
+                    .replace(['\r', '\n'], " ")
+            ),
+            Ok(Err(error)) => format!("LAUNCH-FAILED {error}"),
+            Err(degradation) => format!("POLICY-REJECTED {degradation:?}"),
+        }
+    }
+
     /// The whole shell group. One fixture, one policy, one interpreter set; three arms per
     /// interpreter (unconfined reference, repair-off floor, repair-on ceiling).
     fn shell_tools(fails: &mut u32, node: &Path) {
@@ -2234,6 +2331,93 @@ try {{
             std::fs::copy(src, &dst).expect("stage busybox into the fixture");
             dst
         });
+
+        // ── WHERE CAN NUB'S LEAF READ-GRANT ACTUALLY BE WRITTEN? ────────────────────────
+        //
+        // Run 30534565887 answered the shell question with a NON-answer: de-elevated, EVERY
+        // confined launch died in step 2 of `AppContainerLaunch::run` with
+        // `installing read grant ACE on …\node.exe failed: Access is denied (os error 5)`, and
+        // all nineteen cells came back absent. `grant_leaf_ace` is fail-CLOSED, and the AAP skip
+        // cannot rescue a FILE: `already_granted_to_appcontainers` requires an INHERITABLE ace,
+        // which a file can never carry, so `leaf-grant-redundant` is false for every interpreter
+        // binary regardless of the read+execute the parent directory already publishes to
+        // AppContainers. Whether that abort fires on a REAL machine therefore turns entirely on
+        // per-path `WRITE_DAC`, so each interpreter location's verdict is a first-class
+        // measurement here rather than a footnote. Paired with `leaf-grant-redundant`, the two
+        // together say whether nub would try the write at all and whether it could succeed.
+        let bin_dir = f.root.join("bin");
+        for (label, path) in [
+            ("node-exe", Some(node.to_path_buf())),
+            ("node-dir", node.parent().map(Path::to_path_buf)),
+            ("cmd-exe", Some(cmd_exe.clone())),
+            ("system32", cmd_exe.parent().map(Path::to_path_buf)),
+            ("windir", std::env::var_os("SystemRoot").map(PathBuf::from)),
+            ("powershell-exe", Some(ps_exe.clone())),
+            ("pshome", ps_exe.parent().map(Path::to_path_buf)),
+            ("pwsh-exe", pwsh_exe.clone()),
+            (
+                "pwsh-dir",
+                pwsh_exe
+                    .as_deref()
+                    .and_then(Path::parent)
+                    .map(Path::to_path_buf),
+            ),
+            (
+                "programfiles",
+                std::env::var_os("ProgramFiles").map(PathBuf::from),
+            ),
+            ("staged-busybox", staged_busybox.clone()),
+            ("fixture-bin", Some(bin_dir.clone())),
+        ] {
+            let Some(path) = path else {
+                println!("  fact:shell-leafgrant-{label}=<absent-on-this-image>");
+                continue;
+            };
+            if !path.exists() {
+                println!("  fact:shell-leafgrant-{label}=<path-does-not-exist>");
+                continue;
+            }
+            println!(
+                "  fact:shell-leafgrant-{label}=redundant:{} writable:{} path:{}",
+                nub_sandbox::windows_leaf_grant_redundant(&path),
+                ace_writable(&path),
+                path.display()
+            );
+        }
+
+        // Stage `node.exe` INSIDE the fixture and put that dir first on `PATH`. Without this the
+        // de-elevated battery is UNMEASURABLE — the grant on the image's own interpreter aborts
+        // the launch before any shell starts — and a user-owned interpreter is also the norm
+        // under nub, which provisions Node into its own cache. The production shape (a grant on
+        // a system-owned interpreter) is not engineered away: it gets its own one-variable
+        // property, `shell-prodshape-interpreter-grant-launches`, below.
+        let staged_node = bin_dir.join("node.exe");
+        std::fs::copy(node, &staged_node).expect("stage node into the fixture");
+
+        // `PATH` is REPLACED, not PREPENDED — every directory that carries a `node.exe` is
+        // dropped. A prepend leaves the ambient interpreter reachable through a shim's own
+        // re-search fallback (stock `npm.cmd` carries
+        // `IF NOT EXIST "%~dp0\node.exe" SET "NODE_EXE=node"`), and then a `pathspawn` or
+        // `nestedspawn` cell that resolved the AMBIENT, UNGRANTED node would read as a success
+        // for the staged one. The unconfined reference gets the same block, so the diff stays
+        // honest either way.
+        let staged_path = {
+            let mut parts = vec![bin_dir.display().to_string()];
+            let dropped: Vec<String> =
+                std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                    .filter(|d| {
+                        if d.join("node.exe").is_file() {
+                            true
+                        } else {
+                            parts.push(d.display().to_string());
+                            false
+                        }
+                    })
+                    .map(|d| d.display().to_string())
+                    .collect();
+            println!("  fact:shell-path-dropped-node-dirs={}", dropped.join(";"));
+            parts.join(";")
+        };
 
         let mut plans: Vec<ShellPlan> = Vec::new();
         if cmd_exe.is_file() {
@@ -2317,26 +2501,70 @@ try {{
             );
         }
 
-        // The policy: build-jail shaped, granting node + every shell binary, with the
-        // PRODUCTION `NODE_OPTIONS` stamped through the constructed env.
+        // The policy: build-jail shaped, with the PRODUCTION `NODE_OPTIONS` stamped through the
+        // constructed env.
+        //
+        // EVERY LEAF GRANT IS ON A USER-OWNED PATH, in BOTH arms — that is what keeps the
+        // elevated and de-elevated arms one variable apart. Granting the SYSTEM interpreters
+        // (`cmd.exe`, `powershell.exe`, `%ProgramFiles%\PowerShell\7`) is what aborted the whole
+        // de-elevated run, so an arm that grants them for `runneradmin` and cannot for a standard
+        // user differs in the grant set as well as the token, and neither arm's cells would then
+        // attribute. They are omitted here instead, which relies on the read+execute
+        // `C:\Windows` already publishes to ALL APPLICATION PACKAGES — a claim the
+        // `leafgrant-*` facts above and the `cmdexe` gate op below both measure rather than assume.
         let node_options = nub_sandbox::windows_build_jail_node_options();
-        let mut grants = vec![read_rule(node)];
-        for dir in [
-            node.parent().map(Path::to_path_buf),
-            Some(cmd_exe.clone()),
-            Some(ps_exe.clone()),
-            pwsh_exe
-                .clone()
-                .and_then(|p| p.parent().map(Path::to_path_buf)),
-            staged_busybox.clone(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            grants.push(read_rule(&dir));
+        let mut grants = vec![read_rule(&bin_dir), read_rule(&staged_node)];
+        if let Some(bb) = &staged_busybox {
+            grants.push(read_rule(bb));
         }
-        let policy = jail_shaped(&f, grants, &[("NODE_OPTIONS", node_options.clone())]);
+        let policy = jail_shaped(
+            &f,
+            grants,
+            &[
+                ("NODE_OPTIONS", node_options.clone()),
+                ("PATH", staged_path.clone()),
+            ],
+        );
         println!("  fact:shell-node-options-bytes={}", node_options.len());
+        println!("  fact:shell-staged-node={}", staged_node.display());
+
+        // ── THE DECISIVE PAIR: WHICH INTERPRETER PATH CAN THE JAIL EVEN LAUNCH WITH? ────
+        //
+        // Three launches, identical but for the one path carrying the interpreter leaf grant.
+        // `staged` is a directory nub owns; `ambient` is whatever this image put on PATH;
+        // `allusers` is the canonical MSI location `C:\Program Files\nodejs\node.exe`, planted by
+        // the elevated parent precisely so the shipping shape is measured rather than inferred
+        // from the runner's `C:\hostedtoolcache`. Because `grant_leaf_ace` is fail-CLOSED, the
+        // difference between these three is the difference between a lifecycle script running and
+        // no child existing at all — which makes this the single most load-bearing group here.
+        for (tag, interp) in [
+            ("staged", Some(staged_node.clone())),
+            ("ambient", Some(node.to_path_buf())),
+            (
+                "allusers",
+                std::env::var_os("PROBE_ALLUSERS_NODE").map(PathBuf::from),
+            ),
+        ] {
+            let Some(interp) = interp.filter(|p| p.is_file()) else {
+                println!("  fact:shell-interp-{tag}=<absent-on-this-image>");
+                continue;
+            };
+            let verdict = launch_with_interpreter_grant(&f, &node_options, &interp, tag);
+            println!(
+                "  fact:shell-interp-{tag}={verdict} path={} redundant={} writable={}",
+                interp.display(),
+                nub_sandbox::windows_leaf_grant_redundant(&interp),
+                ace_writable(&interp)
+            );
+            // A MEASUREMENT: a FAIL on `ambient`/`allusers` is the finding, so it is reported and
+            // never gated. Only `staged` is expected to hold under both principals.
+            report(
+                fails,
+                &format!("shell-interpreter-grant-launches-{tag}"),
+                verdict.starts_with("LAUNCHED"),
+                &verdict,
+            );
+        }
 
         // ── the gates. No arm below counts as evidence unless these pass. ───────────────
         let chain: Vec<PathBuf> = {
@@ -2396,6 +2624,15 @@ fs.writeFileSync({marker}, "sentinel=" + String(globalThis.__nubJailStdioShim) +
                 "lstat",
                 f.root.to_string_lossy().into_owned(),
             ),
+            // Is a SYSTEM interpreter reachable with NO nub grant on it? The policy deliberately
+            // omits `cmd.exe`, relying on the read+execute `C:\Windows` already publishes to
+            // ALL APPLICATION PACKAGES; this asks the kernel rather than assuming it, and it is
+            // the cell that says whether omitting those grants was sound.
+            (
+                "cmdexe".into(),
+                "lstat",
+                cmd_exe.to_string_lossy().into_owned(),
+            ),
             (
                 "ungranted".into(),
                 "read",
@@ -2432,6 +2669,18 @@ fs.writeFileSync({marker}, "sentinel=" + String(globalThis.__nubJailStdioShim) +
             &format!(
                 "{} (the ceiling arm's repair must be live — see shell-ace-writable if this fails)",
                 line(&gate_on, "croot")
+            ),
+        );
+        println!("  fact:shell-cmdexe-off={}", line(&gate_off, "cmdexe"));
+        println!("  fact:shell-cmdexe-on={}", line(&gate_on, "cmdexe"));
+        report(
+            fails,
+            "shell-gate-system-interpreter-reachable-ungranted",
+            line(&gate_on, "cmdexe").starts_with("ok:"),
+            &format!(
+                "cmdexe={} (if this fails, omitting the system-interpreter leaf grants was \
+                 unsound and every shell cell below is void)",
+                line(&gate_on, "cmdexe")
             ),
         );
         println!(
@@ -3542,6 +3791,17 @@ p done=1
         // what this round exists for, so it must not sit behind a group that could stall and
         // take the log with it. Its own battery still runs the repair-OFF floor internally, so
         // the shipping/floor comparison is inside this one child.
+        //
+        // The all-users Node is planted HERE, by the still-elevated parent, and handed to both
+        // arms through the environment — the de-elevated child could not create it, and that is
+        // the whole point: a standard user meets that path as an installer left it.
+        step("plant_allusers_node");
+        let allusers = plant_allusers_node(node.as_path());
+        if let Some(exe) = &allusers {
+            // SAFETY: the probe is single-threaded here; the child inherits this block.
+            unsafe { std::env::set_var("PROBE_ALLUSERS_NODE", exe) };
+        }
+
         step("deelev_shell_arm");
         deelev_shell_arm(&mut fails);
 
@@ -3576,6 +3836,18 @@ p done=1
         // nothing after it would be measured.
         step("shell_direct_launch");
         shell_direct_launch(&mut fails);
+
+        // Remove the planted all-users tree: it is probe scaffolding, and leaving a 90 MB
+        // `node.exe` under `%ProgramFiles%` would make a later run on a reused image take the
+        // PRE-EXISTING-LEFT-ALONE branch and silently skip the measurement.
+        if let Some(exe) = &allusers
+            && let Some(root) = exe.parent()
+        {
+            println!(
+                "  fact:allusers-node-cleanup={:?}",
+                std::fs::remove_dir_all(root).map_err(|e| e.raw_os_error())
+            );
+        }
         step("done");
 
         if fails == 0 {
