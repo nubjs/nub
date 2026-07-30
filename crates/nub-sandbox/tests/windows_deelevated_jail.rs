@@ -1311,6 +1311,7 @@ mod win {
     /// purpose: the elevated arm WOULD succeed, and it would leave a lasting AppContainer widening
     /// on the user's own Node install.
     fn can_write_dacl(path: &Path) -> bool {
+        use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
         use windows_sys::Win32::Storage::FileSystem::{
             CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
