@@ -142,7 +142,8 @@ jobs:
                    obj-piped-spawn-hangs-as-shipped \
                    nul-repair-fixes-the-nul-device nul-repair-fixes-stdio-ignore \
                    nul-repair-does-not-fix-the-piped-hang npfs-repair-fixes-the-piped-hang \
-                   fdfile-mitigation-works-under-the-jail; do need "$p"; done
+                   fdfile-mitigation-works-under-the-jail \
+                   fork-baseline-unconfined-forks fork-ipc-hangs-under-the-jail; do need "$p"; done
 
           echo
           echo "── result ──"

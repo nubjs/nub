@@ -300,6 +300,16 @@ function Invoke-ObjectVerdict {
   # ── THE BASELINE-REPEAT GUARD. §5e's `core-js` false positive is why this exists, and a
   # machine-global device DACL makes it sharper: a repair whose revoke failed would leave the
   # device open and make this arm read as repaired.
+  # ── THE RESIDUAL. `fork`'s IPC channel is a pipe in the same global namespace, and no `stdio`
+  # option removes it, so the file-descriptor mitigation has a hole. Both halves in one run: the
+  # unconfined arm must fork, the confined one is the question.
+  W ("    {0,-24} plain={1} confined={2}" -f 'fork-ipc', (Cell 'obj-plain-fork' 'fork-ipc'),
+    (Cell 'obj-ac-fork' 'fork-ipc'))
+  Prop 'fork-baseline-unconfined-forks' ((Cell 'obj-plain-fork' 'fork-ipc') -eq 'OK') `
+    "the allow half: an unconfined child must fork, or a confined failure is the harness: $(Cell 'obj-plain-fork' 'fork-ipc') launch=$(LaunchOf 'obj-plain-fork')"
+  Prop 'fork-ipc-hangs-under-the-jail' ((Cell 'obj-ac-fork' 'fork-ipc') -eq 'MISSING-OP') `
+    "PREDICTED: fork's IPC channel is a pipe in the refused namespace and no stdio option removes it, so the fd mitigation cannot cover it. A FAIL means fork survives and the residual is smaller than thought: $(Cell 'obj-ac-fork' 'fork-ipc') launch=$(LaunchOf 'obj-ac-fork')"
+
   Prop 'baseline-repeats-after-every-repair' `
     (((Cell 'obj-ac-baseline-again' 'nul-open-read') -eq (Cell 'obj-ac-baseline' 'nul-open-read')) -and
      ((Cell 'obj-ac-baseline-again' 'pipe-listen-global') -eq (Cell 'obj-ac-baseline' 'pipe-listen-global')) -and

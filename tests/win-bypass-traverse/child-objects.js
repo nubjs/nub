@@ -94,15 +94,47 @@ function listenOnce(name, pipePath) {
 // WAY". `ignore` is the NUL path: libuv opens `NUL` fresh in the spawning process for fds 0-2.
 // `fdfile` is the measured mitigation (file-backed descriptors in place of pipes). `pipe` is the
 // blocker, and it is last.
+// RUN 30512950258 BUG, caught by the unconfined control exactly as it is designed to be: with
+// `stdio: 'inherit'` the grandchild writes into the SAME log handle this table is written to, and an
+// UNTERMINATED `pong` concatenated with the next `op:` line so it no longer matched `^op:`. The cell
+// then read MISSING-OP in every arm, unconfined included — a harness artifact that would have looked
+// like "the confined child cannot spawn at all". The grandchild's output is now newline-delimited on
+// both sides, so it occupies its own line and the marker survives.
+const GRANDCHILD = 'process.stdout.write("\\ndiag:grandchild-ran\\n")';
+
 function spawnCell(name, opts) {
   run(name, () => {
-    const r = cp.spawnSync(NODE, ['-e', 'process.stdout.write("pong")'], opts);
+    const r = cp.spawnSync(NODE, ['-e', GRANDCHILD], opts);
     if (r.error) throw r.error;
-    return 'status=' + r.status + ' out=' + String((r.stdout && r.stdout.toString()) || '').slice(0, 40);
+    return 'status=' + r.status + ' out=' + String((r.stdout && r.stdout.toString()) || '').trim().slice(0, 40);
   });
 }
 
+// `BT_OBJ_MODE=fork` runs ONE cell and nothing else. `child_process.fork` opens an IPC channel,
+// which is a `uv_pipe` with `ipc=1` — the same `uv__create_pipe_pair` -> `uv__pipe_server` path, in
+// the same global namespace. So the file-descriptor mitigation cannot reach it: there is no stdio
+// option that removes an IPC channel from a fork. It needs its own arm because it is expected to
+// hang, and a cell placed after another hanging cell never runs.
+async function forkMode() {
+  one('child:fork-arm-start arm=' + ARM);
+  run('fork-ipc', () => {
+    // The forkee is written into the granted data dir rather than reusing this file, so the cell
+    // cannot recurse. It never runs if the hypothesis holds: the IPC pipe is created inside the
+    // `fork` call itself, so the spin happens before any child code exists.
+    const forkee = require('path').join(require('path').dirname(process.env.BT_OBJ_SINK), 'forkee.js');
+    fs.writeFileSync(forkee, 'process.exit(0);\n');
+    const child = cp.fork(forkee, [], { stdio: 'inherit' });
+    try {
+      child.kill();
+    } catch (e) {}
+    return 'forked pid=' + child.pid;
+  });
+  one('child:fork-returned arm=' + ARM);
+}
+
 async function main() {
+  if (process.env.BT_OBJ_MODE === 'fork') return forkMode();
+
   await listenOnce('pipe-listen-global', '\\\\.\\pipe\\nubobj-g-' + nonce);
   await listenOnce('pipe-listen-local', '\\\\.\\pipe\\LOCAL\\nubobj-l-' + nonce);
 
@@ -115,10 +147,10 @@ async function main() {
     const sinkPath = process.env.BT_OBJ_SINK;
     const fd = fs.openSync(sinkPath, 'w');
     try {
-      const r = cp.spawnSync(NODE, ['-e', 'process.stdout.write("pong")'], { stdio: [0, fd, fd] });
+      const r = cp.spawnSync(NODE, ['-e', GRANDCHILD], { stdio: [0, fd, fd] });
       if (r.error) throw r.error;
       fs.closeSync(fd);
-      return 'status=' + r.status + ' sink=' + fs.readFileSync(sinkPath, 'utf8').slice(0, 40);
+      return 'status=' + r.status + ' sink=' + fs.readFileSync(sinkPath, 'utf8').trim().slice(0, 40);
     } catch (e) {
       try {
         fs.closeSync(fd);

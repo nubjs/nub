@@ -3,7 +3,10 @@
 # WHY THIS EXISTS. A verdict block only ever exercised against the world it expects will happily
 # report PASS on a harness that measured nothing; that is precisely how this effort previously
 # produced a negative it could not falsify and a "confirmation" from a broken control. So the
-# verdict is driven against SIX synthetic worlds and required to give a DIFFERENT answer in each:
+# verdict is driven against ELEVEN synthetic worlds and required to give a DIFFERENT answer in each.
+# The first six cover the filesystem question, the last five the device/stdio one (see `ObjArm` and
+# `$objPredicted` below for those; a hanging cell is modelled by OMITTING its op line, because that is
+# what the real thing produces):
 #
 #   works        bypass-traverse works        => every property PASSes
 #   denied       bypass-traverse fails        => the bypass-traverse properties FAIL, and every
@@ -125,6 +128,8 @@ $objPredicted = @{
   'obj-ac-nulfix' = Mk (ObjArm 'OK' 'ERR' 'OK' 'HANG' 'OK' 'ERR')
   'obj-ac-npfsfix' = Mk (ObjArm 'ERR' 'OK' 'ERR' 'OK' 'ERR' 'OK')
   'obj-ac-baseline-again' = Mk (ObjArm 'ERR' 'ERR' 'ERR' 'HANG')
+  'obj-plain-fork' = Mk @{ 'fork-ipc' = 'OK' }
+  'obj-ac-fork' = Mk @{}
 }
 
 $worlds = @{
@@ -187,6 +192,11 @@ $worlds['obj-baseline-leaked'] = Merge $fsWorks (Merge $objPredicted @{
   # A revoke that silently failed leaves a MACHINE-GLOBAL device open, so the repeat baseline reads
   # as repaired. Without the repeat arm this world is indistinguishable from the predicted one.
   'obj-ac-baseline-again' = Mk (ObjArm 'OK' 'OK' 'OK' 'OK' 'OK' 'OK')
+})
+$worlds['obj-fork-survives'] = Merge $fsWorks (Merge $objPredicted @{
+  # fork works under the jail after all — so the residual is smaller than predicted, and the
+  # property must say so rather than quietly reporting the predicted answer.
+  'obj-ac-fork' = Mk @{ 'fork-ipc' = 'OK' }
 })
 $worlds['obj-harness-dead'] = Merge $fsWorks (Merge $objPredicted @{
   'obj-plain' = Mk (ObjArm 'ERR' 'ERR' 'ERR' 'HANG') 0 'launch-error CreateProcessW err=2'
@@ -285,6 +295,8 @@ $expect['works'] += @{
   'fdfile-mitigation-works-under-the-jail' = 'PASS'
   'inherit-stdio-works-under-the-jail' = 'PASS'
   'baseline-repeats-after-every-repair' = 'PASS'
+  'fork-baseline-unconfined-forks' = 'PASS'
+  'fork-ipc-hangs-under-the-jail' = 'PASS'
 }
 $expect['obj-nul-fixes-the-hang-too'] = @{
   'nul-repair-does-not-fix-the-piped-hang' = 'FAIL'
@@ -305,6 +317,10 @@ $expect['obj-baseline-leaked'] = @{
   'obj-baseline-unconfined-passes-everything' = 'PASS'
   'obj-device-repair-reached-the-object' = 'PASS'
 }
+$expect['obj-fork-survives'] = @{
+  'fork-ipc-hangs-under-the-jail' = 'FAIL'
+  'fork-baseline-unconfined-forks' = 'PASS'
+}
 $expect['obj-harness-dead'] = @{
   'obj-baseline-unconfined-passes-everything' = 'FAIL'
   'obj-confined-arms-launched' = 'PASS'
@@ -313,7 +329,7 @@ $expect['obj-harness-dead'] = @{
 $bad = 0
 foreach ($name in @('works', 'denied', 'harness-dead', 'ace-inert', 'grant-never-landed',
                     'defect-absent', 'obj-nul-fixes-the-hang-too', 'obj-repair-never-landed',
-                    'obj-baseline-leaked', 'obj-harness-dead')) {
+                    'obj-baseline-leaked', 'obj-fork-survives', 'obj-harness-dead')) {
   $script:fails = 0
   $captured = Invoke-Verdict -Cells $worlds[$name] 6>&1
   $got = @{}
@@ -336,7 +352,7 @@ foreach ($name in @('works', 'denied', 'harness-dead', 'ace-inert', 'grant-never
 
 Write-Host ''
 if ($bad -eq 0) {
-  Write-Host "SELFTEST OK - the verdict discriminates in all ten worlds"
+  Write-Host "SELFTEST OK - the verdict discriminates in all eleven worlds"
   exit 0
 }
 Write-Host "SELFTEST FAILED - $bad expectation(s) wrong"

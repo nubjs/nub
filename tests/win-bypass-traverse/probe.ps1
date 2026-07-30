@@ -365,6 +365,26 @@ public static class BtSec
     static extern bool ImpersonateLoggedOnUser(IntPtr tok);
     [DllImport("advapi32.dll", SetLastError = true)] static extern bool RevertToSelf();
 
+    // THE FALLBACK ROUTE, added after run 30512950258. `GetSecurityInfo` and `SetSecurityInfo` both
+    // return 87 ERROR_INVALID_PARAMETER on the NPFS root — on BOTH images — while the very same
+    // calls succeed on `\Device\Null`, so the refusal is that object's and not the API's. Win32's
+    // wrappers are thin shims over these, so going direct distinguishes "the wrapper rejected the
+    // shape" from "the driver refuses to serve a security query at all". Without this the npfsfix
+    // arm measures nothing: its grant never ran, which is a DIFFERENT result from the grant failing.
+    [DllImport("ntdll.dll")]
+    static extern int NtQuerySecurityObject(IntPtr h, uint secInfo, IntPtr sd, uint len,
+        out uint needed);
+    [DllImport("ntdll.dll")]
+    static extern int NtSetSecurityObject(IntPtr h, uint secInfo, IntPtr sd);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool GetSecurityDescriptorDacl(IntPtr sd, out bool present, out IntPtr dacl,
+        out bool defaulted);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool InitializeSecurityDescriptor(IntPtr sd, uint rev);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool SetSecurityDescriptorDacl(IntPtr sd, bool present, IntPtr dacl,
+        bool defaulted);
+
     const int SE_KERNEL_OBJECT = 6;
     const uint OWNER_SI = 1, GROUP_SI = 2, DACL_SI = 4;
     const uint OPEN_EXISTING = 3;
@@ -411,9 +431,53 @@ public static class BtSec
             string s = Marshal.PtrToStringUni(str);
             LocalFree(str);
             LocalFree(sd);
-            return s;
+            return "win32: " + s;
         }
         finally { CloseHandle(h); }
+    }
+
+    /// The same read through `NtQuerySecurityObject`. Two-call form: length 0 to learn the size,
+    /// then again into a buffer.
+    public static string SddlNt(string path)
+    {
+        IntPtr h = Open(path, READ_CONTROL);
+        if (h == new IntPtr(-1)) return "ERR open err=" + Marshal.GetLastWin32Error();
+        IntPtr buf = IntPtr.Zero;
+        try
+        {
+            uint needed;
+            int st = NtQuerySecurityObject(h, OWNER_SI | GROUP_SI | DACL_SI, IntPtr.Zero, 0, out needed);
+            // STATUS_BUFFER_TOO_SMALL / STATUS_BUFFER_OVERFLOW are the expected sizing answers.
+            if (st != unchecked((int)0xC0000023) && st != unchecked((int)0x80000005) && st != 0)
+                return "ERR ntquery-size status=0x" + st.ToString("x8");
+            if (needed == 0) return "ERR ntquery-size needed=0";
+            buf = Marshal.AllocHGlobal((int)needed);
+            st = NtQuerySecurityObject(h, OWNER_SI | GROUP_SI | DACL_SI, buf, needed, out needed);
+            if (st != 0) return "ERR ntquery status=0x" + st.ToString("x8");
+            IntPtr str; uint len;
+            if (!ConvertSecurityDescriptorToStringSecurityDescriptorW(buf, 1,
+                    OWNER_SI | GROUP_SI | DACL_SI, out str, out len))
+                return "ERR tosddl err=" + Marshal.GetLastWin32Error();
+            string s = Marshal.PtrToStringUni(str);
+            LocalFree(str);
+            return "nt: " + s;
+        }
+        finally
+        {
+            if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf);
+            CloseHandle(h);
+        }
+    }
+
+    /// Read whichever route the object serves. Reported with its route prefix, because "the win32
+    /// wrapper refused but the native call worked" is a materially different fact from either alone.
+    public static string SddlAny(string path)
+    {
+        string a = Sddl(path);
+        if (!a.StartsWith("ERR")) return a;
+        string b = SddlNt(path);
+        if (!b.StartsWith("ERR")) return b;
+        return a + " | " + b;
     }
 
     /// Just the OPEN, so "can this context obtain WRITE_DAC" is measured independently of whether
@@ -468,8 +532,76 @@ public static class BtSec
         }
     }
 
-    public static string Grant(string path, string sidStr, uint mask) { return Edit(path, sidStr, mask, SET_ACCESS); }
-    public static string Revoke(string path, string sidStr) { return Edit(path, sidStr, 0, REVOKE_ACCESS); }
+    /// The same edit through `NtQuerySecurityObject` / `NtSetSecurityObject`, assembling the new
+    /// descriptor by hand: query self-relative, pull its DACL out, merge the ace, wrap the result in
+    /// a fresh ABSOLUTE descriptor (which is what NtSetSecurityObject wants), set.
+    static string EditNt(string path, string sidStr, uint mask, uint mode)
+    {
+        IntPtr sid;
+        if (!ConvertStringSidToSidW(sidStr, out sid))
+            return "ERR sid err=" + Marshal.GetLastWin32Error();
+        IntPtr h = Open(path, READ_CONTROL | WRITE_DAC);
+        if (h == new IntPtr(-1))
+        {
+            LocalFree(sid);
+            return "ERR open err=" + Marshal.GetLastWin32Error();
+        }
+        IntPtr buf = IntPtr.Zero, newDacl = IntPtr.Zero, newSd = IntPtr.Zero;
+        try
+        {
+            uint needed;
+            int st = NtQuerySecurityObject(h, DACL_SI, IntPtr.Zero, 0, out needed);
+            if (st != unchecked((int)0xC0000023) && st != unchecked((int)0x80000005) && st != 0)
+                return "ERR ntquery-size status=0x" + st.ToString("x8");
+            if (needed == 0) return "ERR ntquery-size needed=0";
+            buf = Marshal.AllocHGlobal((int)needed);
+            st = NtQuerySecurityObject(h, DACL_SI, buf, needed, out needed);
+            if (st != 0) return "ERR ntquery status=0x" + st.ToString("x8");
+            bool present, defaulted;
+            IntPtr oldDacl;
+            if (!GetSecurityDescriptorDacl(buf, out present, out oldDacl, out defaulted))
+                return "ERR getdacl err=" + Marshal.GetLastWin32Error();
+            EXPLICIT_ACCESS_W ea = new EXPLICIT_ACCESS_W();
+            ea.grfAccessPermissions = mask;
+            ea.grfAccessMode = mode;
+            ea.grfInheritance = 0;
+            ea.Trustee.TrusteeForm = (int)TRUSTEE_IS_SID;
+            ea.Trustee.TrusteeType = (int)TRUSTEE_IS_UNKNOWN;
+            ea.Trustee.ptstrName = sid;
+            uint rc = SetEntriesInAclW(1, ref ea, present ? oldDacl : IntPtr.Zero, out newDacl);
+            if (rc != 0) return "ERR setentriesinacl rc=" + rc;
+            // SECURITY_DESCRIPTOR is 20 bytes on x64 / 40 with alignment slack; over-allocating is
+            // harmless and avoids depending on the struct layout.
+            newSd = Marshal.AllocHGlobal(64);
+            if (!InitializeSecurityDescriptor(newSd, 1))
+                return "ERR initsd err=" + Marshal.GetLastWin32Error();
+            if (!SetSecurityDescriptorDacl(newSd, true, newDacl, false))
+                return "ERR setsddacl err=" + Marshal.GetLastWin32Error();
+            st = NtSetSecurityObject(h, DACL_SI, newSd);
+            if (st != 0) return "ERR ntset status=0x" + st.ToString("x8");
+            return "OK";
+        }
+        finally
+        {
+            if (newSd != IntPtr.Zero) Marshal.FreeHGlobal(newSd);
+            if (newDacl != IntPtr.Zero) LocalFree(newDacl);
+            if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf);
+            CloseHandle(h);
+            LocalFree(sid);
+        }
+    }
+
+    static string EditAny(string path, string sidStr, uint mask, uint mode)
+    {
+        string a = Edit(path, sidStr, mask, mode);
+        if (a == "OK") return "OK win32";
+        string b = EditNt(path, sidStr, mask, mode);
+        if (b == "OK") return "OK nt";
+        return a + " | nt: " + b;
+    }
+
+    public static string Grant(string path, string sidStr, uint mask) { return EditAny(path, sidStr, mask, SET_ACCESS); }
+    public static string Revoke(string path, string sidStr) { return EditAny(path, sidStr, 0, REVOKE_ACCESS); }
 
     /// Run `CanOpen` under a DE-ELEVATED impersonation of our own token: Administrators disabled
     /// (deny-only), every removable privilege dropped, integrity lowered to Medium — the access
@@ -596,8 +728,8 @@ $npfsRoot = '\\.\pipe\'
 $nullSddl = ''
 $npfsSddl = ''
 if ($script:HaveSec) {
-  $nullSddl = [BtSec]::Sddl($devNull)
-  $npfsSddl = [BtSec]::Sddl($npfsRoot)
+  $nullSddl = [BtSec]::SddlAny($devNull)
+  $npfsSddl = [BtSec]::SddlAny($npfsRoot)
   Fact 'sddl[\Device\Null]' $nullSddl
   Fact 'sddl[NPFS root]' $npfsSddl
   Prop 'device-sd-read-works' (($nullSddl -notlike 'ERR*') -and ($npfsSddl -notlike 'ERR*')) `
@@ -651,10 +783,10 @@ if ($script:HaveSec) {
   Fact 'device-probe-sid' $devProbeSid
   if ($devProbeSid -notlike 'ERR*') {
     Fact 'null/grant-roundtrip' ([BtSec]::Grant($devNull, $devProbeSid, [BtSec]::NUL_MASK))
-    $afterGrant = [BtSec]::Sddl($devNull)
+    $afterGrant = [BtSec]::SddlAny($devNull)
     Fact 'null/sddl-names-probe-sid-after-grant' ($afterGrant -match [Regex]::Escape($devProbeSid))
     Fact 'null/revoke-roundtrip' ([BtSec]::Revoke($devNull, $devProbeSid))
-    $afterRevoke = [BtSec]::Sddl($devNull)
+    $afterRevoke = [BtSec]::SddlAny($devNull)
     Fact 'null/sddl-names-probe-sid-after-revoke' ($afterRevoke -match [Regex]::Escape($devProbeSid))
     Prop 'null-device-grant-is-reversible' (($afterGrant -match [Regex]::Escape($devProbeSid)) -and
       (-not ($afterRevoke -match [Regex]::Escape($devProbeSid)))) `
@@ -891,7 +1023,10 @@ function Invoke-Arm {
     # `child.js`'s piped spawn is opt-in because it does not fail, it spins — leaving it on cost
     # every AppContainer arm the full launch timeout while reporting MISSING-OP either way. The
     # object arms measure the same thing with a repair differential and a bound.
-    [switch]$Piped
+    [switch]$Piped,
+    # `fork` opens its IPC pipe inside the `fork` call, so it needs an arm of its own: a cell placed
+    # after an already-hanging cell never runs.
+    [string]$ObjMode = ''
   )
   W ''
   W "== arm $Name =="
@@ -934,8 +1069,8 @@ function Invoke-Arm {
         Fact "$Name/repair-npfs-root" ([BtSec]::Grant('\\.\pipe\', $sid, [BtSec]::FILE_ALL_ACCESS))
         $devGranted += '\\.\pipe\'
       }
-      if ([BtSec]::Sddl('\\.\NUL') -match [Regex]::Escape($sid)) { $nullAce = 'present' }
-      if ([BtSec]::Sddl('\\.\pipe\') -match [Regex]::Escape($sid)) { $npfsAce = 'present' }
+      if ([BtSec]::SddlAny('\\.\NUL') -match [Regex]::Escape($sid)) { $nullAce = 'present' }
+      if ([BtSec]::SddlAny('\\.\pipe\') -match [Regex]::Escape($sid)) { $npfsAce = 'present' }
     }
     Fact "$Name/null-device-dacl-for-ac-sid" $nullAce
     Fact "$Name/npfs-root-dacl-for-ac-sid" $npfsAce
@@ -957,6 +1092,7 @@ function Invoke-Arm {
 
     $env:BT_ARM = $Name
     $env:BT_PIPED = $(if ($Piped) { '1' } else { '' })
+    $env:BT_OBJ_MODE = $ObjMode
     $log = Join-Path $logDir "$Name.log"
     $entry = if ($EntryFile) { $EntryFile } else { $jailChild }
     $flagPart = if ($NodeFlags.Count) { ' ' + ($NodeFlags -join ' ') } else { '' }
@@ -1076,6 +1212,15 @@ Invoke-Arm -Name 'obj-ac-npfsfix' -AppContainer $true -GrantRX @($runtimeDir) `
   -GrantModify @($dataDir) -Cwd $runtimeDir -EntryFile $objChild -TimeoutMs 45000 -RepairNpfs
 Invoke-Arm -Name 'obj-ac-baseline-again' -AppContainer $true -GrantRX @($runtimeDir) `
   -GrantModify @($dataDir) -Cwd $runtimeDir -EntryFile $objChild -TimeoutMs 45000
+
+# THE RESIDUAL the file-descriptor mitigation cannot cover. `child_process.fork` opens an IPC channel
+# — a `uv_pipe` with `ipc=1`, through the same `uv__create_pipe_pair` -> `uv__pipe_server` path in the
+# same global namespace — and no `stdio` option removes it. Measured rather than inferred, with the
+# unconfined half in the same run, and in its own arm because it is expected to hang.
+Invoke-Arm -Name 'obj-plain-fork' -AppContainer $false -Cwd $runtimeDir -EntryFile $objChild `
+  -TimeoutMs 30000 -ObjMode 'fork'
+Invoke-Arm -Name 'obj-ac-fork' -AppContainer $true -GrantRX @($runtimeDir) `
+  -GrantModify @($dataDir) -Cwd $runtimeDir -EntryFile $objChild -TimeoutMs 30000 -ObjMode 'fork'
 
 # ── ACE RESIDUE: what does a run leave behind on the project tree? ──
 # Every grant is revoked in each arm's `finally`, so a residual ace naming a now-dead sid would
