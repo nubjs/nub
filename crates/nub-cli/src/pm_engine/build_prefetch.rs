@@ -1657,29 +1657,28 @@ mod tests {
 
     /// The redirect targets are what make the `github.com` grant non-inert, so a default
     /// build must admit the WHOLE chain — asserting only the entry host would pass against a
-    /// list that fetches zero bytes. The `--no-default-features` arm keeps the hardened
-    /// build's kill switch honest.
+    /// list that fetches zero bytes.
+    ///
+    /// The two halves of the chain now come from DIFFERENT lists, which is why the
+    /// feature-off arm asserts so little. `$downloads` carries `github.com` and
+    /// `release-assets.githubusercontent.com` in its own right (the jail grants a confined
+    /// script the same pair, so prefetch inherits them), leaving
+    /// `objects.githubusercontent.com` as the only host this widening still contributes
+    /// alone. That makes it the sole honest witness for the kill switch.
     #[test]
     fn a_default_build_fetches_a_github_release_asset_and_its_redirect_targets() {
         let asset = "https://github.com/o/r/releases/download/v1/a.tar.gz";
-        let hops = [
-            "https://release-assets.githubusercontent.com/x",
-            "https://objects.githubusercontent.com/x",
-        ];
-        if cfg!(feature = "prefetch-github-hosts") {
-            assert!(host_allowed(asset));
-            for hop in hops {
-                assert!(host_allowed(hop), "redirect target refused: {hop}");
-            }
-        } else {
-            assert!(!host_allowed(asset));
-            for hop in hops {
-                assert!(
-                    !host_allowed(hop),
-                    "hop admitted without the feature: {hop}"
-                );
-            }
-        }
+        let legacy_cdn = "https://objects.githubusercontent.com/x";
+        // Independent of the feature: these ride `$downloads`.
+        assert!(host_allowed(asset));
+        assert!(host_allowed(
+            "https://release-assets.githubusercontent.com/x"
+        ));
+        assert_eq!(
+            host_allowed(legacy_cdn),
+            cfg!(feature = "prefetch-github-hosts"),
+            "the legacy asset CDN is this widening's alone, so it must track the feature"
+        );
         // Repo-CONTENT hosts are not part of THIS widening — see `GITHUB_PREFETCH_HOSTS`.
         // Asserted against the widening itself rather than through `host_allowed`, because
         // `$downloads` is a separately-governed list that may admit one of these on its own
