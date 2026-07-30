@@ -143,7 +143,7 @@ pub mod windows_admin {
 }
 pub use compiler::{
     CommandRunner, CompileCtx, CompileError, CompileWarning, DOWNLOAD_HOSTS, ScopeCapabilities,
-    compile, compile_build_jail, compile_with_warnings,
+    build_jail_stdio_preload_js, compile, compile_build_jail, compile_with_warnings,
 };
 #[cfg(windows)]
 pub use compiler::{

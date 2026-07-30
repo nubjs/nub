@@ -225,54 +225,54 @@ impl CiState {
         let spawned = thread::Builder::new()
             .name("aube-ci-heartbeat".into())
             .spawn(move || {
-            let state = thread_state;
-            loop {
-                let guard = state.wake_lock.lock().unwrap();
-                // Re-check `done` *before* sleeping. `stop()` sets `done`
-                // and then `notify_all()`s without holding `wake_lock`, so
-                // a notification that races with the tick body would
-                // otherwise be lost and the thread would sleep a full
-                // `CI_HEARTBEAT_INTERVAL` before noticing shutdown.
-                if state.done.load(Ordering::Relaxed) {
-                    break;
+                let state = thread_state;
+                loop {
+                    let guard = state.wake_lock.lock().unwrap();
+                    // Re-check `done` *before* sleeping. `stop()` sets `done`
+                    // and then `notify_all()`s without holding `wake_lock`, so
+                    // a notification that races with the tick body would
+                    // otherwise be lost and the thread would sleep a full
+                    // `CI_HEARTBEAT_INTERVAL` before noticing shutdown.
+                    if state.done.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let (guard, _timeout) = state
+                        .wake
+                        .wait_timeout(guard, CI_HEARTBEAT_INTERVAL)
+                        .unwrap();
+                    drop(guard);
+                    if state.done.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let snap = state.snapshot();
+                    // Don't make noise until an install is actually underway.
+                    // Until then there's nothing to bar-graph and no reason to
+                    // print anything — a no-op install should remain
+                    // completely silent.
+                    if snap.resolved == 0 || snap.phase == 0 {
+                        continue;
+                    }
+                    let line = Self::render(snap);
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let mut last = state.last_printed.lock().unwrap();
+                    if *last == line {
+                        // Same rendered line as before — stay quiet.
+                        continue;
+                    }
+                    *last = line.clone();
+                    drop(last);
+                    // First time we actually print, emit the unframed
+                    // `aube VERSION by jdx.dev` header above the bar so
+                    // the CI log shows the aube banner. Only printed
+                    // once per install — `shown` flips true here.
+                    if !state.shown.swap(true, Ordering::Relaxed) {
+                        let _ = writeln!(std::io::stderr(), "{}", Self::render_header());
+                    }
+                    let _ = writeln!(std::io::stderr(), "{line}");
                 }
-                let (guard, _timeout) = state
-                    .wake
-                    .wait_timeout(guard, CI_HEARTBEAT_INTERVAL)
-                    .unwrap();
-                drop(guard);
-                if state.done.load(Ordering::Relaxed) {
-                    break;
-                }
-                let snap = state.snapshot();
-                // Don't make noise until an install is actually underway.
-                // Until then there's nothing to bar-graph and no reason to
-                // print anything — a no-op install should remain
-                // completely silent.
-                if snap.resolved == 0 || snap.phase == 0 {
-                    continue;
-                }
-                let line = Self::render(snap);
-                if line.is_empty() {
-                    continue;
-                }
-                let mut last = state.last_printed.lock().unwrap();
-                if *last == line {
-                    // Same rendered line as before — stay quiet.
-                    continue;
-                }
-                *last = line.clone();
-                drop(last);
-                // First time we actually print, emit the unframed
-                // `aube VERSION by jdx.dev` header above the bar so
-                // the CI log shows the aube banner. Only printed
-                // once per install — `shown` flips true here.
-                if !state.shown.swap(true, Ordering::Relaxed) {
-                    let _ = writeln!(std::io::stderr(), "{}", Self::render_header());
-                }
-                let _ = writeln!(std::io::stderr(), "{line}");
-            }
-        });
+            });
         // On spawn failure (e.g. EAGAIN under thread/PID exhaustion) leave the
         // handle `None` — the install proceeds without the cosmetic ticker.
         *state.heartbeat.lock().unwrap() = spawned.ok();
