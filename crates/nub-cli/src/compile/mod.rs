@@ -105,7 +105,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     eprintln!("Bundling {} …", opts.entry);
     let bundled = bundle::bundle(&entry_abs, &opts.bundle)?;
     let mut entry_name = layout.bundle_path(&bundled.entry);
-    let mut app_files = assemble_app(&bundled, &layout)?;
+    let mut app_files = assemble_app(&bundled, &layout, &target)?;
     if !opts.bundle.external.is_empty() {
         let shim = external::shim(&app_files, &entry_name, &opts.bundle.external)?;
         entry_name = shim.entry;
@@ -304,7 +304,11 @@ fn target_defines(target: &TargetPlatform) -> Vec<(String, String)> {
 /// so the entry's own directory is the one position no `--include`d file can
 /// shadow. With no assets the entry is already at the root, so this is the same
 /// file in the same place it has always been.
-fn assemble_app(bundled: &bundle::BundleResult, layout: &assets::Layout) -> Result<AppFiles> {
+fn assemble_app(
+    bundled: &bundle::BundleResult,
+    layout: &assets::Layout,
+    target: &TargetPlatform,
+) -> Result<AppFiles> {
     let mut files: AppFiles = bundled
         .files
         .iter()
@@ -349,16 +353,20 @@ fn assemble_app(bundled: &bundle::BundleResult, layout: &assets::Layout) -> Resu
 
     // The launcher refuses any payload name that could escape its extraction dir.
     // Names are partly user-derived since `--include`, so check the SAME predicate
-    // on the WHOLE set here — the last point where every name exists — rather than
-    // shipping an executable that aborts on someone else's machine. Checked against
-    // the TARGET's rules, since a name that is one component on Linux can be an
-    // escape on Windows.
+    // on the WHOLE set here — rather than shipping an executable that aborts on
+    // someone else's machine. Checked against the TARGET's rules, never the host's:
+    // `a\..\..\x` is one ordinary filename on Linux and a traversal on Windows, so
+    // a host-parsed gate lets a cross-compile bake a name its own launcher refuses.
+    let rules = target.name_rules();
     for (name, _) in &files {
-        if !nub_core::compile::is_safe_relative_name(name) {
+        if !nub_core::compile::is_safe_relative_name_for(rules, name) {
             bail!(
-                "this path cannot be embedded: {name:?}. An --include'd path must sit \
-                 inside the tree that holds the entry, and its name must be a plain \
-                 relative path."
+                "this path cannot be embedded for {}: {name:?}. An --include'd path must \
+                 sit inside the tree that holds the entry, and its name must be a plain \
+                 relative path that is also legal on the target — on Windows that rules \
+                 out `\\`, `<>:\"|?*`, a trailing dot or space, and the reserved device \
+                 names (CON, PRN, AUX, NUL, COM1-9, LPT1-9).",
+                target.triple()
             );
         }
     }
@@ -923,6 +931,45 @@ mod tests {
             msg.contains("NUB_LAUNCHER_TEMPLATE"),
             "should name the override: {msg}"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The name gate must read the TARGET's path rules, not the build host's.
+    /// `a\..\..\x` is one ordinary filename on Unix, so a host-parsed gate lets a
+    /// Unix→win32 cross-compile bake an escaping name — which only surfaces as an
+    /// abort on the Windows user's machine. (The predicate itself is covered in
+    /// nub-core; this pins that the target actually reaches it.)
+    #[test]
+    fn the_payload_name_gate_dispatches_on_the_target_not_the_host() {
+        let dir = fresh_dir("winsafe");
+        let source = dir.join("asset.bin");
+        fs::write(&source, b"x").unwrap();
+
+        let bundled = bundle::BundleResult {
+            entry: "main.js".into(),
+            files: vec![bundle::BundledFile {
+                name: "main.js".into(),
+                bytes: b"export {}".to_vec(),
+            }],
+            detached_maps: Vec::new(),
+        };
+        let layout = assets::Layout {
+            entry_prefix: String::new(),
+            assets: vec![assets::Asset {
+                source,
+                rel: "a\\..\\..\\escaped".into(),
+            }],
+        };
+
+        let win = TargetPlatform::parse("win32-x64").unwrap();
+        let err = assemble_app(&bundled, &layout, &win).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("cannot be embedded"), "{msg}");
+        assert!(msg.contains("win32-x64"), "should name the target: {msg}");
+
+        // The same name on a Unix target is a legal single-component filename.
+        let linux = TargetPlatform::parse("linux-x64").unwrap();
+        assert!(assemble_app(&bundled, &layout, &linux).is_ok());
         let _ = fs::remove_dir_all(&dir);
     }
 
