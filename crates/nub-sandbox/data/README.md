@@ -93,7 +93,7 @@ measurement-only bar structurally cannot cover the failures that hurt users most
 published source can. Both classes are honest; the `evidence` field says which one an entry
 rests on, and `measured` remains the stronger claim.
 
-## `catalogVersion` and the `corpus` block
+## The `corpus` block
 
 `corpus` carries the provenance and the denominators for every count in this file — how the
 230 packages were read, how many need network / project filesystem / system paths, and the
