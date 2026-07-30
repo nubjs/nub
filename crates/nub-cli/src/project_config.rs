@@ -773,7 +773,16 @@ fn is_path_like(value: &str) -> bool {
 
 fn expand_runtime_path(value: &str) -> String {
     let key = "__NUB_CONFIG_ENV_PATH_VALUE__";
-    let mut values: std::collections::HashMap<String, String> = std::env::vars().collect();
+    // `vars()`, not `vars_os()`, PANICS on an environment holding any non-UTF-8
+    // key or value — and this runs on the runtime path, once per `envFile`
+    // source, for every `nub <file>` in a project that sets one. A single odd
+    // variable inherited from the shell (a path off a differently-encoded
+    // filesystem, an exotic locale string) would abort the run with a Rust
+    // panic rather than any nub error. A name that cannot round-trip is simply
+    // not a name `$VAR` expansion can reference, so dropping it loses nothing.
+    let mut values: std::collections::HashMap<String, String> = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+        .collect();
     values.insert(key.to_string(), value.to_string());
     nub_core::workspace::env::expand_env_map(&mut values);
     values.remove(key).unwrap_or_default()
