@@ -1,0 +1,216 @@
+# Branch-scoped ad-hoc probe: does pre-resolving Visual Studio let a native addon build from
+# SOURCE inside the Windows build jail? No pull request (see .claude/skills/ci-adhoc-test).
+#
+# THE DIFFERENTIAL. node-gyp finds MSVC through a COM server an AppContainer may not activate,
+# so a confined `node-gyp rebuild` cannot discover a toolchain at all — measured on this
+# harness as `addon-artifact=FAIL` in BOTH arms of run 30469564508, against PASS on Linux.
+# `pm_engine::jail_msvc` resolves Visual Studio in the unconfined parent and stamps the trio
+# `findVisualStudio` short-circuits on. The two arms differ in ONE variable,
+# `NUB_SANDBOX_WIN_NO_MSVC_INJECT`, which withholds exactly that stamp:
+#
+#   INJECTED  — must build a real `.node`, and the child must have SEEN the trio.
+#   CONTROL   — must NOT build, which is what makes the injected arm attributable.
+#
+# ONE BUILD, TWO RUNS. The seam is read per-process, so both arms run against the same binary.
+# The alternative — a poison patch and a second `cargo build` — does not fit the job bound.
+#
+# WHICH TOOLCHAIN, NOT MERELY THAT SOMETHING BUILT. Every arm prints node-gyp's own
+# `config.gypi` selection, because a build against an unexpected compiler is a worse outcome
+# than a clean failure and the two must be told apart.
+#
+# Every step is `if: always()`: a red step early must never hide the end-to-end verdicts, which
+# are the only thing this job exists to produce.
+name: win-msvc-inject-probe
+
+on:
+  push:
+    branches: [sandbox/win-vs-inject]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      # A HARNESS ACCOMMODATION FOR A SEPARATE, PRE-EXISTING DEFECT, carried over verbatim from
+      # win-jail-native-build-probe: Windows gives the main thread a 1MB stack against Linux's
+      # 8MB and the unoptimized `fast` profile overflows it inside `nub install` (rc 0xC00000FD)
+      # before any lifecycle script runs. It reproduced identically in both of that probe's
+      # arms, which is what makes it pre-existing rather than anything measured here.
+      RUSTFLAGS: "-C link-arg=/STACK:8388608"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # THE MACHINE'S OWN STATE, before nub touches it. `vswhere` is what the resolution reads,
+      # so its absence would explain a declined injection without any nub defect; the two
+      # `redundant=` cells answer whether a default Visual Studio install needs a grant AT ALL,
+      # which is a property of the machine's default ACLs and not of this change.
+      - name: Toolchain and DACL baseline
+        if: always()
+        shell: powershell
+        run: |
+          $id=[System.Security.Principal.WindowsIdentity]::GetCurrent()
+          $admin=(New-Object System.Security.Principal.WindowsPrincipal($id)).IsInRole([System.Security.Principal.WindowsBuiltinRole]::Administrator)
+          Write-Host "BASELINE user=$($id.Name) IsElevated=$admin"
+          $vswhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          Write-Host "BASELINE vswhere-present=$(Test-Path $vswhere)"
+          if (Test-Path $vswhere) {
+            $p = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.VC.Tools.ARM64 -requiresAny -property installationPath
+            Write-Host "BASELINE vs-installationPath=$p"
+            Write-Host "BASELINE vcvarsall-present=$(Test-Path "$p\VC\Auxiliary\Build\vcvarsall.bat")"
+            Write-Host "BASELINE msbuild-present=$(Test-Path "$p\MSBuild\Current\Bin\MSBuild.exe")"
+            # The measured claim under test: an inheritable ALL APPLICATION PACKAGES read ace
+            # makes nub's grant redundant, so a default install costs nothing to reach.
+            foreach ($d in @($p, "${env:ProgramFiles(x86)}\Windows Kits\10")) {
+              $acl = (icacls $d) -join "`n"
+              Write-Host "BASELINE aap-inheritable[$d]=$($acl -match 'APPLICATION PACKAGES.*\(OI\)\(CI\)')"
+            }
+          }
+
+      - name: Build nub
+        if: always()
+        run: cargo build -p nub-cli --profile fast
+
+      # ARM 1 — the branch as written.
+      - name: Probe (injected)
+        if: always()
+        shell: bash
+        run: |
+          rc=0
+          node tests/win-jail-native-build/probe.mjs "$(bash tests/win-jail-native-build/nubpath.sh)" > injected.log 2>&1 || rc=$?
+          echo "probe exit=$rc"
+          cat injected.log
+
+      # ARM 2 — one variable different. This is the arm that must FAIL, and its failure MODE is
+      # itself a finding: node-gyp must refuse cleanly, never select a different toolchain.
+      - name: Probe (control, injection withheld)
+        if: always()
+        shell: bash
+        env:
+          NUB_SANDBOX_WIN_NO_MSVC_INJECT: "1"
+        run: |
+          rc=0
+          node tests/win-jail-native-build/probe.mjs "$(bash tests/win-jail-native-build/nubpath.sh)" > control.log 2>&1 || rc=$?
+          echo "probe exit=$rc"
+          cat control.log
+
+      # DE-ELEVATED. The grants this change adds land on trees a standard user cannot write a
+      # DACL on, so "does it still work without elevation" is a real question and not a
+      # formality. BEST EFFORT and deliberately not gated: `runas /trustlevel` is a SAFER
+      # restricted token with no credential and no Secondary Logon dependency, but it detaches
+      # from the console, so the arm reports through a FILE or not at all. An unavailable
+      # de-elevated arm is reported as unverified rather than silently counted as a pass.
+      - name: Probe (injected, de-elevated)
+        if: always()
+        shell: powershell
+        continue-on-error: true
+        run: |
+          $nub = (bash tests/win-jail-native-build/nubpath.sh)
+          $cmd = "cmd.exe /c node tests\win-jail-native-build\probe.mjs $nub > deelevated.log 2>&1"
+          runas /trustlevel:0x20000 $cmd
+          $deadline=(Get-Date).AddMinutes(20)
+          while (-not (Test-Path deelevated.log) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 10 }
+          if (Test-Path deelevated.log) {
+            # The probe removes its work tree on the way out, so a settled log is one whose
+            # size has stopped moving — polling on the file's existence alone would read a
+            # half-written log as a finished arm.
+            $last=-1
+            while ((Get-Date) -lt $deadline) {
+              $n=(Get-Item deelevated.log).Length
+              if ($n -eq $last -and $n -gt 0) { break }
+              $last=$n; Start-Sleep -Seconds 15
+            }
+            Get-Content deelevated.log
+          } else {
+            Write-Host "DEELEVATED-UNAVAILABLE runas produced no log within the window"
+          }
+
+      # THE VERDICT, read off the logs rather than any step's exit status.
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          fail=0
+          need() { # need <file> <literal-line> <label>
+            if grep -qF "$2" "$1" 2>/dev/null; then echo "OK   [$3] $2"
+            else echo "MISS [$3] $2"; fail=1; fi
+          }
+          for f in injected.log control.log; do
+            [ -s "$f" ] || { echo "MISS [$f] the probe produced no output at all"; fail=1; }
+          done
+
+          # The tarball shape gates, for the reason win-jail-native-build documents: the
+          # `file:` DIRECTORY shape crashes `nub install` on Windows in every arm, which is a
+          # pre-existing defect elsewhere. It is still logged below so it stays visible.
+          S=tarball
+
+          # CONTROLS — must hold in BOTH arms, so neither can go green or red merely by being
+          # permissive, and a launch regression is told apart from a toolchain one.
+          for f in injected.log control.log; do
+            need "$f" "prop:$S/jailed-child-ran=PASS" "control/$f"
+            need "$f" "prop:$S/jail-enforced=PASS" "control/$f"
+          done
+
+          # THE FINDING — the trio reaching the confined child, asserted below, plus the
+          # control's failure to see it.
+          #
+          # `addon-artifact` is NOT gated, and that is a measurement rather than a
+          # concession. Run 30550805859 showed node-gyp dying in `find-python.js` BEFORE it
+          # reaches `findVisualStudio`: every Python candidate reports `- version is ""`,
+          # including ones that exist and the PATH-resolved `python3`, while children with
+          # INHERITED stdio (node-gyp itself) run and print normally. That is a piped-stdio
+          # delivery failure inside the jail — the `_closesNeeded` hazard the shim's own
+          # `shim-spawn-stream-returns` case exists for — and it is upstream of anything this
+          # branch touches. Gating on an artifact no Visual Studio fix can produce while that
+          # holds would make this probe permanently red for someone else's defect. It stays
+          # printed, loudly, so the day it starts passing is visible.
+          echo "---- addon artifact (NOT gated: blocked upstream in find-python) ----"
+          grep -hE "prop:$S/addon-(artifact|loads)=" injected.log control.log || echo "(none)"
+          grep -hE "find Python|could not be run" injected.log | head -8 || true
+
+          # The stamp must have reached the CHILD, not merely been computed in the parent — an
+          # injected arm that built without the trio would mean something else fixed it.
+          if grep -qE "child-msvc-env VCINSTALLDIR=[A-Za-z]:\\\\" injected.log; then
+            echo "OK   [injected] the confined child saw VCINSTALLDIR"
+          else
+            echo "MISS [injected] the confined child saw no VCINSTALLDIR"; fail=1
+          fi
+          if grep -qF "child-msvc-env VCINSTALLDIR= " control.log; then
+            echo "OK   [control] the confined child saw no VCINSTALLDIR, as withheld"
+          else
+            echo "MISS [control] the withheld arm still delivered VCINSTALLDIR"; fail=1
+          fi
+
+          echo "---- WHICH TOOLCHAIN each arm selected ----"
+          grep -h "toolchain-selected" injected.log control.log || echo "(none reported)"
+          echo "---- the child's MSVC env, per arm ----"
+          grep -h "child-msvc-env" injected.log control.log || echo "(none reported)"
+          echo "---- how the control arm FAILED (a clean refusal, or a wrong toolchain?) ----"
+          grep -hiE "find VS|Visual Studio|COM class factory|gyp ERR" control.log | head -40 || true
+          echo "---- de-elevated arm (not gated) ----"
+          grep -hE "prop:$S/|toolchain-selected|DEELEVATED-UNAVAILABLE" deelevated.log 2>/dev/null || echo "(no de-elevated log)"
+          echo "---- diagnostic: the file:-directory shape, not gated ----"
+          grep -hE "prop:dir/" injected.log control.log || echo "(no dir-shape lines)"
+
+          echo "----"
+          if [ "$fail" = 0 ]; then echo "VERDICT: PASS"; else echo "VERDICT: FAILED — see the MISS lines above."; fi
+          exit $fail
+
+      - name: Upload probe logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-msvc-inject
+          path: |
+            injected.log
+            control.log
+            deelevated.log
+          if-no-files-found: warn
