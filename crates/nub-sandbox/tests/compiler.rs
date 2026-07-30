@@ -524,12 +524,12 @@ fn build_jail_preset_expands() {
         !cfg!(windows),
         "build-jail admits a $downloads host off Windows, and nothing on Windows"
     );
-    // The negative is now an UNLISTED host rather than a write-capable one: catalog v2
-    // admits `github.com`, `api.github.com`, `registry.npmjs.org` and
-    // `storage.googleapis.com` with a named residual apiece, because refusing them cost 26
-    // points of ecosystem coverage. What the jail must still refuse is anything the catalog
-    // does not name — including a telemetry sink and a container registry, both of which are
-    // recorded refusals rather than omissions.
+    // The negative is an UNLISTED host rather than a write-capable one: `github.com`,
+    // `api.github.com`, `registry.npmjs.org` and `storage.googleapis.com` are all admitted,
+    // because refusing them cost 26 points of ecosystem coverage and what bounds their write
+    // routes is the lifecycle env scrub withholding the credential family. What the jail must
+    // still refuse is anything no catalog entry names — including a telemetry sink and a
+    // container registry.
     for unlisted in ["evil.test", "www.google-analytics.com", "ghcr.io"] {
         assert!(
             !hosts.admits(unlisted),
@@ -644,8 +644,24 @@ fn build_jail_preset_expands() {
             "build-jail must not grant the broad $tooldirs set — ~/{tooldir}"
         );
     }
+    // The system library/header BASE grant, and the refinement that bounds it. A native build
+    // compiles against `/usr/lib` and `/usr/include`, so those are granted — read-only, for
+    // every package, because a system library path holds no victim-specific information.
+    for lib in ["/usr/lib/libc.so", "/usr/include/stdio.h"] {
+        let d = m.decide(std::path::Path::new(lib));
+        assert!(
+            matches!(d.effect, Effect::Allow) && d.access == FsAccess::Read,
+            "build-jail must grant the system library base READ, and only read: {lib} -> {d:?}"
+        );
+    }
+    // LIBRARY SUBPATHS ONLY. A package-manager prefix root would drag in `etc/` service config
+    // and `var/` LIVE DATABASES under the banner of world-readable system libraries, which is
+    // the mistake the refinement exists to prevent — and none of this is a whole-fs read.
     for denied in [
-        std::path::PathBuf::from("/usr/lib/libc.so"),
+        std::path::PathBuf::from("/opt/homebrew/var/postgres/PG_VERSION"),
+        std::path::PathBuf::from("/opt/homebrew/etc/my.cnf"),
+        std::path::PathBuf::from("/usr/local/var/x"),
+        std::path::PathBuf::from("/etc/passwd"),
         common::homes().home.join("notes.txt"),
     ] {
         assert!(

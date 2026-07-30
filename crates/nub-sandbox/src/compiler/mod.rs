@@ -30,26 +30,17 @@ pub use resolve::{CommandRunner, ShellRunner};
 /// The `$downloads` host set, re-exported for the EMBEDDER's out-of-jail prefetch alone,
 /// which derives its fetch allowlist FROM this array rather than restating it.
 ///
-/// `DOWNLOAD_HOSTS_WITH_RESIDUAL` is the subset admitted DESPITE a write route or a
-/// multi-tenant namespace on the same hostname. Exported beside the set rather than left
-/// internal because an embedder deciding what to prefetch out of jail wants exactly this
-/// distinction: those are the hosts whose exposure is bounded by the lifecycle env scrub, so
-/// fetching them from a context that still HOLDS a credential is not equivalent.
-pub use builtin_sets::{DOWNLOAD_HOSTS, DOWNLOAD_HOSTS_WITH_RESIDUAL};
+/// It is the UNION of every catalog entry's `hosts`, which are per-package EVIDENCE rather
+/// than a per-package gate — see [`package_network`] for why egress granularity is a boolean.
+pub use builtin_sets::DOWNLOAD_HOSTS;
 
 /// Per-package egress. THE DEFENSE IS PACKAGE IDENTITY: no entry means no network, and a
-/// package needing it files a PR against the catalog. Read the module docs before using this
-/// — the jail's egress is still GLOBAL today, so this is data without an enforcer.
-pub use package_network::{
-    PACKAGE_NETWORK_FULL, PACKAGE_NETWORK_HOSTS, PackageNetwork, package_network,
-};
+/// package needing it files a PR against the catalog.
+pub use package_network::{NETWORK_GRANTED, network_granted};
 
-/// The system library/header read paths the build jail SHOULD grant for a native compile.
-/// RECORDED, NOT YET FOLDED INTO THE JAIL SURFACE — the module docs and the catalog's
-/// `systemPaths.status` say why, and `system-paths-not-enforced` tracks the wiring.
-pub use system_paths::{
-    SYSTEM_READ_PATHS_LINUX, SYSTEM_READ_PATHS_MACOS, SYSTEM_READ_PATHS_WINDOWS, system_read_paths,
-};
+/// The system library/header read paths the build jail grants READ for a native compile — a
+/// BASE grant for every jailed script, folded into the surface by [`compile_build_jail`].
+pub use system_paths::system_read_paths;
 
 /// The secret-file deny floor, re-exported for the Linux backend ALONE — it recognizes
 /// the floor positionally and by membership, and must read the same arrays
@@ -367,6 +358,9 @@ pub(crate) fn compile_scope(
                 // project's dependencies nor bootstrapped node-gyp) and the surface fold
                 // marks every entry AUTHORED.
                 preset::grant_build_jail_dependency_reads(s, &mut policy, ctx, None);
+                // The system library/header base grant, same post-fold reason: most of its
+                // roots are absent on a host with no Homebrew, Xcode SDK or ODBC driver.
+                preset::grant_build_jail_system_reads(s, &mut policy);
                 // The provisioned interpreter lives under nub's store (not `/usr`), so the
                 // tight-read base does not reach it.
                 preset::grant_build_jail_interpreter(s, &mut policy, ctx);

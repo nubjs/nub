@@ -615,13 +615,13 @@ fn build_jail_gate_admits_the_download_set_and_refuses_everything_else() {
         }
     }
     for refused in [
-        // A recorded REFUSAL, not an omission — the gate is what makes it real. It is here
-        // because no package NEEDS it: the one requester's analytics beacon is
-        // fire-and-forget with an error handler attached, so denial breaks nothing. Five
-        // hosts have left this list across v2 and v3 (`registry.npmjs.org`,
-        // `api.github.com`, `storage.googleapis.com`, then `www.googleapis.com` and
-        // `saucelabs.com`), each admitted with a declared residual rather than dropped
-        // quietly, because a broken package is a worse outcome than a named exposure.
+        // Absent because no package NEEDS it: the one requester's analytics beacon is
+        // fire-and-forget with an error handler attached, so denial breaks nothing. Five hosts
+        // once refused on write-capability grounds are now ADMITTED (`registry.npmjs.org`,
+        // `api.github.com`, `storage.googleapis.com`, `www.googleapis.com`, `saucelabs.com`)
+        // because a broken package is the worse outcome. What bounds each exposure is the
+        // lifecycle env scrub withholding the credential family, not the host list; the
+        // per-host reasoning is in `wiki/research/build-jail-provenance.md`.
         "www.google-analytics.com",
         // Wildcard-free: an attacker-chosen label under a LISTED host is still refused,
         // which is what keeps a secret out of a DNS query.

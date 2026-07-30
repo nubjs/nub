@@ -1,9 +1,4 @@
-//! The curated grants, measured on Linux ONE STAGE AT A TIME.
-//!
-//! `@prisma/client`'s entry carries three needs and each masks the next, so the differential
-//! that put it in `knownDefects` — `DIFFERS` identically with and without the grant — said
-//! only "still broken". These tests say which stage, and they cover the other grant shapes
-//! that share the same mechanism.
+//! The curated project grant, measured on Linux against a real kernel.
 //!
 //! # The arm selector is `package_name`, not a patched binary
 //!
@@ -20,26 +15,27 @@
 //! A per-arm path removes the ordering dependency entirely rather than fixing it by
 //! reordering, which would have left the same trap for the next reader.
 //!
-//! # What was measured (6.17.0-1021-gcp, Landlock ABI 7)
+//! # What the schema migration changed here, and why the file shrank
 //!
-//! | stage | field | ungranted | granted |
-//! | --- | --- | --- | --- |
-//! | create an ABSENT sibling dir | `siblingDirs` | denied | **was denied — the defect** |
-//! | write an EXISTING sibling dir | `siblingDirs` | denied | allowed |
-//! | `chdir` into the project | `projectCwd` | **allowed** | allowed |
-//! | read the project subtree | `projectReads` | denied | allowed |
+//! This file used to measure four SEPARATE grant fields one stage at a time — `siblingDirs`,
+//! `projectCwd`, `projectReads`, `projectWrites.literal` — because `@prisma/client`'s entry
+//! carried three needs and each masked the next. Two of those measurements are why the settled
+//! schema has one field instead of six, and both are recorded rather than lost:
 //!
-//! Two findings, and neither was visible from the macOS measurement:
+//! 1. **A Landlock rule cannot be attached to an ABSENT path.** `landlock_add_rule` takes an
+//!    `O_PATH` descriptor, so a `siblingDirs` grant for a directory the package was about to
+//!    CREATE evaporated at launch and `mkdir` was denied identically with and without it. It
+//!    needed a `create_dir_all` side effect during policy compilation to work at all, and the
+//!    same defect then reappeared on `projectWrites.literal` when `.git/hooks` was missing.
+//!    Granting the project root instead dissolves it: the root always exists, so the rule
+//!    always attaches and the script creates its own children.
+//! 2. **`chdir` is not a Landlock-handled access at all**, so `projectCwd` was a measured
+//!    NO-OP on Linux while being load-bearing on macOS Seatbelt (`EPERM … uv_cwd`). That
+//!    asymmetry is how the Prisma entry shipped broken after being measured only on macOS. A
+//!    tree grant subsumes it on both backends.
 //!
-//! 1. **A Landlock rule cannot be attached to an absent path**, so a `sibling_dirs` grant
-//!    for a directory the package is about to create evaporated at launch. Fixed by
-//!    `curated::materialize_sibling`, which creates it during compilation; the argument for
-//!    why that is not a widening is at that function.
-//! 2. **`chdir` is not a Landlock-handled access at all**, so `projectCwd` is a no-op on
-//!    Linux — the operation it exists to permit was never denied here. It stays because
-//!    macOS Seatbelt DOES gate it (`uv_cwd` was the measured failure there). A grant that is
-//!    load-bearing on one backend and inert on another is worth stating rather than
-//!    discovering twice.
+//! What remains to measure is the one contract that is left: a listed package reaches the
+//! consumer's project tree, an unlisted one does not, and neither reaches anything else.
 #![cfg(target_os = "linux")]
 
 use std::collections::BTreeMap;
@@ -59,10 +55,9 @@ fn runtime() -> &'static nub_sandbox::RuntimeCapability {
     RUNTIME.get_or_init(|| nub_sandbox::earliest_bootstrap().expect("earliest bootstrap"))
 }
 
-/// HOISTED layout deliberately: `@prisma/client`'s postinstall reaches its sibling as
-/// `path.join(__dirname, '../../../.prisma')`, which from `<nm>/@prisma/client/scripts`
-/// resolves to `<nm>` — the same directory `enclosing_node_modules` lands on. Under the
-/// isolated layout both move to the store cell's `node_modules` together.
+/// HOISTED layout deliberately: it is the one where a package's own `../..` arithmetic reaches
+/// the project, so a grant that works here is not relying on the isolated layout's store cell
+/// to contain the damage.
 struct Fixture {
     _root: tempfile::TempDir,
     home: PathBuf,
@@ -140,12 +135,13 @@ fn q(path: &Path) -> String {
     format!("'{}'", path.display())
 }
 
-/// THE DEFECT, and its fix. Creating the sibling directory is the FIRST of the three staged
-/// needs, so before this worked nothing behind it could be measured at all.
+/// The grant reaches a path that DID NOT EXIST, which is the case the enumerated-path schema
+/// could not serve on Linux at all: `landlock_add_rule` takes an `O_PATH` descriptor, so a rule
+/// naming an absent directory could not be attached and the grant evaporated at launch.
 ///
 /// Each arm creates a DIFFERENTLY-NAMED child, so neither can be reading the other's work.
 #[test]
-fn a_sibling_grant_creates_a_directory_that_did_not_exist() {
+fn the_project_grant_creates_a_directory_that_did_not_exist() {
     if skip_without_landlock() {
         return;
     }
@@ -156,20 +152,19 @@ fn a_sibling_grant_creates_a_directory_that_did_not_exist() {
         "the fixture must start WITHOUT .prisma — that absence is the condition under test"
     );
 
-    let granted = fx.reaches(
-        "@prisma/client",
-        true,
-        &format!(
-            "mkdir -p {} && echo g > {}",
-            q(&target),
-            q(&target.join("g.js"))
-        ),
-    );
     assert!(
-        granted,
-        "the sibling grant must reach a .prisma that did not exist. Landlock cannot attach a \
-         rule to an absent path, so this needs curated::materialize_sibling to have created \
-         it during compilation"
+        fx.reaches(
+            "@prisma/client",
+            true,
+            &format!(
+                "mkdir -p {} && echo g > {}",
+                q(&target),
+                q(&target.join("g.js"))
+            ),
+        ),
+        "the project grant must reach a .prisma that did not exist. Under the enumerated-path \
+         schema this needed a create_dir_all side effect during policy compilation; granting the \
+         project root removes the absent-path problem instead of working around it"
     );
 
     let fx2 = Fixture::new("@prisma/client");
@@ -190,72 +185,50 @@ fn a_sibling_grant_creates_a_directory_that_did_not_exist() {
     );
 }
 
-/// `chdir` is NOT a Landlock-handled access, so the ungranted arm reaches the project root
-/// too. Asserted rather than left implicit: it means `projectCwd` buys nothing on Linux, and
-/// a future reader comparing the backends needs that recorded — the macOS measurement's
-/// `EPERM … uv_cwd` has no Linux counterpart.
+/// The consumer's project tree, read and write, for a listed package only. Read is the codegen
+/// INPUT (`prisma/schema.prisma`); write is the hook file a hook installer exists to place —
+/// and `.git/hooks` is measured in BOTH the present and ABSENT states, because the absent one
+/// is what the `projectWrites.literal` schema could not do (`git-commit-msg-linter` mkdirs it
+/// when missing) and was pinned here as a known limitation.
 #[test]
-fn project_cwd_is_inert_on_linux_because_chdir_is_ungoverned() {
-    if skip_without_landlock() {
-        return;
-    }
-    let fx = Fixture::new("@prisma/client");
-    let chdir = format!("cd {} && pwd", q(&fx.project));
-
-    assert!(fx.reaches("@prisma/client", true, &chdir));
-    assert!(
-        fx.reaches("@prisma/client", false, &chdir),
-        "if chdir is denied ungranted, Landlock gained a traverse right and projectCwd is \
-         load-bearing on Linux after all — re-scope the catalog note"
-    );
-    // The pair that keeps the line above from reading as "the jail does nothing": the same
-    // ungranted arm cannot READ the directory it just entered.
-    assert!(
-        !fx.reaches(
-            "@prisma/client",
-            false,
-            &format!("cat {}", q(&fx.project.join("prisma/schema.prisma")))
-        ),
-        "entering the project must not imply reading it"
-    );
-}
-
-/// Stage 3, isolated: the codegen INPUT `prisma generate` reads.
-#[test]
-fn project_reads_grants_the_schema_subtree() {
+fn a_listed_package_reads_and_writes_the_project_tree() {
     if skip_without_landlock() {
         return;
     }
     let fx = Fixture::new("@prisma/client");
     let read = format!("cat {}", q(&fx.project.join("prisma/schema.prisma")));
-
     assert!(fx.reaches("@prisma/client", true, &read));
     assert!(
         !fx.reaches("@prisma/client", false, &read),
         "ungranted must not read the consumer's schema"
     );
-}
 
-/// The same absent-path mechanism, on the OTHER grant shape that meets it:
-/// `projectWrites: {"literal": [".git/hooks"]}` for the nine hook installers. A real
-/// checkout always has `.git/hooks` (git creates it with samples), so the common case is the
-/// present-directory one — but `git-commit-msg-linter` explicitly mkdirs it when missing, so
-/// both are measured. The ABSENT case is expected to FAIL, and that is recorded in the
-/// catalog rather than silently fixed: creating directories inside the consumer's `.git` as
-/// a side effect of compiling a policy is a different call from creating one inside nub's own
-/// dependency tree, and it is not mine to make here.
-#[test]
-fn a_literal_project_write_reaches_an_existing_dir_and_not_an_absent_one() {
-    if skip_without_landlock() {
-        return;
-    }
     let present = Fixture::new("ghooks");
     std::fs::create_dir_all(present.project.join(".git/hooks")).unwrap();
-    let hook = present.project.join(".git/hooks/pre-commit");
     assert!(
-        present.reaches("ghooks", true, &format!("echo '#!/bin/sh' > {}", q(&hook))),
-        "the literal write grant must reach an EXISTING .git/hooks — this is the case every \
-         real checkout presents, and all nine hook-installer grants depend on it"
+        present.reaches(
+            "ghooks",
+            true,
+            &format!(
+                "echo '#!/bin/sh' > {}",
+                q(&present.project.join(".git/hooks/pre-commit"))
+            )
+        ),
+        "the project write grant must reach an EXISTING .git/hooks — the case every real \
+         checkout presents, and what all nine hook-installer grants depend on"
+    );
+
+    let absent = Fixture::new("ghooks");
+    std::fs::create_dir_all(absent.project.join(".git")).unwrap();
+    assert!(
+        absent.reaches(
+            "ghooks",
+            true,
+            &format!("mkdir -p {}", q(&absent.project.join(".git/hooks")))
+        ),
+        "and an ABSENT one, which the enumerated `literal` grant could NOT: a rule for a path \
+         that does not exist cannot be attached to Landlock, so the grant evaporated. If this \
+         fails, the project-root grant has lost MAKE_DIR and the old limitation is back"
     );
 
     let ungranted = Fixture::new("ghooks");
@@ -269,29 +242,18 @@ fn a_literal_project_write_reaches_an_existing_dir_and_not_an_absent_one() {
                 q(&ungranted.project.join(".git/hooks/pre-commit"))
             )
         ),
-        "ungranted must not write the consumer's git hooks — this is the control that makes \
-         the grant above meaningful, and a git hook is code that runs on the next commit"
-    );
-
-    let absent = Fixture::new("ghooks");
-    std::fs::create_dir_all(absent.project.join(".git")).unwrap();
-    assert!(
-        !absent.reaches(
-            "ghooks",
-            true,
-            &format!("mkdir -p {}", q(&absent.project.join(".git/hooks")))
-        ),
-        "KNOWN LIMITATION, pinned so it cannot regress silently: with .git/hooks absent the \
-         literal grant cannot create it on Linux, same absent-path rule drop as siblingDirs. \
-         If this starts passing, the fix landed and the catalog note should be retired"
+        "ungranted must not write the consumer's git hooks — the control that makes the grant \
+         above meaningful, and a git hook is code that runs on the next commit"
     );
 }
 
-/// Every arm is still a jail. A curated grant is a NARROW addition, so if one arrived with
-/// the home secret or the project tree attached, every per-stage result above would be
-/// measuring a hole rather than a grant.
+/// The grant is the PROJECT, not the machine. `node_modules` being writable for a listed
+/// package is deliberate (it is what replaced the enumerated sibling names), so the boundary
+/// that has to hold is the project root itself — and the home secret on both arms, since a
+/// curated grant that arrived with it attached would make every result above a hole rather
+/// than a grant.
 #[test]
-fn no_arm_leaks_the_home_secret_or_the_project_tree() {
+fn the_grant_stops_at_the_project_root_and_never_reaches_the_home_secret() {
     if skip_without_landlock() {
         return;
     }
@@ -309,18 +271,9 @@ fn no_arm_leaks_the_home_secret_or_the_project_tree() {
             !fx.reaches(
                 "@prisma/client",
                 granted,
-                &format!("touch {}", q(&fx.project.join("evil.txt")))
+                &format!("touch {}", q(&fx.home.join("outside.txt")))
             ),
-            "granted={granted}: the project root must stay unwritable"
-        );
-        assert!(
-            !fx.reaches(
-                "@prisma/client",
-                granted,
-                &format!("touch {}", q(&fx.enclosing_nm.join("evil.txt")))
-            ),
-            "granted={granted}: the enclosing node_modules must stay unwritable — it holds \
-             .bin and the virtual store"
+            "granted={granted}: a path OUTSIDE the project must stay unwritable"
         );
         assert!(
             fx.reaches("@prisma/client", granted, "cat own.txt"),
@@ -328,4 +281,23 @@ fn no_arm_leaks_the_home_secret_or_the_project_tree() {
              denial above proves only that it never ran"
         );
     }
+    // The positive half of the same boundary, asserted with its control: inside the project is
+    // writable for the listed package and not otherwise. Distinct fixtures so the ungranted arm
+    // cannot pass on a file the granted arm created (`touch` on an existing file is not a
+    // Landlock-handled access — the trap this file's header records).
+    let inside = Fixture::new("@prisma/client");
+    assert!(inside.reaches(
+        "@prisma/client",
+        true,
+        &format!("touch {}", q(&inside.project.join("granted.txt")))
+    ));
+    let control = Fixture::new("@prisma/client");
+    assert!(
+        !control.reaches(
+            "@prisma/client",
+            false,
+            &format!("touch {}", q(&control.project.join("ungranted.txt")))
+        ),
+        "the project root must stay unwritable without the grant"
+    );
 }

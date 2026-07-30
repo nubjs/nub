@@ -492,10 +492,16 @@ mod tests {
             .map(|e| e.expect("entry").path())
             .collect::<Vec<_>>();
         assert_eq!(jail_home.len(), 1, "one home per package: {jail_home:?}");
+        // Partitioned by whether a grant is inside the FIXTURE, because the jail also carries an
+        // absolute system library/header base grant whose membership is per-platform and
+        // host-dependent (a machine with no Homebrew contributes fewer entries). Pinning the
+        // whole plan would turn this confinement assertion into a test of the host's `/opt`.
+        let (fixture, system): (Vec<_>, Vec<_>) = plan
+            .iter()
+            .map(|grant| (grant.path.clone(), grant.access))
+            .partition(|(path, _)| path.starts_with(as_compiled(dir.path())));
         assert_eq!(
-            plan.iter()
-                .map(|grant| (grant.path.clone(), grant.access))
-                .collect::<Vec<_>>(),
+            fixture,
             vec![
                 (
                     as_compiled(&project.join("node_modules")),
@@ -508,6 +514,16 @@ mod tests {
              dependency tree read-only, and the only writable subtrees the package dir \
              plus the package's own private home"
         );
+        // The base grant is READ-ONLY, which is the whole reason a coarse system-path grant is
+        // admissible at all. A writable one would hand a lifecycle script the host's libraries.
+        for (path, access) in &system {
+            assert_eq!(
+                *access,
+                MountAccess::ReadOnly,
+                "the system library base grant must stay read-only: {}",
+                path.display()
+            );
+        }
         // `as_compiled` shares the normalizer with the code under test, so on Windows the
         // comparison above would stay green if BOTH sides regressed together. Pin the
         // canonical shape independently: an IR path is forward-slashed and never verbatim.

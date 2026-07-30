@@ -1,1865 +1,946 @@
 {
-  "corpus": {
-    "comment": "Provenance for every count in this file. The original four hosts and three package grants came from ONE measured install pass; the rest come from reading 230 published packages' actual source. Both bases are legitimate and the per-entry `evidence` field says which one an entry rests on. The denominators live here so a reader can check any percentage below rather than take it on faith.",
-    "size": 230,
-    "method": "`npm pack` the published tarball, follow the require chain, resolve LITERAL hostnames to a file:line, decide the filesystem axis, classify the failure on denial. Never installed, never executed.",
-    "networkNeeding": 146,
-    "projectFsNeeding": 67,
-    "projectFsNeedingOwnDirOnly": 31,
-    "projectFsNeedingConsumerProject": 36,
-    "writesOutsideOwnPackageDir": 41,
-    "systemPathNeeding": 17,
-    "systemPathNeedingOnDefaultBuildPath": 12,
-    "whyTheProjectFsNumbersDiffer": "67 packages recorded `read` or `readwrite` on the project axis, which reads as 67 carve-out candidates and is NOT what it means. 31 of them touch only paths under their OWN package directory (`./build/Release`, `./prebuilds/`, `./vendor/`), which the jail's baseline `package_dir` rw already grants; of the 36 that genuinely reach the consumer project, most read only `<project>/package.json` or walk up through `node_modules` \u2014 both already granted read by `grant_build_jail_dependency_reads`. The residue needing a NEW grant is the git-hook cohort plus two project-file writers, which is what `packageGrants` below carries. The 67 figure is the honest measurement; eleven new grants is the honest consequence.",
-    "failureModeCounts": {
-      "comment": "After normalizing the lanes' free-text `failure_mode` strings onto the enum (the map is in `failureModes.normalization`). Normalizing MOVED THE HEADLINE: 31 entries were the literal string `SILENT`, but three more encoded a silent primary in prose, so the real primary-SILENT count is 34, and 36 packages have a silent component somewhere.",
-      "LOUD": 142,
-      "GRACEFUL": 53,
-      "SILENT": 34,
-      "UNDETERMINED": 1,
-      "anySilentComponent": 36
-    },
-    "networkCoverage": [
-      {
-        "host": "nodejs.org",
-        "packages": 81,
-        "cumulativeReach": 81,
-        "cumulativePercent": 55
-      },
-      {
-        "host": "github.com",
-        "packages": 40,
-        "cumulativeReach": 115,
-        "cumulativePercent": 79
-      },
-      {
-        "host": "registry.npmjs.org",
-        "packages": 6,
-        "cumulativeReach": 121,
-        "cumulativePercent": 83
-      },
-      {
-        "host": "raw.github.com",
-        "packages": 4,
-        "cumulativeReach": 125,
-        "cumulativePercent": 86
-      },
-      {
-        "host": "storage.googleapis.com",
-        "packages": 3,
-        "cumulativeReach": 128,
-        "cumulativePercent": 88
-      },
-      {
-        "host": "raw.githubusercontent.com",
-        "packages": 3,
-        "cumulativeReach": 131,
-        "cumulativePercent": 90
-      },
-      {
-        "host": "msedgedriver.microsoft.com",
-        "packages": 2,
-        "cumulativeReach": 133,
-        "cumulativePercent": 91
-      },
-      {
-        "host": "node-precompiled-binaries.grpc.io",
-        "packages": 2,
-        "cumulativeReach": 134,
-        "cumulativePercent": 92
-      },
-      {
-        "host": "bin.equinox.io",
-        "packages": 2,
-        "cumulativeReach": 136,
-        "cumulativePercent": 93
-      },
-      {
-        "host": "googlechromelabs.github.io",
-        "packages": 1,
-        "cumulativeReach": 136,
-        "cumulativePercent": 93
-      },
-      {
-        "host": "package.cli.amplify.aws",
-        "packages": 1,
-        "cumulativeReach": 137,
-        "cumulativePercent": 94
-      },
-      {
-        "host": "api.github.com",
-        "packages": 1,
-        "cumulativeReach": 137,
-        "cumulativePercent": 94
-      },
-      {
-        "host": "globalcdn.nuget.org",
-        "packages": 1,
-        "cumulativeReach": 137,
-        "cumulativePercent": 94
-      },
-      {
-        "host": "saucelabs.com",
-        "packages": 1,
-        "cumulativeReach": 138,
-        "cumulativePercent": 95
-      },
-      {
-        "host": "download.microsoft.com",
-        "packages": 1,
-        "cumulativeReach": 139,
-        "cumulativePercent": 95
-      },
-      {
-        "host": "download.visualstudio.microsoft.com",
-        "packages": 1,
-        "cumulativeReach": 139,
-        "cumulativePercent": 95
-      },
-      {
-        "host": "npm.taobao.org",
-        "packages": 1,
-        "cumulativeReach": 139,
-        "cumulativePercent": 95
-      },
-      {
-        "host": "www.python.org",
-        "packages": 1,
-        "cumulativeReach": 139,
-        "cumulativePercent": 95
-      },
-      {
-        "host": "edgeupdates.microsoft.com",
-        "packages": 1,
-        "cumulativeReach": 139,
-        "cumulativePercent": 95
-      },
-      {
-        "host": "msedgewebdriverstorage.blob.core.windows.net",
-        "packages": 1,
-        "cumulativeReach": 139,
-        "cumulativePercent": 95
-      },
-      {
-        "host": "www.google-analytics.com",
-        "packages": 1,
-        "cumulativeReach": 139,
-        "cumulativePercent": 95
-      },
-      {
-        "host": "www.googleapis.com",
-        "packages": 1,
-        "cumulativeReach": 140,
-        "cumulativePercent": 96
-      },
-      {
-        "host": "publicsuffix.org",
-        "packages": 1,
-        "cumulativeReach": 141,
-        "cumulativePercent": 97
-      },
-      {
-        "host": "d332vdhbectycy.cloudfront.net",
-        "packages": 1,
-        "cumulativeReach": 141,
-        "cumulativePercent": 97
-      },
-      {
-        "host": "npm.duckdb.org",
-        "packages": 1,
-        "cumulativeReach": 142,
-        "cumulativePercent": 97
-      },
-      {
-        "host": "f.hubspotusercontent40.net",
-        "packages": 1,
-        "cumulativeReach": 142,
-        "cumulativePercent": 97
-      },
-      {
-        "host": "hummus.s3-us-west-2.amazonaws.com",
-        "packages": 1,
-        "cumulativeReach": 143,
-        "cumulativePercent": 98
-      },
-      {
-        "host": "binaries.tonlabs.io",
-        "packages": 1,
-        "cumulativeReach": 144,
-        "cumulativePercent": 99
-      },
-      {
-        "host": "usqldownload.blob.core.windows.net",
-        "packages": 1,
-        "cumulativeReach": 145,
-        "cumulativePercent": 99
-      },
-      {
-        "host": "appsignal-agent-releases.global.ssl.fastly.net",
-        "packages": 1,
-        "cumulativeReach": 145,
-        "cumulativePercent": 99
-      },
-      {
-        "host": "d135dj0rjqvssy.cloudfront.net",
-        "packages": 1,
-        "cumulativeReach": 145,
-        "cumulativePercent": 99
-      },
-      {
-        "host": "axonodegit.s3.amazonaws.com",
-        "packages": 1,
-        "cumulativeReach": 145,
-        "cumulativePercent": 99
-      },
-      {
-        "host": "download.cypress.io",
-        "packages": 1,
-        "cumulativeReach": 146,
-        "cumulativePercent": 100
-      }
-    ],
-    "threatModel": "What the jail is FOR, which decides how to read every count below. The attack it blunts is the Shai-Hulud shape: an attacker publishes a new preinstall or postinstall into a package that never had one, and it runs with the user's complete access. The defense is PACKAGE IDENTITY \u2014 a package with no entry in this catalog gets nothing, and a package that needs network or filesystem access arrives through a PULL REQUEST here first. That makes the whole surface opt-in. It also means host granularity is worth much less than it looks: narrowing an admitted host constrains a package somebody already reviewed, and does nothing about the unvetted package a worm just reached. Granting a listed package the ability to fetch arbitrary code is a known, accepted fact."
-  },
-  "networkHosts": [
-    {
-      "host": "nodejs.org",
-      "artifact": "Node headers and libs for a from-source native compile",
-      "pathShape": "/dist/<version>/",
-      "fetchedBy": [
-        "@airbnb/node-memwatch",
-        "@appsignal/nodejs",
-        "@cdktf/node-pty-prebuilt-multiarch",
-        "@contrast/fn-inspect",
-        "@ghaiklor/x509",
-        "@matteodisabatino/gc_info",
-        "@newrelic/native-metrics",
-        "@trufflesuite/bigint-buffer",
-        "@vscode/sqlite3",
-        "abstract-socket",
-        "argon2",
-        "better-sqlite3",
-        "blake-hash",
-        "bufferutil",
-        "classic-level",
-        "contextify",
-        "deasync",
-        "diskusage",
-        "eccrypto",
-        "event-loop-stats",
-        "ffi",
-        "ffi-napi",
-        "fibers",
-        "fs-xattr",
-        "gc-stats",
-        "gcstats.js",
-        "grpc",
-        "heapdump",
-        "hiredis",
-        "hnswlib-node",
-        "iconv",
-        "interruptor",
-        "java",
-        "keccak",
-        "libpq",
-        "libxmljs2",
-        "lmdb-store",
-        "lz4",
-        "lzma-native",
-        "lzo",
-        "macos-alias",
-        "microtime",
-        "mmmagic",
-        "modern-syslog",
-        "mongodb-crypt-library-dummy",
-        "mongodb-crypt-library-version",
-        "msgpackr-extract",
-        "nice-napi",
-        "node-expat",
-        "node-libcurl",
-        "node-mac-contacts",
-        "node-rdkafka",
-        "node-webcrypto-ossl",
-        "node-zopfli-es",
-        "nodegit",
-        "oniguruma",
-        "os-dns-native",
-        "pkcs11js",
-        "posix",
-        "pprof",
-        "re2",
-        "ref",
-        "ref-napi",
-        "registry-js",
-        "segfault-handler",
-        "sleep",
-        "sockopt",
-        "spellchecker",
-        "sse4_crc32",
-        "tree-sitter",
-        "tree-sitter-bash",
-        "tree-sitter-json",
-        "tree-sitter-kotlin",
-        "tree-sitter-typescript",
-        "tree-sitter-yaml",
-        "ttf2woff2",
-        "unix-dgram",
-        "ursa-optional",
-        "weak-napi",
-        "xxhash",
-        "zlib-sync"
-      ],
-      "evidence": "source-read",
-      "observed": "node-gyp's `lib/process-release.js:75` `distBaseUrl = 'https://nodejs.org/dist'`, the default reached whenever the header cache at `~/.cache/node-gyp/<ver>` is cold. 81 of the 230 source-read packages can reach it \u2014 55% of every network-needing package and the largest single cohort by a wide margin. TWO limits on that number, stated because they cut in opposite directions. It UNDERSTATES the mechanism: `fetchedBy` is the corpus subset, not the ecosystem, and any package with a `binding.gyp` joins the cohort. It OVERSTATES the common path: for most of the 81 the fetch is a FALLBACK \u2014 a bundled or downloaded prebuild is tried first, and nub sets `npm_config_nodedir` to the provisioned Node root, so node-gyp finds local headers and never leaves the machine. The entry is what keeps the fallback from being a hard failure, not what a normal install exercises. NOT observed in the earlier 311-package corpus run for exactly that reason; absence there is evidence the harness had warm headers, not that the entry is unnecessary.",
-      "platform": "any"
-    },
-    {
-      "host": "binaries.prisma.sh",
-      "artifact": "Prisma query/schema engine binaries",
-      "fetchedBy": [
-        "@prisma/engines"
-      ],
-      "evidence": "vendor-documented",
-      "observed": "Named in Prisma's own firewall-allowlist documentation. A grep of the fetched postinstall bundle found no literal match, so the constant lives in a helper chunk that pass did not fetch. Not independently confirmed from source, and `@prisma/engines` is not in the 230-package source-read corpus, so v2 adds nothing to this entry.",
-      "platform": "any"
-    },
-    {
-      "host": "download.cypress.io",
-      "artifact": "The Cypress binary (302 redirect origin)",
-      "fetchedBy": [
-        "cypress"
-      ],
-      "evidence": "measured",
-      "observed": "Resolved by cypress's postinstall in the corpus harness-validation run. Paired with cdn.cypress.io because the 302 lands there; granting only one leaves the install broken. Corroborated by v2's source read of cypress@15.19.0, which also found the binary is unzipped into a per-user cache OUTSIDE the project (`cachedir('Cypress')`), not into the package dir.",
-      "platform": "linux-arm64"
-    },
-    {
-      "host": "cdn.cypress.io",
-      "artifact": "The Cypress binary (302 redirect target)",
-      "fetchedBy": [
-        "cypress"
-      ],
-      "evidence": "measured",
-      "observed": "Resolved by cypress's postinstall in the corpus harness-validation run, as the redirect target of download.cypress.io. cypress is the one corpus package that installs successfully under v1's four-host list.",
-      "platform": "linux-arm64"
-    },
-    {
-      "host": "github.com",
-      "artifact": "Prebuilt native binaries and vendor CLIs published as GitHub Release assets; CLDR data as repository archives",
-      "pathShape": "/<owner>/<repo>/releases/download/<tag>/<asset>, plus /<owner>/<repo>/archive/<ref>.zip for cldr-data",
-      "fetchedBy": [
-        "@cdktf/node-pty-prebuilt-multiarch",
-        "@cubejs-backend/cubestore",
-        "@cubejs-backend/native",
-        "@discordjs/opus",
-        "@matteodisabatino/gc_info",
-        "@notarize/qlc-cli",
-        "@pact-foundation/pact-node",
-        "@railway/cli",
-        "@sematext/gc-stats",
-        "@serialport/bindings",
-        "@typescript-tools/rust-implementation",
-        "applicationinsights-native-metrics",
-        "canvas",
-        "cldr-data",
-        "cmark-gfm",
-        "drivelist",
-        "electron-prebuilt",
-        "gl",
-        "handbrake-js",
-        "install-artifact-from-github",
-        "kerberos",
-        "keytar",
-        "libxmljs",
-        "libxmljs2",
-        "mbt",
-        "mongodb-client-encryption",
-        "msnodesqlv8",
-        "muhammara",
-        "node-jq",
-        "node-libcurl",
-        "node-zopfli",
-        "nodejieba",
-        "purescript",
-        "re2",
-        "registry-js",
-        "robotjs",
-        "saucectl",
-        "v8-profiler-next",
-        "wdeasync",
-        "zeromq"
-      ],
-      "evidence": "source-read",
-      "observed": "The `prebuild-install` / `@mapbox/node-pre-gyp` GitHub-Releases default, and the single largest gap in v1. `prebuild-install/util.js:57` `urlTemplate()` falls back to `github(opts.pkg) + '/releases/download/{tag_prefix}{version}/' + packageName` whenever a package sets no `binary.host` (canvas is the reference case: its `binary` block carries only `napi_versions`). node-pre-gyp reaches the same default through `lib/util/versioning.js:317`. 40 of the 230 packages resolve a github.com URL; with nodejs.org that is 115 of 146 network-needing packages (79%). Every observed use is a plain GET under one of the two path shapes above \u2014 never a bare repository, never an API route. ONE corpus package escapes that shape and it is called out in `notGranted.deferred`: node-libcurl `git clone`s `github.com/microsoft/vcpkg.git` on its Windows source-build fallback, which is whole-repo access AND a gateway to vcpkg's own port-source hosts, a set that is not enumerable. `zeromq` names github.com only through cmake-ts/vcpkg on a path the source read established is NOT taken on the common path, so its membership in this list is conservative. `install-artifact-from-github` is a shared helper rather than a leaf dependency \u2014 it is listed because it is the mechanism re2 and others reach the host THROUGH, and because it honours a GITHUB_SERVER_URL / per-package `*_DOWNLOAD_MIRROR` override that a user can point elsewhere.",
-      "residual": "github.com serves `git-receive-pack` \u2014 an authenticated WRITE \u2014 on the same hostname. RATIFIED: the host is admitted. What bounds the residual is the jail itself, not the host: `defaults::lifecycle_scrubbed_env` withholds the whole credential family (registry auth, any key containing TOKEN / SECRET / AUTH), and `~/.ssh`, `~/.git-credentials`, `.npmrc` and `<project>/.git` are ungranted, so a confined script has no push credential and an unauthenticated push is rejected. Bounded further by package identity: only a package with a catalog entry reaches it at all.",
-      "platform": "any"
-    },
-    {
-      "host": "api.github.com",
-      "artifact": "GitHub Releases metadata, used to build a better error message on a failed asset download",
-      "pathShape": "/repos/<owner>/<repo>/releases",
-      "fetchedBy": [
-        "@cubejs-backend/cubestore"
-      ],
-      "evidence": "source-read",
-      "observed": "@cubejs-backend/cubestore queries the Releases API only AFTER its asset download has already failed, to name the available assets in the error it then throws; it does not retry the download from the response. The host is therefore not load-bearing for a successful install \u2014 it is admitted so the failure a user sees is the real one rather than a DNS error masking it.",
-      "residual": "The REST API is write-capable across the board, and a token is what makes it so. RATIFIED; bounded by the same env scrub as github.com and by package identity.",
-      "platform": "any"
-    },
-    {
-      "host": "registry.npmjs.org",
-      "artifact": "npm packages fetched by a lifecycle script that shells its own `npm install`, or reads a tarball off the registry directly",
-      "pathShape": "/<pkg> and /<pkg>/-/<pkg>-<version>.tgz",
-      "fetchedBy": [
-        "@netlify/esbuild",
-        "aws-crt",
-        "couchbase",
-        "exifreader",
-        "install-peers",
-        "node"
-      ],
-      "evidence": "source-read",
-      "observed": "Six packages reach the registry from inside their own lifecycle script rather than through the installer. `node`'s postinstall (node-bin-setup@1.1.4 `index.js`) spawns `npm install --no-save <prefix>-<platform>-<arch>@<version>` to fetch the real per-arch Node distribution AS A REGISTRY PACKAGE. `@netlify/esbuild` shells `npm install` and, on failure, falls back to a raw `https.get('https://registry.npmjs.org/' + pkg + '/-/' + \u2026 + '.tgz')` and hand-parses the tar. `exifreader` reaches it transitively through an `npx -p \u2026` invocation. `install-peers` installs the consumer's peerDependencies for real \u2014 and is refused on the filesystem axis (see notGranted.packages), so this host does not rescue it.",
-      "residual": "`npm publish` is a PUT to the host that serves the read. RATIFIED. Bounded by the same env scrub \u2014 the registry-auth family is withheld and `.npmrc` sits inside the secret-file read deny floor, so a confined script holds no publish credential \u2014 and by package identity.",
-      "platform": "any"
-    },
-    {
-      "host": "raw.githubusercontent.com",
-      "artifact": "Vendored binaries and data files served straight out of a repository tree",
-      "pathShape": "/<owner>/<repo>/<ref>/vendor/<platform>/<binary>",
-      "fetchedBy": [
-        "free-email-domains",
-        "jpegtran-bin",
-        "pngquant-bin"
-      ],
-      "evidence": "source-read",
-      "observed": "The imagemin `*-bin` family builds its BinWrapper source URLs from this host: `pngquant-bin/lib/index.js:6` sets `url` to `https://raw.githubusercontent.com/imagemin/pngquant-bin/v${version}/vendor/` with per-OS suffixes, and jpegtran-bin is the same line against its own repo. free-email-domains fetches two disposable-domain blocklists from it. Read-only by construction \u2014 raw.githubusercontent.com serves repository content and accepts nothing.",
-      "platform": "any"
-    },
-    {
-      "host": "raw.github.com",
-      "artifact": "The same vendored binaries, via the legacy hostname alias",
-      "pathShape": "/<owner>/<repo>/<ref>/vendor/<platform>/<binary>",
-      "fetchedBy": [
-        "gif2webp-bin",
-        "jpeg-recompress-bin",
-        "pngout-bin",
-        "zopflipng-bin"
-      ],
-      "evidence": "source-read",
-      "observed": "A SEPARATE entry rather than a note on raw.githubusercontent.com, because four packages hardcode the legacy alias literally \u2014 zopflipng-bin's `lib/index.js`, and gif2webp-bin / jpeg-recompress-bin at `lib/index.js:7` \u2014 and the allowlist gates the name the client resolves, not the name it eventually redirects to. Granting only the modern host leaves these four broken at DNS. Same read-only property.",
-      "platform": "any"
-    },
-    {
-      "host": "storage.googleapis.com",
-      "artifact": "Chrome / Chromium / chromedriver builds from Google-operated buckets",
-      "pathShape": "/chrome-for-testing-public/<buildId>/<platform>/\u2026 and /chromium-browser-snapshots/\u2026",
-      "fetchedBy": [
-        "@percy/core",
-        "@sitespeed.io/chromedriver",
-        "puppeteer"
-      ],
-      "evidence": "source-read",
-      "observed": "puppeteer's default, through `@puppeteer/browsers@3.0.6 lib/browser-data/chrome.js:26` `resolveDownloadUrl(platform, buildId, baseUrl='https://storage.googleapis.com/chrome-for-testing-public')`. @sitespeed.io/chromedriver builds the same prefix at `install.js:47`. @percy/core reaches `/chromium-browser-snapshots/` only when `PERCY_CHROMIUM_BASE_URL` is explicitly set, so it is opt-in and not on the default path. puppeteer alone justifies the entry.",
-      "residual": "The bucket is in the PATH, not the hostname, so this is a genuinely multi-tenant name: an attacker can rent a bucket. RATIFIED and accepted as a known residual \u2014 puppeteer is the package, and a broken puppeteer is the worse outcome. Bounded by package identity. Contrast the bucket-scoped names admitted elsewhere (`hummus.s3-us-west-2.amazonaws.com`, the CloudFront distributions): there the tenant IS the hostname, so an exact-host rule already pins one tenant and no residual exists.",
-      "platform": "any"
-    },
-    {
-      "host": "googlechromelabs.github.io",
-      "artifact": "The Chrome-for-Testing known-good-versions index",
-      "pathShape": "/chrome-for-testing-availability.json",
-      "fetchedBy": [
-        "puppeteer"
-      ],
-      "evidence": "source-read",
-      "observed": "`chrome.js:45` `baseVersionUrl`, reached by `resolveBuildId()` only when the configured buildId is a channel name or milestone ('latest', 'stable') rather than the concrete pinned id `PUPPETEER_REVISIONS` supplies by default. Conditional, and admitted so a consumer who pins a channel is not broken. A GitHub Pages host: static content, accepts nothing.",
-      "platform": "any"
-    },
-    {
-      "host": "node-precompiled-binaries.grpc.io",
-      "artifact": "Prebuilt gRPC native extension and protoc/grpc_node_plugin binaries",
-      "pathShape": "/<name>/v<version>/<abi>-<platform>-<arch>-<libc>.tar.gz",
-      "fetchedBy": [
-        "grpc",
-        "grpc-tools"
-      ],
-      "evidence": "source-read",
-      "observed": "Both set an explicit `binary.host` \u2014 grpc's block is `{module_name:'grpc_node', host:'https://node-precompiled-binaries.grpc.io/', remote_path:'{name}/v{version}', \u2026}` \u2014 which `@mapbox/node-pre-gyp/lib/util/versioning.js:317` prefers over the github.com default. A dedicated single-tenant vendor host, so this is a strictly narrower grant than the github.com one it displaces, and a correction to an inferred claim that had both packages down as github.com fetchers.",
-      "platform": "any"
-    },
-    {
-      "host": "bin.equinox.io",
-      "artifact": "The ngrok binary",
-      "pathShape": "/c/<channel>/ngrok-v3-stable-<platform>.zip",
-      "fetchedBy": [
-        "@shopify/ngrok",
-        "ngrok"
-      ],
-      "evidence": "source-read",
-      "observed": "`download.js`: `const cdn = options.cdnUrl || process.env.NGROK_CDN_URL || 'https://bin.equinox.io'`. @shopify/ngrok's copy was diffed against standalone ngrok's and is near byte-identical \u2014 same default host, same `/c/bNyj1mQVY4c/ngrok-v3-stable-` path, same per-platform archive map. Equinox is a binary-distribution service; the path carries an opaque per-vendor channel id.",
-      "platform": "any"
-    },
-    {
-      "host": "npm.duckdb.org",
-      "artifact": "Prebuilt DuckDB native binding",
-      "fetchedBy": [
-        "duckdb"
-      ],
-      "evidence": "source-read",
-      "observed": "`package.json` `binary.host = 'https://npm.duckdb.org/duckdb'`, taken by node-pre-gyp's `versioning.js:317` in preference to any GitHub-Releases default. Recorded explicitly because the inferred claim had duckdb down as a github.com fetcher and the source read shows it is NOT \u2014 a dedicated vendor host instead. grpc-tools and hummus carry the same correction.",
-      "platform": "any"
-    },
-    {
-      "host": "msedgedriver.microsoft.com",
-      "artifact": "Microsoft Edge WebDriver",
-      "pathShape": "/<version>/edgedriver_<platform>.zip",
-      "fetchedBy": [
-        "@sitespeed.io/edgedriver",
-        "edgedriver"
-      ],
-      "evidence": "source-read",
-      "observed": "@sitespeed.io/edgedriver's `install.js` `getDriverUrl()` builds `const base = process.env.EDGEDRIVER_BASE_URL || 'https://msedgedriver.microsoft.com/<version>/'`. edgedriver's `dist/constants.js` sets the same value as `BASE_CDN_URL`. A dedicated vendor download host, not a shared user-content CDN.",
-      "platform": "any"
-    },
-    {
-      "host": "msedgewebdriverstorage.blob.core.windows.net",
-      "artifact": "Microsoft Edge WebDriver (fallback mirror)",
-      "fetchedBy": [
-        "edgedriver"
-      ],
-      "evidence": "source-read",
-      "observed": "`dist/install.js` `downloadDriver()`'s catch block falls back to `EDGEDRIVER_BUCKET = 'https://msedgewebdriverstorage.blob.core.windows.net/edgewebdriver?\u2026'`. Admitted alongside the primary because a fallback that resolves nowhere converts a recoverable failure into a hard one. A per-storage-account hostname, so the tenant is the name.",
-      "platform": "any"
-    },
-    {
-      "host": "edgeupdates.microsoft.com",
-      "artifact": "Edge product and version index",
-      "pathShape": "/api/products",
-      "fetchedBy": [
-        "edgedriver"
-      ],
-      "evidence": "source-read",
-      "observed": "`EDGE_PRODUCTS_API = 'https://edgeupdates.microsoft.com/api/products'` is DECLARED in edgedriver's bundle but was not observed being called from the install path. Admitted rather than left out: the constant is real, the cost of the entry is one hostname, and the alternative is a version-resolution path that silently fails on some future release.",
-      "platform": "any"
-    },
-    {
-      "host": "publicsuffix.org",
-      "artifact": "The Public Suffix List",
-      "pathShape": "/list/effective_tld_names.dat",
-      "fetchedBy": [
-        "tldjs"
-      ],
-      "evidence": "source-read",
-      "observed": "`lib/updater.js` requires Node's BUILT-IN `https` module \u2014 which is why the inferred claim missed this host entirely, reasoning from tldjs having no HTTP-client dependency \u2014 and reads the URL from tldjs's own `package.json` field `tldjs.providers['publicsuffix-org']`. A static publication site.",
-      "platform": "any"
-    },
-    {
-      "host": "f.hubspotusercontent40.net",
-      "artifact": "A hosted CSV of free email domains",
-      "pathShape": "/hubfs/2832391/Marketing/Lead-Capture/free-domains-2.csv",
-      "fetchedBy": [
-        "free-email-domains"
-      ],
-      "evidence": "source-read",
-      "observed": "One of three entries in `scripts/postinstall.mjs`'s SOURCES array, fetched with global `fetch()`; there is no override env var, so the host is not avoidable. A HubSpot file-hosting CDN \u2014 read-only; HubSpot writes go through api.hubapi.com, a different hostname.",
-      "platform": "any"
-    },
-    {
-      "host": "hummus.s3-us-west-2.amazonaws.com",
-      "artifact": "Prebuilt hummus native binding",
-      "pathShape": "/<module_name>/v<version>/<toolset>/",
-      "fetchedBy": [
-        "hummus"
-      ],
-      "evidence": "source-read",
-      "observed": "`package.json` `binary.host = 'https://hummus.s3-us-west-2.amazonaws.com'` with `remote_path = './{module_name}/v{version}/{toolset}/'` \u2014 an S3 bucket, not GitHub Releases, and another correction to an inferred github.com claim. The bucket name IS the hostname (virtual-hosted style), so an exact-host rule pins exactly one tenant.",
-      "platform": "any"
-    },
-    {
-      "host": "axonodegit.s3.amazonaws.com",
-      "artifact": "Prebuilt nodegit native binding",
-      "pathShape": "/nodegit/nodegit/",
-      "fetchedBy": [
-        "nodegit"
-      ],
-      "evidence": "source-read",
-      "observed": "`package.json` `binary.host = 'https://axonodegit.s3.amazonaws.com/nodegit/nodegit/'`, consumed by node-pre-gyp's default URL template from `lifecycleScripts/install.js`'s `spawn('node-pre-gyp', ['install', '--fallback-to-build'])`. Bucket-as-hostname, single tenant.",
-      "platform": "any"
-    },
-    {
-      "host": "d332vdhbectycy.cloudfront.net",
-      "artifact": "Prebuilt aws-crt native dependencies",
-      "fetchedBy": [
-        "aws-crt"
-      ],
-      "evidence": "source-read",
-      "observed": "`scripts/build_dependencies/build_step_tar.js:44` sets the host literally. A CloudFront distribution id is per-distribution, so the hostname is the tenant.",
-      "platform": "any"
-    },
-    {
-      "host": "d135dj0rjqvssy.cloudfront.net",
-      "artifact": "AppSignal agent binary (primary mirror)",
-      "fetchedBy": [
-        "@appsignal/nodejs"
-      ],
-      "evidence": "source-read",
-      "observed": "`scripts/extension/support/constants.js` declares `MIRRORS = ['https://d135dj0rjqvssy.cloudfront.net', 'https://appsignal-agent-releases.global.ssl.fastly.net']`, with the per-platform filename AND its checksum pinned in the same bundled file (the TRIPLES map). Both mirrors are admitted because the package walks the list.",
-      "platform": "any"
-    },
-    {
-      "host": "appsignal-agent-releases.global.ssl.fastly.net",
-      "artifact": "AppSignal agent binary (secondary mirror)",
-      "fetchedBy": [
-        "@appsignal/nodejs"
-      ],
-      "evidence": "source-read",
-      "observed": "The second entry of the same MIRRORS array. A per-service Fastly hostname; the artifact is checksum-pinned by the package itself.",
-      "platform": "any"
-    },
-    {
-      "host": "binaries.tonlabs.io",
-      "artifact": "Prebuilt Ever SDK Node addon",
-      "pathShape": "/eversdk_<version>_nodejs_addon_<arch>-<platform>.gz",
-      "fetchedBy": [
-        "@eversdk/lib-node"
-      ],
-      "evidence": "source-read",
-      "observed": "`install.js`: `const binariesSource = process.env.TON_CLIENT_BIN_SRC || 'https://binaries.tonlabs.io'`, then a raw `http`/`https.get` piped through `zlib` gunzip. Dedicated single-tenant vendor host.",
-      "platform": "any"
-    },
-    {
-      "host": "usqldownload.blob.core.windows.net",
-      "artifact": "Azure Stream Analytics local-run service package",
-      "pathShape": "/ext/asa/ASALocalRunService.<version>.zip",
-      "fetchedBy": [
-        "azure-streamanalytics-cicd"
-      ],
-      "evidence": "source-read",
-      "observed": "`lib/install.js` `downloadZip()` reads the bundled `docs/downloadfilelist_settings.json` and GETs the entry's `fileUrl`, which resolves to exactly `https://usqldownload.blob.core.windows.net/ext/asa/ASALocalRunService.1.4.0-dotnet.core.8.x.zip`. Per-storage-account hostname.",
-      "platform": "any"
-    },
-    {
-      "host": "package.cli.amplify.aws",
-      "artifact": "The Amplify CLI binary",
-      "pathShape": "/<version>/amplify-pkg-<platform>-<arch>.tgz",
-      "fetchedBy": [
-        "@aws-amplify/cli"
-      ],
-      "evidence": "measured",
-      "observed": "`lib/binary.js`: `const BINARY_LOCATION = 'https://package.cli.amplify.aws'`; also observed in the denied arm of the Linux corpus run as `getaddrinfo EAI_AGAIN package.cli.amplify.aws`, followed by `failed to install amplify binary`. v1 REFUSED this as `not-blocking` because the install still exits 0. v2 admits it, and the reversal is the point: exit 0 with the binary missing is precisely the SILENT class \u2014 the CLI is broken at first use, on a green install. @aws-amplify/cli's normalized failure mode is SILENT. 'Not blocking' was the wrong test.",
-      "platform": "any"
-    },
-    {
-      "host": "globalcdn.nuget.org",
-      "artifact": "librdkafka's Windows dependencies, as NuGet packages",
-      "pathShape": "/packages/<pkg>.<version>.nupkg",
-      "fetchedBy": [
-        "node-rdkafka"
-      ],
-      "evidence": "source-read",
-      "observed": "`binding.gyp`'s `OS=='win'` conditional action runs `python deps/windows-install.py`, whose `downloadBaseUrl` is `env['NODE_RDKAFKA_NUGET_BASE_URL'] || 'https://globalcdn.nuget.org/packages/'`. Windows-only in practice; see `windowsNetworkNote`.",
-      "platform": "win32"
-    },
-    {
-      "host": "download.visualstudio.microsoft.com",
-      "artifact": "The Visual Studio Build Tools installer",
-      "fetchedBy": [
-        "windows-build-tools"
-      ],
-      "evidence": "source-read",
-      "observed": "A hardcoded `installerUrl` for `vs_BuildTools.exe` in windows-build-tools' `dist/constants.js`. Admitted as a single-tenant Microsoft download host. NOTE what the package then DOES with it \u2014 it runs the downloaded installer, a system-wide elevated change; that is a filesystem and exec concern the jail handles on its own axes, and refusing the hostname would not have prevented it.",
-      "platform": "win32"
-    },
-    {
-      "host": "download.microsoft.com",
-      "artifact": "The Visual C++ Build Tools installer",
-      "fetchedBy": [
-        "windows-build-tools"
-      ],
-      "evidence": "source-read",
-      "observed": "The second hardcoded installer URL in the same file, for `visualcppbuildtools_full.exe`.",
-      "platform": "win32"
-    },
-    {
-      "host": "www.python.org",
-      "artifact": "The Python 2.7.15 installer (node-gyp's legacy prerequisite)",
-      "pathShape": "/ftp/python/<version>/",
-      "fetchedBy": [
-        "windows-build-tools"
-      ],
-      "evidence": "source-read",
-      "observed": "`dist/constants.js`: `pythonMirror = inGFW.osSync() ? 'https://npm.taobao.org/mirrors/python' : 'https://www.python.org/ftp/python'`. The python.org arm is the default everywhere the `in-gfw` heuristic does not fire; the taobao mirror is refused separately as a retired host.",
-      "platform": "win32"
-    },
-    {
-      "host": "www.googleapis.com",
-      "artifact": "Chromium snapshot builds, through the Cloud Storage JSON API",
-      "pathShape": "/download/storage/v1/b/chromium-browser-snapshots/o/",
-      "fetchedBy": [
-        "chromium"
-      ],
-      "evidence": "source-read",
-      "observed": "chromium's bundled `config.js` sets `CDN_URL` to this host rather than to storage.googleapis.com. ADMITTED ON RE-EXAMINATION (v3): v2 refused it as `write-capable`, which was the over-tight reasoning the best-effort thesis rejects \u2014 chromium's failure mode is SILENT, so refusing it produced a green install with no browser and a user who finds out at first use. A broken package is the outcome to avoid; a residual is not. `NODE_CHROMIUM_DOWNLOAD_HOST` remains a documented override.",
-      "residual": "The broadest hostname in the set: www.googleapis.com fronts essentially every Google API, authenticated write and upload routes included. Bounded the same way as every other residual here \u2014 the lifecycle env scrub withholds the credential family, so a confined script holds no token for any of those routes \u2014 and bounded further by package identity: `chromium` is the only package with an entry naming it.",
-      "platform": "any"
-    },
-    {
-      "host": "saucelabs.com",
-      "artifact": "Sauce Connect tunnel binary and its version index",
-      "pathShape": "/versions.json and the download endpoint",
-      "fetchedBy": [
-        "sauce-connect-launcher"
-      ],
-      "evidence": "source-read",
-      "observed": "`SAUCE_API_HOST` defaults to 'saucelabs.com' and is used for /versions.json and the download. ADMITTED ON RE-EXAMINATION (v3): v2 refused it because the bare apex also serves an authenticated web application, which is exactly the reasoning the best-effort thesis drops. The download is opt-in (behind an explicit env var) and a no-op by default, so the refusal only bit the user who ASKED for the tunnel \u2014 and broke them. `SAUCE_API_HOST` remains overridable.",
-      "residual": "An apex domain that also serves an interactive credentialed web app, so the artifact path and a login surface share one hostname with no subdomain between them. Bounded by the env scrub and by package identity.",
-      "platform": "any"
-    }
-  ],
-  "windowsNetworkNote": "Seven entries above carry `\"platform\": \"win32\"`, and under the CURRENT Windows posture none of them can be reached: `preset::build_jail_net` compiles to `false` \u2014 deny-all \u2014 on Windows, because the backend refuses a per-host policy outright (`WinNetPlan::PerHostUnsupported`; the available AppContainer exemption exposes every loopback listener, so a local forwarder would bypass the hostname gate). The entries are recorded anyway. They are the evidence a Windows per-host gate would be written against, and an entry that exists before the capability does is what stops the capability from shipping with a guessed allowlist.",
-  "packageNetwork": {
-    "comment": "PER-PACKAGE EGRESS, and the axis that carries the build jail's actual security argument. THE DEFENSE IS PACKAGE IDENTITY, NOT HOST GRANULARITY. The attack this jail exists to blunt is the Shai-Hulud shape: an attacker publishes a new postinstall into a package that never had one, and it runs with the user's full access. That package is not one anybody vetted \u2014 it is whatever the worm reached. So the control that matters is the ENTRY: a package with no entry gets no egress, whatever hosts it wants, and a package that needs egress arrives through a PULL REQUEST against this file. That PR is the whole opt-in mechanism, and it is the sentence that explains why this catalog exists.",
-    "hostLists": "NOT AUTHORED HERE. build.rs INVERTS `networkHosts[].fetchedBy`, which already records per host which packages fetch it, into a per-package map. Restating the same facts package-first would be two sources that drift.",
-    "fullSupersedes": "A `full` entry replaces any inverted host list for that package rather than adding to it \u2014 node-libcurl legitimately appears under both github.com and nodejs.org, and a merged view would claim a precision the grant does not have.",
-    "enforcementStatus": "NOT YET ENFORCED \u2014 READ THIS BEFORE RELYING ON THE MODEL ABOVE. `preset::build_jail_net` compiles to `[\"$downloads\"]` for EVERY jailed lifecycle spawn, and `compile_build_jail`'s `package_name` reaches only the filesystem axis. So today a package with NO entry still reaches all 33 admitted hosts, and the package-identity gate described here is data without an enforcer. Generated as PACKAGE_NETWORK_FULL / PACKAGE_NETWORK_HOSTS and exposed as `compiler::package_network()` so the compiler can consume it. Closing the gap is the highest-value change this catalog now makes possible and is tracked as `knownDefects: per-package-egress-not-enforced`.",
-    "reasons": {
-      "unenumerable": "the package reaches a transitive host set nothing enumerates",
-      "undetermined": "the host could not be resolved to a literal from the published source",
-      "runtime-selected": "the host is chosen at run time, so no static list can be correct"
-    },
-    "full": [
-      {
-        "package": "node-libcurl",
-        "versions": "4.1.0",
-        "reason": "unenumerable",
-        "why": "The case that motivated this axis. Its Windows source-build fallback git-clones github.com/microsoft/vcpkg.git \u2014 whole-repository, not one asset \u2014 and then, once vcpkg installs the curl, openssl, zlib and libssh2 ports, reaches vcpkg's OWN per-port download hosts. That set is plural, per-port, and not derivable from node-libcurl's manifest, so no host list can be right. Full egress for this one package is the honest grant.",
-        "evidence": "source-read",
-        "observed": "binary.host for the prebuilt path plus, on the source-build fallback, the vcpkg clone and its transitive port fetches, read from the published tarball. Previously recorded in notGranted.deferred as the case a path-scoped github.com grant would break; under the package-identity model it simply gets full egress instead.",
-        "platform": "win32 (the fallback path); the entry is unconditional because the grant cannot be platform-scoped today"
-      },
-      {
-        "package": "zeromq",
-        "versions": "6.7.0",
-        "reason": "undetermined",
-        "why": "Its cmake-ts/vcpkg build path was not traced to literal hosts \u2014 likely github.com/microsoft/vcpkg plus individual port sources, through cmake-ts's own dependency rather than zeromq's. The common path ships a prebuilt addon and needs nothing, so this grant is inert for most consumers and correct for the one who falls back.",
-        "evidence": "source-read",
-        "observed": "script/install.js tries lib/load-addon.js first, which resolves a shipped build/<os>/<arch>/... addon.node via build/manifest.json; only a miss reaches the cmake-ts path, which the source read recorded as undetermined.",
-        "platform": "any"
-      },
-      {
-        "package": "hasura-cli",
-        "versions": "2.36.1",
-        "reason": "undetermined",
-        "why": "Its host cannot be read from source because the CODE IS NOT PUBLISHED: package.json declares `postinstall: node dist/index.js` and a `files` list containing `dist`, but the published tarball contains no dist/ at all \u2014 only a placeholder `hasura` text file that says it is 'to be automatically replaced by Hasura CLI binary file by postinstall lifecycle hooks'. The download is certain, the host is unknowable from the artifact.",
-        "evidence": "source-read",
-        "observed": "The published tarball for this version contains only `hasura` (a placeholder), LICENSE, README.md and package.json. No dist/, so the postinstall entry point does not exist in what npm ships.",
-        "platform": "any"
-      },
-      {
-        "package": "redis-memory-server",
-        "versions": "0.10.0",
-        "reason": "undetermined",
-        "why": "Downloads a real Redis server binary into a find-cache-dir location. The URL is assembled across its own compiled RedisBinaryDownloadUrl.js rather than stated as a literal, so the source read could not resolve a hostname \u2014 the mongodb-memory-server family's shape, where the mirror is configurable and version-dependent.",
-        "evidence": "source-read",
-        "observed": "postinstall calls RedisBinary.getPath({}) from lib/util/RedisBinary.js; the sibling modules RedisBinaryDownload.js and RedisBinaryDownloadUrl.js plus the find-cache-dir dependency establish the download without yielding a literal host.",
-        "platform": "any"
-      },
-      {
-        "package": "windows-build-tools",
-        "versions": "5.2.2",
-        "reason": "runtime-selected",
-        "why": "Its Python mirror is chosen by a NETWORK PROBE: `pythonMirror = inGFW.osSync() ? 'https://npm.taobao.org/mirrors/python' : 'https://www.python.org/ftp/python'`, where in-gfw decides by testing reachability at run time. A static host list cannot be correct for both outcomes, and one of the two arms is a retired host that is refused. Four hosts across two installers besides.",
-        "evidence": "source-read",
-        "observed": "dist/constants.js: the in-gfw-driven pythonMirror ternary, plus hardcoded installerUrls on download.visualstudio.microsoft.com and download.microsoft.com. Note what the package then DOES \u2014 it runs the downloaded installers, a system-wide elevated change the filesystem and exec axes govern, not this one.",
-        "platform": "win32"
-      },
-      {
-        "package": "install-artifact-from-github",
-        "versions": "1.3.5",
-        "reason": "runtime-selected",
-        "why": "A shared helper (re2 and others reach GitHub Releases THROUGH it) whose host is whatever the consumer points it at: it honours GITHUB_SERVER_URL and a per-package `<NAME>_DOWNLOAD_MIRROR` override. A host list would be wrong for every user who sets either, which is the documented way to use a private mirror.",
-        "evidence": "source-read",
-        "observed": "The default is the github.com Releases pattern, overridable via GITHUB_SERVER_URL or a package-specific *_DOWNLOAD_MIRROR, read from the published tarball.",
-        "platform": "any"
-      }
-    ]
-  },
-  "systemPaths": {
-    "comment": "A NEW AXIS in v2. 17 of the 230 source-read packages need SYSTEM library or header paths to build, 12 of them on the DEFAULT build path \u2014 a class the schema could not express at all, so it was silently absent from the jail rather than deliberately excluded.",
-    "access": "read",
-    "recommendation": "Grant these directories READ-ONLY, COARSELY, by default. Not a hedge \u2014 coarse is the correct answer here and the per-package alternative is worse. Three reasons. (1) The directories are world-readable and hold no secrets: /usr/lib, /usr/include, the multiarch dirs, the Homebrew prefixes, the Xcode SDK. Read access to them confers nothing a dependency could not get by shipping its own copy of a header. (2) The 17 packages do NOT cluster on an exotic mechanism \u2014 they are the ordinary native-build long tail (OpenSSL, ODBC, X11, Postgres, Kerberos, libsecret, JDK, Xcode frameworks) \u2014 which means the set is open-ended and any enumeration will be wrong for the eighteenth package. (3) Discovery is INDIRECT: pkg-config, pg_config, krb5-config and curl-config are EXECUTED during binding.gyp variable evaluation and their stdout is what supplies the include and link paths, so the paths a per-package grant would have to name are not knowable from the manifest at all. Read-only, coarse, on by default.",
-    "status": "RECORDED, NOT YET ENFORCED. build.rs generates `SYSTEM_READ_PATHS_{LINUX,MACOS,WINDOWS}` from the arrays below and `compiler::system_read_paths()` returns the host platform's. Nothing folds them into `build_jail_surface` yet \u2014 that changes the granted read set on every platform and is a separate, measured change (tracked as `system-paths-not-enforced` in `knownDefects`). Until then this object is the recorded recommendation plus its evidence, and the 17 packages below are expected to fail.",
-    "envAnchored": "An entry may begin with `$NAME` (POSIX) or `%NAME%` (Windows). Those are resolved by the EMBEDDER against the build environment, not by the compiler \u2014 `$JAVA_HOME` and `$SDKROOT` have no meaning to a path matcher, and hardcoding a guess for either would be wrong on most hosts.",
-    "platforms": {
-      "linux": [
-        {
-          "path": "/usr/lib",
-          "why": "default linker search path; libX11 and libXtst for robotjs, libodbc for msnodesqlv8, the krb5 and curl kegs"
-        },
-        {
-          "path": "/usr/lib64",
-          "why": "the same on multilib distributions; named explicitly by canvas and msnodesqlv8"
-        },
-        {
-          "path": "/usr/local/lib",
-          "why": "locally-built libraries; named by canvas, msnodesqlv8 and pngquant-bin"
-        },
-        {
-          "path": "/lib",
-          "why": "canvas's util/has_lib.js SYSTEM_PATHS array lists it first"
-        },
-        {
-          "path": "/usr/include",
-          "why": "default compiler include path; X11 headers, gssapi headers, the ODBC and librdkafka headers"
-        },
-        {
-          "path": "/usr/local/include",
-          "why": "named by msnodesqlv8 and pngquant-bin"
-        },
-        {
-          "path": "/usr/lib/x86_64-linux-gnu",
-          "why": "Debian and Ubuntu multiarch; enumerated literally in canvas's has_lib.js"
-        },
-        {
-          "path": "/usr/lib/aarch64-linux-gnu",
-          "why": "the arm64 multiarch dir, same source"
-        },
-        {
-          "path": "/usr/lib/i386-linux-gnu",
-          "why": "same source"
-        },
-        {
-          "path": "/usr/lib/arm-linux-gnueabihf",
-          "why": "same source"
-        },
-        {
-          "path": "/usr/lib/arm-linux-gnueabi",
-          "why": "same source"
-        },
-        {
-          "path": "/usr/lib/pkgconfig",
-          "why": "the .pc files pkg-config reads: libsecret-1, x11, xi, xext, libpng, zlib, lcms2, openssl, libzstd, libcurl"
-        },
-        {
-          "path": "/usr/share/pkgconfig",
-          "why": "the second default pkg-config search directory"
-        },
-        {
-          "path": "/usr/local/lib/pkgconfig",
-          "why": "the third; where a locally-built library lands its .pc"
-        },
-        {
-          "path": "/opt/local/lib",
-          "why": "canvas's has_lib.js lists it"
-        },
-        {
-          "path": "/home/linuxbrew/.linuxbrew/include",
-          "why": "Linuxbrew prefix, named literally by msnodesqlv8"
-        },
-        {
-          "path": "/home/linuxbrew/.linuxbrew/lib",
-          "why": "same"
-        },
-        {
-          "path": "/opt/microsoft/msodbcsql18",
-          "why": "msnodesqlv8's primary ODBC driver location"
-        },
-        {
-          "path": "/opt/microsoft/msodbcsql17",
-          "why": "msnodesqlv8's fallback ODBC driver location"
-        },
-        {
-          "path": "/usr/lib/jvm",
-          "why": "where find-java-home looks for a JDK on Linux (java)"
-        }
-      ],
-      "macos": [
-        {
-          "path": "/opt/homebrew",
-          "why": "the arm64 Homebrew prefix; msnodesqlv8 names include/ and lib/ under it literally, nodegit reaches krb5 through it, node-rdkafka openssl"
-        },
-        {
-          "path": "/usr/local",
-          "why": "the x86_64 Homebrew prefix and the historical local prefix; node-rdkafka hardcodes -L/usr/local/opt/openssl/lib"
-        },
-        {
-          "path": "$SDKROOT",
-          "why": "the Xcode or CommandLineTools SDK. FRAMEWORK HEADERS ONLY LIVE HERE, and macOS is the largest bucket of the 17 (7 packages): @serialport/bindings links CoreFoundation and IOKit, drivelist Carbon and DiskArbitration, node-mac-contacts AppKit and Contacts, spellchecker AppKit, robotjs Carbon/ApplicationServices/OpenGL, gl QuartzCore/Quartz, pngquant-bin <SDK>/usr/include"
-        },
-        {
-          "path": "/Library/Java/JavaVirtualMachines",
-          "why": "where find-java-home looks for a JDK on macOS (java)"
-        }
-      ],
-      "windows": [
-        {
-          "path": "C:/OpenSSL-Win64",
-          "why": "@ghaiklor/x509's hardcoded OpenSSL include and lib prefix"
-        },
-        {
-          "path": "C:/OpenSSL-Win32",
-          "why": "the 32-bit variant of the same hardcoded path"
-        },
-        {
-          "path": "%LOCALAPPDATA%/node-libcurl-vcpkg",
-          "why": "node-libcurl bootstraps its own vcpkg install here, outside the project tree"
-        },
-        {
-          "path": "%ProgramFiles%/Microsoft SQL Server",
-          "why": "the ODBC driver tree msnodesqlv8 links against on Windows"
-        }
-      ]
-    },
-    "discoveryTools": {
-      "comment": "These are EXECUTED during binding.gyp variable evaluation, and their stdout is what supplies the real include and link paths. A path allowlist alone does not make them work \u2014 the binary has to be on PATH and its own config directory readable. This is why the coarse grant is the only workable shape: the paths are computed at build time, not declared.",
-      "tools": [
-        {
-          "tool": "pkg-config",
-          "usedBy": [
-            "canvas",
-            "node-rdkafka",
-            "gl",
-            "kerberos",
-            "keytar",
-            "pngquant-bin",
-            "robotjs"
-          ],
-          "needs": "the binary on PATH, plus PKG_CONFIG_PATH and the default .pc directories readable"
-        },
-        {
-          "tool": "pg_config",
-          "usedBy": [
-            "libpq"
-          ],
-          "needs": "the binary, located via `which pg_config` or by scanning /usr/bin, /usr/local/bin, /usr/pg*, /opt"
-        },
-        {
-          "tool": "krb5-config",
-          "usedBy": [
-            "nodegit"
-          ],
-          "needs": "the binary; its output names the system Kerberos and GSSAPI include and lib dirs"
-        },
-        {
-          "tool": "curl-config",
-          "usedBy": [
-            "node-libcurl"
-          ],
-          "needs": "the binary; its output names the system curl include and lib dirs"
-        },
-        {
-          "tool": "ldconfig -p",
-          "usedBy": [
-            "canvas"
-          ],
-          "needs": "canvas's has_lib.js shells it to decide with_jpeg/with_gif/with_rsvg before pkg-config runs at all"
-        }
-      ]
-    },
-    "requiredBy": [
-      {
-        "package": "canvas",
-        "version": "3.2.3",
-        "platforms": "all",
-        "onDefaultBuildPath": true,
-        "mechanism": "pkg-config",
-        "evidence": "binding.gyp:124-135,168,171,218,221 \u2014 13 `<!@(pkg-config \u2026)` invocations for pixman-1, cairo, libpng, pangocairo, freetype2, libjpeg and librsvg-2.0; util/has_lib.js:5-16 hardcodes an 11-entry SYSTEM_PATHS array and shells `ldconfig -p` at line 33. Ships NO prebuilds for any of nub's 8 target platforms, so the from-source path is the ONLY path."
-      },
-      {
-        "package": "msnodesqlv8",
-        "version": "4.5.0",
-        "platforms": "all",
-        "onDefaultBuildPath": true,
-        "mechanism": "hardcoded-path",
-        "evidence": "17 literal system paths across the ODBC driver trees, both Homebrew prefixes, Linuxbrew, /usr/include, /usr/lib, /usr/lib64 and /usr/local/ssl/lib64 \u2014 the widest single-package footprint in the corpus."
-      },
-      {
-        "package": "java",
-        "version": "0.14.0",
-        "platforms": "all",
-        "onDefaultBuildPath": true,
-        "mechanism": "hardcoded-path",
-        "evidence": "$JAVA_HOME/include, $JAVA_HOME/include/<platform>, $JAVA_HOME/lib (or jre/lib) for libjvm and libjli, plus the find-java-home package's own scan of /usr/lib/jvm, /Library/Java/JavaVirtualMachines and the Windows registry."
-      },
-      {
-        "package": "libpq",
-        "version": "1.8.13",
-        "platforms": "all",
-        "onDefaultBuildPath": true,
-        "mechanism": "hardcoded-path",
-        "evidence": "locates pg_config via `which` or by scanning /usr/bin, /usr/local/bin, /usr/pg*, /opt, then takes its --includedir and --libdir."
-      },
-      {
-        "package": "node-rdkafka",
-        "version": "3.4.1",
-        "platforms": [
-          "linux",
-          "darwin"
-        ],
-        "onDefaultBuildPath": true,
-        "mechanism": "pkg-config",
-        "evidence": "pkg-config for zlib, libssl, libzstd and libcurl; on macOS also the hardcoded -L/usr/local/opt/openssl/lib and -I/usr/local/opt/openssl/include Homebrew prefix. The BUILD_LIBRDKAFKA=0 fallback additionally reads /usr/include/librdkafka, /usr/local/include/librdkafka and /opt/include/librdkafka."
-      },
-      {
-        "package": "nodegit",
-        "version": "0.28.3",
-        "platforms": [
-          "darwin",
-          "linux"
-        ],
-        "onDefaultBuildPath": true,
-        "mechanism": "hardcoded-path",
-        "evidence": "krb5-config output \u2014 the system Kerberos and GSSAPI dev install, typically /usr/include and /usr/lib, or a Homebrew krb5 keg at /opt/homebrew/opt/krb5."
-      },
-      {
-        "package": "robotjs",
-        "version": "0.6.0",
-        "platforms": [
-          "darwin",
-          "linux"
-        ],
-        "onDefaultBuildPath": true,
-        "mechanism": "hardcoded-path",
-        "evidence": "/usr/include for X11/Xlib.h and X11/extensions/XTest.h and /usr/lib for libX11.so and libXtst.so via the default compiler and linker search; the macOS SDK framework path for Carbon, CoreFoundation, ApplicationServices and OpenGL; pkg-config for libpng only when ROBOTJS_ENABLE_PNG=1."
-      },
-      {
-        "package": "@serialport/bindings",
-        "version": "9.2.11",
-        "platforms": [
-          "darwin"
-        ],
-        "onDefaultBuildPath": true,
-        "mechanism": "xcode-sdk-framework",
-        "evidence": "SDKROOT framework path for CoreFoundation.framework and IOKit.framework."
-      },
-      {
-        "package": "drivelist",
-        "version": "12.1.1",
-        "platforms": [
-          "darwin"
-        ],
-        "onDefaultBuildPath": true,
-        "mechanism": "xcode-sdk-framework",
-        "evidence": "SDKROOT framework path for Carbon.framework and DiskArbitration.framework."
-      },
-      {
-        "package": "node-mac-contacts",
-        "version": "1.6.1",
-        "platforms": [
-          "darwin"
-        ],
-        "onDefaultBuildPath": true,
-        "mechanism": "xcode-sdk-framework",
-        "evidence": "SDKROOT framework search path for CoreFoundation, AppKit and Contacts headers."
-      },
-      {
-        "package": "spellchecker",
-        "version": "3.7.1",
-        "platforms": [
-          "darwin"
-        ],
-        "onDefaultBuildPath": true,
-        "mechanism": "xcode-sdk-framework",
-        "evidence": "reads $(SDKROOT)/System/Library/Frameworks/AppKit.framework. The one entry whose bundled deps otherwise satisfy it \u2014 the SDK read is still required."
-      },
-      {
-        "package": "@ghaiklor/x509",
-        "version": "0.4.0",
-        "platforms": [
-          "win32"
-        ],
-        "onDefaultBuildPath": true,
-        "mechanism": "hardcoded-path",
-        "evidence": "C:/OpenSSL-Win64/include and C:/OpenSSL-Win32/include plus the matching lib dirs, hardcoded."
-      },
-      {
-        "package": "gl",
-        "version": "8.1.6",
-        "platforms": [
-          "linux",
-          "darwin"
-        ],
-        "onDefaultBuildPath": false,
-        "mechanism": "pkg-config",
-        "evidence": "pkg-config x11, xi and xext plus -lGL on Linux; QuartzCore and Quartz via SDKROOT on macOS. Reached on the source-build fallback only."
-      },
-      {
-        "package": "kerberos",
-        "version": "2.2.2",
-        "platforms": [
-          "linux",
-          "darwin"
-        ],
-        "onDefaultBuildPath": false,
-        "mechanism": "pkg-config",
-        "evidence": "system gssapi and krb5 dev headers on the default include path (/usr/include/gssapi/*.h on Linux); explicit pkg-config krb5 on FreeBSD only. Fallback path."
-      },
-      {
-        "package": "keytar",
-        "version": "7.9.0",
-        "platforms": [
-          "linux"
-        ],
-        "onDefaultBuildPath": false,
-        "mechanism": "pkg-config",
-        "evidence": "pkg-config libsecret-1 \u2014 /usr/include/libsecret-1.0 and /usr/lib/pkgconfig/libsecret-1.pc. Fallback path."
-      },
-      {
-        "package": "node-libcurl",
-        "version": "4.1.0",
-        "platforms": "all",
-        "onDefaultBuildPath": false,
-        "mechanism": "pkg-config|vcpkg",
-        "evidence": "curl-config output on macOS and Linux (typically /usr/include and /usr/lib, or a Homebrew curl keg); on Windows a bootstrapped vcpkg install under %LOCALAPPDATA%/node-libcurl-vcpkg/<hash>, outside the project tree. Fallback path \u2014 and see notGranted.deferred, because the Windows arm also git-clones vcpkg."
-      },
-      {
-        "package": "pngquant-bin",
-        "version": "9.0.2",
-        "platforms": [
-          "darwin",
-          "linux",
-          "win32"
-        ],
-        "onDefaultBuildPath": false,
-        "mechanism": "pkg-config",
-        "evidence": "/usr/local/include, /usr/local/lib, /usr/include, /usr/lib, /usr/lib64, <Xcode SDK>/usr/include, <Xcode SDK>/usr/lib, and the pkg-config search paths for libpng, zlib and lcms2. Suggests `brew install libpng` on failure. Fallback path."
-      }
-    ]
-  },
-  "packageGrants": [
-    {
-      "package": "@prisma/client",
-      "versions": "6.x (7.0.0 dropped the postinstall entirely)",
-      "siblingDirs": [
-        ".prisma"
-      ],
-      "projectReads": [
-        "prisma"
-      ],
-      "projectCwd": true,
-      "failureMode": "SILENT",
-      "mechanism": "scripts/postinstall.js does three things, and each masks the next: it calls process.chdir(INIT_CWD); createDefaultGeneratedThrowFiles unconditionally mkdirs path.join(__dirname, '../../../.prisma'), a sibling of @prisma in the package's own enclosing node_modules; then it re-execs the prisma CLI as `prisma generate`, which reads the consumer's prisma/ schema directory. The generated client lands inside package_dir and needs no grant.",
-      "evidence": "measured",
-      "observed": "TWO MEASUREMENTS, one per platform, and the Linux one changed the code.\nmacOS (macos-arm64): EPERM mkdir <own node_modules>/.prisma, then EPERM uv_cwd on chdir(INIT_CWD), then EPERM reading the consumer's prisma/ schema. Verified by artifact, not exit code: a generated client of 71282 B carrying a per-run schema nonce, against absent output and 2 EPERMs without the grants.\nLINUX (6.17.0-1021-gcp, Landlock ABI 7, kernel-enforced, 2026-07-29): the grant did NOT work and the blocking stage is the FIRST one. `landlock_add_rule` takes an O_PATH descriptor, so a rule for a path that does not exist cannot be attached at all \u2014 the `.prisma` grant evaporated at launch and `mkdir` was denied identically with AND without it, which is exactly the DIFFERS-either-way result that put this in knownDefects. Fixed by `curated::materialize_sibling`, which creates the directory during policy compilation; that adds no access, since the subtree is already granted rw, it only makes the access attachable. Granting the PARENT's MAKE_DIR right instead was not available: the parent is the enclosing node_modules, which holds .bin and the virtual store.\nTHE LINUX ARTIFACT DIFFERENTIAL, three arms on the real published 6.19.3 postinstall: UNCONFINED produced .prisma/client at 26336 B; GRANTED produced 26336 B \u2014 byte-identical to unconfined; UNGRANTED produced 0 B with `EACCES: permission denied, mkdir .../node_modules/.prisma` raised at scripts/postinstall.js:248 via createDefaultGeneratedThrowFiles (:205) from main (:67), AND EXIT CODE 0. That exit 0 over an absent artifact is this entry's SILENT failure mode, observed rather than inferred.\nHONEST LIMIT ON THAT ARTIFACT: the 26336 B is the THROW-STUBS, not a generated client, in all three arms INCLUDING unconfined \u2014 so the per-run nonce does not appear anywhere and could not. On 6.19.3 the postinstall never runs `prisma generate`: getLocalPackagePath() does `require.resolve('prisma')`, which throws MODULE_NOT_FOUND because prisma 6.19.3's `main` points at build/index.js while resolution lands on build/types.js, which is not shipped; the script then warns 'please install Prisma CLI' and stops. Verified directly. The macOS observation of a 71282 B nonce-bearing client is therefore NOT reproducible on the version this entry names, and that discrepancy is recorded rather than smoothed over \u2014 see knownDefects: prisma-macos-artifact-unreproduced. The Linux conclusion does not depend on it: unconfined-equals-granted is a stronger control than artifact presence, because it pins the grant to the no-jail baseline.",
-      "platform": "macos-arm64 and linux-x64",
-      "stages": [
-        {
-          "stage": 1,
-          "need": "mkdir <own node_modules>/.prisma",
-          "field": "siblingDirs",
-          "linux": "WAS THE BLOCKER \u2014 absent-path Landlock rule drop; fixed by materialize_sibling",
-          "macos": "denied without the grant, granted with it"
-        },
-        {
-          "stage": 2,
-          "need": "process.chdir(INIT_CWD)",
-          "field": "projectCwd",
-          "linux": "INERT \u2014 chdir is not a Landlock-handled access, so it was never denied here",
-          "macos": "LOAD-BEARING \u2014 measured EPERM uv_cwd without it"
-        },
-        {
-          "stage": 3,
-          "need": "read <project>/prisma/",
-          "field": "projectReads",
-          "linux": "works: denied ungranted, allowed granted",
-          "macos": "works"
-        }
-      ]
-    },
-    {
-      "package": "@danmarshall/deckgl-typings",
-      "versions": "4.9.28",
-      "siblingDirs": [
-        "@types"
-      ],
-      "failureMode": "LOUD",
-      "mechanism": "Its postinstall runs `indefinitely-typed`, which computes path.resolve(cwd, '../..'), asserts that directory is named node_modules, then mkdirs @types there and copySyncs each --folder argument into it. The write target is <own node_modules>/@types \u2014 the same enclosing-node_modules sibling shape as Prisma, under a different name.",
-      "evidence": "measured",
-      "observed": "EPERM mkdir <own node_modules>/@types. With the grant, 20 copied type folders present; without it, absent. A LATER CORPUS RUN MEASURED THIS PACKAGE AS A COMPLETE NO-OP EVEN UNJAILED, which contradicts that EPERM. The two observations are not reconciled: the package is absent from the 230-package source-read corpus, so v2 adds no evidence either way. Retained rather than dropped \u2014 the original measurement is specific enough (a named errno on a named path, and a 20-folder artifact difference) that discarding it on the strength of a null result would be the weaker inference, and an unused grant confers nothing on a script that does nothing. Tracked as knownDefects: noop-grants-unreconciled.",
-      "platform": "macos-arm64"
-    },
-    {
-      "package": "msw",
-      "versions": "2.15.0",
-      "projectWrites": {
-        "manifestField": [
-          "msw",
-          "workerDirectory"
-        ]
-      },
-      "projectCwd": true,
-      "failureMode": "GRACEFUL",
-      "mechanism": "config/scripts/postinstall.js reads the CONSUMER's package.json for msw.workerDirectory, returns silently if absent, and otherwise re-execs its own CLI with cwd set to INIT_CWD to copy mockServiceWorker.js into each listed directory. The directories come from the field rather than a literal because msw imposes no convention \u2014 the consumer picks them.",
-      "evidence": "measured",
-      "observed": "EPERM uv_cwd. The cwd need bites first: without projectCwd the child dies in uv_cwd before it reads the field at all. With the grants, msw's worker script is present; without them, absent. The same later corpus run measured msw as a no-op even unjailed, and here that is CONSISTENT rather than contradictory: msw's postinstall is a no-op unless the consumer's manifest declares msw.workerDirectory, and a fixture that does not declare it exercises nothing. Grant retained.",
-      "platform": "macos-arm64"
-    },
-    {
-      "package": "@arkweid/lefthook",
-      "versions": "0.7.7",
-      "projectWrites": {
-        "literal": [
-          ".git/hooks"
-        ]
-      },
-      "projectCwd": true,
-      "failureMode": "SILENT",
-      "mechanism": "postinstall.js runs `spawnSync(getExePath(), ['install','-f'], { cwd: process.env.INIT_CWD || process.cwd() })` \u2014 INIT_CWD is the consumer project root \u2014 and `lefthook install -f` writes git hook shims into <project>/.git/hooks. projectCwd is needed because the spawn sets cwd to the project root and Node resolves it through uv_cwd before the child runs a line of its own.",
-      "evidence": "source-read",
-      "observed": "Read from the published tarball. The write target is the consumer's .git/hooks and nothing else; the bundled lefthook binary also reads <project>/.lefthook.yml, which is inside the project and NOT granted \u2014 the hook install itself does not depend on it. Denial is SILENT: spawnSync's status is never checked, so the install exits 0 with no hooks written and the user discovers it at their next commit.",
-      "platform": "any"
-    },
-    {
-      "package": "@evilmartians/lefthook",
-      "versions": "2.1.10",
-      "projectWrites": {
-        "literal": [
-          ".git/hooks"
-        ]
-      },
-      "projectCwd": true,
-      "failureMode": "SILENT",
-      "mechanism": "Identical postinstall.js shape to @arkweid/lefthook: `spawnSync(getExePath(), ['install','-f'], { cwd: process.env.INIT_CWD || process.cwd() })`. Two npm names for the same tool at different points in its history; both are still installed today, which is why both get an entry.",
-      "evidence": "source-read",
-      "observed": "Diffed against @arkweid/lefthook's postinstall.js \u2014 same shape, same argv, same cwd derivation. Denial is SILENT for the same reason.",
-      "platform": "any"
-    },
-    {
-      "package": "ghooks",
-      "versions": "2.0.4",
-      "projectWrites": {
-        "literal": [
-          ".git/hooks"
-        ]
-      },
-      "projectNodes": [
-        ".git"
-      ],
-      "failureMode": "SILENT",
-      "mechanism": "lib/install.js: getGitRoot() = `findup.sync(process.cwd(), '.git')` walks up to the consumer project root, then installHooks() writes and chmod-755s all 17 git hook files into <gitRoot>/hooks. The walk-up is an existence probe on the .git NODE, which is what projectNodes grants \u2014 the node alone, so .git/config stays unreadable.",
-      "evidence": "source-read",
-      "observed": "17 fs.writeFileSync plus fs.chmodSync calls into the hooks directory, one per hook name. A .git FILE (submodule or worktree) redirects through its gitdir: pointer to a directory that may be outside the project entirely \u2014 that target is NOT granted and such a layout will still fail; the grant covers the ordinary case. Denial is SILENT.",
-      "platform": "any"
-    },
-    {
-      "package": "yorkie",
-      "versions": "2.0.0",
-      "projectWrites": {
-        "literal": [
-          ".git/hooks"
-        ]
-      },
-      "projectNodes": [
-        ".git"
-      ],
-      "failureMode": "SILENT",
-      "mechanism": "src/install.js installFrom(): projectDir = findParent(depDir, 'package.json'), hooksDir = findHooksDir(projectDir), then createHook() writes and chmods each of the 19 hook names listed in src/hooks.json.",
-      "evidence": "source-read",
-      "observed": "Same shape as ghooks with a different hook list and a manifest-based project-root search. Follows a .git FILE's gitdir: pointer, with the same out-of-project limitation. Denial is SILENT.",
-      "platform": "any"
-    },
-    {
-      "package": "pre-commit",
-      "versions": "2.0.0",
-      "projectWrites": {
-        "literal": [
-          ".git/hooks"
-        ]
-      },
-      "projectNodes": [
-        ".git"
-      ],
-      "failureMode": "SILENT",
-      "mechanism": "install.js: root = path.resolve(__dirname,'..','..'), then getGitFolderPath() recurses path.resolve(currentPath,'..') until a .git file or directory is found or the filesystem root is reached; writes <gitRoot>/hooks/pre-commit and backs up any existing hook to pre-commit.old.",
-      "evidence": "source-read",
-      "observed": "One hook plus a .old backup, both inside .git/hooks. The upward recursion can leave the project on an unusual layout, and paths above the project root are not granted \u2014 that case still fails, deliberately. Denial is SILENT.",
-      "platform": "any"
-    },
-    {
-      "package": "pre-push",
-      "versions": "0.1.4",
-      "projectWrites": {
-        "literal": [
-          ".git/hooks"
-        ]
-      },
-      "projectNodes": [
-        ".git"
-      ],
-      "failureMode": "SILENT",
-      "mechanism": "install.js: root = path.resolve(__dirname,'..','..'), then getGitFolderPath() RECURSIVELY walks upward past the project root looking for a .git dir; writes <gitRoot>/hooks/pre-push and a pre-push.old backup.",
-      "evidence": "source-read",
-      "observed": "The upward walk is unbounded in the package's own code, so in a nested workspace it can target a hooks directory ABOVE the consumer project. The grant is clamped to the project root by curated::contained, so the out-of-project case is DROPPED and the package fails exactly as it would with no exception \u2014 the conservative direction, and the reason an unbounded walk is not itself a reason to refuse the grant. Denial is SILENT.",
-      "platform": "any"
-    },
-    {
-      "package": "git-validate",
-      "versions": "2.2.4",
-      "projectWrites": {
-        "literal": [
-          ".git/hooks"
-        ]
-      },
-      "projectNodes": [
-        ".git"
-      ],
-      "failureMode": "SILENT",
-      "mechanism": "lib/utils.js installHooks(): findGitRoot() walks up from its own module location to the topmost .git dir, then writes its bundled bin/validate.sh into <gitRoot>/.git/hooks/<hook> for pre-commit and pre-push, backing up any existing hook to <hook>.backup first.",
-      "evidence": "source-read",
-      "observed": "Two hooks plus backups, all inside .git/hooks. Denial is SILENT.",
-      "platform": "any"
-    },
-    {
-      "package": "shared-git-hooks",
-      "versions": "1.2.1",
-      "projectWrites": {
-        "literal": [
-          ".git/hooks"
-        ]
-      },
-      "projectNodes": [
-        ".git"
-      ],
-      "failureMode": "LOUD",
-      "mechanism": "index.js findProjectRoot() runs `git rev-parse --git-dir`; installHooks() mkdirs .git/hooks, writes and chmods its own hook.sh inside its package dir, then symlinks each of 17 hook names in .git/hooks at that script, renaming any existing hook to <name>.bak.",
-      "evidence": "source-read",
-      "observed": "17 symlinks plus .bak renames, all inside .git/hooks. The generated hook.sh embeds the caller's PATH, captured via an `execSync` of `sh -c 'echo ${PATH}'`; that write is inside the package's own directory and needs no grant. The only corpus hook installer whose denial is LOUD rather than silent.",
-      "platform": "any"
-    },
-    {
-      "package": "git-commit-msg-linter",
-      "versions": "5.0.8",
-      "projectWrites": {
-        "literal": [
-          ".git/hooks"
-        ]
-      },
-      "projectNodes": [
-        ".git"
-      ],
-      "failureMode": "SILENT",
-      "mechanism": "install.js guessGitDirectory() probes path.resolve(<root>,'.git') across several candidate roots \u2014 process.cwd(), constants.PROJECT_ROOT, and three pnpm-nested-node_modules walk-ups \u2014 then mkdirs .git/hooks if missing and writes .git/hooks/commit-msg, backing up a pre-existing non-symlink hook to commit-msg.old.",
-      "evidence": "source-read",
-      "observed": "One hook plus a conditional backup. Every write is inside <project>/.git/hooks \u2014 the source read recorded writes_outside as FALSE, correcting an inferred claim that said otherwise. It chmods the hook 777, which is the package's own choice and not something a grant changes. Denial is SILENT.",
-      "platform": "any"
-    },
-    {
-      "package": "@cypress/snapshot",
-      "versions": "2.1.7",
-      "projectWrites": {
-        "literal": [
-          "snapshots.js"
-        ]
-      },
-      "failureMode": "LOUD",
-      "mechanism": "src/add-initial-snapshot-file.js: ownerFolder = path.normalize(path.join(process.cwd(),'..','..','..')) \u2014 three levels up from node_modules/@cypress/snapshot, i.e. the consumer project root \u2014 then writes utils.SNAPSHOT_FILE_NAME, which utils.js:56 fixes to the literal 'snapshots.js'.",
-      "evidence": "source-read",
-      "observed": "A single file at a fixed name in the project root, which is what makes this expressible as a literal at all. Stated plainly because it is the uncomfortable part: the file is a .js the consumer's test runner later executes, so this grant is a write to executable project content. Admitted because the filename is fixed by the package rather than chosen at runtime, the write is the package's entire declared purpose, and denial is LOUD so the user sees it. Contrast webdev-toolkit and @bahmutov/add-typescript-to-cypress in notGranted.packages, which scaffold SEVERAL project-root files including linter and build config; the line is the size and openness of the target set, not the file extension.",
-      "platform": "any"
-    },
-    {
-      "package": "@nativescript/core",
-      "versions": "9.0.20",
-      "projectWrites": {
-        "literal": [
-          "hooks"
-        ]
-      },
-      "failureMode": "LOUD",
-      "mechanism": "@nativescript/hook's index.js findProjectDir() checks INIT_CWD, then walks path.dirname() upward skipping node_modules segments until it finds nativescript.config.ts or .js; if found, writes <that dir>/hooks/<hook.type>/nativescript-core.mjs.",
-      "evidence": "source-read",
-      "observed": "A NativeScript project's hooks/ directory is that framework's own convention, so the target is a literal. On any non-NativeScript project the walk finds no config and the postinstall is a pure no-op with no write at all, which makes the grant inert for every consumer not actually using NativeScript. The upward walk can leave the project; curated::contained clamps it and that case fails as it would without the exception. Denial is LOUD.",
-      "platform": "any"
-    }
-  ],
-  "failureModes": {
-    "comment": "What a denied grant DOES to the package, recorded per package because the answer changes what a measurement can see. LOUD is the case every exit-code harness catches. SILENT is the one none of them can: a try/catch or a `|| exit 0` means the script exits 0 having skipped its real work, so the install is GREEN and the breakage surfaces later at runtime \u2014 strictly worse for a user than an install error, and structurally invisible to any measurement that reads a status code. That single fact is the strongest argument for admitting source-read as an evidence class alongside measured.",
-    "enum": {
-      "LOUD": "the denial fails the install with a non-zero exit and a visible error",
-      "SILENT": "the denial is swallowed; the install exits 0 with the package's real work not done",
-      "GRACEFUL": "the denial is handled and the package still ends up correct \u2014 a real fallback path, or a no-op it was always going to take",
-      "UNDETERMINED": "not established by the source read. A real value, not a placeholder: guessing one of the three would assert more than was read."
-    },
-    "normalization": {
-      "comment": "The source-read lanes wrote free text into this field \u2014 14 distinct values across 230 packages, one of them a 400-character paragraph. The map is keyed on the EXACT original string rather than pattern-matched, so a future lane inventing a new phrasing fails the build instead of being silently guessed at. Composite values keep BOTH modes: `primary` is what a plain denial on the default path produces, `secondary` is the other mode the entry recorded, and `note` carries the condition that selects between them. Normalizing MOVED THE HEADLINE COUNT: 31 entries were the literal string SILENT, but three more (egg-ci, react-tsparticles, ttf2woff2) encoded a silent primary in prose, so primary-SILENT is 34 and 36 packages have a silent component.",
-      "compositeExamples": [
-        {
-          "raw": "GRACEFUL/LOUD (platform-dependent)",
-          "primary": "GRACEFUL",
-          "secondary": "LOUD",
-          "note": "platform-dependent"
-        },
-        {
-          "raw": "MIXED -- SILENT on read-denial, LOUD on write-denial",
-          "primary": "SILENT",
-          "secondary": "LOUD",
-          "note": "SILENT on a read denial, LOUD on a write denial"
-        },
-        {
-          "raw": "N/A by default (no-op); SILENT if opted in",
-          "primary": "GRACEFUL",
-          "secondary": "SILENT",
-          "note": "no-op by default; SILENT only when a consumer opts in"
-        },
-        {
-          "raw": "SILENT, AND GRACEFUL AT RUNTIME",
-          "primary": "SILENT",
-          "secondary": "GRACEFUL",
-          "note": "skipped at install AND degraded rather than thrown at runtime"
-        },
-        {
-          "raw": "undetermined (install step) / GRACEFUL (preinstall step, confirmed)",
-          "primary": "UNDETERMINED",
-          "secondary": "GRACEFUL",
-          "note": "preinstall confirmed GRACEFUL; the install step was not traced"
-        }
-      ]
-    },
-    "silent": [
-      {
-        "package": "@appsignal/nodejs",
-        "primary": "SILENT",
-        "needs": "network (2 mirrors, both admitted)",
-        "evidence": "the extension install swallows a failed agent download and leaves the native extension absent"
-      },
-      {
-        "package": "@arkweid/lefthook",
-        "primary": "SILENT",
-        "needs": "project .git/hooks (granted)",
-        "evidence": "spawnSync status unchecked \u2014 no hooks written, install exits 0"
-      },
-      {
-        "package": "@aws-amplify/cli",
-        "primary": "SILENT",
-        "needs": "network (package.cli.amplify.aws, now admitted)",
-        "evidence": "prints `failed to install amplify binary` and exits 0 with no binary. This entry is why v1's `not-blocking` refusal of that host is reversed."
-      },
-      {
-        "package": "@cubejs-backend/native",
-        "primary": "SILENT",
-        "needs": "network (github.com, now admitted)",
-        "evidence": "the native installer catches its own download failure"
-      },
-      {
-        "package": "@evilmartians/lefthook",
-        "primary": "SILENT",
-        "needs": "project .git/hooks (granted)",
-        "evidence": "same unchecked spawnSync as @arkweid/lefthook"
-      },
-      {
-        "package": "@percy/core",
-        "primary": "SILENT",
-        "needs": "network (storage.googleapis.com), opt-in only",
-        "evidence": "the chromium download is behind PERCY_POSTINSTALL_BROWSER; when opted in, a failure is swallowed"
-      },
-      {
-        "package": "@roots/bud-framework",
-        "primary": "SILENT",
-        "needs": "nothing",
-        "evidence": "postinstall failure swallowed"
-      },
-      {
-        "package": "blake-hash",
-        "primary": "SILENT",
-        "needs": "nodejs.org headers (admitted)",
-        "evidence": "node-gyp failure swallowed; the binding is absent and require throws at runtime"
-      },
-      {
-        "package": "chromium",
-        "primary": "SILENT",
-        "needs": "network (www.googleapis.com \u2014 REFUSED)",
-        "evidence": "download failure swallowed. The one silent failure this catalog knowingly does not fix; the reason is at the notGranted.hosts entry."
-      },
-      {
-        "package": "cordova.plugins.diagnostic",
-        "primary": "SILENT",
-        "needs": "project config.xml (read)",
-        "evidence": "main()'s two try/catch blocks route every failure through handleError(), which only logs"
-      },
-      {
-        "package": "eccrypto",
-        "primary": "SILENT",
-        "needs": "nodejs.org headers (admitted)",
-        "evidence": "scripts.install is literally `node-gyp rebuild || exit 0` \u2014 the archetype of the class"
-      },
-      {
-        "package": "edgedriver",
-        "primary": "SILENT",
-        "needs": "network (3 Microsoft hosts, all admitted)",
-        "evidence": "download failure swallowed"
-      },
-      {
-        "package": "egg-bin",
-        "primary": "SILENT",
-        "needs": "project write, target untraced",
-        "evidence": "the egg-ts-helper spawn's failure is not checked; see notGranted.deferred"
-      },
-      {
-        "package": "egg-ci",
-        "primary": "SILENT",
-        "secondary": "LOUD",
-        "note": "SILENT on a read denial, LOUD on a write denial",
-        "needs": "REFUSED \u2014 writes the consumer repo",
-        "evidence": "denial is correct here; the silence is recorded so nobody reads the green install as success"
-      },
-      {
-        "package": "esoftplay",
-        "primary": "SILENT",
-        "needs": "REFUSED \u2014 patches other packages",
-        "evidence": "writeFileSyncWithLog swallows failures"
-      },
-      {
-        "package": "ghooks",
-        "primary": "SILENT",
-        "needs": "project .git/hooks (granted)",
-        "evidence": "17 hook writes, no status check"
-      },
-      {
-        "package": "git-commit-msg-linter",
-        "primary": "SILENT",
-        "needs": "project .git/hooks (granted)",
-        "evidence": "hook write failure swallowed"
-      },
-      {
-        "package": "git-validate",
-        "primary": "SILENT",
-        "needs": "project .git/hooks (granted)",
-        "evidence": "hook write failure swallowed"
-      },
-      {
-        "package": "install-peers",
-        "primary": "SILENT",
-        "needs": "REFUSED \u2014 installs into the consumer tree",
-        "evidence": "the shelled npm or yarn install's exit status is not propagated"
-      },
-      {
-        "package": "keccak",
-        "primary": "SILENT",
-        "needs": "nodejs.org headers (admitted)",
-        "evidence": "same `|| exit 0` shape as eccrypto"
-      },
-      {
-        "package": "mbt",
-        "primary": "SILENT",
-        "needs": "network (github.com, now admitted)",
-        "evidence": "download failure swallowed"
-      },
-      {
-        "package": "pngout-bin",
-        "primary": "SILENT",
-        "needs": "network (raw.github.com, now admitted)",
-        "evidence": "bin-wrapper's download failure is swallowed by the postinstall"
-      },
-      {
-        "package": "pre-commit",
-        "primary": "SILENT",
-        "needs": "project .git/hooks (granted)",
-        "evidence": "hook write failure swallowed"
-      },
-      {
-        "package": "pre-push",
-        "primary": "SILENT",
-        "needs": "project .git/hooks (granted)",
-        "evidence": "hook write failure swallowed"
-      },
-      {
-        "package": "react-particles",
-        "primary": "SILENT",
-        "needs": "project package.json read \u2014 already baseline-granted",
-        "evidence": "guarded by `if (!process.env.INIT_CWD) return`, and a read failure is swallowed"
-      },
-      {
-        "package": "react-tsparticles",
-        "primary": "SILENT",
-        "note": "benign: the skipped work is advisory only",
-        "needs": "project package.json read \u2014 already baseline-granted",
-        "evidence": "raw value was `SILENT (benign)`; the skipped work is a console warning about conflicting packages"
-      },
-      {
-        "package": "sauce-connect-launcher",
-        "primary": "GRACEFUL",
-        "secondary": "SILENT",
-        "note": "no-op by default; SILENT only when a consumer opts in",
-        "needs": "network (saucelabs.com \u2014 REFUSED)",
-        "evidence": "raw value was `N/A by default (no-op); SILENT if opted in`"
-      },
-      {
-        "package": "simple-git-hooks",
-        "primary": "SILENT",
-        "needs": "REFUSED \u2014 deletes unmanaged hooks",
-        "evidence": "hook install failure swallowed. The most contestable refusal in the catalog: denial produces a green install with no hooks. Recorded rather than glossed."
-      },
-      {
-        "package": "truffle",
-        "primary": "SILENT",
-        "needs": "nothing",
-        "evidence": "postinstall failure swallowed"
-      },
-      {
-        "package": "tsparticles-engine",
-        "primary": "SILENT",
-        "needs": "project package.json read \u2014 already baseline-granted",
-        "evidence": "same INIT_CWD read as react-particles"
-      },
-      {
-        "package": "ttag-cli",
-        "primary": "SILENT",
-        "needs": "REFUSED \u2014 /etc/bash_completion.d",
-        "evidence": "the package's own try/catch already treats denial as expected and skips the completion install with a warning, so the refusal costs nothing"
-      },
-      {
-        "package": "ttf2woff2",
-        "primary": "SILENT",
-        "secondary": "GRACEFUL",
-        "note": "skipped at install AND degraded rather than thrown at runtime",
-        "needs": "nodejs.org headers (admitted)",
-        "evidence": "raw value was `SILENT, AND GRACEFUL AT RUNTIME`"
-      },
-      {
-        "package": "vue-inbrowser-compiler-demi",
-        "primary": "SILENT",
-        "needs": "sibling node_modules read \u2014 already baseline-granted",
-        "evidence": "`try { require('vue/package.json') } catch { return 'unknown' }` \u2014 the version probe degrades silently"
-      },
-      {
-        "package": "yorkie",
-        "primary": "SILENT",
-        "needs": "project .git/hooks (granted)",
-        "evidence": "19 hook writes, no status check"
-      },
-      {
-        "package": "zopflipng-bin",
-        "primary": "SILENT",
-        "needs": "network (raw.github.com, now admitted)",
-        "evidence": "same bin-wrapper swallow as pngout-bin"
-      },
-      {
-        "package": "node-libcurl",
-        "primary": "GRACEFUL",
-        "secondary": "SILENT",
-        "note": "the --fallback-to-build retry is GRACEFUL; the postinstall itself swallows its own failure",
-        "needs": "network plus system paths",
-        "evidence": "raw value was a composite; the download-to-source-build transition is a real fallback, the postinstall's own failure is not surfaced"
-      }
-    ]
-  },
-  "notGranted": {
-    "comment": "Documentation only. Nothing in this object is compiled into any allowlist. It records what a real install was measured or read to need and that was NOT admitted, so a contributor can see the bar before opening a PR. A build-time check keeps `hosts` disjoint from `networkHosts`. v2 adds `packages`, and that addition is CONCEPTUAL rather than clerical: without it every measured break reads as a carve-out candidate, and a break list has already been mischaracterized that way once. A `packages` entry means the denial is the jail WORKING \u2014 the break is expected and correct, and a PR to 'fix' it should be closed with a link here.",
+  "@airbnb/node-memwatch": {
+    "network": true,
     "hosts": [
-      {
-        "host": "www.google-analytics.com",
-        "reason": "not-needed",
-        "requester": "@pact-foundation/pact-node",
-        "observedUrl": "https://www.google-analytics.com/collect",
-        "detail": "RE-EXAMINED IN v3 AND THE VERDICT SURVIVES, ON A DIFFERENT REASON. v2 refused it because the POST body is the product, which is the over-tight security framing the best-effort thesis drops. The reason it stays refused is simply that nothing breaks: `@pact-foundation/pact-node`'s beacon is `needle.post(...).on('error', function(){})` \u2014 fire-and-forget with an explicit error handler \u2014 so a denied analytics host does not fail the install, and the source read says so directly ('a DENIED analytics-only host does not fail the install, but a denied github.com download does'). The artifact host it actually needs is github.com, which IS admitted. This is the same class of reason as npm.taobao.org: the entry would buy nothing. If a package ever NEEDS a telemetry host to function, grant it and record the residual.",
-        "evidence": "source-read",
-        "observed": "standalone/install.js's needle.post to /collect, with `.on('error', function(){})` attached, read from the published tarball alongside the github.com Releases download that is the real artifact fetch. PACT_DO_NOT_TRACK / config.pact_do_not_track disable it outright.",
-        "platform": "any"
-      },
-      {
-        "host": "npm.taobao.org",
-        "reason": "retired-host",
-        "requester": "windows-build-tools",
-        "observedUrl": "https://npm.taobao.org/mirrors/python",
-        "detail": "Refused because an entry would grant nothing. The mirror was sunset in 2021 (superseded by registry.npmmirror.com) and no longer serves this path, so admitting the name adds an allowlist member with no reachable artifact behind it. The selection is also not user-driven: windows-build-tools picks the mirror from the `in-gfw` dependency's own network-based China-detection heuristic. The default arm, www.python.org, IS admitted, so the package is not blocked by this refusal wherever the heuristic does not fire.",
-        "evidence": "source-read",
-        "observed": "`dist/constants.js`: `pythonMirror = inGFW.osSync() ? 'https://npm.taobao.org/mirrors/python' : 'https://www.python.org/ftp/python'`.",
-        "platform": "win32"
-      },
-      {
-        "host": "workers.cloudflare.com",
-        "reason": "undecided",
-        "requester": "@cloudflare/wrangler@1.21.0",
-        "observedUrl": "https://workers.cloudflare.com/get-npm-wrangler-binary/1.21.0/x86_64-unknown-linux-musl",
-        "detail": "Recorded as an evidenced candidate, not as a disqualification: no write-capable route or multi-tenant namespace has been established for it, and the fetch is a dedicated single-tenant vendor binary path. Retained as `undecided` through v2 because the package is absent from the 230-package source-read corpus, so nothing new bears on it. Note the requester is wrangler 1.x, which prints its own deprecation notice directing users to the `wrangler` package \u2014 so the demand may not survive the version it was measured on.",
-        "evidence": "measured",
-        "observed": "Downloading release from <url>, then Error fetching release: getaddrinfo EAI_AGAIN workers.cloudflare.com, in the denied arm of the Linux corpus run.",
-        "platform": "linux-x64 (musl artifact)"
-      }
-    ],
-    "packages": [
-      {
-        "package": "ngx-popperjs",
-        "versions": "17.0.1",
-        "reason": "destructive",
-        "wants": "delete access to the parent of its own package directory",
-        "failureMode": "LOUD",
-        "detail": "The worst thing in the corpus. tsbl.js loops over three hardcoded competitor package names (@ngx-tour/core, ngx-ui-tour-core, @ngx-tour/ngx-popper) and requires each one's package.json; Node's resolution walks up through node_modules, so ANY of them resolving anywhere up-tree triggers `child_process.exec(\"rm -rf ../\")` \u2014 fire-and-forget, no callback, no error handling. npm sets a lifecycle script's cwd to its own package directory, so `../` is the consumer's entire node_modules for a top-level dependency. Not a bug and not historical: it ships in the current `latest`.",
-        "evidence": "source-read",
-        "observed": "tsbl.js:31, read from the published tarball, with the three trigger package names at the top of the same file. Independently re-verified against the current `latest` dist-tag.",
-        "platform": "any"
-      },
-      {
-        "package": "egg-ci",
-        "versions": "2.2.0",
-        "reason": "writes-consumer-repo",
-        "wants": "write access to the consumer project root",
-        "failureMode": "SILENT",
-        "detail": "install.js computes `root = path.join(__dirname, '../..')` \u2014 for node_modules/egg-ci that is the CONSUMING PROJECT'S ROOT \u2014 then writes `.github/workflows/nodejs.yml` and, when pkg.ci.license is set, `LICENSE`. A dependency's postinstall authoring the consumer's CI workflow is a write to the file that runs their pipeline; it is not a compatibility gap.",
-        "evidence": "source-read",
-        "observed": "install.js:15 (the root computation), :98-101 (the workflow write), :112 (the LICENSE write). Read from the published tarball.",
-        "platform": "any"
-      },
-      {
-        "package": "esoftplay",
-        "versions": "0.0.269-beta3c640a9",
-        "reason": "patches-other-packages",
-        "wants": "write access to the consumer project root AND to other installed packages' source trees",
-        "failureMode": "SILENT",
-        "detail": "Rewrites roughly nine consumer project-root config files (package.json \u2014 including scripts.start and trustedDependencies \u2014 app.json, config.json, config.live.json, eas.json, metro.config.js, babel.config.js, tsconfig.json, .gitignore, App.tsx) AND patches source IN PLACE inside other installed packages: react-native's JSTimers.js, @react-navigation/core's useNavigationBuilder.tsx, @firebase/app's index.rn.cjs.js, @expo/vector-icons. Writing another dependency's source before that source is executed is the exact vector the jail exists to close, and it is worse than the project-root writes beside it.",
-        "evidence": "source-read",
-        "observed": "bin/build.js defines DIR='../../' relative to node_modules/esoftplay/bin and routes every config write through a writeFileSyncWithLog() helper; the in-place package patches use hardcoded relative paths. The postinstall is `bun ./bin/build.js install`, so it also hard-depends on the Bun runtime binary.",
-        "platform": "any"
-      },
-      {
-        "package": "webdev-toolkit",
-        "versions": "3.0.2",
-        "reason": "project-root-scaffold",
-        "wants": "write access to five files at the consumer project root",
-        "failureMode": "LOUD",
-        "detail": "scripts/install.js does five `copyFileSync('files/X', '../../X')` calls \u2014 npm sets cwd to the package's own directory, so `../../` is the consumer project root \u2014 scaffolding .webdevtoolkitrc, gulpfile.babel.js, .eslintignore, .eslintrc and stylelint.config.js. Two of those are lint config a CI gate reads and one is a build script. Contrast @cypress/snapshot, which IS granted: one file, fixed name. The line is the size and openness of the target set.",
-        "evidence": "source-read",
-        "observed": "The five copyFileSync calls with literal relative destinations, read from the published tarball.",
-        "platform": "any"
-      },
-      {
-        "package": "@bahmutov/add-typescript-to-cypress",
-        "versions": "2.1.2",
-        "reason": "project-root-scaffold",
-        "wants": "write access to the consumer project root and cypress/plugins/",
-        "failureMode": "LOUD",
-        "detail": "src/add-plugin.js climbs three directories up via path.join(process.cwd(),'..','..','..') to reach the project root, then shelljs-copies plugin.js and cy-ts-preprocessor.js into cypress/plugins/ and fs.writeFileSync's tsconfig.json at the root. Gated only by an 'am I a direct dependency' heuristic, which is not consent. Overwriting the consumer's tsconfig.json from a postinstall changes how their whole project compiles.",
-        "evidence": "source-read",
-        "observed": "The three-level climb, the shelljs copies, and the tsconfig.json write, read from the published tarball.",
-        "platform": "any"
-      },
-      {
-        "package": "install-peers",
-        "versions": "1.0.4",
-        "reason": "installs-packages",
-        "wants": "write access to the consumer's node_modules and package.json",
-        "failureMode": "SILENT",
-        "detail": "Reads the consumer's package.json for peerDependencies, chdirs to INIT_CWD, and shells a REAL npm or yarn install into the consumer's node_modules; on the yarn path `yarn add --peer` also rewrites the consumer's package.json. A dependency's postinstall running the package manager is an unbounded install of packages the user never asked for, executed inside the install it is part of \u2014 a re-entrant install whose contents no lockfile describes.",
-        "evidence": "source-read",
-        "observed": "install.js: `rootPath = process.env.INIT_CWD || \u2026`, getPackageConfig() reading <rootPath>/package.json, then `process.chdir(rootPath)` before invoking npm or yarn.",
-        "platform": "any"
-      },
-      {
-        "package": "simple-git-hooks",
-        "versions": "2.13.1",
-        "reason": "deletes-unmanaged-hooks",
-        "wants": "write access to the consumer's .git/hooks and to `git config --local`",
-        "failureMode": "SILENT",
-        "detail": "THE MOST CONTESTABLE ENTRY HERE, recorded as contestable rather than settled. Nine other git-hook installers ARE granted (see packageGrants) on the reasoning that installing hooks is what the user asked for. This one differs in two ways: it REMOVES every hook file whose name is absent from its config on every install \u2014 so it deletes hooks the user or another tool wrote, not just its own \u2014 and it runs `git config --local core.hooksPath`, redirecting where git looks for hooks at all. Deleting a sibling tool's hook is a destructive effect on state the package does not own. The cost of the refusal is real and is stated: denial is SILENT, so the user gets a green install with no hooks and finds out at their next commit. If this is reversed, the grant needs `.git/hooks` write plus a separate decision about `git config --local`, and it should be reversed deliberately rather than by someone reading the break as a bug.",
-        "evidence": "source-read",
-        "observed": "getProjectRootDirectoryFromNodeModules() with special-cased pnpm/.deno/.store/yarn-berry walk-ups; _getHooksDirPath() shelling `execSync('git config --local core.hooksPath')`; the per-hook write loop and the paired removal of every undeclared hook name.",
-        "platform": "any"
-      },
-      {
-        "package": "go-ios",
-        "versions": "1.2.0",
-        "reason": "global-bin",
-        "wants": "write access to a global npm-prefix bin directory",
-        "failureMode": "LOUD",
-        "detail": "postinstall.js's getInstallationPath() resolves `process.env.npm_config_prefix + '/bin'` (or npm_config_prefix itself on win32), mkdirps it, and fs.renames its bundled binary there. For an ordinary local (non -g) install npm_config_prefix commonly still points at the shell's effective GLOBAL prefix, so this writes an executable into a system- or user-wide bin directory that is on PATH, outside the project entirely. A project-level dependency install reaching a shared bin dir is out of scope for a project sandbox regardless of the author's intent, and the mechanism is a hand-rolled emulation of npm's own bin linking.",
-        "evidence": "source-read",
-        "observed": "getInstallationPath()'s npm_config_prefix derivation and verifyAndPlaceBinary()'s fs.rename into it.",
-        "platform": "any"
-      },
-      {
-        "package": "ttag-cli",
-        "versions": "1.12.0",
-        "reason": "system-wide",
-        "wants": "write access to /etc/bash_completion.d",
-        "failureMode": "SILENT",
-        "detail": "scripts/install_completion.js: `var completionDir = '/etc/bash_completion.d/'; if (fs.existsSync(completionDir)) { fs.copyFileSync(path.join(__dirname,'ttag'), path.join(completionDir,'ttag')) }`. A hardcoded absolute SYSTEM directory \u2014 outside the project AND outside the user's home, which is meaningfully more sensitive than a dotfile write. The cheapest refusal in the catalog: the package's own guard already treats a missing or unwritable directory as an expected outcome and just skips the completion with a warning, so nothing the user asked for is lost.",
-        "evidence": "source-read",
-        "observed": "The literal completionDir constant and the guarded copyFileSync, read from the published tarball.",
-        "platform": "any"
-      }
-    ],
-    "deferred": [
-      {
-        "package": "egg-bin",
-        "versions": "6.13.0",
-        "scope": "an untraced project write",
-        "why": "A demonstrated need whose grant SHAPE cannot be written from the evidence in hand. scripts/postinstall.js reads the consumer's package.json (baseline-granted) and, when pkg.egg.typescript or pkg.egg.declarations is set, spawns egg-ts-helper \u2014 a SEPARATE package \u2014 which writes generated .d.ts files into the consumer project. The source read did not trace egg-ts-helper, so the write target is unknown, and a grant cannot be bounded by a mechanism nobody has read. NOT a refusal: nothing here suggests the write is illegitimate. Next step is reading egg-ts-helper's own source for its output path.",
-        "failureMode": "SILENT",
-        "evidence": "source-read"
-      },
-      {
-        "package": "local-cypress",
-        "versions": "1.2.8",
-        "scope": "in-place rewrites of a sibling package's .d.ts files",
-        "why": "postinstall.js's findCypressTypes() does require.resolve('cypress/package.json') to locate the consumer's installed cypress SIBLING package, then REWRITES that package's own .d.ts files in place to comment out global declarations. That is the same shape as esoftplay's in-place patching of other packages \u2014 the vector the jail exists to close \u2014 but the source-read lane left grant_recommended UNSET rather than false, so recording it as a refusal would be this catalog inventing a verdict the data does not carry. Deferred with the concern stated. If the shape holds under review it belongs in `packages` above with reason `patches-other-packages`.",
-        "failureMode": "LOUD",
-        "evidence": "source-read"
-      },
-      {
-        "package": "iobroker.js-controller",
-        "versions": "7.2.2",
-        "scope": "unknown; likely host or system config directories",
-        "why": "The only UNDETERMINED failure mode in the corpus. The preinstall step was traced and is GRACEFUL; the install step's real filesystem footprint was not traced within the lane's budget, and ioBroker's own documented architecture describes first-time PLATFORM setup \u2014 host or system config directories rather than project-local files. No grant can be written, and no refusal either.",
-        "failureMode": "UNDETERMINED",
-        "evidence": "source-read"
-      }
-    ],
-    "notNeededRatherThanRefused": [
-      {
-        "package": "@percy/core",
-        "versions": "1.32.5",
-        "why": "Carries grant_recommended:false in the source-read data like the nine refusals above, but for the OPPOSITE reason, and it must not be read as one: on the ordinary published-package install path (PERCY_POSTINSTALL_BROWSER unset, no shipped ./src) both branches of postinstall.js evaluate false and the script is a complete no-op \u2014 no network, no filesystem writes. Its .local-chromium/ target is inside its own package directory and its storage.googleapis.com fetch happens only behind an explicit opt-in. Nothing is denied because nothing is attempted."
-      },
-      {
-        "package": "cordova.plugins.diagnostic",
-        "versions": "7.3.1",
-        "why": "Recorded here to correct a mistake in this effort's own summary, which listed it among the refusals. The source read REFUTED that framing: the consumer's project-root config.xml is READ ONLY (never written \u2014 every fs.writeFileSync targets the plugin's own plugin.xml inside its own package dir), and the lane recommended a grant. The read is a single named file and the Cordova convention for finding a <preference> element. It needs no packageGrants entry because a project-root file read is not what the jail denies; it is listed so nobody re-derives the refusal from the earlier summary."
-      }
+      "nodejs.org"
     ]
   },
-  "knownDefects": [
-    {
-      "id": "per-package-egress-not-enforced",
-      "severity": "high",
-      "what": "`packageNetwork` describes a package-identity gate on egress that nothing enforces. `preset::build_jail_net` compiles to `[\"$downloads\"]` for every jailed lifecycle spawn, so a package with NO catalog entry still reaches all 33 admitted hosts.",
-      "why": "Egress was global before the catalog recorded per-package need, and the data that makes a per-package gate possible only arrived with v2's corpus. Flipping it is a behavioral change, not a data change: every package the corpus did not name loses network, which is the intended design and needs its own measurement pass.",
-      "next": "Thread `package_name` into `build_jail_surface` so the net axis emits PackageNetwork::NoEntry as deny-all, a host list as those hosts, and Full as unrestricted. This is what makes the PR-submission contract real rather than aspirational, and it is the highest-value change the catalog now enables."
-    },
-    {
-      "id": "prisma-macos-artifact-unreproduced",
-      "severity": "low",
-      "what": "The macOS entry for `@prisma/client` records a 71282 B generated client carrying a per-run schema nonce. On the version the entry names (6.19.3) that artifact cannot be produced at all, on any platform, jailed or not.",
-      "why": "The postinstall's getLocalPackagePath() calls `require.resolve('prisma')`, which throws MODULE_NOT_FOUND on 6.19.3 (its `main` is build/index.js but resolution reaches build/types.js, which is not shipped), so `prisma generate` never runs and the script emits only throw-stubs. Verified directly on Linux with an UNCONFINED baseline. The macOS run must have had a resolvable CLI \u2014 an earlier 6.x, a workspace layout, or a global install.",
-      "next": "Re-run the macOS arm and record which version and layout produced the nonce-bearing client, or downgrade the macOS `observed` to the artifact that actually reproduces. The Linux conclusion is unaffected: it rests on granted being byte-identical to unconfined, which is a stronger control than artifact size."
-    },
-    {
-      "id": "literal-write-cannot-create-an-absent-dir",
-      "severity": "medium",
-      "what": "`projectWrites.literal` hits the same absent-path Landlock rule drop that `siblingDirs` did: with `<project>/.git/hooks` absent, the granted arm cannot create it. Measured on Landlock ABI 7 and pinned by a test so it cannot regress silently.",
-      "why": "Fixed for `siblingDirs` by materializing the directory during compilation, because that path is inside nub's own dependency tree. The same side effect inside a CONSUMER's `.git` is a different call and was deliberately not made here. In practice a real checkout always has `.git/hooks` (git creates it with samples), so the nine hook-installer grants work \u2014 `git-commit-msg-linter` is the one that explicitly mkdirs it when missing.",
-      "next": "Either materialize literal write targets too, scoped to directories the grant already covers, or accept the limitation and say so in the entry. Decide deliberately rather than by discovering it."
-    },
-    {
-      "id": "noop-grants-unreconciled",
-      "severity": "low",
-      "what": "@danmarshall/deckgl-typings and msw were each measured as a complete no-op even UNJAILED in a later corpus run, which does not square with the EPERM each grant was written against.",
-      "why": "For msw the two results are consistent \u2014 its postinstall is a no-op unless the consumer's manifest declares msw.workerDirectory, which a fixture that does not declare it never exercises. For @danmarshall/deckgl-typings there is no such explanation yet. Neither package is in the 230-package source-read corpus, so v2 adds no evidence.",
-      "next": "Re-run @danmarshall/deckgl-typings against a fixture that actually installs it as a dependency and check for the 20 copied type folders. Both grants are harmless if the no-op result is right \u2014 an unused grant confers nothing on a script that does nothing \u2014 so this is a tidiness defect, not a live risk."
-    },
-    {
-      "id": "system-paths-not-enforced",
-      "severity": "medium",
-      "what": "systemPaths is recorded and code-generated but not folded into build_jail_surface, so the 17 packages it covers still fail.",
-      "why": "Wiring it changes the granted read set on every platform and interacts with the backends' minimal-root closures. That is a measured change, not a data change, and v2 is the data.",
-      "next": "Fold compiler::system_read_paths() into the build-jail read set behind a differential on canvas and msnodesqlv8, which between them exercise pkg-config, ldconfig and the widest hardcoded path set in the corpus."
-    },
-    {
-      "id": "source-read-not-measured",
-      "severity": "medium",
-      "what": "Eleven of the fourteen packageGrants and most of the new networkHosts carry evidence:\"source-read\", not \"measured\". No install was run to confirm the grant fixes the break.",
-      "why": "Deliberate, and the reason is in failureModes: 34 of 230 packages fail SILENTLY, so an exit-code-based measurement structurally cannot see the failures that matter most. A measurement-only bar would have left every one of those uncovered. Source-read is the weaker evidence class and the `evidence` field says so on every entry that rests on it.",
-      "next": "Promote entries to measured opportunistically as the corpus harness gains a work signal that is not the exit code. Do not gate the grants on it \u2014 an unexercised grant costs nothing and a missing one breaks an install."
-    }
-  ],
-  "pathShapeNote": "`pathShape` on a host entry is PROVENANCE \u2014 what the package was observed to fetch \u2014 and NOT a gate. Nothing enforces it and nothing should be built to. The reason is the threat model: the defense the build jail actually provides is PACKAGE IDENTITY (a package with no catalog entry gets no egress, and one that needs egress arrives through a pull request), so narrowing an admitted host to a URL prefix would constrain a package somebody already reviewed while doing nothing about the unvetted package a worm just bolted a postinstall onto \u2014 which is the actual attack. The data is kept because it cost nothing to gather and it tells a reviewer what an entry was admitted FOR."
+  "@appsignal/nodejs": {
+    "network": true,
+    "hosts": [
+      "appsignal-agent-releases.global.ssl.fastly.net",
+      "d135dj0rjqvssy.cloudfront.net",
+      "nodejs.org"
+    ]
+  },
+  "@arkweid/lefthook": {
+    "project": "readwrite"
+  },
+  "@aws-amplify/cli": {
+    "network": true,
+    "hosts": [
+      "package.cli.amplify.aws"
+    ]
+  },
+  "@cdktf/node-pty-prebuilt-multiarch": {
+    "network": true,
+    "hosts": [
+      "github.com",
+      "nodejs.org"
+    ]
+  },
+  "@contrast/fn-inspect": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "@cubejs-backend/cubestore": {
+    "network": true,
+    "hosts": [
+      "api.github.com",
+      "github.com"
+    ]
+  },
+  "@cubejs-backend/native": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "@cypress/snapshot": {
+    "project": "readwrite"
+  },
+  "@danmarshall/deckgl-typings": {
+    "project": "readwrite"
+  },
+  "@discordjs/opus": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "@eversdk/lib-node": {
+    "network": true,
+    "hosts": [
+      "binaries.tonlabs.io"
+    ]
+  },
+  "@evilmartians/lefthook": {
+    "project": "readwrite"
+  },
+  "@ghaiklor/x509": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "@matteodisabatino/gc_info": {
+    "network": true,
+    "hosts": [
+      "github.com",
+      "nodejs.org"
+    ]
+  },
+  "@nativescript/core": {
+    "project": "readwrite"
+  },
+  "@netlify/esbuild": {
+    "network": true,
+    "hosts": [
+      "registry.npmjs.org"
+    ]
+  },
+  "@newrelic/native-metrics": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "@notarize/qlc-cli": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "@pact-foundation/pact-node": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "@percy/core": {
+    "network": true,
+    "hosts": [
+      "storage.googleapis.com"
+    ]
+  },
+  "@prisma/client": {
+    "project": "readwrite"
+  },
+  "@prisma/engines": {
+    "network": true,
+    "hosts": [
+      "binaries.prisma.sh"
+    ]
+  },
+  "@railway/cli": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "@sematext/gc-stats": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "@serialport/bindings": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "@shopify/ngrok": {
+    "network": true,
+    "hosts": [
+      "bin.equinox.io"
+    ]
+  },
+  "@sitespeed.io/chromedriver": {
+    "network": true,
+    "hosts": [
+      "storage.googleapis.com"
+    ]
+  },
+  "@sitespeed.io/edgedriver": {
+    "network": true,
+    "hosts": [
+      "msedgedriver.microsoft.com"
+    ]
+  },
+  "@trufflesuite/bigint-buffer": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "@typescript-tools/rust-implementation": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "@vscode/sqlite3": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "abstract-socket": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "applicationinsights-native-metrics": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "argon2": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "aws-crt": {
+    "network": true,
+    "hosts": [
+      "d332vdhbectycy.cloudfront.net",
+      "registry.npmjs.org"
+    ]
+  },
+  "azure-streamanalytics-cicd": {
+    "network": true,
+    "hosts": [
+      "usqldownload.blob.core.windows.net"
+    ]
+  },
+  "better-sqlite3": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "blake-hash": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "bufferutil": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "canvas": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "chromium": {
+    "network": true,
+    "hosts": [
+      "www.googleapis.com"
+    ]
+  },
+  "classic-level": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "cldr-data": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "cmark-gfm": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "contextify": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "couchbase": {
+    "network": true,
+    "hosts": [
+      "registry.npmjs.org"
+    ]
+  },
+  "cypress": {
+    "network": true,
+    "hosts": [
+      "cdn.cypress.io",
+      "download.cypress.io"
+    ]
+  },
+  "deasync": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "diskusage": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "drivelist": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "duckdb": {
+    "network": true,
+    "hosts": [
+      "npm.duckdb.org"
+    ]
+  },
+  "eccrypto": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "edgedriver": {
+    "network": true,
+    "hosts": [
+      "edgeupdates.microsoft.com",
+      "msedgedriver.microsoft.com",
+      "msedgewebdriverstorage.blob.core.windows.net"
+    ]
+  },
+  "electron-prebuilt": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "event-loop-stats": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "exifreader": {
+    "network": true,
+    "hosts": [
+      "registry.npmjs.org"
+    ]
+  },
+  "ffi": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "ffi-napi": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "fibers": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "free-email-domains": {
+    "network": true,
+    "hosts": [
+      "f.hubspotusercontent40.net",
+      "raw.githubusercontent.com"
+    ]
+  },
+  "fs-xattr": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "gc-stats": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "gcstats.js": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "ghooks": {
+    "project": "readwrite"
+  },
+  "gif2webp-bin": {
+    "network": true,
+    "hosts": [
+      "raw.github.com"
+    ]
+  },
+  "git-commit-msg-linter": {
+    "project": "readwrite"
+  },
+  "git-validate": {
+    "project": "readwrite"
+  },
+  "gl": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "grpc": {
+    "network": true,
+    "hosts": [
+      "node-precompiled-binaries.grpc.io",
+      "nodejs.org"
+    ]
+  },
+  "grpc-tools": {
+    "network": true,
+    "hosts": [
+      "node-precompiled-binaries.grpc.io"
+    ]
+  },
+  "handbrake-js": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "hasura-cli": {
+    "network": true
+  },
+  "heapdump": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "hiredis": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "hnswlib-node": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "hummus": {
+    "network": true,
+    "hosts": [
+      "hummus.s3-us-west-2.amazonaws.com"
+    ]
+  },
+  "iconv": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "install-artifact-from-github": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "interruptor": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "java": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "jpeg-recompress-bin": {
+    "network": true,
+    "hosts": [
+      "raw.github.com"
+    ]
+  },
+  "jpegtran-bin": {
+    "network": true,
+    "hosts": [
+      "raw.githubusercontent.com"
+    ]
+  },
+  "keccak": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "kerberos": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "keytar": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "libpq": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "libxmljs": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "libxmljs2": {
+    "network": true,
+    "hosts": [
+      "github.com",
+      "nodejs.org"
+    ]
+  },
+  "lmdb-store": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "lz4": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "lzma-native": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "lzo": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "macos-alias": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "mbt": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "microtime": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "mmmagic": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "modern-syslog": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "mongodb-client-encryption": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "mongodb-crypt-library-dummy": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "mongodb-crypt-library-version": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "msgpackr-extract": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "msnodesqlv8": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "msw": {
+    "project": "readwrite"
+  },
+  "muhammara": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "ngrok": {
+    "network": true,
+    "hosts": [
+      "bin.equinox.io"
+    ]
+  },
+  "nice-napi": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "node": {
+    "network": true,
+    "hosts": [
+      "registry.npmjs.org"
+    ]
+  },
+  "node-expat": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "node-jq": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "node-libcurl": {
+    "network": true,
+    "hosts": [
+      "github.com",
+      "nodejs.org"
+    ]
+  },
+  "node-mac-contacts": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "node-rdkafka": {
+    "network": true,
+    "hosts": [
+      "globalcdn.nuget.org",
+      "nodejs.org"
+    ]
+  },
+  "node-webcrypto-ossl": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "node-zopfli": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "node-zopfli-es": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "nodegit": {
+    "network": true,
+    "hosts": [
+      "axonodegit.s3.amazonaws.com",
+      "nodejs.org"
+    ]
+  },
+  "nodejieba": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "oniguruma": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "os-dns-native": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "pkcs11js": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "pngout-bin": {
+    "network": true,
+    "hosts": [
+      "raw.github.com"
+    ]
+  },
+  "pngquant-bin": {
+    "network": true,
+    "hosts": [
+      "raw.githubusercontent.com"
+    ]
+  },
+  "posix": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "pprof": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "pre-commit": {
+    "project": "readwrite"
+  },
+  "pre-push": {
+    "project": "readwrite"
+  },
+  "puppeteer": {
+    "network": true,
+    "hosts": [
+      "googlechromelabs.github.io",
+      "storage.googleapis.com"
+    ]
+  },
+  "purescript": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "re2": {
+    "network": true,
+    "hosts": [
+      "github.com",
+      "nodejs.org"
+    ]
+  },
+  "redis-memory-server": {
+    "network": true
+  },
+  "ref": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "ref-napi": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "registry-js": {
+    "network": true,
+    "hosts": [
+      "github.com",
+      "nodejs.org"
+    ]
+  },
+  "robotjs": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "sauce-connect-launcher": {
+    "network": true,
+    "hosts": [
+      "saucelabs.com"
+    ]
+  },
+  "saucectl": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "segfault-handler": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "shared-git-hooks": {
+    "project": "readwrite"
+  },
+  "sleep": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "sockopt": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "spellchecker": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "sse4_crc32": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "tldjs": {
+    "network": true,
+    "hosts": [
+      "publicsuffix.org"
+    ]
+  },
+  "tree-sitter": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "tree-sitter-bash": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "tree-sitter-json": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "tree-sitter-kotlin": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "tree-sitter-typescript": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "tree-sitter-yaml": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "ttf2woff2": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "unix-dgram": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "ursa-optional": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "v8-profiler-next": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "wdeasync": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "weak-napi": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "windows-build-tools": {
+    "network": true,
+    "hosts": [
+      "download.microsoft.com",
+      "download.visualstudio.microsoft.com",
+      "www.python.org"
+    ]
+  },
+  "xxhash": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "yorkie": {
+    "project": "readwrite"
+  },
+  "zeromq": {
+    "network": true,
+    "hosts": [
+      "github.com"
+    ]
+  },
+  "zlib-sync": {
+    "network": true,
+    "hosts": [
+      "nodejs.org"
+    ]
+  },
+  "zopflipng-bin": {
+    "network": true,
+    "hosts": [
+      "raw.github.com"
+    ]
+  }
 }

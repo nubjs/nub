@@ -338,6 +338,39 @@ pub fn grant_build_jail_dependency_reads(
     policy.fs.rules.entries.splice(0..0, grants);
 }
 
+/// Grant READ on the system library and header paths a native build compiles against — a BASE
+/// grant for every jailed script, not a per-package carve-out.
+///
+/// The argument for base-granting rather than enumerating per package is at
+/// [`super::system_paths`], and it is worth restating the security half here because this
+/// function is where the read set actually widens: **a system library path holds no
+/// victim-specific information.** A hijacked package that reads `/usr/lib/libssl.so` learns
+/// nothing it could not have got by vendoring its own copy of the header, and the jail already
+/// base-grants the interpreter — so base-granting the headers you compile against is the
+/// consistent choice rather than a concession. The paths are library SUBPATHS only (never a
+/// package-manager prefix root, which would drag in `etc/` service config and `var/` live
+/// databases) and the access is READ.
+///
+/// SPECULATIVE origin, and this is the part that is easy to get wrong: most of these roots are
+/// legitimately absent on a real host — a machine with no Homebrew, no Xcode SDK, no ODBC
+/// driver — and `compile_mount_plan` REFUSES a missing AUTHORED source. Authoring them into
+/// [`build_jail_surface`]'s object instead would therefore abort every confined script on a
+/// host that happens not to have one of them installed. Same reasoning, same origin, as
+/// [`grant_build_jail_dependency_reads`].
+///
+/// Front-inserted so the surface's `package_dir` rw entry stays later and keeps winning under
+/// last-match-wins.
+pub fn grant_build_jail_system_reads(name: &str, policy: &mut SandboxPolicy) {
+    if name != "build-jail" {
+        return;
+    }
+    let mut grants = Vec::new();
+    for path in super::system_paths::system_read_paths() {
+        push_read_path(&mut grants, &path, FsOrigin::Speculative);
+    }
+    policy.fs.rules.entries.splice(0..0, grants);
+}
+
 /// The nearest ancestor of `package_dir` named `node_modules`. That is the directory a
 /// lifecycle script's own dependency closure and `.bin` shims are installed into,
 /// whichever linker placed it.
@@ -498,17 +531,13 @@ pub fn compile_build_jail(
     // `compile_scope`'s preset branch.
     let mut policy = compile(&surface, &ctx)?;
     grant_build_jail_dependency_reads("build-jail", &mut policy, &ctx, Some(package_dir));
+    grant_build_jail_system_reads("build-jail", &mut policy);
     grant_build_jail_interpreter("build-jail", &mut policy, &ctx);
     grant_build_jail_extra_reads(&mut policy, &extra_reads);
     // LAST of the grants, so a curated rw wins under last-match-wins over the
     // front-inserted dependency-tree READ it nests inside. `ctx.homes.project` is the
     // consumer's project root, which aube guarantees whenever it hands over a name.
-    super::curated::grant_curated_package(
-        &mut policy,
-        &ctx.homes.project,
-        package_dir,
-        package_name,
-    );
+    super::curated::grant_curated_package(&mut policy, &ctx.homes.project, package_name);
     enforce_pure_allowlist("build-jail", &mut policy);
     policy.env = defaults::lifecycle_scrubbed_env(&ambient_env);
     policy.build_jail = true;
@@ -631,7 +660,10 @@ mod tests {
     /// Asserted as the WRITE decision specifically. `.prisma` sits inside the enclosing
     /// `node_modules` read grant, so an ordering bug leaves it readable-but-unwritable —
     /// which is exactly the `EPERM … mkdir` the exception exists to remove, and is
-    /// invisible to a rule-presence check.
+    /// invisible to a rule-presence check. It stays the exemplar after the schema migration
+    /// because it is the path the three-stage Linux+macOS measurement was taken against; what
+    /// changed is that the grant reaching it is now the project tree rather than an enumerated
+    /// sibling name.
     #[test]
     fn a_curated_exception_is_wired_into_the_production_path_and_wins_the_write() {
         use crate::matcher::PathMatcher;
@@ -667,20 +699,90 @@ mod tests {
             writable(&named, sibling),
             "the curated sibling must be WRITABLE, not merely inside the dependency read"
         );
-        // Two controls, because "writable" alone would also hold for a compiler that made
-        // the whole enclosing node_modules writable — which is the `.bin`/virtual-store
-        // hazard the enumerated form exists to avoid.
-        assert!(
-            !writable(
-                &named,
-                Path::new("/proj/node_modules/.store/@prisma+client@6/node_modules/.bin/x")
-            ),
-            "the exception must not widen the enclosing node_modules"
-        );
+        // The control that still discriminates. `project: "readwrite"` DELIBERATELY includes
+        // `node_modules` (and therefore `.bin` and the virtual store) — that is what the
+        // enumerated `siblingDirs` field was replaced BY, and the tradeoff is argued at
+        // `curated`'s module docs — so the old "must not widen node_modules" control is now
+        // false by design. What must still hold is that the grant is the PROJECT and not the
+        // machine: a path outside the project root stays unwritable even for a granted package.
+        for outside in ["/testhome/.ssh/id_rsa", "/testhome/other/x", "/etc/x"] {
+            assert!(
+                !writable(&named, Path::new(outside)),
+                "a curated grant is the project tree, not the disk: {outside} became writable"
+            );
+        }
         assert!(
             !writable(&compile(None), sibling),
             "an unnamed spawn (a fetched checkout) gets no exception"
         );
+        // And the grant is the reason, not the baseline: the same path is unwritable without a
+        // name, so the assertion above is the TABLE firing rather than the jail being loose.
+        assert!(!writable(&compile(Some("evil")), sibling));
+    }
+
+    /// THE COST OF A PROJECT GRANT, PINNED SO IT CANNOT CHANGE BY ACCIDENT: a granted package
+    /// reaches the consumer's `.env`, `.npmrc` and `.git/config`.
+    ///
+    /// This is not a floor being broken, and getting that straight matters. The `.env*`/`.npmrc`
+    /// deny band is already INERT in the build jail — `enforce_pure_allowlist` strips every deny
+    /// (§0b.1), so those files are protected by NOT BEING GRANTED rather than by a rule. The
+    /// settled schema's `project` field grants the project tree, so for the fourteen listed
+    /// packages that protection is what it always was for anything inside a granted subtree:
+    /// gone. The exception cannot be expressed either — withholding one file from inside a
+    /// granted subtree is the deny-in-grant shape neither Landlock nor Windows AppContainer can
+    /// represent, which is why the pure allowlist exists in the first place.
+    ///
+    /// So this test asserts the exposure rather than the absence of one, and its CONTROL is the
+    /// ungranted arm: an unlisted package still cannot read any of them, which is what keeps
+    /// this a per-package cost paid by reviewed packages instead of a hole in the jail.
+    #[test]
+    fn a_project_grant_reaches_the_consumers_secret_files_and_an_unlisted_package_does_not() {
+        use crate::matcher::PathMatcher;
+
+        let homes = Homes {
+            home: PathBuf::from("/testhome"),
+            tmp: PathBuf::from("/testtmp"),
+            cache: PathBuf::from("/testhome/.cache"),
+            project: PathBuf::from("/proj"),
+        };
+        let package_dir = PathBuf::from("/proj/node_modules/.store/ghooks@2/node_modules/ghooks");
+        let compile = |name: Option<&str>| {
+            compile_build_jail(
+                homes.clone(),
+                &package_dir,
+                name,
+                Vec::new(),
+                Vec::new(),
+                BTreeMap::new(),
+            )
+            .expect("build-jail compiles")
+        };
+        let granted = compile(Some("ghooks"));
+        let unlisted = compile(Some("evil"));
+        for secret in [
+            "/proj/.env",
+            "/proj/.env.local",
+            "/proj/.npmrc",
+            "/proj/.git/config",
+        ] {
+            let path = Path::new(secret);
+            assert!(
+                matches!(
+                    PathMatcher::new(&granted.fs.rules).decide(path).effect,
+                    Effect::Allow
+                ),
+                "a project grant reaches {secret} — if this now DENIES, the deny-in-grant shape \
+                 became expressible and the tradeoff at `curated`'s module docs should be revisited"
+            );
+            assert!(
+                matches!(
+                    PathMatcher::new(&unlisted.fs.rules).decide(path).effect,
+                    Effect::Deny
+                ),
+                "an UNLISTED package must not reach {secret} — this control is what makes the \
+                 exposure above a per-package cost rather than a hole in the jail"
+            );
+        }
     }
 
     /// One build-jail compile against REAL directories, so `private_home_dir` materializes.
