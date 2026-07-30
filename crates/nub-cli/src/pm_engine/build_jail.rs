@@ -242,6 +242,17 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             extra_reads.extend(python.reads);
         }
 
+        // WINDOWS: node-gyp's THIRD out-of-jail toolchain dependency, and the only one whose
+        // discovery an AppContainer cannot perform at all — it activates a COM server, which
+        // no filesystem grant reaches and no unprivileged permission opens. Pre-resolved out
+        // here and handed over as the env trio `findVisualStudio` short-circuits on; see
+        // [`super::jail_msvc`] for why the trio is stamped as a unit.
+        #[cfg(windows)]
+        if let Some(msvc) = super::jail_msvc::resolve(&ambient, &spawn, &probe) {
+            msvc.stamp(&mut ambient);
+            extra_reads.extend(msvc.reads);
+        }
+
         // PREFETCH — the same move `npm_config_nodedir` makes above, applied to the
         // package's own prebuilt binary: resolve the artifact out here, land it on the
         // path the installer checks before it opens a socket, and the confined script
@@ -1044,7 +1055,10 @@ const PYTHON_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// Collect `child`'s stdout, killing it if it outlives `timeout`. The reader runs on its
 /// own thread because a child that fills the pipe blocks until someone drains it — polling
 /// `try_wait` alone would deadlock against exactly the hang this bounds.
-fn read_bounded(child: &mut std::process::Child, timeout: std::time::Duration) -> Option<Vec<u8>> {
+pub(super) fn read_bounded(
+    child: &mut std::process::Child,
+    timeout: std::time::Duration,
+) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut pipe = child.stdout.take()?;
     let reader = std::thread::spawn(move || {
