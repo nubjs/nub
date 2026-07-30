@@ -517,13 +517,14 @@ OPENABLE under an ORDINARY `%TEMP%`/profile tree with no `C:\`-owned store (VM-v
   a narrower Windows jail, or not confining the operations that need the walk. A residual is
   acceptable here; requiring privilege is not.
 
-- **THE CAUSE IS DISCRETIONARY, AND A RESTRICTED TOKEN DOES NOT SHARE IT (measured).** Everything
-  above describes the AppContainer, and it is not a Windows limit — it is a consequence of the
-  PRINCIPAL. A per-run AppContainer profile gets a brand-new sid that appears in no existing DACL,
-  so nothing is readable until nub writes an ace. A restricted token keeps the user's OWN sid, so
-  the DACLs that already grant that user read still apply. Measured by `AccessCheck` on both a
-  Windows 11 Enterprise 25H2 workstation and Server 2025, identical, with an unmodified-token
-  baseline GRANTED throughout:
+- **THE CAUSE IS THE APPCONTAINER'S SECOND GATE, AND A RESTRICTED TOKEN DOES NOT HAVE IT
+  (measured).** Everything above describes the AppContainer, and it is not a Windows limit on
+  unprivileged directory reads. A LowBox token is access-checked TWICE: the ordinary DACL check,
+  plus a gate requiring the DACL to grant the user AND either the package sid or a held capability.
+  The second gate is what fails, and no ace nub can write above `%USERPROFILE%` satisfies it. A
+  restricted token simply does not carry that gate. Measured by `AccessCheck` on both a Windows 11
+  Enterprise 25H2 workstation and Server 2025, identical, with an unmodified-token baseline GRANTED
+  throughout:
 
   | token | read `C:\` / `C:\Users` / profile | write `C:\` | write profile | write project |
   | --- | --- | --- | --- | --- |
@@ -534,6 +535,17 @@ OPENABLE under an ORDINARY `%TEMP%`/profile tree with no `C:\`-owned store (VM-v
   Reads succeed with NO ace written anywhere, which dissolves the ancestor problem: `realpathSync`,
   `process.cwd()`, the `find-up`/`cosmiconfig` upward walks and `_nodeModulePaths` probing are all
   reads. Integrity then supplies the write fence that the AppContainer's DACL grants were doing.
+
+  **It is NOT that the AppContainer sid "is in no DACL" while a restricted token "keeps the user's
+  sid" — that framing was mine and it is wrong.** A LowBox token retains the base token's user sid
+  (asserted in Chromium's `app_container_unittest.cc`), and it can be built ON a restricted base via
+  `NtCreateLowBoxToken`. Measured in both construction orders, the composed token is denied exactly
+  where a plain LowBox token is: the gate is not bypassed by the base's sid. So the two mechanisms
+  compose structurally and buy nothing, which means Windows forces a CHOICE — coarse egress-deny
+  (an AppContainer withholding `internetClient`) or ancestor reads (a restricted token), not both.
+  Job objects are not a third option: their only network knob is bandwidth shaping plus a DSCP tag,
+  with no deny. One untested candidate remains, `CreateRestrictedToken`'s `SidsToRestrict`, which
+  could deny `\Device\Afd` while leaving `C:\` readable — unmeasured, and a hypothesis only.
 
   Three things this does NOT establish, kept explicit because a green table invites over-reading:
   low integrity denies EVERY write including the project dir, and since the mandatory check runs
