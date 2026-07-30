@@ -1,0 +1,57 @@
+# Branch-scoped Windows probe (see .claude/skills/ci-adhoc-test) — NO PR needed.
+# Pushing to the busybox-lifecycle-shell branch runs this on a real
+# windows-latest runner. It builds one nub and drives the same dependency
+# postinstall fixtures twice, with `busybox.exe` staged next to nub.exe and
+# without it — the sidecar's presence is the only variable, and its absence
+# reproduces the pre-change cmd.exe behavior exactly.
+name: busybox-lifecycle-probe
+on:
+  push:
+    branches: [busybox-lifecycle-shell]
+    paths:
+      - 'tests/busybox-lifecycle-probe/**'
+      - '.github/workflows/busybox-lifecycle-probe.yml'
+      - 'crates/nub-cli/src/pm_engine/mod.rs'
+      - 'crates/nub-cli/src/cli.rs'
+      - 'vendor/aube/crates/aube-scripts/**'
+      - 'vendor/aube/crates/aube-util/src/engine_context.rs'
+      - 'vendor/busybox-w32/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: busybox dependency lifecycle (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: busybox-lifecycle-probe
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: 24
+          cache: 'npm'
+      # Root deps + the nub-native addon, mirroring ci.yml's Windows test leg —
+      # the install path resolves the augmentation preload through them.
+      - run: npm ci
+      - name: Build nub-native addon
+        shell: bash
+        run: |
+          (cd crates/nub-native && cargo build)
+          mkdir -p runtime/addons
+          cp target/debug/nub_native.dll runtime/addons/nub-native.node
+      - name: Build nub
+        run: cargo build -p nub-cli
+      # The probe stages and un-stages target/debug/busybox.exe itself, so it is
+      # deliberately NOT copied here.
+      - name: Probe dependency lifecycle shell (differential)
+        shell: bash
+        run: |
+          node tests/busybox-lifecycle-probe/run-probe.mjs \
+            target/debug/nub.exe "$RUNNER_TEMP/bblp" vendor/busybox-w32/busybox64.exe

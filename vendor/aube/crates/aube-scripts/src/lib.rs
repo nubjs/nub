@@ -43,6 +43,12 @@ use std::path::{Path, PathBuf};
 pub struct ScriptSettings {
     pub node_options: Option<String>,
     pub script_shell: Option<PathBuf>,
+    /// Embedder-supplied replacement for the PLATFORM DEFAULT shell, consulted
+    /// only when [`Self::script_shell`] is unset (an explicit user
+    /// `script-shell` always wins). Copied verbatim from
+    /// [`aube_util::EngineContext::default_script_shell`]; `None` keeps aube's
+    /// own default (`sh -c`, or `cmd.exe /d /s /c` on Windows).
+    pub default_shell: Option<aube_util::ScriptShell>,
     pub unsafe_perm: Option<bool>,
     pub shell_emulator: bool,
     /// Directory of the project's resolved Node runtime, prepended to
@@ -303,9 +309,54 @@ pub fn prepend_paths(bin_dirs: &[PathBuf]) -> std::ffi::OsString {
     std::env::join_paths(entries).unwrap_or(path)
 }
 
+/// How a script body is handed to its shell. Resolved from
+/// [`ScriptSettings`] by [`resolve_shell`], which is the single source of truth
+/// the spawn AND [`shell_quote_arg`] both read — quoting the body for one
+/// dialect and parsing it with another is a silent-wrong-command bug, so the
+/// two are derived from one place rather than each deciding by `cfg`.
+enum ShellInvocation {
+    /// `<program> <args…> <body>`, the body a single argv element. `args` is
+    /// `["-c"]` for a plain shell and `["sh", "-c"]` for a multi-call binary
+    /// that dispatches on an applet name (busybox).
+    Args { program: PathBuf, args: Vec<String> },
+    /// `cmd.exe /d /s /c "<body>"`, built with `raw_arg` — see
+    /// [`spawn_shell`].
+    #[cfg(windows)]
+    CmdRaw,
+}
+
+/// Precedence: the user's explicit `script-shell` → an embedder's replacement
+/// default ([`ScriptSettings::default_shell`]) → aube's platform default.
+fn resolve_shell(settings: &ScriptSettings) -> ShellInvocation {
+    if let Some(shell) = settings.script_shell.as_deref() {
+        return ShellInvocation::Args {
+            program: shell.to_path_buf(),
+            args: vec!["-c".to_string()],
+        };
+    }
+    if let Some(spec) = &settings.default_shell {
+        return ShellInvocation::Args {
+            program: spec.program.clone(),
+            args: spec.args.clone(),
+        };
+    }
+    #[cfg(windows)]
+    {
+        ShellInvocation::CmdRaw
+    }
+    #[cfg(not(windows))]
+    {
+        ShellInvocation::Args {
+            program: PathBuf::from("sh"),
+            args: vec!["-c".to_string()],
+        }
+    }
+}
+
 /// Spawn a shell command line. On Unix we go through `sh -c`, on
 /// Windows through `cmd.exe /d /s /c` — matching what npm passes in
-/// `@npmcli/run-script`.
+/// `@npmcli/run-script` — unless an embedder supplied a replacement default
+/// ([`ScriptSettings::default_shell`]) or the user set `script-shell`.
 ///
 /// On Windows, the script command line is appended with
 /// [`std::os::windows::process::CommandExt::raw_arg`] instead of
@@ -348,31 +399,22 @@ fn spawn_shell_with_settings(
     script_cmd: &str,
     settings: &ScriptSettings,
 ) -> tokio::process::Command {
-    #[cfg(unix)]
-    let mut cmd = {
-        let mut cmd = tokio::process::Command::new(
-            settings
-                .script_shell
-                .as_deref()
-                .unwrap_or_else(|| Path::new("sh")),
-        );
-        cmd.arg("-c").arg(script_cmd);
-        cmd
-    };
-    #[cfg(windows)]
-    let mut cmd = {
-        let mut cmd = tokio::process::Command::new(
-            settings
-                .script_shell
-                .as_deref()
-                .unwrap_or_else(|| Path::new("cmd.exe")),
-        );
-        if settings.script_shell.is_some() {
-            cmd.arg("-c").arg(script_cmd);
-        } else {
-            cmd.raw_arg(cmd_exe_command_tail(script_cmd));
+    let mut cmd = match resolve_shell(settings) {
+        ShellInvocation::Args { program, args } => {
+            let mut cmd = tokio::process::Command::new(program);
+            cmd.args(args).arg(script_cmd);
+            cmd
         }
-        cmd
+        #[cfg(windows)]
+        ShellInvocation::CmdRaw => {
+            let mut cmd = tokio::process::Command::new("cmd.exe");
+            // `/d` skips AutoRun, `/s` flips the quote-stripping rule
+            // so only the *outer* `"..."` pair is removed, `/c` runs
+            // the command and exits. Build the raw argv tail manually
+            // so cmd.exe sees the original script bytes.
+            cmd.raw_arg("/d /s /c \"").raw_arg(script_cmd).raw_arg("\"");
+            cmd
+        }
     };
     apply_script_settings_env(&mut cmd, settings);
     // Dropping the spawned `Child` without `kill_on_drop` would leave the shell
@@ -444,17 +486,16 @@ fn spawn_jailed_shell(
     jail: &ScriptJail,
     home: &Path,
 ) -> tokio::process::Command {
-    let shell = settings
-        .script_shell
-        .as_deref()
-        .unwrap_or_else(|| Path::new("sh"));
+    // Same shell resolution as the unjailed path, just re-hosted under
+    // `sandbox-exec` — `CmdRaw` is unreachable here (macOS-only fn).
+    let ShellInvocation::Args { program, args } = resolve_shell(settings);
     let profile = jail_profile(jail, home);
     let mut cmd = tokio::process::Command::new("/usr/bin/sandbox-exec");
     cmd.arg("-p")
         .arg(profile)
         .arg("--")
-        .arg(shell)
-        .arg("-c")
+        .arg(program)
+        .args(args)
         .arg(script_cmd);
     apply_script_settings_env(&mut cmd, settings);
     // Matches the unjailed path — see `spawn_shell_with_settings`.
@@ -516,68 +557,98 @@ fn spawn_jailed_shell(
 /// interior " and backslash per CommandLineToArgvW. Full cmd.exe
 /// metachar caret-escaping is a rabbit hole, so this is best-effort,
 /// works for the common cases, matches what node's shell-quote does.
+///
+/// The dialect follows the RESOLVED shell, not the target platform: on Windows
+/// an embedder can replace the default with a POSIX shell, and cmd-quoting an
+/// arg a POSIX shell then reparses corrupts it — `%` doubles to `%%`, while a
+/// `$var` or a backtick command substitution stays live inside the double
+/// quotes cmd-quoting emits instead of arriving as the literal the user typed.
+/// Both dialects are compiled on every platform so each stays testable.
 pub fn shell_quote_arg(arg: &str) -> String {
-    #[cfg(unix)]
-    {
-        let mut out = String::with_capacity(arg.len() + 2);
-        out.push('\'');
-        for ch in arg.chars() {
-            if ch == '\'' {
-                out.push_str("'\\''");
-            } else {
+    shell_quote_arg_with_settings(arg, &script_settings())
+}
+
+fn shell_quote_arg_with_settings(arg: &str, settings: &ScriptSettings) -> String {
+    match resolve_shell(settings) {
+        ShellInvocation::Args { ref program, .. } if !is_cmd_program(program) => quote_posix(arg),
+        _ => quote_cmd(arg),
+    }
+}
+
+/// Does this program name invoke `cmd.exe`? Mirrors npm's
+/// `/(?:^|\\)cmd(?:\.exe)?$/i`, so a user `script-shell` of `bash` selects
+/// POSIX quoting while an explicit `cmd` still selects cmd quoting. Splits on
+/// both separators by hand rather than using `Path::file_name`, which does not
+/// treat `\` as one off Windows — a Windows path reaching this on any host
+/// (a settings snapshot in a test, a cross-platform fixture) must still resolve
+/// to its last component.
+fn is_cmd_program(program: &Path) -> bool {
+    let Some(path) = program.to_str() else {
+        return false;
+    };
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    name.eq_ignore_ascii_case("cmd") || name.eq_ignore_ascii_case("cmd.exe")
+}
+
+fn quote_posix(arg: &str) -> String {
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('\'');
+    for ch in arg.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+fn quote_cmd(arg: &str) -> String {
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    let mut backslashes: usize = 0;
+    for ch in arg.chars() {
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                for _ in 0..backslashes * 2 + 1 {
+                    out.push('\\');
+                }
+                out.push('"');
+                backslashes = 0;
+            }
+            // cmd.exe expands %VAR% even inside double quotes.
+            // Outer `/s /c "..."` only strips the outermost
+            // quote pair, the shell still runs env expansion
+            // on the body. Argument like `%COMSPEC%` would
+            // otherwise get replaced with the shell path
+            // before the child saw it. Double the percent so
+            // cmd passes a literal `%` through. Full
+            // caret-escaping of `^ & | < > ( )` is a deeper
+            // rabbit hole, this handles the common injection
+            // vector.
+            '%' => {
+                for _ in 0..backslashes {
+                    out.push('\\');
+                }
+                backslashes = 0;
+                out.push_str("%%");
+            }
+            _ => {
+                for _ in 0..backslashes {
+                    out.push('\\');
+                }
+                backslashes = 0;
                 out.push(ch);
             }
         }
-        out.push('\'');
-        out
     }
-    #[cfg(windows)]
-    {
-        let mut out = String::with_capacity(arg.len() + 2);
-        out.push('"');
-        let mut backslashes: usize = 0;
-        for ch in arg.chars() {
-            match ch {
-                '\\' => backslashes += 1,
-                '"' => {
-                    for _ in 0..backslashes * 2 + 1 {
-                        out.push('\\');
-                    }
-                    out.push('"');
-                    backslashes = 0;
-                }
-                // cmd.exe expands %VAR% even inside double quotes.
-                // Outer `/s /c "..."` only strips the outermost
-                // quote pair, the shell still runs env expansion
-                // on the body. Argument like `%COMSPEC%` would
-                // otherwise get replaced with the shell path
-                // before the child saw it. Double the percent so
-                // cmd passes a literal `%` through. Full
-                // caret-escaping of `^ & | < > ( )` is a deeper
-                // rabbit hole, this handles the common injection
-                // vector.
-                '%' => {
-                    for _ in 0..backslashes {
-                        out.push('\\');
-                    }
-                    backslashes = 0;
-                    out.push_str("%%");
-                }
-                _ => {
-                    for _ in 0..backslashes {
-                        out.push('\\');
-                    }
-                    backslashes = 0;
-                    out.push(ch);
-                }
-            }
-        }
-        for _ in 0..backslashes * 2 {
-            out.push('\\');
-        }
-        out.push('"');
-        out
+    for _ in 0..backslashes * 2 {
+        out.push('\\');
     }
+    out.push('"');
+    out
 }
 
 /// Translate child ExitStatus to a parent exit code.
@@ -2375,6 +2446,134 @@ mod windows_job_object_tests {
         assert!(
             reaped,
             "grandchild pid {pid} survived parent abort — job object did not kill the tree"
+        );
+    }
+}
+
+#[cfg(test)]
+mod shell_resolution_tests {
+    use super::*;
+
+    fn busybox() -> aube_util::ScriptShell {
+        aube_util::ScriptShell {
+            program: PathBuf::from(r"C:\nub\busybox.exe"),
+            args: vec!["sh".to_string(), "-c".to_string()],
+        }
+    }
+
+    fn invocation(settings: &ScriptSettings) -> (String, Vec<String>) {
+        match resolve_shell(settings) {
+            ShellInvocation::Args { program, args } => {
+                (program.to_string_lossy().into_owned(), args)
+            }
+            #[cfg(windows)]
+            ShellInvocation::CmdRaw => ("cmd.exe".to_string(), vec!["/d /s /c".to_string()]),
+        }
+    }
+
+    /// The embedder default replaces the PLATFORM default and carries its own
+    /// leading args, so a multi-call binary gets its applet name — `busybox.exe
+    /// -c <body>` is not a valid invocation and would fail to select `sh`.
+    #[test]
+    fn embedder_default_supplies_program_and_applet_args() {
+        let settings = ScriptSettings {
+            default_shell: Some(busybox()),
+            ..Default::default()
+        };
+        assert_eq!(
+            invocation(&settings),
+            (
+                r"C:\nub\busybox.exe".to_string(),
+                vec!["sh".to_string(), "-c".to_string()]
+            )
+        );
+    }
+
+    /// A user's `script-shell` outranks the embedder default — the embedder
+    /// replaces what aube would have picked, never what the user asked for.
+    #[test]
+    fn user_script_shell_outranks_the_embedder_default() {
+        let settings = ScriptSettings {
+            script_shell: Some(PathBuf::from("/bin/dash")),
+            default_shell: Some(busybox()),
+            ..Default::default()
+        };
+        assert_eq!(
+            invocation(&settings),
+            ("/bin/dash".to_string(), vec!["-c".to_string()])
+        );
+    }
+
+    /// Default-empty settings keep aube's own platform default, so standalone
+    /// aube is unaffected by the seam existing.
+    #[test]
+    fn unset_settings_keep_the_platform_default() {
+        let (program, args) = invocation(&ScriptSettings::default());
+        if cfg!(windows) {
+            assert_eq!(
+                (program.as_str(), args[0].as_str()),
+                ("cmd.exe", "/d /s /c")
+            );
+        } else {
+            assert_eq!((program.as_str(), args[0].as_str()), ("sh", "-c"));
+        }
+    }
+
+    /// The leading-args form has to survive an actual spawn, not just
+    /// `resolve_shell`. `/usr/bin/env` is a stand-in for busybox with the same
+    /// shape — a program that takes a command name and then `-c` — so dropping
+    /// or reordering `args` fails here the same way `busybox.exe -c <body>`
+    /// fails on Windows, the one platform this suite cannot run.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn embedder_default_leading_args_survive_a_real_spawn() {
+        let settings = ScriptSettings {
+            default_shell: Some(aube_util::ScriptShell {
+                program: PathBuf::from("/usr/bin/env"),
+                args: vec!["sh".to_string(), "-c".to_string()],
+            }),
+            ..Default::default()
+        };
+        let out = spawn_shell_with_settings("echo \"ok=${X:-1}\"", &settings)
+            .output()
+            .await
+            .expect("the composed shell must be spawnable");
+        assert!(
+            out.status.success(),
+            "spawn failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "ok=1",
+            "the body must reach a POSIX shell as one argv element, through the \
+             embedder's leading args"
+        );
+    }
+
+    /// Arg quoting must follow the RESOLVED shell, not the platform. Under a
+    /// POSIX default on Windows, cmd rules would corrupt the arg: `%` doubles
+    /// and `$`/backtick stay live inside the double quotes cmd-quoting emits.
+    #[test]
+    fn quoting_follows_the_resolved_shell_not_the_platform() {
+        let posix = ScriptSettings {
+            default_shell: Some(busybox()),
+            ..Default::default()
+        };
+        assert_eq!(
+            shell_quote_arg_with_settings("50%$HOME`id`", &posix),
+            "'50%$HOME`id`'",
+            "a POSIX shell needs single quotes; cmd rules would emit %% and leave $/` live"
+        );
+
+        let cmd = ScriptSettings {
+            script_shell: Some(PathBuf::from(r"C:\Windows\System32\cmd.exe")),
+            ..Default::default()
+        };
+        assert_eq!(
+            shell_quote_arg_with_settings("50%", &cmd),
+            r#""50%%""#,
+            "an explicit cmd.exe still gets cmd's percent-doubling"
         );
     }
 }

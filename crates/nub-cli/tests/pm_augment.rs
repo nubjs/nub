@@ -71,7 +71,7 @@ fn install_runs_lifecycle_scripts_under_runtime_augmentation() {
         .map(|stem| format!("{stem}.cjs"))
         .unwrap_or_default();
 
-    let dir = fixture();
+    let dir = fixture(POSTINSTALL_PROBE);
     let (stdout, stderr, code) = run(&nub, &dir, &["install"]);
     assert_eq!(
         code, 0,
@@ -109,9 +109,50 @@ fn install_runs_lifecycle_scripts_under_runtime_augmentation() {
     );
 }
 
-/// A nub-identity project with a root postinstall probe, an empty lock, no
+/// A POSIX-only `postinstall`: braced parameter expansion with a default, and
+/// the `test` utility. `cmd.exe` leaves `${…}` literal (quotes included) and has
+/// no `test`, so under cmd this writes different bytes AND exits non-zero.
+const POSIX_SHELL_PROBE: &str =
+    "echo \"MARK=${SHELL_PROBE:-posix}\" > shell.txt && test -d . && echo dirok >> shell.txt";
+
+/// Lifecycle scripts run under a POSIX `sh` on every platform: the system
+/// `/bin/sh` on Unix, and on Windows the bundled busybox-w32 `sh` the engine
+/// takes from `EngineContext::default_script_shell` — NOT `cmd.exe`, which the
+/// engine defaulted to before. The body is the assertion: cmd.exe cannot run it,
+/// so a regression here fails the install rather than passing quietly.
+///
+/// Root and dependency hooks share aube's one `spawn_shell_with_settings`, so
+/// this pins the shell selection for both. The dependency path end-to-end (and
+/// the cmd.exe-vs-busybox differential, which needs a real Windows runner) is
+/// `tests/busybox-lifecycle-probe/`.
+#[test]
+fn install_runs_lifecycle_scripts_under_a_posix_shell() {
+    let nub = nub_binary();
+    let dir = fixture(POSIX_SHELL_PROBE);
+    let (stdout, stderr, code) = run(&nub, &dir, &["install"]);
+    assert_eq!(
+        code, 0,
+        "install failed\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let marker = std::fs::read_to_string(dir.join("shell.txt")).unwrap_or_else(|_| {
+        panic!(
+            "the root postinstall wrote no shell.txt — the lifecycle script did not run at all.\
+             \nstdout: {stdout}\nstderr: {stderr}"
+        )
+    });
+    assert_eq!(
+        marker.replace("\r\n", "\n"),
+        "MARK=posix\ndirok\n",
+        "the lifecycle shell did not expand `${{SHELL_PROBE:-posix}}` or run `test -d .`, so it \
+         is not a POSIX sh. On Windows that means the bundled busybox sidecar was not used and \
+         the engine fell back to cmd.exe.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+/// A nub-identity project with the given root `postinstall`, an empty lock, no
 /// dependencies, and a dead-port registry (offline).
-fn fixture() -> PathBuf {
+fn fixture(postinstall: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
@@ -125,7 +166,7 @@ fn fixture() -> PathBuf {
     std::fs::write(dir.join("nub.lock"), EMPTY_LOCK).unwrap();
     let pkg = format!(
         r#"{{"name":"app","version":"1.0.0","packageManager":"nub@0.0.1","scripts":{{"postinstall":{}}}}}"#,
-        serde_json::to_string(POSTINSTALL_PROBE).unwrap()
+        serde_json::to_string(postinstall).unwrap()
     );
     std::fs::write(dir.join("package.json"), pkg).unwrap();
     dir
