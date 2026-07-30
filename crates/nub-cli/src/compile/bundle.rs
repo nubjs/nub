@@ -213,6 +213,19 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
             .generate()
             .await
             .map_err(|e| anyhow!("the bundler failed:\n{}", render_diagnostics(&e)))
+    });
+    // A case-mismatched extension fails inside Rolldown with a diagnostic that
+    // names neither loaders nor the flag that fixes it, and a plugin cannot
+    // improve that from the hook — Rolldown replaces a plugin error with its own
+    // `UNLOADABLE_DEPENDENCY`. So the hint is attached here, to the failure the
+    // user actually sees.
+    let output = output.map_err(|e| {
+        let hints = files_plugin.case_hints();
+        if hints.is_empty() {
+            e
+        } else {
+            anyhow!("{e}\n\n{}", hints.join("\n"))
+        }
     })?;
 
     reject_unresolved(&scan.take(), &output.warnings)?;

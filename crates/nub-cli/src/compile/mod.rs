@@ -966,6 +966,7 @@ mod tests {
                 bytes: b"export {}".to_vec(),
             }],
             detached_maps: Vec::new(),
+            assets: Vec::new(),
         };
         let layout = assets::Layout {
             entry_prefix: String::new(),

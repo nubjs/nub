@@ -103,6 +103,9 @@ pub fn plan(raw: &[String]) -> Result<Loaders> {
         // Kept EXACTLY as written, case included — see `FilePlugin::claims` for
         // why matching is case-sensitive on both sides.
         let ext = ext.trim().trim_start_matches('.').to_string();
+        // The VALUE is trimmed too, or `--loader ".png=file "` reports `unknown
+        // loader "file "` while listing `file` as available.
+        let name = name.trim();
         if ext.is_empty() {
             bail!("--loader expects an extension before the `=`, got {token:?}");
         }
@@ -161,25 +164,39 @@ pub struct FileAsset {
 /// the invariant this loader rests on, and [`crate::compile::bundle`] asserts it.
 #[derive(Debug, Default)]
 pub struct FilePlugin {
-    /// Every mapped extension → whether the `file` loader owns it. Both families
-    /// are present so [`FilePlugin::claims`] can resolve specificity across them;
-    /// see its doc comment.
-    by_ext: BTreeMap<String, bool>,
+    /// Every mapped extension → the loader that owns it. Both families are
+    /// present so [`FilePlugin::claims`] can resolve specificity across them; see
+    /// its doc comment. The loader's NAME is kept, not just which family it is
+    /// in, so [`FilePlugin::case_mismatch`] can suggest the flag verbatim.
+    by_ext: BTreeMap<String, &'static str>,
     collected: Mutex<BTreeMap<String, Vec<u8>>>,
+    /// Hints for imports whose extension is mapped only in another case. Kept
+    /// here rather than raised from the hook — see the `load` implementation.
+    case_hints: Mutex<std::collections::BTreeSet<String>>,
 }
 
 impl FilePlugin {
     pub fn new(loaders: &Loaders) -> Self {
-        let mut by_ext: BTreeMap<String, bool> = loaders
+        let mut by_ext: BTreeMap<String, &'static str> = loaders
             .module_types
-            .keys()
-            .map(|ext| (ext.clone(), false))
+            .iter()
+            .map(|(ext, ty)| (ext.clone(), loader_name(ty)))
             .collect();
-        by_ext.extend(loaders.file.iter().map(|ext| (ext.clone(), true)));
+        by_ext.extend(loaders.file.iter().map(|ext| (ext.clone(), "file")));
         Self {
             by_ext,
             collected: Mutex::new(BTreeMap::new()),
+            case_hints: Mutex::new(std::collections::BTreeSet::new()),
         }
+    }
+
+    /// What to add to a failed bundle's error, if a case-mismatched extension
+    /// could explain it.
+    pub fn case_hints(&self) -> Vec<String> {
+        self.case_hints
+            .lock()
+            .map(|h| h.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Every asset this build emitted, in a deterministic order — `app_sha256`
@@ -225,8 +242,42 @@ impl FilePlugin {
     fn claims(&self, id: &str) -> bool {
         id.match_indices('.')
             .find_map(|(i, _)| self.by_ext.get(&id[i + 1..]))
-            .copied()
-            .unwrap_or(false)
+            .is_some_and(|loader| *loader == "file")
+    }
+
+    /// The mapped spelling of an extension `id` matches in every respect BUT
+    /// case, if there is one.
+    ///
+    /// Case-sensitivity is the deliberate rule (see [`Self::claims`]), and this
+    /// is what keeps it teachable. Without it a `PHOTO.PNG` import fails inside
+    /// Rolldown — `MISSING_EXPORT` for the file family, `PARSE_ERROR` for the
+    /// text family — neither of which names the extension or hints that a
+    /// mapping exists under another case.
+    fn case_mismatch(&self, id: &str) -> Option<(&str, &'static str)> {
+        id.match_indices('.').find_map(|(i, _)| {
+            let suffix = &id[i + 1..];
+            self.by_ext
+                .iter()
+                .find(|(mapped, _)| mapped.eq_ignore_ascii_case(suffix) && *mapped != suffix)
+                .map(|(mapped, loader)| (mapped.as_str(), *loader))
+        })
+    }
+}
+
+/// The `--loader` spelling of a Rolldown module type, for echoing back in a
+/// diagnostic. Only the types [`plan`] admits appear here.
+fn loader_name(ty: &ModuleType) -> &'static str {
+    match ty {
+        ModuleType::Text => "text",
+        ModuleType::Json => "json",
+        ModuleType::Base64 => "base64",
+        ModuleType::Dataurl => "dataurl",
+        ModuleType::Binary => "binary",
+        ModuleType::Empty => "empty",
+        ModuleType::Jsx => "jsx",
+        ModuleType::Ts => "ts",
+        ModuleType::Tsx => "tsx",
+        _ => "js",
     }
 }
 
@@ -297,8 +348,32 @@ impl Plugin for FilePlugin {
         // must both run against the cleaned path.
         let id = clean_url(args.id).to_string();
         let claimed = self.claims(&id);
+        let mismatch = (!claimed)
+            .then(|| {
+                self.case_mismatch(&id)
+                    .map(|(mapped, loader)| (mapped.to_string(), loader))
+            })
+            .flatten();
         async move {
             if !claimed {
+                // Recorded, not raised. A plugin error is swallowed by Rolldown
+                // into a generic `UNLOADABLE_DEPENDENCY: Could not load <file>`
+                // that drops the message entirely, so failing here would replace
+                // one unhelpful diagnostic with another. Letting the module fall
+                // through keeps Rolldown's own failure and lets `compile::bundle`
+                // append this hint to it.
+                if let Some((mapped, loader)) = mismatch
+                    && let Ok(mut seen) = self.case_hints.lock()
+                {
+                    let as_written = Path::new(&id)
+                        .extension()
+                        .map_or_else(|| mapped.clone(), |e| e.to_string_lossy().into_owned());
+                    seen.insert(format!(
+                        "\x20\x20Extensions match exactly, case included, so .{as_written} is not \
+                         covered by the mapping for .{mapped}.\n\
+                         \x20\x20Map this spelling too: --loader .{as_written}={loader}"
+                    ));
+                }
                 return Ok(None);
             }
             let bytes = std::fs::read(&id)
@@ -424,6 +499,34 @@ mod tests {
                 "and point at what to use instead: {msg}"
             );
         }
+    }
+
+    // Case-sensitivity is the rule, so the error a user hits while learning it
+    // has to name the extension and the exact flag — not Rolldown's
+    // MISSING_EXPORT (file family) or PARSE_ERROR (text family), neither of
+    // which mentions loaders at all. The suggested loader must match the family
+    // the mapped extension is in.
+    #[test]
+    fn a_case_mismatched_extension_names_the_flag_that_fixes_it() {
+        let p = FilePlugin::new(&plan(&[]).expect("valid"));
+        assert_eq!(p.case_mismatch("/proj/PHOTO.PNG"), Some(("png", "file")));
+        assert_eq!(p.case_mismatch("/proj/PROMPT.MD"), Some(("md", "text")));
+        assert_eq!(
+            p.case_mismatch("/proj/photo.png"),
+            None,
+            "an exact match is claimed, not reported as a mismatch"
+        );
+        assert_eq!(
+            p.case_mismatch("/proj/notes.rst"),
+            None,
+            "an extension mapped in no case is not this diagnostic's business"
+        );
+    }
+
+    #[test]
+    fn a_loader_value_is_trimmed_like_its_extension() {
+        let l = plan(&[" .png = file ".into()]).expect("padding must not change the mapping");
+        assert!(l.file.contains(&"png".to_string()));
     }
 
     #[test]
