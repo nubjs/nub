@@ -1760,7 +1760,7 @@ pub(super) mod launch {
 
             // SAFETY: cmdline/env_block/cwd_wide/attr/sec_caps/caps all outlive this
             // call; lpCommandLine is a writable UTF-16 buffer as CreateProcessW requires.
-            let launch = || unsafe {
+            let mut launch = || unsafe {
                 CreateProcessW(
                     std::ptr::null(),
                     cmdline.as_mut_ptr(),

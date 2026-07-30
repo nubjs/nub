@@ -576,11 +576,15 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
 /// a non-inherited traverse ACE, written wherever the user holds `WRITE_DAC`, which is
 /// `%USERPROFILE%` and below (`ancestor_chain` in `backend/windows.rs`). `C:\` and `C:\Users`
 /// stay UNREPAIRED — measured refused across three images including a genuine workstation.
-/// The second prong, requesting the capability SIDs those two roots already carry
-/// (`harvest_capability_sids`), is code that never takes effect: `CreateProcessW` refuses the
-/// pair with ERROR_INVALID_PARAMETER and the launch drops it (`CAPABILITY_FALLBACKS`). Raw
-/// capability SIDs are indeed requestable unprivileged — `internetClient` is — but not these,
-/// so do not read the privilege point as making those two roots reachable.
+/// A second prong once requested the capability SIDs those two roots already carry; it never
+/// took effect (`NtCreateLowBoxToken` refuses the `S-1-15-3-65536-…` AppSilo RID class, and the
+/// launch fell back on every attempt in both principals) and has been DELETED. Raw capability
+/// SIDs are indeed requestable unprivileged — `internetClient` is — but not these, so do not
+/// read the privilege point as making those two roots reachable.
+///
+/// WHICH MEANS A REALPATH WALK STILL DIES ON ITS FIRST COMPONENT de-elevated, whatever the ACE
+/// half repaired further down. That is why this preload exists, and why it tolerates a refused
+/// STRICT ANCESTOR of a granted root rather than any refused component.
 ///
 /// WHY NOT REDIRECT REALPATH AT ITS NATIVE TWIN. That was the first candidate, and it is
 /// REFUTED by measurement: `fs.realpathSync.native` is refused under this jail too, with
