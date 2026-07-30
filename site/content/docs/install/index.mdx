@@ -263,7 +263,7 @@ Runtime augmentation is reversible. Passing `--node`, or setting a truthy `NODE_
 
 ### Project configuration
 
-A project [`nub.jsonc`](/docs/config) carries an [`install`](/docs/config#install) block. It applies only when Nub is the project's package manager — a project with an npm, pnpm, Yarn, or Bun lockfile keeps that tool's own configuration.
+A project [`nub.jsonc`](/docs/config) carries an [`install`](/docs/config#install) block. The layout fields shape `node_modules` and apply in every project; the version-selection fields below apply only when Nub is the project's package manager, and a project with an npm, pnpm, Yarn, or Bun lockfile resolves the way that tool would.
 
 ```jsonc title="nub.jsonc"
 {

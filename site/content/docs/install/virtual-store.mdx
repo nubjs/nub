@@ -115,7 +115,7 @@ The `enableGlobalVirtualStore=false` form keeps isolation and its phantom-depend
 
 ## Project configuration
 
-A project [`nub.jsonc`](/docs/config) picks the layout with one [`linker`](/docs/config#installlinker) field — `global-virtual-store` for the shared store (the default), `isolated` for a project-local one, or `hoisted` for a flat, real-directory tree. The block applies only when Nub is the project's package manager; under an npm, pnpm, Yarn, or Bun lockfile the neutral `.npmrc` keys above are the lever.
+A project [`nub.jsonc`](/docs/config) picks the layout with one [`linker`](/docs/config#installlinker) field — `global-virtual-store` for the shared store (the default), `isolated` for a project-local one, or `hoisted` for a flat, real-directory tree. Layout is Nub's own axis rather than a lockfile's, so this applies in every project, including one carrying an npm, pnpm, Yarn, or Bun lockfile.
 
 ```jsonc title="nub.jsonc"
 {

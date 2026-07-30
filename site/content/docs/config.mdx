@@ -54,10 +54,10 @@ Every field, with its full value set. Each has its own section below. Paths are 
   // read for JSX, decorators, and path mapping — not type checking
   "tsconfig": "./tsconfig.runtime.json",
 
-  // warn | error | false
+  // warn | error | true | false; true is warn
   "verifyDeps": "warn",
 
-  // ── installs — Nub reads this block only when it is the project's package manager ──
+  // ── installs — layout applies anywhere, release age only when Nub is the PM ──
   "install": {
     // "global-virtual-store" (default) | "isolated" | "hoisted" | "pnp"
     // "pnp" is rejected on install; the object form adds one knob:
@@ -343,9 +343,18 @@ Nub rejects pnpm's `"install"` and `"prompt"` values, which it does not implemen
 
 ## `install`
 
-The install block configures Nub's package manager.
+The install block configures Nub's package manager. Its fields sit on two axes, and the two are scoped differently.
 
-It applies when Nub is the project's package manager. A project with an `npm`, `pnpm`, `yarn`, or `bun` lockfile keeps that tool's own configuration, and this block is ignored.
+| axis | fields | applies |
+| --- | --- | --- |
+| layout | `linker`, `publicHoist` | every project, whatever lockfile is present |
+| resolution | `minimumReleaseAge`, `minimumReleaseAgeExclude` | only when Nub is the project's package manager |
+
+Layout shapes `node_modules`, and no lockfile records that shape, so honoring it alongside another tool's lockfile cannot change which packages you get. Resolution picks versions, which is where lockfile compatibility lives — under an `npm`, `pnpm`, `yarn`, or `bun` lockfile Nub resolves the way that tool would and names each field it skipped.
+
+```text
+nub: `install.minimumReleaseAge` ignored — it selects package versions, and this project resolves as pnpm. Run `nub pm use nub` to make nub the project's package manager.
+```
 
 ### `install.linker`
 

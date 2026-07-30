@@ -296,10 +296,19 @@ const RESOLUTION_SETTINGS: &[(&str, &str, &str)] = &[
 /// symlink layouts lower to the engine's `isolated`, differing only in
 /// `enableGlobalVirtualStore`, so printing the raw engine value would answer a
 /// project that asked for `global-virtual-store` with the word `isolated` —
-/// while the parenthetical points at the very field that says otherwise. The
-/// store bit is only consulted when something explicitly set it: outside CI the
-/// engine turns the shared store on by default, but that decision is made
-/// during the install, after this line has printed.
+/// while the parenthetical points at the very field that says otherwise.
+///
+/// When nothing set the store bit, the engine's own default decides it, and
+/// that default is the shared store. Reporting the raw `isolated` there
+/// described a tree nobody gets: with no config at all the packages symlink
+/// into the machine-global store, which is what `global-virtual-store` names.
+///
+/// Three things flip it back to a project-local store, and they arrive by
+/// different routes — which is why this cannot simply read one setting. An
+/// explicit `enableGlobalVirtualStore=false` and the `hoist=true` nub pushes
+/// for injected dependencies both land in the settings index. A CI environment
+/// does not: `Linker::new` derives it from `is_ci()` at construction, so the
+/// only way to report it is to ask the same question aube will.
 fn layout_row(index: &SourceIndex) -> (String, Option<Source>) {
     let (linker, linker_source) = index
         .resolve("nodeLinker")
@@ -310,7 +319,11 @@ fn layout_row(index: &SourceIndex) -> (String, Option<Source>) {
     match index.resolve("enableGlobalVirtualStore") {
         Some((shared, source)) if shared == "true" => ("global-virtual-store".to_string(), source),
         Some((_, source)) => ("isolated".to_string(), source),
-        None => (linker, linker_source),
+        None if aube_util::env::is_ci() => ("isolated".to_string(), None),
+        None => match index.resolve("hoist") {
+            Some((hoist, source)) if hoist == "true" => ("isolated".to_string(), source),
+            _ => ("global-virtual-store".to_string(), None),
+        },
     }
 }
 
@@ -690,21 +703,38 @@ mod tests {
             "an explicit project-local store keeps the plain isolated word"
         );
 
-        // Nothing set the store bit: the engine decides during the install, so
-        // the header states only what it can actually know here.
+        // Nothing set the store bit, so the engine's default decides — and that
+        // default is the shared store. Reporting the raw `isolated` here named a
+        // tree nobody gets: with no config the packages symlink into the
+        // machine-global store. Skipped under CI, where `Linker::new` derives
+        // the project-local store from the environment instead of a setting.
         let unset = SourceIndex {
             project_config: Vec::new(),
             embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
             ..project_local
         };
-        assert_eq!(
-            layout_row(&unset),
-            ("isolated".to_string(), Some(Source::Default))
-        );
+        if !aube_util::env::is_ci() {
+            assert_eq!(
+                layout_row(&unset),
+                ("global-virtual-store".to_string(), None)
+            );
+        }
+
+        // The injected-deps carve-out: nub pushes an explicit `hoist=true` for a
+        // project that declares one, and the hidden tree it needs only exists
+        // under a project-local store.
+        let injected = SourceIndex {
+            embedder_defaults: vec![
+                ("nodeLinker".to_string(), "isolated".to_string()),
+                ("hoist".to_string(), "true".to_string()),
+            ],
+            ..unset
+        };
+        assert_eq!(layout_row(&injected).0, "isolated");
 
         let hoisted = SourceIndex {
             embedder_defaults: vec![("nodeLinker".to_string(), "hoisted".to_string())],
-            ..unset
+            ..injected
         };
         assert_eq!(layout_row(&hoisted).0, "hoisted");
     }
