@@ -128,3 +128,109 @@ sibling denied. **Both images byte-identical.**
   `SeChangeNotifyPrivilege` at all — consistent with the loader losing the ability to traverse to
   `C:\Windows\System32` for its own DLLs, which would make the privilege load-bearing for traverse.
   Indirect. Run 2 splits the control so this reads as inconclusive rather than as a result.
+
+## Runs 2 and 3 — 30514541825 and 30514708871, both images, 2026-07-30
+
+Run 2 carried the four harness fixes run 1's own output exposed; run 3 fixed the one arm run 2 was
+still getting wrong. Every headline cell below is **identical on `windows-latest` (Server 2025
+Datacenter 10.0.26100, AMD64) and `windows-11-arm` (Win 11 Enterprise 10.0.26200, ARM64)**, both
+`admin=True`, `integrity-level = High Mandatory Level (S-1-16-12288)`, `session-id=2`.
+
+### Question 1 — settled
+
+- **MEASURED — the MSI DACL defect is real and `nodejs` is the outlier.** With the SID-translation bug
+  fixed, **43/44** `C:\Program Files\*` siblings on `windows-latest` and **34/35** on
+  `windows-11-arm` carry `S-1-15-2-1` (`dotnet`, `Git`, `PowerShell`, `Microsoft Visual Studio`, …).
+  `nodejs` is the one that does not. `msi-install-actually-succeeded=PASS` on both images this time,
+  so those rows describe an installer we ran (`node-v24.18.1-{x64,arm64}.msi`, `msiexec /qn` exit 0)
+  and not the runner image.
+- **⭐ MEASURED, 6/6 image-runs — the AppContainer EXECUTES the MSI-installed `node.exe` anyway.**
+  `exec=OK`, `rc=0`, `isAC=1`, zero capabilities, no ace anywhere on `C:\Program Files`, with the
+  unconfined baseline running the identical command line and the gate live.
+- **⭐ MEASURED — but the bundled `npm` does not run, and that is the real bite.** One variable, same
+  interpreter: unconfined prints `11.16.0`; confined dies
+  `Error: Cannot find module 'C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js'`, `rc=1`.
+  Starting `node.exe` is a parent-context image open; the npm entry script is an ordinary read by the
+  confined child, and reads of that tree are all denied (`node.exe`, `node_modules\npm\package.json`,
+  `readdir` — all `ERR`, while the same child reads System32).
+- **MEASURED — CI provisioning did NOT hide anything on this axis.** `actions/setup-node`'s unzipped
+  toolcache tree ALSO lacks `S-1-15-2-1` (`sids = S-1-5-11,S-1-5-11,S-1-5-18,S-1-5-32-544,S-1-5-32-545`)
+  and execs just the same. The exec result does not depend on the image DACL at all, so the
+  CI-vs-MSI difference is not the thing that concealed this — the earlier probe copying `node.exe`
+  into a granted directory was.
+- **MEASURED — nub cannot repair the DACL unprivileged.** Impersonated admin-stripped token
+  (`Administrators` deny-only, every privilege but `SeChangeNotifyPrivilege` DELETED, read back as
+  `privs=[SeChangeNotifyPrivilege:on]`, `admin-under-impersonation=False`): the write on
+  `C:\Program Files\nodejs` fails and **the descriptor read-back shows `ace-on-disk=none`**, while the
+  control write inside `%USERPROFILE%` succeeds under the same impersonation. Owner is
+  `NT AUTHORITY\SYSTEM`; no ACE in the MSI descriptor grants `WRITE_DAC` to Users or Authenticated
+  Users.
+  *(.NET reports `PrivilegeNotHeldException: SeSecurityPrivilege` rather than an ACCESS_DENIED on
+  `WRITE_DAC`; that is the privilege .NET's persist path demands for the section set it is writing, so
+  a hand-rolled `SetNamedSecurityInfo(DACL only)` might surface a different error. The outcome —
+  nothing lands — is MEASURED; the specific gate is INFERRED.)*
+- **⚠️ AND THE RUN-2 EXPLANATION OF THIS WAS WRONG, recorded because it nearly shipped.** Run 2 still
+  reported the write as succeeding, and I attributed it to `DISABLE_MAX_PRIVILEGE` merely *disabling*
+  privileges that .NET then re-enables. Run 3 refuted that: the real cause was that the probes run
+  under `$ErrorActionPreference = 'Continue'`, where a refused `Set-Acl` is a **non-terminating**
+  error — it printed, the function returned normally, and the caller's `try/catch` recorded `OK`. The
+  `disable` variant fails identically once `-ErrorAction Stop` is set, so the privilege theory was
+  never needed. The tell was there in run 1: the residue check found no ace on `Program Files`
+  afterwards.
+- **⚠️ ONE OBSERVED FLAKE, bounded and unexplained.** `ac-exec-toolcache` on `windows-latest` run 3
+  **timed out at 60 s with a zero-byte log** (`rc=0xffffffff TIMED-OUT`, `isAC=1`) after returning
+  `OK` in run 2 and on ARM. The process was created and produced nothing. Not attributed — noting it
+  because it is an AppContainer child hanging with no output, which is the shape of the sibling lane's
+  piped-hang class, and because the probe's timeout bound is what kept it from eating the job.
+
+### Question 2 — settled for local volumes, inconclusive on mechanism
+
+Run 2 reproduced run 1 cell-for-cell on both images, with the tightened privilege-differential
+controls now reading correctly.
+
+| volume | `Characteristics` | `0x20000` set | reachability control | deep read, ancestors ungranted |
+| --- | --- | --- | --- | --- |
+| local `C:` NTFS (anchor) | `0x00020020` | yes | OK | **OK** |
+| VHD, diskpart NTFS, `V:` | `0x00020120` | yes | OK | **OK** |
+| `subst` drive `S:` | `0x00020020` | yes | OK | **OK** |
+| SMB `\\localhost\<share>\` | `0x00000010` | **no** | **ERR** | ERR |
+
+- **⭐ MEASURED — `windows.rs`'s traverse assumption holds on a mounted VHD volume and a `subst`
+  drive.** Ace on the deep directory only; `V:\` / `S:\` / `C:\` / `C:\Users` all ungranted; DACL
+  read-back `Modify, Synchronize` on the deep file in every arm; every ungranted sibling denied.
+- **MEASURED — an SMB path is unreachable from an AppContainer, and it is NOT the traverse question.**
+  Even with an inheritable ace at the SHARE ROOT (nothing ungranted above the target), `internetClient`
+  **and** `privateNetworkClientServer` capability SIDs, and a **successful**
+  `CheckNetIsolation LoopbackExempt -a` (`OK.`), every open returns an NTSTATUS libuv cannot map
+  (`ERR UNKNOWN`); the unconfined baseline reads the same path fine. Real compat gap, wrong cause to
+  cite.
+- **⚠️ MECHANISM STILL NOT SEPARATED, and the differential that would have done it cannot run.**
+  `cn-kept` (identical `CreateProcessAsUserW` + `CreateRestrictedToken` path, privilege retained, read
+  back as `privs=[SeChangeNotifyPrivilege:on,…]`, 11 log lines) reads deep. `cn-deleted` (one
+  variable) returns **`rc=0xC0000022` with a ZERO-BYTE log** on both images: the process is created
+  (its token is readable, `isAC=1`, `privs=[SeIncreaseWorkingSetPrivilege:off]`) and dies in
+  initialization before Node emits a line, so the read is never attempted.
+  `cn-deleted-child-started-at-all=FAIL` ⇒ the differential is **INCONCLUSIVE**, which is what run 2's
+  tightened predicate now reports (run 1's `-ne 'OK'` accepted `MISSING-OP` and read as a positive).
+  **INFERRED, not measured:** a LowBox process cannot complete startup without
+  `SeChangeNotifyPrivilege` — consistent with the loader losing traverse to `C:\Windows\System32` for
+  its own DLLs, which would make the privilege load-bearing. Indirect, and it also means the
+  privilege can never be absent in practice: the LowBox token inherits it from the launching parent,
+  and a parent lacking it produces a child that never starts.
+- **MEASURED — the flag decode is grounded.** The Windows SDK header is on neither runner image
+  (`sdk-const-source = (not found)`), so the probe used `0x20000`; cross-checked against Microsoft's
+  own generated metadata, `windows-sys-0.61.2/src/Windows/Wdk/System/SystemServices/mod.rs:4326` —
+  `FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL: u32 = 131072u32`.
+
+### Unmeasured, named explicitly
+
+- A **second physical** volume (only a VHD was available on a runner) and a **filter-driver /
+  redirector** device other than SMB.
+- A `net use Z:` mapped drive. **INFERRED** to match the SMB row — same redirector device, same
+  `chars=0x10`.
+- Whether the traverse skip survives on a volume that lacks `0x20000` **and** is reachable under an
+  AppContainer. No such device was found on either image, so the volume rows cannot separate the two
+  mechanisms either.
+- Whether nub's lifecycle-script path actually reaches for the ambient `npm` (INFERRED FROM CODE only:
+  `discovery.rs:367` takes the PATH node when unpinned, so the ambient Node *is* what would be
+  launched).
