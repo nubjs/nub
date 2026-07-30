@@ -277,6 +277,43 @@ const mod = await import("./plugins/csv.js");  // bundled
 
 There is no flag to ship an unresolved import anyway. Deferring the failure would only move the same crash to the machine you ship to, where it is far harder to diagnose.
 
+A `require()` the bundler cannot rewrite fails the same way. The usual source is a package whose `main` is a UMD build: the factory takes `require` as a parameter, so the calls inside are ordinary function calls that survive into the bundle and resolve against the extracted app directory at runtime.
+
+```console
+$ nub compile app.ts
+Bundling app.ts …
+Error: 1 import could not be resolved at build time:
+  /app/node_modules/umdpkg/lib/main.js:8:18
+    require("./helper")
+
+  A compiled binary carries no node_modules, so an unresolved import fails at
+  runtime on the machine you ship to. Make the specifier a static string so
+  the bundler can follow it.
+  A require() whose `require` is a local binding (a UMD factory parameter) is
+  an ordinary call the bundler cannot rewrite. Depend on the package's ESM
+  build, or alias the specifier to it with --alias.
+```
+
+Nub resolves a package's `module` field ahead of `main`, so a dual package reaches its ESM build and never hits this. A UMD-only package needs `--alias` pointed at an ESM entry. Guarded probes are left alone — a `require()` whose specifier is a variable is nearly always an optional loader inside a `try`/`catch`, and failing on those would break builds that work.
+
+## Unparseable output fails the build
+
+Every emitted chunk is parsed before the binary is written. One that is not valid JavaScript fails the compile instead of producing an executable that throws on startup:
+
+```console
+$ nub compile app.ts
+Bundling app.ts …
+Error: the bundler emitted 1 chunk that is not valid JavaScript:
+  app.js:1:16
+    Unexpected JSX expression
+
+  The compiled binary would throw a SyntaxError on startup. This usually means
+  a source language survived the bundle untransformed — most often JSX, from a
+  tsconfig whose compilerOptions.jsx is "preserve".
+```
+
+Nearly always the cause is JSX under a tsconfig setting `"jsx": "preserve"`, which tells the bundler to leave JSX for a later tool to handle. A compiled binary has no later tool, so nub transforms it with the automatic runtime, honoring `jsxImportSource` the same way `nub run` does. The check covers what that cannot reach — a nested tsconfig the entry's own config never sees, for one.
+
 ## Advanced options
 
 The bundler knobs, grouped under their own heading in `nub compile --help`. Most builds never need one.

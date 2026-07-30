@@ -774,6 +774,14 @@ jobs:
         shell: bash
         run: echo "__NUB_BUSYBOX_EXE=$GITHUB_WORKSPACE/vendor/busybox-w32/busybox64.exe" >> "$GITHUB_ENV"
       - run: cargo test
+      # `compile` is not a default feature, so the bare `cargo test` above never
+      # builds `src/compile/**` — including the bundler's emitted-chunk validity
+      # gate, whose whole job is to stop `nub compile` reporting success on output
+      # that cannot load. One leg: the assertions are OS-independent, and the
+      # feature pulls the whole Rolldown stack into the build.
+      - name: Compile-pipeline tests
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '24'
+        run: cargo test -p nub-cli --features compile --bin nub compile::
       # Brand-boundary sweep for the embedded PM engine: a real `nub install`
       # in a sandboxed fixture (HOME/XDG_* inside a temp dir) must never leak
       # the engine's upstream identity — no ERR_AUBE_/WARN_AUBE_/aube.jdx.dev
