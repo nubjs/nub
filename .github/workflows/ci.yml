@@ -803,7 +803,12 @@ jobs:
       # feature pulls the whole Rolldown stack into the build.
       - name: Compile-pipeline tests
         if: matrix.os == 'ubuntu-latest' && matrix.node == '24'
-        run: cargo test -p nub-cli --features compile --bin nub compile::
+        # QUOTED, and it has to stay quoted: a plain YAML scalar ending in `:`
+        # parses as a mapping key, so the unquoted form made this whole workflow
+        # unparseable. GitHub then produced runs named `.github/workflows/ci.yml`
+        # with ZERO jobs — which read as "CI ran and failed" in `gh run list`
+        # while nothing had actually executed.
+        run: "cargo test -p nub-cli --features compile --bin nub compile::"
       # Brand-boundary sweep for the embedded PM engine: a real `nub install`
       # in a sandboxed fixture (HOME/XDG_* inside a temp dir) must never leak
       # the engine's upstream identity — no ERR_AUBE_/WARN_AUBE_/aube.jdx.dev
