@@ -3692,8 +3692,10 @@ mod tests {
         }
     }
 
-    /// The IR→ceiling mapping, the other half of the fix: `["$downloads"]` (any Allow) must reach
-    /// `Permitted`, and the deny-all an uncatalogued package compiles to must not. Pinned apart
+    /// The IR→ceiling mapping, the other half of the fix: ANY Allow — the catch-all `["*"]` the
+    /// build jail now emits for a catalogued package, or a named host from a `nub sandbox`
+    /// policy — must reach `Permitted`, and the deny-all an uncatalogued package compiles to must
+    /// not. Pinned apart
     /// from the BPF assertions above because a correct filter reached through the wrong verdict is
     /// still a granted package with no network.
     #[test]
@@ -3713,6 +3715,17 @@ mod tests {
             ..deny_all.clone()
         };
         assert_eq!(ip_egress_for(&granted), IpEgress::Permitted);
+        // The shape a catalogued package actually compiles to since per-host was dropped: a
+        // catch-all naming no host. It must read as a grant exactly like the named host above,
+        // or every catalogued package silently loses its egress on this backend.
+        let coarse = NetPolicy {
+            rules: vec![NetRule {
+                target: NetTarget::Host("*".to_string()),
+                effect: Effect::Allow,
+            }],
+            ..deny_all.clone()
+        };
+        assert_eq!(ip_egress_for(&coarse), IpEgress::Permitted);
         // A deny-ONLY rule list is still a deny-all base: an entry is not a grant.
         let deny_rule_only = NetPolicy {
             rules: vec![NetRule {
