@@ -116,6 +116,7 @@ jobs:
                    anc-node-bare-through-junction-works-preloaded-with-repair-off \
                    anc-node-npm-cli-entry-works-preloaded-with-repair-off \
                    anc-repair-changes-no-node-cell-under-the-preload \
+                   anc-longform-roots-recover-what-the-repair-off-arm-lost \
                    anc-nonnode-tools-identical-with-repair-off \
                    anc-production-stamp-reaches-node; do
             grep -q "prop:$p=" probe.log || { echo "MISS $p (never measured)"; fail=1; }

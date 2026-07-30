@@ -1531,6 +1531,7 @@ mod win {
         "anc-node-bare-through-junction-works-preloaded-with-repair-off",
         "anc-node-npm-cli-entry-works-preloaded-with-repair-off",
         "anc-repair-changes-no-node-cell-under-the-preload",
+        "anc-longform-roots-recover-what-the-repair-off-arm-lost",
         "anc-nonnode-tools-identical-with-repair-off",
     ];
 
@@ -1545,6 +1546,35 @@ mod win {
             f.package.clone(),
             exe.to_path_buf(),
         ])
+    }
+
+    /// The same term with every root spelled the way the FILESYSTEM spells it.
+    ///
+    /// WHY THIS ARM EXISTS. The shim's tolerance rule is a string prefix test over lowercased
+    /// `path.resolve` output, so it only fires when the refused component and the root share a
+    /// spelling. `std::env::temp_dir()` hands back the 8.3 SHORT form (`C:\Users\RUNNER~1\…`)
+    /// while the confined child walks the LONG form (`C:\Users\runneradmin\…`) — measured, both
+    /// in this fixture's own paths and in the child's `cd`. So a root derived from `%TEMP%`
+    /// matches nothing, and `lstat 'C:\Users\runneradmin'` is refused rather than tolerated.
+    ///
+    /// That makes this the ONE variable separating "the ancestor repair is load-bearing" from
+    /// "the ancestor repair is covering for a root-spelling defect", and the two call for
+    /// opposite next moves. `canonicalize` returns the verbatim `\\?\` form, which the shim
+    /// strips for comparison but which is not what a root should carry, so it is removed here.
+    fn realpath_term_longform(f: &Fixture, exe: &Path) -> String {
+        let long = |p: &Path| -> PathBuf {
+            std::fs::canonicalize(p)
+                .map(|c| match c.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+                    Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
+                    _ => c.clone(),
+                })
+                .unwrap_or_else(|_| p.to_path_buf())
+        };
+        let roots = [long(&f.project), long(&f.package), long(exe)];
+        for r in &roots {
+            println!("  fact:anc-longform-root={}", r.display());
+        }
+        nub_sandbox::realpath_shim_node_options(&roots)
     }
 
     /// One confined NESTED launch: the probe child (already inside the AppContainer) spawns
@@ -1976,6 +2006,23 @@ mod win {
             without_ancestor_repair(|| node_cells(f, &unpreloaded, "ctl", exe, &dir, &npm_cli));
         println!("  fact:anc-control={}", control.detail());
 
+        // ── ARM 4: repair OFF, preload ON, roots spelled the way the FILESYSTEM spells them.
+        //    One variable against ARM 2. If the cells ARM 2 lost come back here, the ancestor
+        //    repair is not load-bearing — it is covering for the shim's roots being unmatchable,
+        //    and the fix is to canonicalize them where they are stamped rather than to keep an
+        //    ACE loop that only works because it makes the refusal not happen.
+        println!("── anc arm: repair OFF + preload with LONG-FORM roots ──");
+        let long_policy = build_jail_with_env(
+            f,
+            exe,
+            root,
+            &[("NODE_OPTIONS", realpath_term_longform(f, exe))],
+        );
+        write_entry(&dir, "lng");
+        let long_roots =
+            without_ancestor_repair(|| node_cells(f, &long_policy, "lng", exe, &dir, &npm_cli));
+        println!("  fact:anc-longform={}", long_roots.detail());
+
         // ── the gates. No arm counts as evidence unless these pass.
         r.record(
             "anc-gate-preload-installs-the-realpath-shim",
@@ -2031,6 +2078,21 @@ mod win {
                 "(repair-on {:?} vs repair-off {:?})",
                 on.outcomes(),
                 off.outcomes()
+            ),
+        );
+
+        // THE FOLLOW-THROUGH. `anc-repair-changes-no-node-cell-under-the-preload` says whether the
+        // repair matters; this says WHY. If long-form roots recover what repair-OFF lost, the
+        // repair's remaining justification is a string-comparison defect in the shim, and the
+        // mechanism becomes deletable behind a one-line canonicalization at the stamp site.
+        r.record(
+            "anc-longform-roots-recover-what-the-repair-off-arm-lost",
+            long_roots.outcomes() == on.outcomes(),
+            &format!(
+                "(repair-ON {:?} vs repair-OFF short-form {:?} vs repair-OFF LONG-form {:?})",
+                on.outcomes(),
+                off.outcomes(),
+                long_roots.outcomes()
             ),
         );
 
