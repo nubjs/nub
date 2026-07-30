@@ -185,11 +185,11 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
             .with_options(options)
             .with_plugins(plugins)
             .build()
-            .map_err(|e| anyhow!("rolldown init: {e:?}"))?;
+            .map_err(|e| anyhow!("rolldown init:\n{}", render_diagnostics(&e)))?;
         bundler
             .generate()
             .await
-            .map_err(|e| anyhow!("rolldown bundle failed: {e:?}"))
+            .map_err(|e| anyhow!("the bundler failed:\n{}", render_diagnostics(&e)))
     })?;
 
     reject_unresolved(&scan.take(), &output.warnings)?;
@@ -679,6 +679,43 @@ fn snippet(source: &str, start: usize, end: usize) -> String {
     } else {
         text
     }
+}
+
+/// Render bundler errors as `file:line:column` + message, in the same shape the
+/// unresolved-import and invalid-chunk gates below use.
+///
+/// `BuildDiagnostic`'s `Debug` prints only severity/kind/message, so `{e:?}` gave
+/// a `PARSE_ERROR` with no indication of WHICH file failed — undebuggable on a
+/// real migration without reproducing each failure standalone. Rolldown carries
+/// the location already; `to_diagnostic_with` is what materializes it (the
+/// message alone never has it, and for plugin-wrapped events it is empty).
+fn render_diagnostics(err: &rolldown_error::BatchedBuildDiagnostic) -> String {
+    let opts = DiagnosticOptions::default();
+    err.iter()
+        .map(|d| {
+            let message = d.to_message_with(&opts);
+            // Columns are 0-based here and 1-based in every other diagnostic nub
+            // prints, so they are converted rather than passed through.
+            match d.to_diagnostic_with(&opts).get_primary_location() {
+                Some((file, line, column, _)) => {
+                    format!(
+                        "\x20\x20{file}:{line}:{}\n\x20\x20\x20\x20{message}",
+                        column + 1
+                    )
+                }
+                // No label — a config or resolve error, not a source position.
+                // The module id is still the most locating thing available.
+                None => match d.id() {
+                    Some(id) => format!(
+                        "\x20\x20{}\n\x20\x20\x20\x20{message}",
+                        opts.stabilize_path(id)
+                    ),
+                    None => format!("\x20\x20{message}"),
+                },
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Fail the build on any import the bundler could not resolve — the
