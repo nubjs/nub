@@ -353,6 +353,59 @@ fn resolve_shell(settings: &ScriptSettings) -> ShellInvocation {
     }
 }
 
+/// A stable identity for the shell lifecycle scripts will actually run under,
+/// for callers that must key persisted build output on it — a cached artifact
+/// built by a different shell can hold *wrong bytes*, not merely stale ones
+/// (`cmd.exe` exits 0 while writing an unexpanded `${VAR:-default}` literally),
+/// so restoring it under a changed shell is a silent correctness bug.
+///
+/// Deliberately the applet/program NAME (`sh`, `bash`, `cmd`), never the
+/// resolved program PATH: an embedder's bundled shell lives at a per-machine,
+/// per-release path, and keying on that would invalidate every entry on an
+/// upgrade that only moved the binary.
+pub fn resolved_shell_id() -> String {
+    shell_id(&resolve_shell(&script_settings()))
+}
+
+fn shell_id(invocation: &ShellInvocation) -> String {
+    let raw = match invocation {
+        // A multi-call binary dispatches on its leading argument (busybox
+        // `sh -c`), so that applet — not the binary's own filename — names the
+        // dialect that parses the script body.
+        ShellInvocation::Args { program, args } => match args.first() {
+            Some(applet) if !applet.starts_with('-') => applet.clone(),
+            _ => program
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        },
+        #[cfg(windows)]
+        ShellInvocation::CmdRaw => "cmd".to_string(),
+    };
+    sanitize_shell_id(&raw)
+}
+
+/// The id is joined into cache paths, so a `script-shell` pointing at an oddly
+/// named binary must not escape or otherwise reshape the path.
+fn sanitize_shell_id(raw: &str) -> String {
+    let cleaned: String = raw
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "shell".to_string()
+    } else {
+        cleaned
+    }
+}
+
 /// Spawn a shell command line. On Unix we go through `sh -c`, on
 /// Windows through `cmd.exe /d /s /c` — matching what npm passes in
 /// `@npmcli/run-script` — unless an embedder supplied a replacement default
@@ -2517,6 +2570,55 @@ mod shell_resolution_tests {
         } else {
             assert_eq!((program.as_str(), args[0].as_str()), ("sh", "-c"));
         }
+    }
+
+    /// The id keys persisted build output, so it must name the DIALECT and
+    /// nothing machine- or release-specific: the bundled busybox lives at a
+    /// path that moves with every embedder release, and keying on it would
+    /// invalidate every cached build on an upgrade that changed nothing.
+    #[test]
+    fn shell_id_names_the_dialect_not_the_program_path() {
+        assert_eq!(
+            shell_id(&resolve_shell(&ScriptSettings {
+                default_shell: Some(busybox()),
+                ..Default::default()
+            })),
+            "sh"
+        );
+        assert_eq!(
+            shell_id(&resolve_shell(&ScriptSettings {
+                default_shell: Some(aube_util::ScriptShell {
+                    program: PathBuf::from(r"D:\other\place\busybox.exe"),
+                    args: vec!["sh".to_string(), "-c".to_string()],
+                }),
+                ..Default::default()
+            })),
+            "sh",
+            "a moved bundled shell is the same dialect and must stay a cache hit"
+        );
+        assert_eq!(
+            shell_id(&resolve_shell(&ScriptSettings {
+                script_shell: Some(PathBuf::from("/usr/local/bin/bash")),
+                ..Default::default()
+            })),
+            "bash",
+            "a user script-shell participates, keyed by name so its location may vary"
+        );
+    }
+
+    /// `cmd.exe` and POSIX `sh` must never share a key: the same script body
+    /// under cmd can exit 0 having written unexpanded `${VAR:-default}` bytes.
+    #[test]
+    fn cmd_and_sh_have_distinct_ids() {
+        assert_eq!(
+            shell_id(&ShellInvocation::Args {
+                program: PathBuf::from("sh"),
+                args: vec!["-c".to_string()],
+            }),
+            "sh"
+        );
+        #[cfg(windows)]
+        assert_eq!(shell_id(&ShellInvocation::CmdRaw), "cmd");
     }
 
     /// The leading-args form has to survive an actual spawn, not just
