@@ -206,8 +206,8 @@ harness = false
 windows-sandbox-probe = []
 # TEST-ONLY. Lets a run DROP the build jail's curated project-file read grant, so the
 # build-jail corpus study's project-grant arm is a runtime setting instead of one patched
-# binary per shard. Compile-time and off by default for the same reason as nub-cli's
-# `prefetch-github-hosts`: neither a user nor a dependency can turn it on. The seam is
+# binary per shard. Off by default, and compile-time for the same reason nub-cli's
+# `prefetch-github-hosts` is: neither a user nor a dependency can turn it on. The seam is
 # drop-only and carries no path channel, so it can never widen the allowlist. Rationale:
 # src/arm.rs module doc.
 build-jail-project-grant-arm = []

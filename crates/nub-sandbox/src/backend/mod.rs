@@ -1580,10 +1580,17 @@ fn generic_apply(
 fn tmp_lost_axis(policy: &SandboxPolicy) -> Option<&'static str> {
     match policy.fs.tmp {
         crate::policy::TmpMode::Shared => None,
-        crate::policy::TmpMode::Private => Some("tmp-private"),
+        crate::policy::TmpMode::Private => Some(TMP_PRIVATE_AXIS_NAME),
         crate::policy::TmpMode::Deny => Some("tmp-deny"),
     }
 }
+
+/// The `lost` axis name for an unenforceable private per-run tmp. Public, and unconditional
+/// even where [`tmp_lost_axis`] is cfg'd away, because an embedder matches on it to explain a
+/// downstream symptom on the platform that DOES report it (nub-cli's
+/// `build_jail::unwritable_tmp_hint` reads a failed native build as an unwritable `%TEMP%`).
+/// A silent rename here would leave that match permanently false.
+pub const TMP_PRIVATE_AXIS_NAME: &str = "tmp-private";
 
 /// Whether the fs policy actually confines anything (a non-relaxed base or any
 /// entry). A relaxed fs axis (allow-all, no rules) is not a lost enforcement.

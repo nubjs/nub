@@ -16,10 +16,12 @@
 //!    dependency-authored) is preserved structurally, not by validation. The only
 //!    reachable effect is strictly LESS access than the default build.
 //! 2. **It is compile-time gated OFF.** The behaviour lives behind the
-//!    `build-jail-project-grant-arm` cargo feature, which no shipped build enables —
-//!    the same reasoning, and the same shape, as `prefetch-github-hosts`. An env var
-//!    alone would be one stray export away from a user or a CI job silently changing
-//!    enforcement.
+//!    `build-jail-project-grant-arm` cargo feature, which no shipped build enables. The
+//!    SHAPE is borrowed from `prefetch-github-hosts` — a cargo feature rather than an env
+//!    var, so the switch is out of reach of both a user and a dependency (that feature is
+//!    default-ON since its widening was ratified; only the shape carries over, not the
+//!    default). An env var alone would be one stray export away from a user or a CI job
+//!    silently changing enforcement.
 //! 3. **It latches ONCE, before any dependency code runs.** [`init_from_env`] is
 //!    called from nub's startup and the answer is frozen in a `OnceLock`. A lifecycle
 //!    script cannot mutate nub's own environment, and even a hypothetical route that

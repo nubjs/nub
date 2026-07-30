@@ -272,6 +272,14 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         if let Some(warning) = prepared.degradation.warning() {
             eprintln!("warning: {warning}");
         }
+        // Read off `prepared` before the launch below consumes it. See `unwritable_tmp_hint`
+        // for what this pairs with.
+        let no_writable_tmp = prepared
+            .degradation
+            .lost
+            .iter()
+            .any(|axis| axis == TMP_PRIVATE_AXIS);
+        let native_build = spawn.args.command_line().contains("node-gyp");
         // The launch handle reaps the script's descendants on return and on drop (which
         // mechanism, per platform: `nub_sandbox::CommandSpec::reap_descendants`). What it
         // cannot cover is a `SIGINT`/`SIGTERM` whose default action kills nub, since that
@@ -279,31 +287,71 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // is a BACKGROUND one, so a terminal Ctrl-C no longer reaches the script by
         // membership either. Enrolling the group in aube's reaper closes both: its handler
         // sweeps every live group, then re-raises so nub still dies with the right status.
-        #[cfg(unix)]
-        {
-            // Declared BEFORE `child` so it drops AFTER it — locals drop in reverse
-            // declaration order, and the group must be killed before its registry slot is
-            // cleared. Clearing first leaves a signal in between skipping the group.
-            let _enrolled;
-            // Armed before the spawn: the child leaves the foreground group the instant it
-            // starts, and until the handler exists a Ctrl-C reaches neither the script nor
-            // anything that would reap it.
-            aube_scripts::unix_group::arm_group_reaper();
-            let mut child = prepared.spawn()?;
-            // `None` unless the kernel confirmed the child leads its own group — the same
-            // fail-open the Windows job object takes when the OS refuses it.
-            _enrolled = child
-                .process_group_id()
-                .and_then(aube_scripts::unix_group::register_embedder_group);
-            child.wait()
+        let status = {
+            #[cfg(unix)]
+            {
+                // Declared BEFORE `child` so it drops AFTER it — locals drop in reverse
+                // declaration order, and the group must be killed before its registry slot is
+                // cleared. Clearing first leaves a signal in between skipping the group.
+                let _enrolled;
+                // Armed before the spawn: the child leaves the foreground group the instant it
+                // starts, and until the handler exists a Ctrl-C reaches neither the script nor
+                // anything that would reap it.
+                aube_scripts::unix_group::arm_group_reaper();
+                let mut child = prepared.spawn()?;
+                // `None` unless the kernel confirmed the child leads its own group — the same
+                // fail-open the Windows job object takes when the OS refuses it.
+                _enrolled = child
+                    .process_group_id()
+                    .and_then(aube_scripts::unix_group::register_embedder_group);
+                child.wait()
+            }
+            // Windows owns spawn+wait inside its launch plan and refuses the asynchronous
+            // `spawn` seam, so the uniform `status()` verb stays the entry point off unix.
+            #[cfg(not(unix))]
+            {
+                prepared.status()
+            }
+        }?;
+        // A nameless spawn is the ROOT project's own script, whose remedy is not a
+        // `dependenciesMeta` entry — and naming the field is most of the hint's value, so
+        // there is nothing useful to say without a name.
+        if !status.success() && no_writable_tmp && native_build {
+            if let Some(name) = spawn.package_name.as_deref() {
+                super::present::warn(&unwritable_tmp_hint(name));
+            }
         }
-        // Windows owns spawn+wait inside its launch plan and refuses the asynchronous
-        // `spawn` seam, so the uniform `status()` verb stays the entry point off unix.
-        #[cfg(not(unix))]
-        {
-            prepared.status()
-        }
+        Ok(status)
     }
+}
+
+/// The axis [`nub_sandbox`] reports lost when it cannot enforce the private per-run tmp the
+/// build jail asks for (`$tmp: "rw"` → `TmpMode::Private`).
+const TMP_PRIVATE_AXIS: &str = "tmp-private";
+
+/// Translate a native build that failed with no writable temp into the cause, because the
+/// tool's own message names the wrong one.
+///
+/// THE MISREPORT IS THE WHOLE REASON THIS EXISTS. node-gyp locates MSVC by running a
+/// PowerShell script through `Add-Type`, which compiles a C# assembly into `%TEMP%`; when
+/// that write fails the probe reports `could not use PowerShell to find Visual Studio 2017
+/// or newer`. A reader takes that at face value and goes to reinstall a toolchain that was
+/// never missing — so the hint is appended AFTER the script's own inherited output, adding
+/// the interpretation without hiding the message it interprets.
+///
+/// Gated on the LOST AXIS rather than on `cfg!(windows)`, and it is Windows that reports it
+/// (`backend/windows.rs`: private tmp is unimplemented there, so the shared tmp stays
+/// visible while the AppContainer holds no write ACE on it, and `$tmp` emits no ordinary fs
+/// rule to supply one). Keying on the axis means this stops firing on its own the moment
+/// that backend gains real private-tmp support, instead of outliving the defect.
+fn unwritable_tmp_hint(name: &str) -> String {
+    format!(
+        "warning: {name} build scripts failed, and the build sandbox has no writable temp \
+         directory on Windows. A failure naming Visual Studio or PowerShell is that, not a \
+         missing toolchain — node-gyp probes for Visual Studio through PowerShell Add-Type, \
+         which compiles a C# assembly into %TEMP%. To build this package unsandboxed, set \
+         dependenciesMeta.{name}.sandbox to false in package.json."
+    )
 }
 
 /// The message a user sees when an install refuses because the build jail cannot be applied.
@@ -1120,6 +1168,28 @@ fn symlink_hop_dirs(path: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hint's whole job is to overrule the tool's own misdiagnosis, so it has to name
+    /// BOTH the misleading symptom and the actionable field. The axis constant is asserted
+    /// against the engine's own spelling, since a rename there would silently stop the
+    /// `run()` gate from ever matching.
+    #[test]
+    fn the_unwritable_tmp_hint_names_the_misreported_cause_and_the_remedy() {
+        let hint = unwritable_tmp_hint("sharp");
+        for expected in [
+            "Visual Studio",
+            "PowerShell",
+            "%TEMP%",
+            "dependenciesMeta.sharp.sandbox to false",
+        ] {
+            assert!(hint.contains(expected), "hint must name {expected}: {hint}");
+        }
+        assert_eq!(
+            TMP_PRIVATE_AXIS,
+            nub_sandbox::TMP_PRIVATE_AXIS_NAME,
+            "the gate in run() compares against this spelling"
+        );
+    }
 
     /// Only an explicit `false` unjails. The `true` and absent cases are not symmetry
     /// for its own sake: they are what keeps the field a narrowing switch, so no manifest

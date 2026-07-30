@@ -103,8 +103,8 @@ pub mod proxy;
 
 pub use backend::{
     CommandArgs, CommandSpec, Degradation, Prepared, PreparedChild, PreparedSignalTarget,
-    RuntimeCapability, StatusReport, apply, apply_with_runtime, earliest_bootstrap,
-    validate_adjacent_resource_bundle,
+    RuntimeCapability, StatusReport, TMP_PRIVATE_AXIS_NAME, apply, apply_with_runtime,
+    earliest_bootstrap, validate_adjacent_resource_bundle,
 };
 #[cfg(target_os = "linux")]
 #[doc(hidden)]

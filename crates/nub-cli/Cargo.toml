@@ -20,6 +20,7 @@ name = "nub-sandbox-probe"
 path = "src/bin/nub-sandbox-probe.rs"
 
 [features]
+default = ["prefetch-github-hosts"]
 # Single self-contained binary: embed the `runtime/` tree as a compressed blob and
 # JIT-extract it on first run (forwards to nub-core, where the extract module +
 # build.rs blob generation live). OFF by default — the `--profile fast` dev loop
@@ -27,12 +28,14 @@ path = "src/bin/nub-sandbox-probe.rs"
 # pass `--features embed-runtime`.
 embed-runtime = ["nub-core/embed-runtime"]
 # Widen prefetch's fetch allowlist past `$downloads` to GitHub's release-asset hosts.
-# OFF by default, and compile-time on purpose so neither a user nor a dependency can
-# enable it at runtime. Rationale: pm_engine/build_prefetch.rs module doc.
+# RATIFIED 2026-07-29, hence in `default` above — it shipped inert only while the widening
+# was under review. Kept as a feature rather than inlined so a hardened build can still drop
+# it with `--no-default-features`, and kept COMPILE-TIME so neither a user nor a dependency
+# can reach the switch. Rationale: pm_engine/build_prefetch.rs module doc.
 prefetch-github-hosts = []
 # TEST-ONLY, forwarded to nub-sandbox: lets a run drop the build jail's curated
 # project-file read grant for the corpus study's project-grant arm. OFF by default,
-# compile-time for the same reason as the feature above. Rationale: nub-sandbox/src/arm.rs.
+# compile-time for the same reason as `prefetch-github-hosts`. Rationale: nub-sandbox/src/arm.rs.
 build-jail-project-grant-arm = ["nub-sandbox/build-jail-project-grant-arm"]
 
 [dependencies]

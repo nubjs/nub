@@ -12,23 +12,25 @@
 //! node-gyp's headers, which is why `nodejs.org` is contacted by none of the corpus
 //! despite being in the set.
 //!
-//! THE FETCH ALLOWLIST IS `$downloads` — UNRATIFIED WIDENING IS OFF BY DEFAULT. On a
-//! default build [`host_allowed`] admits exactly [`nub_sandbox::DOWNLOAD_HOSTS`], so
-//! prefetch introduces NO new network-trust surface: every host nub contacts here is one
-//! the confined script could already have contacted itself, and the change is purely
-//! WHICH SIDE of the jail performs the GET.
+//! THE FETCH ALLOWLIST IS `$downloads` PLUS THE RATIFIED GITHUB WIDENING. [`host_allowed`]
+//! admits [`nub_sandbox::DOWNLOAD_HOSTS`] — every host there is one the confined script
+//! could already have contacted itself, so for those the change is purely WHICH SIDE of the
+//! jail performs the GET — and, on a default build, [`GITHUB_PREFETCH_HOSTS`].
 //!
-//! There IS a real argument that this side may be broader — a `$downloads` entry hands a
-//! running attacker script a bidirectional socket, whereas a prefetch entry only lets nub
-//! perform one anonymous GET whose body is written to a file and never executed. That
-//! would make `github.com` (which covers essentially the whole prebuilt-binary population)
-//! cheap here and useless in `$downloads`. But this code path runs UNCONFINED, as the
-//! user, before the jail exists — it is where this branch's own review found two
-//! arbitrary-file-write defects — so widening it is a maintainer call, not an
-//! implementer's. That widening therefore sits behind the off-by-default
-//! `prefetch-github-hosts` cargo feature ([`GITHUB_PREFETCH_HOSTS`]) and ships inert
-//! pending ratification. A cargo feature, not an env var or config field, precisely so
-//! neither a user nor a dependency can turn it on.
+//! WHY THIS SIDE IS LEGITIMATELY BROADER THAN `$downloads`. A `$downloads` entry hands a
+//! running attacker script a bidirectional socket; a prefetch entry lets nub perform one
+//! anonymous credential-free GET whose body is written to a file and never executed. That
+//! asymmetry makes `github.com` — which covers essentially the whole prebuilt-binary
+//! population, since prebuild-install's default template IS a repo's release-download path
+//! — cheap here even where it is contentious in `$downloads`. The widening was RATIFIED
+//! 2026-07-29 and is now on by default.
+//!
+//! It stays behind the `prefetch-github-hosts` cargo FEATURE, rather than being inlined, for
+//! two reasons that outlived ratification: this code path runs UNCONFINED, as the user,
+//! before the jail exists — it is where this module's own review found two
+//! arbitrary-file-write defects — so a hardened build deserves a way to drop it
+//! (`--no-default-features`); and a cargo feature, never an env var or config field, is what
+//! keeps the switch out of reach of both the user and a dependency.
 //!
 //! Note the gate is on FETCHING, not on USE: [`place`] honours an artifact already on
 //! disk regardless, which is what "nub will not contact a new host" means and all it
@@ -56,19 +58,27 @@ use serde_json::Value;
 
 use super::build_jail::ProbeScope;
 
-/// The unratified widening past `$downloads` — see the module doc for why it is gated.
+/// The ratified widening past `$downloads` — see the module doc for why prefetch's side of
+/// the jail may be broader, and why it stays a compile-time feature regardless.
 ///
-/// THE REDIRECT TARGETS ARE LOAD-BEARING ENTRIES, not conveniences. [`fetch`] re-applies
-/// the allowlist to every hop, so a `github.com` release-asset URL only resolves if the
-/// host it 302s to is here too. Measured 2026-07-28 against a real asset:
+/// THE REDIRECT TARGETS ARE LOAD-BEARING ENTRIES, not conveniences — admitting `github.com`
+/// WITHOUT them fetches zero bytes. [`fetch`] re-applies the allowlist to every hop, so a
+/// release-asset URL only resolves if the host it 302s to is here too. Re-measured
+/// 2026-07-29 against real assets (`node-sqlite3`, `node-keytar`):
 /// `github.com/<o>/<r>/releases/download/…` → **`release-assets.githubusercontent.com`**
 /// (a signed, expiring URL). `objects.githubusercontent.com` is the older spelling of the
 /// same asset CDN, retained because directly-published asset URLs still use it.
 ///
-/// Deliberately ABSENT: `raw.githubusercontent.com`. `github.com/<o>/<r>/raw/…` redirects
-/// there (verified), which is a fine way to serve arbitrary repo content but is not how a
-/// release artifact is published — admitting it would widen the fetchable surface from
-/// "release assets" to "any file in any repo" for no covered package.
+/// Deliberately ABSENT, both for the same reason — they serve arbitrary repo CONTENT rather
+/// than a published release artifact, so admitting either widens the fetchable surface from
+/// "release assets" to "any file in any repo at any ref":
+/// - `raw.githubusercontent.com`, the target of `github.com/<o>/<r>/raw/…` (verified).
+/// - `codeload.github.com`, the target of `github.com/<o>/<r>/archive/<ref>.zip` (verified).
+///   It buys no package regardless: [`detect_family`] recognizes only prebuild-install and
+///   node-pre-gyp, and NEITHER family's URL template can produce an `/archive/` path, so nub
+///   never composes a codeload URL to begin with. The packages that do fetch `/archive/`
+///   (`cldr-data`, whose `install` is a bare `node install.js` driving its own downloader)
+///   are invisible to prefetch — their fix is an egress-catalog entry, not a host here.
 #[cfg(feature = "prefetch-github-hosts")]
 const GITHUB_PREFETCH_HOSTS: &[&str] = &[
     "github.com",
@@ -1645,17 +1655,37 @@ mod tests {
         assert!(!host_allowed("http://nodejs.org/x.tar.gz"));
     }
 
-    /// The unratified widening is INERT unless compiled in — the property that keeps this
-    /// branch from quietly adding a network-trust surface nobody approved.
+    /// The redirect targets are what make the `github.com` grant non-inert, so a default
+    /// build must admit the WHOLE chain — asserting only the entry host would pass against a
+    /// list that fetches zero bytes. The `--no-default-features` arm keeps the hardened
+    /// build's kill switch honest.
     #[test]
-    fn github_is_fetchable_only_under_the_opt_in_feature() {
+    fn a_default_build_fetches_a_github_release_asset_and_its_redirect_targets() {
         let asset = "https://github.com/o/r/releases/download/v1/a.tar.gz";
+        let hops = [
+            "https://release-assets.githubusercontent.com/x",
+            "https://objects.githubusercontent.com/x",
+        ];
         if cfg!(feature = "prefetch-github-hosts") {
             assert!(host_allowed(asset));
-            assert!(host_allowed("https://objects.githubusercontent.com/x"));
+            for hop in hops {
+                assert!(host_allowed(hop), "redirect target refused: {hop}");
+            }
         } else {
             assert!(!host_allowed(asset));
-            assert!(!host_allowed("https://objects.githubusercontent.com/x"));
+            for hop in hops {
+                assert!(!host_allowed(hop), "hop admitted without the feature: {hop}");
+            }
+        }
+        // Repo-CONTENT hosts are not part of THIS widening — see `GITHUB_PREFETCH_HOSTS`.
+        // Asserted against the widening itself rather than through `host_allowed`, because
+        // `$downloads` is a separately-governed list that may admit one of these on its own
+        // merits; what this test owns is that prefetch's own entries stay release-scoped.
+        for content_host in ["raw.githubusercontent.com", "codeload.github.com"] {
+            assert!(
+                !extra_prefetch_hosts().contains(&content_host),
+                "repo-content host in the release-asset widening: {content_host}"
+            );
         }
     }
 
