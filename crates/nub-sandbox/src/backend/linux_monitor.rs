@@ -1490,6 +1490,21 @@ impl SignalRelay {
         state.disarmed = true;
         state.writer.take();
     }
+
+    /// Whether the relay still owns the write end. Tests assert the retain/release
+    /// contract on this owned state rather than on the reader observing pipe EOF:
+    /// `fork` copies the whole descriptor table and `O_CLOEXEC` does not apply to it,
+    /// so any sibling test forking concurrently (cargo runs the suite multi-threaded)
+    /// transiently holds a second write end and suppresses the EOF this process would
+    /// otherwise see. Pipe EOF is a process-global property; relay ownership is not.
+    #[cfg(test)]
+    fn writer_retained(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .writer
+            .is_some()
+    }
 }
 
 fn poison_signal_relay(state: &mut SignalRelayState, detail: &str) -> io::Result<()> {
@@ -9276,15 +9291,20 @@ mod tests {
         let retired = relay.forward(libc::SIGTERM).unwrap_err();
         assert_eq!(retired.kind(), io::ErrorKind::NotConnected);
         assert_eq!(retired.to_string(), "sandbox signal relay is retired");
+        assert!(
+            relay.writer_retained(),
+            "disarm must retire forwarding without releasing the write end"
+        );
         assert_eq!(
             receive_signal_relay_record(reader.as_raw_fd(), 0, Instant::now() + DESCRIBE_TIMEOUT,)
                 .unwrap(),
-            None
+            None,
+            "a disarmed relay must not have emitted a record"
         );
         relay.close();
         assert!(
-            receive_signal_relay_record(reader.as_raw_fd(), 0, Instant::now() + DESCRIBE_TIMEOUT,)
-                .is_err()
+            !relay.writer_retained(),
+            "close is terminal and must release the write end"
         );
     }
 
