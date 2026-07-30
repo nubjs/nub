@@ -71,6 +71,11 @@ const MACHINE_FALLBACKS = ["c3-standard-8", "n2-standard-8", "n2d-standard-8", "
 // regional limit. Falling through to another machine family is exactly the right response.
 const STOCKOUT = /ZONE_RESOURCE_POOL_EXHAUSTED|does not have enough resources|STOCKOUT|QUOTA_EXCEEDED|quota .*exceeded/i;
 const IMAGE_FAMILY = "nub-builder";
+
+// Not any real exit code — `--attach` returning this means "job still running, call again".
+// Declared up here rather than beside the detached-mode code because HELP interpolates it,
+// and HELP is evaluated at module load (a later `const` would be a TDZ ReferenceError).
+const EX_STILL_RUNNING = 75;
 const LABEL = "nub-builder";
 // Ubuntu 24.04 is the base for the golden image; c3-standard-8 matches the box the
 // cross-build was proven on. 50 GB is a floor, not a preference: the dev-loop target dir
@@ -119,6 +124,13 @@ Options:
   --build-image      Bake the golden image, then exit.
   --reap             Delete builder VMs older than 90m (definitionally stray), then exit.
   --reap-all         Delete EVERY builder VM, including live ones owned by other agents.
+  --detach           Provision, sync, start the job on the VM, then EXIT (prints the name).
+  --attach <name>    Stream + poll a --detach'd job; deletes the VM when it finishes.
+                     Exits ${EX_STILL_RUNNING} if still running — just call it again.
+
+Driving this from an agent harness? Use --detach/--attach. A foreground run is SIGKILLed at
+the harness timeout (10 min max, 2 min default), which no signal handler can catch, so the
+VM leaks and only the server-side TTL reclaims it.
   -h, --help         Show this help.
 
 Cost: spot c3-standard-8 is a few cents per build. A stray cannot outlive ${MAX_RUN}.
@@ -137,6 +149,8 @@ export function parseArgs(argv: string[]) {
     buildImage: false,
     reap: false,
     reapAll: false,
+    detach: false,
+    attach: "",
   };
   for (let i = 0; i < argv.length; i++) {
     const v = argv[i];
@@ -154,6 +168,8 @@ export function parseArgs(argv: string[]) {
     else if (v === "--build-image") a.buildImage = true;
     else if (v === "--reap") a.reap = true;
     else if (v === "--reap-all") a.reapAll = true;
+    else if (v === "--detach") a.detach = true;
+    else if (v === "--attach") a.attach = argv[++i];
     else {
       process.stderr.write(`remote-build: unknown argument ${v}\n\n${HELP}`);
       process.exit(2);
@@ -390,12 +406,15 @@ const PREPARE = `set -euo pipefail
 # \`rm -rf ~/src\`, so a target dir INSIDE ~/src would be destroyed with it and every
 # builder would pay a full cold compile despite the image claiming otherwise.
 export CARGO_TARGET_DIR="$HOME/.cargo-shared-target"
-# The \`command -v node\` check below only catches a MISSING node. aube-resolver/build.rs has
-# two further silent-degrade branches (generate-primer.mjs fails to spawn, or exits non-zero)
-# that emit a cargo:warning and ship an EMPTY primer — a binary that falls back to network
-# packument fetches, exit code 0, invisible to artifact verification. release.yml:476 sets
-# this same var so build.rs fails loud instead.
-export AUBE_REQUIRE_PRIMER=1
+# DELIBERATELY NOT SET: AUBE_REQUIRE_PRIMER. aube-resolver/build.rs silently ships an EMPTY
+# primer when scripts/generate-primer.mjs is missing or fails, and release.yml sets that var
+# so a SHIPPED binary fails loud instead. That is a RELEASE concern: a lint/test gate ships
+# nothing, and ci.yml never sets it. Setting it here made every remote gate die in build.rs
+# with "popular package names are required, but …popular-top100000-v1.json was missing" —
+# unsatisfiably, because that JSON is gitignored (vendor/aube/.gitignore) so the
+# \`git ls-files\`-driven sync can never carry it, and regenerating it needs the networked
+# npm-registry crawl that only release.yml's dedicated \`primer\` job performs. This is why
+# the tool had never completed a clippy or test run.
 cd ~/src
 command -v node >/dev/null || { echo "remote-build: node missing on builder (would silently degrade the primer)" >&2; exit 3; }
 mkdir -p runtime/addons
@@ -408,8 +427,11 @@ export function jobScript(job: string, profile: string) {
   // it is its own workspace (panic=unwind cdylib), `exclude`d from the root — so a
   // root-only run goes green on code CI then rejects. The brand lint is a cheap grep.
   if (job === "clippy") {
-    return `${PREPARE}cargo clippy --all-targets --all-features -- -D warnings
-(cd crates/nub-native && cargo clippy --all-features -- -D warnings)
+    // `--profile fast` is part of mirroring ci.yml (lines 220/226), not an optimisation:
+    // omitting it drove a whole SECOND dependency build under `dev`, so the bake's warm
+    // `--profile fast` artifacts were never reused and every remote clippy was fully cold.
+    return `${PREPARE}cargo clippy --all-targets --all-features --profile fast -- -D warnings
+(cd crates/nub-native && cargo clippy --all-features --profile fast -- -D warnings)
 tests/brand-lint/check-env-reads.sh`;
   }
   // CI runs the WHOLE workspace, and builds the REAL addon first because the data-format
@@ -457,6 +479,127 @@ async function runJob(ip: string, script: string, onLine: (s: string) => void) {
   });
 }
 
+
+// DETACHED MODE — why this exists.
+//
+// The agent harness this is usually driven from SIGKILLs a command at its timeout, and that
+// timeout caps at 10 minutes (it defaults to TWO). SIGKILL cannot be caught, so it defeats
+// layer 1 outright: the SIGINT/SIGTERM/SIGHUP handlers never run, the `finally` in oneBuild
+// never runs, and the VM leaks until the server-side TTL reclaims it. Measured twice: a cold
+// clippy killed at 2m13s (default timeout) and again at 10m (the max), each orphaning a
+// builder. A cold `--all-targets --all-features` clippy plus spot-stockout failover simply
+// does not fit that ceiling, so the LOCAL process must not have to outlive the job.
+//
+// So `--detach` starts the job under `setsid` on the VM and returns immediately; `--attach`
+// streams the log and polls for the completion marker in a bounded window, and is safe to
+// re-run as many times as the job needs. Detaching HERE is not the hazard that a detached
+// LOCAL build is: the VM is single-purpose, disposable, and carries a hard
+// `--max-run-duration`, so a forgotten job cannot outlive it or contend with anything.
+const JOB_SH = "$HOME/remote-build-job.sh";
+const JOB_LOG = "$HOME/remote-build-job.log";
+const JOB_RC = "$HOME/remote-build-job.rc";
+// Deliberately well UNDER the harness's 10-minute hard cap rather than near it: the deadline
+// is only checked after both ssh calls, each of which can burn its own 60s timeout, so a
+// window set close to the cap overruns it. Measured — an 8-minute window was SIGKILLed at 10
+// minutes just as it was about to report, losing the progress it was holding.
+const ATTACH_WINDOW_MS = 5 * 60_000;
+
+async function ssh(ip: string, cmd: string, timeout = 60_000) {
+  const { stdout } = await execFileAsync(
+    "ssh",
+    ["-n", "-i", SSH_KEY, ...SSH_OPTS, `${SSH_USER}@${ip}`, cmd],
+    { timeout, maxBuffer: 64 * 1024 * 1024 },
+  );
+  return stdout;
+}
+
+async function startDetachedJob(ip: string, script: string) {
+  const b64 = Buffer.from(script, "utf8").toString("base64");
+  // The script is landed on disk rather than fed to `bash -s`, for the same reason
+  // `remoteJobCommand` does it: anything inside that reads stdin would otherwise swallow the
+  // un-executed remainder and exit 0, silently truncating the job.
+  //
+  // The rc file is written LAST and is the ONLY completion signal `--attach` trusts — an
+  // empty or missing log means nothing, since a job can be silent for minutes while a C
+  // dependency builds.
+  // The `( … &)` subshell is load-bearing, and the obvious spelling is a trap. Writing
+  // `cmd && cmd && setsid … &` backgrounds the ENTIRE `&&` chain, and its earlier commands
+  // inherit the ssh session's stdout — so the channel never reaches EOF and ssh BLOCKS even
+  // though the job started. Measured: that form printed `detached` instantly and then hung
+  // until killed at 25s (here, until the 60s exec timeout, surfacing as `Command failed`).
+  // Backgrounding only the fully-redirected setsid inside a subshell returns in ~2s.
+  await ssh(
+    ip,
+    `printf %s '${b64}' | base64 -d > ${JOB_SH} && rm -f ${JOB_LOG} ${JOB_RC} && ` +
+      `(setsid nohup bash -c 'bash ${JOB_SH} > ${JOB_LOG} 2>&1; echo $? > ${JOB_RC}' ` +
+      `</dev/null >/dev/null 2>&1 &) && sleep 1 && echo detached`,
+  );
+}
+
+async function findZone(name: string) {
+  const z = await gcloud(["compute", "instances", "list", "--filter", `name=${name}`, "--format", "value(zone)"]);
+  if (!z) throw new Error(`remote-build: no instance named ${name} — already reclaimed, or wrong name.`);
+  return z.split("\n")[0].trim();
+}
+
+async function attachToJob(name: string) {
+  const zone = await findZone(name);
+  const ip = await instanceIp(name, zone);
+  const t0 = Date.now();
+  let seen = 0;
+  for (;;) {
+    // `tail -n +N` resumes at the first line not yet printed, so re-attaching after a kill
+    // replays nothing and drops nothing.
+    const out = await ssh(ip, `tail -n +${seen + 1} ${JOB_LOG} 2>/dev/null || true`);
+    const lines = out.split("\n");
+    if (lines[lines.length - 1] === "") lines.pop();
+    for (const l of lines) process.stdout.write(`[r] ${l}\n`);
+    seen += lines.length;
+
+    const rc = (await ssh(ip, `cat ${JOB_RC} 2>/dev/null || true`)).trim();
+    if (rc !== "") {
+      const secs = ((Date.now() - t0) / 1000).toFixed(0);
+      process.stdout.write(`remote-build: job finished rc=${rc} after +${secs}s attached\n`);
+      await deleteInstance(name, zone);
+      return Number(rc) || 0;
+    }
+    if (Date.now() - t0 > ATTACH_WINDOW_MS) {
+      process.stdout.write(
+        `remote-build: still running (${seen} log lines so far); VM kept.\n` +
+          `remote-build: re-attach with: node scripts/remote-build.ts --attach ${name}\n`,
+      );
+      return EX_STILL_RUNNING;
+    }
+    await new Promise((r) => setTimeout(r, 10_000));
+  }
+}
+
+async function startDetached(a: ReturnType<typeof parseArgs>, source: string, live: Set<string>) {
+  const name = `nub-builder-${Date.now().toString(36)}-1-${Math.random().toString(36).slice(2, 6)}`;
+  const log = (s: string) => process.stdout.write(`[1] ${s}\n`);
+  log(`creating ${name} (${a.machine}${a.onDemand ? "" : ", spot"})`);
+  const placement = await createInstance(
+    name,
+    { machine: a.machine, onDemand: a.onDemand, fromImage: true, terminate: "DELETE" },
+    log,
+  );
+  const zone = placement.zone;
+  live.add(`${name}|${zone}`);
+  const ip = await instanceIp(name, zone);
+  await waitForSsh(name, zone, ip, 240_000);
+  log(`ssh up at ${ip} on ${zone}/${placement.machine}`);
+  syncSource(source, ip);
+  log("source synced");
+  await startDetachedJob(ip, jobScript(a.job, a.profile));
+  // Drop it from `live` LAST: registered during the fragile provision/sync window so an
+  // interrupt there still reaps it, then released once the job is running, because from that
+  // point outliving this process is the entire point. `--max-run-duration` is the backstop.
+  live.delete(`${name}|${zone}`);
+  process.stdout.write(
+    `remote-build: detached job=${a.job} on ${name} (${zone})\n` +
+      `remote-build: collect with: node scripts/remote-build.ts --attach ${name}\n`,
+  );
+}
 
 async function oneBuild(
   idx: number,
@@ -708,6 +851,15 @@ async function main() {
   }
   if (a.buildImage) {
     await buildImage(a, source, live);
+    return;
+  }
+  // Collect-only: no provisioning, no local sampling — just stream and poll.
+  if (a.attach) {
+    process.exitCode = await attachToJob(a.attach);
+    return;
+  }
+  if (a.detach) {
+    await startDetached(a, source, live);
     return;
   }
 
