@@ -17,13 +17,19 @@
 #
 # The icacls dump is a FACT, not a gate: it names the capability SIDs on `C:\` and `C:\Users`
 # that the backend harvests, which is what makes the ancestors reachable without elevation.
+#
+# THE COST GROUP. Repair 1's ace is written per lifecycle SPAWN, and the propagating writer it
+# used to go through wedged a 20-minute step and stalled three runs of this probe. It now writes
+# through `SetKernelObjectSecurity`. `ace-cost-named-writer-scales-with-tree` is that group's
+# control — a run where the propagating writer did NOT slow down on the populated tree measured
+# nothing, so it is gated as a PASS alongside the kernel cells rather than reported as a fact.
 name: win-jail-repairs-probe
 
 on:
   push:
     # Path-filtered so a change to a SIBLING probe does not spend ~25 minutes of Windows runner
     # on this one. Shared capacity: every push here costs the full matrix.
-    branches: [sandbox/win-jail-caps]
+    branches: [sandbox/win-jail-caps, sandbox/win-ace-kernel]
     paths:
       - 'crates/nub-sandbox/**'
       - '.github/workflows/win-jail-repairs-probe.yml'
@@ -139,6 +145,33 @@ jobs:
             grep -E "prop:$p=" probe.log || true
           done
           done
+
+          echo "---- what the ancestor ace costs (the SetKernelObjectSecurity claim) ----"
+          # The named-writer cell is the control: if the propagating writer did NOT slow down on
+          # the populated tree, the walk never reproduced here and the kernel numbers are noise.
+          for p in ace-cost-named-writer-scales-with-tree \
+                   ace-cost-kernel-writer-flat-in-tree-size \
+                   ace-cost-kernel-beats-named-on-populated-tree \
+                   ace-cost-real-temp-under-a-second \
+                   ace-lands-with-exact-traverse-mask \
+                   ace-carries-no-inheritance-flags \
+                   ace-absent-on-child-directory \
+                   ace-revoke-removes-it \
+                   ace-preserves-dacl-control-bits; do
+            need_pass "$p"
+          done
+          need "  fact:ace-cost-us "
+
+          echo "---- the already-AppContainer-readable skip ----"
+          for p in aap-skip-declines-a-protected-fixture-root \
+                   aap-skip-sees-the-seeded-grant \
+                   aap-skip-child-still-reads-the-tool \
+                   aap-skip-leaves-the-preexisting-ace-alone; do
+            need_pass "$p"
+          done
+          # Whether the machine's own %ProgramFiles% publishes read to AppContainers is a FACT,
+          # not a gate: the skip is an optimisation and a machine without it simply pays.
+          grep -E 'fact:aap-readable-' probe.log || { echo "MISS the AAP-readability facts"; fail=1; }
 
           echo "---- ancestor reachability ----"
           for p in repair-on-lstat-c-root-permitted \
