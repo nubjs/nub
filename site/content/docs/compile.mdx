@@ -402,6 +402,8 @@ empty     nothing, and the file is not read
 
 Reach for it when an extension nub doesn't map is a real asset — a web build's `.html` and `.css` files, a `.sql` schema — or to move one the other way, as `--loader .wasm=binary` does to inline a module's bytes instead of writing it out.
 
+Extensions match exactly, case included, so a file named `PHOTO.PNG` needs `--loader .PNG=file`.
+
 ### `--conditions`
 
 Add `exports` conditions to resolution. They join the defaults (`default`, `node`) rather than replacing them:

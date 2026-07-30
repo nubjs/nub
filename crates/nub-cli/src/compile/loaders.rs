@@ -100,11 +100,9 @@ pub fn plan(raw: &[String]) -> Result<Loaders> {
                  \x20\x20For example: --loader .html=file --loader .md=text"
             )
         })?;
-        // Lowercased because a filesystem hands back whatever case the file was
-        // created with, and `.PNG`/`.JPG` are routine on macOS and Windows.
-        // Matching case-exactly failed the build on them, which reads as the
-        // loader being broken rather than as a spelling rule.
-        let ext = ext.trim().trim_start_matches('.').to_ascii_lowercase();
+        // Kept EXACTLY as written, case included — see `FilePlugin::claims` for
+        // why matching is case-sensitive on both sides.
+        let ext = ext.trim().trim_start_matches('.').to_string();
         if ext.is_empty() {
             bail!("--loader expects an extension before the `=`, got {token:?}");
         }
@@ -212,8 +210,19 @@ impl FilePlugin {
     /// `file` set would let a broad `.gz=file` steal a file that a more specific
     /// `.tar.gz=text` had claimed — the loser being decided by hook order rather
     /// than by specificity.
+    ///
+    /// CASE-SENSITIVE, DELIBERATELY, and it must stay that way. Lowercasing here
+    /// is tempting — `.PNG` and `.JPG` are ordinary on macOS and Windows — but it
+    /// can only ever fix nub's half. Rolldown looks its own `module_types` up
+    /// with an exact-case `get`, and the text family goes through THAT, so
+    /// lowercasing only here bought `PHOTO.PNG` at the cost of making `PROMPT.MD`
+    /// fail the build: one convenience, two rules, and the difference invisible
+    /// until it bites. Routing the text family through this plugin instead would
+    /// not close it either, since `HookLoadOutput.code` is a string and the
+    /// byte-oriented loaders (`base64`, `binary`, `dataurl`) need bytes. One rule
+    /// for both families is worth more than a convenience that holds in one;
+    /// an uppercase extension is spelled `--loader .PNG=file`.
     fn claims(&self, id: &str) -> bool {
-        let id = id.to_ascii_lowercase();
         id.match_indices('.')
             .find_map(|(i, _)| self.by_ext.get(&id[i + 1..]))
             .copied()
@@ -418,18 +427,20 @@ mod tests {
     }
 
     #[test]
-    fn extensions_match_case_insensitively() {
-        let p = FilePlugin::new(&plan(&[]).expect("valid"));
+    fn extension_matching_is_case_sensitive_in_both_families() {
+        let d = FilePlugin::new(&plan(&[]).expect("valid"));
+        assert!(d.claims("/proj/photo.png"));
         assert!(
-            p.claims("/proj/PHOTO.PNG"),
-            "a screenshot named .PNG is routine"
+            !d.claims("/proj/PHOTO.PNG"),
+            "a lowercase default must not claim an uppercase extension — Rolldown's \
+             own lookup is exact-case, so claiming it here would make the file \
+             family case-insensitive while the text family stayed exact"
         );
-        assert!(p.claims("/proj/photo.png"));
 
-        let upper = plan(&[".HTML=file".into()]).expect("valid");
+        let upper = plan(&[".PNG=file".into()]).expect("valid");
         assert!(
-            upper.file.iter().any(|e| e == "html"),
-            "a flag spelled in caps must map the same extension"
+            FilePlugin::new(&upper).claims("/proj/PHOTO.PNG"),
+            "naming the extension as written is how an uppercase one is mapped"
         );
     }
 
