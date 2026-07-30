@@ -14,9 +14,10 @@
 #                          even though every decisive cell is green. This is the world a verdict
 #                          without a negative control would wave through, and it is the exact failure
 #                          shape §5k's run 1 shipped.
-#   4 wrong-interpreter    The hybrid arm is green but ran jail-bin's OWN node.exe, so it says nothing
-#                          about the ambient one. The interpreter read-back property must FAIL while
-#                          the hybrid property itself passes — the two must be separable.
+#   4 wrong-interpreter    The unconfined hybrid control is green but ran jail-bin's OWN node.exe, so
+#                          it does not establish that the ambient binary is reachable unconfined. The
+#                          interpreter read-back must FAIL while the arm's own cell passes — the two
+#                          must be separable.
 #   5 harness-dead         Nothing ran (every arm missing). Controls must FAIL rather than the whole
 #                          block reporting an absence as a negative result.
 
@@ -53,6 +54,9 @@ function New-WorkingCells {
   $cells['plain-ambient'] = Arm @{ 'npm-version' = C 'OK' '11.16.0' } `
     @{ 'interp-execpath' = C 'OK' "$PF\node.exe"; 'path-seen' = C 'OK' 'jailbin=False progfiles=True';
        'stat-c-root' = C 'OK' 'ok'; 'read-ungranted' = C 'OK' 'CANARY-UNGRANTED' }
+  $cells['plain-hybrid'] = Arm @{ 'npm-direct' = C 'OK' '11.16.0' } `
+    @{ 'interp-execpath' = C 'OK' "$PF\node.exe"; 'stat-c-root' = C 'OK' 'ok';
+       'read-ungranted' = C 'OK' 'CANARY-UNGRANTED' }
   $cells['ac-cmd-floor'] = @{ 'cmd-runs' = C 'OK' ''; '__launch' = C 'rc=0 (0x00000000) isAC=1' ''; '__lines' = C 1 '' }
   $cells['ac-ambient'] = Arm @{ 'npm-version' = C 'ERR' 'MODULE_NOT_FOUND' } `
     @{ 'interp-execpath' = C 'OK' "$PF\node.exe"; 'path-seen' = C 'OK' 'jailbin=False progfiles=True' }
@@ -61,8 +65,9 @@ function New-WorkingCells {
   $cells['ac-jailbin-ungranted'] = Arm @{ 'npm-direct' = C 'ERR' 'MODULE_NOT_FOUND' } $null
   $cells['ac-jailbin-node'] = Arm @{ 'node-version' = C 'OK' 'v24.18.1' } $null
   $cells['ac-jailbin-npm-direct'] = Arm @{ 'npm-direct' = C 'OK' '11.16.0' } $null
-  $cells['ac-hybrid-npm-direct'] = Arm @{ 'npm-direct' = C 'OK' '11.16.0' } `
-    @{ 'interp-execpath' = C 'OK' "$PF\node.exe"; 'path-seen' = C 'OK' 'jailbin=True progfiles=True' }
+  # The measured answer: a confined caller CANNOT exec the ambient image, so ERR is the world where
+  # the mechanism is understood correctly.
+  $cells['ac-hybrid-npm-direct'] = Arm @{ 'npm-direct' = C 'ERR' 'Access is denied.' } $null
   $cells['ac-aap-only'] = Arm @{ 'npm-direct' = C 'OK' '11.16.0' } $null
   $cells['ac-jailbin-npm-stock'] = Arm @{ 'npm-version' = C 'OK' '11.16.0' } $null
   $cells['ac-jailbin-npm-nubshim'] = Arm @{ 'npm-version' = C 'OK' '11.16.0' } $null
@@ -81,7 +86,8 @@ function New-WorkingFacts {
     'ungranted-arm-aap-ace'     = 'none'
     'ungranted-arm-deep-ace'    = 'none | perrun=none'
     'absent-tool-shape'         = 'not-recognized'
-    'ambient-on-path-shape'     = 'node-not-resolvable'
+    'ambient-on-path-shape'     = 'other'
+    'ambient-on-path-resolved-from' = 'jail-bin (silently skipped the MSI dir listed FIRST)'
     'hardlink-create'           = 'OK'
     'hardlink-leak'             = $true
     'hardlink-original-ace'     = 'ReadAndExecute, Synchronize'
@@ -99,7 +105,7 @@ $worlds['1-mechanism-works'] = @{ Cells = (New-WorkingCells); Facts = (New-Worki
 
 # 2. The grant does nothing: every decisive read is denied.
 $c2 = New-WorkingCells
-foreach ($a in @('ac-jailbin-npm-direct', 'ac-hybrid-npm-direct', 'ac-aap-only')) {
+foreach ($a in @('ac-jailbin-npm-direct', 'ac-aap-only')) {
   $c2[$a]['npm-direct'] = C 'ERR' 'MODULE_NOT_FOUND'
 }
 $c2['ac-jailbin-node']['node-version'] = C 'ERR' ''
@@ -111,7 +117,7 @@ $f2['inherited-ace-on-deep-npm-cli'] = 'none'
 $worlds['2-mechanism-fails'] = @{ Cells = $c2; Facts = $f2; MustFail = @(
   'jb-inheritance-at-creation-covered-the-deep-file',
   'jb-node-resolves-and-runs-from-jailbin', 'jb-npm-tree-is-readable-from-jailbin',
-  'jb-ambient-node-plus-owned-npm-tree-works', 'jb-stable-app-package-sid-grant-suffices',
+  'jb-stable-app-package-sid-grant-suffices',
   'jb-a-shim-without-the-prefix-probe-works', 'jb-real-lifecycle-script-runs') }
 
 # 3. Everything green INCLUDING the ungranted arm — so the ace is not what carries the read.
@@ -122,9 +128,9 @@ $worlds['3-no-attribution'] = @{ Cells = $c3; Facts = (New-WorkingFacts); MustFa
 
 # 4. Hybrid green but it ran jail-bin's own node, so it says nothing about the ambient one.
 $c4 = New-WorkingCells
-$c4['ac-hybrid-npm-direct']['interp-execpath'] = C 'OK' "$JB\node.exe"
+$c4['plain-hybrid']['interp-execpath'] = C 'OK' "$JB\node.exe"
 $worlds['4-wrong-interpreter'] = @{ Cells = $c4; Facts = (New-WorkingFacts); MustFail = @(
-  'jb-control-hybrid-really-ran-the-ambient-interpreter') }
+  'jb-control-unconfined-hybrid-really-ran-the-ambient-interpreter') }
 
 # 5. Nothing ran at all.
 $worlds['5-harness-dead'] = @{ Cells = @{}; Facts = @{}; MustFail = @(
@@ -133,9 +139,9 @@ $worlds['5-harness-dead'] = @{ Cells = @{}; Facts = @{}; MustFail = @(
   'jb-control-appcontainer-gate-is-passable', 'jb-control-child-saw-the-sanitized-path',
   'jb-control-ungranted-canary-exists', 'jb-control-grant-still-scopes',
   'jb-node-resolves-and-runs-from-jailbin', 'jb-npm-tree-is-readable-from-jailbin',
-  'jb-ambient-node-plus-owned-npm-tree-works',
+  'jb-control-hybrid-command-line-works-unconfined',
   'jb-inheritance-at-creation-covered-the-deep-file',
-  'jb-ambient-install-dir-is-not-even-path-resolvable') }
+  'jb-ambient-install-dir-is-not-path-resolvable') }
 
 $selftestFails = 0
 foreach ($name in ($worlds.Keys | Sort-Object)) {

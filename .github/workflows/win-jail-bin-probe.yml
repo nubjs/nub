@@ -103,7 +103,8 @@ jobs:
                    jb-control-appcontainer-gate-is-live jb-control-appcontainer-gate-is-passable \
                    jb-control-child-saw-the-sanitized-path \
                    jb-control-ungranted-canary-exists jb-control-grant-still-scopes \
-                   jb-control-hybrid-really-ran-the-ambient-interpreter \
+                   jb-control-hybrid-command-line-works-unconfined \
+                   jb-control-unconfined-hybrid-really-ran-the-ambient-interpreter \
                    jb-control-aap-only-arm-really-withheld-the-per-run-sid \
                    jb-control-ungranted-arm-really-had-no-ace \
                    jb-control-hardlink-was-actually-created \
@@ -114,13 +115,13 @@ jobs:
           # premise the mechanism exists to fix and the negative that makes a green arm attributable.
           echo "-- attribution: the failures that must still be present in THIS run --"
           for p in jb-attribution-ambient-msi-npm-still-fails-confined \
-                   jb-ambient-install-dir-is-not-even-path-resolvable \
+                   jb-ambient-install-dir-is-not-path-resolvable \
                    jb-attribution-ungranted-jailbin-is-denied; do need "$p"; done
 
           echo "-- the decisive cells --"
           for p in jb-node-resolves-and-runs-from-jailbin \
                    jb-npm-tree-is-readable-from-jailbin \
-                   jb-ambient-node-plus-owned-npm-tree-works \
+                   jb-confined-caller-cannot-exec-the-ambient-interpreter \
                    jb-stable-app-package-sid-grant-suffices \
                    jb-a-shim-without-the-prefix-probe-works \
                    jb-real-lifecycle-script-runs \
@@ -136,7 +137,7 @@ jobs:
           grep -E '^  fact:(cost/|populate-|grant-on-|inherited-ace-)' jb-probe.log || true
 
           echo "-- stock npm.cmd vs a nub-authored shim (the pipe question) --"
-          grep -E '^  fact:(stock-npm-cmd-confined|nub-authored-npm-shim-confined|absent-tool-failure-shape) ' jb-probe.log || true
+          grep -E '^  fact:(stock-npm-cmd-confined|nub-authored-npm-shim-confined|absent-tool-failure-shape|ambient-on-path-) ' jb-probe.log || true
 
           echo
           # A red job means "at least one property did not hold", NOT a verdict on the mechanism: the

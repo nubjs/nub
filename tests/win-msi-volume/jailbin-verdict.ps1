@@ -57,7 +57,7 @@
 . (Join-Path (Join-Path (Join-Path $PSScriptRoot '..') 'win-bypass-traverse') 'verdict.ps1')
 
 $script:JbArms = @(
-  'plain-jailbin', 'plain-ambient',
+  'plain-jailbin', 'plain-ambient', 'plain-hybrid',
   'ac-cmd-floor', 'ac-ambient', 'ac-ambient-on-path', 'ac-jailbin-ungranted',
   'ac-jailbin-node', 'ac-jailbin-npm-direct', 'ac-hybrid-npm-direct', 'ac-aap-only',
   'ac-jailbin-npm-stock', 'ac-jailbin-npm-nubshim', 'ac-absent-python', 'ac-lifecycle',
@@ -146,10 +146,13 @@ function Invoke-JailBinVerdict {
   # `'node' is not recognized` rather than Node's `Cannot find module`. §5j named node.exe by absolute
   # path and so never exercised it. INVERTED READING: PASS means the ambient dir on PATH is useless,
   # which is why the hybrid arm must name the interpreter absolutely.
-  Prop 'jb-ambient-install-dir-is-not-even-path-resolvable' `
-    (((Cell 'ac-ambient-on-path' 'npm-version') -eq 'ERR') -and
-     ((F 'ambient-on-path-shape') -eq 'node-not-resolvable')) `
-    "PASS = a confined child cannot resolve node OUT of the un-ACE'd MSI dir at all: shape=$(F 'ambient-on-path-shape') cell=$(Cell 'ac-ambient-on-path' 'npm-version')"
+  # Run 30517055996 sharpened this. With ONLY the MSI dir on PATH the child reported
+  # `'node' is not recognized`; with jail-bin also present there is NO error — cmd's probe of the
+  # un-ACE'd dir finds nothing and SILENTLY falls through, even though the MSI dir is listed FIRST.
+  # That silence is the design-relevant part: jail-bin wins by default, but nothing surfaces the skip.
+  Prop 'jb-ambient-install-dir-is-not-path-resolvable' `
+    ((F 'ambient-on-path-resolved-from') -like 'jail-bin*') `
+    "PASS = with the MSI dir listed FIRST and jail-bin second, a confined cmd resolved node from JAIL-BIN — the un-ACE'd dir is not probeable and is skipped without any error: resolved-from=$(F 'ambient-on-path-resolved-from') shape=$(F 'ambient-on-path-shape')"
 
   # ── THE DECISIVE CELLS ──────────────────────────────────────────────────────────────────────────
   Prop 'jb-node-resolves-and-runs-from-jailbin' ((Cell 'ac-jailbin-node' 'node-version') -eq 'OK') `
@@ -157,15 +160,23 @@ function Invoke-JailBinVerdict {
   # THE READ QUESTION, isolated from the pipe question. No shell pipe anywhere in this command line.
   Prop 'jb-npm-tree-is-readable-from-jailbin' ((Cell 'ac-jailbin-npm-direct' 'npm-direct') -eq 'OK') `
     "confined node <jailbin>\node_modules\npm\bin\npm-cli.js --version — the cell §5j measured FAILING on the MSI tree: $(Cell 'ac-jailbin-npm-direct' 'npm-direct') $(Detail 'ac-jailbin-npm-direct' 'npm-direct')"
-  # ⭐ The cell the whole design hinges on: ambient un-ACE-able interpreter, nub-owned npm tree.
-  Prop 'jb-ambient-node-plus-owned-npm-tree-works' ((Cell 'ac-hybrid-npm-direct' 'npm-direct') -eq 'OK') `
-    "PASS = the ~88 MiB node.exe does NOT need copying; only the ~12 MiB npm tree does. The interpreter is the AMBIENT MSI node.exe (no ace, execs per §5j) and only the npm tree is nub-owned: $(Cell 'ac-hybrid-npm-direct' 'npm-direct') $(Detail 'ac-hybrid-npm-direct' 'npm-direct')"
-  # WHICH INTERPRETER ACTUALLY RAN. Without this the hybrid arm proves nothing: cmd could have
-  # resolved jail-bin's own copy and the row would read identically. The two arms must DISAGREE.
-  Prop 'jb-control-hybrid-really-ran-the-ambient-interpreter' `
-    (((Detail 'ac-hybrid-npm-direct' 'interp-execpath') -like '*Program Files*') -and
-     ((Detail 'ac-jailbin-npm-direct' 'interp-execpath') -notlike '*Program Files*')) `
-    "the hybrid arm's process.execPath must be the MSI binary and the jail-bin arm's must not, or 'PATH order was the only variable' is an assumption: hybrid=$(Detail 'ac-hybrid-npm-direct' 'interp-execpath') jailbin=$(Detail 'ac-jailbin-npm-direct' 'interp-execpath')"
+  # ⭐⭐ THE QUESTION "DOES node.exe NEED COPYING", and run 30517055996 ANSWERED IT: YES.
+  # §5j's "the jail execs the ambient node.exe anyway" holds only because the LAUNCHING process was
+  # the unconfined parent — `CreateProcessW` opens the image in the CALLER's context. When the caller
+  # is itself inside the AppContainer, which is the situation for anything a lifecycle script spawns,
+  # the image open is a CONFINED open and the un-ACE'd binary is refused: cmd printed
+  # `Access is denied.` INVERTED READING: PASS means the ambient interpreter is NOT reachable from
+  # inside the jail, so nub must put node.exe in the ACE'd dir and the payload is ~100 MiB not ~12.
+  Prop 'jb-confined-caller-cannot-exec-the-ambient-interpreter' `
+    ((Cell 'ac-hybrid-npm-direct' 'npm-direct') -eq 'ERR') `
+    "PASS = node.exe DOES need copying: a confined cmd.exe naming the MSI binary by ABSOLUTE path is refused, so §5j's exec result does not extend to a nested spawn: $(Cell 'ac-hybrid-npm-direct' 'npm-direct') $(Detail 'ac-hybrid-npm-direct' 'npm-direct') launch=$(LaunchOf 'ac-hybrid-npm-direct')"
+  # THE ONE VARIABLE. The identical command line UNCONFINED must succeed, or the denial above is a bad
+  # path rather than the confinement.
+  Prop 'jb-control-hybrid-command-line-works-unconfined' ((Cell 'plain-hybrid' 'npm-direct') -eq 'OK') `
+    "the same absolute-path invocation of the MSI node.exe must work with no AppContainer: $(Cell 'plain-hybrid' 'npm-direct') $(Detail 'plain-hybrid' 'npm-direct') interp=$(Detail 'plain-hybrid' 'interp-execpath')"
+  Prop 'jb-control-unconfined-hybrid-really-ran-the-ambient-interpreter' `
+    ((Detail 'plain-hybrid' 'interp-execpath') -like '*Program Files*') `
+    "and it must have been the MSI binary, not jail-bin's copy: $(Detail 'plain-hybrid' 'interp-execpath')"
   # The zero-per-launch-cost design: a STABLE trustee, so the tree grant is written once at populate.
   Prop 'jb-stable-app-package-sid-grant-suffices' ((Cell 'ac-aap-only' 'npm-direct') -eq 'OK') `
     "PASS = an S-1-15-2-1 ace written ONCE at populate time is enough for a zero-capability LowBox token, so no per-launch ACE pass over 2,374 entries is needed: $(Cell 'ac-aap-only' 'npm-direct') $(Detail 'ac-aap-only' 'npm-direct')"

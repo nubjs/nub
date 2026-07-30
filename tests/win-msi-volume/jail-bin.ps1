@@ -16,14 +16,17 @@
 #
 # WHAT THIS PROBE HAS TO ESTABLISH, in the order the design depends on it:
 #
-#   1. WHETHER `node.exe` NEEDS COPYING AT ALL. §5j says the ambient image execs anyway, so the
-#      hybrid arm pairs the AMBIENT MSI `node.exe` — named by ABSOLUTE path, which is how nub spawns
-#      (`npm_node_execpath` / `$NODE`) — with a nub-owned npm tree. If that runs, the copy payload is
-#      the ~12 MiB npm tree, not the ~88 MiB binary. The child reports `process.execPath`, so which
-#      interpreter ran is measured rather than assumed, and the two arms must DISAGREE on it.
-#      A separate arm puts the ambient dir on PATH instead, because run 30516752917 measured that a
-#      confined child cannot even RESOLVE `node` there — a PATH search is a directory probe, and the
-#      un-ACE'd install dir is not probeable. §5j named node.exe absolutely and never saw that.
+#   1. WHETHER `node.exe` NEEDS COPYING AT ALL — ANSWERED YES by run 30517055996, and the arm is kept
+#      because the answer is not the one §5j reads like. §5j's "the jail execs the ambient node.exe
+#      anyway" holds only because the LAUNCHING process was the unconfined parent: `CreateProcessW`
+#      opens the image in the CALLER's context. When the caller is itself inside the AppContainer —
+#      which is the situation for everything a lifecycle script spawns — the image open is a CONFINED
+#      open and the un-ACE'd binary is refused (`Access is denied.`, measured). The hybrid arm names
+#      the MSI binary by ABSOLUTE path so PATH resolution is not the variable, and `plain-hybrid`
+#      runs the identical command line UNCONFINED so the denial is attributable to confinement alone.
+#      A separate arm puts the ambient dir on PATH: with jail-bin also listed, cmd's probe of the
+#      un-ACE'd dir finds nothing and SILENTLY falls through to jail-bin even though the MSI dir is
+#      FIRST — no error surfaces at all.
 #
 #   2. THAT THE ACE IS WHAT DOES THE WORK. The ungranted arm runs first, before any grant exists, on
 #      the identical command line. Without it, a green jail-bin arm could be bypass-traverse, the
@@ -216,8 +219,9 @@ Revoke-AcAce $jailBin $ARAP
 # This is the shippable shape; stock `npm.cmd` is measured beside it as the thing it replaces.
 @'
 @ECHO OFF
-"%~dp0node.exe" "%~dp0node_modules\npm\bin\npm-cli.js" %*
-'@ | Set-Content -LiteralPath (Join-Path $jailBin 'npm-nub.cmd') -Encoding ascii
+"%~dp0node.exe" @@FLAGS@@ "%~dp0node_modules\npm\bin\npm-cli.js" %*
+'@.Replace('@@FLAGS@@', $flags) |
+  Set-Content -LiteralPath (Join-Path $jailBin 'npm-nub.cmd') -Encoding ascii
 
 # The uniform control script every arm runs FIRST. `fs` + `process.env` ONLY — no `child_process`,
 # because a piped spawn under an AppContainer hangs indefinitely (§5h). Authored as a LITERAL
@@ -283,6 +287,13 @@ function New-SanitizedEnv([string]$pathValue) {
     'OS=Windows_NT',
     "TEMP=$scriptsDir",
     "TMP=$scriptsDir",
+    # THE REALPATH INSTRUMENT, delivered via NODE_OPTIONS rather than a command line. Run 30517055996
+    # measured both `.cmd` shims — stock `npm.cmd` and nub's own one-liner — dying in
+    # `resolveMainPath` realpath, because a flag on the OUTER command line does not reach the `node`
+    # the shim spawns. NODE_OPTIONS reaches every one of them, which is what lets the PIPE question be
+    # measured at all. Both flags are on Node's NODE_OPTIONS allowlist. See the $flags note above for
+    # why this is an instrument and not a proposed fix.
+    "NODE_OPTIONS=$flags",
     # The profile POINTERS are present deliberately. They are not a hole: §5h measured `~/.ssh/id_rsa`
     # and `~/.npmrc` denied EPERM in every granting arm, so it is the ACE that denies the secrets, not
     # the absence of a variable naming their directory. Withholding them would instead make npm's own
@@ -422,6 +433,11 @@ $hybridNpm = T 'npm-direct' ('"' + $ambientNode + '" ' + $flags + ' "' + $deepNp
 $null = Invoke-JbArm -Name 'plain-jailbin' -AppContainer $false -PathValue $pathJailBin -Tool (T 'npm-version' 'npm --version')
 $null = Invoke-JbArm -Name 'plain-ambient' -AppContainer $false -PathValue $pathAmbient -Tool (T 'npm-version' 'npm --version')
 
+# 2b. UNCONFINED, the HYBRID command line verbatim. One variable against arm 8: confinement. Without
+#     it, "a confined caller cannot exec the ambient interpreter" cannot be told from a bad path.
+$null = Invoke-JbArm -Name 'plain-hybrid' -AppContainer $false -PathValue $pathJailBin `
+  -Tool $hybridNpm -Interp $ambientNode
+
 # 3. Does `cmd.exe` run confined at all? Every cell here is resolved BY cmd, so a dead shell would
 #    read as a missing tool. No control script — this arm's PATH has no node by design.
 $null = Invoke-JbArm -Name 'ac-cmd-floor' -AppContainer $true -PathValue $pathFloor -Tool 'echo op:cmd-runs=OK' -NoControl
@@ -445,10 +461,19 @@ $null = Invoke-JbArm -Name 'ac-jailbin-npm-direct' -AppContainer $true -PathValu
 #     which one it is.
 $ambOut = Invoke-JbArm -Name 'ac-ambient-on-path' -AppContainer $true -PathValue $pathHybrid `
   -Tool (T 'npm-version' 'npm --version')
+# RUN 30517055996 CORRECTED THE EXPECTED SHAPE. With ONLY the MSI dir on PATH the child reported
+# `'node' is not recognized`; with jail-bin ALSO on PATH (this arm) there is no error at all — cmd's
+# probe of the un-ACE'd dir finds nothing and SILENTLY falls through to the next entry. So the fact
+# worth pinning is not an error string, it is WHICH directory cmd resolved from.
 $facts['ambient-on-path-shape'] = 'other'
 if ($ambOut -match "'node' is not recognized") { $facts['ambient-on-path-shape'] = 'node-not-resolvable' }
 elseif ($ambOut -match 'Cannot find module') { $facts['ambient-on-path-shape'] = 'module-not-found' }
+$ambInterp = Detail 'ac-ambient-on-path' 'interp-execpath'
+$facts['ambient-on-path-resolved-from'] =
+  if ($ambInterp -like "*$jailBin*") { 'jail-bin (silently skipped the MSI dir listed FIRST)' }
+  elseif ($ambInterp -like "*$progFiles*") { 'the MSI dir' } else { "other: $ambInterp" }
 Fact 'ambient-on-path-failure-shape' $facts['ambient-on-path-shape']
+Fact 'ambient-on-path-resolved-from' $facts['ambient-on-path-resolved-from']
 
 # 8. ⭐ THE HYBRID: the AMBIENT MSI node.exe as interpreter (PATH order is the only variable vs arm 7)
 #    with a nub-owned npm tree. A pass here means the ~88 MiB binary does not need copying.
@@ -581,12 +606,18 @@ if ($tokPtr -ne 0) {
 }
 
 # ── residue: nothing this probe did may leave an appcontainer ace on an admin-owned path.
+# BOTH the directory AND `node.exe`: the hardlink cell writes its ace onto the FILE's MFT record, so a
+# directory-only check would have reported `none` while an ace sat on the binary (run 30517055996
+# measured `hardlink-progfiles-original-ace-after = ReadAndExecute, Synchronize`).
 $residue = @()
-try {
-  $residue = @((Get-Acl -LiteralPath $progFiles).Access |
-    Where-Object { $_.IdentityReference.Value -like 'S-1-15-*' } |
-    ForEach-Object { "$($_.IdentityReference.Value)=$($_.FileSystemRights)" })
-} catch { $residue = @("unreadable:$_") }
+foreach ($target in @($progFiles, $ambientNode)) {
+  try {
+    $residue += @((Get-Acl -LiteralPath $target).Access |
+      Where-Object { $_.IdentityReference.Value -like 'S-1-15-*' -or
+                     $_.IdentityReference.Value -like '*APPLICATION PACKAGE*' } |
+      ForEach-Object { "$target :: $($_.IdentityReference.Value)=$($_.FileSystemRights)" })
+  } catch { $residue += @("unreadable:$target") }
+}
 $facts['pf-residue'] = $(if ($residue.Count) { ($residue -join ' ; ') } else { 'none' })
 Fact 'progfiles-appcontainer-aces-after-probe' $facts['pf-residue']
 
