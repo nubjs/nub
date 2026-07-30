@@ -26,7 +26,12 @@ const manifest = fs
   .split('\n')
   .filter((l) => l.trim() && !l.startsWith('#'))
   .map((l) => {
-    const [pkg, version, cls, needs] = l.split('\t');
+    // STRIP THE CR. A CRLF checkout puts a trailing \r on the LAST field of every row,
+    // which on a three-column row is the CLASS — so `classes[cls]` missed, the row got
+    // an empty spec, no predicate ran, and it scored DID-WORK-AND-SUCCEEDED on the
+    // strength of having produced any output at all. Measured on windows-latest: five
+    // of nine pilot rows passed with `reasons: []`.
+    const [pkg, version, cls, needs] = l.replace(/\r$/, '').split('\t');
     return { pkg, version, cls, needs: (needs || '').split(',').filter(Boolean) };
   });
 
@@ -52,7 +57,21 @@ for (const m of manifest) {
   const key = `${m.pkg}@${m.version}`;
   const owner = delta.by_owner[key];
   const detail = delta.owner_detail[key];
-  const spec = classes[m.cls] || {};
+  // AN UNKNOWN CLASS IS FATAL, NEVER AN EMPTY SPEC. `|| {}` meant a row whose class did
+  // not resolve ran no predicate at all and then scored on `effect = true`'s initial
+  // value — a silent, unconditional PASS for the one row whose contract nothing checked.
+  // Every way a class can fail to resolve (a CRLF-tainted name, a typo, a class deleted
+  // from classes.json) therefore produced results that looked stronger than the truth.
+  // Refusing here is what makes a green verdict mean a predicate actually ran.
+  if (!Object.prototype.hasOwnProperty.call(classes, m.cls)) {
+    console.error(
+      `shard-verdict: FATAL — ${m.pkg}@${m.version} names class ${JSON.stringify(m.cls)}, ` +
+        `which is absent from classes.json. Known: ${Object.keys(classes).join(', ')}. ` +
+        `No verdict from this run is interpretable; fix the manifest rather than reading past it.`
+    );
+    process.exit(4);
+  }
+  const spec = classes[m.cls];
   const created = (detail?.created || []);
   const changed = created.concat(detail?.modified || []);
 

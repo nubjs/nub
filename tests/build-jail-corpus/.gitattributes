@@ -1,0 +1,10 @@
+# The manifests are DATA, parsed field-by-field on three platforms — never source to be
+# normalised to the checkout's native line ending. Under a CRLF checkout the trailing \r
+# lands on each row's LAST field, which on a three-column row is the class name, so the
+# class lookup missed and those rows scored a vacuous pass. Pinning LF fixes it at the
+# source; the parsers strip \r as well, because a manifest can also arrive from outside
+# this checkout.
+*.tsv text eol=lf
+*.sh text eol=lf
+*.mjs text eol=lf
+*.json text eol=lf

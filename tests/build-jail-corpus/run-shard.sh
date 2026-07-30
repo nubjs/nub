@@ -75,11 +75,14 @@ LOG="$OUT/run.log"
 
 # ── manifest -> dependency set + the project-file capability UNION ─────────────
 DEPS=""; NEEDS=""; PKGS=()
+# `tr -d '\r'` because a CRLF checkout puts the carriage return on each row's LAST field.
+# Left in, it rides into the provisioning capability names and — via the verdict script —
+# into the class name, where it silently defeated the class lookup.
 while IFS=$'\t' read -r PKG VER CLASS NEED; do
   [ -z "${PKG:-}" ] && continue; case "$PKG" in \#*) continue ;; esac
   DEPS="$DEPS,\"$PKG\":\"$VER\""; PKGS+=("$PKG")
   [ -n "${NEED:-}" ] && NEEDS="$NEEDS,$NEED"
-done < "$MANIFEST"
+done < <(tr -d '\r' < "$MANIFEST")
 DEPS="${DEPS#,}"
 
 DEPS_META=""
@@ -317,6 +320,11 @@ $(wp "$PROJ/node_modules/.store")
 $(wp "$H/.cache/nub/pm/store")" \
   node "$(wp "$HARNESS/lib/shard-verdict.mjs")" "$(wp "$OUT/delta.json")" "$(wp "$MANIFEST")" \
     "$(wp "$LOG")" "$(wp "$OUT/verdicts.json")"
+# The verdict step can now REFUSE (an unresolvable class). Its rc was previously
+# discarded, so a refusal would have left the last run's verdicts.json in place and the
+# arm would still have reported. Fold it into the arm effect instead.
+RC_VERDICT=$?
+[ "$RC_VERDICT" -eq 0 ] || ARM_EFFECT="FAILED-verdict-refused(rc=$RC_VERDICT)"
 
 ARM_EFFECT="$ARM_EFFECT" WARN_COUNT="$WARN_COUNT" GYP_ID="$GYP_ID" PLATFORM="$PLATFORM" \
   LEVER="${LEVER:-none}" NONCE="$NONCE" \
