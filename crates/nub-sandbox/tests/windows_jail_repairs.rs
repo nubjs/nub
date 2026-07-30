@@ -60,6 +60,9 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("__sbxchild__") => std::process::exit(win::child_main(&args[2..])),
+        // The SHIPPING arm: this same binary, re-executed under a token with no administrative
+        // authority, running the shell battery. See `deelev_shell_arm`.
+        Some("__deelevshell__") => std::process::exit(win::deelev_shell_main()),
         _ => std::process::exit(win::probe_main()),
     }
 }
@@ -2177,6 +2180,12 @@ try {{
         let f = Fixture::new("sh");
         println!("  fact:shell-fixture-root={}", f.root.display());
         println!("  fact:probe-elevated={}", probe_elevated());
+        // The oracle that DECIDES whether this arm's `C:\` cells are a ceiling. Reported next to
+        // `probe-elevated` because that flag LIES under the de-elevated route:
+        // `CreateRestrictedToken` copies it instead of recomputing it, so the de-elevated arm
+        // still says `probe-elevated=true` while holding no administrative authority (measured,
+        // run 30423750288). Gate on this line, never on the one above it.
+        println!("  fact:probe-admin-authority={}", admin_authority());
         println!(
             "  fact:shell-fixture-has-space={}",
             f.root.to_string_lossy().contains(' ')
@@ -2376,6 +2385,17 @@ fs.writeFileSync({marker}, "sentinel=" + String(globalThis.__nubJailStdioShim) +
         // fsprobe per arm, on the same paths, so the arms are separated by exactly the seam.
         let gate_ops: Vec<(String, &str, String)> = vec![
             ("croot".into(), "lstat", r"C:\".into()),
+            // THE LIVENESS GATE THAT SURVIVES DE-ELEVATION. `C:\` is only ACE-writable by an
+            // administrator, so `croot` cannot prove the repair ran for a standard user — but the
+            // fixture root is an ancestor of the write grant, sits inside the user's own profile,
+            // and carries a PROTECTED dacl (`secure_root` strips the inheritable ALL APPLICATION
+            // PACKAGES grant `C:\Users` propagates), so it is refused without the repair and
+            // reachable with it whatever the token. One variable, both arms, either principal.
+            (
+                "profileanc".into(),
+                "lstat",
+                f.root.to_string_lossy().into_owned(),
+            ),
             (
                 "ungranted".into(),
                 "read",
@@ -2412,6 +2432,32 @@ fs.writeFileSync({marker}, "sentinel=" + String(globalThis.__nubJailStdioShim) +
             &format!(
                 "{} (the ceiling arm's repair must be live — see shell-ace-writable if this fails)",
                 line(&gate_on, "croot")
+            ),
+        );
+        println!(
+            "  fact:shell-profileanc-off={}",
+            line(&gate_off, "profileanc")
+        );
+        println!(
+            "  fact:shell-profileanc-on={}",
+            line(&gate_on, "profileanc")
+        );
+        report(
+            fails,
+            "shell-gate-repair-off-profile-ancestor-refused",
+            denied(&line(&gate_off, "profileanc")),
+            &format!(
+                "{} (THE CONTROL for the ancestor ace nub CAN write unprivileged)",
+                line(&gate_off, "profileanc")
+            ),
+        );
+        report(
+            fails,
+            "shell-gate-repair-on-profile-ancestor-permitted",
+            line(&gate_on, "profileanc").starts_with("ok:"),
+            &format!(
+                "{} (the repair's ACE half must be live, or no shell cell in this arm is evidence)",
+                line(&gate_on, "profileanc")
             ),
         );
         for (arm, map) in [("off", &gate_off), ("on", &gate_on)] {
@@ -2952,6 +2998,511 @@ p done=1
         );
     }
 
+    // ── DE-ELEVATION: measuring the SHIPPING principal instead of the runner's ───────
+    //
+    // Every Windows cell to date was taken as `runneradmin`, which holds `WRITE_DAC` on `C:\`
+    // and `C:\Users`. So the ancestor repair reached ancestors an ordinary user's token cannot,
+    // and the repaired arm was a CEILING rather than the shipping configuration. This group
+    // re-runs the WHOLE shell battery under a principal with no administrative authority — in
+    // the SAME session and window station, because a LowBox launch from session 0 returns
+    // 0xC0000142 unconditionally (§5e), which is also why CI is the only venue.
+    //
+    // WHY A RESTRICTED TOKEN AND NOT A SECOND ACCOUNT. `windows-latest`'s `runneradmin` is
+    // `TokenElevationTypeDefault`, so there is no linked standard-user token to borrow
+    // (measured, run 30424255514), and a freshly created local account has no logon session on
+    // this window station — `CreateProcessAsUserW` with a `LogonUserW` token lands it in session
+    // 0, where the launch cannot succeed for reasons that have nothing to do with the repair.
+    // `CreateRestrictedToken` with `BUILTIN\Administrators` reduced to DENY-ONLY,
+    // `DISABLE_MAX_PRIVILEGE`, and a drop to medium integrity is STRICTLY MORE confined than a
+    // standard user on the group, privilege and integrity axes, and IDENTICAL on the axis that
+    // decides this question: `WRITE_DAC` on `C:\` is reachable only through the Administrators
+    // ACE or the owner check, and a deny-only SID satisfies neither.
+    //
+    // WHAT IT DOES NOT EMULATE, on the record: the user PROFILE stays `runneradmin`'s (`HKCU`,
+    // `%LOCALAPPDATA%`, `%TEMP%`). That is the one axis the ancestor chain provably does not
+    // depend on — a real standard user owns their own profile too, so the chain's shape is the
+    // same either way: writable from `%USERPROFILE%` down, refused at `C:\Users` and `C:\`.
+
+    /// Whether this process WIELDS administrative authority, decided by an access check.
+    ///
+    /// `TokenIsElevated` is not a substitute: `CreateRestrictedToken` COPIES that flag rather
+    /// than recomputing it, so the de-elevated token reports `IsElevated=1` while being unable
+    /// to do anything an administrator can. `SC_MANAGER_CREATE_SERVICE` is the canonical probe —
+    /// the SCM grants it to Administrators only, a deny-only SID does not match, and the call
+    /// mutates nothing.
+    fn admin_authority() -> bool {
+        use windows_sys::Win32::System::Services::{
+            CloseServiceHandle, OpenSCManagerW, SC_MANAGER_CREATE_SERVICE,
+        };
+        // SAFETY: opens the local SCM for a right that is never exercised; NULL machine/database.
+        unsafe {
+            let h = OpenSCManagerW(
+                std::ptr::null(),
+                std::ptr::null(),
+                SC_MANAGER_CREATE_SERVICE,
+            );
+            if h.is_null() {
+                return false;
+            }
+            CloseServiceHandle(h);
+            true
+        }
+    }
+
+    /// This process's integrity RID (`8192` medium, `12288` high) and the names of every
+    /// privilege still in its token. Both are reported so "de-elevated" is observed rather than
+    /// asserted — the restricted token should be at medium with `SeChangeNotifyPrivilege` alone.
+    fn token_shape() -> (u32, String) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Security::{
+            GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, LUID_AND_ATTRIBUTES,
+            LookupPrivilegeNameW, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY,
+            TokenIntegrityLevel, TokenPrivileges,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        // SAFETY: each class is queried size-first, then into an exactly-sized buffer; the token
+        // handle is closed on every path.
+        unsafe {
+            let mut token = std::ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return (0, "open-token-failed".into());
+            }
+            let mut need = 0u32;
+            GetTokenInformation(
+                token,
+                TokenIntegrityLevel,
+                std::ptr::null_mut(),
+                0,
+                &mut need,
+            );
+            let mut buf = vec![0u8; need.max(4) as usize];
+            let mut il = 0u32;
+            if GetTokenInformation(
+                token,
+                TokenIntegrityLevel,
+                buf.as_mut_ptr().cast(),
+                need,
+                &mut need,
+            ) != 0
+            {
+                let label = buf.as_ptr().cast::<TOKEN_MANDATORY_LABEL>();
+                let sid = (*label).Label.Sid;
+                let count = *GetSidSubAuthorityCount(sid);
+                if count > 0 {
+                    il = *GetSidSubAuthority(sid, u32::from(count) - 1);
+                }
+            }
+            let mut need = 0u32;
+            GetTokenInformation(token, TokenPrivileges, std::ptr::null_mut(), 0, &mut need);
+            let mut buf = vec![0u8; need.max(4) as usize];
+            let mut names: Vec<String> = Vec::new();
+            if GetTokenInformation(
+                token,
+                TokenPrivileges,
+                buf.as_mut_ptr().cast(),
+                need,
+                &mut need,
+            ) != 0
+            {
+                let header = buf.as_ptr().cast::<TOKEN_PRIVILEGES>();
+                let entries =
+                    std::ptr::addr_of!((*header).Privileges).cast::<LUID_AND_ATTRIBUTES>();
+                for i in 0..(*header).PrivilegeCount as usize {
+                    let mut wide = [0u16; 128];
+                    let mut len = wide.len() as u32;
+                    if LookupPrivilegeNameW(
+                        std::ptr::null(),
+                        &(*entries.add(i)).Luid,
+                        wide.as_mut_ptr(),
+                        &mut len,
+                    ) != 0
+                    {
+                        names.push(String::from_utf16_lossy(&wide[..len as usize]));
+                    }
+                }
+            }
+            CloseHandle(token);
+            names.sort();
+            (il, names.join(","))
+        }
+    }
+
+    /// Drop `token` to MEDIUM integrity — the level a standard user's token carries.
+    /// `CreateRestrictedToken` strips groups and privileges but leaves integrity UNTOUCHED, so
+    /// without this the de-elevated arm would still run at High and would be WEAKER than the
+    /// principal it stands in for, which is the one direction the substitution must never go.
+    /// Lowering an integrity level needs no privilege; only raising one does.
+    fn set_medium_integrity(token: windows_sys::Win32::Foundation::HANDLE) -> std::io::Result<()> {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+        use windows_sys::Win32::Security::{
+            GetLengthSid, PSID, SID_AND_ATTRIBUTES, SetTokenInformation, TOKEN_MANDATORY_LABEL,
+            TokenIntegrityLevel,
+        };
+        // windows-sys files this under System_SystemServices; spelled out rather than pulling a
+        // whole feature in for one integer.
+        const SE_GROUP_INTEGRITY: u32 = 0x20;
+        let text: Vec<u16> = "S-1-16-8192".encode_utf16().chain([0]).collect();
+        let mut sid: PSID = std::ptr::null_mut();
+        // SAFETY: converts a well-formed SDDL SID string; freed below.
+        if unsafe { ConvertStringSidToSidW(text.as_ptr(), &mut sid) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut label = TOKEN_MANDATORY_LABEL {
+            Label: SID_AND_ATTRIBUTES {
+                Sid: sid,
+                Attributes: SE_GROUP_INTEGRITY,
+            },
+        };
+        // SAFETY: `label` and the SID it points at both outlive the call.
+        let ok = unsafe {
+            SetTokenInformation(
+                token,
+                TokenIntegrityLevel,
+                std::ptr::from_mut(&mut label).cast(),
+                std::mem::size_of::<TOKEN_MANDATORY_LABEL>() as u32 + GetLengthSid(sid),
+            )
+        };
+        let err = std::io::Error::last_os_error();
+        // SAFETY: the SID was allocated by ConvertStringSidToSidW and is no longer referenced.
+        unsafe { LocalFree(sid.cast()) };
+        if ok == 0 { Err(err) } else { Ok(()) }
+    }
+
+    /// A PRIMARY token for this session with administrative authority removed. Prefers the
+    /// linked (genuine standard-user) token where the logon is UAC-split, and logs why it was
+    /// unavailable when it falls through, so the report never has to guess which principal it
+    /// measured.
+    fn deelevated_primary_token()
+    -> std::io::Result<(windows_sys::Win32::Foundation::HANDLE, &'static str)> {
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
+        use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+        use windows_sys::Win32::Security::{
+            CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, DuplicateTokenEx, GetTokenInformation,
+            PSID, SID_AND_ATTRIBUTES, SecurityImpersonation, TOKEN_ALL_ACCESS,
+            TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_LINKED_TOKEN, TOKEN_QUERY,
+            TokenLinkedToken, TokenPrimary,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+        let mut me: HANDLE = std::ptr::null_mut();
+        // SAFETY: opens our own token with exactly the rights the routes below need.
+        if unsafe {
+            OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY,
+                &mut me,
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        // Route 1 — the linked standard-user token, if this logon is UAC-split.
+        let mut linked = TOKEN_LINKED_TOKEN {
+            LinkedToken: std::ptr::null_mut(),
+        };
+        let mut ret = 0u32;
+        // SAFETY: out-buffer is exactly a TOKEN_LINKED_TOKEN; an unsplit logon fails the call.
+        let got = unsafe {
+            GetTokenInformation(
+                me,
+                TokenLinkedToken,
+                std::ptr::from_mut(&mut linked).cast(),
+                std::mem::size_of::<TOKEN_LINKED_TOKEN>() as u32,
+                &mut ret,
+            )
+        };
+        if got == 0 {
+            println!(
+                "    [deelev] no linked token: {}",
+                std::io::Error::last_os_error()
+            );
+        } else if !linked.LinkedToken.is_null() {
+            let mut primary: HANDLE = std::ptr::null_mut();
+            // SAFETY: duplicating a token handle we own into a primary token.
+            let dup = unsafe {
+                DuplicateTokenEx(
+                    linked.LinkedToken,
+                    TOKEN_ALL_ACCESS,
+                    std::ptr::null(),
+                    SecurityImpersonation,
+                    TokenPrimary,
+                    &mut primary,
+                )
+            };
+            // SAFETY: the impersonation handle is no longer needed either way.
+            unsafe { CloseHandle(linked.LinkedToken) };
+            if dup != 0 {
+                // SAFETY: our own process-token handle, no longer needed.
+                unsafe { CloseHandle(me) };
+                return Ok((primary, "linked-token"));
+            }
+            println!(
+                "    [deelev] DuplicateTokenEx on the linked token failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+
+        // Route 2 — a restricted token: Administrators deny-only, every privilege dropped.
+        let admins_text: Vec<u16> = "S-1-5-32-544".encode_utf16().chain([0]).collect();
+        let mut admins: PSID = std::ptr::null_mut();
+        // SAFETY: converts a well-formed SDDL SID string; freed below.
+        if unsafe { ConvertStringSidToSidW(admins_text.as_ptr(), &mut admins) } == 0 {
+            let e = std::io::Error::last_os_error();
+            // SAFETY: our own token handle.
+            unsafe { CloseHandle(me) };
+            return Err(e);
+        }
+        let disable = [SID_AND_ATTRIBUTES {
+            Sid: admins,
+            Attributes: 0,
+        }];
+        let mut restricted: HANDLE = std::ptr::null_mut();
+        // SAFETY: `disable` outlives the call; `me` is primary, so the derived token is too.
+        let ok = unsafe {
+            CreateRestrictedToken(
+                me,
+                DISABLE_MAX_PRIVILEGE,
+                1,
+                disable.as_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                &mut restricted,
+            )
+        };
+        let err = std::io::Error::last_os_error();
+        // SAFETY: the SID and our token handle are both done with.
+        unsafe {
+            LocalFree(admins.cast());
+            CloseHandle(me);
+        }
+        if ok == 0 {
+            return Err(err);
+        }
+        // `CreateRestrictedToken` hands back a handle carrying only the SOURCE handle's rights,
+        // and `SetTokenInformation(TokenIntegrityLevel)` needs `TOKEN_ADJUST_DEFAULT` —
+        // ACCESS_DENIED without it (run 30424678530). Re-open the token we already own instead
+        // of widening the process-token handle above.
+        let mut full: HANDLE = std::ptr::null_mut();
+        // SAFETY: duplicating a token handle we own into a full-access primary token.
+        let dup = unsafe {
+            DuplicateTokenEx(
+                restricted,
+                TOKEN_ALL_ACCESS,
+                std::ptr::null(),
+                SecurityImpersonation,
+                TokenPrimary,
+                &mut full,
+            )
+        };
+        let dup_err = std::io::Error::last_os_error();
+        // SAFETY: superseded by `full`.
+        unsafe { CloseHandle(restricted) };
+        if dup == 0 {
+            return Err(dup_err);
+        }
+        set_medium_integrity(full).map_err(|e| {
+            // SAFETY: abandoning the token we just built.
+            unsafe { CloseHandle(full) };
+            std::io::Error::other(format!("could not drop to medium integrity: {e}"))
+        })?;
+        Ok((full, "restricted-token+medium-il"))
+    }
+
+    /// Spawn `args` under `token` in THIS session and window station, with stdio going to
+    /// `log`, bounded by `secs`.
+    ///
+    /// The transcript goes to a FILE rather than being inherited for two reasons: the child's
+    /// property names collide with the parent's until the parent re-emits them under a
+    /// `deelev-` prefix, and a child that has to be KILLED still leaves its partial transcript
+    /// on disk, where an inherited-and-then-terminated stream would have left nothing.
+    fn spawn_as_token_captured(
+        token: windows_sys::Win32::Foundation::HANDLE,
+        program: &Path,
+        args: &[&str],
+        log: &Path,
+        secs: u32,
+    ) -> std::io::Result<(i32, bool)> {
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_TIMEOUT,
+        };
+        use windows_sys::Win32::System::Threading::{
+            CreateProcessAsUserW, GetExitCodeProcess, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
+            STARTUPINFOW, TerminateProcess, WaitForSingleObject,
+        };
+
+        let mut cl: Vec<u16> = Vec::new();
+        cl.push(u16::from(b'"'));
+        cl.extend(program.as_os_str().encode_wide());
+        cl.push(u16::from(b'"'));
+        for a in args {
+            cl.push(u16::from(b' '));
+            cl.push(u16::from(b'"'));
+            cl.extend(a.encode_utf16());
+            cl.push(u16::from(b'"'));
+        }
+        cl.push(0);
+
+        let sink = std::fs::File::create(log)?;
+        let sink_handle: HANDLE = sink.as_raw_handle().cast();
+        let stdin: HANDLE = std::io::stdin().as_raw_handle().cast();
+        for h in [stdin, sink_handle] {
+            // SAFETY: marking handles we own inheritable, as `std`'s inherited-stdio spawn does.
+            unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
+        }
+        // SAFETY: zeroed POD structs, fields set below.
+        let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdInput = stdin;
+        si.hStdOutput = sink_handle;
+        si.hStdError = sink_handle;
+        // SAFETY: zeroed POD out-param.
+        let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+
+        // NULL lpEnvironment ⇒ the child inherits OURS. Deliberate: the arms must differ only in
+        // the token, and route 2 is the same user, so TEMP/PATH/LOCALAPPDATA are already right.
+        // SAFETY: `cl` is a writable NUL-terminated UTF-16 buffer that outlives the call.
+        let ok = unsafe {
+            CreateProcessAsUserW(
+                token,
+                std::ptr::null(),
+                cl.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::from_mut(&mut si).cast(),
+                &mut pi,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: bounded wait, then read the code and close both handles exactly once.
+        let out = unsafe {
+            let waited = WaitForSingleObject(pi.hProcess, secs * 1000);
+            let timed_out = waited == WAIT_TIMEOUT;
+            if timed_out {
+                TerminateProcess(pi.hProcess, 0xDEAD);
+                WaitForSingleObject(pi.hProcess, 30_000);
+            }
+            let mut code = 0u32;
+            GetExitCodeProcess(pi.hProcess, &mut code);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            (code as i32, timed_out)
+        };
+        Ok(out)
+    }
+
+    /// The de-elevated child's entry point: report the principal it is, then run the shell
+    /// battery. Its property names are the ordinary ones — the PARENT re-emits them under a
+    /// `deelev-` prefix, so the two arms cannot be confused in the log while the names stay
+    /// mechanically derived from one source.
+    pub fn deelev_shell_main() -> i32 {
+        arm_watchdog();
+        let (il, privs) = token_shape();
+        println!(
+            "  fact:token-user={}",
+            std::env::var("USERNAME").unwrap_or_default()
+        );
+        println!("  fact:token-admin-authority={}", admin_authority());
+        println!("  fact:token-is-elevated-flag={}", probe_elevated());
+        println!("  fact:token-integrity={il}");
+        println!("  fact:token-privileges={privs}");
+        let Some(node) = path_node() else {
+            eprintln!("no node.exe on PATH");
+            return 1;
+        };
+        let node = std::fs::canonicalize(&node)
+            .map(|p| unverbatim(&p))
+            .unwrap_or(node);
+        let mut fails = 0u32;
+        shell_tools(&mut fails, node.as_path());
+        println!("  fact:arm-completed=true");
+        // The count is reported, not returned as a failure: every shell cell is a MEASUREMENT
+        // whose FAIL is the finding. The parent gates on the arm having RUN and on the
+        // principal, which are the only two things that could make the cells meaningless.
+        println!("  fact:arm-report-fails={fails}");
+        0
+    }
+
+    /// The parent half. Builds the de-elevated principal, runs the whole shell group under it,
+    /// and re-emits the child's transcript with `deelev-` inserted into every property name.
+    fn deelev_shell_arm(fails: &mut u32) {
+        println!("  fact:parent-admin-authority={}", admin_authority());
+        let Ok(exe) = std::env::current_exe() else {
+            report(fails, "deelev-arm-ran", false, "current_exe failed");
+            return;
+        };
+        let log = std::env::temp_dir().join(format!("nub-jr-deelev-{}.log", std::process::id()));
+        let (token, route) = match deelevated_primary_token() {
+            Ok(pair) => pair,
+            Err(e) => {
+                report(
+                    fails,
+                    "deelev-arm-ran",
+                    false,
+                    &format!("could not build a de-elevated primary token: {e}"),
+                );
+                return;
+            }
+        };
+        println!("  fact:deelev-route={route}");
+        flush();
+        let spawned = spawn_as_token_captured(token, &exe, &["__deelevshell__"], &log, 15 * 60);
+        // SAFETY: the token is ours and the child has already been waited on.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(token) };
+        let transcript = std::fs::read_to_string(&log).unwrap_or_default();
+        let _ = std::fs::remove_file(&log);
+        match &spawned {
+            Ok((code, timed_out)) => println!(
+                "  fact:deelev-arm-exit={code} timed-out={timed_out} lines={}",
+                transcript.lines().count()
+            ),
+            Err(e) => println!("  fact:deelev-arm-exit=SPAWN-FAILED {e}"),
+        }
+        for raw in transcript.lines() {
+            let line = raw.trim_end_matches(['\r', '\n']);
+            let prefixed = ["prop:", "fact:", "diag:"].iter().find_map(|kind| {
+                line.strip_prefix(&format!("  {kind}"))
+                    .map(|rest| format!("  {kind}deelev-{rest}"))
+            });
+            println!(
+                "{}",
+                prefixed.unwrap_or_else(|| format!("  [deelev] {line}"))
+            );
+        }
+        // THE TWO GATES. Nothing else about the child is asserted, because every shell cell it
+        // produced is a measurement — but a cell from an arm that never ran, or from one that
+        // still held administrative authority, is not evidence of anything.
+        report(
+            fails,
+            "deelev-arm-ran",
+            transcript.contains("fact:arm-completed=true"),
+            &format!(
+                "{} lines, exit {:?} (a partial transcript means the arm was killed mid-battery)",
+                transcript.lines().count(),
+                spawned.as_ref().map(|(c, _)| *c)
+            ),
+        );
+        report(
+            fails,
+            "deelev-arm-holds-no-admin-authority",
+            transcript.contains("fact:token-admin-authority=false"),
+            "the arm must FAIL an access check only an administrator passes, or it measured the \
+             ceiling a second time",
+        );
+    }
+
     // ── the probe ────────────────────────────────────────────────────────────────────
 
     pub fn probe_main() -> i32 {
@@ -2985,6 +3536,14 @@ p done=1
         // whether the stall is gone, so it must not sit behind anything that could reproduce it.
         step("token_privileges");
         token_privileges(&mut fails);
+
+        // THE SHIPPING ARM, FIRST. Everything below it is already measured on this branch
+        // (runs 30532759630 / 30533110308) as the elevated CEILING; the de-elevated answer is
+        // what this round exists for, so it must not sit behind a group that could stall and
+        // take the log with it. Its own battery still runs the repair-OFF floor internally, so
+        // the shipping/floor comparison is inside this one child.
+        step("deelev_shell_arm");
+        deelev_shell_arm(&mut fails);
 
         step("ace_cost");
         ace_cost(&mut fails);

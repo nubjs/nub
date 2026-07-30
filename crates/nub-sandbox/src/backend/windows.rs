@@ -1715,23 +1715,32 @@ pub(super) mod launch {
             // absolute `require()` dies: `EPERM: lstat 'C:\'`, with `C:\Users` and the user
             // profile refused right behind it (run 30464397422).
             //
-            // Two mechanisms, because ONE cannot cover the chain without elevation. Writing
-            // an ACE needs `WRITE_DAC`, which a standard user holds on their own profile and
-            // below but not on `C:\` or `C:\Users` (measured de-elevated, same run). So:
+            // Two mechanisms are attempted, and ONLY THE FIRST IS MEASURED TO WORK. Writing an
+            // ACE needs `WRITE_DAC`, which a standard user holds on their own profile and below
+            // but not on `C:\` or `C:\Users` (measured de-elevated, same run). So:
             //
             //  - Where nub CAN write, it writes a NON-INHERITED ACE carrying exactly
             //    traverse + read-attributes. Non-inherited is not a detail: it grants the
             //    directory OBJECT and nothing under it (so an ancestor grant never becomes a
             //    subtree read), and it costs no DACL propagation, which is what keeps this
-            //    affordable per lifecycle spawn.
-            //  - Where it cannot, it REQUESTS the capability Windows already granted there.
+            //    affordable per lifecycle spawn. THIS is the half that holds unprivileged.
+            //  - Where it cannot, it REQUESTS the capability Windows already granted there:
             //    `C:\` carries `(A;;0x1000a1;;;S-1-15-3-65536-…)` — a capability SID with the
-            //    same traverse+read-attributes mask, non-inherited, on the exact path the
-            //    error names; `C:\Users` carries a different one. Requesting a raw capability
-            //    SID is unprivileged and nub already does it for `internetClient`. They are
-            //    HARVESTED off the DACLs rather than hardcoded: the set differs per path and
-            //    per Windows build, and neither SID resolves through `LookupAccountSid`
-            //    (`ERROR_NONE_MAPPED`), so a name is not available to derive them from.
+            //    same traverse+read-attributes mask, non-inherited, on the exact path the error
+            //    names; `C:\Users` carries a different one. They are HARVESTED off the DACLs
+            //    rather than hardcoded: the set differs per path and per Windows build, and
+            //    neither SID resolves through `LookupAccountSid` (`ERROR_NONE_MAPPED`), so no
+            //    name is available to derive them from.
+            //    ⚠️ AND THE KERNEL REFUSES THEM. `CreateProcessW` returns
+            //    ERROR_INVALID_PARAMETER for this SID pair, so the launch below DROPS the
+            //    harvested set and retries without it (see the fail-soft retry at the
+            //    `CAPABILITY_FALLBACKS` counter). The privilege framing was never the problem
+            //    — requesting a raw capability SID is indeed unprivileged, as `internetClient`
+            //    shows — but that does not make THESE requestable, and this comment previously
+            //    read as if the capability half covered `C:\`/`C:\Users`. It does not: for a
+            //    standard user those two roots stay UNREPAIRED, and what the chain gets is the
+            //    ACE half from `%USERPROFILE%` down. Read `windows_capability_fallbacks()` in
+            //    a probe before assuming otherwise.
             //
             // Both are best-effort by design. This jail is defence in depth, not a watertight
             // boundary; a package that cannot start is a worse outcome than a residual, and

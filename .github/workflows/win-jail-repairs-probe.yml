@@ -32,6 +32,21 @@
 # the preload arrived from INSIDE the confined child — and judges every cell against an
 # UNCONFINED twin of the same script in the same run rather than against an exit code. The
 # per-cell props are MEASUREMENTS: a FAIL is the finding, so only absence is an error.
+#
+# THE DE-ELEVATED ARM — THE SHIPPING CONFIGURATION, and the reason this round exists. Every
+# Windows cell before it ran as `runneradmin`, which holds WRITE_DAC on `C:\` and `C:\Users`, so
+# the repaired arm ACE'd ancestors an ordinary user's token cannot and was a CEILING rather than
+# an answer. `deelev_shell_arm` re-executes this binary under a token with no administrative
+# authority (Administrators deny-only, every privilege dropped, medium integrity) in the SAME
+# session, runs the WHOLE shell battery there, and re-emits its transcript with `deelev-` inserted
+# into every property name. Its gate is an ACCESS CHECK, not `TokenIsElevated` — that flag is
+# COPIED by CreateRestrictedToken and reads `true` on a token holding no authority at all, so
+# `fact:deelev-token-admin-authority` is the line to read and `probe-elevated` is not.
+#
+# `deelev-shell-gate-repair-on-croot-permitted` is EXPECTED to fail there and is therefore a
+# MEASUREMENT, not a gate: `C:\` is not DACL-writable without admin. The de-elevated arm's
+# liveness proof is `…-profile-ancestor-permitted` instead — the fixture root is inside the
+# user's own profile, carries a protected DACL, and is refused without the repair.
 name: win-jail-repairs-probe
 
 on:
@@ -39,7 +54,12 @@ on:
     # Path-filtered so a change to a SIBLING probe does not spend ~25 minutes of Windows runner
     # on this one. Shared capacity: every push here costs the full matrix.
     branches:
-      [sandbox/win-jail-caps, sandbox/win-ace-kernel, sandbox/win-shell-jail]
+      [
+        sandbox/win-jail-caps,
+        sandbox/win-ace-kernel,
+        sandbox/win-shell-jail,
+        sandbox/win-deelev-shell,
+      ]
     paths:
       - 'crates/nub-sandbox/**'
       - '.github/workflows/win-jail-repairs-probe.yml'
@@ -97,9 +117,12 @@ jobs:
           command -v pwsh && pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' || true
           ls -l vendor/busybox-w32/busybox64.exe || true
 
+      # 45/35 rather than 30/20: the de-elevated arm re-runs the WHOLE shell battery, and
+      # Windows PowerShell 5.1 alone costs ~21 s per confined invocation. The inner `timeout`
+      # is what preserves the log — a job-level kill discards it entirely.
       - name: Probe — jail repairs, both directions
         if: always()
-        timeout-minutes: 30
+        timeout-minutes: 45
         shell: bash
         env:
           # The vendored busybox, supplied without the release-packaging step — the same seam
@@ -107,7 +130,7 @@ jobs:
           PROBE_BUSYBOX_EXE: ${{ github.workspace }}\vendor\busybox-w32\busybox64.exe
         run: |
           rc=0
-          timeout -k 30 1200 cargo test -p nub-sandbox --test windows_jail_repairs > probe.log 2>&1 || rc=$?
+          timeout -k 30 2100 cargo test -p nub-sandbox --test windows_jail_repairs > probe.log 2>&1 || rc=$?
           echo "probe exit=$rc"
           cat probe.log
 
@@ -226,6 +249,8 @@ jobs:
           for p in shell-gate-stdio-shim-live \
                    shell-gate-repair-off-croot-refused \
                    shell-gate-repair-on-croot-permitted \
+                   shell-gate-repair-off-profile-ancestor-refused \
+                   shell-gate-repair-on-profile-ancestor-permitted \
                    shell-gate-off-ungranted-read-refused \
                    shell-gate-on-ungranted-read-refused; do
             need_pass "$p"
@@ -233,6 +258,7 @@ jobs:
           # The elevation caveat, on the record: `C:\` and `C:\Users` are not DACL-writable by a
           # standard user, so a repaired cell here is a CEILING unless these say otherwise.
           need "  fact:probe-elevated="
+          need "  fact:probe-admin-authority="
           grep -E 'fact:shell-ace-writable\[' probe.log || { echo "MISS the per-ancestor ACE-writability facts"; fail=1; }
           need "  fact:shell-capability-fallbacks="
           grep -E 'fact:shell-present-' probe.log || { echo "MISS the interpreter inventory"; fail=1; }
@@ -267,6 +293,59 @@ jobs:
 
           echo "---- shells: every cell, all three arms ----"
           grep -E '^  fact:shell-(cmd|powershell|pwsh|busybox)-' probe.log || true
+
+          echo "════ THE SHIPPING ARM: the same battery under a NON-ADMIN token ════"
+          # These two are the only GATES on the whole de-elevated group. Everything else it
+          # produced is a measurement whose FAIL is the answer — but a cell from an arm that
+          # never ran, or from one that still wielded administrative authority, is not evidence.
+          need_pass "deelev-arm-ran"
+          need_pass "deelev-arm-holds-no-admin-authority"
+          need "  fact:parent-admin-authority="
+          need "  fact:deelev-route="
+          need "  fact:deelev-arm-exit="
+          echo "---- the principal that was measured (read admin-authority, NOT the flag) ----"
+          for k in deelev-token-user deelev-token-admin-authority deelev-token-is-elevated-flag \
+                   deelev-token-integrity deelev-token-privileges; do
+            grep -E "fact:$k=" probe.log || { echo "MISS fact:$k"; fail=1; }
+          done
+
+          echo "---- shipping arm: confinement + shim must still hold (gates) ----"
+          for p in deelev-shell-gate-stdio-shim-live \
+                   deelev-shell-gate-off-ungranted-read-refused \
+                   deelev-shell-gate-on-ungranted-read-refused \
+                   deelev-shell-gate-repair-off-profile-ancestor-refused \
+                   deelev-shell-gate-repair-on-profile-ancestor-permitted; do
+            need_pass "$p"
+          done
+
+          echo "---- shipping arm: what the repair CAN and CANNOT reach (measurements) ----"
+          # `croot-permitted` failing here is the finding, not a broken probe: a standard user
+          # cannot write that DACL. `shell-ace-writable[...]` says so per ancestor, and
+          # `capability-fallbacks` says whether the capability half was accepted or dropped.
+          for p in deelev-shell-gate-repair-off-croot-refused \
+                   deelev-shell-gate-repair-on-croot-permitted; do
+            grep -q "prop:$p=" probe.log || { echo "MISS $p (never measured)"; fail=1; }
+            grep -E "prop:$p=" probe.log || true
+          done
+          grep -E 'fact:deelev-shell-ace-writable\[' probe.log || { echo "MISS the de-elevated ACE-writability facts"; fail=1; }
+          need "  fact:deelev-shell-capability-fallbacks="
+          need "  fact:deelev-probe-admin-authority="
+
+          echo "---- shipping arm: does each shell DO ITS JOB? (a FAIL is the finding) ----"
+          for sh in cmd powershell pwsh busybox; do
+            grep -qF "fact:deelev-shell-present-$sh=true" probe.log || { echo "SKIP $sh (absent on this image)"; continue; }
+            need_pass "deelev-shell-$sh-unconfined-completes"
+            for p in deelev-shell-$sh-off-matches-unconfined \
+                     deelev-shell-$sh-on-matches-unconfined \
+                     deelev-shell-$sh-on-ungranted-cd-refused; do
+              grep -q "prop:$p=" probe.log || { echo "MISS $p (never measured)"; fail=1; }
+              grep -E "prop:$p=" probe.log || true
+            done
+            grep -E "diag:deelev-shell-$sh-(off|on)-diff=" probe.log || true
+          done
+
+          echo "---- shipping arm: every cell, all three arms ----"
+          grep -E '^  fact:deelev-shell-(cmd|powershell|pwsh|busybox)-' probe.log || true
 
           echo "---- the facts ----"
           grep -E '^  (fact|diag):' probe.log || true
