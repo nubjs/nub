@@ -67,14 +67,22 @@ run sudo du -sh "$JAIL"
 note "system tree rsync: $((T1-T0))s"
 
 hdr "4 ad-hoc re-sign every Mach-O — the step that strips CS_RUNTIME + the Apple identity"
-N=$(sudo find "$JAIL/bin" "$JAIL/sbin" "$JAIL/usr/bin" "$JAIL/usr/sbin" "$JAIL/usr/libexec" -type f -perm -u+x 2>/dev/null | wc -l | tr -d ' ')
-T0=$(date +%s)
+# Run 2 re-signed /usr/lib/dyld along with everything else and then died with a bare SIGKILL
+# on every exec. dyld is the interpreter the kernel maps before any user code runs, so a
+# broken signature there kills silently — it must keep its Apple signature.
 sudo find "$JAIL/bin" "$JAIL/sbin" "$JAIL/usr/bin" "$JAIL/usr/sbin" "$JAIL/usr/libexec" "$JAIL/usr/lib" \
-  -type f \( -perm -u+x -o -name '*.dylib' \) -print0 2>/dev/null \
-  | sudo xargs -0 -P 8 -n 30 codesign -f -s - >/dev/null 2>&1
+  -type f \( -perm -u+x -o -name '*.dylib' \) ! -path "$JAIL/usr/lib/dyld" -print0 2>/dev/null > "$W/tosign"
+N=$(tr -cd '\0' < "$W/tosign" | wc -c | tr -d ' ')
+T0=$(date +%s)
+# One codesign per file: batching aborts a whole batch on the first failure, and the failure
+# count is the number that matters here.
+sudo xargs -0 -P 8 -n 1 codesign -f -s - < "$W/tosign" > "$W/sign.out" 2> "$W/sign.err"
 T1=$(date +%s)
-echo "re-signed $N executables in $((T1-T0))s"
-note "re-sign: $N executables in $((T1-T0))s"
+FAILED=$(grep -ci 'error\|failed\|invalid' "$W/sign.err" 2>/dev/null || echo 0)
+echo "re-signed $N Mach-O files in $((T1-T0))s; codesign complaint lines: $FAILED"
+[ "$FAILED" -gt 0 ] && { echo "--- first 15 codesign errors ---"; grep -i 'error\|failed\|invalid' "$W/sign.err" | head -15; }
+note "re-sign: $N files in $((T1-T0))s, $FAILED complaints"
+run codesign -dvvv "$JAIL/usr/lib/dyld" 2>&1 | grep -E 'Authority|flags|Platform' | head -4
 
 hdr "5 /private/etc + devfs + DNS"
 sudo tee "$JAIL/private/etc/passwd" >/dev/null <<'EOF'
@@ -91,12 +99,50 @@ run sudo mount -t devfs devfs "$JAIL/dev"
 sudo ln /var/run/mDNSResponder "$JAIL/private/var/run/mDNSResponder" 2>&1 || echo "mDNSResponder link failed"
 
 hdr "6 FIRST REROOT"
+
+# A bare "Killed: 9" carries no reason, so the crash report is the only thing that names it
+# (Library not loaded / Code Signature Invalid / dyld cache missing are indistinguishable
+# from the shell's exit status alone).
+crashreason() {
+  sleep 3
+  for d in /Library/Logs/DiagnosticReports "$HOME/Library/Logs/DiagnosticReports"; do
+    for f in $(sudo ls -t "$d" 2>/dev/null | head -4); do
+      echo "--- $d/$f ---"
+      sudo head -c 1200 "$d/$f" 2>/dev/null | grep -iE 'termination|reason|exception|signature|dyld|namespace|Library not loaded' | head -8
+    done
+  done
+}
+
+sub "6.1 bisect: does the kill survive a MINIMAL jail? (isolates the tree from the mechanism)"
+# Same dyld cache + interpreter, one binary, nothing else. If this runs and the full tree
+# does not, the fault is something the rsync brought in, not the reroot itself.
+MIN=/tmp/minjail
+sudo rm -rf "$MIN"; sudo mkdir -p "$MIN"/{bin,usr/lib,System/Library/dyld,dev}
+sudo cp /bin/echo "$MIN/bin/echo"; sudo codesign -f -s - "$MIN/bin/echo" 2>&1
+sudo cp -p /usr/lib/dyld "$MIN/usr/lib/dyld"
+sudo cp -p "$CS"/dyld_shared_cache_arm64e* "$MIN/System/Library/dyld/" 2>/dev/null
+sudo mkdir -p "$MIN/System/Volumes/Preboot/Cryptexes/OS/System/Library"
+sudo ln -sfn /System/Library/dyld "$MIN/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld"
+run sudo chroot "$MIN" /bin/echo minimal-jail-ok; M=$?
+note "MINIMAL jail /bin/echo: rc=$M"
+[ "$M" -ne 0 ] && crashreason
+
+sub "6.2 the full jail"
 run sudo chroot "$JAIL" /bin/echo hello-from-real-jail; J=$?
-note "real chroot /bin/echo: rc=$J"
+note "FULL jail /bin/echo: rc=$J"
 run sudo chroot "$JAIL" /bin/sh -c 'echo sh-ok; /bin/pwd; /bin/ls /'
 if [ "$J" -ne 0 ]; then
-  sudo log show --last 2m --style compact --predicate 'eventMessage CONTAINS "chroot"' 2>&1 | grep -i chroot | tail -10
-  sudo DYLD_PRINT_LIBRARIES=1 chroot "$JAIL" /bin/echo x 2>&1 | tail -5
+  crashreason
+  sub "6.3 dyld diagnostics"
+  run sudo DYLD_PRINT_LIBRARIES=1 chroot "$JAIL" /bin/echo x 2>&1 | tail -8
+  run sudo DYLD_PRINT_SEARCHING=1 chroot "$JAIL" /bin/echo x 2>&1 | tail -8
+  # Is the cache even visible at the path dyld will look for it?
+  run sudo ls -la "$JAIL/System/Library/dyld/"
+  run sudo ls -la "$JAIL/System/Volumes/Preboot/Cryptexes/OS/System/Library/"
+  run sudo ls -la "$JAIL/usr/lib/dyld"
+  sudo log show --last 2m --style compact --predicate \
+    'eventMessage CONTAINS "mjail" OR eventMessage CONTAINS "chroot" OR eventMessage CONTAINS "Invalid"' 2>&1 \
+    | grep -viE 'log run noninteractively|use_watchroot' | tail -15
 fi
 
 hdr "7 node in the jail"
@@ -135,7 +181,12 @@ for (const p of ["/Users","/Library","/System/Volumes/Data","/private/var/root"]
 hdr "10 CRITERION (c) — node-gyp rebuild → loadable Mach-O arm64"
 CLT=/Library/Developer/CommandLineTools
 echo "xcode-select -p: $(xcode-select -p 2>&1)"
-if [ -d "$CLT" ]; then
+# Staging the toolchain is the single most expensive step; skip it outright when nothing can
+# execute in the jail, rather than spending ~20 minutes to reach a foregone SIGKILL.
+if [ "$J" -ne 0 ]; then
+  echo "SKIPPED — nothing executes in the jail (section 6 rc=$J), so criterion (c) is unreachable"
+  note "criterion(c): SKIPPED, jail not enterable"
+elif [ -d "$CLT" ]; then
   T0=$(date +%s)
   sudo mkdir -p "$JAIL/Library/Developer"
   sudo rsync -a "$CLT/" "$JAIL$CLT/" 2>/dev/null

@@ -45,6 +45,20 @@ run "$W/echo_adhoc" x;              B=$?
 run sudo chroot / "$W/echo_plain" x;  C=$?
 run sudo chroot / "$W/echo_adhoc" x;  D=$?
 
+sub "arm64e hazard — why does re-signing KILL an Apple binary on 14/15 but not on 26?"
+# Measured across the label sweep: `codesign -f -s -` on /bin/echo is fatal (137) on macOS
+# 14.8.7 and 15.7.7, fine on 26.x. Re-signing strips `Platform identifier`, demoting a
+# platform binary to third-party — and every macOS system executable is arm64e-only, an ABI
+# Apple does not support for third-party code. If that is the mechanism, forcing the x86_64
+# slice (Rosetta) should survive where arm64e does not.
+run file "$W/echo_adhoc"
+echo "--- original slice flags ---";  codesign -dvvv --arch arm64e /bin/echo    2>&1 | grep -E 'flags|Platform|Authority=Soft'
+echo "--- re-signed slice flags ---"; codesign -dvvv --arch arm64e "$W/echo_adhoc" 2>&1 | grep -E 'flags|Platform|Authority=Soft'
+run arch -x86_64 "$W/echo_adhoc" via-rosetta; R=$?
+lipo -thin arm64e /bin/echo -output "$W/echo_thin" 2>&1 && codesign -f -s - "$W/echo_thin" 2>&1
+run "$W/echo_thin" thinned; TH=$?
+echo "ARM64E_PROBE: rosetta_x86_64=$R thinned_arm64e=$TH"
+
 sub "AMFI log"
 sudo log show --last 2m --style compact --predicate \
   'eventMessage CONTAINS "chroot" OR eventMessage CONTAINS "not allowed"' 2>&1 \
