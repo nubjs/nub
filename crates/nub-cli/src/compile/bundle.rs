@@ -278,6 +278,13 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
     }
     // `files` is still chunks-only here — maps are merged in below.
     reject_invalid_chunks(&files)?;
+    // Also while it is chunks-only, because reachability is a property of CODE
+    // and a source map is debug metadata. Scanning maps as well happens to give
+    // the same answer today — measured, on every `--sourcemap` mode — but only
+    // because a shaken-out module leaves nothing behind for its map to describe.
+    // That is a coincidence of Rolldown's map generation, not a rule, so the
+    // narrower input is the one worth depending on.
+    retain_referenced(&files, &mut assets);
 
     // A referenced map has to travel with the chunk that names it; an external
     // one must NOT, or `--sourcemap=external` would ship the sources it exists
@@ -289,7 +296,6 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
     };
     files.extend(maps);
 
-    retain_referenced(&files, &mut assets);
     reject_nested_chunks(&files, &assets)?;
 
     Ok(BundleResult {
@@ -1207,6 +1213,41 @@ mod tests {
             assert!(
                 res.assets.is_empty(),
                 "a .{ext} entry shipped an asset nothing references: {:?}",
+                res.assets.iter().map(|a| &a.name).collect::<Vec<_>>()
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    // Reachability must not depend on the sourcemap mode. Maps travel in the
+    // same `files` vec as chunks and a map can carry `sourcesContent`, so the
+    // scan's input is easy to widen by accident; this pins the answer across all
+    // four modes rather than only the default the other tests happen to use.
+    #[test]
+    fn an_unused_asset_is_dropped_under_every_sourcemap_mode() {
+        for mode in [
+            SourcemapMode::None,
+            SourcemapMode::Inline,
+            SourcemapMode::Linked,
+            SourcemapMode::External,
+        ] {
+            let dir = std::env::temp_dir().join(format!("nub-map-{}-{mode:?}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("logo.png"), b"UNUSEDBYTES").unwrap();
+            std::fs::write(
+                dir.join("entry.js"),
+                b"import p from './logo.png';\nglobalThis.OUT = 'hi';\n",
+            )
+            .unwrap();
+
+            let mut o = opts();
+            o.minify = false;
+            o.sourcemap = mode;
+            let res = bundle(&dir.join("entry.js"), &o).expect("compiles");
+            assert!(
+                res.assets.is_empty(),
+                "{mode:?} retained an asset nothing references: {:?}",
                 res.assets.iter().map(|a| &a.name).collect::<Vec<_>>()
             );
             let _ = std::fs::remove_dir_all(&dir);
