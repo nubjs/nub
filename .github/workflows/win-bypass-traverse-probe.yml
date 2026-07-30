@@ -28,6 +28,104 @@ permissions:
   contents: read
 
 jobs:
+  # ─────────────────────────────────────────────────────────────────────────────────────────────
+  # THE SECOND QUESTION, and the one that decides whether fixing Node is enough: `probe.ps1` below
+  # settled that a confined `node` dies in its own realpath walk on `C:\`. Microsoft's `mxc`
+  # host-prep doc names `cmd.exe`, `powershell.exe` and `pwsh.exe` with the SAME habit — and
+  # `vendor/aube/crates/aube-scripts/src/lib.rs:343` runs every dependency lifecycle script through
+  # `cmd.exe /d /s /c`. If cmd.exe cannot start, the Node fix buys nothing. No prior arm asked,
+  # because every one of them launched `node <file>` directly.
+  #
+  # A SEPARATE JOB, not a step in `probe`, for two reasons: it is a different question with its own
+  # controls, and its per-arm timeouts make it the longer job — sharing a timeout budget would let
+  # one truncate the other's table.
+  tools:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Probe — invoked-tool startup inside an AppContainer
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          pwsh -NoLogo -NonInteractive -File tests/win-bypass-traverse/tools.ps1 *>&1 |
+            Tee-Object -FilePath tools.log
+          exit 0
+
+      - name: Per-arm child logs verbatim
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path tools-logs) {
+            Get-ChildItem tools-logs | ForEach-Object {
+              Write-Host "───── $($_.Name) ─────"
+              Get-Content $_.FullName | ForEach-Object { Write-Host "  $_" }
+            }
+          } else { Write-Host "no tools-logs directory — no arm produced a child log" }
+
+      # Read off the LOG, never off a step's exit status, so a probe that never reached a property
+      # cannot be mistaken for one that passed it.
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          fail=0
+          need() {
+            if grep -qF "prop:$1=PASS" tools.log 2>/dev/null; then echo "OK   $1"
+            elif grep -qF "prop:$1=FAIL" tools.log 2>/dev/null; then echo "FAIL $1"; fail=1
+            else echo "MISS $1  (property absent — the probe did not reach it)"; fail=1; fi
+          }
+          [ -s tools.log ] || { echo "MISS the probe produced no output at all"; exit 1; }
+          grep -qF 'TOOLS PROBE END' tools.log || { echo "MISS the probe did not run to completion"; fail=1; }
+
+          echo "── controls (a red one invalidates every row below) ──"
+          for p in no-preexisting-appcontainer-ace tools-baseline-plain-all-started \
+                   appcontainer-gate-is-live appcontainer-positive-control \
+                   node-realpath-defect-reproduces node-realpath-defect-is-the-flags; do need "$p"; done
+
+          echo
+          echo "── the decisive cells: does the SHELL survive the AppContainer? ──"
+          for p in cmd-starts-under-appcontainer cmd-runs-node-under-appcontainer \
+                   cmd-runs-lifecycle-shape powershell-starts-under-appcontainer \
+                   busybox-starts-under-appcontainer busybox-runs-node-under-appcontainer \
+                   busybox-runs-lifecycle-shape; do need "$p"; done
+
+          echo
+          echo "── the startup table ──"
+          sed -n '/== tool startup table/,/== exit status detail/p' tools.log || true
+          echo "── attribution: root-path class, or something else? ──"
+          grep -E '^  fact:(attribution|temp-confound|tools-failing)' tools.log || echo "(none emitted)"
+
+          echo
+          echo "── result ──"
+          # A red job here is NOT "the route is dead" and NOT "the harness broke". A clean negative
+          # — controls green, a decisive cell red — is a GOOD outcome for this effort and still
+          # exits non-zero. Read the table and the attribution lines, not the badge.
+          if [ "$fail" -ne 0 ]; then
+            echo "at least one property did not hold — read the startup table and the attribution lines above"
+            exit 1
+          fi
+          echo "every tool that runs unconfined also runs inside the AppContainer"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: win-appcontainer-tools-${{ matrix.os }}
+          path: |
+            tools.log
+            tools-logs/
+          if-no-files-found: warn
+
   probe:
     strategy:
       fail-fast: false
