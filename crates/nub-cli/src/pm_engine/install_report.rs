@@ -58,6 +58,22 @@ pub(super) enum Source {
     IncompatiblePackage(String),
 }
 
+/// Whether a raw setting string is the engine's idea of true.
+///
+/// Deliberately delegates to `aube_settings::values::parse_bool` rather than
+/// comparing to `"true"`. The tiers this module reads are raw text — an
+/// `.npmrc` line or an env var, unparsed — and the engine accepts `1`, `TRUE`
+/// and `True` alongside `true`. A local `== "true"` therefore disagreed with the
+/// resolver on exactly those spellings, in both directions: `hoist=1` printed
+/// the shared store while the engine built a project-local tree with a hidden
+/// directory, and `enable-global-virtual-store=1` printed `isolated` while the
+/// engine symlinked into the machine-global store. The header's whole claim is
+/// that it reproduces the resolver instead of approximating it, so the boolean
+/// rule has to be the resolver's own.
+fn is_true(raw: &str) -> bool {
+    aube_settings::values::parse_bool(raw).unwrap_or(false)
+}
+
 /// The toolchain's own name for the package that triggered the opt-out. The two
 /// nub seeds are frameworks whose proper names are not their package ids, and
 /// the row is prose the reader is meant to recognize — "react-native projects"
@@ -121,6 +137,16 @@ pub(super) struct SourceIndex {
     /// Whether a branded config file this project's incumbent owns asks for a
     /// `node_modules` layout — a request nub no longer honors from there.
     branded_layout_ignored: bool,
+    /// Whether the engine will read this run as CI, where the global virtual
+    /// store is off by default.
+    ///
+    /// Captured here rather than asked at the point of use, because the answer
+    /// is a process global: a `layout_row` that called `is_ci()` itself could
+    /// only be tested by skipping the assertion whenever the variable happened
+    /// to be set, which on the CI leg that gates merge meant skipping it
+    /// always. Reading it once at `load`, where every other tier is also
+    /// snapshotted, makes the layout decision a pure function of this struct.
+    ci: bool,
 }
 
 impl SourceIndex {
@@ -171,6 +197,7 @@ impl SourceIndex {
                 context.read_yarn_config,
                 context.read_bun_config,
             ),
+            ci: aube_util::env::is_ci(),
             project_config: context.project_config_settings,
         }
     }
@@ -447,11 +474,11 @@ fn layout_row(index: &SourceIndex) -> (String, Option<Source>) {
         return (linker, linker_source);
     }
     match index.resolve("enableGlobalVirtualStore") {
-        Some((shared, source)) if shared == "true" => ("global-virtual-store".to_string(), source),
+        Some((shared, source)) if is_true(&shared) => ("global-virtual-store".to_string(), source),
         Some((_, source)) => ("isolated".to_string(), source),
-        None if aube_util::env::is_ci() => ("isolated".to_string(), Some(Source::Ci)),
+        None if index.ci => ("isolated".to_string(), Some(Source::Ci)),
         None => match index.resolve("hoist") {
-            Some((hoist, source)) if hoist == "true" => ("isolated".to_string(), source),
+            Some((hoist, source)) if is_true(&hoist) => ("isolated".to_string(), source),
             _ => match gvs_incompatible_package(index) {
                 Some(name) => (
                     "isolated".to_string(),
@@ -476,7 +503,7 @@ fn layout_row(index: &SourceIndex) -> (String, Option<Source>) {
 fn gvs_incompatible_package(index: &SourceIndex) -> Option<String> {
     if index
         .resolve("virtualStoreOnly")
-        .is_some_and(|(value, _)| value == "true")
+        .is_some_and(|(value, _)| is_true(&value))
     {
         return None;
     }
@@ -532,7 +559,7 @@ pub(super) fn resolved_rows(index: &SourceIndex) -> Vec<Row> {
     // said nothing at all when the flag was the only thing set.
     let shamefully_hoist = index
         .resolve("shamefullyHoist")
-        .filter(|(value, _)| value == "true");
+        .filter(|(value, _)| is_true(value));
     for setting in ["publicHoistPattern", "hoistPattern"] {
         let resolved = match (setting, &shamefully_hoist) {
             ("publicHoistPattern", Some((_, source))) => Some(("*".to_string(), source.clone())),
@@ -559,10 +586,22 @@ pub(super) fn resolved_rows(index: &SourceIndex) -> Vec<Row> {
         let Some((value, source)) = index.resolve(setting) else {
             continue;
         };
-        if value == *default {
+        // Three of these four are booleans and one (`resolutionMode`) is a
+        // string enum, so compare as booleans when both sides parse that way and
+        // fall back to text otherwise. A raw string compare called
+        // `auto-install-peers=1` a non-default and printed a row for a setting
+        // sitting exactly at its default.
+        let at_default = match (
+            aube_settings::values::parse_bool(&value),
+            aube_settings::values::parse_bool(default),
+        ) {
+            (Some(actual), Some(expected)) => actual == expected,
+            _ => value == *default,
+        };
+        if at_default {
             continue;
         }
-        values.push(if value == "true" {
+        values.push(if is_true(&value) {
             (*spelling).to_string()
         } else {
             format!("{spelling}={value}")
@@ -882,6 +921,7 @@ mod tests {
             embedder_defaults: Vec::new(),
             declared_packages: Vec::new(),
             branded_layout_ignored: false,
+            ci: false,
         };
         assert_eq!(
             layout_row(&shared),
@@ -899,27 +939,28 @@ mod tests {
             ..shared
         };
         assert_eq!(
-            layout_row(&project_local).0,
-            "isolated",
-            "an explicit project-local store keeps the plain isolated word"
+            layout_row(&project_local),
+            (
+                "isolated".to_string(),
+                Some(Source::ProjectConfig("install.linker"))
+            ),
+            "an explicit project-local store keeps the plain isolated word, \
+             still pointing at the field that asked for it"
         );
 
         // Nothing set the store bit, so the engine's default decides — and that
         // default is the shared store. Reporting the raw `isolated` here named a
         // tree nobody gets: with no config the packages symlink into the
-        // machine-global store. Skipped under CI, where `Linker::new` derives
-        // the project-local store from the environment instead of a setting.
+        // machine-global store.
         let unset = SourceIndex {
             project_config: Vec::new(),
             embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
             ..project_local
         };
-        if !aube_util::env::is_ci() {
-            assert_eq!(
-                layout_row(&unset),
-                ("global-virtual-store".to_string(), None)
-            );
-        }
+        assert_eq!(
+            layout_row(&unset),
+            ("global-virtual-store".to_string(), None)
+        );
 
         // The injected-deps carve-out: nub pushes an explicit `hoist=true` for a
         // project that declares one, and the hidden tree it needs only exists
@@ -938,6 +979,80 @@ mod tests {
             ..injected
         };
         assert_eq!(layout_row(&hoisted).0, "hoisted");
+
+        // Nothing set, but the run is CI, where the engine derives the
+        // project-local store from the environment rather than any setting.
+        // This arm used to be untestable: `layout_row` asked `is_ci()` itself,
+        // so the no-config assertion above had to be skipped whenever the
+        // variable happened to be set — which on the leg that gates merge was
+        // always. Reading it from the index instead makes both arms hermetic.
+        let in_ci = SourceIndex {
+            env: Vec::new(),
+            project_config: Vec::new(),
+            workspace_yaml: Vec::new(),
+            project_npmrc: Vec::new(),
+            user_npmrc: Vec::new(),
+            embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
+            declared_packages: Vec::new(),
+            branded_layout_ignored: false,
+            ci: true,
+        };
+        assert_eq!(
+            layout_row(&in_ci),
+            ("isolated".to_string(), Some(Source::Ci))
+        );
+    }
+
+    /// The tiers this module reads are raw text, and the engine's `parse_bool`
+    /// accepts `1`/`TRUE`/`True` as true. Deciding the layout with `== "true"`
+    /// disagreed with the resolver on exactly those spellings — in BOTH
+    /// directions, so the header could print the opposite of the tree the
+    /// install was about to build.
+    #[test]
+    fn boolean_settings_are_read_the_way_the_engine_reads_them() {
+        let with_npmrc = |key: &str, value: &str| SourceIndex {
+            env: Vec::new(),
+            project_config: Vec::new(),
+            workspace_yaml: Vec::new(),
+            project_npmrc: vec![(key.to_string(), value.to_string())],
+            user_npmrc: Vec::new(),
+            embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
+            declared_packages: Vec::new(),
+            branded_layout_ignored: false,
+            ci: false,
+        };
+
+        // The engine symlinks into the machine-global store for each of these,
+        // so the row must not say `isolated`.
+        for spelling in ["1", "TRUE", "True"] {
+            assert_eq!(
+                layout_row(&with_npmrc("enableGlobalVirtualStore", spelling)).0,
+                "global-virtual-store",
+                "`enableGlobalVirtualStore={spelling}` is true to the engine"
+            );
+        }
+
+        // The other direction: `hoist=1` makes the engine veto the shared store
+        // and build the hidden tree, so the row must not claim the shared one.
+        assert_eq!(
+            layout_row(&with_npmrc("hoist", "1")).0,
+            "isolated",
+            "`hoist=1` is true to the engine, which vetoes the shared store"
+        );
+
+        // And `virtualStoreOnly=1` suppresses the package opt-out engine-side.
+        let store_only = SourceIndex {
+            embedder_defaults: vec![
+                ("nodeLinker".to_string(), "isolated".to_string()),
+                (
+                    "disableGlobalVirtualStoreForPackages".to_string(),
+                    "next".to_string(),
+                ),
+            ],
+            declared_packages: vec!["next".to_string()],
+            ..with_npmrc("virtualStoreOnly", "1")
+        };
+        assert_eq!(layout_row(&store_only).0, "global-virtual-store");
     }
 
     /// A package the shared store cannot serve takes the store project-local
@@ -963,19 +1078,18 @@ mod tests {
             ],
             declared_packages: vec!["next".to_string(), "debug".to_string()],
             branded_layout_ignored: false,
+            ci: false,
         };
-        if !aube_util::env::is_ci() {
-            // Named, not bare: `next` is the whole reason this project reads
-            // `isolated` where the documented default is the shared store, and
-            // it appears in no config file the reader could check.
-            assert_eq!(
-                layout_row(&index),
-                (
-                    "isolated".to_string(),
-                    Some(Source::IncompatiblePackage("next".to_string()))
-                )
-            );
-        }
+        // Named, not bare: `next` is the whole reason this project reads
+        // `isolated` where the documented default is the shared store, and it
+        // appears in no config file the reader could check.
+        assert_eq!(
+            layout_row(&index),
+            (
+                "isolated".to_string(),
+                Some(Source::IncompatiblePackage("next".to_string()))
+            )
+        );
 
         // Only a DECLARED name triggers it; the seed on its own must not drag
         // every project off the shared store.
@@ -983,12 +1097,10 @@ mod tests {
             declared_packages: vec!["debug".to_string()],
             ..index
         };
-        if !aube_util::env::is_ci() {
-            assert_eq!(
-                layout_row(&untriggered),
-                ("global-virtual-store".to_string(), None)
-            );
-        }
+        assert_eq!(
+            layout_row(&untriggered),
+            ("global-virtual-store".to_string(), None)
+        );
 
         // `virtualStoreOnly` suppresses the opt-out engine-side, so the label
         // must not claim the project-local store the engine will not build.
@@ -997,9 +1109,21 @@ mod tests {
             project_npmrc: vec![("virtualStoreOnly".to_string(), "true".to_string())],
             ..untriggered
         };
-        if !aube_util::env::is_ci() {
-            assert_eq!(layout_row(&store_only).0, "global-virtual-store");
-        }
+        assert_eq!(layout_row(&store_only).0, "global-virtual-store");
+
+        // CI outranks the package trigger: the engine's own resolution only
+        // reaches the opt-out when the run is not CI, and the layout is
+        // project-local either way, so the row must attribute it to the reason
+        // that actually decided.
+        let in_ci = SourceIndex {
+            ci: true,
+            declared_packages: vec!["next".to_string()],
+            ..store_only
+        };
+        assert_eq!(
+            layout_row(&in_ci),
+            ("isolated".to_string(), Some(Source::Ci))
+        );
     }
 
     /// `shamefully-hoist` hoists every name in the graph, so it reports as the
@@ -1019,6 +1143,7 @@ mod tests {
             embedder_defaults: Vec::new(),
             declared_packages: Vec::new(),
             branded_layout_ignored: false,
+            ci: false,
         };
         let rows = resolved_rows(&index);
         let hoisting = rows.iter().find(|row| row.label == "hoisting").unwrap();
@@ -1055,6 +1180,7 @@ mod tests {
             embedder_defaults: Vec::new(),
             declared_packages: Vec::new(),
             branded_layout_ignored: true,
+            ci: false,
         };
         let note = |index: &SourceIndex| {
             resolved_rows(index)
@@ -1263,6 +1389,7 @@ mod tests {
             embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
             declared_packages: Vec::new(),
             branded_layout_ignored: false,
+            ci: false,
         };
         assert_eq!(
             index.resolve("nodeLinker"),
@@ -1315,6 +1442,7 @@ mod tests {
             embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
             declared_packages: Vec::new(),
             branded_layout_ignored: false,
+            ci: false,
         };
         assert_eq!(
             index.resolve("nodeLinker"),
@@ -1335,6 +1463,7 @@ mod tests {
             embedder_defaults: Vec::new(),
             declared_packages: Vec::new(),
             branded_layout_ignored: false,
+            ci: false,
         };
         let rows = resolved_rows(&index);
         let resolution = rows.iter().find(|row| row.label == "resolution").unwrap();
