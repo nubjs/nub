@@ -182,6 +182,17 @@ jobs:
           echo "---- the bundled npm tree (a fact: it rides the ancestor repair, not this one) ----"
           grep -E '^  fact:interp-(ambient|staged)-npm-tree-read=' probe.log || { echo "MISS the npm-tree facts"; fail=1; }
 
+          # SETTLES A SIBLING LANE'S VERDICT that cmd.exe cannot run confined de-elevated. One
+          # variable: the leaf-read-grant loop's fail-closed-vs-fail-soft behaviour, same fixture,
+          # same policy, same script, same token. `resolve_program` auto-grants the program FILE, so
+          # a System32 program's own grant is attempted and refused de-elevated — under `?` that
+          # aborted the launch, which looks exactly like cmd misbehaving.
+          echo "---- cmd.exe: fail-closed vs fail-soft, one variable ----"
+          need_pass interp-cmd-under-fail-closed-aborts-only-when-its-own-grant-is-unwritable
+          need_pass interp-cmd-under-fail-soft-runs-the-whole-battery
+          grep -E '^  fact:interp-cmd-program-grant-writable=' probe.log || { echo "MISS the program-grant writability fact"; fail=1; }
+          grep -E '^  fact:interp-.*-cmd-cells=' probe.log || { echo "MISS the cmd cell tallies"; fail=1; }
+
           echo "---- the pre-existing groups must not have regressed ----"
           for p in profile-create-and-launch acl-grant-allow acl-grant-deny teardown \
                    job-reap egress-deny production-jail-launch production-jail-egress; do

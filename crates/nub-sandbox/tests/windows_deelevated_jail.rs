@@ -1320,6 +1320,67 @@ mod win {
             denied == 5 || denied == 9,
             &format!("(child exit {denied}; 5/9 = denied)"),
         );
+
+        // ── the fail-closed differential ──────────────────────────────────────────────
+        //
+        // A sibling lane measured `cmd.exe` de-elevated as 19-of-19 cells ABSENT — exit 1 at
+        // 100 ms, empty transcript, `Access is denied.` — and read it as cmd being unusable under
+        // confinement, which would make a different lifecycle shell necessary rather than merely
+        // better. This arm settles it, because the leaf-read-grant loop is the ONE thing that
+        // changed and it is exactly the suspect: `resolve_program` auto-grants the program FILE, so
+        // launching `%SystemRoot%\System32\cmd.exe` attempts an ACE on it, and de-elevated a
+        // standard user holds no `WRITE_DAC` there. Under `?` that aborted the launch — which
+        // produces precisely that shape and is indistinguishable from cmd misbehaving.
+        //
+        // ONE VARIABLE: the same fixture, the same policy, the same script, the same token; only
+        // the seam differs. Reported as a fact in the elevated arm (where the grant SUCCEEDS, so
+        // there is nothing to abort and the arms cannot differ) and GATED de-elevated.
+        println!(
+            "  fact:interp-cmd-program-grant-writable={}",
+            can_write_dacl(Path::new(&comspec_path()))
+        );
+        let (fc_rc, fc_log) = with_fail_closed_read_grants(|| {
+            lifecycle_arm(f, "staged-failclosed", &staged_exe, &staged_dir)
+        });
+        let fc_cells = CMD_CELLS.iter().filter(|c| fc_log.contains(**c)).count();
+        let soft_cells = CMD_CELLS
+            .iter()
+            .filter(|c| staged_log.contains(**c))
+            .count();
+        // The law that holds in BOTH arms: fail-closed loses the launch exactly when the program's
+        // own grant cannot be written. Stated as the dependence rather than "fail-closed always
+        // fails", because elevated it legitimately succeeds — the same mistake the ambient property
+        // already had to be rewritten to avoid.
+        let program_writable = can_write_dacl(Path::new(&comspec_path()));
+        r.record(
+            "interp-cmd-under-fail-closed-aborts-only-when-its-own-grant-is-unwritable",
+            (fc_cells > 0) == program_writable,
+            &format!(
+                "(program grant writable {program_writable}; fail-closed cells {fc_cells}/{}, rc \
+                 {fc_rc}; fail-soft cells {soft_cells}/{})",
+                CMD_CELLS.len(),
+                CMD_CELLS.len()
+            ),
+        );
+        // …and the consequence the sibling verdict turns on: under fail-SOFT, cmd runs the whole
+        // battery. If this ever fails while the fail-closed arm also produces nothing, cmd really is
+        // broken confined and the sibling reading stands.
+        r.record(
+            "interp-cmd-under-fail-soft-runs-the-whole-battery",
+            soft_cells == CMD_CELLS.len(),
+            &format!("({soft_cells}/{} cells)", CMD_CELLS.len()),
+        );
+    }
+
+    /// The command interpreter the arms launch, resolved the way [`lifecycle_arm`] resolves it so
+    /// the grant-writability fact is about the same file.
+    fn comspec_path() -> String {
+        std::env::var("ComSpec").unwrap_or_else(|_| {
+            format!(
+                "{}\\System32\\cmd.exe",
+                std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into())
+            )
+        })
     }
 
     /// Whether THIS token may rewrite `path`'s DACL — the one permission [`set_ace`] needs, asked
@@ -1378,6 +1439,8 @@ mod win {
         "interp-staged-dir-publishes-read-to-appcontainers",
         "interp-staged-deep-entry-inherited-the-ace-at-creation",
         "interp-staged-ungranted-secret-still-refused",
+        "interp-cmd-under-fail-closed-aborts-only-when-its-own-grant-is-unwritable",
+        "interp-cmd-under-fail-soft-runs-the-whole-battery",
     ];
 
     /// The all-users MSI install first, because it is the configuration that exhibits the defect
@@ -1459,6 +1522,16 @@ mod win {
                  node -e \"{i}\" >> \"{m}\" 2>&1\r\n\
                  if errorlevel 1 exit /b 12\r\n\
                  echo LIFECYCLE-OK>> \"{m}\"\r\n\
+                 if exist \"{m}\" echo CELL-IF-EXIST>> \"{m}\"\r\n\
+                 cd>> \"{m}\" 2>&1\r\n\
+                 if not errorlevel 1 echo CELL-CD>> \"{m}\"\r\n\
+                 dir /b>> \"{m}\" 2>&1\r\n\
+                 if not errorlevel 1 echo CELL-DIR>> \"{m}\"\r\n\
+                 for %%%%V in (1) do echo CELL-FOR>> \"{m}\"\r\n\
+                 set NUBCELL=1\r\n\
+                 if \"%%NUBCELL%%\"==\"1\" echo CELL-SET-AND-EXPAND>> \"{m}\"\r\n\
+                 where.exe node>> \"{m}\" 2>&1\r\n\
+                 if not errorlevel 1 echo CELL-WHERE>> \"{m}\"\r\n\
                  node -e \"{n}\" >> \"{m}\" 2>&1\r\n\
                  if errorlevel 1 echo NPM-TREE-READ-FAILED>> \"{m}\"\r\n",
                 m = leaf(&marker),
@@ -1469,12 +1542,7 @@ mod win {
         .expect("write the arm's script");
 
         let policy = build_jail_for(f, exe, root);
-        let comspec = std::env::var("ComSpec").unwrap_or_else(|_| {
-            format!(
-                "{}\\System32\\cmd.exe",
-                std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into())
-            )
-        });
+        let comspec = comspec_path();
         let spec = CommandSpec::new(&comspec)
             .arg("/c")
             .arg(leaf(&script))
@@ -1493,6 +1561,17 @@ mod win {
             }
         };
         let log = std::fs::read_to_string(&marker).unwrap_or_default();
+        let cells: Vec<&str> = CMD_CELLS
+            .iter()
+            .copied()
+            .filter(|c| log.contains(c))
+            .collect();
+        println!(
+            "  fact:interp-{tag}-cmd-cells={}/{} [{}]",
+            cells.len(),
+            CMD_CELLS.len(),
+            cells.join(" ")
+        );
         println!(
             "  fact:interp-{tag}-npm-tree-read={}",
             if log.contains("npm=") { "ok" } else { "failed" }
@@ -1549,6 +1628,35 @@ mod win {
             .expect("an arm file has a name")
             .to_string_lossy()
             .into_owned()
+    }
+
+    /// The cmd-interpreter behaviours the script body exercises beyond "a script ran": the
+    /// builtins and the PATH search a real postinstall depends on. Named so a partial result is a
+    /// list rather than a count — which is the difference between "cmd is broken confined" and "one
+    /// builtin is".
+    const CMD_CELLS: &[&str] = &[
+        "STEP-CMD-OPENED-THE-SCRIPT",
+        "STEP-BARE-NODE-RESOLVED-AND-RAN",
+        "LIFECYCLE-OK",
+        "CELL-IF-EXIST",
+        "CELL-CD",
+        "CELL-DIR",
+        "CELL-FOR",
+        "CELL-SET-AND-EXPAND",
+        "CELL-WHERE",
+    ];
+
+    /// Run `body` with the leaf-read-grant loop restored to its FAIL-CLOSED behaviour, so one arm
+    /// of the same run carries the code a sibling lane measured `cmd.exe` under. Mirrors
+    /// `windows_jail_repairs`'s `without_ancestor_repair`.
+    fn with_fail_closed_read_grants<T>(body: impl FnOnce() -> T) -> T {
+        const KEY: &str = "NUB_SANDBOX_WIN_FAIL_CLOSED_READ_GRANTS";
+        // SAFETY: the arm is single-threaded at this point (every launch in this group is
+        // sequential), and the variable is removed before returning on both paths.
+        unsafe { std::env::set_var(KEY, "1") };
+        let out = body();
+        unsafe { std::env::remove_var(KEY) };
+        out
     }
 
     /// A Windows path as a SINGLE-QUOTED JS string literal, backslashes doubled.

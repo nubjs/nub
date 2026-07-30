@@ -1751,10 +1751,19 @@ pub(super) mod launch {
             //    package directory being built, both under the user's own tree, so a refusal
             //    there is not a reachable configuration — it is a broken assumption, and
             //    continuing would launch a build that silently cannot write its output.
+            // THE SEAM, and it exists for one reason: the fail-closed behaviour this replaced is
+            // the prime suspect for a sibling lane's finding that `cmd.exe` cannot run confined at
+            // all de-elevated. `resolve_program` auto-grants the program FILE (above), so a
+            // System32 program's own leaf grant is attempted, and de-elevated it is refused — which
+            // under `?` aborted the launch and is indistinguishable from cmd misbehaving. Without an
+            // arm that restores the old behaviour on the same fixture, neither reading can be told
+            // from the other. It can only ever make the jail STRICTER, so it is not a lever
+            // anything can be widened with.
+            let fail_closed = std::env::var_os("NUB_SANDBOX_WIN_FAIL_CLOSED_READ_GRANTS").is_some();
             for (kind, dir, access) in leaves {
                 let installed = match grant_leaf_ace(dir, ac_sid, access) {
                     Ok(installed) => installed,
-                    Err(_) if kind == "read" => continue,
+                    Err(_) if kind == "read" && !fail_closed => continue,
                     Err(error) => {
                         return Err(io::Error::new(
                             error.kind(),
