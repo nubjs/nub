@@ -2770,7 +2770,9 @@ fs.writeFileSync({marker}, "sentinel=" + String(globalThis.__nubJailStdioShim) +
             r#"
 const fs = require("node:fs");
 const dep = require({dep});
-fs.writeFileSync({marker}, "entry=ok require=" + String(dep));
+fs.writeFileSync({marker}, "entry=ok require=" + String(dep) +
+  " shim=" + String(globalThis.__nubJailStdioShim) +
+  " nodeopts=" + String(process.env.NODE_OPTIONS || "").length);
 "#,
             dep = js_literal(&f.work.join("dep.js")),
             marker = js_literal(&entry_marker),
@@ -2847,15 +2849,17 @@ fs.writeFileSync({marker}, "entry=ok require=" + String(dep));
             native_options.len(),
             env_block_chars(&native_policy)
         );
-        report(
-            fails,
-            "shell-nodeopts-with-realpath-fits-the-env-block",
-            env_block_chars(&realpath_policy) <= 32767,
-            &format!(
-                "{} chars of 32767 (an overflow means production could not stamp both terms \
-                 either)",
-                env_block_chars(&realpath_policy)
-            ),
+        // A MEASUREMENT, NOT A GATE — and it was a gate for one round, wrongly. Run 30538778889
+        // delivered a 42,824-character block, 10,057 OVER the 32,767 the docs give, and the child
+        // launched and resolved correctly anyway; the `nodeopts` length the child reports back is
+        // what proves nothing was truncated. So 32,767 is not the operative limit for a Unicode
+        // environment block here, and gating on it turned a working configuration red. It stays
+        // reported because production stamping ~39 KB of `NODE_OPTIONS` relies on tolerance the
+        // documentation does not promise, which is worth knowing even though it holds.
+        println!(
+            "  fact:shell-nodeopts-env-block-vs-documented-ceiling={} of 32767 over={}",
+            env_block_chars(&realpath_policy),
+            env_block_chars(&realpath_policy).saturating_sub(32767)
         );
 
         for arm in ["off", "on", "on-realpath", "on-native-shim"] {

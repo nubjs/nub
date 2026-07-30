@@ -287,7 +287,8 @@ jobs:
               grep -q "prop:$p=" probe.log || { echo "MISS $p (never measured)"; fail=1; }
               grep -E "prop:$p=" probe.log || true
             done
-            need_pass "${arm}shell-nodeopts-with-realpath-fits-the-env-block"
+            grep -E "fact:${arm}shell-nodeopts-env-block-vs-documented-ceiling=" probe.log \
+              || { echo "MISS the env-block ceiling measurement"; fail=1; }
           done
           grep -E 'fact:(deelev-)?shell-nodeopts-chars-' probe.log || { echo "MISS the NODE_OPTIONS size facts"; fail=1; }
           grep -E 'fact:(deelev-)?shell-realpath-roots=' probe.log || { echo "MISS the realpath roots"; fail=1; }
