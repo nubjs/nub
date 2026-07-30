@@ -1,0 +1,44 @@
+name: buildjail-matrix
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe/vw-corpus]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: environment
+        run: |
+          . /etc/os-release; echo "DISTRO=$PRETTY_NAME"; uname -r
+          echo "sysctl:"; sysctl kernel.apparmor_restrict_unprivileged_userns || echo absent
+          id; echo "sudo:"; sudo -n true && echo PASSWORDLESS_SUDO_YES || echo NO
+          aa-status --version 2>/dev/null || true
+      - name: build probe
+        run: gcc -static -O2 tests/buildjail-matrix/capprobe.c -o /tmp/capprobe && file /tmp/capprobe
+      - name: CELL - bare ubuntu-latest runner, unprivileged user
+        run: /tmp/capprobe
+      - name: CELL - bare runner as root via sudo
+        run: sudo /tmp/capprobe
+      - name: CELL - docker default
+        run: docker run --rm -v /tmp/capprobe:/capprobe:ro ubuntu:24.04 /capprobe
+      - name: CELL - docker cap-drop ALL
+        run: docker run --rm -v /tmp/capprobe:/capprobe:ro --cap-drop=ALL ubuntu:24.04 /capprobe
+      - name: CELL - docker cap-add SYS_ADMIN
+        run: docker run --rm -v /tmp/capprobe:/capprobe:ro --cap-add=SYS_ADMIN ubuntu:24.04 /capprobe
+      - name: CELL - docker SYS_ADMIN + apparmor unconfined
+        run: docker run --rm -v /tmp/capprobe:/capprobe:ro --cap-add=SYS_ADMIN --security-opt apparmor=unconfined ubuntu:24.04 /capprobe
+      - name: CELL - docker privileged
+        run: docker run --rm -v /tmp/capprobe:/capprobe:ro --privileged ubuntu:24.04 /capprobe
+      - name: CELL - rootless podman
+        run: |
+          sudo apt-get -qq update >/dev/null 2>&1
+          sudo apt-get -qq install -y podman >/dev/null 2>&1 || echo PODMAN_INSTALL_FAILED
+          podman --version || exit 0
+          podman run --rm -v /tmp/capprobe:/capprobe:ro docker.io/library/ubuntu:24.04 /capprobe || echo PODMAN_RUN_RC=$?
+      - name: CELL - one-time rescue attempt, apparmor profile as root
+        run: |
+          printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile nub-jail /tmp/capprobe flags=(unconfined) {\n  userns,\n}\n' | sudo tee /etc/apparmor.d/nub-jail
+          sudo apparmor_parser -r -W /etc/apparmor.d/nub-jail && echo PROFILE_LOADED
+          echo "--- probe again as unprivileged user, profile in force ---"
+          /tmp/capprobe
