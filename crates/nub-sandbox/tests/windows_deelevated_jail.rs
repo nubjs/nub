@@ -1187,12 +1187,20 @@ mod win {
         let source_publishes = nub_sandbox::windows_leaf_grant_redundant(&source_root);
         println!("  fact:interp-source-publishes-aap={source_publishes}");
 
+        // THE PROXIMATE CAUSE, asked directly and WITHOUT MUTATING ANYTHING. `set_ace` needs
+        // `WRITE_DAC` on its target, so whether nub can grant the ambient interpreter at all is a
+        // property of this token against that DACL — and opening the file for `WRITE_DAC` asks
+        // exactly that. Writing a real ace to find out would leave a lasting widening on the
+        // user's own Node install, which is not a probe's business.
+        let write_dac = can_write_dacl(&source_exe);
+        println!("  fact:interp-source-write-dac={write_dac}");
+
         let (ambient_rc, ambient_log) = lifecycle_arm(f, "ambient", &source_exe, &source_root);
 
         // Staged under the fixture's own cache home, which is where `compile_build_jail`'s `$cache`
         // anchor points — the same relationship the product's `<cache>/jail-bin/<key>` has, without
         // touching the real user cache.
-        let staged_dir = f.home.join("cache/nub/pm/jail-bin/probe");
+        let staged_dir = f.home.join("cache").join("nub").join("pm").join("jail-bin");
         let began = Instant::now();
         let staged = nub_sandbox::backend::windows_jail_bin::stage_appcontainer_readable_copy(
             &source_root,
@@ -1206,35 +1214,49 @@ mod win {
         // THE ZERO-PRIVILEGE CLAIM, and it is only a claim in the de-elevated arm — which is
         // exactly why it lives in this differential rather than in a Windows unit test.
         r.record(
-            "interp-staging-succeeds",
+            "interp-staging-needs-no-write-dac-anywhere-privileged",
             staged.is_ok() && staged_exe.is_file(),
             &format!("({staged:?}; node.exe present {})", staged_exe.is_file()),
         );
 
         let (staged_rc, staged_log) = lifecycle_arm(f, "staged", &staged_exe, &staged_dir);
+        let ambient_ok = ambient_rc == 0 && ambient_log.contains("LIFECYCLE-OK");
+        let staged_ok = staged_rc == 0 && staged_log.contains("LIFECYCLE-OK");
 
-        // The control. `!= 0` rather than a specific code because the ambient arm can fail at
-        // either of two independent points — the ACE write, or the confined image open — and
-        // pinning one would make the property FAIL when the OTHER cause fired.
+        // THE LAW, stated so it holds in BOTH arms rather than being an expectation that
+        // contradicts itself across them. An earlier draft demanded the ambient arm FAIL in both,
+        // which is wrong and would have been a self-inflicted red: an ELEVATED nub holds
+        // `WRITE_DAC` on `%ProgramFiles%`, writes the ace, and the ambient interpreter works.
+        // What is invariant is the DEPENDENCE — the ambient install is usable exactly when nub
+        // could grant it — and stating it that way makes the elevated arm carry information
+        // instead of being the same measurement twice.
         r.record(
-            "interp-ambient-install-cannot-run-a-lifecycle-script",
-            ambient_rc != 0 && !ambient_log.contains("LIFECYCLE-OK"),
-            &format!("(rc {ambient_rc}; log {})", one_line(&ambient_log)),
+            "interp-ambient-install-is-usable-only-where-nub-can-write-its-dacl",
+            ambient_ok == write_dac,
+            &format!(
+                "(write_dac {write_dac}, lifecycle ok {ambient_ok}; rc {ambient_rc}; log {})",
+                one_line(&ambient_log)
+            ),
         );
+        // …and the fix is that the staged copy does NOT depend on it. This is the property the
+        // whole change exists for, so it is gated in both arms and the de-elevated one is the
+        // meaningful half.
         r.record(
-            "interp-staged-copy-runs-a-lifecycle-script-to-completion",
-            staged_rc == 0 && staged_log.contains("LIFECYCLE-OK"),
+            "interp-staged-copy-runs-a-lifecycle-script-without-write-dac",
+            staged_ok,
             &format!("(rc {staged_rc}; log {})", one_line(&staged_log)),
         );
         // ATTRIBUTION, and it is what stops the staged arm passing for the wrong reason. A refused
         // read grant is now SKIPPED rather than fatal, so a launch can succeed while the child
         // quietly ran the ambient interpreter off some other PATH entry — which would look
         // identical here. The child reports its own `process.execPath`, so it cannot.
+        //
+        // Compared as PATHS, not strings. The first draft compared spellings and failed on a run
+        // where the fix worked, because a `/`-containing `join` literal and Windows's own `\`
+        // spelling name the same file — a control that varied more than the thing under test.
         r.record(
             "interp-staged-child-execpath-is-the-nub-owned-copy",
-            staged_log
-                .lines()
-                .any(|l| l.trim().eq_ignore_ascii_case(&staged_exe.to_string_lossy())),
+            staged_log.lines().any(|l| same_file(l.trim(), &staged_exe)),
             &format!(
                 "(expected {}; log {})",
                 staged_exe.display(),
@@ -1245,7 +1267,8 @@ mod win {
         // `node-gyp-build` both default the prebuild they fetch to `process.versions.modules` of
         // the RUNNING Node, so a staged interpreter reporting a different one would silently make
         // every package in that family download an unloadable binary. Both arms report it, so this
-        // compares the copy against its own source rather than against a tabulated expectation.
+        // compares the copy against its own source rather than against a tabulated expectation —
+        // and it can only be answered where BOTH arms produced a reading.
         let (source_abi, copy_abi) = (abi_of(&ambient_log), abi_of(&staged_log));
         r.record(
             "interp-staged-abi-matches-the-source",
@@ -1261,7 +1284,7 @@ mod win {
             nub_sandbox::windows_leaf_grant_redundant(&staged_dir),
             "(an inheritable ALL APPLICATION PACKAGES ace ⇒ the per-spawn leaf grant skips)",
         );
-        let deep = staged_dir.join("node_modules/npm/bin");
+        let deep = staged_dir.join("node_modules").join("npm").join("bin");
         r.record(
             "interp-staged-deep-entry-inherited-the-ace-at-creation",
             deep.is_dir() && nub_sandbox::windows_leaf_grant_redundant(&deep),
@@ -1283,12 +1306,56 @@ mod win {
         );
     }
 
+    /// Whether THIS token may rewrite `path`'s DACL — the one permission [`set_ace`] needs, asked
+    /// by opening for it rather than by writing an ace and observing the result. Non-mutating on
+    /// purpose: the elevated arm WOULD succeed, and it would leave a lasting AppContainer widening
+    /// on the user's own Node install.
+    fn can_write_dacl(path: &Path) -> bool {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+        const WRITE_DAC: u32 = 0x0004_0000;
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: an OPEN_EXISTING open for one access right on a NUL-terminated wide path; the
+        // handle is closed on the success path and nothing is written through it.
+        unsafe {
+            let h = CreateFileW(
+                wide.as_ptr(),
+                WRITE_DAC,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            );
+            if h == INVALID_HANDLE_VALUE || h.is_null() {
+                return false;
+            }
+            CloseHandle(h);
+            true
+        }
+    }
+
+    /// Whether a path the CHILD printed names the same file as one nub built. Windows accepts both
+    /// separators, so two spellings of one path are equal as paths and unequal as strings — and a
+    /// string compare here silently inverted a control (see the call site).
+    fn same_file(reported: &str, expected: &Path) -> bool {
+        let norm = |p: &str| p.replace('/', "\\").to_ascii_lowercase();
+        !reported.is_empty() && norm(reported) == norm(&expected.to_string_lossy())
+    }
+
     /// Every property [`interpreter_group`] reports, so a machine with no Node still emits a
     /// verdict for each rather than leaving the table looking complete with rows missing.
     const INTERPRETER_PROPS: &[&str] = &[
-        "interp-staging-succeeds",
-        "interp-ambient-install-cannot-run-a-lifecycle-script",
-        "interp-staged-copy-runs-a-lifecycle-script-to-completion",
+        "interp-staging-needs-no-write-dac-anywhere-privileged",
+        "interp-ambient-install-is-usable-only-where-nub-can-write-its-dacl",
+        "interp-staged-copy-runs-a-lifecycle-script-without-write-dac",
         "interp-staged-child-execpath-is-the-nub-owned-copy",
         "interp-staged-abi-matches-the-source",
         "interp-staged-dir-publishes-read-to-appcontainers",
@@ -1337,21 +1404,35 @@ mod win {
             ),
         )
         .expect("write the arm's entry file");
-        // `node` BARE, not by absolute path: a PATH search is itself a directory probe, and a
-        // confined child is refused on an un-ACE'd install tree — which surfaces as `'node' is not
+        // Every path INSIDE the script is CWD-RELATIVE, and that is not tidiness. An absolute open
+        // from inside the jail walks the whole ancestor chain as targets, and making that chain
+        // reachable without elevation is a SEPARATE, still-open repair — an absolute script path
+        // made the de-elevated arm fail with cmd's `Access is denied.` before either interpreter
+        // was reached, i.e. it measured the ancestor blocker instead of the interpreter. A relative
+        // open resolves against the inherited cwd handle and does not.
+        //
+        // `node` is BARE, not absolute: a PATH search is itself a directory probe, and a confined
+        // child is refused on an un-ACE'd install tree — which surfaces as `'node' is not
         // recognized`, a different and earlier failure than a refused image open. Both are the
         // defect; naming the interpreter absolutely would have measured only the second.
         std::fs::write(
             &script,
             format!(
+                // BREADCRUMB PER STAGE, so a failure is attributable to one of them instead of
+                // arriving as a bare exit code. An earlier run produced `rc 1` with an EMPTY log
+                // and nothing distinguished "cmd could not open the script" from "`node` was
+                // unresolvable" from "the require was refused" — three causes with three different
+                // fixes.
                 "@echo off\r\n\
-                 node -p \"process.version\" > \"{m}\" 2>&1\r\n\
+                 echo STEP-CMD-OPENED-THE-SCRIPT> \"{m}\"\r\n\
+                 node -p \"process.version\" >> \"{m}\" 2>&1\r\n\
                  if errorlevel 1 exit /b 11\r\n\
+                 echo STEP-BARE-NODE-RESOLVED-AND-RAN>> \"{m}\"\r\n\
                  node \"{e}\" >> \"{m}\" 2>&1\r\n\
                  if errorlevel 1 exit /b 12\r\n\
                  echo LIFECYCLE-OK>> \"{m}\"\r\n",
-                m = marker.display(),
-                e = entry.display()
+                m = leaf(&marker),
+                e = leaf(&entry)
             ),
         )
         .expect("write the arm's script");
@@ -1365,7 +1446,7 @@ mod win {
         });
         let spec = CommandSpec::new(&comspec)
             .arg("/c")
-            .arg(&script)
+            .arg(leaf(&script))
             .cwd(&f.package);
         let rc = match apply(&policy, spec) {
             Ok(p) => match p.status() {
@@ -1382,6 +1463,12 @@ mod win {
         };
         let log = std::fs::read_to_string(&marker).unwrap_or_default();
         println!("    arm:{tag} rc={rc}");
+        if log.is_empty() {
+            // Nothing ran, so the grant list is the only remaining evidence about why.
+            for rule in &policy.fs.rules.entries {
+                println!("      {tag}# grant {:?} {:?}", rule.access, rule.matcher);
+            }
+        }
         for line in log.lines() {
             println!("      {tag}| {line}");
         }
@@ -1418,6 +1505,15 @@ mod win {
             ambient,
         )
         .expect("compile_build_jail")
+    }
+
+    /// A path's file name, for the cwd-relative spellings the script uses. Panics on a path with
+    /// no final component, which is a probe bug rather than a measurement.
+    fn leaf(p: &Path) -> String {
+        p.file_name()
+            .expect("an arm file has a name")
+            .to_string_lossy()
+            .into_owned()
     }
 
     /// A Windows path as a JS string literal — backslashes doubled, so the emitted `require()`

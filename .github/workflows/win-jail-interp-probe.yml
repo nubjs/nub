@@ -19,14 +19,23 @@
 # would measure the runner image's unzipped hostedtoolcache Node, which is a different tree with a
 # different (also un-ACE'd) DACL — usable, but not the configuration a real user has.
 #
-# THE CONTROLS. `interp-ambient-install-cannot-run-a-lifecycle-script` is the arm where the defect
-# still reproduces: without it a green staged arm measures nothing.
-# `interp-staged-child-execpath-is-the-nub-owned-copy` is the attribution control — a refused read
-# grant is now skipped rather than fatal, so a launch can succeed while the child quietly ran the
-# ambient interpreter, and only the child's own execPath tells those apart.
+# THE CONTROLS. `interp-ambient-install-is-usable-only-where-nub-can-write-its-dacl` is the one the
+# whole run rests on, and it is stated as a DEPENDENCE rather than a failure because that is what
+# holds in both arms: an elevated nub does hold WRITE_DAC on %ProgramFiles% and the ambient
+# interpreter then works, so demanding the ambient arm fail everywhere would be a self-inflicted red
+# that measured nothing. `interp-staged-child-execpath-is-the-nub-owned-copy` is the attribution
+# control — a refused read grant is now SKIPPED rather than fatal, so a launch can succeed while the
+# child quietly ran the ambient interpreter, and only the child's own execPath tells those apart.
 # `fact:interp-source-publishes-aap` decides whether the run could exhibit the defect at all: on an
 # install that already publishes read to AppContainers the ambient arm passes for a reason that has
-# nothing to do with nub, which makes the differential VOID rather than green.
+# nothing to do with nub.
+#
+# CROSS-ARM CONTAMINATION, recorded because it bit run 30542604419: the ELEVATED arm's ambient
+# lifecycle spawn rewrites %ProgramFiles%\nodejs's DACL to add its per-run grant, and the
+# AppContainer-readability read-back went false → TRUE across the two arms even though the per-run
+# ace is revoked. So `fact:interp-source-publishes-aap` is only trustworthy in the arm that ran
+# FIRST, and the WRITE_DAC fact — a property of the token, which no earlier arm can change in the
+# permissive direction — is what the gated property keys on instead.
 name: win-jail-interp-probe
 
 on:
@@ -64,8 +73,12 @@ jobs:
       # The configuration under test. Recipe lifted from tests/win-msi-volume/msi-node-acl.ps1: the
       # dist index picks the VERSION and a HEAD request decides whether the artifact exists, because
       # index.json never lists win-arm64-msi for any release even where the .msi is served.
+      # `pwsh` (PowerShell 7), NOT `powershell` (5.1): under 5.1 every `Invoke-WebRequest -Method
+      # Head` against nodejs.org threw, the version loop found nothing, and the step died on
+      # `no LTS release serves a x64 .msi` having never reached msiexec. tests/win-msi-volume runs
+      # the identical recipe under pwsh, where it works.
       - name: Install a stock Node MSI to %ProgramFiles%\nodejs
-        shell: powershell
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
@@ -139,21 +152,19 @@ jobs:
           need 'DEELEV route='
 
           echo "---- the interpreter the run actually measured ----"
-          grep -E '^  fact:interp-(source|source-publishes-aap|stage-ms)' probe.log || { echo "MISS the interpreter facts"; fail=1; }
-          # VOIDS THE DIFFERENTIAL rather than merely weakening it: an already-AppContainer-readable
-          # source install cannot exhibit the defect, so the ambient arm's failure would have to
-          # come from somewhere else.
-          if grep -q '^  fact:interp-source-publishes-aap=true' probe.log; then
-            echo "VOID the source install already publishes read to AppContainers — the ambient arm is not the defect"
-            fail=1
-          fi
+          grep -E '^  fact:interp-' probe.log || { echo "MISS the interpreter facts"; fail=1; }
           grep -qE '^  fact:interp-source=.*[Pp]rogram [Ff]iles' probe.log || { echo "MISS the probe did not measure the MSI install"; fail=1; }
+          # THE DIFFERENTIAL IS ONLY REAL IF THE TWO ARMS DIFFERED ON THE PERMISSION UNDER TEST.
+          # Both readings must appear across the run: an elevated arm that holds WRITE_DAC on the
+          # ambient install, and a de-elevated one that does not.
+          grep -q '^  fact:interp-source-write-dac=true'  probe.log || { echo "MISS no arm held WRITE_DAC on the ambient install"; fail=1; }
+          grep -q '^  fact:interp-source-write-dac=false' probe.log || { echo "MISS no arm LACKED WRITE_DAC — the arms did not differ on the permission under test"; fail=1; }
 
-          echo "---- the differential (the control first: it must still reproduce) ----"
-          need_pass interp-ambient-install-cannot-run-a-lifecycle-script
-          need_pass interp-staged-copy-runs-a-lifecycle-script-to-completion
+          echo "---- the differential ----"
+          need_pass interp-ambient-install-is-usable-only-where-nub-can-write-its-dacl
+          need_pass interp-staged-copy-runs-a-lifecycle-script-without-write-dac
           need_pass interp-staged-child-execpath-is-the-nub-owned-copy
-          need_pass interp-staging-succeeds
+          need_pass interp-staging-needs-no-write-dac-anywhere-privileged
           need_pass interp-staged-abi-matches-the-source
 
           echo "---- the cost claim: no per-spawn DACL write over the tree ----"
