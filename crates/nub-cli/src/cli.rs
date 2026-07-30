@@ -941,6 +941,12 @@ pub enum Command {
         #[arg(long, value_name = "FROM=TO", action = ArgAction::Append, help_heading = COMPILE_ADVANCED)]
         alias: Vec<String>,
 
+        /// Choose what importing a file extension evaluates to, repeatable:
+        /// `--loader .html=file`. Types: `file` (embeds the file and yields its
+        /// path), `text`, `json`, `base64`, `dataurl`, `binary`, `empty`.
+        #[arg(long, value_name = "EXT=TYPE", action = ArgAction::Append, help_heading = COMPILE_ADVANCED)]
+        loader: Vec<String>,
+
         /// Extra `exports` condition to honor, repeatable. Added to the
         /// defaults rather than replacing them.
         #[arg(long, value_name = "NAME", action = ArgAction::Append, help_heading = COMPILE_ADVANCED)]
@@ -2575,6 +2581,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             no_treeshake,
             ignore_annotations,
             alias,
+            loader,
             conditions,
             external,
             tsconfig,
@@ -2606,6 +2613,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 conditions,
                 external,
                 tsconfig: tsconfig.map(PathBuf::from),
+                loaders: loader,
             },
         }),
         Some(Command::Init {

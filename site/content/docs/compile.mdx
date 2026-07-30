@@ -206,6 +206,42 @@ nub compile app.ts --include=data --exclude=data/fixtures --exclude='**/*.tmp'
 
 An `--exclude` that matches nothing is ignored rather than an error, so it can outlive the files it was written for. That also means a mistyped one prunes nothing — check what shipped if a path was meant to stay out.
 
+## Importing an asset
+
+Importing a file that isn't JavaScript gives you either its contents or its path, depending on the extension:
+
+```ts
+import prompt from "./prompt.md";     // the text, as a string
+import model from "./model.wasm";     // an absolute path to the file
+```
+
+The extension decides which:
+
+| Extension | Import evaluates to |
+| --- | --- |
+| `.txt`, `.md` | The file's contents, as a string |
+| `.json` | The parsed value |
+| `.wasm`, `.png`, `.mp3`, `.woff2`, `.bin`, and other binary formats | An absolute path to the file |
+
+A binary asset ships inside the executable and is written out beside the compiled entry, so the path points at a real file that every filesystem API works on:
+
+```ts
+import wasm from "./model.wasm";
+
+const { instance } = await WebAssembly.instantiate(readFileSync(wasm));
+```
+
+The path is absolute and computed when the executable runs, so it holds wherever the binary is started from — no joining against `__dirname` first.
+
+Import attributes are accepted and ignored, since the extension already decides. Both of these load the same text:
+
+```ts
+import prompt from "./prompt.md";
+import prompt from "./prompt.md" with { type: "text" };
+```
+
+An asset that nothing uses is left out of the executable, so an unused import costs nothing.
+
 ## Asset paths resolve from the entry
 
 Compiling bundles every module into one file at the entry's location, so in the compiled app `import.meta.url` and `__dirname` always point at the entry's directory — including in code that lived in a subdirectory beforehand. Write asset paths as the entry would see them:
@@ -343,6 +379,30 @@ Resolve one specifier as another, repeatable:
 ```bash
 nub compile app.ts --alias lodash=lodash-es --alias '@/=./src/'
 ```
+
+### `--loader`
+
+Choose what importing an extension evaluates to, overriding the defaults. Repeatable:
+
+```bash
+nub compile app.ts --loader .html=file --loader .sql=text
+```
+
+Available loaders:
+
+```
+file      embeds the file and yields an absolute path to it
+text      the file's contents, as a string
+json      the parsed value
+base64    the bytes, base64-encoded into the bundle
+dataurl   the bytes, as a data: URL
+binary    the bytes, as a Uint8Array
+empty     nothing, and the file is not read
+```
+
+Reach for it when an extension nub doesn't map is a real asset — a web build's `.html` and `.css` files, a `.sql` schema — or to move one the other way, as `--loader .wasm=binary` does to inline a module's bytes instead of writing it out.
+
+Extensions match exactly, case included, so a file named `PHOTO.PNG` needs `--loader .PNG=file`.
 
 ### `--conditions`
 
