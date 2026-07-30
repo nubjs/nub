@@ -5678,8 +5678,10 @@ const RELEASE_CANARY_API_ENV: &str = "NUB_RELEASE_CANARY_URL";
 
 /// The releases-download base URL — the test seam's override if set, else the
 /// canonical github.com path. Centralized so the override is read in exactly one
-/// place and the default is the single source of truth.
-fn release_download_base() -> String {
+/// place and the default is the single source of truth. Shared with
+/// `compile::launcher`, which pulls per-target launcher templates from the same
+/// release, so one seam redirects both channels.
+pub(crate) fn release_download_base() -> String {
     std::env::var(RELEASE_DOWNLOAD_BASE_ENV)
         .unwrap_or_else(|_| format!("https://github.com/{RELEASE_REPO}/releases/download"))
 }

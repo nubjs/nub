@@ -1083,6 +1083,16 @@ jobs:
               tar -czf "release-archives/$archive" -C "$PKG" bin runtime
             fi
             (cd release-archives && sha256sum "$archive" > "$archive.sha256")
+            # The `nub compile` launcher template as a STANDALONE asset, so a
+            # cross-compile can fetch the one platform it needs (a few hundred KB)
+            # instead of a whole release archive. This job is the only place all
+            # eight exist together — the build matrix is per-platform, and each job
+            # packages only the launcher it just built. compile::launcher resolves
+            # `<release>/<tag>/nub-launcher-<platform><exe>` and verifies it against
+            # the `.sha256` sidecar, so BOTH names are part of that contract.
+            LEXE=""; [[ "$platform" == win32-* ]] && LEXE=".exe"
+            cp "$PKG/bin/nub-launcher-$platform$LEXE" "release-archives/"
+            (cd release-archives && sha256sum "nub-launcher-$platform$LEXE" > "nub-launcher-$platform$LEXE.sha256")
           done
           ls -la release-archives
 
@@ -1108,6 +1118,22 @@ jobs:
             release-archives/nub-win32-x64.zip.sha256
             release-archives/nub-win32-arm64.zip
             release-archives/nub-win32-arm64.zip.sha256
+            release-archives/nub-launcher-darwin-arm64
+            release-archives/nub-launcher-darwin-arm64.sha256
+            release-archives/nub-launcher-darwin-x64
+            release-archives/nub-launcher-darwin-x64.sha256
+            release-archives/nub-launcher-linux-x64
+            release-archives/nub-launcher-linux-x64.sha256
+            release-archives/nub-launcher-linux-x64-musl
+            release-archives/nub-launcher-linux-x64-musl.sha256
+            release-archives/nub-launcher-linux-arm64
+            release-archives/nub-launcher-linux-arm64.sha256
+            release-archives/nub-launcher-linux-arm64-musl
+            release-archives/nub-launcher-linux-arm64-musl.sha256
+            release-archives/nub-launcher-win32-x64.exe
+            release-archives/nub-launcher-win32-x64.exe.sha256
+            release-archives/nub-launcher-win32-arm64.exe
+            release-archives/nub-launcher-win32-arm64.exe.sha256
 
       - name: Verify all release assets present (re-upload missing, else FAIL)
         env:
@@ -1115,11 +1141,15 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
-          # The exhaustive list of 16 assets (8 platforms × {archive, .sha256}) that
-          # a complete release MUST carry. This is the load-bearing check that the
-          # v0.0.48 partial upload (9/16) would have FAILED instead of shipping. We
-          # list the release's current assets, re-upload any missing ones (with
-          # retries), then re-list and FAIL LOUD if a gap survives.
+          # The exhaustive list of 32 assets (8 platforms × {archive, launcher} ×
+          # {artifact, .sha256}) that a complete release MUST carry. This is the
+          # load-bearing check that the v0.0.48 partial upload (9/16) would have
+          # FAILED instead of shipping. The launcher templates are equally
+          # load-bearing: `nub compile --platform <foreign>` fetches one from this
+          # release, so a missing launcher asset silently disables cross-compiling
+          # to that platform for everyone on this version. We list the release's
+          # current assets, re-upload any missing ones (with retries), then re-list
+          # and FAIL LOUD if a gap survives.
           EXPECTED=(
             nub-darwin-arm64.tar.gz nub-darwin-arm64.tar.gz.sha256
             nub-darwin-x64.tar.gz nub-darwin-x64.tar.gz.sha256
@@ -1129,6 +1159,14 @@ jobs:
             nub-linux-arm64-musl.tar.gz nub-linux-arm64-musl.tar.gz.sha256
             nub-win32-x64.zip nub-win32-x64.zip.sha256
             nub-win32-arm64.zip nub-win32-arm64.zip.sha256
+            nub-launcher-darwin-arm64 nub-launcher-darwin-arm64.sha256
+            nub-launcher-darwin-x64 nub-launcher-darwin-x64.sha256
+            nub-launcher-linux-x64 nub-launcher-linux-x64.sha256
+            nub-launcher-linux-x64-musl nub-launcher-linux-x64-musl.sha256
+            nub-launcher-linux-arm64 nub-launcher-linux-arm64.sha256
+            nub-launcher-linux-arm64-musl nub-launcher-linux-arm64-musl.sha256
+            nub-launcher-win32-x64.exe nub-launcher-win32-x64.exe.sha256
+            nub-launcher-win32-arm64.exe nub-launcher-win32-arm64.exe.sha256
           )
           TAG="$GITHUB_REF_NAME"
 
@@ -1332,6 +1370,9 @@ jobs:
               tar -czf "release-archives/$archive" -C "$PKG" bin runtime
             fi
             (cd release-archives && sha256sum "$archive" > "$archive.sha256")
+            LEXE=""; [[ "$platform" == win32-* ]] && LEXE=".exe"
+            cp "$PKG/bin/nub-launcher-$platform$LEXE" "release-archives/"
+            (cd release-archives && sha256sum "nub-launcher-$platform$LEXE" > "nub-launcher-$platform$LEXE.sha256")
           done
           ls -la release-archives
 
@@ -1371,9 +1412,11 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
-          # Same 16-asset completeness check as github-release (keep in sync),
+          # Same 32-asset completeness check as github-release (keep in sync),
           # against the rolling `canary` tag: list, re-upload any missing with
-          # retries, fail loud if a gap survives.
+          # retries, fail loud if a gap survives. A canary build's `nub compile`
+          # fetches its launcher templates from THIS tag, so they are as required
+          # here as on a stable release.
           EXPECTED=(
             nub-darwin-arm64.tar.gz nub-darwin-arm64.tar.gz.sha256
             nub-darwin-x64.tar.gz nub-darwin-x64.tar.gz.sha256
@@ -1383,6 +1426,14 @@ jobs:
             nub-linux-arm64-musl.tar.gz nub-linux-arm64-musl.tar.gz.sha256
             nub-win32-x64.zip nub-win32-x64.zip.sha256
             nub-win32-arm64.zip nub-win32-arm64.zip.sha256
+            nub-launcher-darwin-arm64 nub-launcher-darwin-arm64.sha256
+            nub-launcher-darwin-x64 nub-launcher-darwin-x64.sha256
+            nub-launcher-linux-x64 nub-launcher-linux-x64.sha256
+            nub-launcher-linux-x64-musl nub-launcher-linux-x64-musl.sha256
+            nub-launcher-linux-arm64 nub-launcher-linux-arm64.sha256
+            nub-launcher-linux-arm64-musl nub-launcher-linux-arm64-musl.sha256
+            nub-launcher-win32-x64.exe nub-launcher-win32-x64.exe.sha256
+            nub-launcher-win32-arm64.exe nub-launcher-win32-arm64.exe.sha256
           )
           TAG="canary"
 

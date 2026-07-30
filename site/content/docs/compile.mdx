@@ -12,10 +12,6 @@ nub compile app.ts       # → ./app, a standalone executable
 
 Everything the entry imports is transpiled and bundled at compile time on your machine. The output carries no `node_modules` and needs no toolchain on the target — TypeScript, JSX, and non-erasable syntax are already down-leveled and packaged.
 
-<Callout title="Cross-compiling is in progress">
-Building one platform's executable from another needs that platform's prebuilt launcher, and a Nub install ships only its own. Passing `--platform` for a foreign target names the launcher it could not find.
-</Callout>
-
 ## Two shapes
 
 The default embeds Node; `--smol` does not.
@@ -308,15 +304,23 @@ The box lives on the alternate screen, so when setup finishes it disappears and 
 
 ## `--platform`
 
-Choose the platform the executable is built for. The default is the host.
+Choose the platform the executable is built for. The default is the host, and one machine can build for all of them — which is what a release workflow needs from a single runner.
 
 ```bash
-nub compile app.ts --platform linux-x64
+nub compile app.ts --platform linux-x64     # → ./app, from a Mac
+nub compile app.ts --platform win32-x64     # → ./app.exe
 ```
 
-Accepted values: `darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-arm64-musl`, `linux-x64`, `linux-x64-musl`, `win32-arm64`, `win32-x64`. A Windows target gets an `.exe` output name and embeds the Windows build of Node.
+Accepted values:
 
-Cross-compiling needs the target platform's launcher — see the note at the top of the page.
+```
+darwin-arm64   linux-arm64        linux-x64        win32-arm64
+darwin-x64     linux-arm64-musl   linux-x64-musl   win32-x64
+```
+
+Everything platform-dependent follows the target rather than the build machine: the Node it embeds, the executable format, the `.exe` suffix on a Windows output, and the values `process.platform` and `process.arch` are folded to in the bundle.
+
+Building for a platform other than the host also needs that platform's launcher, and an install ships only its own. Nub fetches the one it needs from the release it came from, checks it against the published checksum, and caches it — so the first cross-compile to a given platform downloads a few hundred kilobytes and later ones do not. Setting `NUB_LAUNCHER_TEMPLATE` to a launcher on disk skips that entirely, which is the way to cross-compile with no network at all.
 
 ## Unresolved imports fail the build
 
