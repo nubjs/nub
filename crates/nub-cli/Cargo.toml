@@ -22,6 +22,10 @@ embed-runtime = ["nub-core/embed-runtime"]
 
 [dependencies]
 nub-core = { path = "../nub-core" }
+# The raw-text nesting bound every externally-authored JSONC read goes through
+# (src/jsonc.rs). Shared with the nub-native addon, which parses the same
+# JSON-family formats in its own workspace, so the two cannot drift.
+nub-json-guard = { path = "../nub-json-guard" }
 # Shared phantom-classification primitives (specifier extraction + guard modeling
 # + builtin/name classification) for the pre-run phantom scan (src/phantom_scan.rs).
 # Depends on the LEAN oxc parser subset, not the full `oxc` umbrella — see the

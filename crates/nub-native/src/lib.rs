@@ -48,9 +48,26 @@ pub fn parse_toml(source: String) -> napi::Result<serde_json::Value> {
         .map_err(|e| napi::Error::from_reason(format!("TOML→JSON conversion error: {e}")))
 }
 
+/// Deepest `{`/`[` nesting the data-format loaders accept.
+///
+/// Higher than the CLI's bound on its own config files, because these loaders
+/// take arbitrary user data — a `.json5` fixture is not a `nub.jsonc` — but far
+/// enough below the measured abort thresholds (json5 dies between 2500 and 3000
+/// levels on an 8 MiB stack and between 300 and 400 on Windows' 1 MiB) that the
+/// margin holds on the smallest stack nub runs on.
+pub(crate) const MAX_NESTING_DEPTH: usize = 128;
+
+/// Bound `source`'s nesting, reporting a violation as `format`'s parse error so a
+/// hostile document reads to JS like any other malformed one.
+fn check_depth(source: &str, format: &str) -> napi::Result<()> {
+    nub_json_guard::check_nesting_depth(source, MAX_NESTING_DEPTH)
+        .map_err(|e| napi::Error::from_reason(format!("{format} parse error: {e}")))
+}
+
 /// Parse JSON5 source into a JS value.
 #[napi]
 pub fn parse_json5(source: String) -> napi::Result<serde_json::Value> {
+    check_depth(&source, "JSON5")?;
     json5::from_str(&source)
         .map_err(|e| napi::Error::from_reason(format!("JSON5 parse error: {e}")))
 }
@@ -58,6 +75,7 @@ pub fn parse_json5(source: String) -> napi::Result<serde_json::Value> {
 /// Parse JSONC (JSON with comments) source into a JS value.
 #[napi]
 pub fn parse_jsonc(source: String) -> napi::Result<serde_json::Value> {
+    check_depth(&source, "JSONC")?;
     // The `Option` is the deserialization target, not a wrapper the parser adds:
     // it is `None` for the empty document.
     jsonc_parser::parse_to_serde_value::<Option<serde_json::Value>>(&source, &Default::default())

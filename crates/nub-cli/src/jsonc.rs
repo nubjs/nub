@@ -1,6 +1,6 @@
 //! The guarded JSONC reader every externally-authored file goes through.
 //!
-//! `jsonc_parser`'s descent is unbounded, as is the recursive `Drop` of the
+//! `jsonc_parser` descends recursively, as does the `Drop` of the
 //! `serde_json::Value` it produces, so a deeply-nested document exhausts the
 //! stack. That is not a catchable failure — it aborts the process
 //! (`STATUS_STACK_OVERFLOW` on Windows, `SIGSEGV` elsewhere), and it happens
@@ -9,7 +9,9 @@
 //!
 //! Depth is therefore capped on the RAW TEXT, before the parser is handed it —
 //! the only point at which the recursion can still be bounded, since the parser
-//! exposes no depth option.
+//! exposes no depth option. `jsonc_parser` 0.32.4 does stop at 512 levels of its
+//! own accord, but that is an upstream detail a version bump can remove, and it
+//! sits above what a 1 MiB stack survives, so nub does not rely on it.
 //!
 //! [`read_guarded`] is the other half of the same job: these files arrive by a
 //! path the user chose, so obtaining the bytes is itself unbounded work unless
@@ -117,76 +119,18 @@ pub(crate) fn starts_with_bom(path: &Path) -> bool {
         .is_ok_and(|()| head == *UTF8_BOM)
 }
 
-/// Byte-scan for the deepest `{`/`[` nesting, ignoring delimiters inside strings
-/// and comments. Bytes are safe to scan directly: every delimiter is ASCII and
-/// UTF-8 continuation bytes are all >= 0x80, so no multi-byte character can be
-/// mistaken for one.
+/// Bound this text's nesting at [`MAX_NESTING_DEPTH`].
 ///
 /// Callable on its own because the CST writer in [`crate::config`] hands the same
-/// externally-authored text to `jsonc_parser::cst`, whose descent is unbounded in
+/// externally-authored text to `jsonc_parser::cst`, which descends recursively in
 /// exactly the same way — the guard belongs to the text, not to one parser entry
 /// point.
+///
+/// The scan itself lives in `nub-json-guard` so the addon, which parses the same
+/// JSON-family formats in its own workspace, shares this implementation and its
+/// tests rather than carrying a copy that could drift.
 pub(crate) fn check_nesting_depth(text: &str) -> Result<(), String> {
-    #[derive(Clone, Copy)]
-    enum State {
-        Code,
-        /// Inside a string opened by this quote byte. `jsonc_parser` accepts
-        /// single-quoted strings, so the closing quote must match the opener.
-        Str(u8),
-        LineComment,
-        BlockComment,
-    }
-
-    let bytes = text.as_bytes();
-    let mut state = State::Code;
-    let mut depth: usize = 0;
-    let mut i = 0;
-
-    while i < bytes.len() {
-        let b = bytes[i];
-        match state {
-            State::Code => match b {
-                b'"' | b'\'' => state = State::Str(b),
-                b'/' if bytes.get(i + 1) == Some(&b'/') => {
-                    state = State::LineComment;
-                    i += 1;
-                }
-                b'/' if bytes.get(i + 1) == Some(&b'*') => {
-                    state = State::BlockComment;
-                    i += 1;
-                }
-                b'{' | b'[' => {
-                    depth += 1;
-                    if depth > MAX_NESTING_DEPTH {
-                        return Err(format!(
-                            "nesting is deeper than the {MAX_NESTING_DEPTH}-level limit"
-                        ));
-                    }
-                }
-                b'}' | b']' => depth = depth.saturating_sub(1),
-                _ => {}
-            },
-            State::Str(quote) => match b {
-                b'\\' => i += 1,
-                _ if b == quote => state = State::Code,
-                _ => {}
-            },
-            State::LineComment => {
-                if b == b'\n' {
-                    state = State::Code;
-                }
-            }
-            State::BlockComment => {
-                if b == b'*' && bytes.get(i + 1) == Some(&b'/') {
-                    state = State::Code;
-                    i += 1;
-                }
-            }
-        }
-        i += 1;
-    }
-
-    Ok(())
+    nub_json_guard::check_nesting_depth(text, MAX_NESTING_DEPTH)
 }
 
 #[cfg(test)]
@@ -248,15 +192,24 @@ mod tests {
         assert!(parse_to_value(&siblings).is_ok());
     }
 
-    /// The guard is only worth as much as its coverage: a single direct call to
-    /// `jsonc_parser` re-opens the abort on a different door, and that door would
-    /// be invisible to a test asserting the guarded path. Bypasses are therefore
-    /// caught here rather than by reviewer vigilance.
+    /// The guard is only worth as much as its coverage: a single direct call to a
+    /// recursive-descent JSON-family parser re-opens the abort on a different
+    /// door, and that door would be invisible to a test asserting the guarded
+    /// path. Bypasses are therefore caught here rather than by reviewer vigilance.
+    ///
+    /// The walk spans every crate, not just this one, because the addon reaches
+    /// these parsers from its OWN workspace — `nub-native` carries `test = false`
+    /// (a cdylib cannot link a test harness against napi symbols), so nothing
+    /// inside it can assert this and a scan scoped to `nub-cli/src` reported the
+    /// gap as closed while three unguarded calls sat one directory over.
     #[test]
-    fn no_module_parses_jsonc_outside_this_one() {
+    fn no_module_parses_json_without_bounding_its_nesting() {
         fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             for entry in std::fs::read_dir(dir).expect("readable source dir") {
                 let path = entry.expect("readable dir entry").path();
+                if path.file_name().is_some_and(|n| n == "target") {
+                    continue;
+                }
                 if path.is_dir() {
                     rs_files(&path, out);
                 } else if path.extension().is_some_and(|e| e == "rs") {
@@ -265,25 +218,36 @@ mod tests {
             }
         }
 
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = Vec::new();
-        rs_files(&src, &mut files);
-        assert!(files.len() > 1, "source walk found nothing at {src:?}");
+        // The entry points that recurse on nesting with no bound of their own, or
+        // with one too loose to survive a 1 MiB stack.
+        const UNGUARDED_PARSERS: [&str; 2] = ["parse_to_serde_value", "json5::from_str"];
 
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates dir");
+        let mut files = Vec::new();
+        rs_files(crates, &mut files);
+        assert!(files.len() > 1, "source walk found nothing at {crates:?}");
+
+        // A file may reach one of those parsers only if it also names the bound.
+        // Co-occurrence rather than an allowlist of blessed paths: an allowlist
+        // says nothing once a file is on it, so deleting the guard from a listed
+        // file would still pass. This fails on both moves — a new unguarded call
+        // site, and the bound being dropped from an existing one.
         let offenders: Vec<_> = files
             .iter()
-            .filter(|path| path.file_name().is_some_and(|n| n != "jsonc.rs"))
             .filter(|path| {
-                std::fs::read_to_string(path)
-                    .expect("readable source file")
-                    .contains("parse_to_serde_value")
+                let text = std::fs::read_to_string(path).expect("readable source file");
+                UNGUARDED_PARSERS.iter().any(|p| text.contains(p))
+                    && !text.contains("check_nesting_depth")
             })
             .collect();
 
         assert!(
             offenders.is_empty(),
-            "these call jsonc_parser directly and so skip MAX_NESTING_DEPTH; \
-             route them through jsonc::parse_to_value: {offenders:#?}"
+            "these parse JSON-family text without bounding its nesting, so a deep \
+             document aborts the process; call check_nesting_depth on the source \
+             first: {offenders:#?}"
         );
     }
 

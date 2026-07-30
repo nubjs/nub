@@ -781,6 +781,8 @@ fn parent_dir(p: &str) -> String {
 fn read_jsonc(path: &str) -> Result<Value, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|_| format!("Cannot resolve tsconfig at path: {path}"))?;
+    nub_json_guard::check_nesting_depth(&text, crate::MAX_NESTING_DEPTH)
+        .map_err(|e| format!("Failed to parse tsconfig at: {path}: {e}"))?;
     // The `Option` is the deserialization target, not a wrapper the parser adds:
     // it is `None` for the empty document.
     jsonc_parser::parse_to_serde_value::<Option<Value>>(&text, &Default::default())

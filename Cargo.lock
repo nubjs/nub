@@ -2725,6 +2725,7 @@ dependencies = [
  "mimalloc",
  "node-semver",
  "nub-core",
+ "nub-json-guard",
  "nub-phantom-core",
  "nub-phantom-scan",
  "num_cpus",
@@ -2777,6 +2778,10 @@ dependencies = [
  "zip",
  "zstd",
 ]
+
+[[package]]
+name = "nub-json-guard"
+version = "0.1.0"
 
 [[package]]
 name = "nub-phantom-core"
