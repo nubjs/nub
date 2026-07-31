@@ -96,6 +96,25 @@ The mirror case does not manufacture a break, it shrinks the corpus — an A0 ar
 package reports it as a no-op and the row is dropped. That is reported separately as
 `denominator possibly under-counted` rather than absorbed silently.
 
+### `PER_PKG=1` removes the truncation instead of ruling around it
+
+The gate above decides what a truncated window is allowed to say. `PER_PKG=1` stops the window
+being truncated at all: instead of one `approve-builds --all`, the runner reads the pending set out
+of the install's own `WARN_NUB_IGNORED_BUILD_SCRIPTS` line and drives one `approve-builds <name>`
+per package. The `failed` flag that stops scheduling lives in a single install process, so with one
+job per process it cannot reach the next package — truncation is impossible by construction rather
+than detected after the fact. The expensive half, resolve and fetch and link, is still paid once for
+the whole shard; what it costs is the serialisation of builds `--all` would have run five wide.
+
+One shape survives: `approve-builds` rejects a `name@version` argument, and a bare name with two
+pending VERSIONS approves both together. `windows.json` records every window's job list and exit
+code, so that window is ruled on by the same test as a batch one and the rest of the shard is not
+tarred with it. `scheduling` therefore becomes a per-row fact rather than a per-shard one.
+
+Control, run before the sweep: on `shard-pilot` — which exits 0 in both arms and so was never
+truncated — `PER_PKG=1` reproduces the `--all` verdict summary exactly. A mode that changed
+verdicts on an untruncated shard would be changing the measurement, not the scheduling.
+
 Two stages, mechanically linked, so the default path is trustworthy without isolating everything:
 
 ```
@@ -196,6 +215,7 @@ labelled as the other.
 ```sh
 export NUB_BIN=/path/to/nub NUB_EXPECT_GIT_SHA=<sha>
 export STUDY_PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PER_PKG=1                                   # one window per package; see above
 ./run-shard.sh pilot shard-pilot.tsv A0
 ./run-shard.sh pilot shard-pilot.tsv PROD
 node aggregate.mjs out

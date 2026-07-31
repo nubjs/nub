@@ -54,6 +54,25 @@ const approved = Number((log.match(/Approved (\d+) package\(s\)/) || [])[1] || '
 // to answer what the batch cannot.
 const schedulingTruncated = rcScript !== 0 && approved > 1;
 
+// PER-PACKAGE WINDOWS make truncation a per-ROW fact instead of a per-SHARD one.
+// With `PER_PKG=1` the runner drives one `approve-builds <name>` per pending package,
+// so the `failed` flag that stops scheduling is scoped to a single process and cannot
+// reach the next package. Truncation then survives in exactly one place: a bare name
+// whose two pending VERSIONS aube approves together. `windows.json` carries each
+// window's job list and rc, so that case is ruled by the same test as a batch window
+// — more than one job AND the window failed — and every other row is untruncated by
+// construction rather than by assumption. Absent the file this is inert and a
+// `--all` run scores exactly as it did before.
+let truncatedPkgs = null;
+if (process.env.WINDOWS_JSON && fs.existsSync(process.env.WINDOWS_JSON)) {
+  truncatedPkgs = new Set();
+  for (const w of JSON.parse(fs.readFileSync(process.env.WINDOWS_JSON, 'utf8'))) {
+    if (w.rc === 0 || w.jobs.length <= 1) continue;
+    for (const j of w.jobs) truncatedPkgs.add(j.replace(/@[^@]+$/, ''));
+  }
+}
+const truncatedFor = (pkg) => (truncatedPkgs ? truncatedPkgs.has(pkg) : schedulingTruncated);
+
 const manifest = fs
   .readFileSync(manifestF, 'utf8')
   .split('\n')
@@ -256,7 +275,7 @@ for (const m of manifest) {
   // here, on one arm, condemned 315 of 345 rows and threw the corpus away.
   let scheduling = 'ran';
   if (failedByName.has(m.pkg)) scheduling = 'named-failed';
-  else if (verdict === 'NEVER-RAN-ITS-REAL-PATH') scheduling = schedulingTruncated ? 'silent-in-truncated-window' : 'silent';
+  else if (verdict === 'NEVER-RAN-ITS-REAL-PATH') scheduling = truncatedFor(m.pkg) ? 'silent-in-truncated-window' : 'silent';
 
   results.push({
     pkg: m.pkg, version: m.version, class: m.cls, kind, acted,
@@ -281,7 +300,8 @@ const out = {
   shard: process.env.SHARD, arm: process.env.ARM,
   rc_install: Number(process.env.RC_INSTALL || 0), rc_script: rcScript,
   suppressed: (log.match(/SUPPRESSED capability: (\S+)/) || [])[1] || null,
-  scheduling_truncated: schedulingTruncated,
+  scheduling_truncated: truncatedPkgs ? truncatedPkgs.size > 0 : schedulingTruncated,
+  per_package_windows: truncatedPkgs ? true : null,
   approved_jobs: approved,
   // A one-row manifest is the ISOLATED measurement, and the aggregate lets it
   // supersede whatever the batch screen said about the same package.

@@ -272,15 +272,17 @@ CAT_ENV=()
 [ -n "${NUB_BUILD_JAIL_CATALOG:-}" ] && CAT_ENV=("NUB_BUILD_JAIL_CATALOG=$(wp "$NUB_BUILD_JAIL_CATALOG")")
 echo "catalog_override=${NUB_BUILD_JAIL_CATALOG:-none}" >> "$LOG"
 
-runnub() {
+runnub_to() {
+  local sink="$1"; shift
   ( cd "$PROJ" && env -i \
       PATH="$STUDY_PATH" HOME="$H" TMPDIR="$TMPD" \
       ${WIN_ENV[@]+"${WIN_ENV[@]}"} \
       ${CAT_ENV[@]+"${CAT_ENV[@]}"} \
       NUB_CACHE_DIR="$(wp "$CACHE")" npm_config_cache="$(wp "$CACHE/npm")" \
-      ${FORCE:+$FORCE} ${TIMEOUT_BIN:+"$TIMEOUT_BIN" 3000} "$NUB" "$@" ) >> "$LOG" 2>&1
+      ${FORCE:+$FORCE} ${TIMEOUT_BIN:+"$TIMEOUT_BIN" 3000} "$NUB" "$@" ) > "$sink" 2>&1
   return $?
 }
+runnub() { local t="$OUT/.nub-out"; runnub_to "$t" "$@"; local rc=$?; cat "$t" >> "$LOG"; return $rc; }
 
 echo "--- phase 1: install (resolve+fetch+link) — OUTSIDE the window" >> "$LOG"
 runnub install; RC_INSTALL=$?
@@ -290,7 +292,50 @@ snap "$OUT/pre.ndjson"
 echo "--- phase 2: approve-builds  <<<< THE LIFECYCLE-SCRIPT WINDOW >>>>" >> "$LOG"
 # NEVER dangerouslyAllowAllBuilds: it runs scripts DURING install, collapsing the two
 # phases and destroying the measurement window the whole method rests on.
-runnub approve-builds --all; RC_SCRIPT=$?
+#
+# PER_PKG=1 — ONE WINDOW PER PACKAGE, which is what makes a batch run untruncated.
+# `approve-builds --all` queues every pending build in ONE process, and aube stops
+# scheduling the queue once any sibling fails, so an absent delta means either "the
+# jail blocked it" or "it never ran". Driving one `approve-builds <name>` per pending
+# package puts each job in its OWN process: the `failed` flag is per-invocation, so a
+# failure cannot reach across windows, and the expensive half (resolve + fetch + link)
+# is still paid once for the whole shard. Measured cost is the serialisation of builds
+# that `--all` would have run five-wide, not a re-install per package.
+#
+# The one window that can still hold two jobs is a bare name with two pending
+# VERSIONS, which aube approves together; `windows.json` records each window's job
+# count so the scheduling gate rules on that case exactly as it does on a batch.
+if [ -n "${PER_PKG:-}" ]; then
+  PENDING="$(node "$(wp "$HARNESS/lib/pending.mjs")" "$(wp "$LOG")")"
+  WIN_JSON="$OUT/windows.json"; : > "$OUT/.windows.ndjson"
+  RC_SCRIPT=0; NWIN=0
+  for p in $PENDING; do
+    W="$OUT/.win-out"
+    runnub_to "$W" approve-builds "$p"; wrc=$?
+    NWIN=$((NWIN + 1))
+    [ "$wrc" -ne 0 ] && RC_SCRIPT=$wrc
+    { echo "--- window: $p (rc=$wrc)"; cat "$W"; } >> "$LOG"
+    WIN_NAME="$p" WIN_RC="$wrc" node -e '
+      const fs=require("fs");
+      const t=fs.readFileSync(process.argv[1],"utf8");
+      // The names aube actually queued for this window, taken from its own header
+      // rather than assumed to be one — a bare name with two pending versions
+      // lists both, and that window CAN be truncated.
+      const m=t.match(/Approved \d+ package\(s\)[^\n]*\n((?:\s{2}\S+@\S+\n)+)/);
+      const jobs=m?m[1].trim().split(/\n+/).map(s=>s.trim()):[];
+      fs.appendFileSync(process.argv[2], JSON.stringify({
+        name:process.env.WIN_NAME, rc:Number(process.env.WIN_RC), jobs,
+      })+"\n");' "$(wp "$W")" "$(wp "$OUT/.windows.ndjson")"
+  done
+  node -e '
+    const fs=require("fs");
+    const rows=fs.readFileSync(process.argv[1],"utf8").split("\n").filter(Boolean).map(JSON.parse);
+    fs.writeFileSync(process.argv[2], JSON.stringify(rows,null,2));' \
+    "$(wp "$OUT/.windows.ndjson")" "$(wp "$WIN_JSON")"
+  echo "per-package windows=$NWIN worst rc=$RC_SCRIPT" >> "$LOG"
+else
+  runnub approve-builds --all; RC_SCRIPT=$?
+fi
 echo "approve rc=$RC_SCRIPT" >> "$LOG"
 snap "$OUT/post.ndjson"
 
@@ -351,6 +396,10 @@ if [ "$INSTALLED_ANY" -gt 0 ] && [ "${ATTRIBUTED:-0}" -eq 0 ]; then
   ARM_EFFECT="FAILED-attribution-wipeout(installed=$INSTALLED_ANY,cells=0)"
 fi
 echo "attributed_cells=$ATTRIBUTED installed_top_level=$INSTALLED_ANY" >> "$LOG"
+# Exported rather than written as an assignment prefix: the RESULT of an expansion
+# is never parsed as an assignment, so `${PER_PKG:+WINDOWS_JSON=…}` in front of the
+# command ran the path as the command name and returned 127.
+[ -n "${PER_PKG:-}" ] && export WINDOWS_JSON="$(wp "$OUT/windows.json")"
 NONCE="$NONCE" SHARD="$SHARD" ARM="$ARM" RC_SCRIPT="$RC_SCRIPT" RC_INSTALL="$RC_INSTALL" \
   PROJ="$(wp "$PROJ")" STOREROOT="$(wp "$H")" \
   STORE_BASES="$(wp "$CACHE/store")
