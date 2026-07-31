@@ -520,9 +520,16 @@ struct CapData {
 /// This matters precisely where this backend is most needed. `nub install` inside a
 /// container commonly runs as root, and Docker's default set still carries `CAP_CHOWN`,
 /// `CAP_FOWNER`, `CAP_DAC_OVERRIDE` and `CAP_MKNOD`. Landlock does not mediate `chmod`,
-/// `chown`, `setxattr` or `utime` at any ABI, so DAC is the only thing standing between a
-/// dependency's install script and host-wide metadata rewriting — and `CAP_DAC_OVERRIDE`
-/// removes DAC. Unprivileged callers hold nothing to drop and this is a no-op for them.
+/// `chown`, `setxattr` or `utime` at any ABI — no ABI ever has, and upstream tracks the
+/// missing hook as `landlock-lsm/linux#11` — so DAC is what stands between a dependency's
+/// install script and host-wide metadata rewriting, and `CAP_DAC_OVERRIDE` removes DAC.
+/// Unprivileged callers hold nothing to drop and this is a no-op for them.
+///
+/// Two of those four are now ALSO seccomp-denied for build-jail launches (`deny_metadata`
+/// in `linux.rs`'s `build_seccomp`), so DAC is no longer the only lever against `chown`
+/// and `setxattr`. `chmod` and `utime` still ride on it alone: denying either breaks real
+/// packages, and seccomp cannot scope a denial to a path. This drop is what covers them
+/// when the caller is root.
 ///
 /// The BOUNDING set is dropped first, because doing so needs `CAP_SETPCAP` in the effective
 /// set; zeroing the sets first would make the bounding drop fail. A bounding drop that fails

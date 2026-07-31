@@ -64,6 +64,8 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **Fail-closed below the floor.** Below Landlock 5.13 the jail **refuses** rather than running a dependency's install script unconfined — *"the code the jail exists to contain is the last thing to run free because the kernel is old."* The only escape is the internal differential pin `NUB_SANDBOX_MECHANISM=bubblewrap` (`linux_landlock.rs:599-606`), which is not a user knob.
 
+**And it does not fail closed ABOVE the floor — audited 2026-07-30, clean, do not re-audit.** The hazard worth naming: a backend that requests a right its kernel lacks and then demands *full* enforcement refuses to confine at all, so a newer right silently becomes a hard kernel floor. That is a live trap in `rust-landlock`, whose `BestEffort` downgrade reports `PartiallyEnforced` — measured directly, by forcing the ABI probe to report 2 on a 6.8 host, where the degraded ruleset still enforced every v2 restriction but `RulesetStatus` came back `PartiallyEnforced`. A `!= FullyEnforced` check there would refuse to run on **every** 5.19–6.1 LTS kernel (Ubuntu 22.04, Debian 12, RHEL 9). **Nub cannot reach that state by construction.** It does not use `rust-landlock`'s compatibility layer at all: it issues raw syscalls, probes once via `probe_abi()`, and derives both `handled_access_fs(abi)` and every grant's rights *from that number* — so it only ever declares rights the running kernel has, and there is no `RulesetStatus` or `FullyEnforced` comparison anywhere in the crate. Its only refusal is the deliberate `MIN_FS_ABI = 1` floor above. This is a checked-and-clean result, not an absence of evidence; the per-ABI derivation is what makes it true, so preserve that shape rather than introducing a "require the newest right" check.
+
 ## The wholesale system read floor — ADOPTED, deliberately coarse
 
 **What it is.** `/usr`, `/bin`, `/sbin`, `/lib*` granted **wholesale** as read, with `/etc` enumerated leaf by leaf and `/opt` absent entirely. `backend/linux.rs`'s `ESSENTIAL_READ_PATHS`, shared verbatim by the Landlock backend.
@@ -205,6 +207,28 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **Why it is refused.** The seccomp filter **has no path filtering**, so it would break every legitimate `chmod +x` on build output — which native builds do constantly. **The cost of the mitigation vastly exceeds the benefit.**
 
+**Now measured, twice, rather than argued.** A denial matrix over real installs breaks **4 of 5** packages with `npm error code EPERM / syscall chmod` — `sqlite3` (on `prebuild-install/bin.js`), `esbuild` (`bin/esbuild`), `simple-git-hooks` (`cli.js`), `bufferutil` (`node-gyp-build/optional.js`); only `better-sqlite3` survives. Ubuntu 24.04, kernel 6.8, `Errno(EPERM)`, non-root, against a 5/5-green no-denial control. A separate 344-package survey puts chmod-from-a-reachable-install-entry at **48/344 (14%)**, realistically ~20% counting `tar-fs` and `adm-zip`.
+
+**The breakage is INVERTED relative to intuition, and this is the most useful thing anyone has learned here.** The chmods you would most want to stop — writing `+x` into `<project>/.git/hooks` — **fail gracefully** (3 of 6 hook installers catch and warn). The entirely benign ones — making your own downloaded binary executable inside your own package dir — **abort the install**. And **81% of chmod-using packages are fully covered by "inside your own package dir"**, the out-of-grant remainder being one archetype of ~11–13 git-hook installers.
+
+**So a path-scoped chmod grant would be nearly free — and path-scoping is exactly what seccomp cannot express.** The crux was never compatibility; it is that the mechanism cannot say the thing we mean. `seccomp_unotify` does not rescue it either: `include/uapi/linux/seccomp.h` states outright that *"the seccomp notifier _cannot_ be used to implement a security policy!"*, because `USER_NOTIF_FLAG_CONTINUE` has an inherent TOCTOU on pointer arguments — and conditional-allow on a path is precisely what a path filter needs. **Do not reopen this expecting a different answer; it needs a kernel-side hook, not a cleverer filter.**
+
+## Denying the `chown` and `setxattr` families in seccomp — ADOPTED
+
+**What it is.** `chown`/`lchown`/`fchownat` and `setxattr`/`lsetxattr`/`removexattr`/`lremovexattr` → `Errno(EPERM)`. Carried by the `deny_metadata` dimension of `build_seccomp` (`backend/linux.rs`), enabled by `apply_landlock` — the Landlock backend, which is the build jail's only mechanism.
+
+**Scoped to the build jail, deliberately.** `nub sandbox` runs commands the **user** chose, where a refused `chown` is a surprise with no threat model behind it; a dependency's install script has no comparable claim. So the bubblewrap/nesting path (`linux_monitor.rs`) passes `deny_metadata: false` and is byte-identical to before.
+
+**The same denial also exists in `vendor/aube/crates/aube-scripts/src/linux_jail.rs`, which never engages under Nub** — `jail_enabled()` is `!embedder_owns_lifecycle_sandbox && …` and Nub's embedder profile sets that flag true, so Nub interposes `nub-sandbox` instead. That copy is correct for standalone aube and changes nothing about Nub; do not read it as the one that binds.
+
+**Measured free, on a real kernel, at both uids.** Ubuntu 24.04 / 6.8, five packages (`better-sqlite3`, `sqlite3`, `esbuild`, `simple-git-hooks`, `bufferutil`): 5/5 pass as uid 1000 **and** 5/5 as root, against a 5/5-green control. The `chmod` arm above is the arm-effect control proving the filter genuinely reaches the install rather than silently not loading.
+
+**The root case specifically, because it was the open question.** As root, node-tar's `preserveOwner` default flips on, so the chown traffic is real rather than hypothetical: a cold-cache root install of `sqlite3` issues **6 `fchownat` calls**. Under the filter all six return `-1 EPERM` and **the install still exits 0** with a loadable `node_sqlite3.node` — the extractors treat chown as best-effort and swallow the failure. The only behavioural delta is that files stay owned by the installing uid instead of being chowned to the uid recorded in the tarball, which is benign and arguably preferable.
+
+**`utimensat` was proposed for the same list and dropped — it is not free.** It breaks `sqlite3` and `bufferutil` (2 of 5) in either form, path or fd. The proposal came from an strace sample showing zero calls; a wider run falsified it. **Absence of calls in a sample is not absence of use** — anything added to this list needs the denial matrix re-run, not just a trace.
+
+**Be honest about what it buys: very little.** The two families that are safe to deny are safe *because* nobody uses them, and nobody uses them because they do nothing — `chown` to another uid already fails under DAC, and `user.*` xattrs are inert. The one with real teeth, `chmod`, is the one packages genuinely need. **The partial is cheap precisely because it denies operations nobody uses, which is the same reason it closes nothing.** The residual below survives it completely intact.
+
 ---
 
 # Accepted residuals — measured, decided, not defects to re-chase
@@ -242,6 +266,10 @@ Each approach carries a status, what it would have bought, the evidence with its
 **What it is.** A jailed script `chmod`'d an ungranted `~/.ssh/id_rsa` from **600 to 777** on Linux, verified on disk. `unlink` of an ungranted file was `EACCES` (directory ops mediated, pure-metadata ops not). macOS blocks the same chmod.
 
 **Why it is accepted.** Landlock cannot mediate metadata ops at any ABI, and the only other lever — [adding `chmod` to seccomp](#adding-chmod-to-the-seccomp-filter--rejected-design) — has no path filtering.
+
+**This is a known upstream gap with no owner, not an oversight on our side.** Landlock has no LSM hook on the metadata path; upstream tracks it as [`landlock-lsm/linux#11`](https://github.com/landlock-lsm/linux/issues/11), open since 2024 and blocked on an LSM hook signature change nobody has picked up. **No ABI — 1 through the current 10 — has ever added a metadata right, and none is queued.** Treat "a later kernel will fix this" as false until that issue moves.
+
+**What the partial seccomp denial does and does not change.** [Denying `chown` and `setxattr`](#denying-the-chown-and-setxattr-families-in-seccomp--adopted) removes two of the four primitives for build-jail launches. **The residual is untouched by it**: `chmod 0777` on anything the jailed uid owns, host-wide, plus arbitrary mtime rewriting. Those are the two with teeth and both remain.
 
 **Honest sharp edge, do not flatten it.** 600→777 makes the key world-readable to **other** processes. It is still not a read BY the jailed script.
 
@@ -422,6 +450,7 @@ Recorded because a negative needs its positive controls named. Against `sandbox/
 
 ## Changelog
 
+- 2026-07-30 — Recorded the Landlock fail-shut audit as checked-and-clean: Nub derives rights from a runtime `probe_abi()` and never compares against `FullyEnforced`, so a newer right cannot silently become a hard kernel floor. Measured against the `rust-landlock` trap it avoids. Also recorded the metadata-mitigation measurements: `chown` and `setxattr` denial measured free at both uids (5/5 packages, non-root and root, kernel 6.8) and adopted as the `deny_metadata` dimension of `nub-sandbox`'s `build_seccomp`, enabled for the Landlock backend only (`nub sandbox` is unchanged). The same denial is mirrored in aube's own jail, which — verified in code — never engages under Nub. `utimensat` proposed and dropped: it breaks `sqlite3` and `bufferutil`. `chmod` exclusion promoted from argued to measured (4/5 break with EPERM), plus the inverted-breakage finding — the harmful chmods fail gracefully while the benign ones abort, 81% are in-package-dir, so a *path-scoped* grant would be nearly free and path-scoping is exactly what seccomp cannot express. Named the upstream blocker (`landlock-lsm/linux#11`) so the residual reads as a tracked gap rather than an oversight.
 - 2026-07-30 — Reconciled against the tree. Corrected the ABI ceiling: upstream now documents ABI 10 (UDP plus `LANDLOCK_ADD_RULE_QUIET`), and since no version has ever added a deny or subtract primitive, no verdict here moves — the number was stale, the mechanism is not. Closed the "stale comments" section (all four now read correctly) and most of the CI-gate section (`ci.yml` builds and stages the pinned bwrap, repairs the runner's userns, sets the require-gate, and lints on three OSes), leaving the conformance workflow's branch coverage as the one live residual. Recorded that the per-package `packageNetwork` table reaches only the Windows-stamped net gate, so neither catalog network table varies a Linux run, and added the dev-only catalog override.
 - 2026-07-30 — Moved into tracked `research/design/` so code comments can link here, and scrubbed of pointers into untracked documents. Every measurement, table and verdict is unchanged.
 - 2026-07-29 — Initial consolidation.

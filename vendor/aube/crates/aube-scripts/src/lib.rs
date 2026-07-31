@@ -569,9 +569,9 @@ fn spawn_jailed_shell(
     unsafe {
         cmd.pre_exec(move || {
             linux_jail::apply_landlock(&jail, &home).map_err(std::io::Error::other)?;
-            if !jail.network {
-                linux_jail::apply_seccomp_net_filter().map_err(std::io::Error::other)?;
-            }
+            // Unconditional: the filter now also carries the metadata
+            // denials, which a network grant has no reason to relax.
+            linux_jail::apply_seccomp_filter(jail.network).map_err(std::io::Error::other)?;
             Ok(())
         });
     }

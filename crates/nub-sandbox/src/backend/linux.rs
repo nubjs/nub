@@ -2620,6 +2620,40 @@ struct SandboxSyscalls {
     keyctl: i64,
     add_key: i64,
     request_key: i64,
+    setxattr: i64,
+    lsetxattr: i64,
+    removexattr: i64,
+    lremovexattr: i64,
+    fchownat: i64,
+    /// x86_64 keeps the legacy path-based `chown`/`lchown`; arm64's generic syscall ABI
+    /// dropped them, leaving `fchownat` as glibc's only path-form entry point — hence
+    /// `None` there rather than a number that does not exist.
+    chown: Option<i64>,
+    lchown: Option<i64>,
+}
+
+#[cfg(test)]
+impl Default for SandboxSyscalls {
+    /// x86_64's real numbers, so a test literal can spread in the fields it does not
+    /// exercise. Real numbers rather than zeros, because a stray `0` would mean `read`.
+    fn default() -> Self {
+        Self {
+            socket: 41,
+            io_uring_setup: 425,
+            io_uring_enter: 426,
+            io_uring_register: 427,
+            keyctl: 250,
+            add_key: 248,
+            request_key: 249,
+            setxattr: 188,
+            lsetxattr: 189,
+            removexattr: 197,
+            lremovexattr: 198,
+            fchownat: 260,
+            chown: Some(92),
+            lchown: Some(94),
+        }
+    }
 }
 
 /// Whether the socket ceiling admits the IP families (`AF_INET`/`AF_INET6`). Deliberately NOT
@@ -2645,8 +2679,9 @@ pub(super) fn build_seccomp(
     ip_egress: IpEgress,
     deny_keyring: bool,
     permit_keyring_join: bool,
+    deny_metadata: bool,
 ) -> Result<Option<BpfProgram>, String> {
-    if !restrict_network && !deny_keyring {
+    if !restrict_network && !deny_keyring && !deny_metadata {
         return Ok(None);
     }
     let arch = TargetArch::try_from(std::env::consts::ARCH)
@@ -2657,6 +2692,7 @@ pub(super) fn build_seccomp(
         ip_egress,
         deny_keyring,
         permit_keyring_join,
+        deny_metadata,
         SandboxSyscalls {
             socket: libc::SYS_socket,
             io_uring_setup: libc::SYS_io_uring_setup,
@@ -2665,6 +2701,19 @@ pub(super) fn build_seccomp(
             keyctl: libc::SYS_keyctl,
             add_key: libc::SYS_add_key,
             request_key: libc::SYS_request_key,
+            setxattr: libc::SYS_setxattr,
+            lsetxattr: libc::SYS_lsetxattr,
+            removexattr: libc::SYS_removexattr,
+            lremovexattr: libc::SYS_lremovexattr,
+            fchownat: libc::SYS_fchownat,
+            #[cfg(target_arch = "x86_64")]
+            chown: Some(libc::SYS_chown),
+            #[cfg(not(target_arch = "x86_64"))]
+            chown: None,
+            #[cfg(target_arch = "x86_64")]
+            lchown: Some(libc::SYS_lchown),
+            #[cfg(not(target_arch = "x86_64"))]
+            lchown: None,
         },
     )
     .map(Some)
@@ -2676,6 +2725,7 @@ fn build_seccomp_for(
     ip_egress: IpEgress,
     deny_keyring: bool,
     permit_keyring_join: bool,
+    deny_metadata: bool,
     syscalls: SandboxSyscalls,
 ) -> Result<BpfProgram, String> {
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
@@ -2786,6 +2836,48 @@ fn build_seccomp_for(
             );
         } else {
             rules.insert(syscalls.keyctl, Vec::new());
+        }
+    }
+
+    if deny_metadata {
+        // Landlock has no metadata hook at ANY ABI, so ownership and xattr rewriting is
+        // otherwise unmediated here — see `drop_all_capabilities`, which handles the
+        // capability half of the same problem. seccomp is the only other lever without a
+        // mount namespace, and this is the subset of it that costs nothing.
+        //
+        // WHAT IS ABSENT MATTERS MORE THAN WHAT IS PRESENT. A denial matrix over five real
+        // native installs (better-sqlite3, sqlite3, esbuild, simple-git-hooks, bufferutil)
+        // on kernel 6.8 found these two families free at BOTH uid 1000 and root, while:
+        //   - `chmod`/`fchmodat` breaks 4 of 5 with EPERM — node-gyp chmods the built addon
+        //     from inside a make recipe, so denying it kills every from-source build.
+        //   - `utimensat` breaks sqlite3 and bufferutil, in either the path or the fd form.
+        // Both were proposed off an strace showing zero calls and falsified by actually
+        // denying them. Anything added here needs that matrix re-run, not a trace.
+        //
+        // The fd forms (`fchown`, `fsetxattr`) are deliberately absent. As root, node-tar's
+        // `preserveOwner` flips on and the extractors chown heavily through them; the path
+        // forms below are attempted too (6 `fchownat` calls in a cold-cache root install of
+        // sqlite3) but every one is best-effort and swallowed, so EPERM there costs nothing
+        // while EPERM on the fd form is untested and needlessly risks a root regression.
+        //
+        // Honest value: these two families are safe to deny because nothing uses them, and
+        // nothing uses them because they achieve little — chown to another uid already fails
+        // under DAC, and `user.*` xattrs are inert. This narrows the metadata surface; the
+        // residual it leaves (host-wide `chmod` on anything the jailed uid owns, plus
+        // arbitrary mtime rewriting) is the part with teeth, and it survives intact.
+        // See wiki/design/build-jail-linux.md.
+        for syscall in [
+            syscalls.setxattr,
+            syscalls.lsetxattr,
+            syscalls.removexattr,
+            syscalls.lremovexattr,
+            syscalls.fchownat,
+        ]
+        .into_iter()
+        .chain(syscalls.chown)
+        .chain(syscalls.lchown)
+        {
+            rules.insert(syscall, Vec::new());
         }
     }
 
@@ -3038,6 +3130,10 @@ fn apply_landlock(
         ip_egress_for(&policy.net),
         protects_ambient_credentials(policy),
         false,
+        // Metadata denial is scoped to THIS backend, which is the build jail's only
+        // mechanism. `nub sandbox` runs commands the user chose, where a refused chown
+        // would be a surprise; a dependency's install script has no comparable claim.
+        true,
     )
     .map_err(|reason| Degradation {
         lost: vec!["net".to_string()],
@@ -3335,6 +3431,7 @@ mod tests {
             IpEgress::Denied,
             true,
             false,
+            false,
             SandboxSyscalls {
                 socket: i64::from(X86_64_SOCKET),
                 io_uring_setup: i64::from(IO_URING_SETUP),
@@ -3343,6 +3440,7 @@ mod tests {
                 keyctl: i64::from(X86_64_KEYCTL),
                 add_key: i64::from(X86_64_ADD_KEY),
                 request_key: i64::from(X86_64_REQUEST_KEY),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -3407,6 +3505,7 @@ mod tests {
                 IpEgress::Denied,
                 true,
                 false,
+                false,
                 SandboxSyscalls {
                     socket: i64::from(GENERIC_SOCKET),
                     io_uring_setup: i64::from(IO_URING_SETUP),
@@ -3415,6 +3514,7 @@ mod tests {
                     keyctl: i64::from(GENERIC_KEYCTL),
                     add_key: i64::from(GENERIC_ADD_KEY),
                     request_key: i64::from(GENERIC_REQUEST_KEY),
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -3470,7 +3570,7 @@ mod tests {
         let killed = u32::from(SeccompAction::KillProcess);
 
         assert!(
-            build_seccomp(false, IpEgress::Denied, false, false)
+            build_seccomp(false, IpEgress::Denied, false, false, false)
                 .unwrap()
                 .is_none()
         );
@@ -3481,6 +3581,7 @@ mod tests {
                 IpEgress::Denied,
                 keyring,
                 permit_join,
+                false,
                 SandboxSyscalls {
                     socket: SOCKET,
                     io_uring_setup: IO_URING_SETUP,
@@ -3489,6 +3590,7 @@ mod tests {
                     keyctl: KEYCTL,
                     add_key: ADD_KEY,
                     request_key: REQUEST_KEY,
+                    ..Default::default()
                 },
             )
             .unwrap()
@@ -3620,11 +3722,13 @@ mod tests {
             keyctl: 250,
             add_key: 248,
             request_key: 249,
+            ..Default::default()
         };
         let permitted = build_seccomp_for(
             TargetArch::x86_64,
             true,
             IpEgress::Permitted,
+            false,
             false,
             false,
             syscalls(),
@@ -3634,6 +3738,7 @@ mod tests {
             TargetArch::x86_64,
             true,
             IpEgress::Denied,
+            false,
             false,
             false,
             syscalls(),
@@ -3754,7 +3859,7 @@ mod tests {
             }
         }
 
-        let program = build_seccomp(true, IpEgress::Denied, false, false)
+        let program = build_seccomp(true, IpEgress::Denied, false, false, false)
             .unwrap()
             .unwrap();
         let child = unsafe { libc::fork() };

@@ -4723,6 +4723,9 @@ fn create_stopped_target(
         },
         spec.deny_keyring,
         spec.permit_keyring_join,
+        // This is the bubblewrap/nesting path — `nub sandbox`, which runs commands the
+        // user chose. Metadata denial is build-jail-scoped; see `apply_landlock`.
+        false,
     )
     .map_err(|error| io::Error::other(format!("building target seccomp: {error}")))?;
     let (gate_reader, gate_writer) = pipe_files(false)?;
