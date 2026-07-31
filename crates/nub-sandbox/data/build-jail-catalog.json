@@ -1,5 +1,4 @@
 {
-  "catalogVersion": 1,
   "networkHosts": [
     {
       "host": "nodejs.org",

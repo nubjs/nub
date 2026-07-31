@@ -23,7 +23,6 @@ use nub_sandbox::catalog_override::decide;
 /// constant would trip `dead_code` and fail the workspace clippy gate.
 #[cfg(feature = "build-jail-catalog-override")]
 const TRAVERSING_CATALOG: &str = r#"{
-  "catalogVersion": 1,
   "networkHosts": [],
   "packageGrants": [
     {
