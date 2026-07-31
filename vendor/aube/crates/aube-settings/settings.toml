@@ -3283,7 +3283,7 @@ unset, empty string, or arbitrary text) leaves the default
 """
 sources.cli = []
 sources.env = ["npm_config_aube_no_lock", "NPM_CONFIG_AUBE_NO_LOCK", "AUBE_NO_LOCK"]
-sources.npmrc = ["aubeNoLock", "aube-no-lock", "nubNoLock", "nub-no-lock"]
+sources.npmrc = ["nubNoLock", "nub-no-lock", "aubeNoLock", "aube-no-lock"]
 sources.workspaceYaml = ["aubeNoLock"]
 examples = [
     "AUBE_NO_LOCK=1 aube install",

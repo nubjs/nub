@@ -712,6 +712,12 @@ mod tests {
     }
 
     #[test]
+    fn canonical_list_key_prefers_nub_lock_alias() {
+        assert_eq!(list::canonical_list_key("aubeNoLock"), "nubNoLock");
+        assert_eq!(list::canonical_list_key("nub-no-lock"), "nubNoLock");
+    }
+
+    #[test]
     fn canonical_list_key_collapses_workspace_only_alias_to_setting_name() {
         assert_eq!(
             list::canonical_list_key("jailBuildPermissions"),
