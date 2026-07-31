@@ -6,13 +6,23 @@
     "Predicate operators, evaluated against the delta produced by delta.mjs and the run log:",
     "  created_all_of  : every regex must match >=1 entry in CREATED (root:rel form)",
     "  created_any_of  : >=1 regex must match >=1 CREATED entry",
-    "  changed_any_of  : as created_any_of but over CREATED + MODIFIED",
-    "  min_created     : CREATED count over all roots must be >= n",
+    "  changed_any_of  : >=1 regex must match a PROJECT path changed in the window —",
+    "                    for a package whose effect lands outside its own store cell",
+    "  cell_changed_any_of : as above but over the package's OWN CELL, for output that",
+    "                    lands beside the package rather than under its name",
+    "  min_created     : CREATED entry count must be >= n (COUNTS DIRECTORIES — weak)",
+    "  min_created_files : CREATED/MODIFIED regular-FILE count must be >= n",
+    "  min_created_bytes : total bytes of CREATED/MODIFIED regular files must be >= n",
     "  content_nonce   : a CREATED/MODIFIED file matching `where` must CONTAIN the run nonce.",
     "                    This is the ONLY operator a warm cache cannot satisfy, because the",
     "                    nonce is generated per run and cannot pre-exist. Prefer it wherever",
     "                    the class admits it.",
     "  log_match       : the combined stdout+stderr must match",
+    "",
+    "PREFER FILES AND BYTES OVER PATH COUNTS. `min_created` is satisfied by a DIRECTORY,",
+    "and a downloader whose fetch is refused leaves exactly one: its empty staging dir.",
+    "Five of the 44 downloaders the first macOS corpus scored as surviving the jail were",
+    "false passes on that operator alone.",
     "",
     "STRENGTH is recorded per class and is not decoration: a verdict built on a weak signal",
     "must be labelled weak in the corpus output, or the corpus overstates its own confidence."
@@ -48,13 +58,17 @@
     ],
     "predicate": {
       "created_any_of": ["\\.node$", "^pkg:(prebuilds|build/Release)/"],
-      "min_created": 1
+      "min_created_files": 1,
+      "min_created_bytes": 16384
     },
     "strength": "medium",
     "why": [
       "No nonce is possible: the artifact is an upstream-fixed binary, so its content cannot",
       "carry a per-run marker. The signal therefore rests entirely on CREATED-in-window plus a",
-      "verified-cold cache. State that dependency wherever the number is cited."
+      "verified-cold cache. State that dependency wherever the number is cited.",
+      "The byte floor is what stops a truncated or zero-length `.node` from reading as a",
+      "download: no real N-API addon is 16 KiB. It is a FLOOR, not the evidence — the evidence",
+      "is the cross-arm size ratio the aggregate applies on top."
     ]
   },
 
@@ -65,14 +79,24 @@
       "an inherited skip flag is a silent bail-out that scores as a pass."
     ],
     "predicate": {
-      "created_any_of": ["^(pkg|home|store):.*"],
-      "min_created": 1
+      "min_created_files": 1,
+      "min_created_bytes": 65536
     },
     "strength": "medium",
     "why": [
-      "Same no-nonce limitation as the prebuilt class. The corroborating signal is that the",
-      "CREATED entry is a large executable; the harness records size so this is checkable",
-      "post hoc rather than baked into the predicate."
+      "Same no-nonce limitation as the prebuilt class, so the artifact itself has to carry the",
+      "signal. The old predicate was `min_created: 1` over any created path, with the size",
+      "corroboration left as 'checkable post hoc' — which nobody ever checked. Five of the 44",
+      "downloaders the first macOS corpus scored as surviving the jail were false passes, each",
+      "satisfying it with something that is not a download: three bin symlinks the LINKER made",
+      "inside the cell (`azure-functions-core-tools`, `chromium`, `cldr-data` — 601 MB, an",
+      "entire Chromium.app and 13,296 locale files missing respectively), an empty staging",
+      "DIRECTORY created just before the fetch was refused (`@go-task/cli`, whose own log reads",
+      "`getaddrinfo ENOTFOUND github.com`), and nub's own 117-byte jail-home scratch, which",
+      "exists only in the confined arm. Requiring FILES and BYTES makes all four shapes",
+      "unsatisfiable; the bin-link and scratch shapes are additionally refused at attribution.",
+      "64 KiB is a floor below any real downloaded binary or archive, not a measurement — the",
+      "measurement is the cross-arm size ratio the aggregate applies on top."
     ]
   },
 
@@ -132,12 +156,55 @@
       "Cold cache; and check for an 'already configured' short-circuit, which is the bail-out",
       "shape for this class."
     ],
-    "predicate": { "min_created": 1 },
+    "predicate": { "min_created_files": 1 },
     "strength": "weak",
     "why": [
       "Heterogeneous class with no common artifact. Treated as ACTED-only: it can be separated",
       "from NEVER-RAN but not verified to have done its specific job, so it must never be",
-      "counted in a 'succeeded' figure without a per-package predicate written by hand."
+      "counted in a 'succeeded' figure without a per-package predicate written by hand.",
+      "FILES, not paths: `argon2` scored a pass here on six `.bin` symlinks the linker made,",
+      "having produced nothing of its own."
     ]
+  },
+
+  "_package_predicates": {
+    "_doc": [
+      "A PER-PACKAGE PREDICATE REPLACES ITS CLASS PREDICATE OUTRIGHT, keyed by `name@version`",
+      "or by bare `name`. It exists for packages whose class is right about WHAT THEY DO and",
+      "wrong about HOW IT IS OBSERVED — not as a place to soften a predicate a package fails.",
+      "",
+      "The bar for adding one: the class predicate must be unsatisfiable BY CONSTRUCTION for",
+      "this package, and the replacement must name a specific artifact that only the real code",
+      "path produces. An entry that merely widens a predicate until the package passes is the",
+      "false-pass machinery this whole file exists to prevent, wearing a different hat."
+    ],
+
+    "msw": {
+      "predicate": { "changed_any_of": ["^proj:public/mockServiceWorker\\.js$"] },
+      "strength": "strong",
+      "why": [
+        "Classed `codegen`, whose predicate is `content_nonce` — unsatisfiable here BY",
+        "CONSTRUCTION, because msw copies a FIXED service-worker file and no per-run nonce can",
+        "ever appear in it. The postinstall's entire observable effect is that one file, written",
+        "into the project at the path `msw.workerDirectory` names, so the file IS the signal.",
+        "It also lands OUTSIDE msw's own store cell, which is why per-package attribution saw",
+        "nothing and scored NEVER-RAN in both arms.",
+        "Measured on the isolated pair: created in A0 and in PROD alike — msw works under the jail."
+      ]
+    },
+
+    "@danmarshall/deckgl-typings": {
+      "predicate": { "cell_changed_any_of": ["@types/deck\\.gl"] },
+      "strength": "strong",
+      "why": [
+        "Same construction problem as msw: `codegen` by class, fixed content in fact. Its",
+        "postinstall copies 22 `@types/deck.gl*` trees into its own cell beside itself, which no",
+        "path rule can claim as `own-package-dir` — they read as dependency links — so the",
+        "package scored DID-WORK-AND-FAILED while doing exactly its job.",
+        "Only in-window entries count, and the linker finishes before the window opens, so a hit",
+        "is the script's work. Measured on the isolated pair: 64 such entries in A0 and in PROD",
+        "alike — it works under the jail."
+      ]
+    }
   }
 }

@@ -167,10 +167,17 @@ echo "provisioned:$PROVISIONED suppressed:${SUPPRESS:-none}" >> "$LOG"
 
 # A snapshot that truncates is FATAL: the delta would be taken over a partial tree
 # and every package past the cut would report NEVER-RAN. Abort rather than report.
+#
+# THERE IS NO `nm` ROOT. `<proj>/node_modules` is walked by the `proj` root already,
+# so a separate root for it recorded every file twice under two different keys —
+# doubling every count a predicate reads, and defeating attribution, since the
+# project virtual-store regex is anchored at `^node_modules/.store/` and cannot
+# match `nm:.store/…`. `delta.mjs` folds any `nm` record from an archived run back
+# onto its real path, so re-scoring older output still works.
 snap() {
   SNAP_MAX_ENTRIES="${SNAP_MAX_ENTRIES:-4000000}" \
     node "$(wp "$HARNESS/lib/snapshot.mjs")" "$(wp "$1")" \
-    "proj=$(wp "$PROJ")" "nm=$(wp "$PROJ/node_modules")" "home=$(wp "$H")" \
+    "proj=$(wp "$PROJ")" "home=$(wp "$H")" \
     "store=$(wp "$CACHE")" "tmp=$(wp "$TMPD")" 2>> "$LOG"
   local rc=$?
   if [ $rc -ne 0 ]; then

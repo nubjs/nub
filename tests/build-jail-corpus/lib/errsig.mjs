@@ -106,6 +106,14 @@ const out = {
   node_gyp_identity: process.env.GYP_ID || 'none-observed',
   rc_install: verdicts.rc_install,
   rc_script: verdicts.rc_script,
+  // Scheduling facts travel with the report, because the aggregate — not the
+  // runner — is where a break count is finally asserted, and a break asserted
+  // over a truncated window is a measurement of which sibling failed first.
+  scheduling_truncated: verdicts.scheduling_truncated ?? null,
+  approved_jobs: verdicts.approved_jobs ?? null,
+  failed_packages: verdicts.failed_packages ?? [],
+  isolated: verdicts.isolated ?? false,
+  manifest_rows: verdicts.manifest_rows ?? null,
   verdict_summary: verdicts.summary,
   failure_signature_totals: totals,
   failure_signatures_by_package: byPkg,

@@ -42,16 +42,37 @@ const unmangle = (n) => n.replace(/\+/g, '/');
 // Store bookkeeping that is nub's own, not any package's content.
 const STORE_META = /(?:^|\/)store\/(?:\.tmp|\.index|_locks|index-v\d)/;
 
+// NUB'S OWN SCRATCH CAN NEVER BE A PACKAGE'S EVIDENCE, AND THE REFUSAL BELONGS
+// HERE RATHER THAN IN A FILTER SOMEONE HAS TO REMEMBER TO APPLY.
+// The jail gives each confined script a private HOME under
+// `<home>/.cache/nub/jail-home/<pkg>-<hash>/`, and nub then writes its own
+// `.cache/nub/node-discovery.json` (117 B) into it. That file exists ONLY in the
+// confined arm, so it inflates PROD and not A0 — a self-contamination that
+// manufactures the reassuring answer. It satisfied `binary-downloader`'s
+// `min_created: 1` by itself. Refusing it at the attribution boundary makes it
+// structurally unable to satisfy any package predicate, on any class, forever.
+const NUB_SCRATCH = /(?:^|\/)\.cache\/nub\/jail-home(?:\/|$)/;
+
 export function attribute(rootAndRel) {
   const [root, ...rest] = rootAndRel.split(':');
   const rel = rest.join(':');
 
+  if (NUB_SCRATCH.test(rel)) return { owner: null, kind: 'nub-scratch' };
   if (STORE_META.test(rel)) return { owner: null, kind: 'pm-meta' };
 
-  const m = rel.match(STORE_CELL) || (root === 'proj' || root === 'nm' ? rel.match(PROJ_CELL) : null);
+  const m = rel.match(STORE_CELL) || (root === 'proj' ? rel.match(PROJ_CELL) : null);
   if (m) {
     const [, rawName, version, inner] = m;
     const name = unmangle(rawName);
+    // `.bin` INSIDE A CELL IS THE LINKER'S WORK, NOT THE SCRIPT'S. The `.`-prefix
+    // clause below exists for Prisma's `.prisma/client`, and it over-caught
+    // `.bin/`: `azure-functions-core-tools`, `chromium` and `cldr-data` each
+    // scored a confined PASS on three bin symlinks (`extract-zip`, `rimraf`,
+    // `glob`) after their download was refused and their real artifact — 601 MB,
+    // an entire Chromium.app, 13,296 locale files — never landed.
+    if (inner === '.bin' || inner.startsWith('.bin/')) {
+      return { owner: `${name}@${version}`, kind: 'cell-bin-link', inner };
+    }
     // `inner` is `<name>/…` for the package's own content, or
     // `<otherpkg>/…` when the cell holds a dependency link — the latter is a
     // materialisation detail, not this package's work.
@@ -82,23 +103,45 @@ export function attribute(rootAndRel) {
 // UNATTRIBUTED, which the caller must surface rather than discard: a project
 // write, a $HOME write, or a write into someone else's cell is the whole point
 // of running a shared shard instead of isolated fixtures.
+//
+// SIZE AND TYPE TRAVEL WITH EVERY ENTRY, because a path list cannot tell a
+// download from a stub. `@go-task/cli` created exactly one entry under the jail
+// — an empty `archive-RbAf1H` staging DIRECTORY, made just before the fetch was
+// refused — and a count-of-paths predicate read that as the download succeeding.
+// A predicate that can require FILES and BYTES cannot be satisfied that way.
 export function groupByOwner(delta) {
   const byOwner = new Map();
-  const unattributed = { 'project-file': [], home: [], tmp: [], other: [], 'cell-dependency-link': [] };
+  // A cell's `node_modules/<otherpkg>` is ambiguous by path alone — it is either
+  // the linker's materialisation or the cell owner's own output — so it is kept
+  // per owner rather than only in the flat unattributed bucket. It is what makes
+  // `@danmarshall/deckgl-typings` scoreable: its postinstall copies 22 `@types/*`
+  // trees into its own cell, which is not `own-package-dir` by any path rule.
+  const cellLinksByOwner = new Map();
+  const unattributed = { 'project-file': [], home: [], tmp: [], other: [], 'cell-dependency-link': [], 'cell-bin-link': [], 'nub-scratch': [] };
+  const entry = (e, cls, inner) => ({
+    cls,
+    path: inner,
+    type: e.type,
+    bytes: cls === 'modified' ? (e.size_after ?? 0) : (e.size ?? 0),
+  });
   for (const cls of ['created', 'modified', 'deleted']) {
     for (const e of delta[cls] || []) {
       const k = `${e.root}:${e.rel}`;
       const a = attribute(k);
-      if (a.kind === 'pm-meta') continue;
+      if (a.kind === 'pm-meta' || a.kind === 'nub-scratch') continue;
       if (a.owner && a.kind === 'own-package-dir') {
         if (!byOwner.has(a.owner)) byOwner.set(a.owner, { created: [], modified: [], deleted: [] });
-        byOwner.get(a.owner)[cls].push(a.inner);
+        byOwner.get(a.owner)[cls].push(entry(e, cls, a.inner));
+      } else if (a.owner && (a.kind === 'cell-dependency-link' || a.kind === 'cell-bin-link')) {
+        if (!cellLinksByOwner.has(a.owner)) cellLinksByOwner.set(a.owner, []);
+        cellLinksByOwner.get(a.owner).push({ ...entry(e, cls, a.inner), kind: a.kind });
+        (unattributed[a.kind] ||= []).push({ cls, path: k, owner: a.owner });
       } else {
         (unattributed[a.kind] ||= []).push({ cls, path: k, owner: a.owner ?? null });
       }
     }
   }
-  return { byOwner, unattributed };
+  return { byOwner, cellLinksByOwner, unattributed };
 }
 
 // Distinguish SCRIPT OUTPUT from PM MATERIALISATION inside the same window.
