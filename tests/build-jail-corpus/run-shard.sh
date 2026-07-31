@@ -65,6 +65,11 @@ LOG="$OUT/run.log"
 # fresh HOME makes that structurally impossible rather than procedurally avoided.
 { echo "=== PROVENANCE ==="
   echo "shard=$SHARD arm=$ARM lever=${LEVER:-none} platform=$PLATFORM nonce=$NONCE"
+  # The two arms differ by a path segment (`…-A0` vs `…-PROD`), which every
+  # absolute path a script prints then carries. Recorded so a cross-arm window
+  # comparison can subtract it instead of reading it as a real difference — and
+  # recorded HERE rather than re-derived, so a relocated archive still normalises.
+  echo "out=$OUT"
   echo "nub_bin=$NUB"
   echo "nub_bin_sha256=$(shasum -a 256 "$NUB" 2>/dev/null | awk '{print $1}' || sha256sum "$NUB" | awk '{print $1}')"
   echo "expect_git_sha=$EXPECT_SHA"

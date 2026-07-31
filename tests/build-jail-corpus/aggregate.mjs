@@ -65,6 +65,8 @@ for (const r of ok) {
       artifact: v.artifact || null, scheduling: v.scheduling ?? null,
       isolated: !!r.isolated, truncated: !!r.scheduling_truncated,
       fail: r.failure_signatures_by_package[v.pkg] || null,
+      project_scoped: !!v.project_scoped, project_scope_shared: v.project_scope_shared ?? null,
+      window: v.own_window || null,
     };
   }
 }
@@ -88,6 +90,47 @@ for (const [pkg, e] of Object.entries(table)) {
           ? 'NO-OP-BY-DESIGN — the script does nothing on this path even unconfined'
           : 'INVALID-FIXTURE — the class effect is unreachable even unconfined';
       } else { admissible = true; note = ''; }
+
+      // THE SHARED-PROJECT-DELTA GATE. A project-scoped class (a hook installer)
+      // has no per-package filesystem attribution at all: `delta.project_paths`
+      // is the whole project's, so one shard member writing `.git/hooks`
+      // satisfies the predicate for EVERY project-scoped row in that shard, and
+      // the confined arm — which writes none — then flips all of them to MISS
+      // together. That manufactured a break for `yorkie` and `simple-git-hooks`,
+      // both of which are pure no-ops that print the same line with the jail on
+      // and off ("skipping Git hooks installation", "Config was not found!").
+      //
+      // The evidence that IS per-package is the package's own lifecycle window,
+      // and the test it supports is a differential rather than a heuristic: if
+      // the jail changed nothing the package printed and nothing it returned,
+      // the jail did not break it. Real hook installers fail loudly and
+      // distinctly here — EPERM on the hook open, `Unable to read current
+      // working directory`, `getwd: invalid argument` — so this refuses exactly
+      // the rows whose two arms are the same run twice.
+      //
+      // TWO SCOPINGS, both load-bearing.
+      //
+      // PROJECT-ONLY EVIDENCE: a downloader can be blocked silently, with
+      // identical (empty) output in both arms and the break visible only in its
+      // own cell's delta, which IS attributed. Applying this there would hide
+      // real breaks.
+      //
+      // AND ONLY WHERE THE ROW WOULD OTHERWISE BREAK. The gate exists to refuse
+      // a manufactured break, not to strip a demonstrated pass. Unscoped it also
+      // fired on `msw`, whose project file is created in BOTH arms — nothing was
+      // manufactured there, so all the gate did was delete two survivors. This
+      // is the mirror of the artifact diff's scoping one screen down, which is
+      // applied only to rows that would otherwise PASS for the same reason: each
+      // gate corrects the direction its evidence can actually be wrong in.
+      let noop_both_arms = false;
+      if (admissible && prod && a0 && a0.project_scoped && prod.project_scoped
+          && prod.verdict !== 'DID-WORK-AND-SUCCEEDED'
+          && a0.window && prod.window
+          && a0.window.digest === prod.window.digest && a0.window.rc === prod.window.rc) {
+        admissible = false;
+        noop_both_arms = true;
+        note = `NO-OP-BOTH-ARMS — the package's own lifecycle window is identical with the jail on and off (rc=${prod.window.rc}); its A0 "denominator" is a project-delta HIT shared with ${a0.project_scope_shared ?? '?'} rows in this shard and is not attributable to it`;
+      }
 
       // THE SCHEDULING GATE, AND IT NEEDS BOTH ARMS TO FIRE. The manufactured
       // break has exactly one shape: the unconfined arm proves the package HAD
@@ -123,12 +166,29 @@ for (const [pkg, e] of Object.entries(table)) {
         }
       }
 
+      // A STRING, BECAUSE THIS FIELD IS READ BY A HUMAN TRIAGING BREAKS. It used
+      // to be the raw `{fs,net,build,engine}` counts object, which rendered as
+      // `[object Object]` in every table it appeared in and, when it did resolve,
+      // said `build:5` rather than what was actually denied. The counts are kept
+      // beside it for anything that wants to aggregate them.
+      const counts = prod?.fail ? Object.fromEntries(Object.entries(prod.fail).filter(([k]) => k !== 'samples')) : null;
+      const sig = counts
+        ? `${Object.entries(counts).map(([k, n]) => `${k}:${n}`).join(' ')}`
+          + (prod.fail.samples?.length ? ` | ${prod.fail.samples[0]}` : '')
+        : null;
+
       rows.push({
         pkg, class: e.class, shard, platform: plat, isolated: !!(prod?.isolated ?? a0?.isolated),
         a0: a0?.verdict ?? '-', prod: prod?.verdict ?? '-',
         a0_changed: a0?.changed ?? null, prod_changed: prod?.changed ?? null,
-        admissible, note, jail_cost, artifact_ratio, inconclusive, denominator_suspect,
-        prod_failure_signature: prod?.fail ? Object.fromEntries(Object.entries(prod.fail).filter(([k]) => k !== 'samples')) : null,
+        admissible, note, jail_cost, artifact_ratio, inconclusive, denominator_suspect, noop_both_arms,
+        // Per-package attribution is unavailable for these, so any count built
+        // from them is an upper bound. Carried on the row rather than stated as
+        // a footnote, so a reader of the table cannot miss it.
+        project_scope_shared: prod?.project_scope_shared ?? a0?.project_scope_shared ?? null,
+        prod_window_rc: prod?.window?.rc ?? null,
+        prod_failure_signature: sig,
+        prod_failure_counts: counts,
         prod_failure_samples: prod?.fail?.samples ?? null,
       });
     }
@@ -165,7 +225,11 @@ const breaks = adm.filter((r) => r.jail_cost && r.jail_cost !== 'OK');
 console.log(`\nadmissible cells: ${adm.length} / ${rows.length}`);
 console.log(`  survives the jail : ${adm.filter((r) => r.jail_cost === 'OK').length}`);
 console.log(`  BREAKS under jail : ${breaks.length}`);
-for (const r of breaks) console.log(`      ${pad(r.pkg, 40)} ${pad(r.class, 24)} ${r.jail_cost}${r.isolated ? ' [isolated]' : ' [BATCH — not yet isolated]'}`);
+for (const r of breaks) console.log(`      ${pad(r.pkg, 40)} ${pad(r.class, 24)} ${r.jail_cost}${r.isolated ? ' [isolated]' : ' [BATCH — not yet isolated]'}\n          ${r.prod_failure_signature || '(no failure signature)'}`);
+// A break with no signature is a break nobody can triage, so the coverage is
+// reported next to the count rather than discovered later by hand.
+const sigged = breaks.filter((r) => r.prod_failure_signature).length;
+console.log(`  breaks carrying a failure signature: ${sigged} / ${breaks.length}`);
 const inad = {};
 for (const r of rows.filter((r) => !r.admissible)) inad[r.note] = (inad[r.note] || 0) + 1;
 console.log('  inadmissible reasons:', JSON.stringify(inad, null, 2));

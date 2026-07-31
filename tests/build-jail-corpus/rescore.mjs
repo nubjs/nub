@@ -37,11 +37,16 @@ const read = (f) => JSON.parse(fs.readFileSync(f, 'utf8'));
 
 for (const dir of runDirs) {
   const name = path.basename(dir.replace(/\/$/, ''));
-  for (const f of ['pre.ndjson', 'post.ndjson', 'run.log', 'verdicts.json', 'report.json']) {
-    if (!fs.existsSync(path.join(dir, f))) {
-      console.error(`SKIP ${name}: missing ${f}`);
-      continue;
-    }
+  // `continue` here used to advance the FILE loop, not the run loop, so an
+  // incomplete arm printed SKIP and then crashed the whole re-score on the very
+  // file it had just reported missing. A killed or still-running arm
+  // (`default5-PROD`) is the normal case for this, and it must not take the
+  // other 61 with it.
+  const missing = ['pre.ndjson', 'post.ndjson', 'run.log', 'verdicts.json', 'report.json']
+    .filter((f) => !fs.existsSync(path.join(dir, f)));
+  if (missing.length) {
+    console.error(`SKIP ${name}: missing ${missing.join(', ')}`);
+    continue;
   }
   const oldVerdicts = read(path.join(dir, 'verdicts.json'));
   const oldReport = read(path.join(dir, 'report.json'));
@@ -71,6 +76,17 @@ for (const dir of runDirs) {
     stdio: ['ignore', 'pipe', 'inherit'],
     env: {
       ...process.env,
+      // FORWARDED, because without it a re-score silently runs a DIFFERENT
+      // scheduling gate than the run did: `truncatedPkgs` stays null and the
+      // scorer falls back to the shard-level `rc_script && approved > 1` test,
+      // whose `approved` is parsed from the first `Approved N package(s)` line —
+      // always 1 under per-package windows. The re-score then reads untruncated
+      // by accident rather than by construction, which is the same answer for
+      // the wrong reason and would not have survived a `--all` archive.
+      // Set to the empty string, never left inherited: an ambient WINDOWS_JSON
+      // from the caller's shell would otherwise be applied to every run dir,
+      // including ones that have no such file.
+      WINDOWS_JSON: fs.existsSync(path.join(dir, 'windows.json')) ? path.join(dir, 'windows.json') : '',
       NONCE: nonce,
       SHARD: oldVerdicts.shard ?? name.replace(/-(A0|PROD).*$/, ''),
       ARM: oldVerdicts.arm ?? (/-A0/.test(name) ? 'A0' : 'PROD'),

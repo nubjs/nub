@@ -46,6 +46,21 @@ A validity gate sits on top. A jail-arm verdict is admissible only if the same p
 class effect with the jail **off** — otherwise it is reported as `NO-OP-BY-DESIGN` or
 `INVALID-FIXTURE` rather than folded into a compatibility number.
 
+**The package's own exit code vetoes its own success.** A predicate asks whether the class effect is
+present; it cannot ask whether the script FINISHED, and for anything that emits incrementally those
+are different questions. `gl@8.1.6` compiled 5,994 object files and then died on `"C++20 or later
+required."` — rc=1, artifact predicate satisfied three ways over, scored `DID-WORK-AND-SUCCEEDED`,
+and stood as the A0 denominator for a package that does not build at all on this host. So a package
+whose own window exits non-zero (or that nub names in a `lifecycle script … failed for` line) is
+`DID-WORK-AND-FAILED` however complete its artifact looks.
+
+The cost, stated rather than hidden: a script that does its real work and then exits non-zero on
+something incidental is demoted too, and its row leaves the corpus. That shrinks the denominator
+instead of inventing a break, which is the right way to be wrong — and a package that fails its own
+install unconfined was never a compatibility measurement in either arm. On the 2026-07-31 macOS
+sweep it removed 27 rows that had been counted as surviving the jail while failing in BOTH arms, and
+promoted 3 that were failing only under it.
+
 ## The two arms
 
 | arm | how |
@@ -64,11 +79,47 @@ axis is a curated per-host allowlist enforced through a proxy, while on Linux it
 
 ## Attribution
 
-Output is attributed by **store path**, not by log: lifecycle output is not framed per package, so
-a shard-level exit code cannot say which script failed. The isolated store materialises each
+**Filesystem effects** are attributed by **store path**. The isolated store materialises each
 package in its own cell keyed by `name@version`, and build output lands there, so attribution is a
 parse. A write landing outside the writer's own cell is reported as unattributed — that is the
 interaction case worth surfacing, not noise.
+
+**Log output** is attributed by the **window marker** the runner emits under `PER_PKG=1`
+(`--- window: <name> (rc=N)`), which is a boundary the runner parsed rather than one the scorer
+infers. Path-shaped rules are the fallback, for a `--all` run and for install-phase lines outside
+every window. They were once the only mechanism, and they systematically lose the commonest
+lifecycle failure there is — a bare message with no path in it. `getaddrinfo ENOTFOUND github.com`
+names nothing, so it fell through to a `(shard-level)` bucket that joins to no row: 61 of 291
+classified lines on `default3-PROD`, leaving 7 of that shard's 10 break rows with no signature at
+all. With window attribution the same shard's residue is 1 of 293.
+
+Where no errno rule matches the failure at all — `could not be installed: fetch failed`, `Could not
+connect to CDN`, `getwd: invalid argument`, `not a git repository` — the window's own most
+problem-shaped line is carried under an explicit `unclassified` kind. Widening the classifier
+instead would mean guessing whether those are network denials or application bugs, which silently
+moves cost between the two answers the study exists to produce.
+
+### The project delta cannot be attributed at all
+
+A project-scoped class (a hook installer, msw) has its effect land OUTSIDE its own cell, and
+`delta.project_paths` is the WHOLE project's. So one shard member writing `.git/hooks` satisfies the
+predicate for EVERY project-scoped row in that shard, and the confined arm — which writes none —
+flips all of them to MISS together, manufacturing a break for packages that never did anything.
+Both `yorkie` ("trying to install from sub 'node_module' directory, skipping") and
+`simple-git-hooks` ("Config was not found!") print the identical line with the jail on and off and
+were scored breaks off `ghooks`'s 17 hook files.
+
+The evidence that IS per-package is the package's own window, so a row whose two arms print and
+return exactly the same thing cannot be called a break: it is `NO-OP-BOTH-ARMS`, inadmissible. Two
+scopings make this a gate rather than a blunt instrument — it applies only where the evidence is
+project-scoped (a downloader can be blocked *silently*, with the break visible only in its own
+attributed cell delta), and only where the row would otherwise BREAK (`msw` writes its service
+worker in both arms, so nothing was manufactured and stripping its pass would just delete a
+survivor). Rows that survive the gate still carry `project_scope_shared`, because per-package
+attribution remains unavailable and any count built from them is an upper bound.
+
+Real per-package attribution here needs a per-WINDOW snapshot of the project surface. An archived
+run does not have one, and this gate is what an archived run can honestly say instead.
 
 ## A batch run is a screen, not a result
 
@@ -210,6 +261,35 @@ is falsified by the artifact check, which is why it counts as a break.)
 Quote the batch number as a screen and the isolated number as the finding; never hand over one
 labelled as the other.
 
+## Scoring-defect re-score, 2026-07-31 (supersedes the 190 / 121 / 69 headline)
+
+Three scoring defects were fixed and the archived `runs-v2` sweep re-scored through them. No new
+runs; same 60 arms, same snapshots.
+
+The control first: re-scoring `runs-v2` through the **unmodified** scorers reproduces 190 / 121 / 69
+with **zero verdicts moved**, so every number below is attributable to the fixes rather than to the
+re-score path.
+
+| | published | project-delta gate | exit-code veto | **both** |
+| --- | --- | --- | --- | --- |
+| admissible cells | 190 | 188 | 160 | **158** |
+| survives the jail | 121 | 121 | 91 | **91** |
+| **breaks** | **69** | **67** | 69 | **67** |
+| breaks carrying a failure signature | 26 / 69 | 67 / 67 | 68 / 69 | **67 / 67** |
+
+Movement, per fix:
+
+- **Project-delta gate** — removes exactly the two manufactured hook-installer breaks, `yorkie` and
+  `simple-git-hooks`. Both were no-ops in both arms scored off `ghooks`'s 17 hook files.
+- **Exit-code veto** — 27 rows counted as *surviving the jail* were failing their own install in
+  **both** arms (all 27 confirmed with a non-zero A0 window); 3 more were failing only under the
+  jail and are now breaks (`esbuild` on `npm error code ENOTFOUND`, `nice-napi`, `weak-napi`); and 3
+  A0 arms that had propped up a break row are no longer valid denominators, `gl@8.1.6` among them.
+- **Window attribution** — every break is now triageable, matching the hand triage's 67 of 67.
+
+The hook-installer count remains an upper bound for the reason above: the surviving 11 rows still
+share one project delta.
+
 ## Running it
 
 ```sh
@@ -246,11 +326,12 @@ come back `UNSIGNALLED` with an explicit UNEVALUABLE reason rather than a false 
 node selftest.mjs        # the scoring gates, offline, ~1s
 ```
 
-Eleven assertions against synthetic snapshot pairs, driving the real scorers end to end. **Every one
-is a differential** — each asserted failure is paired with the nearest input that must still pass,
-because a gate that rejects everything is not a gate, and four of the five bugs these cases encode
-were originally hidden by exactly that kind of one-sided check. Each fix was verified to make its own
-assertion go red when removed.
+Twenty-six assertions against synthetic snapshot pairs, driving the real scorers end to end. **Every
+one is a differential** — each asserted failure is paired with the nearest input that must still
+pass, because a gate that rejects everything is not a gate, and four of the five bugs these cases
+encode were originally hidden by exactly that kind of one-sided check. Each fix was verified to make
+its own assertion go red when removed, and only its own: the controls are what caught the no-op gate
+over-firing on `msw`.
 
 The live counterpart withholds one project-file capability, which must move only the packages that
 depend on it:

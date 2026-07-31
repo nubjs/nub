@@ -16,6 +16,7 @@
 // move cost between the two answers this study exists to produce.
 
 import fs from 'node:fs';
+import { parseWindows, ownerAt } from './windows.mjs';
 
 const [logF, manifestF, verdictsF, outF] = process.argv.slice(2);
 const log = fs.readFileSync(logF, 'utf8');
@@ -58,10 +59,20 @@ function classify(line) {
   return null;
 }
 
-// Attribution: prefer an exact store-cell key (`name@version-hash`), which is a
-// parse rather than an inference; fall back to a bare package name appearing as a
-// path segment. A line naming no package is kept as `shard-level` — those are the
-// ones a per-package rc would have resolved and this harness cannot.
+// ATTRIBUTION IS THE ENCLOSING WINDOW FIRST, because that is a boundary the
+// runner PARSED rather than one this file infers. The path-shaped rules below
+// were the only mechanism for a long time and they systematically lose the
+// commonest lifecycle failure there is: a bare message with no path in it.
+// `getaddrinfo ENOTFOUND github.com` names no package, so it fell through the
+// cell match, through the bare-name match, through a six-line lookback, and into
+// a `(shard-level)` bucket that joins to no row — measured on `default3-PROD`,
+// 61 of 291 classified lines, leaving 7 of that shard's 10 break rows with no
+// signature at all while a hand triage using these same markers attributed 67 of
+// 67. The window is authoritative when it exists; the path rules stay as the
+// fallback for a `--all` run, which emits no markers, and for install-phase
+// lines that sit outside every window.
+const segs = parseWindows(lines);
+
 function attributeLine(line) {
   const cell = line.match(/store\/(.+?)@[^/@]+?(?:_[^/]*_)?-[0-9a-f]{8,}\//);
   if (cell) return cell[1].replace(/\+/g, '/');
@@ -77,15 +88,45 @@ for (let i = 0; i < lines.length; i++) {
   if (!kind) continue;
   hits.push({
     kind,
-    pkg: attributeLine(lines[i]) ?? attributeLine(lines.slice(Math.max(0, i - 6), i).join('\n')),
+    pkg:
+      ownerAt(segs, i)
+      ?? attributeLine(lines[i])
+      ?? attributeLine(lines.slice(Math.max(0, i - 6), i).join('\n')),
     line: lines[i].trim().slice(0, 400),
   });
+}
+
+// A BREAK WITH NO SIGNATURE IS A BREAK NOBODY CAN TRIAGE, and the classifier
+// above is deliberately narrow — it recognises errno shapes, not prose. Ten of
+// the 67 breaks on the macOS sweep failed in words it does not match at all
+// (`could not be installed: fetch failed`, `Could not connect to CDN`, `getwd:
+// invalid argument`, `not a git repository`), so they carried nothing at all
+// into triage.
+//
+// The fix is NOT to widen SIGS. Guessing whether `fetch failed` is a network
+// denial or an application bug is exactly the miscategorisation this file's
+// header refuses to make, and it would move cost between the two answers the
+// study exists to produce. Instead the window's own most problem-shaped line is
+// carried under an explicit `unclassified` kind: enough to triage by hand,
+// labelled so it can never be counted as fs or net.
+//
+// Gated on the window having actually gone wrong, so a healthy package that
+// merely prints the word "error" in its banner picks up nothing.
+const PROBLEM = /\b(error|fail(ed|ure)?|cannot|could not|unable|denied|not permitted|fatal|invalid|refused|timed out)\b/i;
+const verdictByPkg = new Map((verdicts.results || []).map((r) => [r.pkg, r.verdict]));
+const classified = new Set(hits.filter((h) => h.pkg).map((h) => h.pkg));
+for (const s of segs) {
+  if (classified.has(s.pkg)) continue;
+  if (s.rc === 0 && verdictByPkg.get(s.pkg) === 'DID-WORK-AND-SUCCEEDED') continue;
+  const line = lines.slice(s.from, s.to).find((l) => PROBLEM.test(l) && !/^\s*(Approved \d+|warning: )/.test(l));
+  if (!line) continue;
+  hits.push({ kind: 'unclassified', pkg: s.pkg, line: line.trim().slice(0, 400) });
 }
 
 const byPkg = {};
 for (const h of hits) {
   const k = h.pkg || '(shard-level)';
-  byPkg[k] ??= { fs: 0, net: 0, build: 0, engine: 0, samples: [] };
+  byPkg[k] ??= { fs: 0, net: 0, build: 0, engine: 0, unclassified: 0, samples: [] };
   byPkg[k][h.kind]++;
   if (byPkg[k].samples.length < 4) byPkg[k].samples.push(`[${h.kind}] ${h.line}`);
 }
@@ -119,6 +160,11 @@ const out = {
   manifest_rows: verdicts.manifest_rows ?? null,
   verdict_summary: verdicts.summary,
   failure_signature_totals: totals,
+  // The residue, reported rather than buried: how much of the classified log
+  // this run could NOT attach to a package. It is the direct measure of whether
+  // window attribution is working, and it was ~21% before it existed.
+  windows_parsed: segs.length,
+  unattributed_failure_lines: hits.filter((h) => !h.pkg).length,
   failure_signatures_by_package: byPkg,
   verdicts: verdicts.results,
   unattributed: verdicts.unattributed,

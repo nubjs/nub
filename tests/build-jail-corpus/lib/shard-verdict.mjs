@@ -26,6 +26,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { parseWindows, windowsByPkg, normaliseWindow, digest, outDirFromLog } from './windows.mjs';
 
 const [deltaF, manifestF, logF, outF] = process.argv.slice(2);
 const delta = JSON.parse(fs.readFileSync(deltaF, 'utf8'));
@@ -72,6 +73,15 @@ if (process.env.WINDOWS_JSON && fs.existsSync(process.env.WINDOWS_JSON)) {
   }
 }
 const truncatedFor = (pkg) => (truncatedPkgs ? truncatedPkgs.has(pkg) : schedulingTruncated);
+
+// EACH PACKAGE'S OWN LIFECYCLE WINDOW, which is the only per-package evidence
+// this arm holds that the shared filesystem delta cannot supply. Two things are
+// read off it: the package's own exit code, and a normalised digest of what it
+// printed — the latter so the aggregate can ask whether the jail changed
+// anything at all for a package whose delta evidence is unattributable.
+const logLines = log.split('\n');
+const winByPkg = windowsByPkg(logLines, parseWindows(logLines));
+const OUT_DIR = outDirFromLog(log, process.env.PROJ);
 
 const manifest = fs
   .readFileSync(manifestF, 'utf8')
@@ -171,8 +181,26 @@ for (const m of manifest) {
     if (P.changed_any_of) {
       // Project-scoped: the effect lands OUTSIDE the writer's own cell (a hook
       // installer's `.git/hooks`, msw's `public/mockServiceWorker.js`).
+      //
+      // THIS OPERATOR HAS NO PER-PACKAGE ATTRIBUTION AND CANNOT BE GIVEN ONE
+      // FROM AN ARM-WIDE SNAPSHOT PAIR. `delta.project_paths` is the WHOLE
+      // project delta, so every project-scoped row in a shard reads the same
+      // list: `ghooks` writing 17 hook files scored a HIT for `simple-git-hooks`
+      // too, and since the confined arm writes none, every such row flipped
+      // A0-HIT -> PROD-MISS in lockstep — a break manufactured for packages that
+      // no-op identically in both arms (`yorkie`, `simple-git-hooks`, each
+      // printing the same "skipping"/"Config was not found!" line with the jail
+      // on and off).
+      //
+      // The HIT is left as it is, because for the shard's real hook writers it
+      // is true; what is recorded alongside it is that the evidence is SHARED,
+      // and the aggregate — which has both arms — refuses to call a break on a
+      // package whose own window is unchanged by the jail. Real per-package
+      // attribution needs a per-WINDOW snapshot of the project surface, which an
+      // archived run does not have.
       const hit = P.changed_any_of.some((re) => projPaths.some((p) => new RegExp(re).test(p)));
-      reasons.push(`changed_any_of(project): ${hit ? 'HIT' : 'MISS'}`); if (!hit) effect = false;
+      reasons.push(`changed_any_of(project): ${hit ? 'HIT' : 'MISS'} (shared project delta — not attributed to this package)`);
+      if (!hit) effect = false;
     }
     if (P.cell_changed_any_of) {
       // Cell-scoped: the effect lands inside the writer's OWN cell but under a
@@ -256,16 +284,40 @@ for (const m of manifest) {
   const externalOnly = (P.changed_any_of || P.cell_changed_any_of)
     && !P.created_all_of && !P.created_any_of && P.min_created == null
     && P.min_created_files == null && P.min_created_bytes == null && !P.content_nonce;
+  // Narrower than `externalOnly`: `cell_changed_any_of` reads THIS package's own
+  // cell and is attributed; only the project delta is shared.
+  const projectScoped = !!P.changed_any_of
+    && !P.cell_changed_any_of && !P.created_all_of && !P.created_any_of && P.min_created == null
+    && P.min_created_files == null && P.min_created_bytes == null && !P.content_nonce;
+
+  // THE PACKAGE'S OWN EXIT CODE VETOES ITS OWN SUCCESS. A predicate asks whether
+  // the class effect is PRESENT; it cannot ask whether the script FINISHED, and
+  // for anything that emits incrementally those are different questions.
+  // `gl@8.1.6` compiled 5,994 object files and then died on
+  // `"C++20 or later required."` — rc=1, artifact predicate satisfied three ways
+  // over, scored DID-WORK-AND-SUCCEEDED. As an A0 denominator that is a package
+  // the study claims works unconfined when it does not work at all; as a PROD
+  // cell it is a false pass, which is the direction that flatters the jail.
+  //
+  // THE COST, stated rather than hidden: a script that completes its real work
+  // and then exits non-zero on something incidental is demoted too, and its row
+  // leaves the corpus (an A0 that is not DID-WORK-AND-SUCCEEDED is inadmissible).
+  // That shrinks the denominator rather than inventing a break, which is the
+  // right way to be wrong — and a package that genuinely fails its own install is
+  // not a compatibility measurement in either arm.
+  const scriptFailed = failedByName.has(m.pkg) || (winByPkg.get(m.pkg)?.rc ?? 0) !== 0;
 
   let verdict;
   if (effect === null) verdict = 'UNSIGNALLED';
   else if (kind === 'absent') verdict = 'NOT-INSTALLED';
+  else if (effect && scriptFailed) verdict = 'DID-WORK-AND-FAILED';
   else if (effect && externalOnly) verdict = 'DID-WORK-AND-SUCCEEDED';
   else if (kind === 'installed-no-delta') verdict = 'NEVER-RAN-ITS-REAL-PATH';
   else if (kind === 'pm-materialisation') verdict = 'NEVER-RAN-ITS-REAL-PATH';
   else if (effect) verdict = 'DID-WORK-AND-SUCCEEDED';
   else if (acted) verdict = 'DID-WORK-AND-FAILED';
   else verdict = 'NEVER-RAN-ITS-REAL-PATH';
+  if (effect && scriptFailed) reasons.push(`own lifecycle window exited non-zero (rc=${winByPkg.get(m.pkg)?.rc ?? 'named-failed'}) — the class effect is present but the script did not finish`);
 
   // SCHEDULING EVIDENCE IS RECORDED HERE AND JUDGED IN THE AGGREGATE, because
   // deciding it needs BOTH arms. `silent-in-truncated-window` says only "this
@@ -277,9 +329,20 @@ for (const m of manifest) {
   if (failedByName.has(m.pkg)) scheduling = 'named-failed';
   else if (verdict === 'NEVER-RAN-ITS-REAL-PATH') scheduling = truncatedFor(m.pkg) ? 'silent-in-truncated-window' : 'silent';
 
+  // THE PER-PACKAGE HALF OF THE EVIDENCE, carried so the aggregate can compare
+  // the two arms directly. A digest rather than the text: a native build's
+  // window runs to hundreds of kilobytes, and the only question asked of it is
+  // whether the jail changed it.
+  const win = winByPkg.get(m.pkg) || null;
+  const normalised = win ? normaliseWindow(win.text, { outDir: OUT_DIR, nonce }) : null;
+
   results.push({
     pkg: m.pkg, version: m.version, class: m.cls, kind, acted,
     changed: changed.length, effect, verdict, scheduling, reasons,
+    project_scoped: projectScoped,
+    own_window: win
+      ? { rc: win.rc, digest: digest(normalised), bytes: normalised.length, sample: normalised.slice(0, 300) }
+      : null,
     // Carried per row so the aggregate can diff the confined artifact against the
     // unconfined one. A pass is only as good as what it produced, and the two
     // arms are the only scale on which "big enough" means anything.
@@ -293,6 +356,13 @@ for (const m of manifest) {
     },
   });
 }
+
+// HOW MANY ROWS READ THE SAME PROJECT DELTA. Stated per row rather than left as
+// a caveat in prose: with more than one, no project-scoped HIT in this arm is
+// attributable to the package it was scored for, and any count built from them
+// is an upper bound.
+const projectScopedRows = results.filter((r) => r.project_scoped).length;
+for (const r of results) if (r.project_scoped) r.project_scope_shared = projectScopedRows;
 
 const summary = {};
 for (const r of results) summary[r.verdict] = (summary[r.verdict] || 0) + 1;
