@@ -125,7 +125,11 @@ jobs:
           grep -hE "Could not find any Python|is not set from environment variable PYTHON|checking if \"|Found Python" synthetic.log registry.log || echo "(no node-gyp python lines)"
 
           echo
-          n=$(grep -hcF "build_jail.python_grant" synthetic.log registry.log 2>/dev/null | paste -sd+ - | bc)
+          # `grep -c` counts PER FILE and `bc` is not on Windows Git Bash, so the obvious
+          # `paste -sd+ | bc` spelling made this step die with `bc: command not found` and
+          # report a red job for a harness defect rather than a finding. Count the lines
+          # once, across both files, with nothing but grep and wc.
+          n=$(cat synthetic.log registry.log 2>/dev/null | grep -cF "build_jail.python_grant" || true)
           echo "grant diag lines: ${n:-0}"
           if [ "${n:-0}" -gt 0 ]; then
             echo "VERDICT: diagnostic fired on ${{ matrix.os }} — read the lines above."
