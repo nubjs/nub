@@ -74,8 +74,12 @@ to report numbers when that assertion fails. An earlier harness selected arms wi
 variables that nothing read, so every arm ran the identical configuration; the assertion exists so
 that cannot recur silently.
 
-`PROD` means different things per platform, which is deliberate and useful: on macOS the network
-axis is a curated per-host allowlist enforced through a proxy, while on Linux it is a binary deny.
+The network axis means the same thing on every platform, and this line used to say otherwise. It
+is a per-package boolean: a package the catalog names reaches every host it likes, a package it
+does not name reaches none, and no platform starts a proxy or gates a hostname. What differs per
+platform is only how the admitted case is spelled to the backend — see
+`crates/nub-sandbox/src/compiler/preset.rs` (`build_jail_net`). A corpus arm therefore separates
+packages by whether the catalog admits them, never by which hosts they contact.
 
 ## Attribution
 

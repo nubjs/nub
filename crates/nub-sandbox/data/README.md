@@ -27,7 +27,7 @@ broken without it**, and it is written as the **narrowest grant that fixes the m
 failure**. "This package would probably also like write access to X" is not evidence.
 A PR that widens an existing entry needs its own measurement.
 
-## `networkHosts` — the egress allowlist
+## `networkHosts` — the prefetcher's host allowlist
 
 Exposed to policy authors as the `$downloads` token, and used as the allowlist for nub's own
 out-of-jail prefetch. Adding a host widens THAT allowlist, which runs unconfined on
@@ -70,10 +70,12 @@ and only widens the prefetcher.
 by hand afterwards (`playwright install`) is not an install-time fetch and does not earn an
 entry.
 
-**The threat model is bytes LEAVING the machine.** A host that accepts a write — a forge API,
-a registry publish route, a container blob push, a telemetry endpoint whose POST body is the
-product — or a multi-tenant object store where an attacker can rent a namespace under the same
-hostname and read back what a confined script sent there, is a worse host than one that only
+**The threat model is bytes LEAVING the machine, and the sender to picture is the
+PREFETCHER.** Nub's prefetch GET is unconfined, and its URL is composed from a manifest an
+attacker may have authored, so the request itself is a channel: a host that accepts a write —
+a forge API, a registry publish route, a container blob push, a telemetry endpoint whose POST
+body is the product — or a multi-tenant object store where an attacker can rent a namespace
+under the same hostname and read back what was sent there, is a worse host than one that only
 serves, and the set is kept as small as the evidence allows for that reason.
 
 **A write-capable host is not automatically disqualified, but this list is not the place to
@@ -100,11 +102,19 @@ postinstall at all, and the filesystem, environment and network confinement is w
 it. Do not cut an entry for being a supply-chain-integrity risk — that is a different
 criterion, and conflating the two has removed correct entries before.
 
-**Wildcards are rejected, and this is a security property rather than a style rule.** The
-egress proxy resolves the upstream name itself and gates both the CONNECT authority and the
-TLS SNI, so an exact hostname pins every DNS label. A `*.example.com` entry would hand the
-confined script the label positions, and a lookup of `<secret>.cdn.example.com` exfiltrates
-through the resolver without a single byte of payload being sent.
+**Wildcards are rejected, and this is a security property rather than a style rule.** What
+the rule buys differs by consumer, and only the first consumer is this list's own:
+
+- **For the prefetcher it is SSRF containment.** Nub composes the URL from the package's
+  manifest and performs the GET unconfined, so an exact hostname is what stops a manifest
+  pointing `binary.host` at `169.254.169.254`, an intranet name, or an attacker's own
+  subdomain under an admitted suffix.
+- **For nub's agent sandbox it is resolver exfiltration.** That product routes egress through
+  a proxy which resolves the upstream name and gates both the CONNECT authority and the TLS
+  SNI, so an exact hostname pins every DNS label; a `*.example.com` entry would hand the
+  confined process the label positions, and a lookup of `<secret>.cdn.example.com` leaks
+  through the resolver with no payload sent. The build jail runs no proxy and gates no
+  hostname, so this half does not describe it.
 
 This list is deliberately **not** merged with the broader `$trusted` set used by nub's agent
 sandbox. That set is a read-only browsing surface for an agent the user is driving; this one
@@ -436,7 +446,7 @@ settled verdict while carrying nothing a reviewer can re-check.
 | host | reason | why |
 | --- | --- | --- |
 | `github.com` | `write-capable` | It serves `git-receive-pack` on the same hostname as its release assets, and this list is the unconfined prefetcher's allowlist as well as the jail's provenance record. The jail reaches it through a `packageNetwork` entry instead. |
-| `storage.googleapis.com` | `multi-tenant` | An attacker can rent a bucket under the same hostname and read back what a confined script sends there. The four packages that need it reach it through `packageNetwork` instead. |
+| `storage.googleapis.com` | `multi-tenant` | An attacker can rent a bucket under the same hostname, so a manifest-composed URL the prefetcher fetches unconfined lands on storage the attacker reads back. The four packages that need it reach it through `packageNetwork` instead. |
 | `package.cli.amplify.aws` | `not-blocking` | The fetch fails and the install still exits 0. A soft fetch that degrades does not earn an entry. |
 | `workers.cloudflare.com` | `undecided` | No disqualification established — a single-tenant vendor binary path. Recorded as an evidenced candidate; admitting it is a maintainer call. |
 
@@ -520,10 +530,11 @@ needed it yet; adding a field ahead of a real case would be guessing at its shap
   That argument is retired. The defense is **package identity, not host or path
   granularity**: no catalog entry means no network, and an entry means the network the review
   ratified. Path-scoping would refine what an already-vetted package may do, which is the
-  cheaper half of the problem, and the effort it demands is real: terminating TLS for those
-  hosts, and re-checking every redirect against the prefix, since a release download 302s to
-  `release-assets.githubusercontent.com`, whose asset paths are opaque signed GUIDs. A package
-  that needs `github.com` gets a `packageNetwork` entry rather than waiting for it.
+  cheaper half of the problem, and the effort it demands is real: the jail inspects no URL and
+  runs no proxy on any platform, so scoping a path means building one — terminating TLS for
+  those hosts and re-checking every redirect against the prefix, since a release download 302s
+  to `release-assets.githubusercontent.com`, whose asset paths are opaque signed GUIDs. A
+  package that needs `github.com` gets a `packageNetwork` entry rather than waiting for it.
 
   What follows for a reviewer: judge a host on whether an install-time fetch was measured and
   on what refusing it costs, not on whether some path under it accepts a write. A refusal
@@ -545,13 +556,15 @@ file would be equivalent to shipping a malicious nub release, without needing th
 signing key.
 
 What that compromise could actually do is bounded, and worth stating precisely rather than
-alarming about. The grants are narrow and per-package: a hostile catalog could add an egress
-host (the largest risk — an exfiltration sink reachable by any lifecycle script), or widen
-one named package's filesystem reach to another directory in the project. It could not turn
-the jail off, escape the project root (paths are clamped at grant time), or grant anything
-to a package the attacker does not already control code in. The realistic attack is
-therefore **a supply-chain attacker who already owns a dependency**, using a catalog entry to
-open the egress or filesystem path their payload needs.
+alarming about. Every grant is keyed on a package name, so a hostile catalog buys reach for
+packages it names and nothing else: it could grant a named package egress (the largest risk —
+that package's script then reaches any host it likes), widen a named package's filesystem
+reach to another directory in the project, or add a hostname to the prefetcher's allowlist,
+which points nub's own unconfined GET somewhere new. It could not turn the jail off, escape
+the project root (paths are clamped at grant time), or grant anything to a package the
+attacker does not already control code in. The realistic attack is therefore **a supply-chain
+attacker who already owns a dependency**, using a catalog entry to open the egress or
+filesystem path their payload needs.
 
 The design the implementation must satisfy:
 
@@ -584,8 +597,10 @@ The design the implementation must satisfy:
   same build-time validations re-run at load time — which is the one place a runtime parse
   is unavoidable, and where a rejection must fail closed to the compiled copy.
 
-Open question for whoever implements it: whether a fetched catalog should be allowed to add
-**network hosts** at all, or only per-package filesystem grants. Hosts are the higher-value
-target for an attacker — an egress sink benefits any compromised package, while a filesystem
-grant only helps one named package — so restricting remote updates to `packageGrants` and
-keeping `networkHosts` release-gated is worth considering as the conservative default.
+Open question for whoever implements it: whether a fetched catalog should be allowed to touch
+the **network** at all, or only per-package filesystem grants. Both network shapes are
+higher-value targets than a filesystem grant. An egress grant hands one package the whole
+network rather than one more directory, and a `networkHosts` entry additionally moves the
+prefetcher, which runs unconfined as the user and is the one surface here that is not
+sandboxed at all. So restricting remote updates to `packageGrants` and keeping `networkHosts`
+and `packageNetwork` release-gated is worth considering as the conservative default.
