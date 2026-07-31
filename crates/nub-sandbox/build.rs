@@ -76,7 +76,12 @@ fn gen_grants(catalog: &catalog::Catalog) -> String {
         let cwd = grant.project_cwd;
         let writes = match &grant.project_writes {
             None => "ProjectWrites::None".to_string(),
-            Some(keys) => format!("ProjectWrites::ManifestField(&{keys:?})"),
+            Some(catalog::ProjectWriteSource::ManifestField(keys)) => {
+                format!("ProjectWrites::ManifestField(&{keys:?})")
+            }
+            Some(catalog::ProjectWriteSource::Literal(paths)) => {
+                format!("ProjectWrites::Literal(&{paths:?})")
+            }
         };
         // Each chain gets its own `&` so the outer literal is a slice OF SLICES: the derived
         // `Debug` of a `Vec<Vec<String>>` emits a bare `[[..]]`, an array of ARRAYS, and only

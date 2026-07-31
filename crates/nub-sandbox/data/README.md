@@ -109,9 +109,12 @@ through the resolver without a single byte of payload being sent.
 This list is deliberately **not** merged with the broader `$trusted` set used by nub's agent
 sandbox. That set is a read-only browsing surface for an agent the user is driving; this one
 is the artifact surface for attacker-authored dependency code, and the two populations have no
-reason to coincide. Membership here is earned by a measured install-time fetch and nothing
-else — `registry.npmjs.org` is absent because no lifecycle script has been measured to need
-it, not because it is categorically barred.
+reason to coincide. Membership here is earned by a measured install-time fetch **that the
+prefetcher needs**, which is a narrower bar than "some script wanted it": `registry.npmjs.org`
+is now measured — two lifecycle scripts shell `npm install` and die on it — and is still
+absent, because those two packages are granted in `packageNetwork` and the host itself serves
+an authenticated publish route on the same name that a project `.npmrc` token would reach.
+That is the github.com shape, and it resolves the same way.
 
 ## `packageNetwork` — egress for a package whose hosts are not the point
 
@@ -169,7 +172,7 @@ fetching — recording the observation must not become a grant.
 | `siblingDirs` | Named entries of the package's own enclosing `node_modules` it may read and write. |
 | `dependencyDirs` | Chains of package *names* whose resolved directories it may read and write. See below. |
 | `projectReads` | Project-relative subtrees it may read. |
-| `projectWrites` | Where its project write targets come from. See below. |
+| `projectWrites` | Where its project write targets come from — `manifestField` or `literal`. See below. |
 | `projectCwd` | Grant read on the project root directory node alone. |
 | `mechanism` | What the package's own code does. This is what bounds the grant. |
 | `evidence` / `observed` / `platform` | As for hosts. |
@@ -243,22 +246,37 @@ once: `emit_fs` compiled a read grant into a write *deny* and emitted it last, s
 to 0 with the read grant as the only variable. Fixed at the mechanism (an Allow now emits
 no deny on any backend), which is why the guidance above can be stated as a flat rule.
 
-`projectWrites` currently supports one shape:
+`projectWrites` supports two shapes, and an entry carries exactly one of them. They are
+split on **who authored the path**, which is the only distinction a reviewer has to check:
 
 ```json
 "projectWrites": { "manifestField": ["msw", "workerDirectory"] }
+"projectWrites": { "literal": [".git/hooks"] }
 ```
 
-This reads a dotted field path from the **consumer's** root `package.json` and treats its
-value (a string, or an array of strings) as project-relative directories. nub owns the
-field *name*; the consumer owns the *value*; every resolved path is clamped back inside the
-project root and silently dropped if it escapes.
+`manifestField` reads a dotted field path from the **consumer's** root `package.json` and
+treats its value (a string, or an array of strings) as project-relative directories. nub
+owns the field *name*; the consumer owns the *value*. This exists for a package that
+imposes no directory convention of its own — the consumer already had to name the directory
+for the package to work at all, so their manifest is the only place the answer exists.
 
-This exists for a package that imposes no directory convention of its own — the consumer
-already had to name the directory for the package to work at all, so their manifest is the
-only place the answer exists. It is the narrow alternative to granting the whole project
-tree. If a package writes to a directory *it* defines, that is a literal, and this catalog
-does not yet have a field for it (see "Known gaps").
+`literal` names the path outright, for a package that writes where *it* decides. `.git/hooks`
+is the worked case: git owns that path, the consumer configures nothing, and a hook
+installer's entire function is to write there.
+
+Both are clamped back inside the project root and silently dropped if they escape, so the
+shapes differ in provenance rather than in reach. A `literal` that traverses out is rejected
+at build time rather than dropped, because a grant that appears present and does nothing is
+worse than one that fails loudly.
+
+**A `literal` grant is reviewed harder than its size suggests, and `.git/hooks` is why.** A
+file written there runs **unconfined**, as the developer, on their next `git commit` — long
+after the install that planted it. That makes it persistent code execution, not a
+configuration write, so it is granted **per package** and never as a class rule: "looks like
+a hook installer" is a shape any dependency can adopt, and the jail exists because a
+lifecycle script is attacker-authored. The five hook installers in the table earned their
+entries by being packages whose stated function is writing that file, which is the thing the
+consumer installed them to do.
 
 ### `projectCwd`
 
@@ -305,7 +323,7 @@ settled verdict while carrying nothing a reviewer can re-check.
 | host | reason | why |
 | --- | --- | --- |
 | `github.com` | `write-capable` | It serves `git-receive-pack` on the same hostname as its release assets, and this list is the unconfined prefetcher's allowlist as well as the jail's provenance record. The jail reaches it through a `packageNetwork` entry instead. |
-| `storage.googleapis.com` | `multi-tenant` | An attacker can rent a bucket under the same hostname and read back what a confined script sends there. |
+| `storage.googleapis.com` | `multi-tenant` | An attacker can rent a bucket under the same hostname and read back what a confined script sends there. The four packages that need it reach it through `packageNetwork` instead. |
 | `package.cli.amplify.aws` | `not-blocking` | The fetch fails and the install still exits 0. A soft fetch that degrades does not earn an entry. |
 | `workers.cloudflare.com` | `undecided` | No disqualification established — a single-tenant vendor binary path. Recorded as an evidenced candidate; admitting it is a maintainer call. |
 
@@ -369,8 +387,8 @@ Four properties are worth knowing before you rely on it:
 Things the current schema cannot express. Each is unbuilt because no shipped entry has
 needed it yet; adding a field ahead of a real case would be guessing at its shape.
 
-- **A literal project write path.** `projectWrites` only supports `manifestField`. A package
-  that writes to a directory it defines itself would need a `literal` variant.
+- ~~**A literal project write path.**~~ **Built 2026-07-31** as `projectWrites.literal`, for
+  the five `.git/hooks` installers; see the `projectReads` vs `projectWrites` section.
 - **Platform-conditional entries.** Every grant applies on every OS. A package that needs a
   carve-out only on Windows currently gets it everywhere, which is wider than necessary.
   The corpus that produced these entries ran on one platform per measurement, so a

@@ -22,6 +22,20 @@
 use std::collections::BTreeSet;
 use std::path::{Component, Path};
 
+/// Where a package's project WRITE targets come from — the two spellings of
+/// `projectWrites`, which are distinguished because they carry different authorship.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectWriteSource {
+    /// A dotted field path read out of the CONSUMER's root manifest. nub owns the field
+    /// NAME, the consumer owns the value.
+    ManifestField(Vec<String>),
+    /// Project-relative subtrees nub names outright, for a package that writes to a
+    /// location IT defines rather than one the consumer configures. `.git/hooks` is the
+    /// case: a hook installer's whole function is to write there, and no manifest field
+    /// carries the answer because the path is git's, not the consumer's.
+    Literal(Vec<String>),
+}
+
 /// One package's exception, exactly as the catalog spells it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageGrant {
@@ -32,8 +46,8 @@ pub struct PackageGrant {
     /// resolves, and the `@prisma/engines` THAT package resolves".
     pub dependency_dirs: Vec<Vec<String>>,
     pub project_reads: Vec<String>,
-    /// The dotted field path of a `projectWrites.manifestField`, if the entry has one.
-    pub project_writes: Option<Vec<String>>,
+    /// Where the entry's project writes come from, if it has any.
+    pub project_writes: Option<ProjectWriteSource>,
     pub project_cwd: bool,
 }
 
@@ -168,31 +182,7 @@ fn parse_grants(catalog: &serde_json::Value) -> Result<Vec<PackageGrant>, String
 
         let project_writes = match entry.get("projectWrites") {
             None | Some(serde_json::Value::Null) => None,
-            Some(w) => {
-                let field = w
-                    .get("manifestField")
-                    .and_then(serde_json::Value::as_array)
-                    .ok_or_else(|| {
-                        format!(
-                            "{at}: projectWrites must be {{\"manifestField\": [..]}} — the only \
-                             shape the compiler implements"
-                        )
-                    })?;
-                if field.is_empty() {
-                    return Err(format!(
-                        "{at}: projectWrites.manifestField must name a field"
-                    ));
-                }
-                let mut keys = Vec::with_capacity(field.len());
-                for k in field {
-                    keys.push(
-                        k.as_str()
-                            .ok_or_else(|| format!("{at}: manifestField entries must be strings"))?
-                            .to_string(),
-                    );
-                }
-                Some(keys)
-            }
+            Some(w) => Some(parse_project_writes(w, &at)?),
         };
 
         let project_cwd = match entry.get("projectCwd") {
@@ -213,6 +203,62 @@ fn parse_grants(catalog: &serde_json::Value) -> Result<Vec<PackageGrant>, String
     }
 
     Ok(grants)
+}
+
+/// Validate `projectWrites` — exactly one of `manifestField` or `literal`.
+///
+/// EXACTLY ONE, rejected rather than merged, because the two differ in who authored the
+/// path and a reader has to be able to tell at a glance. `manifestField` grants what the
+/// CONSUMER wrote in their own manifest; `literal` grants what NUB wrote in this file. An
+/// entry carrying both would be one grant with two provenances and one `observed` string
+/// covering neither cleanly.
+///
+/// A `literal` entry is held to the same project-relative check as `projectReads`: the
+/// runtime clamp in `compiler::curated::contained` would silently DROP a traversal, so
+/// rejecting it here is what turns an inert grant into a visible build failure.
+fn parse_project_writes(w: &serde_json::Value, at: &str) -> Result<ProjectWriteSource, String> {
+    let field = w.get("manifestField");
+    let literal = w.get("literal");
+    match (field, literal) {
+        (Some(_), Some(_)) => Err(format!(
+            "{at}: projectWrites carries both `manifestField` and `literal` — pick the one \
+             that matches who authored the path"
+        )),
+        (Some(f), None) => {
+            let keys = write_targets(f, at, "manifestField")?;
+            Ok(ProjectWriteSource::ManifestField(keys))
+        }
+        (None, Some(l)) => {
+            let paths = write_targets(l, at, "literal")?;
+            for rel in &paths {
+                require_project_relative(rel, "projectWrites.literal", at)?;
+            }
+            Ok(ProjectWriteSource::Literal(paths))
+        }
+        (None, None) => Err(format!(
+            "{at}: projectWrites must be {{\"manifestField\": [..]}} or {{\"literal\": [..]}}"
+        )),
+    }
+}
+
+fn write_targets(value: &serde_json::Value, at: &str, key: &str) -> Result<Vec<String>, String> {
+    let items = value
+        .as_array()
+        .ok_or_else(|| format!("{at}: projectWrites.{key} must be an array of strings"))?;
+    if items.is_empty() {
+        return Err(format!(
+            "{at}: projectWrites.{key} must name at least one entry"
+        ));
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        out.push(
+            item.as_str()
+                .ok_or_else(|| format!("{at}: projectWrites.{key} entries must be strings"))?
+                .to_string(),
+        );
+    }
+    Ok(out)
 }
 
 /// Validate `dependencyDirs` — a list of package-NAME chains, never paths.
