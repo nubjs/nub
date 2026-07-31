@@ -1177,6 +1177,24 @@ function wrapChildProcessCompileCache(cp) {
     return base === "node" || base === "node.exe";
   };
 
+  // The fresh-invocation protocol attributes each rewritten environment value
+  // to Nub. This preload is another Nub-owned writer: when it strips the live
+  // compile-cache value for R8, update an existing current-protocol marker to
+  // the exact absent state. A later compat boundary can then restore the
+  // captured user value instead of mistaking this removal for a user mutation.
+  // Legacy parents carry neither marker and keep their legacy fallback.
+  const markCompileCacheAbsent = (env) => {
+    const valueMarker = "__NUB_AUGMENTED_NODE_COMPILE_CACHE";
+    const presentMarker = "__NUB_AUGMENTED_NODE_COMPILE_CACHE_PRESENT";
+    if (
+      Object.hasOwn(env, valueMarker) ||
+      Object.hasOwn(env, presentMarker)
+    ) {
+      env[valueMarker] = "";
+      env[presentMarker] = "0";
+    }
+  };
+
   // Returns a possibly-rewritten options object with NODE_COMPILE_CACHE stripped
   // from the child's env, after writing the sentinel keyed on THIS process's pid
   // (= the grandchild's process.ppid). Two source cases, both stripped:
@@ -1204,6 +1222,7 @@ function wrapChildProcessCompileCache(cp) {
       } catch { return options; }
       const newEnv = { ...env };
       delete newEnv.NODE_COMPILE_CACHE;
+      markCompileCacheAbsent(newEnv);
       return { ...opts, env: newEnv };
     }
     // Inherited env path: only act when this process actually carries a live cache
@@ -1215,6 +1234,7 @@ function wrapChildProcessCompileCache(cp) {
     } catch { return options; }
     const newEnv = { ...process.env };
     delete newEnv.NODE_COMPILE_CACHE;
+    markCompileCacheAbsent(newEnv);
     return { ...opts, env: newEnv };
   };
 

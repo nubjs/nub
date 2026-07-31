@@ -454,20 +454,7 @@ fn strip_windows_verbatim_prefix(path: &str) -> String {
 /// keying the extra drop on which family is live reproduces each one's
 /// direct-runner behavior exactly.
 fn watch_guarded_env_file_keys(auto_cascade: bool) -> Vec<&'static str> {
-    let mut keys: Vec<&'static str> = nub_core::workspace::env::denied_env_file_keys()
-        .iter()
-        .copied()
-        // The load-time denylist and this guard share a list but not a purpose.
-        // The denylist answers "may a `.env` SUPPLY this key" — no, for every
-        // entry. The guard answers "must the child start without it", and it
-        // enforces that by planting an empty placeholder. That is wrong for a
-        // key nub itself hands the child: the runtime snapshot is stamped from
-        // the resolved `nub.jsonc`, never from a file, so blanking it strips
-        // the child's own `tsconfig`/`preload`/`loader` and it starts unconfigured.
-        // Skipping it here costs nothing — the denylist already stopped any
-        // file-supplied value from ever reaching the injection map.
-        .filter(|key| *key != nub_core::node::spawn::RUNTIME_CONFIG_ENV)
-        .collect();
+    let mut keys = nub_core::workspace::env::denied_env_file_keys().to_vec();
     if auto_cascade {
         keys.push("NODE_ENV");
     }
@@ -477,12 +464,27 @@ fn watch_guarded_env_file_keys(auto_cascade: bool) -> Vec<&'static str> {
 /// Exact ambient spellings of the guarded keys. A Unix process may carry both
 /// canonical and mixed-case spellings; Windows collapses them through its
 /// case-insensitive environment. An ambient value is the user's own and must
-/// survive untouched — only file-derived values are stripped.
-fn ambient_guarded_env_file_keys(guarded: &[&'static str]) -> Vec<String> {
-    env::vars_os()
+/// survive untouched — only file-derived values are stripped. Nub-owned keys
+/// that this particular launcher actually stamps are appended in their
+/// canonical spelling because they live on the child command rather than in
+/// this process environment. Do not treat the whole internal namespace as
+/// launcher-owned: an unstamped key must keep its placeholder so a raw env file
+/// cannot forge it.
+fn ambient_guarded_env_file_keys(
+    guarded: &[&'static str],
+    launcher_owned: &[String],
+) -> Vec<String> {
+    let mut keys: Vec<String> = env::vars_os()
         .filter_map(|(key, _)| key.into_string().ok())
         .filter(|key| guarded.iter().any(|g| key.eq_ignore_ascii_case(g)))
-        .collect()
+        .collect();
+    keys.extend(
+        launcher_owned
+            .iter()
+            .filter(|key| guarded.iter().any(|guarded| key == guarded))
+            .cloned(),
+    );
+    keys
 }
 
 /// Canonical placeholders the watch supervisor must carry so Node's early
@@ -3114,6 +3116,35 @@ pub(crate) fn runtime_config_json(
     serde_json::to_string(runtime).context("could not serialize the resolved runtime config")
 }
 
+/// Environment-key equality follows the target platform. Windows collapses
+/// ASCII case, while Unix permits distinct spellings such as `FOO` and `foo`.
+fn runtime_env_keys_equal(left: &str, right: &str, windows: bool) -> bool {
+    if windows {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+/// Insert a runtime `envFile` value with its source-order precedence. Replacing
+/// an equivalent existing spelling before insertion both gives the later source
+/// precedence and preserves that source's spelling in the resulting map.
+fn merge_runtime_env_source_value(
+    values: &mut HashMap<String, String>,
+    key: String,
+    value: String,
+    windows: bool,
+) {
+    if let Some(previous) = values
+        .keys()
+        .find(|previous| runtime_env_keys_equal(previous, &key, windows))
+        .cloned()
+    {
+        values.remove(&previous);
+    }
+    values.insert(key, value);
+}
+
 fn load_runtime_env_sources_raw(paths: &[PathBuf]) -> Result<HashMap<String, String>> {
     let mut values = HashMap::new();
     let mut denied = Vec::new();
@@ -3125,7 +3156,9 @@ fn load_runtime_env_sources_raw(paths: &[PathBuf]) -> Result<HashMap<String, Str
             )
         })?;
         for (key, value) in nub_core::workspace::env::parse_env(&content) {
-            if env::var_os(&key).is_some() || key == "NODE_ENV" {
+            if env::var_os(&key).is_some()
+                || runtime_env_keys_equal(&key, "NODE_ENV", cfg!(windows))
+            {
                 continue;
             }
             if nub_core::workspace::env::is_denied_env_file_key(&key) {
@@ -3133,7 +3166,7 @@ fn load_runtime_env_sources_raw(paths: &[PathBuf]) -> Result<HashMap<String, Str
                 continue;
             }
             // Explicit source arrays follow Node/CLI ordering: later files win.
-            values.insert(key, value);
+            merge_runtime_env_source_value(&mut values, key, value, cfg!(windows));
         }
     }
     denied.sort();
@@ -4439,7 +4472,7 @@ fn build_script_command(
         }
         None => std::ffi::OsString::from(bin_path.clone()),
     };
-    command.env("PATH", path);
+    command.env("PATH", &path);
 
     // busybox-w32 script-shell integration (Windows default only; `bin_path` on
     // the PATH above already lets it resolve `node_modules/.bin/*.cmd` shims).
@@ -4477,11 +4510,15 @@ fn build_script_command(
     // single-file tools it launches (tsc/eslint/prettier-class bundles) load
     // their V8 blobs instead of reparsing. User-set values are untouched —
     // they're already in the inherited env and this only fills the unset case.
-    if std::env::var_os("NODE_COMPILE_CACHE").is_none() {
-        if let Some(dir) = nub_core::node::spawn::default_compile_cache_dir() {
-            command.env("NODE_COMPILE_CACHE", dir);
-        }
-    }
+    let ambient_compile_cache = std::env::var_os("NODE_COMPILE_CACHE");
+    let expected_compile_cache = if let Some(value) = ambient_compile_cache {
+        Some(value)
+    } else if let Some(dir) = nub_core::node::spawn::default_compile_cache_dir() {
+        command.env("NODE_COMPILE_CACHE", &dir);
+        Some(dir)
+    } else {
+        None
+    };
 
     // $NODE: npm/pnpm point this at the node binary running the script so userland
     // `$NODE child.js` / `spawn(process.env.NODE, …)` invoke "the same Node." When
@@ -4497,7 +4534,7 @@ fn build_script_command(
         .as_ref()
         .and_then(|a| a.node_shim_exe())
         .unwrap_or_else(|| std::ffi::OsString::from(node.path.as_str()));
-    command.env("NODE", node_env);
+    command.env("NODE", &node_env);
 
     if let Some(node_opts) = aug.as_ref().and_then(|a| a.node_options.as_ref()) {
         command.env("NODE_OPTIONS", node_opts);
@@ -4511,6 +4548,27 @@ fn build_script_command(
         aug.apply_restore_markers(|key, value| {
             command.env(key, value);
         });
+        nub_core::node::spawn::apply_expected_augmentation_marker(
+            "NODE",
+            Some(&node_env),
+            |key, value| {
+                command.env(key, value);
+            },
+        );
+        nub_core::node::spawn::apply_expected_augmentation_marker(
+            "NODE_COMPILE_CACHE",
+            expected_compile_cache.as_deref(),
+            |key, value| {
+                command.env(key, value);
+            },
+        );
+        nub_core::node::spawn::apply_expected_augmentation_marker(
+            "PATH",
+            Some(&path),
+            |key, value| {
+                command.env(key, value);
+            },
+        );
         aug.apply_localstorage_env(|k, v| {
             command.env(k, v);
         });
@@ -4564,6 +4622,14 @@ fn build_script_command(
     }
     for (k, v) in &npm_env {
         command.env(k, v);
+    }
+    // Compat is tree-wide, not only a choice made by this one launcher. An
+    // inherited PATH can already contain a Nub node shim from an outer logical
+    // invocation; stamping the neutral public opt-out makes any such bare
+    // `node` descendant stay vanilla. Apply it last so an explicit `--node` (or
+    // resolved `nodeCompat`) cannot be undone by a forwarded env file.
+    if compat_mode {
+        command.env("NODE_COMPAT", "1");
     }
 
     if let StreamMode::Prefixed = stream {
@@ -5487,12 +5553,40 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
     cmd.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
+    let mut launcher_owned_env_keys = vec![crate::project_config::RUNTIME_CONFIG_ENV.to_string()];
     if let Some(token) = nub_preload_token.as_deref() {
         // Watch assembles NODE_OPTIONS directly instead of using AugmentationEnv,
         // so it must stamp the same fresh-invocation restoration metadata itself.
         nub_core::node::spawn::apply_augmentation_restore_markers(token, None, |key, value| {
             cmd.env(key, value);
+            launcher_owned_env_keys.push(key.to_string());
         });
+        // Watch changes NODE_OPTIONS below. The other restoration-controlled
+        // variables retain their inherited values, but still need exact
+        // ownership markers so a watched script's later mutation wins at a
+        // fresh nested-Nub boundary.
+        for name in ["NODE", "NODE_PATH", "NODE_COMPILE_CACHE", "PATH"] {
+            let value = env::var_os(name);
+            nub_core::node::spawn::apply_expected_augmentation_marker(
+                name,
+                value.as_deref(),
+                |key, value| {
+                    cmd.env(key, value);
+                    launcher_owned_env_keys.push(key.to_string());
+                },
+            );
+        }
+        // Reserve and protect the marker now; the final NODE_OPTIONS value is
+        // assembled after the raw-env guard state below and overwrites this
+        // absent sentinel before the command starts.
+        nub_core::node::spawn::apply_expected_augmentation_marker(
+            "NODE_OPTIONS",
+            None,
+            |key, value| {
+                cmd.env(key, value);
+                launcher_owned_env_keys.push(key.to_string());
+            },
+        );
     }
     // Node's Windows watch supervisor first registers the long-spelled env-file
     // directory, then registers module paths reported by the watched child. If
@@ -5553,7 +5647,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         // suppressed it; that decides whether `NODE_ENV` is guarded here (see
         // `watch_guarded_env_file_keys`).
         let guarded_keys = watch_guarded_env_file_keys(!env_file_present && !no_env_file);
-        let ambient_keys = ambient_guarded_env_file_keys(&guarded_keys);
+        let ambient_keys = ambient_guarded_env_file_keys(&guarded_keys, &launcher_owned_env_keys);
         for key in watch_env_guard_placeholders(&guarded_keys, &ambient_keys, cfg!(windows)) {
             cmd.env(key, "");
         }
@@ -5590,7 +5684,16 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
             effective_node_options.push(' ');
             effective_node_options.push_str(&nub_core::node::spawn::node_options_token(option));
         }
-        cmd.env("NODE_OPTIONS", effective_node_options);
+        cmd.env("NODE_OPTIONS", &effective_node_options);
+        if nub_preload_token.is_some() {
+            nub_core::node::spawn::apply_expected_augmentation_marker(
+                "NODE_OPTIONS",
+                Some(std::ffi::OsStr::new(&effective_node_options)),
+                |key, value| {
+                    cmd.env(key, value);
+                },
+            );
+        }
     } else {
         // Same order, minus the env-file cleanup guard: ambient requires → nub
         // preload → project config.
@@ -5598,8 +5701,8 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         if let Some(existing) = sanitized_node_options.filter(|value| !value.is_empty()) {
             parts.push(existing);
         }
-        if let Some(token) = nub_preload_token {
-            parts.push(token);
+        if let Some(token) = nub_preload_token.as_deref() {
+            parts.push(token.to_string());
         }
         // Quoted for the same reason as the branch above.
         parts.extend(
@@ -5608,7 +5711,17 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
                 .map(|opt| nub_core::node::spawn::node_options_token(opt)),
         );
         if !parts.is_empty() {
-            cmd.env("NODE_OPTIONS", parts.join(" "));
+            let effective_node_options = parts.join(" ");
+            cmd.env("NODE_OPTIONS", &effective_node_options);
+            if nub_preload_token.is_some() {
+                nub_core::node::spawn::apply_expected_augmentation_marker(
+                    "NODE_OPTIONS",
+                    Some(std::ffi::OsStr::new(&effective_node_options)),
+                    |key, value| {
+                        cmd.env(key, value);
+                    },
+                );
+            }
         }
     }
     // NOT `cmd.status()`. Every other long-lived spawn in nub goes through a
@@ -5955,7 +6068,7 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
     let node_env = aug
         .node_shim_exe()
         .unwrap_or_else(|| std::ffi::OsString::from(node.path.as_str()));
-    cmd.env("NODE", node_env);
+    cmd.env("NODE", &node_env);
     // localStorage-neutralize signal (webstorage flag-needed band, no user
     // --localstorage-file); applied before the partial moves of aug below.
     aug.apply_restore_markers(|key, value| {
@@ -5989,7 +6102,17 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
         }
         None => std::ffi::OsString::from(bin_chain),
     };
-    cmd.env("PATH", path);
+    cmd.env("PATH", &path);
+    nub_core::node::spawn::apply_expected_augmentation_marker(
+        "NODE",
+        Some(&node_env),
+        |key, value| {
+            cmd.env(key, value);
+        },
+    );
+    nub_core::node::spawn::apply_expected_augmentation_marker("PATH", Some(&path), |key, value| {
+        cmd.env(key, value);
+    });
     Ok(())
 }
 
@@ -8969,7 +9092,10 @@ fn shim_version_line(pm: nub_core::pm::Pm, version: &str) -> String {
 /// Entry point for an `npm`/`pnpm`/`yarn`/… argv0 invocation through the shim.
 fn run_pm_shim(invoked: nub_core::pm::shim::ShimName, args: &[String]) -> Result<i32> {
     let cwd = env::current_dir()?;
-    initialize_config_snapshot(false, false)?;
+    // The shim either hands argv to another package manager or makes a
+    // pin/lockfile decision from that manager's native files. It never reads
+    // nub's resolved project config, so do not let an unrelated malformed
+    // ancestor `nub.jsonc` block a transparent `npm`/`pnpm`/`yarn` passthrough.
     match shim_plan(invoked, args, &cwd)? {
         ShimPlan::Refuse { message } => {
             eprintln!("{message}");
@@ -9789,6 +9915,62 @@ mod tests {
                 .contains(&"NODE_ENV"),
             "an ambient NODE_ENV must pass through untouched"
         );
+    }
+
+    #[test]
+    fn watch_guard_keeps_launcher_stamped_keys_denied_without_blanketing_them() {
+        let guarded = watch_guarded_env_file_keys(false);
+        let launcher_owned = [
+            nub_core::node::spawn::RUNTIME_CONFIG_ENV,
+            "__NUB_COMPAT_NODE_OPTIONS",
+            "__NUB_AUGMENTATION_TOKEN",
+            "__NUB_AUGMENTED_NODE_OPTIONS",
+            "__NUB_AUGMENTED_NODE_OPTIONS_PRESENT",
+        ]
+        .map(str::to_string);
+
+        for key in &launcher_owned {
+            assert!(
+                guarded.contains(&key.as_str()),
+                "a raw env file must remain unable to supply {key}"
+            );
+        }
+
+        let placeholders = watch_env_guard_placeholders(&guarded, &launcher_owned, false);
+        assert!(placeholders.contains(&"NODE_OPTIONS"));
+        for key in &launcher_owned {
+            assert!(
+                !placeholders.contains(&key.as_str()),
+                "a placeholder must not overwrite the launcher-stamped {key}"
+            );
+        }
+        assert!(
+            placeholders.contains(&"__NUB_COMPAT_NODE_PATH"),
+            "an unstamped internal key must remain guarded"
+        );
+        assert!(
+            placeholders.contains(&"__NUB_AUGMENTED_NODE_PATH"),
+            "the namespace must not be treated as launcher-owned wholesale"
+        );
+    }
+
+    #[test]
+    fn runtime_env_source_merge_uses_platform_key_semantics() {
+        let mut windows = HashMap::new();
+        merge_runtime_env_source_value(&mut windows, "FOO".to_string(), "first".to_string(), true);
+        merge_runtime_env_source_value(&mut windows, "foo".to_string(), "second".to_string(), true);
+        assert_eq!(windows.len(), 1, "Windows has one case-folded env key");
+        assert_eq!(windows.get("foo").map(String::as_str), Some("second"));
+        assert!(
+            !windows.contains_key("FOO"),
+            "the later source's spelling must be preserved"
+        );
+
+        let mut unix = HashMap::new();
+        merge_runtime_env_source_value(&mut unix, "FOO".to_string(), "first".to_string(), false);
+        merge_runtime_env_source_value(&mut unix, "foo".to_string(), "second".to_string(), false);
+        assert_eq!(unix.get("FOO").map(String::as_str), Some("first"));
+        assert_eq!(unix.get("foo").map(String::as_str), Some("second"));
     }
 
     #[test]

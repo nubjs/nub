@@ -30,6 +30,10 @@ const ENV_FILE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 ///   `.env` that sets it would rewrite the code nub transpiles. The watch path
 ///   in particular applies its injected `.env` values AFTER stamping this var,
 ///   so without the denylist a repo-supplied `.env` wins.
+/// - `__NUB_COMPAT_*` / `__NUB_AUGMENTATION_TOKEN` — the parent-captured ambient
+///   environment and ownership metadata used when a nested Nub invocation sheds
+///   its parent's augmentation. Script launchers apply `.env` values after these
+///   markers, so the whole wire shape must be protected together.
 ///
 /// Only values ORIGINATING from a `.env*` file are dropped: an ambiently-set value
 /// passes through untouched (shell-wins, and the child inherits nub's env). A user
@@ -41,6 +45,24 @@ const ENV_FILE_DENYLIST: &[&str] = &[
     "NODE_EXTRA_CA_CERTS",
     "NODE_REPL_EXTERNAL_MODULE",
     "__NUB_RUNTIME_CONFIG",
+    "__NUB_COMPAT_NODE_OPTIONS",
+    "__NUB_COMPAT_NODE_PATH",
+    "__NUB_COMPAT_NODE",
+    "__NUB_COMPAT_NODE_COMPILE_CACHE",
+    "__NUB_COMPAT_PATH",
+    "__NUB_COMPAT_PRESENT",
+    "__NUB_COMPAT_SHIM_DIR",
+    "__NUB_AUGMENTATION_TOKEN",
+    "__NUB_AUGMENTED_NODE_OPTIONS",
+    "__NUB_AUGMENTED_NODE_PATH",
+    "__NUB_AUGMENTED_NODE",
+    "__NUB_AUGMENTED_NODE_COMPILE_CACHE",
+    "__NUB_AUGMENTED_PATH",
+    "__NUB_AUGMENTED_NODE_OPTIONS_PRESENT",
+    "__NUB_AUGMENTED_NODE_PATH_PRESENT",
+    "__NUB_AUGMENTED_NODE_PRESENT",
+    "__NUB_AUGMENTED_NODE_COMPILE_CACHE_PRESENT",
+    "__NUB_AUGMENTED_PATH_PRESENT",
 ];
 
 /// The runtime-control keys Nub refuses to source from env files.
@@ -1129,15 +1151,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nub-deny-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join(".env"),
-            "NODE_OPTIONS=--require ./x.js\n\
-             node_tls_reject_unauthorized=0\n\
-             NODE_EXTRA_CA_CERTS=/x.pem\n\
-             NODE_REPL_EXTERNAL_MODULE=./repl.js\n\
-             APP_KEY=safe\n",
-        )
-        .unwrap();
+        let mut source = String::new();
+        for (index, denied) in denied_env_file_keys().iter().enumerate() {
+            let spelling = if index == 0 {
+                denied.to_ascii_lowercase()
+            } else {
+                (*denied).to_string()
+            };
+            source.push_str(&format!("{spelling}=blocked-{index}\n"));
+        }
+        source.push_str("APP_KEY=safe\n");
+        std::fs::write(dir.join(".env"), source).unwrap();
 
         let base = load_env_files(&dir);
         for denied in denied_env_file_keys() {
@@ -1161,18 +1185,57 @@ mod tests {
     #[test]
     fn strip_denied_env_file_keys_removes_control_vars() {
         let mut map = HashMap::new();
-        map.insert("NODE_OPTIONS".to_string(), "--require ./x.js".to_string());
-        map.insert("node_extra_ca_certs".to_string(), "/x.pem".to_string());
+        for (index, denied) in denied_env_file_keys().iter().enumerate() {
+            let spelling = if index == 0 {
+                denied.to_ascii_lowercase()
+            } else {
+                (*denied).to_string()
+            };
+            map.insert(spelling, format!("blocked-{index}"));
+        }
         map.insert("PORT".to_string(), "3000".to_string());
 
         let dropped = strip_denied_env_file_keys(&mut map);
 
-        assert_eq!(dropped, vec!["NODE_OPTIONS", "node_extra_ca_certs"]);
-        assert!(!map.contains_key("NODE_OPTIONS"));
-        assert!(!map.contains_key("node_extra_ca_certs"));
+        assert_eq!(dropped.len(), denied_env_file_keys().len());
+        for denied in denied_env_file_keys() {
+            assert!(
+                !map.keys().any(|key| key.eq_ignore_ascii_case(denied)),
+                "explicit env map retained {denied}: {map:?}"
+            );
+        }
         assert_eq!(map.get("PORT").map(String::as_str), Some("3000"));
         assert!(is_denied_env_file_key("node_options"));
         assert!(!is_denied_env_file_key("PATH"));
+    }
+
+    #[test]
+    fn fresh_invocation_wire_vars_are_denied_from_env_files() {
+        for key in [
+            "__NUB_COMPAT_NODE_OPTIONS",
+            "__NUB_COMPAT_NODE_PATH",
+            "__NUB_COMPAT_NODE",
+            "__NUB_COMPAT_NODE_COMPILE_CACHE",
+            "__NUB_COMPAT_PATH",
+            "__NUB_COMPAT_PRESENT",
+            "__NUB_COMPAT_SHIM_DIR",
+            "__NUB_AUGMENTATION_TOKEN",
+            "__NUB_AUGMENTED_NODE_OPTIONS",
+            "__NUB_AUGMENTED_NODE_PATH",
+            "__NUB_AUGMENTED_NODE",
+            "__NUB_AUGMENTED_NODE_COMPILE_CACHE",
+            "__NUB_AUGMENTED_PATH",
+            "__NUB_AUGMENTED_NODE_OPTIONS_PRESENT",
+            "__NUB_AUGMENTED_NODE_PATH_PRESENT",
+            "__NUB_AUGMENTED_NODE_PRESENT",
+            "__NUB_AUGMENTED_NODE_COMPILE_CACHE_PRESENT",
+            "__NUB_AUGMENTED_PATH_PRESENT",
+        ] {
+            assert!(
+                is_denied_env_file_key(key),
+                "{key} is parent-owned invocation metadata, not project env"
+            );
+        }
     }
 
     /// `expand_env_map` (used by the `--env-file` flag path) must apply the same

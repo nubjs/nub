@@ -150,12 +150,13 @@ fn parse_node_version(s: &str) -> Option<(u32, u32, u32)> {
     Some((maj, min, pat))
 }
 
-/// The Node version `nub` resolves in this environment (the first `node` on PATH,
-/// which is what the suite's PATH-prepend matrix selects). Resolved once.
-fn target_node_version() -> (u32, u32, u32) {
+/// The exact Node binary `nub` resolves in this environment. Direct-Node probes
+/// use the absolute path so an outer Nub invocation's temporary PATH shim cannot
+/// silently turn a plain-Node fixture into another augmented Nub run.
+fn target_node_path() -> &'static Path {
     use std::sync::OnceLock;
-    static V: OnceLock<(u32, u32, u32)> = OnceLock::new();
-    *V.get_or_init(|| {
+    static NODE: OnceLock<PathBuf> = OnceLock::new();
+    NODE.get_or_init(|| {
         // Prefer the exact binary nub would pick (`nub node which`); fall back to
         // PATH `node`. Either resolves the same version the spawned-nub tests use.
         // (`nub node which` prints the path to stdout, the explainer to stderr —
@@ -165,7 +166,7 @@ fn target_node_version() -> (u32, u32, u32) {
         // crate dir the walk-up hits the repo-root engines.node (>=22.15.0) and
         // can report a store/nvm Node instead of the PATH-matrix Node the
         // fixture tests actually spawn.
-        let node = Command::new(nub_binary())
+        Command::new(nub_binary())
             .args(["node", "which"])
             .current_dir(fixtures_dir())
             .output()
@@ -173,8 +174,18 @@ fn target_node_version() -> (u32, u32, u32) {
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "node".to_string());
-        let out = Command::new(&node)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("node"))
+    })
+}
+
+/// The Node version `nub` resolves in this environment (the first `node` on PATH,
+/// which is what the suite's PATH-prepend matrix selects). Resolved once.
+fn target_node_version() -> (u32, u32, u32) {
+    use std::sync::OnceLock;
+    static V: OnceLock<(u32, u32, u32)> = OnceLock::new();
+    *V.get_or_init(|| {
+        let out = Command::new(target_node_path())
             .arg("--version")
             .output()
             .expect("`node --version` to resolve the target Node version");
@@ -1313,7 +1324,7 @@ console.log(JSON.stringify({ checked: planted.length + 1, clobbered }));
     )
     .unwrap();
 
-    let output = Command::new("node")
+    let output = Command::new(target_node_path())
         .arg(&script)
         .arg(&polyfills)
         .current_dir(&work)
@@ -4268,7 +4279,7 @@ fn watch_env_guard_fails_closed_on_malformed_state() {
         process.stdout.write(JSON.stringify({ code: error.code, visible, markerPresent: Object.hasOwn(process.env, '__NUB_WATCH_ENV_GUARD') }));
       }
     "#;
-    let mut cmd = Command::new("node");
+    let mut cmd = Command::new(target_node_path());
     cmd.args(["-e", script]).arg(guard);
     remove_ambient_watch_control_vars(&mut cmd);
     cmd.env("__NUB_WATCH_ENV_GUARD", "{not-json")
@@ -4303,7 +4314,7 @@ fn watch_env_guard_missing_main_state_clears_denied_and_aborts() {
         process.stdout.write(JSON.stringify({ code: error.code, visible, markerPresent: Object.hasOwn(process.env, '__NUB_WATCH_ENV_GUARD') }));
       }
     "#;
-    let mut cmd = Command::new("node");
+    let mut cmd = Command::new(target_node_path());
     cmd.args(["-e", script]).arg(guard);
     remove_ambient_watch_control_vars(&mut cmd);
     cmd.env("NODE_OPTIONS", "--no-warnings")
@@ -4349,7 +4360,7 @@ fn watch_env_guard_non_main_reentry_preserves_sanitized_ambient() {
       worker.once('message', (value) => process.stdout.write(JSON.stringify(value)));
       worker.once('error', (error) => { throw error; });
     "#;
-    let mut cmd = Command::new("node");
+    let mut cmd = Command::new(target_node_path());
     cmd.args(["-e", script]).arg(&worker).arg(&guard);
     remove_ambient_watch_control_vars(&mut cmd);
     cmd.env("NODE_OPTIONS", "--no-warnings")
@@ -4436,7 +4447,7 @@ fn watch_env_guard_compat_loader_worker_preserves_ambient() {
         "ambientKeys": nub_core::workspace::env::denied_env_file_keys(),
         "nodeOptions": ambient_node_options,
     });
-    let mut cmd = Command::new("node");
+    let mut cmd = Command::new(target_node_path());
     cmd.args(["--import", "./bootstrap.mjs", "entry.cjs"])
         .current_dir(&dir);
     remove_ambient_watch_control_vars(&mut cmd);

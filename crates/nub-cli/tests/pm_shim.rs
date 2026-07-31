@@ -197,16 +197,15 @@ fn argv0_pnpm_dispatches_to_the_shim_and_falls_through_when_unpinned() {
 }
 
 #[test]
-fn argv0_pm_shim_initializes_one_project_config_snapshot() {
-    let work = tmp("config-snapshot");
+fn argv0_pm_shim_passthrough_ignores_malformed_nub_config() {
+    let work = tmp("malformed-config");
     let proj = work.join("proj");
     std::fs::create_dir_all(&proj).unwrap();
-    std::fs::write(proj.join("nub.jsonc"), r#"{ "conditions": [] }"#).unwrap();
+    std::fs::write(proj.join("nub.jsonc"), "{ malformed").unwrap();
     let sys = work.join("sys");
     std::fs::create_dir_all(&sys).unwrap();
     let fake = fake_pm(&sys, "pnpm");
     let link = shim_link(&work, "pnpm");
-    let log = work.join("snapshot.log");
 
     let (stdout, stderr, code) = run(
         &link,
@@ -215,41 +214,13 @@ fn argv0_pm_shim_initializes_one_project_config_snapshot() {
         &[
             ("PATH", sys.to_str().unwrap()),
             ("HOME", work.to_str().unwrap()),
-            ("__NUB_TEST_CONFIG_SNAPSHOT_LOG", log.to_str().unwrap()),
         ],
     );
     assert_eq!(
         code, 0,
-        "a project config must not block PM-shim exec; stderr:\n{stderr}"
+        "a malformed nub.jsonc must not block transparent PM-shim exec; stderr:\n{stderr}"
     );
     assert_eq!(stdout, format!("FAKE:{}:--version\n", fake.display()));
-
-    let lines: Vec<_> = std::fs::read_to_string(&log)
-        .expect("PM-shim route must initialize the config snapshot")
-        .lines()
-        .map(str::to_owned)
-        .collect();
-    assert_eq!(
-        lines.len(),
-        1,
-        "the successful argv0 PM route must initialize exactly one snapshot from its resolved cwd: {lines:?}"
-    );
-    let logged = lines[0]
-        .strip_prefix("cwd=")
-        .and_then(|rest| rest.strip_suffix(" project=loaded"))
-        .unwrap_or_else(|| panic!("unexpected snapshot log line: {}", lines[0]));
-    // Compare resolved directories, not path spellings. Windows hands the child
-    // whatever form the environment carried — an 8.3 short name under a
-    // RUNNER~1 home — while `canonicalize` returns the extended-length `\\?\`
-    // form. Both name the same directory; the contract under test is WHICH
-    // directory the snapshot resolved from.
-    assert_eq!(
-        std::path::Path::new(logged)
-            .canonicalize()
-            .expect("logged cwd exists"),
-        proj.canonicalize().expect("target exists"),
-        "the successful argv0 PM route must initialize exactly one snapshot from its resolved cwd"
-    );
 }
 
 #[test]
