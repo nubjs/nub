@@ -34,7 +34,7 @@
 //! successfully" mean the output is at least loadable.
 
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -246,6 +246,7 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
         collected: Arc::clone(&collected),
         files: Arc::clone(&files_plugin),
         workers: Mutex::new(BTreeSet::new()),
+        modules: Mutex::new(BTreeMap::new()),
     });
     // Sharing `collected` is what makes an addon reached twice ship once, and
     // gives `.node` the same content-hashed flat naming as every other asset.
@@ -311,7 +312,15 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
     let sites = scan.take();
     reject_unresolved(&sites, &output.warnings, opts.allow_dynamic_import)?;
     let dynamic_import_sites = if opts.allow_dynamic_import {
-        sites.iter().filter(|s| s.kind == SiteKind::Dynamic).count()
+        // Both `import()` shapes are excused by the flag and both are served by
+        // the same runtime hook, so both are counted — omitting the variable-held
+        // one would ship an artifact whose hook the build decided it did not need.
+        let deferred: Vec<&DynamicSite> = sites
+            .iter()
+            .filter(|s| s.kind != SiteKind::Indirect)
+            .collect();
+        warn_deferred_imports(&deferred);
+        deferred.len()
     } else {
         0
     };
@@ -400,10 +409,12 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
 
     reject_nested_chunks(&files, &assets)?;
 
-    // Read AFTER `retain_referenced`, so the summary names what the payload
-    // actually carries rather than every addon the load hook happened to see.
+    // Read AFTER `retain_referenced`, so both reports name what the payload
+    // actually carries rather than everything the hooks happened to see.
+    let kept: BTreeSet<&str> = assets.iter().map(|a| a.name.as_str()).collect();
+    warn_module_data_assets(&new_urls.module_assets(&kept));
     let native_addons = native_plugin
-        .map(|n| n.survivors(&assets.iter().map(|a| a.name.as_str()).collect()))
+        .map(|n| n.survivors(&kept))
         .unwrap_or_default();
 
     Ok(BundleResult {
@@ -836,6 +847,9 @@ struct NewUrlAssets {
     /// chunk `is_entry`, so without this a worker would be mistaken for the
     /// program's own entry and the launcher would boot the wrong module.
     workers: Mutex<BTreeSet<String>>,
+    /// Payload name → source path, for each embedded asset that is itself a
+    /// JavaScript or TypeScript module. See [`warn_module_data_assets`].
+    modules: Mutex<BTreeMap<String, PathBuf>>,
 }
 
 /// One `new URL(<literal>, import.meta.url)` this build can act on.
@@ -907,6 +921,80 @@ impl NewUrlAssets {
     fn worker_names(&self) -> BTreeSet<String> {
         self.workers.lock().map(|g| g.clone()).unwrap_or_default()
     }
+
+    /// Record a data asset that is itself a module, for the post-bundle report.
+    fn note_if_module(&self, name: &str, source: &Path) -> Result<()> {
+        if !is_module_extension(source) {
+            return Ok(());
+        }
+        self.modules
+            .lock()
+            .map_err(|_| anyhow!("the module-asset collector was poisoned by an earlier panic"))?
+            .insert(name.to_string(), source.to_path_buf());
+        Ok(())
+    }
+
+    /// The module-shaped data assets that reached the payload, named as the user
+    /// wrote them.
+    ///
+    /// Filtered against `kept` for the same reason `native::NativeAddons`
+    /// filters its own: bytes are collected while the graph is being built, and
+    /// [`retain_referenced`] drops whatever no chunk ends up naming. Reporting the
+    /// collection-time set would name a file the binary does not carry.
+    fn module_assets(&self, kept: &BTreeSet<&str>) -> Vec<PathBuf> {
+        self.modules
+            .lock()
+            .map(|m| {
+                m.iter()
+                    .filter(|(payload, _)| kept.contains(payload.as_str()))
+                    .map(|(_, source)| source.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// Extensions Node and the bundler both read as JavaScript source.
+fn is_module_extension(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        matches!(
+            e.to_ascii_lowercase().as_str(),
+            "js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx"
+        )
+    })
+}
+
+/// Say so when a JavaScript or TypeScript file ships as a DATA asset.
+///
+/// A `new URL("./x.ts", import.meta.url)` that is not a `new Worker` argument is
+/// embedded verbatim, so the artifact carries the file exactly as authored:
+/// untranspiled if it was TypeScript, and with every bare import still naming a
+/// package the extracted app dir has no `node_modules` for. Anything that then
+/// EXECUTES it fails, and until this note nothing about the build said so.
+///
+/// A WARNING RATHER THAN A REFUSAL, deliberately, and this is the one place in
+/// this file that resolves that way. The build cannot tell the two uses apart:
+/// reading a script's TEXT — a codegen template, source served to a browser, a
+/// snippet handed to `new Worker(src, { eval: true })` — is a correct and
+/// currently-working use of the identical expression. Unlike the computed-import
+/// refusal there is no flag that means "I meant it", so a refusal would be a wall
+/// with nothing on the other side of it, and the only way past would be to stop
+/// using `new URL` — which is the idiomatic spelling this compiler went out of
+/// its way to support. The executed case that IS decidable, `new Worker(new
+/// URL(…))`, is already emitted as a real chunk, so what reaches here skews to
+/// inert data. The defect is the ABSENCE of a build-time signal; a note is the
+/// whole of that.
+fn warn_module_data_assets(sources: &[PathBuf]) {
+    for source in sources {
+        eprintln!(
+            "note: {} is embedded as a data asset, not as code.\n\
+             \x20\x20It ships exactly as written — never transpiled — and its own imports would\n\
+             \x20\x20resolve against the extracted app dir, which has no node_modules. Reading\n\
+             \x20\x20its text works; executing it does not. A worker entry belongs in\n\
+             \x20\x20new Worker(new URL(…)), which is bundled as a real chunk instead.",
+            source.display()
+        );
+    }
 }
 
 impl Plugin for NewUrlAssets {
@@ -950,7 +1038,9 @@ impl Plugin for NewUrlAssets {
                     let bytes = std::fs::read(&edit.source).map_err(|e| {
                         anyhow!("reading {} for new URL(): {e}", edit.source.display())
                     })?;
-                    self.collected.add(&edit.source, bytes)?
+                    let name = self.collected.add(&edit.source, bytes)?;
+                    self.note_if_module(&name, &edit.source)?;
+                    name
                 };
                 named.push((edit, name));
             }
@@ -1232,8 +1322,18 @@ fn has_url_scheme(spec: &str) -> bool {
 
 /// A template literal with no interpolation is as static as a string literal —
 /// Rolldown resolves both, so both are analyzable here.
+///
+/// TYPE WRAPPERS ARE ERASED FIRST, because the TypeScript transform erases them
+/// too: `import("./x" as string)` reaches the resolver as `import("./x")`, so
+/// reading the specifier through the wrapper is what keeps this analysis agreeing
+/// with what the bundler actually follows. Reading it as written reported a
+/// literal as computed and then told the author to make it a static string it had
+/// already written — advice that cannot be acted on, which is what sends people
+/// to hide the site from the scanner instead. `get_inner_expression` unwraps
+/// exactly the set oxc's own transform drops: `as`, `satisfies`, `!`, `<T>`,
+/// instantiation, and parentheses.
 fn static_specifier(expr: &Expression<'_>) -> Option<String> {
-    match expr {
+    match expr.get_inner_expression() {
         Expression::StringLiteral(s) => Some(s.value.to_string()),
         Expression::TemplateLiteral(t) if t.expressions.is_empty() => t
             .quasis
@@ -1430,6 +1530,12 @@ fn split_once_eq(s: &str) -> Option<(String, String)> {
 enum SiteKind {
     /// `import(expr)` — no statically analyzable specifier.
     Dynamic,
+    /// `import(name)` where `name` is a module-scope `const` whose value this
+    /// pass can read. Static to its author and to nobody else: the bundler
+    /// follows the ARGUMENT, never the binding, so the module is still left out
+    /// of the artifact — but "make the specifier a static string" is advice this
+    /// author has already taken, so the site needs its own fix line.
+    Variable,
     /// `require("./x")` whose `require` is a LOCAL binding (a UMD factory
     /// parameter, or `createRequire`). The specifier is static, but the call is
     /// an ordinary function call to the bundler, so it is left verbatim and
@@ -1445,6 +1551,10 @@ struct DynamicSite {
     line: usize,
     column: usize,
     snippet: String,
+    /// Every string the specifier can evaluate to, when that set is knowable.
+    /// Empty for a genuinely computed one — which is the difference between
+    /// telling the author what to inline and having nothing to say.
+    resolves_to: Vec<String>,
 }
 
 /// Collects unresolvable `import()` / `require()` sites while the graph loads.
@@ -1514,12 +1624,31 @@ fn scan_unresolvable(id: &str, source: &str) -> Vec<DynamicSite> {
         /// A module-level `var/let/const require = …` (the `createRequire` shape)
         /// shadows for the whole file.
         module_binds_require: bool,
-        found: Vec<(SiteKind, Span)>,
+        /// Module-scope `const` specifiers this pass could read. See
+        /// [`literal_consts`].
+        consts: BTreeMap<String, Vec<String>>,
+        found: Vec<(SiteKind, Span, Vec<String>)>,
     }
 
     impl Visitor {
         fn require_is_local(&self) -> bool {
             self.module_binds_require || self.fn_stack.iter().any(|shadows| *shadows)
+        }
+
+        /// What can be said about an `import()` whose specifier is not a literal.
+        ///
+        /// Naming a readable binding is the whole point; when the specifier is
+        /// anything else this deliberately says nothing rather than guessing,
+        /// because a wrong "it resolves to X" sends the author to inline a value
+        /// their program never uses.
+        fn classify_import(&self, source: &Expression<'_>) -> (SiteKind, Vec<String>) {
+            let Expression::Identifier(name) = source.get_inner_expression() else {
+                return (SiteKind::Dynamic, Vec::new());
+            };
+            match self.consts.get(name.name.as_str()) {
+                Some(values) => (SiteKind::Variable, values.clone()),
+                None => (SiteKind::Dynamic, Vec::new()),
+            }
         }
 
         /// `Some` when this `require(...)` is a live, unconditional dependency
@@ -1574,14 +1703,15 @@ fn scan_unresolvable(id: &str, source: &str) -> Vec<DynamicSite> {
             if let Expression::ImportExpression(imp) = expr
                 && static_specifier(&imp.source).is_none()
             {
-                self.found.push((SiteKind::Dynamic, imp.span));
+                let (kind, resolves_to) = self.classify_import(&imp.source);
+                self.found.push((kind, imp.span, resolves_to));
             }
             walk::walk_expression(self, expr);
         }
 
         fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
             if let Some(kind) = self.classify_require(call) {
-                self.found.push((kind, call.span));
+                self.found.push((kind, call.span, Vec::new()));
             }
             walk::walk_call_expression(self, call);
         }
@@ -1593,7 +1723,13 @@ fn scan_unresolvable(id: &str, source: &str) -> Vec<DynamicSite> {
         )
     }
 
-    let source_type = SourceType::from_path(id).unwrap_or_else(|_| SourceType::mjs());
+    // A Rolldown module id can carry a `?query`, which is why every other path
+    // read in this file cleans it first. Taking the source type off the raw id
+    // falls back to `mjs`, and a TypeScript module parsed as JavaScript loses
+    // every site in it — so the unresolved import this gate exists to refuse
+    // would compile clean, which is the failure mode the gate is for.
+    let module = clean_url(id);
+    let source_type = SourceType::from_path(module).unwrap_or_else(|_| SourceType::mjs());
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, source_type).parse();
     if parsed.panicked {
@@ -1607,6 +1743,14 @@ fn scan_unresolvable(id: &str, source: &str) -> Vec<DynamicSite> {
                 matches!(&decl.id, BindingPattern::BindingIdentifier(id) if id.name == "require")
             }))
         }),
+        // A second full walk, so it is skipped for the modules that cannot need
+        // it — the same cheap reject `cjs_path_globals_edit` opens with, and most
+        // of a dependency graph names `import(` nowhere.
+        consts: if source.contains("import(") {
+            literal_consts(&parsed.program)
+        } else {
+            BTreeMap::new()
+        },
         found: Vec::new(),
     };
     visitor.visit_program(&parsed.program);
@@ -1614,17 +1758,105 @@ fn scan_unresolvable(id: &str, source: &str) -> Vec<DynamicSite> {
     visitor
         .found
         .into_iter()
-        .map(|(kind, span)| {
+        .map(|(kind, span, resolves_to)| {
             let (line, column) = line_col(source, span.start as usize);
             DynamicSite {
                 kind,
-                module: id.to_string(),
+                module: module.to_string(),
                 line,
                 column,
                 snippet: snippet(source, span.start as usize, span.end as usize),
+                resolves_to,
             }
         })
         .collect()
+}
+
+/// Module-scope `const` bindings whose specifier value this pass can read.
+///
+/// The narrowest analysis that recognizes the shape which keeps reaching the
+/// unresolved-import diagnostic: a specifier named a line or two above the
+/// `import()` that uses it, most often a platform package picked out of a short
+/// list. `const` is the whole trick — the language guarantees no reassignment, so
+/// there is no data flow to get wrong — and a ternary between literals is the one
+/// composite worth reading through, because that is how a platform pick is
+/// written. A concatenation, a call, a `let`: unresolved, deliberately. This pass
+/// only ever adds a sentence to a diagnostic, and it never converts a refusal
+/// into a pass, so the cost of saying nothing is small and the cost of saying
+/// something wrong is an author inlining a value their program never takes.
+///
+/// A name bound more than once ANYWHERE is dropped: the `import(name)` may be
+/// reaching an inner shadow, and telling which needs the scope analysis this pass
+/// exists to avoid.
+fn literal_consts(program: &Program<'_>) -> BTreeMap<String, Vec<String>> {
+    use oxc_ast::ast::{BindingIdentifier, BindingPattern, Statement, VariableDeclarationKind};
+    use oxc_ast_visit::Visit;
+
+    #[derive(Default)]
+    struct Bindings(BTreeMap<String, usize>);
+
+    impl<'a> Visit<'a> for Bindings {
+        fn visit_binding_identifier(&mut self, it: &BindingIdentifier<'a>) {
+            *self.0.entry(it.name.to_string()).or_default() += 1;
+        }
+    }
+
+    let mut bindings = Bindings::default();
+    bindings.visit_program(program);
+
+    let mut out = BTreeMap::new();
+    for stmt in &program.body {
+        let Statement::VariableDeclaration(decl) = stmt else {
+            continue;
+        };
+        if decl.kind != VariableDeclarationKind::Const {
+            continue;
+        }
+        for declarator in &decl.declarations {
+            let BindingPattern::BindingIdentifier(id) = &declarator.id else {
+                continue;
+            };
+            if bindings.0.get(id.name.as_str()) != Some(&1) {
+                continue;
+            }
+            if let Some(init) = &declarator.init
+                && let Some(values) = specifier_candidates(init, 8)
+            {
+                out.insert(id.name.to_string(), values);
+            }
+        }
+    }
+    out
+}
+
+/// Every string an initializer can evaluate to, or `None` when that set is not
+/// knowable.
+///
+/// `depth` bounds the ternary recursion: a minified chain right-nests
+/// arbitrarily far, and this pass must never be the thing that overflows the
+/// stack on someone's dependency.
+fn specifier_candidates(expr: &Expression<'_>, depth: u32) -> Option<Vec<String>> {
+    if let Some(literal) = static_specifier(expr) {
+        return Some(vec![literal]);
+    }
+    if depth == 0 {
+        return None;
+    }
+    let Expression::ConditionalExpression(cond) = expr.get_inner_expression() else {
+        return None;
+    };
+    let mut values = specifier_candidates(&cond.consequent, depth - 1)?;
+    values.extend(specifier_candidates(&cond.alternate, depth - 1)?);
+    Some(values)
+}
+
+/// Specifier values as a reader would write them, for a diagnostic.
+fn quoted_list(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|v| format!("{v:?}"))
+        .collect::<Vec<_>>()
+        .join(" or ")
 }
 
 fn line_col(source: &str, offset: usize) -> (usize, usize) {
@@ -1701,10 +1933,12 @@ fn render_diagnostics(err: &rolldown_error::BatchedBuildDiagnostic) -> String {
 /// `import(expr)` / `require(…)` sites the scan found, plus Rolldown's own
 /// UNRESOLVED_IMPORT warnings for named specifiers that resolved to nothing.
 ///
-/// `allow_dynamic` excuses the `import(expr)` sites ONLY. An indirect `require`
-/// is a different defect with a different fix (the resolver picked a UMD build),
-/// and an UNRESOLVED_IMPORT is a static specifier that resolved to nothing —
-/// neither is served by a runtime resolve hook, so neither is opted out of.
+/// `allow_dynamic` excuses the `import()` sites ONLY — both the computed and the
+/// variable-held shape, since the runtime hook serves them identically. An
+/// indirect `require` is a different defect with a different fix (the resolver
+/// picked a UMD build), and an UNRESOLVED_IMPORT is a static specifier that
+/// resolved to nothing — neither is served by a runtime resolve hook, so neither
+/// is opted out of.
 fn reject_unresolved(
     sites: &[DynamicSite],
     warnings: &[BuildDiagnostic],
@@ -1713,16 +1947,25 @@ fn reject_unresolved(
     let mut lines = Vec::new();
     let mut any_indirect = false;
     let mut any_dynamic = false;
+    let mut any_variable = false;
     for site in sites {
-        if site.kind == SiteKind::Dynamic {
-            if allow_dynamic {
-                continue;
-            }
-            any_dynamic = true;
+        match site.kind {
+            SiteKind::Dynamic if allow_dynamic => continue,
+            SiteKind::Variable if allow_dynamic => continue,
+            SiteKind::Dynamic => any_dynamic = true,
+            SiteKind::Variable => any_variable = true,
+            SiteKind::Indirect => any_indirect = true,
         }
-        any_indirect |= site.kind == SiteKind::Indirect;
+        let resolved = if site.resolves_to.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\x20\x20\x20\x20resolves to {}",
+                quoted_list(&site.resolves_to)
+            )
+        };
         lines.push(format!(
-            "\x20\x20{}:{}:{}\n\x20\x20\x20\x20{}",
+            "\x20\x20{}:{}:{}\n\x20\x20\x20\x20{}{resolved}",
             site.module, site.line, site.column, site.snippet
         ));
     }
@@ -1751,24 +1994,70 @@ fn reject_unresolved(
     // an indirect require or an UNRESOLVED_IMPORT would send the user to a
     // switch that changes nothing about their failure.
     let dynamic_hint = if any_dynamic {
-        "\n\x20\x20A specifier your program computes at run time — a plugin path, a config\n\
-         \x20\x20module — cannot be made static. Pass --allow-dynamic-import to keep it, and\n\
-         \x20\x20the binary will resolve it from the directory it is started in. What it\n\
-         \x20\x20loads then depends on the machine you ship to."
+        "\n\x20\x20Make the specifier a static string so the bundler can follow it. A specifier\n\
+         \x20\x20your program computes at run time — a plugin path, a config module — cannot\n\
+         \x20\x20be made static. Pass --allow-dynamic-import to keep it, and the binary will\n\
+         \x20\x20resolve it from the directory it is started in. What it loads then depends\n\
+         \x20\x20on the machine you ship to."
+    } else {
+        ""
+    };
+    // Separate from the computed-specifier hint because the fix is different and
+    // the generic one is actively wrong here: this author DID write a static
+    // string. The bundler follows the argument, not the binding, so what is left
+    // to do is move the literal into the call.
+    let variable_hint = if any_variable {
+        "\n\x20\x20A specifier held in a variable is static to you and not to the bundler, which\n\
+         \x20\x20follows the argument and never the binding. Write the literal inside the\n\
+         \x20\x20import() — one call per branch whose value differs — and each one is bundled.\n\
+         \x20\x20Pass --allow-dynamic-import to keep it as written instead, and the binary will\n\
+         \x20\x20resolve it from the directory it is started in."
     } else {
         ""
     };
     bail!(
         "{} import{} could not be resolved at build time:\n{}\n\n\
          \x20\x20A compiled binary carries no node_modules, so an unresolved import fails at\n\
-         \x20\x20runtime on the machine you ship to. Make the specifier a static string so\n\
-         \x20\x20the bundler can follow it.{}{}",
+         \x20\x20runtime on the machine you ship to.{}{}{}",
         lines.len(),
         if lines.len() == 1 { "" } else { "s" },
         lines.join("\n"),
         dynamic_hint,
+        variable_hint,
         indirect_hint
     );
+}
+
+/// Name every `import()` that `--allow-dynamic-import` let through.
+///
+/// The flag is the sanctioned way to ship a genuinely computed specifier, and it
+/// is also the one place a RESOLVABLE import can leave the graph with nothing
+/// failing: the site survives into the artifact and is resolved from the launch
+/// directory, which for a self-contained binary usually has no `node_modules` at
+/// all. That lands as `Cannot find package …` on the deploy machine with nothing
+/// at build time to attribute it to. Refusing is not available — the flag exists
+/// precisely to allow this, and the maintainer confirmed it is needed in the wild
+/// — so the build says which sites it deferred, and what each resolves to when
+/// that is knowable, which is the difference between an author seeing their
+/// platform package go unbundled and finding out on the deploy machine.
+fn warn_deferred_imports(sites: &[&DynamicSite]) {
+    // Enough to see the shape without burying the rest of the compile output; a
+    // large graph can carry a lot of these and the count line follows anyway.
+    const MAX: usize = 10;
+    for site in sites.iter().take(MAX) {
+        let resolved = if site.resolves_to.is_empty() {
+            String::new()
+        } else {
+            format!(" — resolves to {}", quoted_list(&site.resolves_to))
+        };
+        eprintln!(
+            "note: {}:{}:{} {} is resolved where the binary runs, not at build time{resolved}",
+            site.module, site.line, site.column, site.snippet
+        );
+    }
+    if let Some(rest) = sites.len().checked_sub(MAX).filter(|n| *n > 0) {
+        eprintln!("note: … and {rest} more deferred import site(s)");
+    }
 }
 
 // ---- emitted-chunk validity ---------------------------------------------------
@@ -2667,6 +2956,7 @@ const pkg = require("./package.json");
             line: 12,
             column: 20,
             snippet: "import(pluginPath)".into(),
+            resolves_to: Vec::new(),
         }
     }
 
@@ -2704,6 +2994,7 @@ const pkg = require("./package.json");
             line: 4,
             column: 15,
             snippet: r#"require("./impl/format")"#.into(),
+            resolves_to: Vec::new(),
         };
         let err = reject_unresolved(&[dynamic_site(), indirect], &[], true)
             .expect_err("an indirect require must still fail");
