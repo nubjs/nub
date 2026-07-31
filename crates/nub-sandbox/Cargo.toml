@@ -240,6 +240,14 @@ windows-sandbox-probe = []
 # drop-only and carries no path channel, so it can never widen the allowlist. Rationale:
 # src/arm.rs module doc.
 build-jail-project-grant-arm = []
+# TEST-ONLY, and a CONTROL rather than a capability. Drops the Windows `APPDATA` redirect so
+# the corpus can measure that change against an otherwise byte-identical binary — the two
+# arms then differ by this feature and nothing else, which a comparison across 23 commits of
+# unrelated tree movement is not. Drop-only and carries no path channel, exactly like the arm
+# above, so its only reachable effect is strictly LESS access than the default build. The
+# featured build announces itself on stderr so a run asserts the arm engaged from its own
+# output instead of trusting the build flags. Rationale: compiler/preset.rs, at the redirect.
+build-jail-appdata-arm = []
 # DEVELOPMENT-ONLY. Lets a run load the build-jail catalog from a path at startup instead of
 # the copy build.rs bakes in, so a corpus iteration is an edit and a re-run rather than a full
 # Rust rebuild. Compile-time and off by default for the same reason as the arm above: an env

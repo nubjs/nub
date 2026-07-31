@@ -780,11 +780,22 @@ pub fn compile_build_jail(
         // redirect onto a path that does not exist trades one failure for another.
         let _ = std::fs::create_dir_all(&appdata);
         let appdata_value = appdata.to_string_lossy().into_owned();
-        for (key, value) in [
-            ("HOME", &home_value),
-            ("USERPROFILE", &home_value),
-            ("APPDATA", &appdata_value),
-        ] {
+        // THE CONTROL ARM. `build-jail-appdata-arm` drops the APPDATA redirect so the
+        // corpus can measure it against an otherwise identical binary. The banner is not
+        // decoration: an arm that silently did nothing is how a prior run measured jail-on
+        // against jail-on, so the harness asserts engagement from the run's own output
+        // rather than from the build flags it believes it used.
+        let mut keys: Vec<(&str, &String)> =
+            vec![("HOME", &home_value), ("USERPROFILE", &home_value)];
+        if cfg!(feature = "build-jail-appdata-arm") {
+            eprintln!(
+                "warning: build-jail APPDATA redirect DROPPED (build-jail-appdata-arm) \
+                 — experimental control arm, not a shipped configuration"
+            );
+        } else {
+            keys.push(("APPDATA", &appdata_value));
+        }
+        for (key, value) in keys {
             // Matched the way `insert_env` replaces (case-insensitively on Windows, where
             // the ambient may spell it `Userprofile`), so presence and replacement agree.
             // Presence-gating is also what keeps this Windows-only without a `cfg`: a POSIX

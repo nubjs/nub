@@ -1,0 +1,16 @@
+# The fourteen rows whose PROD failure names %APPDATA%\npm-cache. The control shard for
+# the APPDATA redirect: run against the default binary and against one built with
+# build-jail-appdata-arm, the arms differ by that feature and nothing else.
+registry-js	1.16.1	native-build-prebuilt	
+keytar	7.9.0	native-build-prebuilt	
+robotjs	0.8.0	native-build-prebuilt	
+kerberos	7.0.0	native-build-prebuilt	
+msnodesqlv8	5.2.3	native-build-prebuilt	
+realm	20.2.0	native-build-prebuilt	
+canvas	3.2.3	native-build-prebuilt	
+@matteodisabatino/gc_info	2.1.0	native-build-prebuilt	
+libxmljs2	0.37.0	native-build-prebuilt	
+mongodb-client-encryption	7.2.0	native-build-prebuilt	
+sqlite3	6.0.1	native-build-prebuilt	
+gl	8.1.6	native-build-prebuilt	
+iltorb	2.4.5	native-build-prebuilt	

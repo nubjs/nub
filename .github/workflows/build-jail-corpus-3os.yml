@@ -62,6 +62,104 @@ jobs:
           path: stage
           retention-days: 7
 
+  # THE APPDATA CONTROL. Two binaries from ONE commit, differing by one cargo feature,
+  # so the comparison has exactly one variable. Measuring the redirect against the
+  # previous corpus run instead would put ~23 commits of unrelated tree movement inside
+  # the control, which is the failure this effort has repeated most.
+  build-control:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      RUSTFLAGS: '-C link-arg=/STACK:8388608'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: corpus-3os-windows-latest
+      - name: Build with the APPDATA redirect dropped
+        run: cargo build -p nub-cli --profile fast --features nub-cli/build-jail-appdata-arm
+      - name: Stage
+        shell: bash
+        run: mkdir -p stage-control && cp target/fast/nub.exe stage-control/nub.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nub-windows-appdata-arm
+          path: stage-control
+          retention-days: 7
+
+  appdata-control:
+    needs: [build, build-control]
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          name: nub-windows-latest
+          path: stage
+      - uses: actions/download-artifact@v4
+        with:
+          name: nub-windows-appdata-arm
+          path: stage-control
+      - name: 'Three cells, one variable'
+        working-directory: tests/build-jail-corpus
+        shell: bash
+        env:
+          NUB_EXPECT_GIT_SHA: ${{ github.sha }}
+          PER_PKG: '1'
+        run: |
+          set -u
+          export STUDY_PATH="/c/Windows/system32:/c/Windows:/c/Windows/System32/Wbem"
+          chmod +x run-shard.sh
+          DEF="$PWD/../../stage/nub.exe"; CTL="$PWD/../../stage-control/nub.exe"
+          echo "default_sha256=$(sha256sum "$DEF" | awk '{print $1}')" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "control_sha256=$(sha256sum "$CTL" | awk '{print $1}')" | tee -a "$GITHUB_STEP_SUMMARY"
+          FAILED=""
+          NUB_BIN="$DEF" OUTROOT="${{ runner.temp }}/ad-base" \
+            ./run-shard.sh winappdata shard-winappdata.tsv A0 || FAILED="$FAILED A0"
+          NUB_BIN="$DEF" OUTROOT="${{ runner.temp }}/ad-on" \
+            ./run-shard.sh winappdata shard-winappdata.tsv PROD || FAILED="$FAILED PROD-redirect-on"
+          NUB_BIN="$CTL" OUTROOT="${{ runner.temp }}/ad-off" \
+            ./run-shard.sh winappdata shard-winappdata.tsv PROD || FAILED="$FAILED PROD-redirect-off"
+          echo "INADMISSIBLE:${FAILED:-none}" | tee -a "$GITHUB_STEP_SUMMARY"
+          # ANTI-HOLLOW: the control arm must ANNOUNCE itself, and the default arm must
+          # not. A featured build whose feature silently did nothing would make both
+          # cells the same experiment — which is how a prior run measured jail-on
+          # against jail-on and reported an effect.
+          ON=$(grep -c 'APPDATA redirect DROPPED' "${{ runner.temp }}/ad-on/winappdata-PROD/run.log" || true)
+          OFF=$(grep -c 'APPDATA redirect DROPPED' "${{ runner.temp }}/ad-off/winappdata-PROD/run.log" || true)
+          echo "arm banners — redirect-on cell: ${ON:-0} (must be 0), redirect-off cell: ${OFF:-0} (must be >0)" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          { echo '| cell | npm-cache EPERM lines |'; echo '| --- | --- |'
+            for c in ad-base:A0 ad-on:PROD ad-off:PROD; do
+              L="${{ runner.temp }}/${c%%:*}/winappdata-${c##*:}/run.log"
+              echo "| ${c%%:*} | $(grep -c 'AppData\\Roaming\\npm-cache' "$L" 2>/dev/null || echo 0) |"
+            done; } | tee -a "$GITHUB_STEP_SUMMARY"
+          [ -z "$FAILED" ] || exit 1
+          [ "${ON:-0}" -eq 0 ] && [ "${OFF:-0}" -gt 0 ] || { echo "ARM DID NOT ENGAGE AS BUILT"; exit 1; }
+      - name: Verdicts per cell
+        if: always()
+        working-directory: tests/build-jail-corpus
+        shell: bash
+        run: |
+          for c in ad-base ad-on ad-off; do
+            echo "### $c"; node aggregate.mjs "${{ runner.temp }}/$c" 2>&1 | tail -25
+          done | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: appdata-control
+          path: ${{ runner.temp }}/ad-*
+          retention-days: 7
+
   # Nine corpus rows fail PROD naming `…\Packages\<profile>\AC\Temp`. This job asks
   # whether that is a jail defect or a path disagreement this harness manufactures,
   # by reproducing the signature on the affected nine and then LOOKING at where the
@@ -155,6 +253,11 @@ jobs:
 
   corpus:
     needs: build
+    # Held off: run 30662499497 is already sweeping these eight shards on this commit's
+    # DEFAULT build, and the only change since is a cargo feature that is off in that
+    # build (`cfg!` false leaves the redirect exactly as it was). Its corpus delta stands;
+    # this push exists to add the control, not to re-measure. Flip back for the next sweep.
+    if: ${{ false }}
     strategy:
       fail-fast: false
       # A ceiling on how much of the shared runner pool this one probe may hold.
