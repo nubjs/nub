@@ -2450,7 +2450,29 @@ fn path_contains_component(
     let (Some(path), Some(component)) = (path, component) else {
         return false;
     };
-    env::split_paths(path).any(|entry| entry.as_os_str() == component)
+    env::split_paths(path).any(|entry| path_component_matches(&entry, component))
+}
+
+fn path_component_matches(entry: &Path, component: &std::ffi::OsStr) -> bool {
+    if entry.as_os_str() == component {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        let component = Path::new(component);
+        if let (Ok(entry), Ok(component)) = (entry.canonicalize(), component.canonicalize())
+            && entry == component
+        {
+            return true;
+        }
+        entry
+            .as_os_str()
+            .to_string_lossy()
+            .replace('/', "\\")
+            .eq_ignore_ascii_case(&component.as_os_str().to_string_lossy().replace('/', "\\"))
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 fn augmentation_environment_restoration(
@@ -2546,7 +2568,7 @@ fn augmentation_environment_restoration(
             // Userland changed PATH after augmentation. Remove only Nub's exact
             // shim component so prepended/appended entries survive.
             let filtered = env::split_paths(current_path)
-                .filter(|entry| entry.as_os_str() != shim_dir)
+                .filter(|entry| !path_component_matches(entry, shim_dir))
                 .collect::<Vec<_>>();
             match env::join_paths(filtered) {
                 Ok(path) => changes.push(("PATH", Some(path))),
@@ -2560,7 +2582,7 @@ fn augmentation_environment_restoration(
         // Backward compatibility with a parent that predates the raw PATH marker.
         if let Some(path) = current_path {
             let filtered = env::split_paths(&path)
-                .filter(|entry| entry.as_os_str() != shim_dir)
+                .filter(|entry| !path_component_matches(entry, shim_dir))
                 .collect::<Vec<_>>();
             // Rust rejects a Windows PATH component containing a literal double
             // quote and a Unix component containing the separator. Neither is a
@@ -5261,7 +5283,7 @@ mod tests {
     #[test]
     fn path_component_detection_handles_a_quoted_semicolon_entry() {
         let raw = std::ffi::OsStr::new(
-            r#""C:\tools;with-semicolon";C:\nub-node-shim-42;C:\Windows\System32"#,
+            r#""C:\tools;with-semicolon";C:/nub-node-shim-42;C:\Windows\System32"#,
         );
         assert!(path_contains_component(
             Some(raw),
