@@ -509,6 +509,10 @@ export function requireTargetIsEsm(filePath, ext) {
 // where it turns JSX on (`tsx`/`jsx`), otherwise the extension decides. Shared by
 // the format probe and the transform itself so the parse that DECIDES the format
 // and the parse that PRODUCES the output can never disagree about what a file is.
+// The one pairing this would silently discard — `ts` on `.tsx`/`.jsx`, which
+// still parses as JSX — is refused by the config parser (`validate_loader`), so
+// reaching the extension fallback here always means the config asked for nothing
+// different, never that a request was dropped.
 function langFor(ext) {
   const configuredLoader = RUNTIME_LOADER[ext];
   return configuredLoader === "tsx" || configuredLoader === "jsx"

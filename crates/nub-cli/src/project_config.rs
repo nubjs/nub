@@ -953,6 +953,24 @@ fn validate_loader(v: &Value, path: &str) -> Result<BTreeMap<String, String>> {
                 ),
             });
         }
+        // `.tsx`/`.jsx` carry their JSX dialect in the extension, and the runtime
+        // takes the dialect FROM the extension whenever the configured loader is
+        // not itself `tsx`/`jsx` (`runtime/transform-core.mjs::langFor`). So `ts`
+        // on one of these is not merely redundant — it is discarded, and the file
+        // still parses as JSX. Refuse it here rather than let the config say one
+        // thing and the runtime do another; a silent no-op is the exact failure
+        // this parser is fail-loud to prevent. Every other pairing does take
+        // effect: a data loader moves the extension out of the transpile set, and
+        // `tsx`/`jsx` are honored verbatim.
+        if loader == "ts" && matches!(extension.as_str(), ".tsx" | ".jsx") {
+            return Err(ConfigError::Value {
+                path: child(path, extension),
+                message: format!(
+                    "`{extension}` is always parsed as JSX, so the `ts` loader cannot apply. \
+                     Drop this entry, or rename the files to a non-JSX extension."
+                ),
+            });
+        }
     }
     Ok(values)
 }
@@ -1428,6 +1446,46 @@ mod tests {
             parse_project_config(r#"{ "loader": { "asset": "text" } }"#),
             Err(ConfigError::Value { .. })
         ));
+    }
+
+    /// `langFor` takes the dialect from the extension unless the configured
+    /// loader is itself `tsx`/`jsx`, so `ts` on a JSX extension was accepted and
+    /// then discarded — the file kept parsing as JSX. Refusing it is the whole
+    /// point of a fail-loud config: a setting that cannot take effect must not
+    /// look like it did. Everything adjacent still resolves, so the refusal
+    /// cannot widen into "you may not configure these extensions at all".
+    #[test]
+    fn a_jsx_extension_rejects_the_non_jsx_ts_loader_but_nothing_else() {
+        for extension in [".tsx", ".jsx"] {
+            let error =
+                parse_project_config(&format!(r#"{{ "loader": {{ "{extension}": "ts" }} }}"#))
+                    .unwrap_err();
+            assert!(
+                matches!(&error, ConfigError::Value { message, .. }
+                    if message.contains("always parsed as JSX")),
+                "{extension}: {error}"
+            );
+        }
+
+        // Still accepted, because each of these genuinely reaches the runtime:
+        // `tsx`/`jsx` are honored verbatim, a data loader moves the extension out
+        // of the transpile set, and `ts` on a non-JSX extension is what the
+        // extension already resolves to.
+        for (extension, loader) in [
+            (".tsx", "jsx"),
+            (".jsx", "tsx"),
+            (".tsx", "text"),
+            (".jsx", "yaml"),
+            (".ts", "ts"),
+            (".mts", "ts"),
+            (".cts", "ts"),
+            (".ts", "tsx"),
+        ] {
+            parse_project_config(&format!(
+                r#"{{ "loader": {{ "{extension}": "{loader}" }} }}"#
+            ))
+            .unwrap_or_else(|e| panic!("{extension} -> {loader} must stay valid: {e}"));
+        }
     }
 
     #[test]

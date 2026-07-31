@@ -37,6 +37,32 @@
       "propertyNames": {
         "pattern": "^\\.[\\s\\S]+$"
       },
+      "properties": {
+        ".tsx": {
+          "enum": [
+            "text",
+            "jsonc",
+            "json5",
+            "toml",
+            "yaml",
+            "tsx",
+            "jsx"
+          ],
+          "description": "`.tsx` is always parsed as JSX, so the `ts` loader cannot apply."
+        },
+        ".jsx": {
+          "enum": [
+            "text",
+            "jsonc",
+            "json5",
+            "toml",
+            "yaml",
+            "tsx",
+            "jsx"
+          ],
+          "description": "`.jsx` is always parsed as JSX, so the `ts` loader cannot apply."
+        }
+      },
       "additionalProperties": {
         "enum": [
           "text",
