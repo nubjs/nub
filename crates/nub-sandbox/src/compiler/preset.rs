@@ -332,10 +332,9 @@ fn package_home_slug(package_dir: &Path) -> String {
 /// confined script there.
 ///
 /// ORDER: outermost path first, so each later grant nests INSIDE the one before it in
-/// bwrap's argv. The project root is deliberately absent today (nothing needs it), which
-/// leaves bwrap to auto-create it as writable scaffolding; if that has to become an empty
-/// read-only bind to restore a loud `EROFS`, it slots in at the head of this list and the
-/// nested grants keep working unchanged.
+/// bwrap's argv. The project root heads the list as a NODE-only read ([`project_cwd_node`]),
+/// so bwrap binds it list-only instead of auto-creating writable scaffolding, and the
+/// `package.json` / `node_modules` grants nest inside it unchanged.
 ///
 /// Front-inserted so the surface's `package_dir` rw entry stays later and keeps winning.
 pub fn grant_build_jail_dependency_reads(
@@ -377,11 +376,55 @@ pub fn grant_build_jail_dependency_reads(
     {
         roots.push(own);
     }
-    let mut grants = Vec::new();
+    let mut grants = vec![project_cwd_node(&ctx.homes.project)];
     for root in roots {
         push_read_path(&mut grants, &root, FsOrigin::Speculative);
     }
     policy.fs.rules.entries.splice(0..0, grants);
+}
+
+/// The project root DIRECTORY NODE, read — `getcwd()`'s permission, not a project read.
+///
+/// WHAT THIS FIXES. Seatbelt gates `getcwd(2)` on `file-read-data` of the CWD's OWN
+/// directory node: measured on macOS 15, a process whose cwd is an ungranted directory
+/// gets EPERM from `getcwd` even though every ancestor and every path it goes on to open
+/// is granted. Nothing else in the jail's surface names the project root, so a confined
+/// process running there cannot learn where it is — `uv_cwd` EPERM in Node,
+/// `getwd: invalid argument` from Go, `fatal: Unable to read current working directory`
+/// from git, `pwd: .: Operation not permitted` from coreutils.
+///
+/// It is reached constantly because `INIT_CWD` is the project root and a lifecycle script
+/// acting on the CONSUMER's repository spawns its real work there — every git-hook
+/// installer does, and so does anything shelling out to make, python, or a Go/Rust binary.
+/// The script's OWN cwd is its package dir, which is granted, so the failure surfaces only
+/// once it spawns or `chdir`s; that made it look like a rule about process DEPTH (children
+/// fine, grandchildren broken) when depth is irrelevant and the cwd is the whole story.
+///
+/// THE NODE ALONE, and that distinction is the entire safety argument: `defaults::
+/// subtree_globs` would add the `/**` twin and turn this into a read of the consumer's
+/// whole project — source, `.env`, credentials. A bare path names the directory node, so
+/// what a confined package gains is the ability to LIST the project root's top-level
+/// entries, and nothing below it. Both backends already implement that distinction for
+/// `curated::project_cwd`'s per-package version of this same grant — `(literal …)` on
+/// macOS, `MountAccess::ListOnly` on Linux — and both once lost it in the WIDENING
+/// direction, so a change here re-reads those two first.
+///
+/// OUTSIDE the experimental arm above, deliberately. That arm exists to measure which
+/// packages need to READ the consumer's project files; withholding the cwd node with them
+/// would break `getcwd` in every confined spawn and confound the measurement with a
+/// failure that is not about reading anything.
+///
+/// Only Seatbelt enforces it — `chdir`/`getcwd` are not Landlock-handled accesses, and a
+/// Windows process's cwd is process state no AppContainer check consults — but the grant
+/// is emitted unconditionally anyway: it is one rule, and the platform that needs it is
+/// the one most developers install on.
+fn project_cwd_node(project_root: &Path) -> FsRule {
+    FsRule {
+        matcher: CanonGlob(canonicalize_glob_prefix(&project_root.to_string_lossy())),
+        effect: Effect::Allow,
+        access: FsAccess::Read,
+        origin: FsOrigin::Speculative,
+    }
 }
 
 /// The nearest ancestor of `package_dir` named `node_modules`. That is the directory a
@@ -796,6 +839,34 @@ mod tests {
             BTreeMap::new(),
         )
         .expect("build-jail compiles")
+    }
+
+    /// The project root resolves as a CWD without the project becoming readable.
+    ///
+    /// Seatbelt gates `getcwd(2)` on read of the cwd's OWN directory node, and a lifecycle
+    /// script that acts on the consumer's repository spawns its work at `INIT_CWD` — so
+    /// without the node grant every such spawn dies before it does anything (`uv_cwd` EPERM,
+    /// Go's `getwd: invalid argument`, git's `Unable to read current working directory`).
+    ///
+    /// The `.env` and `src/` arms are what make it a real assertion rather than a tautology:
+    /// the failure this guards against is not the grant disappearing but the grant WIDENING,
+    /// which is what happens the moment someone routes it through `subtree_globs`.
+    #[test]
+    fn the_project_root_resolves_as_a_cwd_without_opening_the_project() {
+        let policy = production_build_jail_policy();
+        let m = crate::matcher::PathMatcher::new(&policy.fs.rules);
+        assert_eq!(
+            m.decide(Path::new("/proj")).effect,
+            Effect::Allow,
+            "the project root node must be readable or `getcwd` fails at INIT_CWD"
+        );
+        for leaked in ["/proj/.env", "/proj/src/index.ts"] {
+            assert_ne!(
+                m.decide(Path::new(leaked)).effect,
+                Effect::Allow,
+                "the cwd grant widened into a project read: {leaked}"
+            );
+        }
     }
 
     /// Each shape's toolchain reads actually LAND — the headers node-gyp compiles against and

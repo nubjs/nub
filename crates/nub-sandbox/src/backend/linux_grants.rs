@@ -23,8 +23,9 @@ pub(crate) enum MountAccess {
     /// LIST the directory node, and open NOTHING under it — the IR's node-only read.
     ///
     /// The compiler spells a subtree as the PAIR `[P, P/**]` (`defaults::subtree_globs`),
-    /// so a bare `P` with no twin names the directory NODE alone; `curated::project_cwd`
-    /// is the one grant that authors it. Collapsing that into `ReadOnly` handed the
+    /// so a bare `P` with no twin names the directory NODE alone; its authors are
+    /// `preset::project_cwd_node` (the build jail's unconditional project-root cwd grant,
+    /// on EVERY policy) and `curated::project_cwd`. Collapsing that into `ReadOnly` handed the
     /// granted package a read of the CONSUMER'S WHOLE PROJECT, because a Landlock rule's
     /// rights are inherited by everything beneath the path it is attached to.
     ListOnly,
@@ -326,8 +327,10 @@ mod tests {
     }
 
     /// A read grant with no `/**` twin is the directory NODE, and must not widen into the
-    /// subtree. Its one author is `curated::project_cwd`, where the widening handed the
-    /// granted package a read of the consumer's entire project — Landlock inherits a rule's
+    /// subtree. Its authors are `preset::project_cwd_node` and `curated::project_cwd`, where
+    /// the widening handed the granted package a read of the consumer's entire project — and
+    /// the first of those is on every build-jail policy, so the stake is no longer a handful
+    /// of curated packages. Landlock inherits a rule's
     /// rights down the whole hierarchy beneath the path it is attached to.
     ///
     /// Paired with the twin arm so the assertion cannot pass against a compiler that
@@ -566,6 +569,10 @@ mod tests {
                 .map(|grant| (grant.path.clone(), grant.access))
                 .collect::<Vec<_>>(),
             vec![
+                // `ListOnly`, not `ReadOnly` — the cwd grant names the project root NODE, so
+                // the project's own files stay out. Widening it here would silently open the
+                // consumer's whole tree, which is the one way this grant can do harm.
+                (as_compiled(&project), MountAccess::ListOnly),
                 (
                     as_compiled(&project.join("node_modules")),
                     MountAccess::ReadOnly,
@@ -573,9 +580,9 @@ mod tests {
                 (as_compiled(&jail_home[0]), MountAccess::ReadWrite),
                 (as_compiled(&package_dir), MountAccess::ReadWrite),
             ],
-            "dropping the absent cache dirs must leave the confinement intact — the \
-             dependency tree read-only, and the only writable subtrees the package dir \
-             plus the package's own private home"
+            "dropping the absent cache dirs must leave the confinement intact — the project \
+             root listable only, the dependency tree read-only, and the only writable \
+             subtrees the package dir plus the package's own private home"
         );
         // `as_compiled` shares the normalizer with the code under test, so on Windows the
         // comparison above would stay green if BOTH sides regressed together. Pin the
