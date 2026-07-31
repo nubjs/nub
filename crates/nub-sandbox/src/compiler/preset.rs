@@ -392,7 +392,7 @@ fn push_read_path(out: &mut Vec<FsRule>, path: &Path, origin: FsOrigin) {
 /// this folds) plus the OS backends' minimal-root closure — with WRITE confined to a
 /// per-run tmp (private everywhere but Windows, which takes the shared tmp; see the `$tmp`
 /// comment below) and, via [`compile_build_jail`], the script's own package dir.
-/// Egress curated down to the install-time artifact hosts (see [`build_jail_net`]).
+/// Egress gated on package identity, coarsely (see [`build_jail_net`]).
 ///
 /// `package_dir` is the per-spawn WRITE grant. It stays LAST so its read-write access
 /// wins over the front-inserted dependency-tree read for the package subtree
@@ -492,32 +492,54 @@ fn build_jail_surface(
 /// the refused set from the union, so a refusal cannot be contradicted by an observation of
 /// what the package was seen fetching.
 ///
-/// THE GRANT IS SPELLED PER PLATFORM, because the coarseness is real and the IR states what the
-/// mechanism actually enforces rather than a uniform promise two of three backends would break.
-/// Denial is `false` everywhere; the admitted case splits:
+/// PER-HOST EGRESS IS DELIBERATELY NOT ENFORCED HERE, AND `$downloads` IS DELIBERATELY NOT
+/// REFERENCED. Do not restore either as a missing feature. Two of the three backends cannot
+/// enforce a host list at all: Linux needs a network namespace to force the child through nub's
+/// proxy, which needs an unprivileged user namespace — denied by default on Ubuntu 24.04, and
+/// requiring it is the one thing this product cannot do; Windows' loopback exemption
+/// (`NetworkIsolationSetAppContainerConfig`) is admin-only. macOS alone COULD enforce it, via
+/// Seatbelt confining egress to the proxy port, and enforcing it there was withdrawn on purpose:
+/// macOS is the platform most developers use, so being stricter there means an incomplete host
+/// list throws errors that Linux and Windows users never see, and confidence in the list is low.
+/// A host list that gates one platform and is provenance on two is a compat liability, not a
+/// defense. `$downloads` still serves `nub sandbox`, a different mechanism where per-host DOES
+/// work — this jail simply no longer consults it.
 ///
-/// - **macOS** and **Linux** get `["$downloads"]`. Seatbelt pins the child's egress to nub's
-///   proxy, so there the host list is genuinely enforced. The Linux build jail is Landlock-only
-///   (a netns needs an unprivileged user namespace, which this product cannot require), so
-///   `backend::linux::apply_landlock` reads the Allow as its coarse per-package permit and lifts
-///   `AF_INET`/`AF_INET6` out of the seccomp socket ceiling — the hosts are provenance there, not
-///   a gate. That backend owns the comment explaining why coarse is sound.
-/// - **Windows** gets `true`. Its unprivileged egress lever is the AppContainer `internetClient`
-///   capability, which the backend grants on exactly `!net.enforce` — so coarse-allow is the ONLY
-///   spelling that reaches it. `["$downloads"]` would instead select the per-host tier, which
-///   needs an admin-registered loopback exemption, so an ordinary `nub install` would fail closed
-///   (or divert to the dedicated-account backend) for every catalogued package. `true` is not
-///   "unrestricted host networking" there either: WFP refuses an AppContainer's loopback whatever
-///   its capabilities, and `privateNetworkClientServer` stays withheld, so the grant is public
-///   outbound only — tighter than the same spelling means on any other platform.
+/// The catalog's per-package `hosts` arrays are retained for the same reason and enforce nothing
+/// either: a CHANGING host list is a detection signal, so a package that used to fetch from its
+/// own CDN and now reaches somewhere else shows up as a reviewable diff on
+/// `data/build-jail-catalog.json`. They are provenance, never a gate.
+///
+/// The surviving contract is uniform: no catalog entry ⇒ no egress; an entry ⇒ coarse egress.
+/// Denial is `false` everywhere. The admitted case is coarse everywhere too, but SPELLED per
+/// platform, because `enforce` carries more than egress on Linux:
+///
+/// - **macOS** and **Windows** get `true` (`enforce = false`). Seatbelt emits `(allow network*)`
+///   and starts no proxy; Windows' unprivileged egress lever is the AppContainer
+///   `internetClient` capability, which the backend grants on exactly `!net.enforce`, so
+///   coarse-allow is the ONLY spelling that reaches it. A host array there would instead select
+///   the per-host tier via `needs_account_backend` / `plan_net`, which needs an admin-registered
+///   loopback exemption, so an ordinary `nub install` would fail closed (or divert to the
+///   admin-only dedicated-account backend) for every catalogued package. `true` is still not
+///   "unrestricted" on Windows: WFP refuses an AppContainer's loopback whatever its capabilities
+///   and `privateNetworkClientServer` stays withheld, so the grant is public outbound only.
+/// - **Linux** gets `["*"]` — a catch-all Allow, naming no host. It CANNOT be `true`, because
+///   `backend::linux::build_seccomp` gates the whole socket-family ceiling and the io_uring
+///   triple-block on `net.enforce`: `enforce = false` would re-permit `AF_UNIX` (a path to host
+///   daemons like `docker.sock` that neither Landlock nor a netns scopes), `AF_VSOCK`,
+///   `AF_PACKET`, and io_uring's socket-creation side door. Keeping `enforce = true` with a
+///   catch-all Allow lifts exactly `AF_INET`/`AF_INET6` out of that ceiling and leaves the rest
+///   denied, which is the coarse grant with the non-egress protections intact. Zero named hosts
+///   means nothing here reads as a gate, and zero *authored* hosts keeps `mode` off the
+///   proxy-starting path (`apply_inner`'s Landlock arm skips the proxy outright).
 fn build_jail_net(package_name: Option<&str>) -> Value {
     if !super::package_network::build_jail_net_allowed(package_name) {
         return json!(false);
     }
-    if cfg!(windows) {
-        json!(true)
+    if cfg!(target_os = "linux") {
+        json!(["*"])
     } else {
-        json!(["$downloads"])
+        json!(true)
     }
 }
 

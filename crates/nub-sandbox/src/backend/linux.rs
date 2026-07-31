@@ -3008,16 +3008,16 @@ unsafe fn cloexec_open_fds_from_proc() -> std::io::Result<()> {
 /// Per-host egress requires the child's ONLY route out to be nub's proxy, which requires an
 /// empty network namespace, which requires an unprivileged user namespace: the one thing this
 /// product cannot demand (Ubuntu 24.04 denies it by default, and refusing to install there is
-/// not an option). Absent a netns, a permitted `AF_INET` dials any host directly, so the
-/// `$downloads` entries in the IR are PROVENANCE on this path and nothing enforces them. The
+/// not an option). Absent a netns, a permitted `AF_INET` dials any host directly, so no host list
+/// could be enforced here — which is why `build_jail_net` emits none, on any platform. The
 /// defense that survives is the one aimed at the actual attack: an unvetted package — the
 /// Shai-Hulud shape, a `postinstall` published into something nobody reviewed — has no catalog
 /// entry and therefore gets zero egress. A coarse permit is only ever handed to a package a
 /// pull request already admitted.
 ///
-/// The residual is named rather than hidden: a granted package can also reach loopback and any
-/// host outside `$downloads`. That is accepted — the jail is defense in depth, and the exposure
-/// is bounded to the reviewed set. What is NOT accepted is what this comment used to assert,
+/// The residual is named rather than hidden: a granted package can reach loopback and any host at
+/// all. That is accepted — the jail is defense in depth, and the exposure is bounded to the
+/// reviewed set. What is NOT accepted is what this comment used to assert,
 /// that prefetch serves every package needing a remote artifact. It does not: prefetch covers
 /// `prebuild-install`/`node-pre-gyp` artifacts, while 181 of the 344-package corpus fetch
 /// beyond that, so a blanket deny broke them instead of confining them.
@@ -3096,8 +3096,8 @@ fn apply_landlock(
 
 /// The socket ceiling the compiled net axis asks for, read out of the IR.
 ///
-/// An Allow rule IS the catalog verdict: `build_jail_net` emits `["$downloads"]` for a package the
-/// catalog names and `false` for one it does not. Deriving from the IR rather than re-consulting
+/// An Allow rule IS the catalog verdict: `build_jail_net` emits a catch-all `["*"]` for a package
+/// the catalog names and `false` for one it does not. Deriving from the IR rather than re-consulting
 /// the catalog keeps this backend a pure IR translator, so it cannot grant something the compiled
 /// policy did not. A relaxed axis (`default_effect == Allow`) counts too — it admits every host,
 /// which no build-jail policy emits, but reading it as a deny would UNDER-permit a policy that
