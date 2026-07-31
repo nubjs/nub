@@ -8,7 +8,7 @@ Cloud Run accepts any image that follows its [container runtime contract](https:
 ## Dockerfile
 
 ```dockerfile title="Dockerfile"
-FROM ghcr.io/nubjs/nub:0.6.0
+FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
 
 COPY --chown=node:node package.json package-lock.json ./
 RUN nub ci
@@ -70,7 +70,7 @@ Authenticated callers need the Cloud Run Invoker role. Test a private service wi
 URL=$(gcloud run services describe nub-app \
   --region us-west1 \
   --format="value(status.url)")
-TOKEN=$(gcloud auth print-identity-token --audiences="$URL")
+TOKEN=$(gcloud auth print-identity-token)
 curl -H "Authorization: Bearer $TOKEN" "$URL"
 ```
 

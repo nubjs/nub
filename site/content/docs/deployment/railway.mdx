@@ -8,7 +8,7 @@ Railway [detects a root `Dockerfile`](https://docs.railway.com/builds/dockerfile
 ## Dockerfile
 
 ```dockerfile title="Dockerfile"
-FROM ghcr.io/nubjs/nub:0.6.0
+FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
 
 COPY --chown=node:node package.json package-lock.json ./
 RUN nub ci

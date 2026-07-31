@@ -8,8 +8,8 @@ AWS Lambda runs container images from ECR rather than GHCR. Add the [AWS Lambda 
 ## Dockerfile
 
 ```dockerfile title="Dockerfile"
-FROM public.ecr.aws/awsguru/aws-lambda-adapter:1.0.0 AS lambda-adapter
-FROM ghcr.io/nubjs/nub:0.6.0
+FROM public.ecr.aws/awsguru/aws-lambda-adapter:1.0.1 AS lambda-adapter
+FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
 
 COPY --from=lambda-adapter /lambda-adapter /opt/extensions/lambda-adapter
 COPY --chown=node:node package.json package-lock.json ./

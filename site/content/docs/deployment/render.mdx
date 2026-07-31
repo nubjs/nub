@@ -8,7 +8,7 @@ Render can [build a repository's Dockerfile](https://render.com/docs/docker) or 
 ## Dockerfile
 
 ```dockerfile title="Dockerfile"
-FROM ghcr.io/nubjs/nub:0.6.0
+FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
 
 COPY --chown=node:node package.json package-lock.json ./
 RUN nub ci

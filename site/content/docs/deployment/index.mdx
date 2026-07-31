@@ -3,7 +3,7 @@ title: Deployment
 description: Deploy Nub projects through GitHub Actions, the official container image, or the installer and npm package used by managed builders.
 ---
 
-Nub uses three deployment paths. Pick the one your platform exposes:
+Choose the deployment path your platform exposes:
 
 1. **GitHub Actions** — use [`nubjs/setup-nub@v0`](/docs/deployment/github-action) to install Nub, provision the project's Node, and cache the store.
 2. **Containers** — use [`ghcr.io/nubjs/nub`](/docs/deployment/docker) as the base image. It contains Node and Nub for `linux/amd64` and `linux/arm64`.
@@ -21,12 +21,18 @@ Nub uses three deployment paths. Pick the one your platform exposes:
 
 ## Managed builders
 
-A hosted builder that runs the install from your lockfile can resolve Nub from `node_modules/.bin`. Add the CLI as a devDependency and call it from a package script:
+A hosted builder that runs the install from your lockfile cannot resolve Nub until the project supplies it:
+
+```console
+sh: nub: not found
+```
+
+Add the CLI as a devDependency and call it from a package script:
 
 ```json title="package.json"
 {
   "devDependencies": {
-    "@nubjs/nub": "^0.6.0"
+    "@nubjs/nub": "^{{NUB_VERSION}}"
   },
   "scripts": {
     "build": "nubx vite build"
@@ -34,7 +40,7 @@ A hosted builder that runs the install from your lockfile can resolve Nub from `
 }
 ```
 
-The package exposes both `nub` and `nubx`. npm, pnpm, Bun, and Nub all link those commands without running a dependency lifecycle script.
+The package exposes both `nub` and `nubx`. npm, pnpm, Yarn, Bun, and Nub all link those commands without running a dependency lifecycle script. Bin linking does not depend on pnpm's dependency build-script approval, and the Nub launcher sets its executable bit at runtime, so pnpm needs no allowlist entry.
 
 <Callout type="warn">
   Keep development dependencies enabled for the build. Use the installer or a Dockerfile when the platform installs production dependencies only.
@@ -45,7 +51,7 @@ The package exposes both `nub` and `nubx`. npm, pnpm, Bun, and Nub all link thos
 The official image starts from Node, installs Nub, and runs as the non-root `node` user. A web service only needs a Dockerfile and an application that listens on `0.0.0.0` at the provider's `PORT`:
 
 ```dockerfile title="Dockerfile"
-FROM ghcr.io/nubjs/nub:0.6.0
+FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
 
 COPY --chown=node:node package.json package-lock.json ./
 RUN nub ci
