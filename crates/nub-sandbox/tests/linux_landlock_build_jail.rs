@@ -165,7 +165,7 @@ fn a_nub_process_starts_under_the_jail_that_denies_it_proc_self_maps() {
 /// no network at all.
 ///
 /// ONE VARIABLE, and it is the package name. The same probe binary, the same jail, the same
-/// listener — `canvas` carries a catalog entry and `left-pad` does not, so a difference between
+/// listener — `node-gyp` carries a catalog entry and `left-pad` does not, so a difference between
 /// the two runs can only come from the identity gate. Both arms are asserted, because the deny
 /// half is the whole defense against the Shai-Hulud shape and a fix that granted everything
 /// would satisfy the allow half perfectly.
@@ -202,9 +202,25 @@ fn egress_is_granted_by_catalog_entry_and_refused_without_one() {
         )
     };
 
-    // GRANTED. `canvas` is catalogued (it fetches GitHub release assets), so the ceiling admits
-    // the IP families and the probe reaches the listener.
-    let (code, stdout) = run(Some("canvas"));
+    // GRANTED. `node-gyp` is catalogued (it fetches Node headers from nodejs.org when the
+    // header cache is cold), so the ceiling admits the IP families and the probe reaches the
+    // listener.
+    //
+    // ASSERTED, NOT ASSUMED. An uncatalogued fixture does not weaken this test into a false
+    // pass — it makes the granted arm UNSATISFIABLE, and it reports as a bare `Some(10)` that
+    // reads exactly like the egress mechanism being broken. That is not hypothetical: this arm
+    // was originally written against `canvas`, which is not in the table and never was, so it
+    // could not pass from the commit that introduced it. Check the table directly, so a catalog
+    // edit that drops the entry fails HERE naming the cause.
+    const GRANTED: &str = "node-gyp";
+    assert!(
+        nub_sandbox::build_jail_net_allowed(Some(GRANTED)),
+        "fixture `{GRANTED}` is absent from the generated egress table {:?}, so the granted arm \
+         cannot pass — pick a catalogued package rather than granting this one network",
+        nub_sandbox::PACKAGE_NETWORK_ALLOWED
+    );
+
+    let (code, stdout) = run(Some(GRANTED));
     assert_eq!(
         code,
         Some(0),
@@ -234,7 +250,7 @@ fn egress_is_granted_by_catalog_entry_and_refused_without_one() {
     // through a filesystem path nothing here scopes and AF_VSOCK is CID-addressed to the
     // hypervisor, so both stay denied for the GRANTED package too — the arm where a widened
     // carve-out would show up.
-    let (_, stdout) = run(Some("canvas"));
+    let (_, stdout) = run(Some(GRANTED));
     for family in ["UNIX", "VSOCK"] {
         assert!(
             stdout.contains(&format!("{family}=DENIED")),
