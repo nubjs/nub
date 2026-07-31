@@ -50,6 +50,12 @@ pub fn resolve(name: &str) -> Result<Value, CompileError> {
 /// Enforced by stripping rather than by suppressing each finalizer, so a deny added to the
 /// surface or to a fold finalizer later cannot silently reintroduce the rejection; the
 /// invariant lives in one place and is asserted by `build_jail_emits_no_deny_rules`.
+///
+/// THE INVARIANT BINDS THE BACKENDS, NOT JUST THIS FUNCTION. Stripping every `Effect::Deny`
+/// is worth nothing if a backend then SYNTHESIZES one out of an allow, which is exactly what
+/// the Seatbelt write loop did — a read-only Allow became `(deny file-write* …)`, so the
+/// jail's own grants cancelled each other while the IR looked deny-free. A backend may
+/// render an Allow only as permission.
 pub fn enforce_pure_allowlist(name: &str, policy: &mut SandboxPolicy) {
     if name != "build-jail" {
         return;

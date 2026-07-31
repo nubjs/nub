@@ -767,6 +767,88 @@ fn write_confine_allows_target_denies_rest() {
     );
 }
 
+/// BUG-H: a read grant must not revoke a write grant it ENCLOSES.
+///
+/// `emit_fs` mapped `(Allow, Read)` to `(deny file-write* …)` and emitted it last, so a
+/// later read grant silently stripped write from everything under it — the shape
+/// `curated::grant_from_table` produces every time, since it appends `project_reads`
+/// (read) AFTER `sibling_dirs` (rw). Measured on a real Seatbelt profile: widening
+/// `siblingDirs` alone wrote 20 entries; adding `projectReads: ["node_modules"]` alone
+/// wrote 0. Same root cause as the `projectCwd` node/subtree defect, which was fixed at
+/// one call site and so survived at every other.
+///
+/// The table drives ONE policy and asserts in both directions, because a fix in either
+/// direction alone is a different bug: the enclosed write must REACH, and the enclosing
+/// read must not have become a write. The rows rule out the trivial passes — an
+/// unenforcing profile (rows 3/4 would reach) and a dropped read grant (row 2 would not).
+///
+///   probe                                          expect
+///   write the enclosed rw grant                    REACHED   ← the regression
+///   read a file the enclosing read grant covers    REACHED
+///   write elsewhere under the read grant           BLOCKED
+///   write outside every grant                      BLOCKED
+#[test]
+fn an_enclosing_read_grant_does_not_revoke_a_nested_write_grant() {
+    let f = fixture();
+    // The rw grant comes FIRST and the enclosing read SECOND — the order that broke, and
+    // the order the curated table emits. `sub/inner` is the `siblingDirs` analogue.
+    fs::create_dir_all(f.proj.join("sub/inner")).unwrap();
+    let policy = serde_json::json!({
+        "fs": { "./sub/inner": "rw", "./sub": "r" }, "net": false, "vars": true
+    });
+
+    // PREMISE GUARD. The whole test is about the rw entry coming FIRST, which holds only
+    // because `serde_json`'s `preserve_order` keeps the surface object's key order — a
+    // BTreeMap would sort `./sub` ahead of `./sub/inner` and the probes below would pass
+    // vacuously against the safe order. Assert the IR before trusting the kernel.
+    let ir = compile(&policy, &f.ctx(&[])).expect("policy compiles");
+    let at = |suffix: &str| {
+        ir.fs
+            .rules
+            .entries
+            .iter()
+            .position(|r| r.matcher.as_str().ends_with(suffix))
+            .unwrap_or_else(|| panic!("no rule ending {suffix}: {:?}", ir.fs.rules.entries))
+    };
+    assert!(
+        at("/sub/inner/**") < at("/sub/**"),
+        "premise: the rw grant must be authored BEFORE the read grant that encloses it"
+    );
+
+    assert!(
+        f.allowed(
+            policy.clone(),
+            TOUCH,
+            &[&s(&f.proj.join("sub/inner/built.txt"))]
+        ),
+        "the nested write grant must survive the read grant that encloses it"
+    );
+    assert!(
+        f.allowed(policy.clone(), CAT, &[&s(&f.proj.join("sub/nested.txt"))]),
+        "the enclosing read grant must still read"
+    );
+    assert!(
+        !f.allowed(policy.clone(), TOUCH, &[&s(&f.proj.join("sub/leak.txt"))]),
+        "the read grant must not have become a write grant"
+    );
+    assert!(
+        !f.allowed(policy, TOUCH, &[&s(&f.root.join("outside/w.txt"))]),
+        "nothing outside the grants is writable"
+    );
+
+    // ARM CONTROL: the same write with the enclosing read grant REMOVED. It must reach
+    // either way — that is what makes the first assertion a statement about the read
+    // grant rather than about whether `./sub/inner` was ever writable at all.
+    assert!(
+        f.allowed(
+            serde_json::json!({ "fs": { "./sub/inner": "rw" }, "net": false, "vars": true }),
+            TOUCH,
+            &[&s(&f.proj.join("sub/inner/arm.txt"))]
+        ),
+        "arm control: the write grant reaches with no enclosing read grant"
+    );
+}
+
 // ── env scrub (construction) ──────────────────────────────────────────────────
 
 #[test]

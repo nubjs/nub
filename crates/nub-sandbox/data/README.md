@@ -189,8 +189,17 @@ executed*, and `.bin` is the shim directory that later tooling runs **unconfined
 
 ### `projectReads` vs `projectWrites`
 
-Read is the smaller grant — prefer it. A code generator needs its schema *readable*, not
-writable.
+Grant read where read is what the package needs — a code generator needs its schema
+*readable*, not writable. Reach for the field that matches the mechanism, not the one that
+sounds smaller: a read entry is not a way to *narrow* a write entry, and it cannot take
+write away from a path another field granted. Nothing here subtracts. Every field in this
+table adds, and a package that needs no grant gets no entry.
+
+That last sentence is the backends' job as much as the catalog's, and Seatbelt lost it
+once: `emit_fs` compiled a read grant into a write *deny* and emitted it last, so a
+`projectReads` entry covering a `siblingDirs` target revoked it — 20 written entries went
+to 0 with the read grant as the only variable. Fixed at the mechanism (an Allow now emits
+no deny on any backend), which is why the guidance above can be stated as a flat rule.
 
 `projectWrites` currently supports one shape:
 

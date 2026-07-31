@@ -13,9 +13,10 @@
 //!     `(allow file-read* (subpath "/"))` generous base; each IR entry emits a
 //!     read allow/deny in order. `file-map-executable` shadows every read-allow so
 //!     dylibs in an allowed region load.
-//!   - writes: deny-default (the base denies all writes); a ReadWrite allow emits
-//!     `(allow file-write*)`, a Read allow or a Deny emits `(deny file-write*)` so
-//!     a narrower read-only/deny caps a broader earlier write grant.
+//!   - writes: deny-default (the base denies all writes); ONLY a ReadWrite allow emits
+//!     `(allow file-write*)` and ONLY a Deny emits `(deny file-write*)`. An Allow is
+//!     purely additive on this axis — see the Read arm in [`emit_fs`] for why a
+//!     synthesized deny could never do anything but cancel another grant.
 //!   - net:    not-enforced → `(allow network*)`; enforced WITH a proxy → egress
 //!     permitted ONLY to the proxy's loopback port (per-host enforced through it);
 //!     enforced WITHOUT a proxy → the base deny stands (coarse deny, loopback closed).
@@ -789,19 +790,36 @@ fn emit_fs(policy: &SandboxPolicy, spec: &CommandSpec, out: &mut String) {
                 }
                 out.push_str(&format!("(allow file-write* {term})\n"));
             }
-            // A read-only allow or a deny caps write: revoke any write a broader
-            // earlier rw-allow granted at this path (last-match-wins).
-            (Effect::Allow, FsAccess::Read) | (Effect::Deny, _) => {
-                out.push_str(&format!("(deny file-write* {term})\n"))
-            }
+            // AN ALLOW NEVER SUBTRACTS. A read-only Allow grants read and takes nothing
+            // away; Deny is the only subtractive verb on this axis. That is [`FsPolicy`]'s
+            // own contract (write-set = the ReadWrite allows; a Deny removes read AND
+            // write) and the only reading the other backends can render — Landlock unions
+            // its rules and has no deny primitive at any ABI, and Windows accumulates a
+            // read set and a write set with no ordering at all.
+            //
+            // The synthesized deny this arm used to emit had NOTHING to cap: the write base
+            // is `(deny default)` and a generous `default_effect` widens only READS, so the
+            // sole thing it could ever cancel was another nub grant. It did exactly that —
+            // `curated::project_reads` appends its read pair AFTER `sibling_dirs`, so
+            // `(deny file-write* (subpath <proj>/node_modules))` landed last and revoked the
+            // write grant beneath it (measured: `projectReads: ["node_modules"]` added alone
+            // took `.prisma/client` from 20 written entries to 0). Same root cause as the
+            // `project_cwd` node/subtree widening, which was fixed at its call site and so
+            // survived here.
+            //
+            // The cost, stated: "readable but not writable INSIDE a writable grant" is not
+            // expressible — on any backend. Removing access is a Deny, which removes read too.
+            (Effect::Allow, FsAccess::Read) => {}
+            (Effect::Deny, _) => out.push_str(&format!("(deny file-write* {term})\n")),
         }
     }
     // The Apple toolchain (xcrun/cc/libtool) writes its `xcrun_db` scratch to the
     // per-user DARWIN confstr TEMP dir — NOT redirectable via TMPDIR — so a
-    // from-source compile fails without this grant. Emitted LAST so it survives a
-    // generous-read policy's `(deny file-write* /)` cap (last-match-wins); the
-    // only thing it can override is a user write-deny targeting the OS temp, which
-    // is rare and acceptable. The persistent DARWIN CACHE dir is deliberately NOT
+    // from-source compile fails without this grant. Emitted LAST so it survives every
+    // write-deny above it under last-match-wins; since only a Deny emits one, the only
+    // thing it can override is a user write-deny targeting the OS temp, which is rare
+    // and acceptable (and `emit_move_block` re-asserts that deny's unlink/create half
+    // afterwards). The persistent DARWIN CACHE dir is deliberately NOT
     // granted — it is a cross-build poisoning surface a later unsandboxed tool
     // consumes, and `cc`/`xcrun` need only the temp scratch.
     for dir in confstr_scratch_dirs() {
@@ -824,8 +842,8 @@ fn emit_fs(policy: &SandboxPolicy, spec: &CommandSpec, out: &mut String) {
 ///
 /// INVARIANT (load-bearing): these denies MUST be emitted AFTER the confstr grant so they
 /// win the last-match-wins race, and ONLY the Deny arm + the ancestor-dir chain are
-/// re-denied — NEVER the generous `/` read-cap or the confstr grant itself, either of which
-/// would re-deny the legit `xcrun_db` / `$TMPDIR` scratch write.
+/// re-denied — never an Allow (which subtracts nothing anywhere in this backend) and never
+/// the confstr grant itself, which would re-deny the legit `xcrun_db` scratch write.
 fn emit_move_block(policy: &SandboxPolicy, out: &mut String) {
     // Fix 1 — re-assert each Deny's unlink/create block. A `(subpath)` deny covers the
     // denied file/subtree; re-emitting the unlink/create primitives here restores the deny
@@ -1162,16 +1180,16 @@ enum MatchTerm {
 ///
 /// THE IR SPELLS A SUBTREE AS THE PAIR `[P, P/**]` (`compiler::defaults::subtree_globs`), so a
 /// bare `P` NAMES THE DIRECTORY NODE AND NOTHING UNDER IT. Rendering it `(subpath P)`
-/// — which this did — silently widened it in both directions at once, because `emit_fs`
-/// runs the same term through two loops with opposite polarity: the read loop turned
-/// `curated::project_cwd`'s node grant into a read of the consumer's WHOLE project, and
-/// the write loop turned it into `(deny file-write* (subpath P))`, a subtree write-deny
-/// emitted after every grant it encloses. Under Seatbelt's within-node last-match-wins
-/// that deny beat `package_dir` and `siblingDirs`, so the flagship catalog grant revoked
-/// itself (measured: `EPERM mkdir <cell>/node_modules/.prisma` on a path the policy
-/// granted rw; flipping `projectCwd` alone made it succeed). `(literal P)` matches only
-/// operations whose target IS `P`, so the node stays listable and renameable-blocked
-/// while writes BELOW it are governed by the rules that actually name them.
+/// — which this did — silently widened `curated::project_cwd`'s node grant into a read of
+/// the consumer's WHOLE project. It also, at the time, widened the write loop's
+/// then-synthesized `(deny file-write* (subpath P))` over every grant `P` enclosed, which
+/// under Seatbelt's within-node last-match-wins revoked `package_dir` and `siblingDirs`
+/// (measured: `EPERM mkdir <cell>/node_modules/.prisma` on a path the policy granted rw;
+/// flipping `projectCwd` alone made it succeed). That second face is gone at its root —
+/// `emit_fs`'s Allow arms no longer emit any deny — but the widening is still wrong on the
+/// read axis. `(literal P)` matches only operations whose target IS `P`, so the node stays
+/// listable and renameable-blocked while paths BELOW it are governed by the rules that
+/// actually name them.
 ///
 /// Emitting the pair as `(literal P)` + `(subpath P)` is the same coverage it always
 /// had — `(subpath P)` already includes `P` — so nothing that spells a subtree the IR's
@@ -2214,17 +2232,15 @@ mod tests {
         assert!(prof.contains("(allow file-read* (subpath \"/proj\"))"));
     }
 
-    /// rw → write allow; read-only allow → write deny (caps a broader grant); deny → write
-    /// deny. Base denies writes, so only rw opens one.
+    /// The write axis in one table: rw Allow → allow, Deny → deny, read-only Allow →
+    /// NOTHING. The base denies writes, so only an rw Allow ever opens one.
     ///
-    /// The cap's REACH is the regression this pins. A read-only allow spelled as a subtree
-    /// pair caps the subtree; one spelled as a bare NODE must cap the node alone. Emitting
-    /// the node as `(subpath …)` put a subtree write-deny after every grant it enclosed, and
-    /// SBPL resolves position within one operation node, so it revoked them — that is how
-    /// `curated::project_cwd` disabled the catalog's own `package_dir` and `siblingDirs`
-    /// writes. Both spellings are asserted together so neither can drift into the other.
+    /// Both spellings of a read-only allow are asserted — the subtree PAIR and the bare
+    /// NODE — because the two once rendered differently and each broke the same way. A
+    /// synthesized deny has nothing to cap (the write base is `(deny default)`) and can
+    /// only cancel another grant, which is what it did to `siblingDirs` and `package_dir`.
     #[test]
-    fn write_axis_maps_access_to_allow_or_capping_deny() {
+    fn write_axis_allows_only_readwrite_and_denies_only_on_deny() {
         let p = fs_policy(
             Effect::Deny,
             vec![
@@ -2238,37 +2254,88 @@ mod tests {
         );
         let prof = build_profile(&p, &spec(), None, None, None);
         assert!(prof.contains("(allow file-write* (subpath \"/proj\"))"));
-        assert!(prof.contains("(deny file-write* (subpath \"/proj/ro\"))"));
         assert!(prof.contains("(deny file-write* (literal \"/proj/secret\"))"));
-        assert!(prof.contains("(deny file-write* (literal \"/proj/cwd\"))"));
+        for term in [
+            "(subpath \"/proj/ro\")",
+            "(literal \"/proj/ro\")",
+            "(subpath \"/proj/cwd\")",
+            "(literal \"/proj/cwd\")",
+        ] {
+            assert!(
+                !prof.contains(&format!("(deny file-write* {term}")),
+                "a read-only allow must emit no write deny, got one for {term}:\n{prof}"
+            );
+        }
+    }
+
+    /// The BUG-H regression, at the profile level: an rw grant and, AFTER it, a read-only
+    /// grant that ENCLOSES it — the exact order `curated::grant_from_table` appends
+    /// (`sibling_dirs` rw, then `project_reads` r). The enclosing read must leave the write
+    /// allow as the last word on the nested path.
+    ///
+    /// Both directions are pinned. Dropping the write-deny is not allowed to turn the read
+    /// grant into a write grant: `/proj/node_modules` itself must gain no `file-write*`
+    /// allow, so the only writable thing under it is the path an rw rule actually named.
+    #[test]
+    fn a_read_grant_does_not_revoke_a_write_grant_it_encloses() {
+        let p = fs_policy(
+            Effect::Deny,
+            vec![
+                rule(
+                    "/proj/node_modules/.prisma",
+                    Effect::Allow,
+                    FsAccess::ReadWrite,
+                ),
+                rule(
+                    "/proj/node_modules/.prisma/**",
+                    Effect::Allow,
+                    FsAccess::ReadWrite,
+                ),
+                rule("/proj/node_modules", Effect::Allow, FsAccess::Read),
+                rule("/proj/node_modules/**", Effect::Allow, FsAccess::Read),
+            ],
+        );
+        let prof = build_profile(&p, &spec(), None, None, None);
         assert!(
-            !prof.contains("(deny file-write* (subpath \"/proj/cwd\"))"),
-            "a node-only read allow must not revoke writes BELOW it:\n{prof}"
+            prof.contains("(allow file-write* (subpath \"/proj/node_modules/.prisma\"))"),
+            "the enclosed write grant must be emitted:\n{prof}"
+        );
+        assert!(
+            !prof.contains("(deny file-write* (subpath \"/proj/node_modules\"))"),
+            "the enclosing read grant must not emit a write deny over it:\n{prof}"
+        );
+        assert!(
+            prof.contains("(allow file-read* (subpath \"/proj/node_modules\"))"),
+            "the read grant itself must survive:\n{prof}"
+        );
+        assert!(
+            !prof.contains("(allow file-write* (subpath \"/proj/node_modules\"))"),
+            "and must not become a write grant:\n{prof}"
         );
     }
 
     #[test]
-    fn confstr_scratch_write_wins_over_generous_write_cap() {
-        // A generous-read policy caps writes with `(deny file-write* (subpath "/"))`
-        // (from the `**` read-only allow). The confstr temp grant MUST be emitted
-        // after it so it survives last-match-wins — otherwise the Apple toolchain's
-        // xcrun_db write is silently denied (the C1 regression).
+    fn confstr_scratch_write_follows_a_policy_write_deny() {
+        // The C1 regression: the Apple toolchain's xcrun_db write is silently denied unless
+        // the confstr grant is the LAST word on the temp dir. A policy deny that covers the
+        // DARWIN scratch root is the only thing that can now precede it on that path (a
+        // read-only allow emits no write deny at all), so that is what this drives.
         let p = fs_policy(
             Effect::Deny,
             vec![
                 rule("**", Effect::Allow, FsAccess::Read),
+                rule("/private/var/folders/**", Effect::Deny, FsAccess::Read),
                 rule("/proj", Effect::Allow, FsAccess::ReadWrite),
             ],
         );
         let prof = build_profile(&p, &spec(), None, None, None);
-        let cap = prof.find("(deny file-write* (subpath \"/\"))").unwrap();
+        let deny = prof
+            .find("(deny file-write* (subpath \"/private/var/folders\"))")
+            .unwrap();
         let confstr = prof
             .find("(allow file-write* (subpath \"/private/var/folders/")
             .unwrap();
-        assert!(
-            confstr > cap,
-            "confstr grant must follow the write cap-deny"
-        );
+        assert!(confstr > deny, "confstr grant must follow the policy deny");
     }
 
     #[test]
@@ -2301,21 +2368,32 @@ mod tests {
     }
 
     #[test]
-    fn move_block_does_not_reassert_generous_write_cap() {
-        // The `**` read-only allow emits `(deny file-write* (subpath "/"))`; re-asserting
-        // THAT after the confstr grant would re-deny the whole temp dir and break the
-        // xcrun_db write. Only the Deny arm is re-emitted — no root-subpath unlink/create
-        // deny may appear (which would blanket-block the confstr scratch write).
+    fn move_block_reasserts_only_deny_entries() {
+        // The move block runs AFTER the confstr grant, so anything it re-asserts outranks
+        // the xcrun_db scratch write. Only the Deny arm may be re-emitted: a read-only
+        // Allow contributes nothing to the write axis, and it must contribute nothing here
+        // either — re-asserting a generous `**` read as unlink/create denies would
+        // blanket-block the temp dir. This is the move-block half of "an Allow never
+        // subtracts", asserted for both a whole-fs read and an enclosing subtree read.
         let p = fs_policy(
             Effect::Deny,
             vec![
                 rule("**", Effect::Allow, FsAccess::Read),
                 rule("/proj", Effect::Allow, FsAccess::ReadWrite),
+                rule("/proj/**", Effect::Allow, FsAccess::ReadWrite),
+                rule("/proj/ro", Effect::Allow, FsAccess::Read),
+                rule("/proj/ro/**", Effect::Allow, FsAccess::Read),
             ],
         );
         let prof = build_profile(&p, &spec(), None, None, None);
-        assert!(!prof.contains("(deny file-write-unlink (subpath \"/\"))"));
-        assert!(!prof.contains("(deny file-write-create (subpath \"/\"))"));
+        for op in ["file-write-unlink", "file-write-create"] {
+            for term in ["(subpath \"/\")", "(subpath \"/proj/ro\")"] {
+                assert!(
+                    !prof.contains(&format!("(deny {op} {term})")),
+                    "the move block must re-assert no Allow, got {op} {term}:\n{prof}"
+                );
+            }
+        }
         // And the confstr grant is still the last word on the temp dir.
         assert!(prof.contains("(allow file-write* (subpath \"/private/var/folders/"));
     }

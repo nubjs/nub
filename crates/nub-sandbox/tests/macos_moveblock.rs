@@ -51,6 +51,21 @@ fn rule(m: &str, effect: Effect, access: FsAccess) -> FsRule {
     }
 }
 
+/// The rw grant on a container DIRECTORY, spelled the way the compiler spells a subtree:
+/// the PAIR `[P, P/**]` (`compiler::defaults::subtree_globs`).
+///
+/// A bare `P` names the directory NODE alone — Seatbelt renders it `(literal P)`, which
+/// grants nothing INSIDE, and `write_grant_roots` (which bounds the ancestor move-block)
+/// collects only `Subpath` grants. Every policy here needs a writable container: that is
+/// what makes the relocation attack possible in the first place, so the pair is the shape
+/// under test, not a convenience.
+fn subtree_rw(root: &str) -> [FsRule; 2] {
+    [
+        rule(root, Effect::Allow, FsAccess::ReadWrite),
+        rule(&format!("{root}/**"), Effect::Allow, FsAccess::ReadWrite),
+    ]
+}
+
 /// Run `sh -c script` in `cwd` under `policy` via the REAL `apply()` path; trimmed stdout.
 fn run_confined(policy: &SandboxPolicy, cwd: &Path, script: &str) -> String {
     let spec = CommandSpec::new("/bin/sh").args(["-c", script]).cwd(cwd);
@@ -160,11 +175,14 @@ fn anchored_deny_secret_cannot_be_relocated_by_ancestor_rename() {
     std::fs::write(root_c.join("proj/.env"), MARKER).expect("plant secret");
 
     let root_s = root_c.to_string_lossy().to_string();
-    let policy = fs_policy(vec![
-        rule("**", Effect::Allow, FsAccess::Read),
-        rule(&root_s, Effect::Allow, FsAccess::ReadWrite),
-        rule(&format!("{root_s}/proj/.env"), Effect::Deny, FsAccess::Read),
-    ]);
+    let mut entries = vec![rule("**", Effect::Allow, FsAccess::Read)];
+    entries.extend(subtree_rw(&root_s));
+    entries.push(rule(
+        &format!("{root_s}/proj/.env"),
+        Effect::Deny,
+        FsAccess::Read,
+    ));
+    let policy = fs_policy(entries);
 
     let relocate = "/bin/mv proj proj2 2>/dev/null; /bin/cat proj2/.env 2>/dev/null";
 
@@ -219,15 +237,14 @@ fn regex_dir_pinning_deny_secret_cannot_be_relocated_by_ancestor_rename() {
     std::fs::write(root_c.join("secrets/topsecret.key"), MARKER).expect("plant secret");
 
     let root_s = root_c.to_string_lossy().to_string();
-    let policy = fs_policy(vec![
-        rule("**", Effect::Allow, FsAccess::Read),
-        rule(&root_s, Effect::Allow, FsAccess::ReadWrite),
-        rule(
-            &format!("{root_s}/secrets/*.key"),
-            Effect::Deny,
-            FsAccess::Read,
-        ),
-    ]);
+    let mut entries = vec![rule("**", Effect::Allow, FsAccess::Read)];
+    entries.extend(subtree_rw(&root_s));
+    entries.push(rule(
+        &format!("{root_s}/secrets/*.key"),
+        Effect::Deny,
+        FsAccess::Read,
+    ));
+    let policy = fs_policy(entries);
 
     let relocate =
         "/bin/mv secrets secretz 2>/dev/null; /bin/cat secretz/topsecret.key 2>/dev/null";
@@ -283,11 +300,10 @@ fn floating_name_subtree_deny_stays_relocatable_residual() {
     std::fs::write(root_c.join("secrets/x.key"), MARKER).expect("plant secret");
 
     let root_s = root_c.to_string_lossy().to_string();
-    let policy = fs_policy(vec![
-        rule("**", Effect::Allow, FsAccess::Read),
-        rule(&root_s, Effect::Allow, FsAccess::ReadWrite),
-        rule("**/secrets/**", Effect::Deny, FsAccess::Read),
-    ]);
+    let mut entries = vec![rule("**", Effect::Allow, FsAccess::Read)];
+    entries.extend(subtree_rw(&root_s));
+    entries.push(rule("**/secrets/**", Effect::Deny, FsAccess::Read));
+    let policy = fs_policy(entries);
 
     // BOUND: the direct read at the original path IS denied (the rule's primary read-deny
     // holds — proving the sandbox applies, so the relocation leak is a genuine residual,
@@ -330,15 +346,14 @@ fn partial_component_glob_deny_stays_relocatable_residual() {
     std::fs::write(root_c.join("secrets/x.key"), MARKER).expect("plant secret");
 
     let root_s = root_c.to_string_lossy().to_string();
-    let policy = fs_policy(vec![
-        rule("**", Effect::Allow, FsAccess::Read),
-        rule(&root_s, Effect::Allow, FsAccess::ReadWrite),
-        rule(
-            &format!("{root_s}/sec*/x.key"),
-            Effect::Deny,
-            FsAccess::Read,
-        ),
-    ]);
+    let mut entries = vec![rule("**", Effect::Allow, FsAccess::Read)];
+    entries.extend(subtree_rw(&root_s));
+    entries.push(rule(
+        &format!("{root_s}/sec*/x.key"),
+        Effect::Deny,
+        FsAccess::Read,
+    ));
+    let policy = fs_policy(entries);
 
     // BOUND: the direct read at the original path IS denied (the rule's primary read-deny
     // holds — proving the sandbox applies, so the relocation leak is a genuine residual).

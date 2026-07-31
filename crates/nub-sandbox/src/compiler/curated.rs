@@ -71,7 +71,13 @@ struct CuratedGrant {
     sibling_dirs: &'static [&'static str],
     /// Project-relative subtrees it may READ — a codegen INPUT the consumer authored, and
     /// the reason this is a separate field from `project_writes`: a generator needs its
-    /// schema readable, not writable, and read is the smaller grant.
+    /// schema readable, not writable.
+    ///
+    /// NOT a way to narrow another field. These rules are appended AFTER `sibling_dirs`,
+    /// so for a while an entry here that ENCLOSED a sibling-dir target revoked its write on
+    /// macOS — `emit_fs` compiled a read Allow into a write deny. That is fixed at the
+    /// backend (an Allow emits no deny anywhere), so the fields compose: each one adds, and
+    /// nothing in this struct subtracts.
     project_reads: &'static [&'static str],
     /// Project-relative subtrees it may WRITE.
     project_writes: ProjectWrites,
