@@ -410,12 +410,15 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
     reject_nested_chunks(&files, &assets)?;
 
     // Read AFTER `retain_referenced`, so both reports name what the payload
-    // actually carries rather than everything the hooks happened to see.
-    let kept: BTreeSet<&str> = assets.iter().map(|a| a.name.as_str()).collect();
-    warn_module_data_assets(&new_urls.module_assets(&kept));
-    let native_addons = native_plugin
-        .map(|n| n.survivors(&kept))
-        .unwrap_or_default();
+    // actually carries rather than everything the hooks happened to see. Scoped
+    // so the set's borrow of `assets` ends before `assets` is moved out below.
+    let native_addons = {
+        let kept: BTreeSet<&str> = assets.iter().map(|a| a.name.as_str()).collect();
+        warn_module_data_assets(&new_urls.module_assets(&kept));
+        native_plugin
+            .map(|n| n.survivors(&kept))
+            .unwrap_or_default()
+    };
 
     Ok(BundleResult {
         entry,
@@ -1950,8 +1953,7 @@ fn reject_unresolved(
     let mut any_variable = false;
     for site in sites {
         match site.kind {
-            SiteKind::Dynamic if allow_dynamic => continue,
-            SiteKind::Variable if allow_dynamic => continue,
+            SiteKind::Dynamic | SiteKind::Variable if allow_dynamic => continue,
             SiteKind::Dynamic => any_dynamic = true,
             SiteKind::Variable => any_variable = true,
             SiteKind::Indirect => any_indirect = true,
@@ -2834,6 +2836,22 @@ mod tests {
         assert_eq!(percent_decode("./%FF.bin"), None);
     }
 
+    // What separates a file that is unusable when embedded verbatim from one that
+    // is exactly right that way. `.json` belongs on the second list: reading it as
+    // data is the canonical correct use of a `new URL`, not a mistake to report.
+    #[test]
+    fn module_extensions_are_the_ones_node_reads_as_source() {
+        for ext in ["js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", "TS"] {
+            assert!(is_module_extension(Path::new(&format!("w.{ext}"))), "{ext}");
+        }
+        for ext in ["json", "wasm", "png", "md", "txt", "node"] {
+            assert!(
+                !is_module_extension(Path::new(&format!("w.{ext}"))),
+                "{ext}"
+            );
+        }
+    }
+
     // The invariant behind `map: HookTransformOutputMap::Null` — the transform
     // does not move positions, so every line must still begin where it did. A
     // no-substitution template literal is the one specifier form that can span
@@ -2901,6 +2919,78 @@ await import(`./${name}.js`);
             "the snippet must show the offending call, got {:?}",
             sites[0].snippet
         );
+    }
+
+    // A cast is erased before the bundler resolves, so reading the specifier as
+    // WRITTEN reported a literal as computed — and then told the author to make it
+    // a static string they had already written. The last two lines are the control
+    // that erasure does not make everything look static: unwrapping `spec!` and a
+    // template with a substitution still leaves something no bundler can follow.
+    #[test]
+    fn a_type_wrapped_specifier_is_read_through_the_wrapper() {
+        let src = r#"
+await import("./as.js" as string);
+await import(("./paren.js"));
+await import(("./satisfies.js" satisfies string));
+await import(spec!);
+await import(`./${spec}.js`);
+"#;
+        let sites = scan_unresolvable("/p/app.ts", src);
+        let lines: Vec<_> = sites.iter().map(|s| s.line).collect();
+        assert_eq!(
+            lines,
+            vec![5, 6],
+            "only the two genuinely non-static specifiers are unresolvable, got {sites:?}"
+        );
+    }
+
+    // The shape that kept reaching the generic diagnostic: a specifier named a
+    // line above the import that uses it, including a platform pick written as a
+    // ternary. `let` is the control — this pass reads `const` only, because that
+    // is what makes "no reassignment" a language guarantee rather than an
+    // analysis, and a wrong value is worse than none.
+    #[test]
+    fn a_const_specifier_is_read_and_a_let_is_not() {
+        let src = r#"
+const plugin = "./plugin.js";
+const pkg = process.platform === "darwin" ? "@x/core-darwin" : "@x/core-linux";
+let later = "./later.js";
+await import(plugin);
+await import(pkg);
+await import(later);
+"#;
+        let sites = scan_unresolvable("/p/app.ts", src);
+        let read: Vec<_> = sites
+            .iter()
+            .map(|s| (s.kind, s.resolves_to.clone()))
+            .collect();
+        assert_eq!(
+            read,
+            vec![
+                (SiteKind::Variable, vec!["./plugin.js".to_string()]),
+                (
+                    SiteKind::Variable,
+                    vec!["@x/core-darwin".to_string(), "@x/core-linux".to_string()]
+                ),
+                (SiteKind::Dynamic, Vec::new()),
+            ],
+            "got {sites:?}"
+        );
+    }
+
+    // A name bound twice may be reaching an inner shadow, and saying which needs
+    // the scope analysis this pass exists to avoid — so it claims nothing and the
+    // site stays an ordinary computed one.
+    #[test]
+    fn a_shadowed_name_is_not_read() {
+        let src = r#"
+const pkg = "./outer.js";
+export function load(pkg) { return import(pkg); }
+"#;
+        let sites = scan_unresolvable("/p/app.ts", src);
+        assert_eq!(sites.len(), 1, "got {sites:?}");
+        assert_eq!(sites[0].kind, SiteKind::Dynamic);
+        assert!(sites[0].resolves_to.is_empty(), "got {sites:?}");
     }
 
     // The jsonc-parser@2.3.1 shape: a UMD factory takes `require` as a
@@ -3009,6 +3099,35 @@ const pkg = require("./package.json");
             !msg.contains("--allow-dynamic-import"),
             "a flag that cannot help this site must not be offered: {msg}"
         );
+    }
+
+    // A variable specifier refuses by default like any other unfollowable import,
+    // but it earns its own fix line: the author already wrote a static string, so
+    // "make it a static string" is advice that cannot be acted on. The flag is
+    // still the sanctioned way past it, and the second half asserts it is not
+    // weakened.
+    #[test]
+    fn rejection_of_a_variable_specifier_names_its_value_and_the_flag() {
+        let site = DynamicSite {
+            kind: SiteKind::Variable,
+            module: "/p/src/platform.ts".into(),
+            line: 7,
+            column: 22,
+            snippet: "import(pkg)".into(),
+            resolves_to: vec!["@x/core-darwin".into(), "@x/core-linux".into()],
+        };
+        let err = reject_unresolved(&[site.clone()], &[], false).expect_err("must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("/p/src/platform.ts:7:22"), "got: {msg}");
+        assert!(msg.contains("import(pkg)"), "got: {msg}");
+        assert!(
+            msg.contains(r#""@x/core-darwin" or "@x/core-linux""#),
+            "the value the author has to inline must be named, got: {msg}"
+        );
+        assert!(msg.contains("--allow-dynamic-import"), "got: {msg}");
+
+        reject_unresolved(&[site], &[], true)
+            .expect("the flag must excuse a variable specifier exactly as it does a computed one");
     }
 
     // The gate that makes "Compiled …" mean something: a chunk carrying raw JSX
