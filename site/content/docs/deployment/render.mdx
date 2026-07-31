@@ -23,8 +23,18 @@ Change `package-lock.json` to the project's lockfile. The HTTP server must liste
 import { createServer } from "node:http";
 
 const port = Number(process.env.PORT || 10000);
-createServer((_request, response) => {
-  response.end("Hello from Nub");
+createServer((request, response) => {
+  if (request.url !== "/alive") {
+    response.writeHead(404);
+    response.end();
+    return;
+  }
+
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(JSON.stringify({
+    alive: true,
+    runtime: "nub-on-node",
+  }));
 }).listen(port, "0.0.0.0");
 ```
 
@@ -57,3 +67,20 @@ The free plan is available for web services and has platform limits. Omit `plan`
 Select **Existing Image** to deploy an application image published to GHCR instead of building the Dockerfile on Render. Public images need no registry credential; private images require one in the Render workspace.
 
 Prebuilt-image services do not receive automatic deploys from source commits. Trigger a redeploy after GitHub Actions publishes a new image.
+
+The Render CLI can create the same service without the dashboard:
+
+```bash
+render services create \
+  --name nub-app \
+  --type web_service \
+  --image ghcr.io/OWNER/nub-app:COMMIT_SHA \
+  --plan free \
+  --region oregon \
+  --health-check-path /alive \
+  --confirm \
+  --output json
+
+curl --fail https://nub-app.onrender.com/alive
+# {"alive":true,"runtime":"nub-on-node"}
+```

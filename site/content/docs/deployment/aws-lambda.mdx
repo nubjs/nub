@@ -27,8 +27,18 @@ Change `package-lock.json` to the project's lockfile. The application must liste
 import { createServer } from "node:http";
 
 const port = Number(process.env.PORT || 8080);
-createServer((_request, response) => {
-  response.end("Hello from Nub on Lambda");
+createServer((request, response) => {
+  if (request.url !== "/alive") {
+    response.writeHead(404);
+    response.end();
+    return;
+  }
+
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(JSON.stringify({
+    alive: true,
+    runtime: "nub-on-node",
+  }));
 }).listen(port, "0.0.0.0");
 ```
 
@@ -52,7 +62,12 @@ aws ecr create-repository \
 aws ecr get-login-password --region "$AWS_REGION" \
   | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
-docker build --platform linux/amd64 --provenance=false -t "$ECR_IMAGE" .
+docker buildx build \
+  --platform linux/amd64 \
+  --provenance=false \
+  --load \
+  -t "$ECR_IMAGE" \
+  .
 docker push "$ECR_IMAGE"
 ```
 
@@ -60,18 +75,88 @@ Reuse `aws ecr describe-repositories` instead of `create-repository` when the re
 
 ## Create the function
 
-1. Open Lambda in the [same region as the ECR repository](https://docs.aws.amazon.com/lambda/latest/dg/images-create.html).
-2. Select **Create function → Container image** and choose the pushed image.
-3. Select or create a Lambda execution role with only the permissions the application needs.
-4. Enable a Function URL when the service should be reachable over HTTP.
-
-A [Function URL](https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html) with auth type **NONE** is public. Use `AWS_IAM` when callers should authenticate.
-
-Verify the result with the URL Lambda returns:
+Create an execution role that Lambda can assume. This example attaches only Lambda's managed policy for writing logs; add application permissions separately:
 
 ```bash
-curl https://FUNCTION_ID.lambda-url.us-east-1.on.aws/
+export LAMBDA_FUNCTION=nub-lambda-app
+export LAMBDA_ROLE=nub-lambda-app-role
+
+cat > lambda-trust-policy.json <<'JSON'
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Service": "lambda.amazonaws.com" },
+    "Action": "sts:AssumeRole"
+  }]
+}
+JSON
+
+ROLE_ARN=$(aws iam create-role \
+  --role-name "$LAMBDA_ROLE" \
+  --assume-role-policy-document file://lambda-trust-policy.json \
+  --query Role.Arn \
+  --output text)
+
+aws iam attach-role-policy \
+  --role-name "$LAMBDA_ROLE" \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+# Give the new role time to propagate before Lambda assumes it.
+sleep 10
 ```
+
+Create the function from the image in the same region, then wait for Lambda to finish optimizing it:
+
+```bash
+aws lambda create-function \
+  --function-name "$LAMBDA_FUNCTION" \
+  --package-type Image \
+  --code "ImageUri=$ECR_IMAGE" \
+  --role "$ROLE_ARN" \
+  --architectures x86_64 \
+  --timeout 30 \
+  --memory-size 512 \
+  --environment 'Variables={AWS_LWA_PORT=8080}' \
+  --region "$AWS_REGION"
+
+aws lambda wait function-active-v2 \
+  --function-name "$LAMBDA_FUNCTION" \
+  --region "$AWS_REGION"
+```
+
+A [Function URL](https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html) with auth type **NONE** is public. When using the CLI, add both URL permissions that AWS requires for new Function URLs:
+
+```bash
+FUNCTION_URL=$(aws lambda create-function-url-config \
+  --function-name "$LAMBDA_FUNCTION" \
+  --auth-type NONE \
+  --invoke-mode BUFFERED \
+  --region "$AWS_REGION" \
+  --query FunctionUrl \
+  --output text)
+
+aws lambda add-permission \
+  --function-name "$LAMBDA_FUNCTION" \
+  --statement-id FunctionURLAllowPublicAccess \
+  --action lambda:InvokeFunctionUrl \
+  --principal '*' \
+  --function-url-auth-type NONE \
+  --region "$AWS_REGION"
+
+aws lambda add-permission \
+  --function-name "$LAMBDA_FUNCTION" \
+  --statement-id FunctionURLInvokeAllowPublicAccess \
+  --action lambda:InvokeFunction \
+  --principal '*' \
+  --invoked-via-function-url \
+  --region "$AWS_REGION"
+
+curl --fail "${FUNCTION_URL}alive"
+# {"alive":true,"runtime":"nub-on-node"}
+```
+
+Update the AWS CLI if it does not recognize `--invoked-via-function-url`. Use `AWS_IAM` instead of `NONE` when callers should authenticate.
 
 ## GitHub Actions
 

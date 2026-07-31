@@ -61,13 +61,13 @@ export default function handler(
 Connect the repository from the Vercel dashboard, or push a deployment from the CLI:
 
 ```bash
-nubx vercel deploy
+nubx -y vercel deploy --prod
 ```
 
 Request the Function after the production deployment:
 
 ```bash
-curl https://PROJECT.vercel.app/api/alive
+curl --fail https://PROJECT.vercel.app/api/alive
 ```
 
 ```json

@@ -48,14 +48,19 @@ Point Wrangler at the handler:
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "nub-app",
   "main": "src/index.ts",
-  "compatibility_date": "2026-07-30"
+  "compatibility_date": "2026-07-30",
+  "build": {
+    "command": "nub run build"
+  }
 }
 ```
 
-After Workers Builds runs the build and deploy commands, request the assigned domain:
+Workers Builds runs the configured build and deploy commands after each push. To run the same deployment from a workstation instead:
 
 ```bash
-curl https://nub-app.ACCOUNT.workers.dev
+nubx -y wrangler deploy
+curl --fail https://nub-app.ACCOUNT.workers.dev
+# {"alive":true,"provider":"cloudflare","runtime":"cloudflare-workers"}
 ```
 
 ## Pages

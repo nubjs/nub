@@ -24,8 +24,18 @@ Change `package-lock.json` to the project's lockfile. The ingress container must
 import { createServer } from "node:http";
 
 const port = Number(process.env.PORT || 8080);
-createServer((_request, response) => {
-  response.end("Hello from Nub");
+createServer((request, response) => {
+  if (request.url !== "/alive") {
+    response.writeHead(404);
+    response.end();
+    return;
+  }
+
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(JSON.stringify({
+    alive: true,
+    runtime: "nub-on-node",
+  }));
 }).listen(port, "0.0.0.0");
 ```
 
@@ -63,6 +73,16 @@ gcloud run deploy nub-app \
 Cloud Build builds the Dockerfile, stores the image in Artifact Registry, and creates a Cloud Run revision. The command prints the service URL when the revision is ready.
 
 The public-access flag disables Cloud Run's invoker IAM check without adding an `allUsers` IAM binding, so it also works with domain-restricted sharing policies. Omit the flag for a private service.
+
+Request the public service:
+
+```bash
+URL=$(gcloud run services describe nub-app \
+  --region us-west1 \
+  --format="value(status.url)")
+curl --fail "$URL/alive"
+# {"alive":true,"runtime":"nub-on-node"}
+```
 
 Authenticated callers need the Cloud Run Invoker role. Test a private service with an identity token:
 

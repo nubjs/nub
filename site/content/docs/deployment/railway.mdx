@@ -23,8 +23,18 @@ Change `package-lock.json` to the lockfile the project already uses. The start s
 import { createServer } from "node:http";
 
 const port = Number(process.env.PORT || 8080);
-createServer((_request, response) => {
-  response.end("Hello from Nub");
+createServer((request, response) => {
+  if (request.url !== "/alive") {
+    response.writeHead(404);
+    response.end();
+    return;
+  }
+
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(JSON.stringify({
+    alive: true,
+    runtime: "nub-on-node",
+  }));
 }).listen(port, "0.0.0.0");
 ```
 
@@ -42,13 +52,20 @@ Install and authenticate the [Railway CLI](https://docs.railway.com/guides/cli),
 
 ```bash
 railway login
-railway init
+railway init --name nub-app
 railway add --service nub-app
-railway up
-railway domain
+railway up --service nub-app --ci
+railway domain --service nub-app
 ```
 
 The final command creates a free `*.up.railway.app` domain for the service.
+
+Request its aliveness endpoint:
+
+```bash
+curl --fail https://nub-app-production.up.railway.app/alive
+# {"alive":true,"runtime":"nub-on-node"}
+```
 
 ## Port and health checks
 
