@@ -82,6 +82,52 @@ fn build_age_gate_resolves_dist_tag_range() {
     assert_eq!(d.gated, vec!["3.0.0".to_string()]);
 }
 
+/// Pins the BUILDERS, not the formatter. The help-text tests hand-construct the
+/// details structs, so they cannot observe which identity `build_age_gate` /
+/// `build_release_age_missing_time` actually store — swapping
+/// `task.registry_name()` back to `task.name` there would keep the whole suite
+/// green while restoring exactly the inert
+/// `--minimum-release-age-exclude=<alias>` advice this revision removed.
+/// `real_name: Some(..)` is the only shape where the two identities differ, so
+/// it is the only shape that can catch the regression.
+#[test]
+fn builders_store_the_registry_name_for_an_aliased_task() {
+    // `"foo": "npm:real-pkg@^1"` — the human reads `foo`, the exclude matcher
+    // keys on `real-pkg`.
+    let task = ResolveTask {
+        name: "foo".into(),
+        range: "^1".into(),
+        dep_type: DepType::Production,
+        is_root: true,
+        parent: None,
+        importer: ".".into(),
+        original_specifier: None,
+        real_name: Some("real-pkg".into()),
+        ancestors: Arc::from([]),
+        range_from_override: false,
+    };
+
+    let mut dated = make_packument("real-pkg", &["1.0.0"], "1.0.0");
+    dated
+        .time
+        .insert("1.0.0".to_string(), "2026-07-01T00:00:00.000Z".to_string());
+    let d = build_age_gate(&task, &dated, 60);
+    assert_eq!(d.name, "foo", "the readable chain keeps the alias");
+    assert_eq!(
+        d.registry_name, "real-pkg",
+        "exclude remedies must carry the identity minimumReleaseAgeExclude matches"
+    );
+
+    // The undated builder shares the field and the same failure mode.
+    let undated_pack = make_packument("real-pkg", &["1.0.0"], "1.0.0");
+    let u = build_release_age_missing_time(&task, &undated_pack);
+    assert_eq!(u.name, "foo");
+    assert_eq!(
+        u.registry_name, "real-pkg",
+        "the undated path must carry the matching identity too"
+    );
+}
+
 #[test]
 fn build_no_match_falls_back_to_prereleases() {
     let packument = make_packument(
@@ -199,6 +245,7 @@ fn classify_registry_error_prefers_git_over_http_url() {
 fn age_gate_help_lists_gated_versions_and_bypass() {
     let err = Error::AgeGate(Box::new(AgeGateDetails {
         name: "lodash".into(),
+        registry_name: "lodash".into(),
         range: "^4".into(),
         minutes: 60,
         importer: "packages/app".into(),
@@ -209,8 +256,88 @@ fn age_gate_help_lists_gated_versions_and_bypass() {
     assert!(help.contains("importer: packages/app"));
     assert!(help.contains("chain: parent@1.0.0 > lodash"));
     assert!(help.contains("blocked by age gate: 4.17.21, 4.17.20"));
-    assert!(help.contains("minimumReleaseAgeStrict=false"));
+    // The one-shot flags lead: this error usually interrupts a single command,
+    // where a config edit is the wrong shape of remedy.
+    // Assert the FLAG is offered and that turning it off is reachable, without
+    // pinning one literal spelling of the value — the remedy legitimately moved
+    // from `=0` to `=<duration>` when shortening became the leading advice.
+    assert!(
+        help.contains("--minimum-release-age="),
+        "the one-shot window flag must be offered, got: {help}"
+    );
+    assert!(
+        help.contains("`0` turns it off"),
+        "turning the window off must stay reachable from the help, got: {help}"
+    );
+    assert!(
+        help.contains("--minimum-release-age-exclude=lodash"),
+        "the per-package one-shot exemption must be offered, got: {help}"
+    );
     assert!(help.contains("minimumReleaseAgeExclude"));
+    // Guard, not decoration. An earlier revision of this test asserted the
+    // help DID offer `--no-minimum-release-age-strict`; when that flag was
+    // removed the suite stayed green while the advice became unrunnable
+    // (`error: unexpected argument`). Every remedy printed here has to be one
+    // the CLI accepts, so assert the removed spelling is ABSENT.
+    assert!(
+        !help.contains("--no-minimum-release-age-strict"),
+        "the removed strictness flag must never be advertised, got: {help}"
+    );
+    // Strictness is not offered as a remedy either: nub enforces the window, so
+    // the way out is a shorter window or an exemption, never a window that is
+    // silently ignored.
+    assert!(
+        !help.contains("minimumReleaseAgeStrict=false"),
+        "loosening strictness must not be recommended, got: {help}"
+    );
+    // Shortening is the proportionate remedy and must be offered, not just the
+    // all-or-nothing `0`: the flag takes a duration.
+    assert!(
+        help.contains("--minimum-release-age=<duration>"),
+        "shortening the window must be offered, not only turning it off: {help}"
+    );
+}
+
+/// An `npm:`-aliased dep is the one case where the name the human reads and the
+/// name `minimumReleaseAgeExclude` matches differ. The exclude remedies must
+/// print the REGISTRY name: an entry naming the alias is accepted by clap and
+/// by the config parser, then silently matches nothing, so the user follows
+/// nub's own advice and stays blocked with no indication why.
+#[test]
+fn exclude_remedies_name_the_registry_identity_not_the_alias() {
+    let err = Error::AgeGate(Box::new(AgeGateDetails {
+        name: "foo".into(),
+        registry_name: "real-pkg".into(),
+        range: "^1".into(),
+        minutes: 60,
+        importer: ".".into(),
+        ancestors: vec![],
+        gated: vec!["1.2.3".into()],
+    }));
+    let help = err.help().expect("help set").to_string();
+    assert!(
+        help.contains("--minimum-release-age-exclude=real-pkg"),
+        "the one-shot exemption must name the matcher's identity, got: {help}"
+    );
+    assert!(
+        !help.contains("--minimum-release-age-exclude=foo"),
+        "naming the alias hands the user an entry that matches nothing: {help}"
+    );
+
+    // Same contract on the undated path, which shares the field.
+    let undated = Error::ReleaseAgeMissingTime(Box::new(UndatedDetails {
+        name: "foo".into(),
+        registry_name: "real-pkg".into(),
+        range: "^1".into(),
+        importer: ".".into(),
+        ancestors: vec![],
+        undated: vec!["1.2.3".into()],
+    }));
+    let help = undated.help().expect("help set").to_string();
+    assert!(
+        help.contains("`real-pkg` to `minimumReleaseAgeExclude`"),
+        "the undated remedy must name the matcher's identity too, got: {help}"
+    );
 }
 
 /// A registry that publishes no `time` data blocks the whole range, but for a
@@ -222,6 +349,7 @@ fn age_gate_help_lists_gated_versions_and_bypass() {
 fn release_age_missing_time_names_the_registry_as_the_cause() {
     let err = Error::ReleaseAgeMissingTime(Box::new(UndatedDetails {
         name: "lodash".into(),
+        registry_name: "lodash".into(),
         range: "^4".into(),
         importer: ".".into(),
         ancestors: vec![],

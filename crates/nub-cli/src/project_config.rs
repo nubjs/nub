@@ -1298,7 +1298,14 @@ fn validate_dlx(v: &Value, path: &str) -> Result<DlxConfig> {
 /// units `s|m|h|d|w` ONLY (no months/years — calendar ambiguity; `m` is
 /// unambiguously minutes). A bare unit-less number is REJECTED (the npm-days vs
 /// pnpm-minutes trap, made unrepresentable).
-fn parse_duration(s: &str, path: &str) -> Result<Duration> {
+///
+/// Shared with the `--minimum-release-age` CLI flag
+/// ([`crate::pm_engine::min_release_age`]) so the file and the flag cannot drift
+/// to two different grammars. The flag layers ONE relaxation on top: a bare
+/// number there means MINUTES, because that is pnpm's CLI contract and the CLI
+/// mirrors pnpm. The file keeps the rejection — it is nub's own surface, with no
+/// incumbent grammar to match and nothing to disambiguate it.
+pub(crate) fn parse_duration(s: &str, path: &str) -> Result<Duration> {
     let invalid = |msg: &str| ConfigError::Value {
         path: path.into(),
         message: format!("invalid duration `{s}` — {msg}"),

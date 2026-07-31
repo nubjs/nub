@@ -292,6 +292,126 @@ fn emit_notice(target: &Target, recorded: &[String]) {
     ));
 }
 
+/// Engine minutes for a `--minimum-release-age` value, accepting BOTH surfaces
+/// this setting already has:
+///
+/// - `<integer><unit>` (`s|m|h|d|w`) — the exact grammar `nub.jsonc`'s
+///   `install.minimumReleaseAge` accepts, parsed by the same
+///   [`crate::project_config::parse_duration`] so a value that works in the file
+///   works on the flag and the two cannot drift.
+/// - a bare integer — MINUTES, mirroring pnpm's CLI, whose type map declares
+///   `minimum-release-age` as a Number.
+///
+/// The file deliberately REJECTS the bare form (npm counts days, pnpm counts
+/// minutes, so an unqualified number in a config file is a trap). On the CLI the
+/// ambiguity is already settled by the tool nub mirrors, so accepting it is
+/// compatibility rather than a hazard.
+///
+/// Sub-minute values round UP, never down: the engine setting is whole minutes,
+/// and `30s` collapsing to `0` would SILENTLY DISABLE the gate instead of
+/// tightening it. Same rule, and the same reason, as the bunfig seconds→minutes
+/// conversion in [`super::bun_config`]. A literal `0` still means zero — that is
+/// the documented "turn it off" value, not a rounding artifact.
+fn parse_release_age_minutes(raw: &str) -> Result<u64, String> {
+    let s = raw.trim();
+    if let Ok(minutes) = s.parse::<u64>() {
+        return Ok(minutes);
+    }
+    // Take the config parser's VERDICT but not its wording: its `Display`
+    // attributes the failure to `nub.jsonc`, which is a lie on a command line.
+    // The grammar stays in one place; only the sentence differs.
+    let dur = crate::project_config::parse_duration(s, "--minimum-release-age").map_err(|_| {
+        format!(
+            "expected minutes (e.g. `1440`) or a duration with a unit \
+             s|m|h|d|w (e.g. `3d`), got `{raw}`"
+        )
+    })?;
+    Ok(dur.as_secs().div_ceil(60))
+}
+
+// The per-invocation age-gate flags, flattened into every nub surface that
+// resolves from the registry (`install`/`ci`, the engine verbs via
+// `EngineGlobals`, and `nubx`).
+//
+// Each flag mirrors BOTH of the surfaces this setting already has: the pnpm
+// spelling (its CLI type map declares `minimum-release-age` and
+// `minimum-release-age-exclude`) and the value grammar of the matching
+// `nub.jsonc` field (`install.minimumReleaseAge`,
+// `install.minimumReleaseAgeExclude`).
+//
+// NO STRICTNESS FLAG, deliberately. Under nub the gate defaults to strict, and
+// the way to opt out is `--minimum-release-age=0` — turn the window OFF, rather
+// than keep a window and quietly install versions that fail it. pnpm's
+// `minimumReleaseAgeStrict` defaults to false, which leaves its 24h window
+// advisory unless you separately opt in; nub does not reproduce that. So there
+// is no `--[no-]minimum-release-age-strict`, and no
+// `install.minimumReleaseAgeStrict` in `nub.jsonc` either — one axis (how
+// long), not two.
+//
+// (Plain `//`, not rustdoc: a `///` comment on a clap `Args` struct becomes the
+// augmented command's `--help` about-text and clobbers the verb's own, the same
+// hazard `EngineGlobals` documents. This one leaked onto `nub add --help`.)
+#[derive(Debug, Default, Clone, clap::Args)]
+pub struct AgeGateFlags {
+    /// How old a version must be before it can be installed: a duration with a
+    /// unit (`30s`, `5m`, `2h`, `3d`, `1w`), or a bare number meaning minutes.
+    /// `0` turns the age gate off for this run. Overrides `minimumReleaseAge`
+    /// from config.
+    #[arg(long, value_name = "DURATION", value_parser = parse_release_age_minutes)]
+    pub minimum_release_age: Option<u64>,
+
+    /// Exempt packages from the age gate for this run (repeatable). Entry
+    /// grammar matches the config field: a bare name, a `*` name glob, or a
+    /// name with a version range. REPLACES any configured
+    /// `minimumReleaseAgeExclude` rather than adding to it, so pass every
+    /// package you still need exempt.
+    #[arg(long, value_name = "PKG")]
+    pub minimum_release_age_exclude: Vec<String>,
+}
+
+impl AgeGateFlags {
+    /// The `(setting, value)` pairs for [`aube_settings::set_global_cli_overrides`].
+    /// Keys are the canonical setting names — `cli_key_matches` compares in
+    /// kebab-case, so these reach `minimumReleaseAge` / `minimumReleaseAgeExclude`
+    /// without needing a `sources.cli` alias declared in `settings.toml`.
+    fn cli_overrides(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        if let Some(minutes) = self.minimum_release_age {
+            out.push(("minimumReleaseAge".to_string(), minutes.to_string()));
+        }
+        if !self.minimum_release_age_exclude.is_empty() {
+            // The settings reader takes the LAST matching CLI entry and parses it
+            // as one list, so repeated `--minimum-release-age-exclude` flags have
+            // to arrive joined rather than as separate entries.
+            out.push((
+                "minimumReleaseAgeExclude".to_string(),
+                self.minimum_release_age_exclude.join(","),
+            ));
+        }
+        out
+    }
+
+    /// Publish the flags into the engine's process-global CLI-override bag,
+    /// which `aube_settings`' typed accessors consult ahead of every other
+    /// source. One call covers the whole run: the resolver, the default-trust
+    /// floor, and any chained install all read through the same accessors, so
+    /// nothing needs the value threaded down to it.
+    ///
+    /// A managed (org-policy) config still wins — `minimumReleaseAge` carries
+    /// `managedPolicy = "max"`, applied by the generated accessor's finalizer
+    /// after this bag is consulted, so a CLI flag can raise the floor but never
+    /// lower one an administrator set.
+    ///
+    /// The bag is a `OnceLock`, so skip the call when nothing was passed rather
+    /// than latching an empty vec.
+    pub fn apply(&self) {
+        let overrides = self.cli_overrides();
+        if !overrides.is_empty() {
+            aube_settings::set_global_cli_overrides(overrides);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,5 +545,88 @@ mod tests {
             read_workspace_yaml_string_list(&dir.path().join("pnpm-workspace.yaml"), EXCLUDE_KEY),
             vec!["vite@6.0.0"]
         );
+    }
+
+    /// Zero must reach the engine as a literal `0`, because `0` is the ONLY way
+    /// to turn the gate off — nub ships no strictness flag, so a value that
+    /// arrived as anything else (or was dropped as "unset") would leave a user
+    /// who asked for no window still gated. `resolve_minimum_release_age`
+    /// short-circuits to `None` on exactly `0`.
+    #[test]
+    fn zero_reaches_the_engine_as_the_off_switch() {
+        let flags = AgeGateFlags {
+            minimum_release_age: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            flags.cli_overrides(),
+            vec![("minimumReleaseAge".to_string(), "0".to_string())],
+            "0 must be published verbatim, not elided as a falsy/default value"
+        );
+        // Every spelling of "no window" collapses to the same 0.
+        assert_eq!(parse_release_age_minutes("0"), Ok(0));
+        assert_eq!(parse_release_age_minutes("0s"), Ok(0));
+        assert_eq!(parse_release_age_minutes("0d"), Ok(0));
+    }
+
+    /// The flag takes both surfaces the setting already has: `nub.jsonc`'s
+    /// unit grammar, and pnpm's bare-number-means-minutes.
+    #[test]
+    fn release_age_accepts_the_config_units_and_pnpms_bare_minutes() {
+        // Bare number = minutes, matching pnpm's CLI type map.
+        assert_eq!(parse_release_age_minutes("1440"), Ok(1440));
+        assert_eq!(parse_release_age_minutes("0"), Ok(0));
+        // Every unit `nub.jsonc`'s install.minimumReleaseAge accepts.
+        assert_eq!(parse_release_age_minutes("5m"), Ok(5));
+        assert_eq!(parse_release_age_minutes("2h"), Ok(120));
+        assert_eq!(parse_release_age_minutes("3d"), Ok(4320));
+        assert_eq!(parse_release_age_minutes("1w"), Ok(10_080));
+        // `1d` is the default window, so this is the identity a user checks.
+        assert_eq!(
+            parse_release_age_minutes("1d"),
+            parse_release_age_minutes("1440")
+        );
+    }
+
+    /// Sub-minute values must round UP. Truncating `30s` to `0` would turn a
+    /// request to TIGHTEN the gate into silently disabling it — the same trap
+    /// the bunfig seconds→minutes conversion guards against.
+    #[test]
+    fn sub_minute_release_age_rounds_up_so_it_never_disables_the_gate() {
+        assert_eq!(parse_release_age_minutes("30s"), Ok(1));
+        assert_eq!(parse_release_age_minutes("1s"), Ok(1));
+        assert_eq!(parse_release_age_minutes("90s"), Ok(2));
+        // An explicit zero is the documented "off" value, not a rounding artifact.
+        assert_eq!(parse_release_age_minutes("0s"), Ok(0));
+    }
+
+    /// The flag inherits the config grammar's rejections, so a value the file
+    /// refuses cannot sneak in through the CLI.
+    #[test]
+    fn release_age_rejects_what_the_config_grammar_rejects() {
+        for bad in ["3y", "-1d", "3 d", "d", "3_0d", ""] {
+            assert!(
+                parse_release_age_minutes(bad).is_err(),
+                "{bad:?} must be rejected on the flag, as it is in nub.jsonc"
+            );
+        }
+    }
+
+    /// Repeated `--minimum-release-age-exclude` must arrive as ONE joined entry:
+    /// the settings reader takes the last matching CLI key and parses it as a
+    /// single list, so separate entries would drop all but the final package.
+    #[test]
+    fn repeated_excludes_are_joined_into_one_cli_entry() {
+        let flags = AgeGateFlags {
+            minimum_release_age_exclude: vec!["react".into(), "@myorg/*".into()],
+            ..Default::default()
+        };
+        let overrides = flags.cli_overrides();
+        let exclude: Vec<_> = overrides
+            .iter()
+            .filter(|(k, _)| k == "minimumReleaseAgeExclude")
+            .collect();
+        assert_eq!(exclude.len(), 1, "must be one entry, got {overrides:?}");
+        assert_eq!(exclude[0].1, "react,@myorg/*");
     }
 }
