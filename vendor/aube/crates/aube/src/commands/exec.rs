@@ -367,8 +367,7 @@ async fn exec_bin_with_node_args_and_env(
         return Err(bin_not_found_error(bin));
     }
 
-    let command =
-        build_bin_command(cwd, bin_path, bin, args, node_args, shell_mode, child_env);
+    let command = build_bin_command(cwd, bin_path, bin, args, node_args, shell_mode, child_env);
     let status = crate::process_guard::spawn_and_wait(command)
         .await
         .into_diagnostic()
@@ -416,8 +415,7 @@ pub(crate) async fn exec_bin_terminal_with_env(
         if !shell_mode && !bin_path.exists() {
             return Err(bin_not_found_error(bin));
         }
-        let mut command =
-            build_bin_command(cwd, bin_path, bin, args, &[], shell_mode, child_env);
+        let mut command = build_bin_command(cwd, bin_path, bin, args, &[], shell_mode, child_env);
         // `exec` only returns on failure; on success the tool has replaced us.
         let err = command.as_std_mut().exec();
         return Err(miette!(

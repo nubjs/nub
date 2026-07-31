@@ -221,7 +221,9 @@ fn link_hoisted_placement_bins(
             continue;
         };
         let bin_dir = dep_modules_dir_for(pkg_dir, &pkg.name).join(".bin");
-        link_bins_for_dep_at(cache, &bin_dir, graph, dep_path, &pkg.name, pkg_dir, shim_opts)?;
+        link_bins_for_dep_at(
+            cache, &bin_dir, graph, dep_path, &pkg.name, pkg_dir, shim_opts,
+        )?;
     }
     Ok(())
 }
