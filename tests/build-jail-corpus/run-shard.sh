@@ -159,6 +159,12 @@ if [ -n "${SUPPRESS:-}" ]; then
   case "$SUPPRESS" in
     prisma-schema) rm -rf "$PROJ/prisma" ;;
     git-repo) rm -rf "$PROJ/.git" ;;
+    # A capability delivered as a package.json FIELD cannot be withheld by
+    # deleting a path, so the default `rm -f` below silently suppressed nothing
+    # and the self-test it was meant to drive passed vacuously.
+    msw-manifest) node -e '
+      const f=process.argv[1], j=JSON.parse(require("fs").readFileSync(f,"utf8"));
+      delete j.msw; require("fs").writeFileSync(f, JSON.stringify(j,null,2));' "$PROJ/package.json" ;;
     *) rm -f "$PROJ/$SUPPRESS" ;;
   esac
   echo "SUPPRESSED capability: $SUPPRESS" >> "$LOG"
