@@ -177,10 +177,18 @@ this grant both die in `uv_cwd` before running a line of their own logic.
 Node-only is what keeps this from being a project read: the project's *contents* stay
 ungranted, and anything the package then reads there must still be named in `projectReads`.
 
-It is not zero disclosure, and the platforms differ — stated rather than glossed. A Landlock
-read rule on a directory carries `READ_DIR`, so on Linux a granted package can list the
-project root's top-level entry names. macOS grants metadata only. Filenames, never contents,
-and only for the packages in this table.
+It is not zero disclosure — stated rather than glossed. Both backends let a granted package
+list the project root's top-level entry names: Landlock grants `READ_DIR` on the node,
+Seatbelt a `(literal …)` read of it. Filenames, never contents, and only for the packages in
+this table.
+
+Holding that line is the backends' job, and both once lost it in the widening direction.
+Seatbelt rendered the node as `(subpath …)`, which read the whole project *and* revoked every
+write grant under it; the Linux mount plan collapsed it into a subtree grant whose rights
+each file below inherits. Reach for the backend before assuming a bare path stays a node.
+
+On Linux the grant is inert: `chdir` is not a Landlock-handled access, so the operation it
+exists to permit was never denied there. It stays because Seatbelt does gate it.
 
 ## `notGranted`
 

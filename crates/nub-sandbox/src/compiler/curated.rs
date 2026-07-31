@@ -88,10 +88,24 @@ struct CuratedGrant {
     /// project stay ungranted, and everything the package then reads there still has to be
     /// named in `project_reads`.
     ///
-    /// It is not zero disclosure, and the platforms differ — stated rather than glossed.
-    /// A Landlock read rule on a directory carries `READ_DIR`, so on Linux the granted
-    /// package can LIST the project root's top-level entries; macOS grants metadata only.
-    /// Filenames, never contents, and only for the handful of packages in the table.
+    /// THE NODE/SUBTREE DISTINCTION IS THE BACKENDS' JOB AND BOTH ONCE LOST IT, in the
+    /// widening direction, silently — an earlier version of this comment claimed the
+    /// residual was "filenames, never contents", and it was not. Seatbelt rendered the bare
+    /// path as `(subpath …)`, so the read covered the whole project AND the same term became
+    /// a subtree write-DENY that revoked `package_dir` and `sibling_dirs` under
+    /// last-match-wins. Landlock's mount plan collapsed it into a subtree grant whose rights
+    /// every file below inherits. Both are fixed at their backend — `(literal …)` on macOS,
+    /// `MountAccess::ListOnly` (`READ_DIR` alone) on Linux — so a change here should re-read
+    /// those before assuming a term named a node just because this field says so.
+    ///
+    /// The residual now IS filenames: Landlock's `READ_DIR` lets the package list the
+    /// project root's top-level entries. macOS grants the node's own reads. Contents stay
+    /// out on both, and only for the handful of packages in the table.
+    ///
+    /// LINUX GETS NOTHING FROM THIS and keeps it anyway: `chdir` is not a Landlock-handled
+    /// access, so the operation the grant exists to permit was never denied there (measured,
+    /// 6.17 / ABI 7). It stays because Seatbelt DOES gate it — `uv_cwd` was the measured
+    /// failure — and the field is one catalog entry, not one per platform.
     project_cwd: bool,
 }
 

@@ -118,6 +118,13 @@ const DEVICE_PATHS: &[&str] = &[
 /// bubblewrap analogue (bubblewrap gets device nodes from `--dev`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LandlockAccess {
+    /// LIST the directory and open nothing in it — the IR's node-only read grant.
+    ///
+    /// Landlock's unit of grant is a path and its rights are inherited by everything
+    /// beneath it, so a node cannot be separated from its subtree by PATH. It can by
+    /// RIGHT: `READ_DIR` alone permits the `readdir` the grant exists for while
+    /// withholding `READ_FILE`, so a file below stays unopenable unless a rule names it.
+    ListDir,
     /// Read, list, and EXECUTE. See [`LandlockAccess::rights`] for why execute is here.
     ReadExecute,
     /// Every right the ABI handles.
@@ -149,6 +156,9 @@ impl LandlockAccess {
     /// by dropping EXECUTE.
     fn rights(self, abi: u32) -> u64 {
         match self {
+            // No EXECUTE and no READ_FILE: both are rights over the FILES under the path,
+            // which is precisely what a node-only grant withholds.
+            LandlockAccess::ListDir => ACCESS_READ_DIR,
             LandlockAccess::ReadExecute => {
                 ACCESS_READ_FILE | ACCESS_READ_DIR | ACCESS_EXECUTE | ioctl_dev(abi)
             }
@@ -338,6 +348,7 @@ pub(crate) fn derive_grants(
         grants.push(LandlockGrant {
             path: grant.path,
             access: match grant.access {
+                MountAccess::ListOnly => LandlockAccess::ListDir,
                 MountAccess::ReadOnly => LandlockAccess::ReadExecute,
                 MountAccess::ReadWrite => LandlockAccess::ReadWrite,
             },
@@ -357,7 +368,10 @@ pub(crate) fn derive_grants(
 /// under-enforcing.
 fn reject_narrowing_grants(plan: &[MountGrant]) -> Result<(), String> {
     for (index, grant) in plan.iter().enumerate() {
-        if grant.access != MountAccess::ReadOnly {
+        // Every narrowing shape, not just `ReadOnly`: a `ListOnly` node nested in a
+        // writable grant is the same non-restriction, and skipping it would let the
+        // guard pass on a plan it exists to refuse.
+        if grant.access == MountAccess::ReadWrite {
             continue;
         }
         if let Some(wider) = plan[..index].iter().find(|earlier| {
@@ -731,6 +745,16 @@ mod tests {
         }
     }
 
+    /// A subtree the way the compiler spells it — the node and its `/**` twin. A bare path
+    /// with no twin is the directory NODE, a different grant ([`MountAccess::ListOnly`]),
+    /// so a fixture meaning "this tree" has to say so.
+    fn subtree(path: &str, effect: Effect, access: FsAccess) -> [FsRule; 2] {
+        [
+            rule(path, effect, access),
+            rule(&format!("{path}/**"), effect, access),
+        ]
+    }
+
     fn policy(entries: Vec<FsRule>) -> SandboxPolicy {
         let mut policy = SandboxPolicy::default();
         policy.fs.rules = FsRuleSet {
@@ -769,6 +793,7 @@ mod tests {
         for abi in 1..=7 {
             let handled = handled_access_fs(abi);
             for access in [
+                LandlockAccess::ListDir,
                 LandlockAccess::ReadExecute,
                 LandlockAccess::ReadWrite,
                 LandlockAccess::Device,
@@ -806,14 +831,19 @@ mod tests {
         let child = parent.join("child");
         std::fs::create_dir_all(&child).unwrap();
 
-        let error = derive_grants_for_test(&policy(vec![
-            rule(
-                &parent.to_string_lossy(),
-                Effect::Allow,
-                FsAccess::ReadWrite,
-            ),
-            rule(&child.to_string_lossy(), Effect::Allow, FsAccess::Read),
-        ]))
+        let error = derive_grants_for_test(&policy(
+            [
+                subtree(
+                    &parent.to_string_lossy(),
+                    Effect::Allow,
+                    FsAccess::ReadWrite,
+                ),
+                subtree(&child.to_string_lossy(), Effect::Allow, FsAccess::Read),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+        ))
         .expect_err("a narrowing cap must be refused, not silently widened");
         assert!(
             error.contains("rules union"),
@@ -831,14 +861,19 @@ mod tests {
         let package = tree.join("native");
         std::fs::create_dir_all(&package).unwrap();
 
-        let grants = derive_grants_for_test(&policy(vec![
-            rule(&tree.to_string_lossy(), Effect::Allow, FsAccess::Read),
-            rule(
-                &package.to_string_lossy(),
-                Effect::Allow,
-                FsAccess::ReadWrite,
-            ),
-        ]))
+        let grants = derive_grants_for_test(&policy(
+            [
+                subtree(&tree.to_string_lossy(), Effect::Allow, FsAccess::Read),
+                subtree(
+                    &package.to_string_lossy(),
+                    Effect::Allow,
+                    FsAccess::ReadWrite,
+                ),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+        ))
         .expect("the build jail's own nesting must compile");
         assert_eq!(
             grants
