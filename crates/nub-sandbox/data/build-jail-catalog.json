@@ -82,6 +82,12 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "@larksuite/cli",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 31591608 B / 1558 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
         "package": "@notarize/qlc-cli",
         "evidence": "measured",
         "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `Unhandled error: Error: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
@@ -102,8 +108,8 @@
       {
         "package": "@playwright/browser-chromium",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 586882987 B / 2752 files. nub v0.6.0 a96f26529005.",
-        "platform": "darwin-arm64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 691193515 B / 2154 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
       },
       {
         "package": "@playwright/browser-firefox",
@@ -120,8 +126,8 @@
       {
         "package": "@posthog/cli",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 51059435 B / 2403 files. nub v0.6.0 a96f26529005.",
-        "platform": "darwin-arm64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 47986568 B / 1563 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
       },
       {
         "package": "@railway/cli",
@@ -168,14 +174,20 @@
       {
         "package": "@vscode/ripgrep",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 29664196 B / 2398 files. nub v0.6.0 a96f26529005.",
-        "platform": "darwin-arm64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 55850539 B / 1558 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
       },
       {
         "package": "azure-functions-core-tools",
         "evidence": "measured",
         "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND cdn.functions.azure.com` fetching https://cdn.functions.azure.com/public/4.0.286861/Azure.Functions.Cli.osx-arm64.4.12.1.zip. Unconfined A0, same fixture: the same URL downloads.",
         "platform": "macos-arm64"
+      },
+      {
+        "package": "bootstrap-slider",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 60986436 B / 4503 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
       },
       {
         "package": "canvas",
@@ -228,8 +240,8 @@
       {
         "package": "electron",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 416749679 B / 2423 files. nub v0.6.0 a96f26529005.",
-        "platform": "darwin-arm64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 130131869 B / 1390 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
       },
       {
         "package": "electron-chromedriver",
@@ -282,14 +294,14 @@
       {
         "package": "inngest-cli",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 76025288 B / 2369 files. nub v0.6.0 a96f26529005.",
-        "platform": "darwin-arm64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 64824526 B / 1537 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
       },
       {
         "package": "ip-num",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 23394203 B / 2419 files. nub v0.6.0 a96f26529005.",
-        "platform": "darwin-arm64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 16724736 B / 1557 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
       },
       {
         "package": "mbt",
@@ -306,8 +318,8 @@
       {
         "package": "n8n-nodes-evolution-api",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 23410239 B / 2430 files. nub v0.6.0 a96f26529005.",
-        "platform": "darwin-arm64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 16740577 B / 1568 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
       },
       {
         "package": "ngrok",
@@ -342,14 +354,20 @@
       {
         "package": "odbc",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 22129522 B / 2230 files. nub v0.6.0 a96f26529005.",
-        "platform": "darwin-arm64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 18635686 B / 1444 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
       },
       {
         "package": "pngout-bin",
         "evidence": "measured",
         "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `RequestError: getaddrinfo ENOTFOUND raw.github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. raw.github.com is deliberately NOT promoted to networkHosts: it 301s to raw.githubusercontent.com, which serves arbitrary repository content rather than published release assets, and the prefetcher excludes that host on purpose (see GITHUB_PREFETCH_HOSTS in pm_engine/build_prefetch.rs).",
         "platform": "macos-arm64"
+      },
+      {
+        "package": "postman-code-generators",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 16851911 B / 1557 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
       },
       {
         "package": "protoc-gen-grpc-web",
@@ -384,8 +402,8 @@
       {
         "package": "skia-canvas",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 45760124 B / 2398 files. nub v0.6.0 a96f26529005.",
-        "platform": "darwin-arm64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 47186585 B / 1558 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
       },
       {
         "package": "snyk",
@@ -402,14 +420,14 @@
       {
         "package": "squawk-cli",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 28452334 B / 2398 files. nub v0.6.0 a96f26529005.",
-        "platform": "darwin-arm64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 23342007 B / 1557 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
       },
       {
         "package": "supabase",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 112740162 B / 2033 files. nub v0.6.0 a96f26529005.",
-        "platform": "darwin-arm64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 110276485 B / 1286 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
       },
       {
         "package": "taiko",
