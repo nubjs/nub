@@ -5,14 +5,16 @@
 //! produce drops recursively too, so a deeply-nested document exhausts the stack.
 //! That is not a catchable failure — it aborts the process (`SIGSEGV`, or
 //! `STATUS_STACK_OVERFLOW` on Windows) before any validation can reject the file.
+//! Windows sees it first: its main-thread stack budget is ~1 MiB against ~8 MiB
+//! on Linux and macOS.
 //!
 //! Measured on the `fast` profile, feeding `[[[…1…]]]` through the addon's
 //! `parseJson5` (json5 0.4 imposes no bound of its own): abort between 2500 and
 //! 3000 levels on a stock 8 MiB macOS stack, and between 300 and 400 on a 1 MiB
-//! stack — the Windows main-thread budget, which is why Windows sees it first.
-//! `jsonc_parser` 0.32.4 happens to stop at 512 internally, but that is an
-//! upstream implementation detail no test of ours pins and a version bump can
-//! remove, so JSONC is bounded here too rather than left to it.
+//! one. `jsonc_parser` 0.32.4 happens to stop at 512 internally — above what a
+//! 1 MiB stack survives, and an upstream implementation detail no test of ours
+//! pins and a version bump can remove — so JSONC is bounded here too rather than
+//! left to it.
 //!
 //! The bound is applied to the TEXT because that is the only point at which the
 //! recursion can still be stopped: none of these parsers exposes a depth option,
@@ -26,10 +28,6 @@
 /// `max_depth` is the caller's, not a constant here, because the two callers
 /// bound different things — nub's own config schema versus arbitrary user data
 /// reaching the runtime's data-format loaders.
-///
-/// Callable on its own because a CST writer hands the same externally-authored
-/// text to `jsonc_parser::cst`, whose descent is unbounded in exactly the same
-/// way — the guard belongs to the text, not to one parser entry point.
 pub fn check_nesting_depth(text: &str, max_depth: usize) -> Result<(), String> {
     #[derive(Clone, Copy)]
     enum State {

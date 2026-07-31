@@ -155,9 +155,9 @@ blake3.workspace = true
 # invalidation contract can be unit-tested off the un-testable cdylib. A path dep
 # that crosses into the MAIN workspace (where nub-cache-key is a member).
 nub-cache-key = { path = "../nub-cache-key" }
-# The raw-text nesting bound the JSON-family parsers below are called behind.
-# Shared with nub-cli rather than copied: this crate has `test = false`, so a copy
-# here could never be unit tested. Another cross-workspace path dep.
+# The raw-text nesting bound the JSON-family parsers above are called behind.
+# Shared with nub-cli rather than copied: `test = false` on this crate means a
+# local copy could never be unit tested. A second path dep into the MAIN workspace.
 nub-json-guard = { path = "../nub-json-guard" }
 
 [build-dependencies]

@@ -41,7 +41,11 @@ fn string_map(tag: usize) -> BTreeMap<String, String> {
 /// the pnpm-mirroring surfaces, not this one. Both differ from the explicit-
 /// empty form (`Enabled(false)`), which is what the falsy-precedence case needs.
 fn verify_deps(tag: usize) -> VerifyDeps {
-    [VerifyDeps::Warn, VerifyDeps::Error][tag % 2].clone()
+    if tag.is_multiple_of(2) {
+        VerifyDeps::Warn
+    } else {
+        VerifyDeps::Error
+    }
 }
 
 /// One variant per strategy, and the two that carry a knob carry a tagged one —
@@ -204,6 +208,9 @@ fn specs() -> Vec<KeySpec> {
     ]
 }
 
+/// One per `ConfigKey` variant; [`ordinal`] is what keeps it honest.
+const KEY_COUNT: usize = 14;
+
 /// Exhaustive by construction: adding a `ConfigKey` variant breaks this match,
 /// forcing the new key into the spec table.
 fn ordinal(key: ConfigKey) -> usize {
@@ -259,8 +266,8 @@ fn resolve(layers: [Option<ProjectConfig>; 5]) -> EffectiveConfig {
 #[test]
 fn spec_table_covers_every_config_key_exactly_once() {
     let specs = specs();
-    assert_eq!(specs.len(), 14, "one spec per ConfigKey variant");
-    let mut seen = [false; 14];
+    assert_eq!(specs.len(), KEY_COUNT, "one spec per ConfigKey variant");
+    let mut seen = [false; KEY_COUNT];
     for spec in &specs {
         let idx = ordinal(spec.key);
         assert!(!seen[idx], "duplicate spec for {}", spec.name);

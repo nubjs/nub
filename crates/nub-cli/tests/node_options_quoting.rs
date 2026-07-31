@@ -1,18 +1,14 @@
 //! A project `nub.jsonc` `nodeOptions` entry containing a double quote must
 //! reach the child intact on EVERY surface that composes `NODE_OPTIONS`.
 //!
-//! Four separate producers build that variable — the direct file run and the
+//! Four independent producers build that variable — the direct file run and the
 //! script/exec augmentation in `nub_core::node::spawn`, plus two more inside
-//! `nub watch` — and they drifted: three quoted their entries through
-//! `node_options_token` and one appended them raw. The CLI validator rejects
-//! whitespace and NUL but NOT a quote, and `--title` is in Node's
-//! `allowedNodeEnvironmentFlags`, so `--title=a"b` passed validation and reached
-//! Node's tokenizer with an unmatched quote — which is a hard startup abort
-//! (`invalid value for NODE_OPTIONS (unterminated string)`, exit 9), not a
-//! degraded run.
-//!
-//! Every surface is exercised because the defect was precisely that they are
-//! independent producers: fixing one says nothing about the other three.
+//! `nub watch` — so fixing one says nothing about the other three, and all four
+//! are exercised here. The CLI validator rejects whitespace and NUL but NOT a
+//! quote, and `--title` is in Node's `allowedNodeEnvironmentFlags`, so
+//! `--title=a"b` passes validation and reaches Node's tokenizer with an
+//! unmatched quote: a hard startup abort (`invalid value for NODE_OPTIONS
+//! (unterminated string)`, exit 9) rather than a degraded run.
 
 #![cfg(unix)]
 
@@ -26,11 +22,7 @@ use std::time::Duration;
 const TITLE: &str = r#"a"b"#;
 
 fn nub_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // deps/
-    path.pop(); // debug/
-    path.push(format!("nub{}", std::env::consts::EXE_SUFFIX));
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_nub"))
 }
 
 fn host_node_usable() -> bool {
@@ -98,19 +90,19 @@ impl Fixture {
     fn command(&self) -> Command {
         self.command_for(nub_binary())
     }
+}
 
-    /// Run a surface that exits on its own and assert the title round-tripped.
-    fn assert_surface(&self, surface: &str, mut command: Command) {
-        let output = command.output().unwrap();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            output.status.success(),
-            "[{surface}] exited {:?} instead of running — a raw (unquoted) \
-             nodeOptions entry aborts Node before it executes a line.\nstderr: {stderr}",
-            output.status.code()
-        );
-        assert_title(surface, &String::from_utf8_lossy(&output.stdout));
-    }
+/// Run a surface that exits on its own and assert the title round-tripped.
+fn assert_surface(surface: &str, mut command: Command) {
+    let output = command.output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "[{surface}] exited {:?} instead of running — a raw (unquoted) \
+         nodeOptions entry aborts Node before it executes a line.\nstderr: {stderr}",
+        output.status.code()
+    );
+    assert_title(surface, &String::from_utf8_lossy(&output.stdout));
 }
 
 /// Assert the probe's JSON line reports a byte-identical title. The observed
@@ -140,15 +132,15 @@ fn quoted_node_option_survives_every_node_options_producer() {
 
     let mut file_run = fixture.command();
     file_run.arg("probe.js");
-    fixture.assert_surface("nub <file>", file_run);
+    assert_surface("nub <file>", file_run);
 
     let mut script_run = fixture.command();
     script_run.args(["run", "probe"]);
-    fixture.assert_surface("nub run", script_run);
+    assert_surface("nub run", script_run);
 
-    let mut exec = fixture.command_for(&fixture.nubx);
-    exec.arg("probe");
-    fixture.assert_surface("nubx", exec);
+    let mut nubx = fixture.command_for(&fixture.nubx);
+    nubx.arg("probe");
+    assert_surface("nubx", nubx);
 }
 
 /// `nub watch` gets its own test because it never exits: the assertion is on

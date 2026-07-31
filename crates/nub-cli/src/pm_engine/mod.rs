@@ -921,7 +921,7 @@ fn scoped_install_settings(
     let mut settings = lowered.layout.clone();
     settings.extend(lowered.resolution.iter().cloned());
     if store_locality == VirtualStoreLocality::ProjectLocal {
-        settings.retain(|(key, value)| key != "enableGlobalVirtualStore" || value != "true");
+        settings.retain(|(key, value)| !(key == "enableGlobalVirtualStore" && value == "true"));
     }
     settings
 }
@@ -957,20 +957,21 @@ fn warn_install_config_scoped_out(
 
 /// Which nub-native `install` fields the project actually wrote, in nub's vocabulary.
 fn install_fields_written(install: &crate::project_config::InstallConfig) -> Vec<&'static str> {
-    let mut written = Vec::new();
-    if install.linker.is_some() {
-        written.push("install.linker");
-    }
-    if install.public_hoist.is_some() {
-        written.push("install.publicHoist");
-    }
-    if install.minimum_release_age.is_some() {
-        written.push("install.minimumReleaseAge");
-    }
-    if install.minimum_release_age_exclude.is_some() {
-        written.push("install.minimumReleaseAgeExclude");
-    }
-    written
+    [
+        ("install.linker", install.linker.is_some()),
+        ("install.publicHoist", install.public_hoist.is_some()),
+        (
+            "install.minimumReleaseAge",
+            install.minimum_release_age.is_some(),
+        ),
+        (
+            "install.minimumReleaseAgeExclude",
+            install.minimum_release_age_exclude.is_some(),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(field, written)| written.then_some(field))
+    .collect()
 }
 
 /// The project's active-PM role, declaration-first (a declared PM outranks a
@@ -985,6 +986,8 @@ fn active_role(detected: Option<&DetectedLockfile>, cwd: &Path) -> Option<config
     )
 }
 
+/// Whether nub OWNS this project — the gate every nub-native `install` field
+/// passes through before it can reach the engine.
 fn native_pm_mode(detected: Option<&DetectedLockfile>, truly_fresh: bool, cwd: &Path) -> bool {
     if truly_fresh {
         return true;
@@ -1011,33 +1014,33 @@ fn lower_native_install_settings(
         );
     }
 
-    let mut layout = Vec::new();
+    let mut layout: Vec<(String, String)> = Vec::new();
+    let mut push = |key: &str, value: &str| layout.push((key.to_string(), value.to_string()));
     let mut eject_patterns: Option<Vec<String>> = None;
     if let Some(linker) = install.linker.as_ref() {
         // Both symlink layouts are aube's `isolated`; they differ only in where
         // the store lives, which is `enableGlobalVirtualStore`.
-        layout.push((
-            "nodeLinker".to_string(),
+        push(
+            "nodeLinker",
             match linker {
                 LinkerConfig::Global { .. } | LinkerConfig::Isolated { .. } => "isolated",
                 LinkerConfig::Hoisted => "hoisted",
                 LinkerConfig::Pnp => unreachable!("pnp rejected above"),
-            }
-            .to_string(),
-        ));
+            },
+        );
         match linker {
             LinkerConfig::Isolated { hoist } => {
-                layout.push(("enableGlobalVirtualStore".to_string(), "false".to_string()));
+                push("enableGlobalVirtualStore", "false");
                 match hoist {
                     Some(Hoist::Bool(enabled)) => {
-                        layout.push(("hoist".to_string(), enabled.to_string()));
+                        push("hoist", &enabled.to_string());
                         if *enabled {
-                            layout.push(("hoistPattern".to_string(), "*".to_string()));
+                            push("hoistPattern", "*");
                         }
                     }
                     Some(Hoist::Patterns(patterns)) => {
-                        layout.push(("hoist".to_string(), "true".to_string()));
-                        layout.push(("hoistPattern".to_string(), patterns.join(",")));
+                        push("hoist", "true");
+                        push("hoistPattern", &patterns.join(","));
                     }
                     None => {}
                 }
@@ -1055,7 +1058,7 @@ fn lower_native_install_settings(
                     // Written explicitly rather than left to the engine default.
                     // The projectConfig tier outranks lower settings, so silence
                     // here could quietly turn an explicit global request local.
-                    layout.push(("enableGlobalVirtualStore".to_string(), "true".to_string()));
+                    push("enableGlobalVirtualStore", "true");
                 }
                 eject_patterns = eject.clone();
             }
@@ -1069,8 +1072,8 @@ fn lower_native_install_settings(
     // pattern list would hoist everything, the opposite of naming patterns.
     // Naming patterns is always a narrowing, so the blanket flag goes off.
     if let Some(patterns) = install.public_hoist.as_ref() {
-        layout.push(("shamefullyHoist".to_string(), "false".to_string()));
-        layout.push(("publicHoistPattern".to_string(), patterns.join(",")));
+        push("shamefullyHoist", "false");
+        push("publicHoistPattern", &patterns.join(","));
     }
 
     // ADDITIVE, deliberately: the merge seeds from the embedder's own ejects —
@@ -1099,7 +1102,7 @@ fn lower_native_install_settings(
                     merged.push(pattern.clone());
                 }
             }
-            layout.push((key.to_string(), merged.join(",")));
+            push(key, &merged.join(","));
         }
     }
 
@@ -1107,6 +1110,7 @@ fn lower_native_install_settings(
     let mut resolution = Vec::new();
     if let Some(age) = install.minimum_release_age {
         let seconds = age.as_secs();
+        // Round UP: a sub-minute remainder must not weaken the configured gate.
         let minutes = seconds / 60 + u64::from(seconds % 60 != 0);
         resolution.push(("minimumReleaseAge".to_string(), minutes.to_string()));
         resolution.push(("minimumReleaseAgeStrict".to_string(), "true".to_string()));
@@ -1130,13 +1134,10 @@ fn lower_native_install_settings_for_mode(
     native_mode: bool,
     embedder_defaults: &[(String, String)],
 ) -> Result<NativeInstallSettings> {
-    if !native_mode {
-        return Ok(NativeInstallSettings::default());
+    match install {
+        Some(install) if native_mode => lower_native_install_settings(install, embedder_defaults),
+        _ => Ok(NativeInstallSettings::default()),
     }
-    install
-        .map(|install| lower_native_install_settings(install, embedder_defaults))
-        .transpose()
-        .map(Option::unwrap_or_default)
 }
 
 /// The config-derived install knobs the IMPLEMENT-wins resolve from the active
@@ -1639,7 +1640,7 @@ fn augmentation_to_lifecycle_overlay(
     // $NODE → the shim (→ nub) so userland `$NODE child.js` / `spawn(env.NODE)`
     // in a build script stays augmented, exactly as build_script_command sets it.
     let node_shim = aug.node_shim_exe();
-    if let Some(node_shim) = node_shim.as_ref() {
+    if let Some(node_shim) = &node_shim {
         overlay.push((OsString::from("NODE"), node_shim.clone()));
     }
     if let Some(opts) = &aug.node_options {
@@ -1648,16 +1649,15 @@ fn augmentation_to_lifecycle_overlay(
     if let Some(node_path) = &aug.node_path {
         overlay.push((OsString::from("NODE_PATH"), node_path.clone()));
     }
-    aug.apply_restore_markers(|key, value| {
+    let mut set_env = |key: &str, value: &std::ffi::OsStr| {
         overlay.push((OsString::from(key), value.to_os_string()));
-    });
+    };
+    aug.apply_restore_markers(&mut set_env);
     let ambient_node = std::env::var_os("NODE");
     nub_core::node::spawn::apply_expected_augmentation_marker(
         "NODE",
         node_shim.as_deref().or(ambient_node.as_deref()),
-        |key, value| {
-            overlay.push((OsString::from(key), value.to_os_string()));
-        },
+        &mut set_env,
     );
     // Aube composes its lifecycle `.bin` chain after this overlay, so the exact
     // final PATH is not available here. Mark the ambient baseline: a fresh
@@ -1667,9 +1667,7 @@ fn augmentation_to_lifecycle_overlay(
     nub_core::node::spawn::apply_expected_augmentation_marker(
         "PATH",
         ambient_path.as_deref(),
-        |key, value| {
-            overlay.push((OsString::from(key), value.to_os_string()));
-        },
+        &mut set_env,
     );
     if let Some(runtime_json) = runtime_json {
         overlay.push((
@@ -1749,7 +1747,7 @@ fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
     let runtime_node_options = crate::cli::runtime_node_options(&runtime, &node)?;
     let runtime_json = crate::cli::runtime_config_json(&runtime)?;
     let pnp_ctx = nub_core::pnp::detect(cwd);
-    let Some(mut aug) = nub_core::node::spawn::compute_augmentation_env_with_options(
+    let Some(mut aug) = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
         node.path.as_std_path(),
         node.version.clone(),
@@ -1763,18 +1761,18 @@ fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
     };
     // npm/pnpm parity: `npm_config_node_options` seeds a lifecycle script's
     // NODE_OPTIONS only when the ambient env carries none of its own.
-    if std::env::var_os("NODE_OPTIONS").is_none() {
-        let selected = std::env::var("NPM_CONFIG_NODE_OPTIONS")
+    if std::env::var_os("NODE_OPTIONS").is_none()
+        && let Some(configured) = std::env::var("NPM_CONFIG_NODE_OPTIONS")
+            .or_else(|_| std::env::var("npm_config_node_options"))
             .ok()
-            .or_else(|| std::env::var("npm_config_node_options").ok());
-        if let Some(selected) = selected.filter(|value| !value.is_empty()) {
-            match aug.node_options.as_mut() {
-                Some(options) => {
-                    options.push(' ');
-                    options.push_str(&selected);
-                }
-                None => aug.node_options = Some(selected),
+            .filter(|value| !value.is_empty())
+    {
+        match &mut aug.node_options {
+            Some(options) => {
+                options.push(' ');
+                options.push_str(&configured);
             }
+            None => aug.node_options = Some(configured),
         }
     }
     let (env_overlay, path_prepends) =
@@ -1993,12 +1991,9 @@ pub(crate) fn engine_brand_preflight() {
         .map(resolve_config_surface)
         .unwrap_or(ConfigSurface::PnpmOrFresh);
     let read_branded_pnpm_config = matches!(surface, ConfigSurface::PnpmOrFresh);
-    let read_pnpm_global_config = cwd
+    let pnpm_v11_incumbent = cwd
         .as_deref()
-        .is_some_and(|cwd| read_pnpm_global_config_for_surface(&surface, cwd));
-    let read_pnpm_workspace_layout = cwd
-        .as_deref()
-        .is_some_and(|cwd| read_pnpm_workspace_layout_for_surface(&surface, cwd));
+        .is_some_and(|cwd| pnpm_v11_surface(&surface, cwd));
     // pnpm REVERSED its env-var convention at v11: pnpm ≤10 reads `npm_config_*`
     // registry-client env vars and IGNORES `pnpm_config_*`; pnpm 11 reads
     // `pnpm_config_*` / `PNPM_CONFIG_*` and IGNORES `npm_config_*`. Honor bare
@@ -2058,11 +2053,11 @@ pub(crate) fn engine_brand_preflight() {
         // only for a provable pnpm-v11+ incumbent; unknown majors use the v10
         // model and never inherit pnpm global state. Global writes remain
         // neutral-only (`config set -g` never writes pnpm's files).
-        c.read_pnpm_global_config = read_pnpm_global_config;
+        c.read_pnpm_global_config = pnpm_v11_incumbent;
         // Nub identity consumes only neutral config, and compat projects retain
         // their incumbent's layout source. Pnpm 11+ reads workspace YAML; older
         // or unknown majors retain the `.npmrc` model.
-        c.read_layout_from_workspace_yaml = read_pnpm_workspace_layout;
+        c.read_layout_from_workspace_yaml = pnpm_v11_incumbent;
         c.read_pnpm_config_env_registry = read_pnpm_config_env_registry;
         c.read_yarn_config = read_yarn_config;
         c.yarn_is_classic = yarn_is_classic;
@@ -2184,46 +2179,26 @@ enum ConfigSurface {
     PnpmOrFresh,
 }
 
-/// Whether nub may read pnpm-NAMED global files (`config.yaml` and `auth.ini`).
-/// This is deliberately a separate EngineContext field from the project-local
-/// pnpm surface, because the engine loads global files through a different
-/// path. Both files were introduced by pnpm 11, so this posture requires a
-/// provable pnpm-v11+ incumbent. An unknown major follows the dominant v10
-/// model and leaves them unread; nub, npm, yarn, and bun identities likewise
-/// must not read pnpm's global state.
-fn read_pnpm_global_config_for_surface(surface: &ConfigSurface, cwd: &Path) -> bool {
-    if !matches!(surface, ConfigSurface::PnpmOrFresh) {
-        return false;
-    }
-
-    // pnpm 10 reads settings/auth through its rc model; pnpm 11 introduced
-    // `<configDir>/config.yaml` and `<configDir>/auth.ini`. Keep this keyed on
-    // the declared major like the sibling env/npmrc policies. A lockfile or a
-    // pnpm-named project file proves the incumbent's NAME but not its major,
-    // so it correctly stays on the unknown-major v10 default.
-    nub_core::pm::resolve::declared_pm_raw(cwd)
-        .and_then(|(name, version)| (name == "pnpm").then_some(version).flatten())
-        .is_some_and(|version| {
-            parse_major_minor(&version)
-                .0
-                .is_some_and(|major| major >= 11)
-        })
-}
-
-/// Whether pnpm's project layout settings come from `pnpm-workspace.yaml`.
-/// Pnpm 11 moved this scalar-config home from `.npmrc`; an unknown major keeps
-/// the dominant v10 `.npmrc` model.
-fn read_pnpm_workspace_layout_for_surface(surface: &ConfigSurface, cwd: &Path) -> bool {
-    if !matches!(surface, ConfigSurface::PnpmOrFresh) {
-        return false;
-    }
-    nub_core::pm::resolve::declared_pm_raw(cwd)
-        .and_then(|(name, version)| (name == "pnpm").then_some(version).flatten())
-        .is_some_and(|version| {
-            parse_major_minor(&version)
-                .0
-                .is_some_and(|major| major >= 11)
-        })
+/// Whether the project is a provable pnpm-v11+ incumbent — the gate on the two
+/// engine postures that pnpm 11 introduced together: the pnpm-NAMED global
+/// files (`config.yaml` + `auth.ini`), and `pnpm-workspace.yaml` as the home for
+/// layout settings that v10 keeps in `.npmrc`. They stay SEPARATE EngineContext
+/// fields (the engine loads global files by a different path) but share one
+/// predicate, because they share one version boundary.
+///
+/// Keyed on the declared major like the sibling env/npmrc policies: a lockfile
+/// or a pnpm-named project file proves the incumbent's NAME but not its major,
+/// so it correctly stays on the unknown-major v10 default. nub, npm, yarn, and
+/// bun identities never reach either surface.
+///
+/// Takes `cwd` rather than reading it, so `engine_brand_preflight` keeps to its
+/// one `current_dir()` read.
+fn pnpm_v11_surface(surface: &ConfigSurface, cwd: &Path) -> bool {
+    matches!(surface, ConfigSurface::PnpmOrFresh)
+        && nub_core::pm::resolve::declared_pm_raw(cwd)
+            .and_then(|(name, version)| (name == "pnpm").then_some(version).flatten())
+            .and_then(|version| parse_major_minor(&version).0)
+            .is_some_and(|major| major >= 11)
 }
 
 /// Engine-free, single-walk resolution of the project's [`ConfigSurface`]
@@ -4430,97 +4405,53 @@ mod tests {
         );
     }
 
+    /// The gate on both pnpm-11-only surfaces: the pnpm-NAMED global
+    /// `config.yaml`/`auth.ini` pair, and `pnpm-workspace.yaml` as the layout
+    /// home. Living in the user config home does not make the global files
+    /// PM-agnostic or version-agnostic, and only a DECLARED major proves v11.
     #[test]
-    fn pnpm_global_config_gate_follows_the_incumbent_surface() {
-        // `config.yaml` and `auth.ini` are pnpm-NAMED even though they live in
-        // the user config home. pnpm 11 introduced both files, so their global
-        // location does not make them PM-agnostic or version-agnostic.
+    fn pnpm_v11_surfaces_need_a_declared_v11_incumbent() {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().to_path_buf();
-        std::fs::write(
-            root.path().join("package.json"),
-            r#"{"packageManager":"pnpm@10.0.0"}"#,
-        )
-        .unwrap();
-        assert!(!read_pnpm_global_config_for_surface(
-            &ConfigSurface::PnpmOrFresh,
-            root.path(),
-        ));
-        assert!(!read_pnpm_workspace_layout_for_surface(
-            &ConfigSurface::PnpmOrFresh,
-            root.path(),
-        ));
-        std::fs::write(
-            root.path().join("package.json"),
-            r#"{"packageManager":"pnpm@11.0.0"}"#,
-        )
-        .unwrap();
-        assert!(read_pnpm_global_config_for_surface(
-            &ConfigSurface::PnpmOrFresh,
-            root.path(),
-        ));
-        assert!(read_pnpm_workspace_layout_for_surface(
-            &ConfigSurface::PnpmOrFresh,
-            root.path(),
-        ));
-        assert!(!read_pnpm_global_config_for_surface(
-            &ConfigSurface::NubIdentity(dir.clone()),
-            root.path(),
-        ));
-        assert!(!read_pnpm_workspace_layout_for_surface(
-            &ConfigSurface::NubIdentity(dir.clone()),
-            root.path(),
-        ));
+        let manifest = |json: &str| std::fs::write(root.path().join("package.json"), json).unwrap();
+
+        manifest(r#"{"packageManager":"pnpm@10.0.0"}"#);
+        assert!(!pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, root.path()));
+
+        manifest(r#"{"packageManager":"pnpm@11.0.0"}"#);
+        assert!(pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, root.path()));
+        assert!(
+            !pnpm_v11_surface(&ConfigSurface::NubIdentity(dir.clone()), root.path()),
+            "nub identity must not read pnpm's global files or workspace layout"
+        );
         for role in ["npm", "yarn", "bun"] {
             assert!(
-                !read_pnpm_global_config_for_surface(
+                !pnpm_v11_surface(
                     &ConfigSurface::NonPnpmCompat {
                         role,
                         dir: dir.clone(),
                     },
                     root.path(),
                 ),
-                "{role} identity must not read pnpm's global files"
-            );
-            assert!(
-                !read_pnpm_workspace_layout_for_surface(
-                    &ConfigSurface::NonPnpmCompat {
-                        role,
-                        dir: dir.clone(),
-                    },
-                    root.path(),
-                ),
-                "{role} identity must not read pnpm's workspace layout"
+                "{role} identity must not read pnpm's global files or workspace layout"
             );
         }
 
-        std::fs::write(
-            root.path().join("package.json"),
-            r#"{"packageManager":"vlt@1.0.0"}"#,
-        )
-        .unwrap();
+        manifest(r#"{"packageManager":"vlt@1.0.0"}"#);
         assert!(
-            !read_pnpm_global_config_for_surface(&ConfigSurface::PnpmOrFresh, root.path()),
+            !pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, root.path()),
             "the conservative CLI surface for an unknown tool is not pnpm incumbency"
         );
-        assert!(!read_pnpm_workspace_layout_for_surface(
-            &ConfigSurface::PnpmOrFresh,
-            root.path(),
-        ));
 
-        std::fs::write(root.path().join("package.json"), "{}").unwrap();
+        manifest("{}");
         std::fs::write(
             root.path().join("pnpm-lock.yaml"),
             "lockfileVersion: '9.0'\n",
         )
         .unwrap();
         assert!(
-            !read_pnpm_global_config_for_surface(&ConfigSurface::PnpmOrFresh, root.path()),
+            !pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, root.path()),
             "a pnpm lockfile proves the incumbent name, not the major; unknown defaults to v10"
-        );
-        assert!(
-            !read_pnpm_workspace_layout_for_surface(&ConfigSurface::PnpmOrFresh, root.path()),
-            "an unknown pnpm major keeps the v10 .npmrc layout model"
         );
     }
 

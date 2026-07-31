@@ -552,14 +552,12 @@ fn dlx_separate_value_flags() -> &'static [String] {
             .get_arguments()
             .filter(|arg| arg.get_action().takes_values() && !arg.is_require_equals_set())
             .flat_map(|arg| {
-                let mut flags = Vec::new();
-                if let Some(shorts) = arg.get_short_and_visible_aliases() {
-                    flags.extend(shorts.into_iter().map(|short| format!("-{short}")));
-                }
-                if let Some(longs) = arg.get_long_and_visible_aliases() {
-                    flags.extend(longs.into_iter().map(|long| format!("--{long}")));
-                }
-                flags
+                let shorts = arg.get_short_and_visible_aliases().unwrap_or_default();
+                let longs = arg.get_long_and_visible_aliases().unwrap_or_default();
+                shorts
+                    .into_iter()
+                    .map(|short| format!("-{short}"))
+                    .chain(longs.into_iter().map(|long| format!("--{long}")))
             })
             .collect::<Vec<_>>();
         spellings.sort();
@@ -594,7 +592,7 @@ fn take_dlx_node_flag(args: &[String]) -> (bool, Vec<String>) {
         }
         kept.push(arg.clone());
         i += 1;
-        if dlx_separate_value_flags().iter().any(|flag| flag == arg) && i < args.len() {
+        if dlx_separate_value_flags().contains(arg) && i < args.len() {
             kept.push(args[i].clone());
             i += 1;
         }

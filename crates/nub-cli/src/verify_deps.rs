@@ -162,13 +162,13 @@ pub(crate) fn gate(cwd: &Path, compat_mode: bool) -> Option<i32> {
 /// unknown-pnpm-version default, and every non-pnpm incumbent keep reading the
 /// neutral project `.npmrc` — unchanged from before this key was yaml-aware.
 fn resolve_policy(project: &Project) -> Policy {
-    if let Some(value) = crate::project_config::effective_config().and_then(|config| {
-        config
-            .sources
-            .get(&crate::project_config::ConfigKey::VerifyDeps)
-            .filter(|source| source.kind != crate::project_config::ConfigSourceKind::Defaults)?;
-        config.values.verify_deps.as_ref()
-    }) {
+    use crate::project_config::{ConfigKey, ConfigSourceKind};
+
+    if let Some(config) = crate::project_config::effective_config()
+        && let Some(source) = config.sources.get(&ConfigKey::VerifyDeps)
+        && source.kind != ConfigSourceKind::Defaults
+        && let Some(value) = config.values.verify_deps.as_ref()
+    {
         return project_config_policy(value);
     }
     let workspace_root = project.workspace_root.as_deref().unwrap_or(&project.root);
@@ -446,26 +446,25 @@ fn installed_tree_reason(project: &Project) -> Option<String> {
     // the happy path never pays for the gather (which in a workspace reads the
     // root manifest).
     let mut pinned: Option<HashSet<String>> = None;
+    let mut is_override_pinned = |name: &String| {
+        pinned
+            .get_or_insert_with(|| override_pinned_names(project))
+            .contains(name)
+    };
     for (name, spec) in &deps {
-        match resolved(name) {
-            None => return Some(format!("`{name}` is not installed")),
-            Some(installed) => {
-                if let Some(reason) = version_mismatch(name, spec, &installed)
-                    && !pinned
-                        .get_or_insert_with(|| override_pinned_names(project))
-                        .contains(name.as_str())
-                {
-                    return Some(reason);
-                }
-            }
+        let Some(installed) = resolved(name) else {
+            return Some(format!("`{name}` is not installed"));
+        };
+        if let Some(reason) = version_mismatch(name, spec, &installed)
+            && !is_override_pinned(name)
+        {
+            return Some(reason);
         }
     }
     for (name, spec) in &dev_deps {
         if let Some(installed) = resolved(name)
             && let Some(reason) = version_mismatch(name, spec, &installed)
-            && !pinned
-                .get_or_insert_with(|| override_pinned_names(project))
-                .contains(name.as_str())
+            && !is_override_pinned(name)
         {
             return Some(reason);
         }
@@ -489,16 +488,14 @@ fn installed_tree_reason(project: &Project) -> Option<String> {
 fn override_pinned_names(project: &Project) -> HashSet<String> {
     let mut names = HashSet::new();
 
-    let workspace_manifest = match project.workspace_root.as_deref() {
-        Some(ws) if ws != project.root.as_path() => {
-            std::fs::read_to_string(ws.join("package.json"))
-                .ok()
-                .and_then(|text| {
-                    serde_json::from_str::<serde_json::Value>(nub_core::strip_utf8_bom(&text)).ok()
-                })
-        }
-        _ => None,
-    };
+    let workspace_manifest = project
+        .workspace_root
+        .as_deref()
+        .filter(|ws| *ws != project.root.as_path())
+        .and_then(|ws| std::fs::read_to_string(ws.join("package.json")).ok())
+        .and_then(|text| {
+            serde_json::from_str::<serde_json::Value>(nub_core::strip_utf8_bom(&text)).ok()
+        });
     // `pnpm.overrides` is a pnpm-BRANDED field, so it is honored only when pnpm
     // is genuinely the incumbent (AGENTS.md's pnpm-named gate). The free presence
     // probe short-circuits first, so a project without the field never pays for

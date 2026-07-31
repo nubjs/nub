@@ -54,18 +54,21 @@ pub struct PackageNameMatcher {
 }
 
 impl PackageNameMatcher {
-    pub fn new(patterns: &[String]) -> Self {
+    /// Generic over the element so a caller holding `&str`s need not materialize
+    /// a `Vec<String>` purely to be read once.
+    pub fn new<S: AsRef<str>>(patterns: &[S]) -> Self {
         let mut literals = HashSet::new();
         let mut globs = Vec::new();
         for pattern in patterns {
+            let pattern = pattern.as_ref();
             if !pattern.contains(GLOB_METACHARS) {
-                literals.insert(pattern.clone());
+                literals.insert(pattern.to_owned());
                 continue;
             }
             match glob::Pattern::new(pattern) {
                 Ok(compiled) => globs.push(compiled),
                 Err(_) => {
-                    literals.insert(pattern.clone());
+                    literals.insert(pattern.to_owned());
                 }
             }
         }

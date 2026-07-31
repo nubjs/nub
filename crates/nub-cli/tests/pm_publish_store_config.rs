@@ -174,8 +174,8 @@ fn config_path_prints_the_unwritten_global_settings_file() {
         "printing the path must not create the settings file"
     );
 
-    let (alias_stdout, _, alias_code) = ctx.run(&["c", "path"]);
-    assert_eq!(alias_code, 0);
+    let (alias_stdout, alias_stderr, alias_code) = ctx.run(&["c", "path"]);
+    assert_eq!(alias_code, 0, "stderr: {alias_stderr}");
     assert_eq!(
         alias_stdout, stdout,
         "the `c` alias must print the same path"
@@ -782,8 +782,8 @@ fn config_help_lists_the_wired_subcommands_only() {
         );
     }
 
-    let (path_help, _, code) = ctx.run(&["config", "path", "--help"]);
-    assert_eq!(code, 0);
+    let (path_help, stderr, code) = ctx.run(&["config", "path", "--help"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
     assert!(path_help.contains("Usage: nub config path"), "{path_help}");
 
     // `path` is claimed ahead of the parse, so the interception must also

@@ -274,9 +274,10 @@ pub struct Linker {
     /// the project, so Node's upward `node_modules` walk from inside the adapter
     /// can't reach the backend at the project root; materializing just the
     /// adapter puts its realpath back inside the project and the walk succeeds.
-    /// Matched as package-name glob patterns against each graph package. Empty for standalone
-    /// callers and every existing test → the GVS pass is byte-for-byte
-    /// unchanged.
+    /// Matched as package-name glob patterns against each graph package. Empty
+    /// for standalone callers and every existing test → the GVS pass is
+    /// byte-for-byte unchanged.
+    ///
     /// Undeclared imports an ejected package makes are resolved by the collective
     /// project-local hidden hoist tree the linker builds over this whole set under
     /// GVS (see [`Linker::link_hidden_hoist`]) — each ejected package's realpath is

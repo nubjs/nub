@@ -217,9 +217,10 @@ fn duplicate_key(object: &CstObject, prefix: &str) -> Option<String> {
         let Some(name) = prop.name().and_then(|n| n.decoded_value().ok()) else {
             continue;
         };
-        let path = match prefix.is_empty() {
-            true => name.clone(),
-            false => format!("{prefix}.{name}"),
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}.{name}")
         };
         if let Some(found) = prop.value().as_ref().and_then(|v| in_node(v, &path)) {
             return Some(found);
@@ -233,31 +234,26 @@ fn duplicate_key(object: &CstObject, prefix: &str) -> Option<String> {
 
 /// Get-or-create the object property `name` of `obj`.
 ///
-/// An existing scalar or array is not an absent parent. Replacing it would
-/// silently discard the author's value, so refuse the whole edit instead. The
-/// duplicate guard in [`root_object`] makes the post-append lookup unambiguous.
+/// `_or_create`, never `_or_set` — the same distinction [`root_object`] makes at
+/// the root: an existing scalar or array is not an absent parent, and replacing
+/// it would silently discard the author's value, so `None` becomes a refusal of
+/// the whole edit. The duplicate guard in [`root_object`] makes the lookup by
+/// name unambiguous.
 fn ensure_object(
     obj: &CstObject,
     name: &str,
     path: &Path,
     dotted_path: &str,
 ) -> std::io::Result<CstObject> {
-    if let Some(existing) = obj.object_value(name) {
-        return Ok(existing);
-    }
-    if obj.get(name).is_some() {
-        return Err(refuse_edit(
+    obj.object_value_or_create(name).ok_or_else(|| {
+        refuse_edit(
             path,
             ConfigError::Type {
                 path: dotted_path.to_string(),
                 expected: "an object",
             },
-        ));
-    }
-    obj.append(name, CstInputValue::Object(Vec::new()));
-    Ok(obj
-        .object_value(name)
-        .expect("just-appended object is present"))
+        )
+    })
 }
 
 /// Write `value` at the object path `segments` (the last element is the leaf
@@ -278,13 +274,8 @@ pub(crate) fn set_json_path(
 
     let (leaf, parents) = segments.split_last().expect("a setting path has a leaf");
     let mut cursor = obj;
-    let mut parent_path = String::new();
-    for name in parents {
-        if !parent_path.is_empty() {
-            parent_path.push('.');
-        }
-        parent_path.push_str(name);
-        cursor = ensure_object(&cursor, name, path, &parent_path)?;
+    for (i, name) in parents.iter().enumerate() {
+        cursor = ensure_object(&cursor, name, path, &parents[..=i].join("."))?;
     }
     match cursor.get(leaf) {
         Some(prop) => prop.set_value(value),
@@ -318,9 +309,10 @@ pub(crate) fn set_json_path(
 /// author's CRLF line endings.
 fn write_preserving_mode(path: &Path, text: &str) -> std::io::Result<()> {
     let prior = std::fs::metadata(path).ok().map(|m| m.permissions());
-    let bytes = match crate::jsonc::starts_with_bom(path) {
-        true => [crate::jsonc::UTF8_BOM, text.as_bytes()].concat(),
-        false => text.as_bytes().to_vec(),
+    let bytes = if crate::jsonc::starts_with_bom(path) {
+        [crate::jsonc::UTF8_BOM, text.as_bytes()].concat()
+    } else {
+        text.as_bytes().to_vec()
     };
     aube_util::fs_atomic::atomic_write_with_permissions(path, &bytes, prior)?;
 
@@ -354,18 +346,15 @@ pub(crate) fn unset_json_path(path: &Path, segments: &[&str]) -> std::io::Result
 
     let (leaf, parents) = segments.split_last().expect("a setting path has a leaf");
     let mut cursor = obj;
-    let mut parent_path = String::new();
-    for name in parents {
-        if !parent_path.is_empty() {
-            parent_path.push('.');
-        }
-        parent_path.push_str(name);
+    for (i, name) in parents.iter().enumerate() {
         let Some(next) = cursor.object_value(name) else {
+            // A non-object intermediate is the same refusal `set` raises; an
+            // absent one is simply nothing to remove.
             if cursor.get(name).is_some() {
                 return Err(refuse_edit(
                     path,
                     ConfigError::Type {
-                        path: parent_path,
+                        path: parents[..=i].join("."),
                         expected: "an object",
                     },
                 ));
@@ -745,11 +734,16 @@ mod tests {
                 "left the file byte-identical: {err}"
             );
         }
+    }
 
-        // A UTF-8 BOM is NOT one of these. Windows editors write one by default,
-        // so refusing it would reject a file that looks correct to its author;
-        // the reader strips it, and the write edits through it and keeps the
-        // rest of the document intact.
+    /// A UTF-8 BOM is not one of the refusals above. Windows editors write one
+    /// by default, so rejecting it would turn away a file that looks correct to
+    /// its author; the reader strips it and the writer puts it back, exactly as
+    /// it keeps their comments and CRLFs.
+    #[test]
+    fn set_carries_the_authors_bom_across_an_edit_and_never_invents_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nub.jsonc");
         std::fs::write(
             &path,
             b"\xef\xbb\xbf{\n  // kept\n  \"nodeCompat\": false\n}\n",
@@ -765,6 +759,7 @@ mod tests {
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(after.contains("// kept"), "kept the comment: {after}");
         assert!(after.contains("\"preload\""), "applied the edit: {after}");
+
         // Exactly one: the reader strips only a leading marker, so restoring it
         // must not stack a second one on the next edit.
         set_json_path(
@@ -776,10 +771,10 @@ mod tests {
         let raw = std::fs::read(&path).unwrap();
         assert!(raw.starts_with(crate::jsonc::UTF8_BOM), "still BOM'd");
         assert!(
-            !raw[3..].starts_with(crate::jsonc::UTF8_BOM),
+            !raw[crate::jsonc::UTF8_BOM.len()..].starts_with(crate::jsonc::UTF8_BOM),
             "a repeated edit must not stack BOMs"
         );
-        // A file with NO BOM must not acquire one.
+
         std::fs::write(&path, b"{\n  \"nodeCompat\": false\n}\n").unwrap();
         set_json_path(&path, &["preload"], CstInputValue::Array(Vec::new())).unwrap();
         assert!(
@@ -788,10 +783,15 @@ mod tests {
                 .starts_with(crate::jsonc::UTF8_BOM),
             "a plain file never gains a BOM"
         );
+    }
 
-        // The blank slates that legitimately remain: absent, empty, and
-        // comment-only, the last of which keeps its comment.
-        std::fs::remove_file(&path).unwrap();
+    /// The blank slates that legitimately remain, given the refusals above:
+    /// absent, empty, and comment-only — the last of which keeps its comment,
+    /// because a document with nothing but comments still has an author.
+    #[test]
+    fn set_treats_only_an_absent_empty_or_comment_only_file_as_a_blank_slate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nub.jsonc");
         for (blank, keeps) in [("", ""), ("{}", ""), ("// keep me\n", "// keep me")] {
             if !blank.is_empty() {
                 std::fs::write(&path, blank).unwrap();
@@ -906,9 +906,9 @@ mod tests {
     /// A duplicated key makes the reader and the writer disagree about which
     /// occurrence is authoritative — `serde_json` keeps the LAST, the CST edits
     /// the FIRST — so a `set` would report success for a change no later read
-    /// can see, and a duplicated intermediate object would panic the re-fetch in
-    /// `ensure_object`. Both are refused, naming the key, and the file is left
-    /// exactly as its author wrote it.
+    /// can see, and a duplicated intermediate object leaves the parent lookup in
+    /// [`ensure_object`] no single object to land in. Both are refused, naming
+    /// the key, and the file is left exactly as its author wrote it.
     #[test]
     fn set_refuses_a_duplicated_key_and_leaves_the_file_byte_identical() {
         let dir = tempfile::tempdir().unwrap();
@@ -922,7 +922,7 @@ mod tests {
                 "nodeCompat",
             ),
             // A duplicated intermediate object on the path being written — the
-            // input that reached `ensure_object`'s `expect` and panicked.
+            // input that panicked the writer's parent lookup before this guard.
             (
                 r#"{ "install": 1, "install": 2 }"#,
                 &["install", "linker"],

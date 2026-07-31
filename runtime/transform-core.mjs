@@ -149,13 +149,14 @@ function __ensureBuiltins() {
 // original eager-at-eval behavior). The floor defers to first-use — see above.
 if (typeof process.getBuiltinModule === "function") __ensureBuiltins();
 
-// The Rust frontend resolves one source-anchored snapshot after final cwd and
-// transports it unchanged through nested shim launches. This is internal
-// process plumbing, not a user-facing environment knob.
-let RUNTIME_CONFIG = {};
-try { RUNTIME_CONFIG = JSON.parse(process.env.__NUB_RUNTIME_CONFIG || "{}"); } catch {}
-const RUNTIME_LOADER = RUNTIME_CONFIG.loader || {};
-const RUNTIME_TSCONFIG = RUNTIME_CONFIG.tsconfig || undefined;
+// The resolved `nub.jsonc` snapshot. The Rust frontend resolves it once, after
+// the final cwd is known, and transports it unchanged through nested shim
+// launches, so every process in a run transpiles against the same config. This
+// is internal process plumbing, not a user-facing environment knob.
+let runtimeConfig = {};
+try { runtimeConfig = JSON.parse(process.env.__NUB_RUNTIME_CONFIG || "{}"); } catch {}
+const RUNTIME_LOADER = runtimeConfig.loader || {};
+const RUNTIME_TSCONFIG = runtimeConfig.tsconfig || undefined;
 
 // NOTE: the transpile-cache version component is no longer read here. nub's
 // version is baked into the native addon at compile time (`env!("CARGO_PKG_VERSION")`
@@ -182,15 +183,17 @@ export const PLAIN_JS_EXTS = new Set([".js", ".mjs", ".cjs"]);
 // The data loaders nub SHIPS — a runtime feature, not a project setting, so they stay
 // in force inside node_modules too (see dataExtsFor).
 const BUILTIN_DATA_EXTS = { ".jsonc": "jsonc", ".json5": "json5", ".toml": "toml", ".yaml": "yaml", ".yml": "yaml", ".txt": "txt" };
-// The built-ins with this project's `loader` config layered on top. FIRST-PARTY only.
-export const DATA_EXTS = { ...BUILTIN_DATA_EXTS };
+// The built-ins with this project's `loader` config layered on top: an extension
+// pointed at a TS/JSX dialect moves to TRANSPILE_EXTS, anything else becomes (or
+// overrides) a data loader.
+const PROJECT_DATA_EXTS = { ...BUILTIN_DATA_EXTS };
 for (const [ext, loader] of Object.entries(RUNTIME_LOADER)) {
-  if (["ts", "tsx", "jsx"].includes(loader)) {
-    delete DATA_EXTS[ext];
+  if (loader === "ts" || loader === "tsx" || loader === "jsx") {
+    delete PROJECT_DATA_EXTS[ext];
     TRANSPILE_EXTS.add(ext);
   } else {
     TRANSPILE_EXTS.delete(ext);
-    DATA_EXTS[ext] = loader === "text" ? "txt" : loader;
+    PROJECT_DATA_EXTS[ext] = loader === "text" ? "txt" : loader;
   }
 }
 export const TS_PARENT_EXTS = new Set([".ts", ".tsx", ".mts", ".cts"]);
@@ -198,13 +201,13 @@ export const TS_PARENT_EXTS = new Set([".ts", ".tsx", ".mts", ".cts"]);
 // Which data-loader map governs `url`. A project's `loader` config must not reach code
 // the project didn't write — `{".json": "text"}` would otherwise turn every dependency's
 // JSON import into a string, and pointing a built-in extension at a transpile loader
-// would DELETE a loader a dependency relies on. This is the same project/dependency
-// boundary the TRANSPILE_EXTS and PLAIN_JS_EXTS dispatches draw with `!isNodeModules`,
-// but as a map SWAP rather than a bail: the built-in half must keep serving deps. Both
-// the dispatch sites and loadData() route through here, so the "does this load?" test
-// and the "as what?" answer can never disagree.
+// would DELETE a loader a dependency relies on. Same project/dependency boundary the
+// TRANSPILE_EXTS and PLAIN_JS_EXTS dispatches draw with `!isNodeModules`, but as a map
+// SWAP rather than a bail: the built-in half must keep serving deps. Both the dispatch
+// sites and loadData() route through here, so "does this load?" and "as what?" can
+// never disagree.
 export function dataExtsFor(url) {
-  return isNodeModules(url) ? BUILTIN_DATA_EXTS : DATA_EXTS;
+  return isNodeModules(url) ? BUILTIN_DATA_EXTS : PROJECT_DATA_EXTS;
 }
 
 // Packages resolved from Nub's distribution, not the user's.
@@ -503,9 +506,9 @@ export function requireTargetIsEsm(filePath, ext) {
 
 // ── Module-format detection ─────────────────────────────────────────
 // The oxc `lang` for a transpiled extension: the project's `loader` config wins
-// where it names a TS/JSX dialect, otherwise the extension decides. Shared by the
-// format probe and the transform itself so the parse that DECIDES the format and
-// the parse that PRODUCES the output can never disagree about what a file is.
+// where it turns JSX on (`tsx`/`jsx`), otherwise the extension decides. Shared by
+// the format probe and the transform itself so the parse that DECIDES the format
+// and the parse that PRODUCES the output can never disagree about what a file is.
 function langFor(ext) {
   const configuredLoader = RUNTIME_LOADER[ext];
   return configuredLoader === "tsx" || configuredLoader === "jsx"

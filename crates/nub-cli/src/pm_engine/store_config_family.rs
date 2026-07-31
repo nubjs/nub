@@ -137,10 +137,11 @@ fn run_config(canonical: &str, typed: &str, args: &[String]) -> Result<i32> {
     // `config`/`c` spelling: under the hidden `get`/`set` shorthands `path` is a
     // setting key, not a subcommand.
     if canonical == "config"
-        && let Some(("path", rest)) = args.split_first().map(|(head, rest)| (head.as_str(), rest))
+        && let [subcommand, rest @ ..] = args
+        && subcommand == "path"
         // `--help` is left to the parse below, which renders `path`'s own help
         // from the augmented command rather than the no-arguments refusal.
-        && !rest.iter().any(|a| a == "-h" || a == "--help")
+        && !rest.iter().any(|arg| arg == "-h" || arg == "--help")
     {
         return run_config_path(typed, rest);
     }
@@ -175,16 +176,17 @@ fn config_command(bin: &str) -> clap::Command {
     for unwired in ["explain", "find", "tui"] {
         cmd = cmd.mut_subcommand(unwired, |sub| sub.hide(true));
     }
-    cmd = cmd.mut_subcommand("get", |sub| {
+    // Each `about` names both homes, because one key space spans them.
+    cmd.mut_subcommand("get", |sub| {
         sub.about("Print the effective value of a setting key or `nub.jsonc` field")
-    });
-    cmd = cmd.mut_subcommand("set", |sub| {
+    })
+    .mut_subcommand("set", |sub| {
         sub.about("Write a setting key to `.npmrc`, or a field to `nub.jsonc`")
-    });
-    cmd = cmd.mut_subcommand("delete", |sub| {
+    })
+    .mut_subcommand("delete", |sub| {
         sub.about("Remove a setting key from `.npmrc`, or a field from `nub.jsonc`")
-    });
-    cmd.subcommand(clap::Command::new("path").about("Print the path of the global `nub.jsonc`"))
+    })
+    .subcommand(clap::Command::new("path").about("Print the path of the global `nub.jsonc`"))
 }
 
 /// Parse against [`config_command`], routing help and usage output through the
@@ -366,12 +368,12 @@ fn project_scalar_home(pnpm_incumbent: bool) -> config_model::ScalarHome {
 /// fall through to the engine's `.npmrc`-class handling.
 fn try_nub_config(parsed: &ConfigArgs, explicit_global: bool) -> Option<i32> {
     use crate::config::ImplicitDlx;
-    const KEY: &str = "exec.implicitDlx";
-    const KEY_ALIAS: &str = "exec.implicit-dlx";
-    let is_key = |k: &str| k == KEY || k == KEY_ALIAS;
     if let Some(code) = try_nub_field(parsed, explicit_global) {
         return Some(code);
     }
+    const KEY: &str = "exec.implicitDlx";
+    const KEY_ALIAS: &str = "exec.implicit-dlx";
+    let is_key = |k: &str| k == KEY || k == KEY_ALIAS;
     match &parsed.command {
         Some(ConfigCommand::Set(set)) if is_key(&set.key) => {
             let Some(value) = ImplicitDlx::parse(&set.value) else {
@@ -460,13 +462,10 @@ fn try_nub_field(parsed: &ConfigArgs, explicit_global: bool) -> Option<i32> {
         }
         _ => return None,
     };
-    Some(match outcome {
-        Ok(code) => code,
-        Err(e) => {
-            eprintln!("nub: {e}");
-            1
-        }
-    })
+    Some(outcome.unwrap_or_else(|e| {
+        eprintln!("nub: {e}");
+        1
+    }))
 }
 
 fn dispatch_config(parsed: ConfigArgs, explicit_global: bool) -> Result<i32> {

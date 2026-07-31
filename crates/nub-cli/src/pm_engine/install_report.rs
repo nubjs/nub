@@ -20,8 +20,9 @@
 //! the block rather than printed with a guessed value or a guessed origin,
 //! because a wrong provenance is worse than none.
 
+use std::fmt;
 use std::path::Path;
-use std::sync::{OnceLock, RwLock};
+use std::sync::RwLock;
 
 use clx::style;
 
@@ -90,26 +91,29 @@ fn readable_value(meta: &aube_settings::SettingMeta, raw: &str) -> Option<String
     Some(raw.to_string())
 }
 
+/// The items of a comma-separated setting value: trimmed, blanks dropped. Every
+/// list-valued setting reaches this module as one such string, whatever tier it
+/// came from.
+fn comma_items(raw: &str) -> impl Iterator<Item = &str> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+}
+
 /// The list representation the report passes to its comma-splitting rows.
 /// This mirrors aube's `parse_string_list`: JSON-ish arrays and bare lists both
 /// collapse to comma-separated items, with empty and quoted entries removed.
 fn render_string_list(raw: &str) -> String {
     let trimmed = raw.trim();
-    let items = if let Some(inner) = trimmed
+    let items: Vec<&str> = match trimmed
         .strip_prefix('[')
         .and_then(|raw| raw.strip_suffix(']'))
     {
-        inner
-            .split(',')
-            .map(|item| item.trim().trim_matches(|ch: char| ch == '"' || ch == '\''))
+        Some(inner) => comma_items(inner)
+            .map(|item| item.trim_matches(|ch: char| ch == '"' || ch == '\''))
             .filter(|item| !item.is_empty())
-            .collect::<Vec<_>>()
-    } else {
-        trimmed
-            .split(',')
-            .map(str::trim)
-            .filter(|item| !item.is_empty())
-            .collect::<Vec<_>>()
+            .collect(),
+        None => comma_items(trimmed).collect(),
     };
     items.join(",")
 }
@@ -127,24 +131,27 @@ fn toolchain_display_name(package: &str) -> &str {
     }
 }
 
-impl Source {
-    fn render(&self) -> String {
+impl fmt::Display for Source {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Source::Cli(flag) => flag.clone(),
-            Source::Env(var) => var.clone(),
-            Source::ProjectConfig(field) => format!("nub.jsonc {field}"),
-            Source::WorkspaceYaml => "pnpm-workspace.yaml".to_string(),
-            Source::GlobalConfigYaml => "pnpm global config.yaml".to_string(),
-            Source::Npmrc => ".npmrc".to_string(),
-            Source::Default => "default".to_string(),
-            Source::Ci => "global virtual store auto-disabled in CI".to_string(),
-            Source::IncompatiblePackage(name) => format!(
+            Source::Cli(flag) => f.write_str(flag),
+            Source::Env(var) => f.write_str(var),
+            Source::ProjectConfig(field) => write!(f, "nub.jsonc {field}"),
+            Source::WorkspaceYaml => f.write_str("pnpm-workspace.yaml"),
+            Source::GlobalConfigYaml => f.write_str("pnpm global config.yaml"),
+            Source::Npmrc => f.write_str(".npmrc"),
+            Source::Default => f.write_str("default"),
+            Source::Ci => f.write_str("global virtual store auto-disabled in CI"),
+            Source::IncompatiblePackage(name) => write!(
+                f,
                 "global virtual store auto-disabled in {} projects",
                 toolchain_display_name(name)
             ),
         }
     }
+}
 
+impl Source {
     /// Whether the reader themselves put this value on a surface nub still
     /// reads for layout. `Default` is not one — it means nothing in the project
     /// asked, which is exactly the state a dropped branded layout setting
@@ -231,19 +238,15 @@ impl SourceIndex {
             }),
             _ => aube_settings::values::string_from_workspace_yaml(meta.name, raw),
         };
-        let workspace_yaml = aube_settings::all()
-            .iter()
-            .filter(|meta| !aube_settings::workspace_yaml_suppressed(meta))
-            .filter_map(|meta| workspace_yaml_scalar(meta, &raw).map(|value| (meta.name, value)))
-            .collect();
-        let global_raw = aube::commands::load_global_config_yaml();
-        let global_config_yaml = aube_settings::all()
-            .iter()
-            .filter(|meta| !aube_settings::workspace_yaml_suppressed(meta))
-            .filter_map(|meta| {
-                workspace_yaml_scalar(meta, &global_raw).map(|value| (meta.name, value))
-            })
-            .collect();
+        let yaml_settings = |raw| {
+            aube_settings::all()
+                .iter()
+                .filter(|meta| !aube_settings::workspace_yaml_suppressed(meta))
+                .filter_map(|meta| workspace_yaml_scalar(meta, raw).map(|value| (meta.name, value)))
+                .collect::<Vec<_>>()
+        };
+        let workspace_yaml = yaml_settings(&raw);
+        let global_config_yaml = yaml_settings(&aube::commands::load_global_config_yaml());
         // The same walk as `workspace_yaml`, filter inverted: that field holds
         // the settings the YAML still supplies, this one asks whether the
         // current pnpm-major posture rejected a layout key.
@@ -288,16 +291,15 @@ impl SourceIndex {
         // faithfully from this narrowed representation, so only name declared
         // command flags. The engine still applies those generic keys; the report
         // simply omits an origin it cannot attribute exactly.
-        if let Some((flag, value)) = self.cli.iter().rev().find_map(|(flag, value)| {
+        if let Some((flag, value)) = self.cli.iter().rev().find_map(|(flag, raw)| {
             meta.cli_flags
                 .contains(&flag.as_str())
-                .then(|| readable_value(meta, value).map(|value| (flag, value)))
+                .then(|| readable_value(meta, raw))
                 .flatten()
+                .map(|value| (flag, value))
         }) {
-            return Some((
-                value.clone(),
-                Some(Source::Cli(format!("--{flag}={value}"))),
-            ));
+            let source = Source::Cli(format!("--{flag}={value}"));
+            return Some((value, Some(source)));
         }
         // Match the resolver's alias priority first, then its most-recent value
         // rule within that alias. An invalid boolean masks its env tier and lets
@@ -326,39 +328,33 @@ impl SourceIndex {
                 ));
             }
         }
-        if let Some((_, value)) = self
-            .workspace_yaml
-            .iter()
-            .find(|(name, _)| *name == setting)
-        {
-            return Some((value.clone(), Some(Source::WorkspaceYaml)));
-        }
-        if let Some((_, value)) = self
-            .global_config_yaml
-            .iter()
-            .find(|(name, _)| *name == setting)
-        {
-            return Some((value.clone(), Some(Source::GlobalConfigYaml)));
+        for (entries, source) in [
+            (&self.workspace_yaml, Source::WorkspaceYaml),
+            (&self.global_config_yaml, Source::GlobalConfigYaml),
+        ] {
+            if let Some((_, value)) = entries.iter().find(|(name, _)| *name == setting) {
+                return Some((value.clone(), Some(source)));
+            }
         }
         for entries in [&self.project_npmrc, &self.user_npmrc] {
-            if let Some((_, value)) = entries.iter().rev().find_map(|(key, value)| {
+            if let Some(value) = entries.iter().rev().find_map(|(key, raw)| {
                 meta.npmrc_keys
                     .contains(&key.as_str())
-                    .then(|| readable_value(meta, value).map(|value| (key, value)))
+                    .then(|| readable_value(meta, raw))
                     .flatten()
             }) {
-                return Some((value.clone(), Some(Source::Npmrc)));
+                return Some((value, Some(Source::Npmrc)));
             }
         }
         self.embedder_defaults
             .iter()
             .rev()
-            .find_map(|(key, value)| {
+            .find_map(|(key, raw)| {
                 (key == setting)
-                    .then(|| readable_value(meta, value).map(|value| (key, value)))
+                    .then(|| readable_value(meta, raw))
                     .flatten()
             })
-            .map(|(_, value)| (value.clone(), Some(Source::Default)))
+            .map(|value| (value, Some(Source::Default)))
     }
 }
 
@@ -434,8 +430,8 @@ fn project_config_field(setting: &str) -> Option<&'static str> {
 /// One styled run on a line. Width math runs on the plain text and the styling
 /// is applied only at write time, so an ANSI escape can never be counted as a
 /// display column.
-struct Piece {
-    text: String,
+struct Piece<'a> {
+    text: &'a str,
     /// What precedes this piece when it is not the first thing on its line.
     sep: &'static str,
     dim: bool,
@@ -454,9 +450,15 @@ impl Row {
         Self {
             label,
             values,
-            note: source.map(|source| format!("({})", source.render())),
+            note: source.map(|source| format!("({source})")),
         }
     }
+}
+
+/// Where the value column starts, given the widest label in the block. Also the
+/// hanging indent every continuation line is padded to.
+fn hanging_indent(label_w: usize) -> usize {
+    INDENT + label_w + GAP
 }
 
 /// Render rows as an unruled two-column block: labels left-aligned in a column
@@ -464,41 +466,34 @@ impl Row {
 /// holds every continuation line in the value column.
 fn render_block(rows: &[Row], cols: usize) -> String {
     let label_w = rows.iter().map(|row| row.label.len()).max().unwrap_or(0);
-    let value_col = INDENT + label_w + GAP;
     // A pathologically narrow terminal must still make progress rather than
     // emit one token per line forever.
-    let limit = cols.max(value_col + 20);
+    let limit = cols.max(hanging_indent(label_w) + 20);
     let mut out = String::new();
     for row in rows {
-        let mut pieces: Vec<Piece> = row
+        let mut pieces: Vec<Piece<'_>> = row
             .values
             .iter()
             .map(|value| Piece {
-                text: value.clone(),
+                text: value.as_str(),
                 sep: ", ",
                 dim: false,
             })
             .collect();
         if let Some(note) = &row.note {
             pieces.push(Piece {
-                text: note.clone(),
+                text: note.as_str(),
                 sep: " ",
                 dim: true,
             });
         }
-        write_row(&mut out, row.label, label_w, value_col, limit, &pieces);
+        write_row(&mut out, row.label, label_w, limit, &pieces);
     }
     out
 }
 
-fn write_row(
-    out: &mut String,
-    label: &str,
-    label_w: usize,
-    value_col: usize,
-    limit: usize,
-    pieces: &[Piece],
-) {
+fn write_row(out: &mut String, label: &str, label_w: usize, limit: usize, pieces: &[Piece<'_>]) {
+    let value_col = hanging_indent(label_w);
     out.push_str(&" ".repeat(INDENT));
     out.push_str(&style::edim(format!("{label:<label_w$}")).to_string());
     out.push_str(&" ".repeat(GAP));
@@ -518,11 +513,11 @@ fn write_row(
             out.push_str(piece.sep);
             col += piece.sep.len();
         }
-        out.push_str(&if piece.dim {
-            style::edim(&piece.text).to_string()
+        if piece.dim {
+            out.push_str(&style::edim(piece.text).to_string());
         } else {
-            piece.text.clone()
-        });
+            out.push_str(piece.text);
+        }
         col += width;
         at_line_start = false;
     }
@@ -553,6 +548,22 @@ const RESOLUTION_SETTINGS: &[(&str, &str, &str)] = &[
     ("resolutionMode", "resolution-mode", "highest"),
 ];
 
+/// Whether a resolved value still sits at the engine's own default for it.
+///
+/// Three of the four settings above are booleans and one (`resolutionMode`) is
+/// a string enum, so compare as booleans when both sides parse that way and fall
+/// back to text otherwise. A raw string compare called `auto-install-peers=1` a
+/// non-default and printed a row for a setting sitting exactly at its default.
+fn at_default(value: &str, default: &str) -> bool {
+    match (
+        aube_settings::values::parse_bool(value),
+        aube_settings::values::parse_bool(default),
+    ) {
+        (Some(actual), Some(expected)) => actual == expected,
+        _ => value == default,
+    }
+}
+
 /// The layout value, in the vocabulary the reader's own config uses. Both
 /// symlink layouts lower to the engine's `isolated`, differing only in
 /// `enableGlobalVirtualStore`, so printing the raw engine value would answer a
@@ -579,26 +590,31 @@ const RESOLUTION_SETTINGS: &[(&str, &str, &str)] = &[
 /// cannot account for by opening their config, so leaving them bare showed a
 /// value that contradicts the documented default with nothing to explain it.
 fn layout_row(index: &SourceIndex) -> (String, Option<Source>) {
+    let isolated = |source: Option<Source>| ("isolated".to_string(), source);
     let (linker, linker_source) = index
         .resolve("nodeLinker")
-        .unwrap_or_else(|| ("isolated".to_string(), None));
+        .unwrap_or_else(|| isolated(None));
     if linker != "isolated" {
         return (linker, linker_source);
     }
-    match index.resolve("enableGlobalVirtualStore") {
-        Some((shared, source)) if is_true(&shared) => ("global-virtual-store".to_string(), source),
-        Some((_, source)) => ("isolated".to_string(), source),
-        None if index.ci => ("isolated".to_string(), Some(Source::Ci)),
-        None => match index.resolve("hoist") {
-            Some((hoist, source)) if is_true(&hoist) => ("isolated".to_string(), source),
-            _ => match gvs_incompatible_package(index) {
-                Some(name) => (
-                    "isolated".to_string(),
-                    Some(Source::IncompatiblePackage(name)),
-                ),
-                None => ("global-virtual-store".to_string(), None),
-            },
-        },
+    // Then the four routes to a project-local store, in the order the engine
+    // settles them; the first that fires owns both the word and the note.
+    if let Some((shared, source)) = index.resolve("enableGlobalVirtualStore") {
+        return if is_true(&shared) {
+            ("global-virtual-store".to_string(), source)
+        } else {
+            isolated(source)
+        };
+    }
+    if index.ci {
+        return isolated(Some(Source::Ci));
+    }
+    if let Some((_, source)) = index.resolve("hoist").filter(|(hoist, _)| is_true(hoist)) {
+        return isolated(source);
+    }
+    match gvs_incompatible_package(index) {
+        Some(name) => isolated(Some(Source::IncompatiblePackage(name))),
+        None => ("global-virtual-store".to_string(), None),
     }
 }
 
@@ -620,16 +636,13 @@ fn gvs_incompatible_package(index: &SourceIndex) -> Option<String> {
         return None;
     }
     let (raw, _) = index.resolve("disableGlobalVirtualStoreForPackages")?;
-    raw.split(',')
-        .map(str::trim)
-        .filter(|pattern| !pattern.is_empty())
-        .find_map(|pattern| {
-            index
-                .declared_packages
-                .iter()
-                .find(|name| aube_linker::package_name_matches(pattern, name))
-                .cloned()
-        })
+    comma_items(&raw).find_map(|pattern| {
+        index
+            .declared_packages
+            .iter()
+            .find(|name| aube_linker::package_name_matches(pattern, name))
+            .cloned()
+    })
 }
 
 /// What the layout row says in place of provenance when the project asked for a
@@ -638,81 +651,67 @@ fn gvs_incompatible_package(index: &SourceIndex) -> Option<String> {
 /// remedy is the name of the file that would work.
 const LAYOUT_POINTER: &str = "configurable via .npmrc node-linker or --node-linker";
 
-pub(super) fn resolved_rows(index: &SourceIndex) -> Vec<Row> {
-    let mut rows = Vec::new();
-
-    // Always present, even when everything is default: the layout is the one
-    // fact that governs how the tree on disk is shaped.
-    //
-    // The pointer displaces provenance only where provenance is nub's own
-    // default or nothing at all. A layout the reader wrote into `nub.jsonc`,
-    // `.npmrc`, or the environment already has a live surface, so naming that
-    // surface answers the question they actually have and the advice would be
-    // noise on top of it.
-    let (layout, layout_source) = layout_row(index);
-    let authored = layout_source
+/// Always present, even when everything is default: the layout is the one fact
+/// that governs how the tree on disk is shaped.
+///
+/// The pointer displaces provenance only where provenance is nub's own default
+/// or nothing at all. A layout the reader wrote into `nub.jsonc`, `.npmrc`, or
+/// the environment already has a live surface, so naming that surface answers
+/// the question they actually have and the advice would be noise on top of it.
+fn linker_row(index: &SourceIndex) -> Row {
+    let (layout, source) = layout_row(index);
+    let authored = source
         .as_ref()
         .is_some_and(Source::is_authored_layout_surface);
-    let mut row = Row::new("linker", vec![layout], layout_source);
+    let mut row = Row::new("linker", vec![layout], source);
     if index.branded_layout_ignored && !authored {
         row.note = Some(format!("({LAYOUT_POINTER})"));
     }
-    rows.push(row);
+    row
+}
 
-    // Both pattern lists answer "where can an undeclared import find this", so
-    // they share a row. The patterns ARE the answer — an enumerated package list
-    // would be unreadable and a count says nothing at all.
-    //
-    // `shamefullyHoist` is pnpm's sugar for `publicHoistPattern: ['*']`, and the
-    // linker honors it as a strict superset — a true flag skips the pattern test
-    // for every name rather than adding to the list — so it IS the pattern when
-    // set. Reading only the pattern list described a root `node_modules` holding
-    // the few names it mentions while the install had put every name there, and
-    // said nothing at all when the flag was the only thing set.
+/// Both pattern lists answer "where can an undeclared import find this", so they
+/// share a row. The patterns ARE the answer — an enumerated package list would
+/// be unreadable and a count says nothing at all.
+///
+/// `shamefullyHoist` is pnpm's sugar for `publicHoistPattern: ['*']`, and the
+/// linker honors it as a strict superset — a true flag skips the pattern test
+/// for every name rather than adding to the list — so it IS the pattern when
+/// set. Reading only the pattern list described a root `node_modules` holding
+/// the few names it mentions while the install had put every name there, and
+/// said nothing at all when the flag was the only thing set.
+fn hoisting_rows(index: &SourceIndex) -> Vec<Row> {
     let shamefully_hoist = index
         .resolve("shamefullyHoist")
         .filter(|(value, _)| is_true(value));
-    for setting in ["publicHoistPattern", "hoistPattern"] {
-        let resolved = match (setting, &shamefully_hoist) {
-            ("publicHoistPattern", Some((_, source))) => Some(("*".to_string(), source.clone())),
-            _ => index.resolve(setting),
-        };
-        let Some((raw, source)) = resolved else {
-            continue;
-        };
-        let patterns: Vec<String> = raw
-            .split(',')
-            .map(str::trim)
-            .filter(|pattern| !pattern.is_empty())
-            .map(str::to_string)
-            .collect();
-        if patterns.is_empty() {
-            continue;
-        }
-        rows.push(Row::new("hoisting", patterns, source));
-    }
+    ["publicHoistPattern", "hoistPattern"]
+        .into_iter()
+        .filter_map(|setting| {
+            let (raw, source) = match (setting, &shamefully_hoist) {
+                ("publicHoistPattern", Some((_, source))) => ("*".to_string(), source.clone()),
+                _ => index.resolve(setting)?,
+            };
+            let patterns: Vec<String> = comma_items(&raw).map(str::to_string).collect();
+            if patterns.is_empty() {
+                return None;
+            }
+            Some(Row::new("hoisting", patterns, source))
+        })
+        .collect()
+}
 
+/// The resolution settings a project has moved off their built-in default, on
+/// one row. Empty when it has moved none, which is the common case.
+fn resolution_row(index: &SourceIndex) -> Option<Row> {
     let mut values = Vec::new();
     let mut shared_source = None;
     for (setting, spelling, default) in RESOLUTION_SETTINGS {
-        let Some((value, source)) = index.resolve(setting) else {
+        let Some((value, source)) = index
+            .resolve(setting)
+            .filter(|(value, _)| !at_default(value, default))
+        else {
             continue;
         };
-        // Three of these four are booleans and one (`resolutionMode`) is a
-        // string enum, so compare as booleans when both sides parse that way and
-        // fall back to text otherwise. A raw string compare called
-        // `auto-install-peers=1` a non-default and printed a row for a setting
-        // sitting exactly at its default.
-        let at_default = match (
-            aube_settings::values::parse_bool(&value),
-            aube_settings::values::parse_bool(default),
-        ) {
-            (Some(actual), Some(expected)) => actual == expected,
-            _ => value == *default,
-        };
-        if at_default {
-            continue;
-        }
         values.push(if is_true(&value) {
             (*spelling).to_string()
         } else {
@@ -727,9 +726,16 @@ pub(super) fn resolved_rows(index: &SourceIndex) -> Vec<Row> {
             shared_source = None;
         }
     }
-    if !values.is_empty() {
-        rows.push(Row::new("resolution", values, shared_source));
+    if values.is_empty() {
+        return None;
     }
+    Some(Row::new("resolution", values, shared_source))
+}
+
+pub(super) fn resolved_rows(index: &SourceIndex) -> Vec<Row> {
+    let mut rows = vec![linker_row(index)];
+    rows.extend(hoisting_rows(index));
+    rows.extend(resolution_row(index));
     rows
 }
 
@@ -785,16 +791,16 @@ pub(super) enum Reason {
     Closure,
 }
 
-impl Reason {
-    fn render(&self) -> String {
+impl fmt::Display for Reason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Reason::Undeclared(names) => format!("undeclared imports: {}", names.join(", ")),
-            Reason::PeerTypes => "peer types resolved from the project root".to_string(),
-            Reason::ProjectContext => "build script reads the project".to_string(),
-            Reason::LegacyVite => "vite below 8.1".to_string(),
-            Reason::Configured => "named by config".to_string(),
-            Reason::ImporterOf(spec) => format!("imports {spec}"),
-            Reason::Closure => "pulled in by the materialized set".to_string(),
+            Reason::Undeclared(names) => write!(f, "undeclared imports: {}", names.join(", ")),
+            Reason::PeerTypes => f.write_str("peer types resolved from the project root"),
+            Reason::ProjectContext => f.write_str("build script reads the project"),
+            Reason::LegacyVite => f.write_str("vite below 8.1"),
+            Reason::Configured => f.write_str("named by config"),
+            Reason::ImporterOf(spec) => write!(f, "imports {spec}"),
+            Reason::Closure => f.write_str("pulled in by the materialized set"),
         }
     }
 }
@@ -813,27 +819,19 @@ impl Materialized {
     }
 }
 
-static PLAN: OnceLock<RwLock<Vec<Materialized>>> = OnceLock::new();
-
-fn plan() -> &'static RwLock<Vec<Materialized>> {
-    PLAN.get_or_init(|| RwLock::new(Vec::new()))
-}
+static PLAN: RwLock<Vec<Materialized>> = RwLock::new(Vec::new());
 
 /// Record the expansion hook's plan for the digest. Sorted here because the plan
 /// is built from hash sets, and an install's output must not reorder run to run.
 pub(super) fn record_plan(mut entries: Vec<Materialized>) {
     entries.sort_by(|a, b| (&a.name, &a.version).cmp(&(&b.name, &b.version)));
-    match plan().write() {
-        Ok(mut slot) => *slot = entries,
-        Err(poisoned) => *poisoned.into_inner() = entries,
-    }
+    *PLAN.write().unwrap_or_else(|error| error.into_inner()) = entries;
 }
 
 fn recorded_plan() -> Vec<Materialized> {
-    match plan().read() {
-        Ok(slot) => slot.clone(),
-        Err(poisoned) => poisoned.into_inner().clone(),
-    }
+    PLAN.read()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
 }
 
 pub(super) fn digest_rows(entries: &[Materialized], verbose: bool) -> Vec<Row> {
@@ -849,7 +847,7 @@ pub(super) fn digest_rows(entries: &[Materialized], verbose: bool) -> Vec<Row> {
             .map(|(i, entry)| Row {
                 label: if i == 0 { "materialized" } else { "" },
                 values: vec![entry.spec()],
-                note: Some(format!("({})", entry.reason.render())),
+                note: Some(format!("({})", entry.reason)),
             })
             .collect();
     }
@@ -916,6 +914,58 @@ mod tests {
             name: name.to_string(),
             version: version.to_string(),
             reason,
+        }
+    }
+
+    /// An index no tier claims anything in, to be filled one tier at a time with
+    /// `..empty_index()`. Spelling the whole struct out per test buried which
+    /// field each one was actually about.
+    fn empty_index() -> SourceIndex {
+        SourceIndex {
+            cli: Vec::new(),
+            env: Vec::new(),
+            project_config: Vec::new(),
+            workspace_yaml: Vec::new(),
+            global_config_yaml: Vec::new(),
+            project_npmrc: Vec::new(),
+            user_npmrc: Vec::new(),
+            embedder_defaults: Vec::new(),
+            declared_packages: Vec::new(),
+            branded_layout_ignored: false,
+            ci: false,
+        }
+    }
+
+    fn engine_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::pm_engine::ENGINE_GLOBAL_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// Holds the engine lock and restores the process-global engine context on
+    /// DROP, not by a statement at the end: the asserts in between can panic, and
+    /// a tail restore would leave every later test in this binary reading the
+    /// postures this one set. Since every holder takes the lock with
+    /// `unwrap_or_else(into_inner)`, they proceed on that corrupted state rather
+    /// than failing — one real failure would spray unrelated ones and bury which
+    /// test actually broke.
+    struct EngineGuard {
+        context: aube_util::EngineContext,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EngineGuard {
+        fn take() -> Self {
+            Self {
+                _lock: engine_lock(),
+                context: aube_util::engine_context(),
+            }
+        }
+    }
+
+    impl Drop for EngineGuard {
+        fn drop(&mut self) {
+            aube_util::set_engine_context(self.context.clone());
         }
     }
 
@@ -1036,20 +1086,11 @@ mod tests {
     #[test]
     fn layout_names_the_strategy_the_project_wrote() {
         let shared = SourceIndex {
-            cli: Vec::new(),
-            env: Vec::new(),
             project_config: vec![
                 ("nodeLinker".to_string(), "isolated".to_string()),
                 ("enableGlobalVirtualStore".to_string(), "true".to_string()),
             ],
-            workspace_yaml: Vec::new(),
-            global_config_yaml: Vec::new(),
-            project_npmrc: Vec::new(),
-            user_npmrc: Vec::new(),
-            embedder_defaults: Vec::new(),
-            declared_packages: Vec::new(),
-            branded_layout_ignored: false,
-            ci: false,
+            ..empty_index()
         };
         assert_eq!(
             layout_row(&shared),
@@ -1115,17 +1156,9 @@ mod tests {
         // variable happened to be set — which on the leg that gates merge was
         // always. Reading it from the index instead makes both arms hermetic.
         let in_ci = SourceIndex {
-            cli: Vec::new(),
-            env: Vec::new(),
-            project_config: Vec::new(),
-            workspace_yaml: Vec::new(),
-            global_config_yaml: Vec::new(),
-            project_npmrc: Vec::new(),
-            user_npmrc: Vec::new(),
             embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
-            declared_packages: Vec::new(),
-            branded_layout_ignored: false,
             ci: true,
+            ..empty_index()
         };
         assert_eq!(
             layout_row(&in_ci),
@@ -1141,17 +1174,9 @@ mod tests {
     #[test]
     fn boolean_settings_are_read_the_way_the_engine_reads_them() {
         let with_npmrc = |key: &str, value: &str| SourceIndex {
-            cli: Vec::new(),
-            env: Vec::new(),
-            project_config: Vec::new(),
-            workspace_yaml: Vec::new(),
-            global_config_yaml: Vec::new(),
             project_npmrc: vec![(key.to_string(), value.to_string())],
-            user_npmrc: Vec::new(),
             embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
-            declared_packages: Vec::new(),
-            branded_layout_ignored: false,
-            ci: false,
+            ..empty_index()
         };
 
         // The engine symlinks into the machine-global store for each of these,
@@ -1196,13 +1221,6 @@ mod tests {
     #[test]
     fn a_gvs_incompatible_dependency_reports_the_project_local_store() {
         let index = SourceIndex {
-            cli: Vec::new(),
-            env: Vec::new(),
-            project_config: Vec::new(),
-            workspace_yaml: Vec::new(),
-            global_config_yaml: Vec::new(),
-            project_npmrc: Vec::new(),
-            user_npmrc: Vec::new(),
             embedder_defaults: vec![
                 ("nodeLinker".to_string(), "isolated".to_string()),
                 (
@@ -1211,8 +1229,7 @@ mod tests {
                 ),
             ],
             declared_packages: vec!["next".to_string(), "debug".to_string()],
-            branded_layout_ignored: false,
-            ci: false,
+            ..empty_index()
         };
         // Named, not bare: `next` is the whole reason this project reads
         // `isolated` where the documented default is the shared store, and it
@@ -1266,20 +1283,11 @@ mod tests {
     #[test]
     fn shamefully_hoist_reports_the_pattern_it_actually_is() {
         let index = SourceIndex {
-            cli: Vec::new(),
-            env: Vec::new(),
-            project_config: Vec::new(),
-            workspace_yaml: Vec::new(),
-            global_config_yaml: Vec::new(),
             project_npmrc: vec![
                 ("shamefully-hoist".to_string(), "true".to_string()),
                 ("public-hoist-pattern".to_string(), "ms".to_string()),
             ],
-            user_npmrc: Vec::new(),
-            embedder_defaults: Vec::new(),
-            declared_packages: Vec::new(),
-            branded_layout_ignored: false,
-            ci: false,
+            ..empty_index()
         };
         let rows = resolved_rows(&index);
         let hoisting = rows.iter().find(|row| row.label == "hoisting").unwrap();
@@ -1312,17 +1320,8 @@ mod tests {
     #[test]
     fn a_dropped_branded_layout_points_at_the_neutral_surface() {
         let dropped = SourceIndex {
-            cli: Vec::new(),
-            env: Vec::new(),
-            project_config: Vec::new(),
-            workspace_yaml: Vec::new(),
-            global_config_yaml: Vec::new(),
-            project_npmrc: Vec::new(),
-            user_npmrc: Vec::new(),
-            embedder_defaults: Vec::new(),
-            declared_packages: Vec::new(),
             branded_layout_ignored: true,
-            ci: false,
+            ..empty_index()
         };
         let note = |index: &SourceIndex| {
             resolved_rows(index)
@@ -1403,25 +1402,7 @@ mod tests {
     /// whether nub reads that file at all.
     #[test]
     fn each_branded_layout_source_is_detected() {
-        let _guard = crate::pm_engine::ENGINE_GLOBAL_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-
-        // Restored on DROP, not by a statement at the end. The context is a
-        // process global and the asserts below can panic, so a tail restore
-        // leaves every later test in this binary reading the postures this one
-        // set — and since every holder of the lock takes it with
-        // `unwrap_or_else(|e| e.into_inner())`, they proceed on that corrupted
-        // state rather than failing. One real failure would spray unrelated
-        // ones and bury which test actually broke.
-        struct Restore(aube_util::EngineContext);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                aube_util::set_engine_context(self.0.clone());
-            }
-        }
-        let _restore = Restore(aube_util::engine_context());
-
+        let _guard = EngineGuard::take();
         aube_util::update_engine_context(|c| {
             c.read_branded_pnpm_config = true;
             c.read_layout_from_workspace_yaml = false;
@@ -1444,18 +1425,17 @@ mod tests {
         let detected =
             |dir: &tempfile::TempDir| SourceIndex::load(dir.path(), &[]).branded_layout_ignored;
 
-        assert!(detected(&project(&[(
-            "pnpm-workspace.yaml",
-            "nodeLinker: hoisted\n"
-        )])));
-        assert!(detected(&project(&[(
-            ".yarnrc.yml",
-            "nodeLinker: node-modules\n"
-        )])));
-        assert!(detected(&project(&[(
-            "bunfig.toml",
-            "[install]\nlinker = \"hoisted\"\n"
-        )])));
+        for (file, body) in [
+            ("pnpm-workspace.yaml", "nodeLinker: hoisted\n"),
+            ("pnpm-workspace.yaml", "modulesDir: vendor_modules\n"),
+            (".yarnrc.yml", "nodeLinker: node-modules\n"),
+            ("bunfig.toml", "[install]\nlinker = \"hoisted\"\n"),
+        ] {
+            assert!(
+                detected(&project(&[(file, body)])),
+                "{file} asks for a layout, so the row must say where to set one: {body:?}"
+            );
+        }
 
         assert!(
             !detected(&project(&[])),
@@ -1468,10 +1448,6 @@ mod tests {
             )])),
             "the probe keys on a layout setting, not on the file's presence"
         );
-        assert!(detected(&project(&[(
-            "pnpm-workspace.yaml",
-            "modulesDir: vendor_modules\n"
-        )])));
 
         // The gate: a file nub never opens went unread for its own reason, and
         // blaming the compat layout policy for it would send the reader to the wrong fix.
@@ -1496,12 +1472,12 @@ mod tests {
     #[test]
     fn an_unattributed_closure_member_does_not_blame_config() {
         assert_eq!(
-            Reason::Closure.render(),
+            Reason::Closure.to_string(),
             "pulled in by the materialized set"
         );
         assert_ne!(
-            Reason::Closure.render(),
-            Reason::Configured.render(),
+            Reason::Closure.to_string(),
+            Reason::Configured.to_string(),
             "the two must stay distinguishable — collapsing them is the defect"
         );
     }
@@ -1512,9 +1488,7 @@ mod tests {
     /// notice the sort disappearing; this goes through the recording path.
     #[test]
     fn a_recorded_plan_is_ordered_regardless_of_insertion() {
-        let _guard = crate::pm_engine::ENGINE_GLOBAL_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = engine_lock();
         struct RestorePlan(Vec<Materialized>);
         impl Drop for RestorePlan {
             fn drop(&mut self) {
@@ -1535,10 +1509,7 @@ mod tests {
             entry("acorn", "8.12.1"),
         ]);
 
-        let ordered: Vec<_> = recorded_plan()
-            .into_iter()
-            .map(|m| format!("{}@{}", m.name, m.version))
-            .collect();
+        let ordered: Vec<_> = recorded_plan().iter().map(Materialized::spec).collect();
         assert_eq!(
             ordered,
             ["acorn@8.12.1", "next@14.2.0", "next@15.0.0", "zod@3.23.8"],
@@ -1558,35 +1529,38 @@ mod tests {
     #[test]
     fn provenance_names_the_authored_surface() {
         assert_eq!(
-            Source::Cli("--node-linker=hoisted".to_string()).render(),
+            Source::Cli("--node-linker=hoisted".to_string()).to_string(),
             "--node-linker=hoisted"
         );
         assert_eq!(
-            Source::ProjectConfig("install.publicHoist").render(),
+            Source::ProjectConfig("install.publicHoist").to_string(),
             "nub.jsonc install.publicHoist"
         );
-        assert_eq!(Source::Npmrc.render(), ".npmrc");
-        assert_eq!(Source::WorkspaceYaml.render(), "pnpm-workspace.yaml");
-        assert_eq!(Source::GlobalConfigYaml.render(), "pnpm global config.yaml");
-        assert_eq!(Source::Default.render(), "default");
+        assert_eq!(Source::Npmrc.to_string(), ".npmrc");
+        assert_eq!(Source::WorkspaceYaml.to_string(), "pnpm-workspace.yaml");
         assert_eq!(
-            Source::Env("npm_config_node_linker".to_string()).render(),
+            Source::GlobalConfigYaml.to_string(),
+            "pnpm global config.yaml"
+        );
+        assert_eq!(Source::Default.to_string(), "default");
+        assert_eq!(
+            Source::Env("npm_config_node_linker".to_string()).to_string(),
             "npm_config_node_linker"
         );
         assert_eq!(
-            Source::Ci.render(),
+            Source::Ci.to_string(),
             "global virtual store auto-disabled in CI"
         );
         assert_eq!(
-            Source::IncompatiblePackage("next".to_string()).render(),
+            Source::IncompatiblePackage("next".to_string()).to_string(),
             "global virtual store auto-disabled in Next projects"
         );
         assert_eq!(
-            Source::IncompatiblePackage("react-native".to_string()).render(),
+            Source::IncompatiblePackage("react-native".to_string()).to_string(),
             "global virtual store auto-disabled in React Native projects"
         );
         assert_eq!(
-            Source::IncompatiblePackage("some-local-pkg".to_string()).render(),
+            Source::IncompatiblePackage("some-local-pkg".to_string()).to_string(),
             "global virtual store auto-disabled in some-local-pkg projects"
         );
     }
@@ -1622,17 +1596,10 @@ mod tests {
     #[test]
     fn resolution_walks_tiers_in_precedence_order() {
         let index = SourceIndex {
-            cli: Vec::new(),
-            env: Vec::new(),
             project_config: vec![("nodeLinker".to_string(), "hoisted".to_string())],
-            workspace_yaml: Vec::new(),
-            global_config_yaml: Vec::new(),
             project_npmrc: vec![("node-linker".to_string(), "isolated".to_string())],
-            user_npmrc: Vec::new(),
             embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
-            declared_packages: Vec::new(),
-            branded_layout_ignored: false,
-            ci: false,
+            ..empty_index()
         };
         assert_eq!(
             index.resolve("nodeLinker"),
@@ -1685,9 +1652,7 @@ mod tests {
             project_npmrc: vec![("nodeLinker".to_string(), "isolated".to_string())],
             user_npmrc: vec![("nodeLinker".to_string(), "isolated".to_string())],
             embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
-            declared_packages: Vec::new(),
-            branded_layout_ignored: false,
-            ci: false,
+            ..empty_index()
         };
         assert_eq!(
             index.resolve("nodeLinker"),
@@ -1705,17 +1670,10 @@ mod tests {
     #[test]
     fn global_config_yaml_has_the_engine_precedence_tier() {
         let index = SourceIndex {
-            cli: Vec::new(),
-            env: Vec::new(),
-            project_config: Vec::new(),
-            workspace_yaml: Vec::new(),
             global_config_yaml: vec![("nodeLinker", "hoisted".to_string())],
             project_npmrc: vec![("nodeLinker".to_string(), "isolated".to_string())],
             user_npmrc: vec![("nodeLinker".to_string(), "isolated".to_string())],
-            embedder_defaults: Vec::new(),
-            declared_packages: Vec::new(),
-            branded_layout_ignored: false,
-            ci: false,
+            ..empty_index()
         };
         assert_eq!(
             index.resolve("nodeLinker"),
@@ -1738,17 +1696,10 @@ mod tests {
     #[test]
     fn pnpm_v11_yaml_list_tiers_preserve_hoisting_provenance() {
         let index = SourceIndex {
-            cli: Vec::new(),
-            env: Vec::new(),
-            project_config: Vec::new(),
             workspace_yaml: vec![("publicHoistPattern", "vitest,@types/*".to_string())],
             global_config_yaml: vec![("publicHoistPattern", "eslint".to_string())],
             project_npmrc: vec![("public-hoist-pattern".to_string(), "lodash".to_string())],
-            user_npmrc: Vec::new(),
-            embedder_defaults: Vec::new(),
-            declared_packages: Vec::new(),
-            branded_layout_ignored: false,
-            ci: false,
+            ..empty_index()
         };
         let hoisting = |index: &SourceIndex| {
             resolved_rows(index)
@@ -1773,16 +1724,7 @@ mod tests {
     /// both show every pattern and keep its source rather than falling through.
     #[test]
     fn pnpm_v11_workspace_yaml_sequences_keep_list_provenance() {
-        let _guard = crate::pm_engine::ENGINE_GLOBAL_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        struct RestoreContext(aube_util::EngineContext);
-        impl Drop for RestoreContext {
-            fn drop(&mut self) {
-                aube_util::set_engine_context(self.0.clone());
-            }
-        }
-        let _restore = RestoreContext(aube_util::engine_context());
+        let _guard = EngineGuard::take();
         aube_util::update_engine_context(|context| {
             context.read_branded_pnpm_config = true;
             context.read_layout_from_workspace_yaml = true;
@@ -1819,11 +1761,6 @@ mod tests {
     #[test]
     fn npmrc_tiers_use_later_entry_wins_order() {
         let index = SourceIndex {
-            cli: Vec::new(),
-            env: Vec::new(),
-            project_config: Vec::new(),
-            workspace_yaml: Vec::new(),
-            global_config_yaml: Vec::new(),
             project_npmrc: vec![
                 ("nodeLinker".to_string(), "hoisted".to_string()),
                 ("node-linker".to_string(), "isolated".to_string()),
@@ -1832,10 +1769,7 @@ mod tests {
                 ("nodeLinker".to_string(), "isolated".to_string()),
                 ("node-linker".to_string(), "hoisted".to_string()),
             ],
-            embedder_defaults: Vec::new(),
-            declared_packages: Vec::new(),
-            branded_layout_ignored: false,
-            ci: false,
+            ..empty_index()
         };
         assert_eq!(
             index.resolve("nodeLinker"),
@@ -1862,18 +1796,11 @@ mod tests {
                 "npm_config_enable_global_virtual_store".to_string(),
                 "0".to_string(),
             )],
-            project_config: Vec::new(),
-            workspace_yaml: Vec::new(),
-            global_config_yaml: Vec::new(),
             project_npmrc: vec![
                 ("enable-global-virtual-store".to_string(), "1".to_string()),
                 ("enableGlobalVirtualStore".to_string(), "yes".to_string()),
             ],
-            user_npmrc: Vec::new(),
-            embedder_defaults: Vec::new(),
-            declared_packages: Vec::new(),
-            branded_layout_ignored: false,
-            ci: false,
+            ..empty_index()
         };
         assert_eq!(
             index.resolve("enableGlobalVirtualStore"),
@@ -1903,17 +1830,9 @@ mod tests {
     #[test]
     fn branded_env_aliases_are_not_a_source() {
         let index = SourceIndex {
-            cli: Vec::new(),
             env: vec![("AUBE_NODE_LINKER".to_string(), "hoisted".to_string())],
-            project_config: Vec::new(),
-            workspace_yaml: Vec::new(),
-            global_config_yaml: Vec::new(),
-            project_npmrc: Vec::new(),
-            user_npmrc: Vec::new(),
             embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
-            declared_packages: Vec::new(),
-            branded_layout_ignored: false,
-            ci: false,
+            ..empty_index()
         };
         assert_eq!(
             index.resolve("nodeLinker"),
@@ -1926,28 +1845,11 @@ mod tests {
     /// value the resolver did not read.
     #[test]
     fn pnpm_branded_env_aliases_follow_the_engine_context_gate() {
-        let _guard = crate::pm_engine::ENGINE_GLOBAL_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        struct RestoreContext(aube_util::EngineContext);
-        impl Drop for RestoreContext {
-            fn drop(&mut self) {
-                aube_util::set_engine_context(self.0.clone());
-            }
-        }
-        let _restore = RestoreContext(aube_util::engine_context());
+        let _guard = EngineGuard::take();
         let index = SourceIndex {
-            cli: Vec::new(),
             env: vec![("PNPM_CONFIG_NODE_LINKER".to_string(), "hoisted".to_string())],
-            project_config: Vec::new(),
-            workspace_yaml: Vec::new(),
-            global_config_yaml: Vec::new(),
-            project_npmrc: Vec::new(),
-            user_npmrc: Vec::new(),
             embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
-            declared_packages: Vec::new(),
-            branded_layout_ignored: false,
-            ci: false,
+            ..empty_index()
         };
 
         aube_util::update_engine_context(|context| context.read_branded_pnpm_config = false);
@@ -1971,17 +1873,9 @@ mod tests {
     #[test]
     fn mixed_sources_drop_the_shared_parenthetical() {
         let index = SourceIndex {
-            cli: Vec::new(),
-            env: Vec::new(),
-            project_config: Vec::new(),
-            workspace_yaml: Vec::new(),
-            global_config_yaml: Vec::new(),
             project_npmrc: vec![("auto-install-peers".to_string(), "false".to_string())],
             user_npmrc: vec![("strict-peer-dependencies".to_string(), "true".to_string())],
-            embedder_defaults: Vec::new(),
-            declared_packages: Vec::new(),
-            branded_layout_ignored: false,
-            ci: false,
+            ..empty_index()
         };
         let rows = resolved_rows(&index);
         let resolution = rows.iter().find(|row| row.label == "resolution").unwrap();

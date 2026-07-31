@@ -1177,22 +1177,18 @@ function wrapChildProcessCompileCache(cp) {
     return base === "node" || base === "node.exe";
   };
 
-  // The fresh-invocation protocol attributes each rewritten environment value
-  // to Nub. This preload is another Nub-owned writer: when it strips the live
-  // compile-cache value for R8, update an existing current-protocol marker to
-  // the exact absent state. A later compat boundary can then restore the
-  // captured user value instead of mistaking this removal for a user mutation.
-  // Legacy parents carry neither marker and keep their legacy fallback.
+  // The fresh-invocation protocol attributes each rewritten environment value to
+  // Nub. This preload is another Nub-owned writer: when it strips the live
+  // compile-cache value for R8, move an existing current-protocol marker to the
+  // exact absent state, so a later compat boundary restores the captured user
+  // value instead of mistaking this removal for a user mutation. Legacy parents
+  // carry neither marker and keep their legacy fallback.
+  const CCACHE_MARKER = "__NUB_AUGMENTED_NODE_COMPILE_CACHE";
+  const CCACHE_PRESENT_MARKER = `${CCACHE_MARKER}_PRESENT`;
   const markCompileCacheAbsent = (env) => {
-    const valueMarker = "__NUB_AUGMENTED_NODE_COMPILE_CACHE";
-    const presentMarker = "__NUB_AUGMENTED_NODE_COMPILE_CACHE_PRESENT";
-    if (
-      Object.hasOwn(env, valueMarker) ||
-      Object.hasOwn(env, presentMarker)
-    ) {
-      env[valueMarker] = "";
-      env[presentMarker] = "0";
-    }
+    if (!Object.hasOwn(env, CCACHE_MARKER) && !Object.hasOwn(env, CCACHE_PRESENT_MARKER)) return;
+    env[CCACHE_MARKER] = "";
+    env[CCACHE_PRESENT_MARKER] = "0";
   };
 
   // Returns a possibly-rewritten options object with NODE_COMPILE_CACHE stripped

@@ -41,7 +41,8 @@
 //! pre-productionization pure-symlink behavior. All policy lives here; aube owns
 //! only the neutral seam + the graph primitive.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::{LazyLock, PoisonError, RwLock};
 
 use aube_linker::DiskMaterializePlan;
 use aube_lockfile::{LockedPackage, LockfileGraph};
@@ -81,14 +82,19 @@ pub(crate) fn register() {
 /// default can't be added in one place and silently dropped by the other.
 pub(super) const NUB_INTERNAL_DISK_MATERIALIZE_SEED: &[&str] = &["vite"];
 
-static NATIVE_CONFIG_SEED: std::sync::LazyLock<std::sync::RwLock<Vec<String>>> =
-    std::sync::LazyLock::new(|| std::sync::RwLock::new(Vec::new()));
+/// `install.linker.eject` from the project's `nub.jsonc`, published by
+/// [`super::engine_session_inner`]. A process-global because the eject hook is a
+/// bare `fn` the engine installs once and calls with only the resolved graph —
+/// there is no seam to thread session state through. Poisoning is ignored
+/// throughout: the guarded value is a plain name list, so a panic mid-write
+/// cannot leave it inconsistent.
+static NATIVE_CONFIG_SEED: LazyLock<RwLock<Vec<String>>> =
+    LazyLock::new(|| RwLock::new(Vec::new()));
 
 pub(super) fn set_native_config_seed(seed: Vec<String>) {
-    match NATIVE_CONFIG_SEED.write() {
-        Ok(mut current) => *current = seed,
-        Err(poisoned) => *poisoned.into_inner() = seed,
-    }
+    *NATIVE_CONFIG_SEED
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = seed;
 }
 
 /// Curated "project-context" packages (nub#457): each one's build script READS or
@@ -173,10 +179,9 @@ fn eject_list_token(names: &[&str]) -> String {
 /// Keep nub's internal and native-config seed names, dropping every
 /// incumbent/user-source `diskMaterializePackages` entry.
 fn nub_internal_seed(resolved_seed: &[String]) -> Vec<String> {
-    let configured = match NATIVE_CONFIG_SEED.read() {
-        Ok(seed) => seed.clone(),
-        Err(poisoned) => poisoned.into_inner().clone(),
-    };
+    let configured = NATIVE_CONFIG_SEED
+        .read()
+        .unwrap_or_else(PoisonError::into_inner);
     resolved_seed
         .iter()
         .filter(|n| {
@@ -225,7 +230,7 @@ fn label_plan(
 
     // One representative version per planned name — the digest is name-keyed
     // (so is the linker's eject), so a duplicated name needs one printable spec.
-    let mut version_of: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+    let mut version_of: BTreeMap<&str, &str> = BTreeMap::new();
     for pkg in graph.packages.values() {
         if planned.contains(pkg.name.as_str()) {
             version_of.entry(&pkg.name).or_insert(&pkg.version);
@@ -234,8 +239,8 @@ fn label_plan(
 
     version_of
         .iter()
-        .map(|(name, version)| {
-            let flag = flags.iter().find(|flag| flag.name == *name);
+        .map(|(&name, &version)| {
+            let flag = flags.iter().find(|flag| flag.name == name);
             let reason = if let Some(flag) = flag.filter(|flag| {
                 !flag.targets.is_empty()
                     && should_seed(
@@ -251,9 +256,9 @@ fn label_plan(
                     .any(|peer| is_top_level(&types_package_name(peer)))
             }) {
                 Reason::PeerTypes
-            } else if NUB_PROJECT_CONTEXT_EJECT.contains(name) {
+            } else if NUB_PROJECT_CONTEXT_EJECT.contains(&name) {
                 Reason::ProjectContext
-            } else if *name == "vite" && super::vite_compat::vite_lt_8_1(version) {
+            } else if name == "vite" && super::vite_compat::vite_lt_8_1(version) {
                 Reason::LegacyVite
             } else if seed_matcher.matches(name) {
                 Reason::Configured
@@ -263,9 +268,9 @@ fn label_plan(
                 graph
                     .packages
                     .values()
-                    .filter(|pkg| pkg.name == *name)
+                    .filter(|pkg| pkg.name == name)
                     .flat_map(|pkg| pkg.dependencies.keys())
-                    .filter(|dep| dep.as_str() != *name)
+                    .filter(|dep| dep.as_str() != name)
                     .find_map(|dep| {
                         version_of
                             .get(dep.as_str())
@@ -274,8 +279,8 @@ fn label_plan(
                     .unwrap_or(Reason::Closure)
             };
             Materialized {
-                name: (*name).to_string(),
-                version: (*version).to_string(),
+                name: name.to_string(),
+                version: version.to_string(),
                 reason,
             }
         })
@@ -394,8 +399,7 @@ fn plan_from_flags(
     let mut seed_dep_paths: HashSet<&str> = HashSet::new();
     // Compiled once, not per comparison: this loop runs over every package in
     // the graph, and matching inline re-parsed each pattern on every one.
-    let seed_patterns: Vec<String> = seed_names.iter().map(|s| (*s).to_string()).collect();
-    let seed_matcher = aube_linker::PackageNameMatcher::new(&seed_patterns);
+    let seed_matcher = aube_linker::PackageNameMatcher::new(&seed_names);
     for (dep_path, pkg) in &graph.packages {
         if seed_names_set.contains(pkg.name.as_str())
             || seed_matcher.matches(&pkg.name)

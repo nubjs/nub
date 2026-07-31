@@ -1,0 +1,35 @@
+# The positive control for `../yaml-alias-budget/bomb.yaml`: heavy but entirely
+# legitimate alias use, which must LOAD rather than be refused.
+#
+# `defaults` is a small anchored collection — seven nodes, one of them a nested
+# sequence — reused FLATLY 64 times. Nothing nests, so the clones yaml-rust2
+# makes are linear in the document: 448 materialized nodes against a
+# 100,000-node budget. 64 is deliberately past the 50-collection-alias cap the
+# estimator used to carry, so a preflight that COUNTED aliases rather than
+# pricing them would reject this file.
+#
+# `region` is a scalar anchor aliased just as often. A scalar clone cannot
+# amplify a tree, so scalar aliases are never charged at all.
+
+defaults: &defaults { enabled: true, names: [one, two] }
+region: &region "us-east-1"
+
+configs:
+  - [*defaults, *defaults, *defaults, *defaults, *defaults, *defaults, *defaults, *defaults]
+  - [*defaults, *defaults, *defaults, *defaults, *defaults, *defaults, *defaults, *defaults]
+  - [*defaults, *defaults, *defaults, *defaults, *defaults, *defaults, *defaults, *defaults]
+  - [*defaults, *defaults, *defaults, *defaults, *defaults, *defaults, *defaults, *defaults]
+  - [*defaults, *defaults, *defaults, *defaults, *defaults, *defaults, *defaults, *defaults]
+  - [*defaults, *defaults, *defaults, *defaults, *defaults, *defaults, *defaults, *defaults]
+  - [*defaults, *defaults, *defaults, *defaults, *defaults, *defaults, *defaults, *defaults]
+  - [*defaults, *defaults, *defaults, *defaults, *defaults, *defaults, *defaults, *defaults]
+
+regions:
+  - [*region, *region, *region, *region, *region, *region, *region, *region]
+  - [*region, *region, *region, *region, *region, *region, *region, *region]
+  - [*region, *region, *region, *region, *region, *region, *region, *region]
+  - [*region, *region, *region, *region, *region, *region, *region, *region]
+  - [*region, *region, *region, *region, *region, *region, *region, *region]
+  - [*region, *region, *region, *region, *region, *region, *region, *region]
+  - [*region, *region, *region, *region, *region, *region, *region, *region]
+  - [*region, *region, *region, *region, *region, *region, *region, *region]

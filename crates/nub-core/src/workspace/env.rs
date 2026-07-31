@@ -237,16 +237,16 @@ pub fn discover_env_files(project_root: &Path) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-// A self-referential value grows MULTIPLICATIVELY per round, so the 10-round
-// bound alone does not bound the output: `A=${A}${A}${A}${A}${A}${A}${A}${A}`
-// is 8x per pass, i.e. 8^10 ≈ a billion characters, which leaves the process
-// thrashing swap rather than looping forever. Reachable from a cloned repo —
-// a `.env` file has always fed this, and a `nub.jsonc` `envFile` now does too.
-//
-// A value that would exceed the cap keeps its PRE-expansion text rather than
-// being truncated: a truncated value is a silently wrong one, and the raw form
-// is at least visibly literal. 128 KiB is far above any real environment
-// variable and well under the point where this hurts.
+/// A self-referential value grows MULTIPLICATIVELY per round, so the 10-round
+/// bound alone does not bound the output: `A=${A}${A}${A}${A}${A}${A}${A}${A}`
+/// is 8x per pass, i.e. 8^10 ≈ a billion characters, which leaves the process
+/// thrashing swap rather than looping forever. Reachable from a cloned repo —
+/// a `.env` file has always fed this, and a `nub.jsonc` `envFile` now does too.
+///
+/// A value that would exceed the cap keeps its PRE-expansion text rather than
+/// being truncated: a truncated value is a silently wrong one, and the raw form
+/// is at least visibly literal. 128 KiB is far above any real environment
+/// variable and well under the point where this hurts.
 const MAX_EXPANDED_VALUE: usize = 128 * 1024;
 
 /// Expand `${VAR}` and `$VAR` references within all values of a map, in-place.
@@ -550,22 +550,26 @@ fn upsert_env_pair(
     }
 }
 
-/// Append `text` without ever growing an expansion past its cap.
+/// Append `text`, or give up if that would grow the expansion past its cap.
 fn push_bounded(result: &mut String, text: &str) -> Option<()> {
-    if result.len().checked_add(text.len())? > MAX_EXPANDED_VALUE {
-        return None;
-    }
-    result.push_str(text);
-    Some(())
+    (result.len() + text.len() <= MAX_EXPANDED_VALUE).then(|| result.push_str(text))
 }
 
-/// Append one literal character without ever growing an expansion past its cap.
+/// [`push_bounded`] for one literal character.
 fn push_char_bounded(result: &mut String, ch: char) -> Option<()> {
-    if result.len().checked_add(ch.len_utf8())? > MAX_EXPANDED_VALUE {
-        return None;
+    (result.len() + ch.len_utf8() <= MAX_EXPANDED_VALUE).then(|| result.push(ch))
+}
+
+/// Append one `$VAR` / `${VAR}` expansion. The map wins over the ambient process
+/// environment, and an undefined name expands to nothing.
+fn push_var_bounded(result: &mut String, name: &str, env: &HashMap<String, String>) -> Option<()> {
+    match env.get(name) {
+        Some(resolved) => push_bounded(result, resolved),
+        None => match std::env::var(name) {
+            Ok(resolved) => push_bounded(result, &resolved),
+            Err(_) => Some(()),
+        },
     }
-    result.push(ch);
-    Some(())
 }
 
 /// Expand `${VAR}` and `$VAR` references in a value.
@@ -589,11 +593,7 @@ fn expand_vars(value: &str, env: &HashMap<String, String>) -> Option<String> {
                 // ${VAR} form
                 if let Some(close) = chars[i + 2..].iter().position(|&c| c == '}') {
                     let var_name: String = chars[i + 2..i + 2 + close].iter().collect();
-                    if let Some(resolved) = env.get(&var_name) {
-                        push_bounded(&mut result, resolved)?;
-                    } else if let Ok(resolved) = std::env::var(&var_name) {
-                        push_bounded(&mut result, &resolved)?;
-                    }
+                    push_var_bounded(&mut result, &var_name, env)?;
                     i += close + 3;
                     continue;
                 }
@@ -606,11 +606,7 @@ fn expand_vars(value: &str, env: &HashMap<String, String>) -> Option<String> {
                     end += 1;
                 }
                 let var_name: String = chars[start..end].iter().collect();
-                if let Some(resolved) = env.get(&var_name) {
-                    push_bounded(&mut result, resolved)?;
-                } else if let Ok(resolved) = std::env::var(&var_name) {
-                    push_bounded(&mut result, &resolved)?;
-                }
+                push_var_bounded(&mut result, &var_name, env)?;
                 i = end;
                 continue;
             }
@@ -683,7 +679,7 @@ mod tests {
         map.insert("SMALL".to_string(), "resolved".to_string());
         map.insert(
             "ESCAPED".to_string(),
-            r#"\$SMALL:${MISSING}:$SMALL"#.to_string(),
+            r"\$SMALL:${MISSING}:$SMALL".to_string(),
         );
 
         assert_eq!(
@@ -1137,26 +1133,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Every denylisted key, canonically spelled except `NODE_OPTIONS`, which is
+    /// lower-cased so the ASCII-case-insensitive match is exercised rather than
+    /// assumed.
+    fn denied_keys_under_test() -> Vec<String> {
+        denied_env_file_keys()
+            .iter()
+            .map(|key| {
+                if *key == "NODE_OPTIONS" {
+                    key.to_ascii_lowercase()
+                } else {
+                    (*key).to_string()
+                }
+            })
+            .collect()
+    }
+
     /// Env hygiene (Deno parity): a `.env` FILE must never inject a runtime-control
     /// var ([`ENV_FILE_DENYLIST`]) — those configure Node's own start-up, not the
-    /// user's program. Every canonical key is exercised directly, with one
-    /// mixed-case spelling to lock the case-insensitive match; benign siblings
-    /// must still load. The strip runs in the shared per-file loop, so `.env`
-    /// coverage exercises it for every `.env*` file — mode-file SELECTION is a
-    /// separate concern (tested by `env_file_names*`) and needs no ambient env here.
+    /// user's program. Benign siblings must still load. The strip runs in the
+    /// shared per-file loop, so `.env` coverage exercises it for every `.env*`
+    /// file — mode-file SELECTION is a separate concern (tested by
+    /// `env_file_names*`) and needs no ambient env here.
     #[test]
     fn denylisted_runtime_control_vars_never_injected() {
         let dir = std::env::temp_dir().join(format!("nub-deny-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut source = String::new();
-        for (index, denied) in denied_env_file_keys().iter().enumerate() {
-            let spelling = if index == 0 {
-                denied.to_ascii_lowercase()
-            } else {
-                (*denied).to_string()
-            };
-            source.push_str(&format!("{spelling}=blocked-{index}\n"));
+        for key in denied_keys_under_test() {
+            source.push_str(&format!("{key}=blocked\n"));
         }
         source.push_str("APP_KEY=safe\n");
         std::fs::write(dir.join(".env"), source).unwrap();
@@ -1182,20 +1188,16 @@ mod tests {
     /// dropped keys sorted.
     #[test]
     fn strip_denied_env_file_keys_removes_control_vars() {
-        let mut map = HashMap::new();
-        for (index, denied) in denied_env_file_keys().iter().enumerate() {
-            let spelling = if index == 0 {
-                denied.to_ascii_lowercase()
-            } else {
-                (*denied).to_string()
-            };
-            map.insert(spelling, format!("blocked-{index}"));
-        }
+        let mut map: HashMap<String, String> = denied_keys_under_test()
+            .into_iter()
+            .map(|key| (key, "blocked".to_string()))
+            .collect();
         map.insert("PORT".to_string(), "3000".to_string());
 
         let dropped = strip_denied_env_file_keys(&mut map);
 
         assert_eq!(dropped.len(), denied_env_file_keys().len());
+        assert!(dropped.is_sorted(), "the warning needs a stable order");
         for denied in denied_env_file_keys() {
             assert!(
                 !map.keys().any(|key| key.eq_ignore_ascii_case(denied)),
@@ -1207,6 +1209,9 @@ mod tests {
         assert!(!is_denied_env_file_key("PATH"));
     }
 
+    /// The wire shape of the fresh-invocation protocol, spelled out on purpose:
+    /// every other denylist test iterates [`denied_env_file_keys`] and so would
+    /// still pass if a key were dropped from the list. This one pins the names.
     #[test]
     fn fresh_invocation_wire_vars_are_denied_from_env_files() {
         for key in [

@@ -190,8 +190,7 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
         } else {
             None
         };
-    let fresh = !(force_resolve
-        || revalidate_release_policy && matches!(mode, FrozenMode::Prefer))
+    let fresh = !(force_resolve || revalidate_release_policy && matches!(mode, FrozenMode::Prefer))
         && matches!(
             parsed,
             Ok((g, k))

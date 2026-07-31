@@ -3649,33 +3649,37 @@ fn data_format_loaders() {
     );
 }
 
+/// Run `entry` from a throwaway project. The data imports under test must load
+/// through the staged native addon in CI rather than the JS parser fallbacks —
+/// yaml/json5/toml are deliberately absent from this crate's test dependencies.
+fn run_data_loader_probe(project: &Path, entry: &str) -> std::process::Output {
+    Command::new(nub_binary())
+        .arg(project.join(entry))
+        .current_dir(project)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("spawn nub")
+}
+
+/// 128 levels of nesting load; 129 are refused by the scanner before the tree is
+/// materialized, and the importing module never runs. The fixture stays
+/// temporary so a hostile-depth document never becomes a checked-in source file
+/// another tool might eagerly parse.
 #[test]
-fn native_data_loaders_bound_yaml_depth_and_keep_jsonc_null_fallback_semantics() {
-    // These imports must load through the staged native addon in CI, not the JS
-    // parser fallbacks: yaml/json5/toml are deliberately absent from this crate's
-    // test dependencies. Keep the fixture temporary so a hostile-depth document
-    // never becomes a checked-in source file another tool might eagerly parse.
+fn native_yaml_loader_bounds_nesting_at_128_levels() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path();
-    let at_limit = (0..128)
-        .map(|depth| format!("{}next:\n", "  ".repeat(depth)))
-        .collect::<String>()
-        + &format!("{}ok\n", "  ".repeat(128));
-    let over_limit = (0..129)
-        .map(|depth| format!("{}next:\n", "  ".repeat(depth)))
-        .collect::<String>()
-        + &format!("{}ok\n", "  ".repeat(129));
-    std::fs::write(project.join("at-limit.yaml"), at_limit).unwrap();
-    std::fs::write(project.join("over-limit.yaml"), over_limit).unwrap();
-    std::fs::write(project.join("null.jsonc"), "null\n").unwrap();
+    let nested = |depth: usize| {
+        (0..depth)
+            .map(|level| format!("{}next:\n", "  ".repeat(level)))
+            .collect::<String>()
+            + &format!("{}ok\n", "  ".repeat(depth))
+    };
+    std::fs::write(project.join("at-limit.yaml"), nested(128)).unwrap();
+    std::fs::write(project.join("over-limit.yaml"), nested(129)).unwrap();
     std::fs::write(
         project.join("at-limit.ts"),
         "import value from './at-limit.yaml';\nconsole.log(value ? 'yaml-at-limit' : 'missing');\n",
-    )
-    .unwrap();
-    std::fs::write(
-        project.join("null.ts"),
-        "import value from './null.jsonc';\nconsole.log(typeof value);\n",
     )
     .unwrap();
     std::fs::write(
@@ -3684,15 +3688,7 @@ fn native_data_loaders_bound_yaml_depth_and_keep_jsonc_null_fallback_semantics()
     )
     .unwrap();
 
-    let run = |entry: &str| {
-        Command::new(nub_binary())
-            .arg(project.join(entry))
-            .current_dir(project)
-            .env("XDG_CACHE_HOME", unique_test_cache())
-            .output()
-            .expect("spawn nub")
-    };
-    let at_limit = run("at-limit.ts");
+    let at_limit = run_data_loader_probe(project, "at-limit.ts");
     assert!(
         at_limit.status.success(),
         "128-level YAML must load: {}",
@@ -3703,15 +3699,7 @@ fn native_data_loaders_bound_yaml_depth_and_keep_jsonc_null_fallback_semantics()
         "yaml-at-limit"
     );
 
-    let null = run("null.ts");
-    assert!(
-        null.status.success(),
-        "JSONC null must import: {}",
-        String::from_utf8_lossy(&null.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&null.stdout).trim(), "undefined");
-
-    let over_limit = run("over-limit.ts");
+    let over_limit = run_data_loader_probe(project, "over-limit.ts");
     assert!(
         !over_limit.status.success(),
         "over-limit YAML must fail normally rather than loading"
@@ -3725,6 +3713,29 @@ fn native_data_loaders_bound_yaml_depth_and_keep_jsonc_null_fallback_semantics()
         !String::from_utf8_lossy(&over_limit.stdout).contains("must-not-run"),
         "the importer must not execute after a YAML-depth error"
     );
+}
+
+/// A JSONC document whose entire body is `null` is a valid module, not a load
+/// error: its default export is JSON null, which the importer sees as
+/// `undefined`. The native parser must keep the JS fallback's answer here.
+#[test]
+fn a_jsonc_null_document_imports_as_undefined() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+    std::fs::write(project.join("null.jsonc"), "null\n").unwrap();
+    std::fs::write(
+        project.join("null.ts"),
+        "import value from './null.jsonc';\nconsole.log(typeof value);\n",
+    )
+    .unwrap();
+
+    let output = run_data_loader_probe(project, "null.ts");
+    assert!(
+        output.status.success(),
+        "a JSONC null document must import: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "undefined");
 }
 
 #[test]
@@ -4178,23 +4189,14 @@ fn wait_for_watch_reload(
     stderr: &Path,
     mut poke: impl FnMut(),
 ) -> String {
-    // The pokes are BOUNDED, and that bound is the whole correctness argument.
-    //
-    // `poke` re-writes the very file Node is watching, so each one RESTARTS the
-    // child. Poking on a fixed interval forever therefore livelocks the moment
-    // the child cannot boot and append within one interval: the next poke kills
-    // it before it writes, and the next, and the next. Measured against this
-    // loop by sweeping child boot cost — 900ms boot returns in 2.14s, 1000ms
-    // never returns and burns the entire budget having written one snapshot,
-    // proving the restarted child never appended once. The cliff sits wherever
-    // boot approaches the interval, and it is identical on this branch and its
-    // merge-base, so this is a defect in the harness rather than in nub.
-    //
-    // That livelock is not budget-solvable, which is what an earlier raise of
-    // this limit (15s -> 60s) got wrong: above the cliff no budget succeeds,
-    // and below it the wait returns in 1-2s. Three pokes are far more than the
-    // watcher-registration race needs (it needs the write re-applied at all),
-    // and after them a slow child is simply given time to finish.
+    // The poke bound is the correctness argument, not a tuning knob. `poke`
+    // re-writes the file Node is watching, so each one RESTARTS the child;
+    // poking forever on a fixed interval livelocks as soon as the child cannot
+    // boot and append within one interval, because the next poke kills it first.
+    // Measured by sweeping boot cost against this loop: a 900ms boot returns in
+    // 2.14s, a 1000ms boot never returns. Raising the budget cannot fix that —
+    // above the cliff no budget succeeds, below it the wait returns in 1-2s. So
+    // bound the pokes instead, and let a slow child simply finish afterwards.
     const MAX_POKES: usize = 3;
     let mut pokes = 0;
     for i in 0..300 {
@@ -7141,14 +7143,9 @@ fn run_points_node_env_at_an_augmenting_shim() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The `node` PATH-shim hijack honors `--node` as an augmentation opt-out.
-/// `node foo.js` (no flag) runs FULLY augmented — `.env` is eager-loaded into the
-/// child. `node --node foo.js` strips the flag and runs the pinned Node VANILLA —
-/// clean `NODE_OPTIONS`/`execArgv`, no `.env`. `--node` after a `--` separator is
-/// a literal program arg, not consumed.
-/// The shim lives in a `nub-node-shim-*` dir so `which_node` skips it (no
-/// recursion back into the shim when nub re-spawns the real Node). Unix-only
-/// (the hijack is reached via an argv0=`node` symlink).
+/// The argv0=`node` route must build the effective-config snapshot exactly once,
+/// anchored to its own cwd, and a project config it never consumes must not gate
+/// it. Unix-only: the hijack is reached via an argv0=`node` symlink.
 #[cfg(unix)]
 #[test]
 fn node_argv0_initializes_one_project_config_snapshot() {
@@ -7191,22 +7188,27 @@ fn node_argv0_initializes_one_project_config_snapshot() {
         .strip_prefix("cwd=")
         .and_then(|rest| rest.strip_suffix(" project=loaded"))
         .unwrap_or_else(|| panic!("unexpected snapshot log line: {}", lines[0]));
-    // Compare resolved directories, not path spellings. Windows hands the child
-    // whatever form the environment carried — an 8.3 short name under a
-    // RUNNER~1 home — while `canonicalize` returns the extended-length `\\?\`
-    // form. Both name the same directory; the contract under test is WHICH
-    // directory the snapshot resolved from.
+    // Compare resolved directories, not path spellings: `std::env::temp_dir()`
+    // hands the child `/var/...` while `canonicalize` returns the `/private/var`
+    // target. Both name the same directory, and WHICH directory the snapshot
+    // resolved from is the contract under test.
     assert_eq!(
-        std::path::Path::new(logged)
-            .canonicalize()
-            .expect("logged cwd exists"),
-        proj.canonicalize().expect("target exists"),
-        "the successful node argv0 route must initialize exactly one snapshot from its final cwd"
+        Path::new(logged).canonicalize().expect("logged cwd exists"),
+        proj.canonicalize().expect("project dir exists"),
+        "the snapshot must be anchored to the argv0 route's own cwd"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The `node` PATH-shim hijack honors `--node` as an augmentation opt-out.
+/// `node foo.js` (no flag) runs FULLY augmented — `.env` is eager-loaded into the
+/// child. `node --node foo.js` strips the flag and runs the pinned Node VANILLA —
+/// clean `NODE_OPTIONS`/`execArgv`, no `.env`. `--node` after a `--` separator is
+/// a literal program arg, not consumed.
+/// The shim lives in a `nub-node-shim-*` dir so `which_node` skips it (no
+/// recursion back into the shim when nub re-spawns the real Node). Unix-only
+/// (the hijack is reached via an argv0=`node` symlink).
 #[cfg(unix)]
 #[test]
 fn node_hijack_node_flag_opts_out_of_augmentation() {
@@ -8376,5 +8378,31 @@ fn yaml_alias_bomb_is_rejected_before_loader_materialization() {
     assert!(
         stderr.contains("alias expansion would materialize more than the 100000-node limit"),
         "the pre-loader materialization budget must reject it: {stderr}"
+    );
+}
+
+/// The positive control for the budget above. The fixture reuses one small
+/// anchored collection 64 times and a scalar anchor 64 more — past the
+/// 50-collection-alias cap the preflight used to carry, but only 448 nodes of
+/// actual materialization — so a budget that counted aliases instead of pricing
+/// them would refuse a document that is entirely ordinary.
+#[test]
+fn yaml_alias_reuse_within_the_budget_still_loads() {
+    let (stdout, stderr, code) = run_nub("yaml-alias-reuse", "main.ts");
+    assert_eq!(code, 0, "flat alias reuse must load; stderr: {stderr}");
+    // Assert the expanded data, not just the exit code: a loader that returned
+    // an empty shell would also exit 0.
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|err| {
+        panic!("stdout is not the probe's JSON ({err})\nstdout: {stdout}\nstderr: {stderr}")
+    });
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "configs": 64,
+            "regions": 64,
+            "last": { "enabled": true, "names": ["one", "two"] },
+            "lastRegion": "us-east-1",
+        }),
+        "every alias must expand to its anchored value; stderr: {stderr}"
     );
 }

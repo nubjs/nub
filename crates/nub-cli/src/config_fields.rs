@@ -179,6 +179,16 @@ impl Field {
     fn segments(&self) -> Vec<&'static str> {
         self.path.split('.').collect()
     }
+
+    /// The top-level section the field lives under — `install` for
+    /// `install.linker`, the field itself for a root key. This is the unit
+    /// `project_config::GLOBAL_ONLY_KEYS` is expressed in.
+    fn section(&self) -> &'static str {
+        self.path
+            .split('.')
+            .next()
+            .expect("a setting path has a first segment")
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -188,18 +198,13 @@ impl Field {
 /// Print the configured value, or `undefined` when the field is unset in the
 /// files `scope` names.
 pub(crate) fn get(field: &Field, scope: Scope, json: bool) -> anyhow::Result<i32> {
-    let value = match resolve_scope(field, scope)? {
-        // The unscoped read answers "what applies here": the project file wins
-        // over the global one, mirroring the precedence a run uses.
-        ScopeTarget::Both(project, global) => match read_at(&project, field)? {
-            Some(v) => Some(v),
-            None => match global {
-                Some(path) => read_at(&path, field)?,
-                None => None,
-            },
-        },
-        ScopeTarget::One(path) => read_at(&path, field)?,
-    };
+    let mut value = None;
+    for path in read_targets(field, scope)? {
+        value = read_at(&path, field)?;
+        if value.is_some() {
+            break;
+        }
+    }
     match (value, json) {
         (Some(v), true) => println!("{v}"),
         (Some(v), false) => println!("{}", render(&v)),
@@ -243,22 +248,24 @@ pub(crate) fn delete(field: &Field, scope: Scope) -> anyhow::Result<i32> {
 // File resolution
 // ─────────────────────────────────────────────────────────────────────────────
 
-enum ScopeTarget {
-    Both(PathBuf, Option<PathBuf>),
-    One(PathBuf),
-}
-
-fn resolve_scope(field: &Field, scope: Scope) -> anyhow::Result<ScopeTarget> {
+/// The files a read consults, in precedence order.
+fn read_targets(field: &Field, scope: Scope) -> anyhow::Result<Vec<PathBuf>> {
     if field.global_only {
         // Reading a global-only field from the project file would always be
         // `undefined`, so every scope resolves to the global file rather than
         // reporting an absence that cannot be anything else.
-        return Ok(ScopeTarget::One(global_file(field)?));
+        return Ok(vec![global_file(field)?]);
     }
     Ok(match scope {
-        Scope::Auto => ScopeTarget::Both(project_file(), global_file(field).ok()),
-        Scope::Project => ScopeTarget::One(project_file()),
-        Scope::Global => ScopeTarget::One(global_file(field)?),
+        // The unscoped read answers "what applies here": the project file wins
+        // over the global one, mirroring the precedence a run uses. A global
+        // file that does not resolve is simply not consulted.
+        Scope::Auto => [project_file()]
+            .into_iter()
+            .chain(global_file(field).ok())
+            .collect(),
+        Scope::Project => vec![project_file()],
+        Scope::Global => vec![global_file(field)?],
     })
 }
 
@@ -270,12 +277,7 @@ fn write_target(field: &Field, scope: Scope) -> anyhow::Result<PathBuf> {
             return Err(anyhow::anyhow!(
                 "{}",
                 ConfigError::GlobalOnlyKey {
-                    key: field
-                        .path
-                        .split('.')
-                        .next()
-                        .expect("a setting path has a first segment")
-                        .to_string(),
+                    key: field.section().to_string(),
                 }
             ));
         }
@@ -326,19 +328,19 @@ fn read_at(path: &Path, field: &Field) -> anyhow::Result<Option<Value>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(anyhow::anyhow!("{}", ConfigError::Io(e).in_file(path))),
     };
-    let value = crate::jsonc::parse_to_value(&text)
-        .map_err(|e| anyhow::anyhow!("{}", ConfigError::Parse(e).in_file(path)))?;
-    let mut cursor = match value {
-        Some(v) => v,
-        None => return Ok(None),
+    let Some(root) = crate::jsonc::parse_to_value(&text)
+        .map_err(|e| anyhow::anyhow!("{}", ConfigError::Parse(e).in_file(path)))?
+    else {
+        return Ok(None);
     };
+    let mut cursor = &root;
     for segment in field.segments() {
         match cursor.get(segment) {
-            Some(next) => cursor = next.clone(),
+            Some(next) => cursor = next,
             None => return Ok(None),
         }
     }
-    Ok(Some(cursor))
+    Ok(Some(cursor.clone()))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -348,16 +350,15 @@ fn read_at(path: &Path, field: &Field) -> anyhow::Result<Option<Value>> {
 /// The one-key document `value` would appear in, so the schema validator sees
 /// the field in its real position.
 fn document(field: &Field, value: Value) -> Map<String, Value> {
+    let segments = field.segments();
+    let (outermost, inner) = segments
+        .split_first()
+        .expect("a setting path has a first segment");
     let mut current = value;
-    for segment in field.segments().into_iter().rev() {
-        let mut level = Map::new();
-        level.insert(segment.to_string(), current);
-        current = Value::Object(level);
+    for segment in inner.iter().rev() {
+        current = Value::Object(Map::from_iter([(segment.to_string(), current)]));
     }
-    match current {
-        Value::Object(obj) => obj,
-        _ => unreachable!("a setting path has at least one segment"),
-    }
+    Map::from_iter([(outermost.to_string(), current)])
 }
 
 /// Turn a shell argument into the JSON value the field's grammar describes.
@@ -370,10 +371,8 @@ fn document(field: &Field, value: Value) -> Map<String, Value> {
 fn coerce(field: &Field, raw: &str) -> Result<Value, ConfigError> {
     let trimmed = raw.trim_start();
     let structured = match field.shape {
-        Shape::StrList => trimmed.starts_with('['),
-        Shape::Loader => trimmed.starts_with('{'),
-        Shape::EnvFile => trimmed.starts_with('['),
-        Shape::Linker => trimmed.starts_with('{'),
+        Shape::StrList | Shape::EnvFile => trimmed.starts_with('['),
+        Shape::Loader | Shape::Linker => trimmed.starts_with('{'),
         Shape::Bool | Shape::Str | Shape::VerifyDeps => false,
     };
     if structured {
@@ -383,26 +382,25 @@ fn coerce(field: &Field, raw: &str) -> Result<Value, ConfigError> {
         });
     }
     Ok(match field.shape {
-        // Coercion is identical for these two; their grammars differ only in
-        // which non-boolean strings the validator then accepts.
-        Shape::Bool | Shape::VerifyDeps => {
+        // Coercion is identical for these three: a boolean spelling becomes a
+        // boolean and anything else stays a string. Their grammars differ only
+        // in which non-boolean strings the validator then accepts.
+        Shape::Bool | Shape::VerifyDeps | Shape::EnvFile => {
             parse_bool(raw).map_or_else(|| Value::String(raw.into()), Value::Bool)
         }
         Shape::Str | Shape::Linker => Value::String(raw.into()),
+        // The two shapes with no scalar spelling of their own: a bare shell
+        // string here is a missing pair of brackets or braces, not a value.
         Shape::StrList => {
             return Err(ConfigError::Value {
                 path: field.path.into(),
-                message: "expected a JSON array (for example, [\"./setup.ts\",\"tsx/esm\"])".into(),
+                message: r#"expected a JSON array (for example, ["./setup.ts","tsx/esm"])"#.into(),
             });
         }
-        Shape::EnvFile => match parse_bool(raw) {
-            Some(b) => Value::Bool(b),
-            None => Value::String(raw.into()),
-        },
         Shape::Loader => {
             return Err(ConfigError::Value {
                 path: field.path.into(),
-                message: "expected a JSON object (for example, {\".graphql\":\"text\"})".into(),
+                message: r#"expected a JSON object (for example, {".graphql":"text"})"#.into(),
             });
         }
     })
@@ -489,10 +487,9 @@ mod tests {
         // The write target must follow the reader's scope rule, not a second
         // hand-maintained opinion about which sections are global.
         for f in FIELDS {
-            let section = f.path.split('.').next().expect("a path has a segment");
             assert_eq!(
                 f.global_only,
-                project_config::GLOBAL_ONLY_KEYS.contains(&section),
+                project_config::GLOBAL_ONLY_KEYS.contains(&f.section()),
                 "{} disagrees with GLOBAL_ONLY_KEYS",
                 f.path
             );

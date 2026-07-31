@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use jsonc_parser::ParseOptions;
 use napi_derive::napi;
 
-/// Pin JSONC acceptance to the pre-0.32 dialect.  New parser versions default
+/// Pin JSONC acceptance to the pre-0.32 dialect. New parser versions default
 /// new extensions on, but tsconfig and data imports must not silently become
 /// more permissive when this dependency moves.
 pub(crate) fn jsonc_parse_options() -> ParseOptions {
@@ -50,8 +50,7 @@ pub fn parse_yaml(source: String) -> napi::Result<serde_json::Value> {
 
     check_yaml_depth(&source)?;
     check_yaml_alias_expansion(&source)?;
-    let docs = YamlLoader::load_from_str(&source)
-        .map_err(|e| napi::Error::from_reason(format!("YAML parse error: {e}")))?;
+    let docs = YamlLoader::load_from_str(&source).map_err(yaml_error)?;
 
     let doc = docs.into_iter().next().unwrap_or(yaml_rust2::Yaml::Null);
     Ok(yaml_to_json(&doc))
@@ -84,6 +83,12 @@ fn check_depth(source: &str, format: &str) -> napi::Result<()> {
         .map_err(|e| napi::Error::from_reason(format!("{format} parse error: {e}")))
 }
 
+/// Every YAML rejection — scanner, preflight, or loader — reaches JS under one
+/// prefix, so a document stopped by a bound reads like any other malformed one.
+fn yaml_error(message: impl std::fmt::Display) -> napi::Error {
+    napi::Error::from_reason(format!("YAML parse error: {message}"))
+}
+
 /// Bound YAML collections before `YamlLoader` constructs a recursive tree.
 ///
 /// YAML's block collections use indentation rather than JSON's `{` / `[` syntax,
@@ -96,10 +101,7 @@ fn check_yaml_depth(source: &str) -> napi::Result<()> {
     let mut scanner = Scanner::new(source.chars());
     let mut depth = 0_usize;
     loop {
-        let Some(token) = scanner
-            .next_token()
-            .map_err(|e| napi::Error::from_reason(format!("YAML parse error: {e}")))?
-        else {
+        let Some(token) = scanner.next_token().map_err(yaml_error)? else {
             return Ok(());
         };
 
@@ -110,8 +112,8 @@ fn check_yaml_depth(source: &str) -> napi::Result<()> {
             | TokenType::FlowMappingStart => {
                 depth += 1;
                 if depth > MAX_NESTING_DEPTH {
-                    return Err(napi::Error::from_reason(format!(
-                        "YAML parse error: nesting is deeper than the {MAX_NESTING_DEPTH}-level limit"
+                    return Err(yaml_error(format!(
+                        "nesting is deeper than the {MAX_NESTING_DEPTH}-level limit"
                     )));
                 }
             }
@@ -123,14 +125,10 @@ fn check_yaml_depth(source: &str) -> napi::Result<()> {
     }
 }
 
-/// yaml-rust2 clones an anchored collection for every alias reference. Limit
-/// its estimated recursive expansion before `YamlLoader` starts allocating
-/// those clones.
-///
-/// Scalar aliases do not amplify a tree. For each collection alias, the scanner
-/// adds the known size of the referenced collection to a 100,000-node budget.
-/// This admits flat reuse while rejecting low-token, high-allocation chains
-/// before yaml-rust2 materializes them.
+/// Node budget for the collections yaml-rust2 will clone. Only collection
+/// aliases are charged against it — a scalar alias cannot amplify a tree — which
+/// admits flat reuse of one anchor across many keys while still catching a
+/// chain of anchors that each double the previous one.
 const MAX_YAML_ALIAS_MATERIALIZATION: usize = 100_000;
 
 #[derive(Clone, Copy)]
@@ -144,13 +142,13 @@ struct YamlCollectionFrame {
     anchor: Option<String>,
 }
 
-fn yaml_alias_error(message: impl Into<String>) -> napi::Error {
-    napi::Error::from_reason(format!("YAML parse error: {}", message.into()))
-}
-
-/// Estimate the nodes yaml-rust2 will clone from collection aliases using only
-/// scanner tokens. This is intentionally iterative and runs before the loader;
-/// parsing errors remain the loader's responsibility.
+/// Bound alias expansion before `YamlLoader` allocates it.
+///
+/// yaml-rust2 clones the referenced collection at every alias, so a document
+/// whose anchors each double the previous one costs allocation exponential in
+/// its own length. Estimating that from scanner tokens keeps the preflight
+/// iterative and ahead of the loader; a malformed document remains the loader's
+/// error to report, not this scan's.
 fn check_yaml_alias_expansion(source: &str) -> napi::Result<()> {
     use yaml_rust2::scanner::{Scanner, TokenType};
 
@@ -176,10 +174,7 @@ fn check_yaml_alias_expansion(source: &str) -> napi::Result<()> {
     let mut materialized_nodes = 0_usize;
 
     loop {
-        let Some(token) = scanner
-            .next_token()
-            .map_err(|e| napi::Error::from_reason(format!("YAML parse error: {e}")))?
-        else {
+        let Some(token) = scanner.next_token().map_err(yaml_error)? else {
             return Ok(());
         };
 
@@ -192,7 +187,6 @@ fn check_yaml_alias_expansion(source: &str) -> napi::Result<()> {
                 pending_anchor = None;
             }
             TokenType::Anchor(name) => pending_anchor = Some(name),
-            TokenType::Tag(..) => {}
             TokenType::BlockSequenceStart
             | TokenType::BlockMappingStart
             | TokenType::FlowSequenceStart
@@ -213,7 +207,7 @@ fn check_yaml_alias_expansion(source: &str) -> napi::Result<()> {
                 if size.collection {
                     materialized_nodes = materialized_nodes.saturating_add(size.nodes);
                     if materialized_nodes > MAX_YAML_ALIAS_MATERIALIZATION {
-                        return Err(yaml_alias_error(format!(
+                        return Err(yaml_error(format!(
                             "alias expansion would materialize more than the {MAX_YAML_ALIAS_MATERIALIZATION}-node limit"
                         )));
                     }
@@ -245,32 +239,31 @@ pub fn parse_json5(source: String) -> napi::Result<serde_json::Value> {
         .map_err(|e| napi::Error::from_reason(format!("JSON5 parse error: {e}")))
 }
 
+fn jsonc_error(message: impl std::fmt::Display) -> napi::Error {
+    napi::Error::from_reason(format!("JSONC parse error: {message}"))
+}
+
 /// Parse JSONC (JSON with comments) source into a JS value.
 #[napi]
 pub fn parse_jsonc(source: String) -> napi::Result<serde_json::Value> {
     check_depth(&source, "JSONC")?;
-    // `Option<T>` maps both an empty document and literal `null` to `None`.
-    // The data loader deliberately turns a parsed null into an undefined default
-    // export, matching its JavaScript fallback, while an absent document remains
-    // a parse error.
+    // Deserializing into `Option<T>` maps both an empty document and a literal
+    // `null` to `None`, and the two must not share a fate: the data loader turns
+    // a parsed null into an undefined default export, matching its JavaScript
+    // fallback, while an absent document stays a parse error. The AST reports
+    // presence, not value, so it separates them.
     let parsed = jsonc_parser::parse_to_serde_value::<Option<serde_json::Value>>(
         &source,
         &jsonc_parse_options(),
     )
-    .map_err(|e| napi::Error::from_reason(format!("JSONC parse error: {e}")))?;
+    .map_err(jsonc_error)?;
     if let Some(value) = parsed {
         return Ok(value);
     }
-    let present = jsonc_parser::parse_to_value(&source, &jsonc_parse_options())
-        .map_err(|e| napi::Error::from_reason(format!("JSONC parse error: {e}")))?
-        .is_some();
-    if present {
-        Ok(serde_json::Value::Null)
-    } else {
-        Err(napi::Error::from_reason(
-            "JSONC: empty document".to_string(),
-        ))
-    }
+    jsonc_parser::parse_to_value(&source, &jsonc_parse_options())
+        .map_err(jsonc_error)?
+        .map(|_| serde_json::Value::Null)
+        .ok_or_else(|| napi::Error::from_reason("JSONC: empty document"))
 }
 
 fn yaml_to_json(yaml: &yaml_rust2::Yaml) -> serde_json::Value {
@@ -308,52 +301,5 @@ fn yaml_to_json(yaml: &yaml_rust2::Yaml) -> serde_json::Value {
         yaml_rust2::Yaml::Null | yaml_rust2::Yaml::BadValue | yaml_rust2::Yaml::Alias(_) => {
             serde_json::Value::Null
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::check_yaml_alias_expansion;
-
-    #[test]
-    fn yaml_alias_preflight_allows_bounded_collection_reuse() {
-        check_yaml_alias_expansion(
-            "defaults: &defaults { enabled: true, names: [one, two] }\n\
-             first: *defaults\n\
-             second: *defaults\n",
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn yaml_alias_preflight_does_not_count_scalar_aliases_as_amplification() {
-        let aliases = std::iter::repeat_n("*label", 64)
-            .collect::<Vec<_>>()
-            .join(", ");
-        check_yaml_alias_expansion(&format!("label: &label value\nitems: [{aliases}]\n")).unwrap();
-    }
-
-    #[test]
-    fn yaml_alias_preflight_allows_flat_collection_reuse() {
-        let entries = (0..64)
-            .map(|index| format!("entry{index}: *defaults"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        check_yaml_alias_expansion(&format!(
-            "defaults: &defaults {{ enabled: true }}\n{entries}\n"
-        ))
-        .unwrap();
-    }
-
-    #[test]
-    fn yaml_alias_preflight_rejects_exponential_collection_expansion() {
-        let source = include_str!("../../../tests/fixtures/yaml-alias-budget/bomb.yaml");
-        let error = check_yaml_alias_expansion(source).unwrap_err();
-        assert!(
-            error
-                .reason
-                .contains("alias expansion would materialize more than the 100000-node limit"),
-            "{error}"
-        );
     }
 }

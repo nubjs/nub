@@ -400,7 +400,7 @@ pub(crate) const RUNTIME_CONFIG_ENV: &str = nub_core::node::spawn::RUNTIME_CONFI
 /// child aborts every run on a field a newer parent added, blaming a config
 /// file the user cannot see. Unknown fields are already tolerated by serde,
 /// which covers the other direction.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub(crate) struct RuntimeConfig {
     pub node_compat: bool,
@@ -413,28 +413,16 @@ pub(crate) struct RuntimeConfig {
     pub tsconfig: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", content = "sources", rename_all = "camelCase")]
 pub(crate) enum RuntimeEnvFile {
+    #[default]
     Default,
     Disabled,
     Sources(Vec<PathBuf>),
 }
 
-impl Default for RuntimeConfig {
-    fn default() -> Self {
-        Self {
-            node_compat: false,
-            preload: Vec::new(),
-            node_options: Vec::new(),
-            v8_flags: Vec::new(),
-            env_file: RuntimeEnvFile::Default,
-            loader: BTreeMap::new(),
-            conditions: Vec::new(),
-            tsconfig: None,
-        }
-    }
-}
+const NODE_MODULES_DIR: &str = "node_modules";
 
 /// Walk up from `start` (inclusive) to the filesystem root, returning the first
 /// directory that holds a `nub.jsonc` — skipping anything inside `node_modules`.
@@ -460,30 +448,33 @@ pub fn discover_project_config(start: &Path) -> Option<PathBuf> {
     None
 }
 
-const NODE_MODULES_DIR: &str = "node_modules";
-
-/// Parse + validate the `nub.jsonc` at `path`.
-/// FAIL-LOUD: an unknown key or malformed value is a [`ConfigError`], NOT a
-/// silent degrade (unlike the best-effort global reader).
-pub fn read_project_config_at(path: &Path) -> Result<LoadedConfig> {
+/// Read `path` and hand its text to `parse`, attributing every failure — I/O
+/// included — to the absolute path, which discovery may have found far above the
+/// cwd.
+fn read_config_at(
+    path: &Path,
+    kind: ConfigSourceKind,
+    parse: fn(&str) -> Result<ProjectConfig>,
+) -> Result<LoadedConfig> {
     // Resolved before the read so an I/O failure is attributable too.
     let source_path = std::path::absolute(path).map_err(ConfigError::Io)?;
     let text =
         crate::jsonc::read_guarded(path).map_err(|e| ConfigError::Io(e).in_file(&source_path))?;
     Ok(LoadedConfig {
-        source: ConfigSource::file(ConfigSourceKind::Project, &source_path),
-        values: parse_project_config(&text).map_err(|e| e.in_file(&source_path))?,
+        source: ConfigSource::file(kind, &source_path),
+        values: parse(&text).map_err(|e| e.in_file(&source_path))?,
     })
 }
 
+/// Parse + validate the `nub.jsonc` at `path`.
+/// FAIL-LOUD: an unknown key or malformed value is a [`ConfigError`], NOT a
+/// silent degrade (unlike the best-effort global reader).
+pub fn read_project_config_at(path: &Path) -> Result<LoadedConfig> {
+    read_config_at(path, ConfigSourceKind::Project, parse_project_config)
+}
+
 pub(crate) fn read_global_config_at(path: &Path) -> Result<LoadedConfig> {
-    let source_path = std::path::absolute(path).map_err(ConfigError::Io)?;
-    let text =
-        crate::jsonc::read_guarded(path).map_err(|e| ConfigError::Io(e).in_file(&source_path))?;
-    Ok(LoadedConfig {
-        source: ConfigSource::file(ConfigSourceKind::Global, &source_path),
-        values: parse_global_config(&text).map_err(|e| e.in_file(&source_path))?,
-    })
+    read_config_at(path, ConfigSourceKind::Global, parse_global_config)
 }
 
 /// Parse + validate from raw JSONC text. Split out so tests can hit the validator
@@ -505,13 +496,8 @@ fn parse_global_config(text: &str) -> Result<ProjectConfig> {
     };
     let mut obj = as_object(&value, "")?.clone();
     let legacy_consent = obj
-        .remove("exec")
-        .and_then(|exec| {
-            exec.get("implicitDlx")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .and_then(|value| ImplicitDlx::parse(&value));
+        .get("exec")
+        .and_then(|exec| ImplicitDlx::parse(exec.get("implicitDlx")?.as_str()?));
     // DELIBERATE, and it reads like an oversight — an unknown ROOT key here is
     // dropped rather than rejected, while the same typo one level down
     // (`install.bogus`) is an error. The global file is BEST-EFFORT by design:
@@ -579,16 +565,14 @@ pub fn initialize_effective_config_without_project(
 }
 
 fn retain_effective_config(config: EffectiveConfig) -> &'static EffectiveConfig {
-    if EFFECTIVE_CONFIG.set(config).is_ok() {
-        record_snapshot_initialization_for_tests(
-            EFFECTIVE_CONFIG
-                .get()
-                .expect("effective config was initialized"),
-        );
-    }
-    EFFECTIVE_CONFIG
+    let won_the_race = EFFECTIVE_CONFIG.set(config).is_ok();
+    let retained = EFFECTIVE_CONFIG
         .get()
-        .expect("effective config was initialized")
+        .expect("effective config was initialized");
+    if won_the_race {
+        record_snapshot_initialization_for_tests(retained);
+    }
+    retained
 }
 
 fn record_snapshot_initialization_for_tests(config: &EffectiveConfig) {
@@ -633,11 +617,14 @@ pub fn effective_dlx_consent() -> ImplicitDlx {
 }
 
 fn dlx_consent_for(config: &EffectiveConfig, legacy: ImplicitDlx) -> ImplicitDlx {
-    let source = config.sources.get(&ConfigKey::DlxConsent);
-    if !source.is_some_and(|source| source.kind != ConfigSourceKind::Defaults) {
-        return legacy;
+    match config.sources.get(&ConfigKey::DlxConsent) {
+        // A built-in default is not a configured value: the legacy reader still
+        // holds the only setting the user actually wrote.
+        Some(source) if source.kind != ConfigSourceKind::Defaults => {
+            config.values.dlx.consent.unwrap_or(legacy)
+        }
+        _ => legacy,
     }
-    config.values.dlx.consent.unwrap_or(legacy)
 }
 
 pub(crate) fn runtime_config() -> Result<RuntimeConfig> {
@@ -700,9 +687,8 @@ impl EffectiveConfig {
         let values = &self.values;
         let preload = values
             .preload
-            .as_deref()
-            .unwrap_or_default()
             .iter()
+            .flatten()
             .map(|value| {
                 if is_path_like(value) {
                     self.resolve_path(ConfigKey::Preload, value)
@@ -721,18 +707,17 @@ impl EffectiveConfig {
                 sources
                     .iter()
                     .map(|source| {
-                        let expanded = expand_runtime_path(source);
-                        self.resolve_path(ConfigKey::EnvFile, &expanded)
+                        self.resolve_path(ConfigKey::EnvFile, &expand_runtime_path(source))
                     })
                     .collect(),
             ),
         };
 
-        let tsconfig = values
-            .tsconfig
-            .as_deref()
-            .map(|path| self.resolve_path(ConfigKey::Tsconfig, path))
-            .map(|path| path.to_string_lossy().into_owned());
+        let tsconfig = values.tsconfig.as_deref().map(|path| {
+            self.resolve_path(ConfigKey::Tsconfig, path)
+                .to_string_lossy()
+                .into_owned()
+        });
 
         // Compat runs no transpiler, so the tsconfig is never consumed — and
         // validating it anyway would abort `--node` / `NODE_COMPAT` on a value
@@ -741,23 +726,17 @@ impl EffectiveConfig {
         // `tsconfig` path disarms the zero-augmentation escape hatch exactly
         // when a broken config is what the user is escaping.
         let node_compat = values.node_compat.unwrap_or(false);
-        if let Some(path) = tsconfig.as_deref().filter(|_| !node_compat) {
-            let text = crate::jsonc::read_guarded(Path::new(path)).map_err(|error| {
-                ConfigError::Value {
-                    path: "tsconfig".into(),
-                    message: format!("cannot read `{path}`: {error}"),
-                }
-            })?;
-            let parsed =
-                crate::jsonc::parse_to_value(&text).map_err(|error| ConfigError::Value {
-                    path: "tsconfig".into(),
-                    message: format!("cannot parse `{path}`: {error}"),
-                })?;
+        if !node_compat && let Some(path) = tsconfig.as_deref() {
+            let invalid = |message: String| ConfigError::Value {
+                path: "tsconfig".into(),
+                message,
+            };
+            let text = crate::jsonc::read_guarded(Path::new(path))
+                .map_err(|error| invalid(format!("cannot read `{path}`: {error}")))?;
+            let parsed = crate::jsonc::parse_to_value(&text)
+                .map_err(|error| invalid(format!("cannot parse `{path}`: {error}")))?;
             if !matches!(parsed, Some(Value::Object(_))) {
-                return Err(ConfigError::Value {
-                    path: "tsconfig".into(),
-                    message: format!("`{path}` must contain a JSON object"),
-                });
+                return Err(invalid(format!("`{path}` must contain a JSON object")));
             }
         }
 
@@ -775,14 +754,17 @@ impl EffectiveConfig {
 }
 
 fn is_path_like(value: &str) -> bool {
-    value.starts_with('.')
-        || value.starts_with('/')
-        || value.starts_with('~')
-        || Path::new(value).is_absolute()
+    // `/` is listed separately because Windows treats a rooted-but-driveless
+    // path as relative, so `is_absolute` alone would miss it there.
+    value.starts_with(['.', '/', '~']) || Path::new(value).is_absolute()
 }
 
+/// Expand `${VAR}` / `$VAR` in one `envFile` source, by routing it through the
+/// engine's map-shaped expander under a sentinel key. Reusing that expander is
+/// what keeps `envFile` sources and `.env` values on one grammar, including the
+/// bounded re-expansion rounds.
 fn expand_runtime_path(value: &str) -> String {
-    let key = "__NUB_CONFIG_ENV_PATH_VALUE__";
+    const SENTINEL: &str = "__NUB_CONFIG_ENV_PATH_VALUE__";
     // `vars()`, not `vars_os()`, PANICS on an environment holding any non-UTF-8
     // key or value — and this runs on the runtime path, once per `envFile`
     // source, for every `nub <file>` in a project that sets one. A single odd
@@ -793,9 +775,9 @@ fn expand_runtime_path(value: &str) -> String {
     let mut values: std::collections::HashMap<String, String> = std::env::vars_os()
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
         .collect();
-    values.insert(key.to_string(), value.to_string());
+    values.insert(SENTINEL.to_string(), value.to_string());
     nub_core::workspace::env::expand_env_map(&mut values);
-    values.remove(key).unwrap_or_default()
+    values.remove(SENTINEL).unwrap_or_default()
 }
 
 fn resolve_effective_config(
@@ -839,106 +821,49 @@ fn resolve_effective_config(
     }
 }
 
-macro_rules! merge_field {
-    ($dst:expr, $sources:expr, $src:expr, $source:expr, $field:ident, $key:expr) => {
-        if let Some(value) = $src.$field.as_ref() {
-            $dst.$field = Some(value.clone());
-            $sources.insert($key, $source.clone());
-        }
-    };
-}
-
+/// Overlay one layer, strongest-last: a field the layer SET (including an
+/// explicit `false` / `[]`) overwrites the accumulator and claims the key's
+/// source; a field it left absent falls through untouched.
 fn merge_layer(
     values: &mut ProjectConfig,
     sources: &mut BTreeMap<ConfigKey, ConfigSource>,
     layer: &ProjectConfig,
     source: &ConfigSource,
 ) {
-    merge_field!(
-        values,
-        sources,
-        layer,
-        source,
-        node_compat,
-        ConfigKey::NodeCompat
-    );
-    merge_field!(values, sources, layer, source, preload, ConfigKey::Preload);
-    merge_field!(
-        values,
-        sources,
-        layer,
-        source,
-        node_options,
-        ConfigKey::NodeOptions
-    );
-    merge_field!(values, sources, layer, source, v8_flags, ConfigKey::V8Flags);
-    merge_field!(values, sources, layer, source, env_file, ConfigKey::EnvFile);
-    merge_field!(values, sources, layer, source, loader, ConfigKey::Loader);
-    merge_field!(
-        values,
-        sources,
-        layer,
-        source,
-        conditions,
-        ConfigKey::Conditions
-    );
-    merge_field!(
-        values,
-        sources,
-        layer,
-        source,
-        tsconfig,
-        ConfigKey::Tsconfig
-    );
-    merge_field!(
-        values,
-        sources,
-        layer,
-        source,
-        verify_deps,
-        ConfigKey::VerifyDeps
-    );
+    // `merge!(install.linker, ConfigKey::InstallLinker)` — the field path is the
+    // same on both sides, so naming it once keeps this a readable table of
+    // field ↔ key rather than fourteen near-identical `if let`s.
+    macro_rules! merge {
+        ($($field:ident).+, $key:expr) => {
+            if let Some(value) = layer.$($field).+.as_ref() {
+                values.$($field).+ = Some(value.clone());
+                sources.insert($key, source.clone());
+            }
+        };
+    }
 
-    merge_field!(
-        values.install,
-        sources,
-        layer.install,
-        source,
-        linker,
-        ConfigKey::InstallLinker
-    );
-    merge_field!(
-        values.install,
-        sources,
-        layer.install,
-        source,
-        public_hoist,
-        ConfigKey::InstallPublicHoist
-    );
-    merge_field!(
-        values.install,
-        sources,
-        layer.install,
-        source,
-        minimum_release_age,
+    merge!(node_compat, ConfigKey::NodeCompat);
+    merge!(preload, ConfigKey::Preload);
+    merge!(node_options, ConfigKey::NodeOptions);
+    merge!(v8_flags, ConfigKey::V8Flags);
+    merge!(env_file, ConfigKey::EnvFile);
+    merge!(loader, ConfigKey::Loader);
+    merge!(conditions, ConfigKey::Conditions);
+    merge!(tsconfig, ConfigKey::Tsconfig);
+    merge!(verify_deps, ConfigKey::VerifyDeps);
+
+    merge!(install.linker, ConfigKey::InstallLinker);
+    merge!(install.public_hoist, ConfigKey::InstallPublicHoist);
+    merge!(
+        install.minimum_release_age,
         ConfigKey::InstallMinimumReleaseAge
     );
-    merge_field!(
-        values.install,
-        sources,
-        layer.install,
-        source,
-        minimum_release_age_exclude,
+    merge!(
+        install.minimum_release_age_exclude,
         ConfigKey::InstallMinimumReleaseAgeExclude
     );
-    merge_field!(
-        values.dlx,
-        sources,
-        layer.dlx,
-        source,
-        consent,
-        ConfigKey::DlxConsent
-    );
+
+    merge!(dlx.consent, ConfigKey::DlxConsent);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -956,13 +881,19 @@ fn child(path: &str, key: &str) -> String {
     }
 }
 
+/// A JSON path as a message names it. The document root has no key of its own,
+/// so it gets a placeholder rather than an empty string.
+fn named_path(path: &str) -> String {
+    if path.is_empty() {
+        "<root>".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
 fn as_object<'a>(v: &'a Value, path: &str) -> Result<&'a serde_json::Map<String, Value>> {
     v.as_object().ok_or_else(|| ConfigError::Type {
-        path: if path.is_empty() {
-            "<root>".into()
-        } else {
-            path.into()
-        },
+        path: named_path(path),
         expected: "an object",
     })
 }
@@ -1017,7 +948,8 @@ fn validate_loader(v: &Value, path: &str) -> Result<BTreeMap<String, String>> {
             return Err(ConfigError::Value {
                 path: child(path, extension),
                 message: format!(
-                    "unsupported loader `{loader}`; expected text|jsonc|json5|toml|yaml|ts|tsx|jsx"
+                    "unsupported loader `{loader}`; expected {}",
+                    LOADERS.join("|")
                 ),
             });
         }
@@ -1026,25 +958,20 @@ fn validate_loader(v: &Value, path: &str) -> Result<BTreeMap<String, String>> {
 }
 
 /// Reject any key of `obj` not in `allowed` (fail-loud). The blessed `$schema`
-/// key is tolerated at the root only (the caller adds it to `allowed` there).
+/// key is tolerated at the root only — [`ROOT_KEYS`] carries it, the nested key
+/// sets do not.
 fn reject_unknown_keys(
     obj: &serde_json::Map<String, Value>,
     path: &str,
     allowed: &[&str],
 ) -> Result<()> {
-    for key in obj.keys() {
-        if !allowed.contains(&key.as_str()) {
-            return Err(ConfigError::UnknownKey {
-                path: if path.is_empty() {
-                    "<root>".into()
-                } else {
-                    path.into()
-                },
-                key: key.clone(),
-            });
-        }
+    match obj.keys().find(|key| !allowed.contains(&key.as_str())) {
+        Some(key) => Err(ConfigError::UnknownKey {
+            path: named_path(path),
+            key: key.clone(),
+        }),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Which file is being parsed. The two differ in exactly one way: `dlx` governs
@@ -1081,14 +1008,12 @@ pub(crate) fn validate_document(
     obj: &serde_json::Map<String, Value>,
     global: bool,
 ) -> Result<ProjectConfig> {
-    validate_root(
-        obj,
-        if global {
-            ConfigScope::Global
-        } else {
-            ConfigScope::Project
-        },
-    )
+    let scope = if global {
+        ConfigScope::Global
+    } else {
+        ConfigScope::Project
+    };
+    validate_root(obj, scope)
 }
 
 fn validate_root(
@@ -1201,12 +1126,10 @@ const LINKER_STRATEGY_KEYS: &[(&str, &[&str])] = &[
 fn validate_linker(v: &Value, path: &str) -> Result<LinkerConfig> {
     // String shorthand: the strategies that admit no knob are the common case,
     // and `"linker": "hoisted"` should not have to be spelled as an object.
-    let obj = match v {
-        Value::String(_) => {
-            return linker_without_options(as_str(v, path)?, path, path);
-        }
-        _ => as_object(v, path)?,
-    };
+    if let Value::String(strategy) = v {
+        return linker_without_options(strategy, path, path);
+    }
+    let obj = as_object(v, path)?;
 
     let strategy_path = child(path, "strategy");
     let Some(strategy) = obj.get("strategy") else {
@@ -1217,18 +1140,15 @@ fn validate_linker(v: &Value, path: &str) -> Result<LinkerConfig> {
                 .into(),
         });
     };
-    let strategy = as_str(strategy, &strategy_path)?.to_string();
+    let strategy = as_str(strategy, &strategy_path)?;
 
     let Some((_, allowed)) = LINKER_STRATEGY_KEYS
         .iter()
         .find(|(name, _)| *name == strategy)
     else {
-        return Err(unknown_strategy(&strategy, &strategy_path, path));
+        return Err(unknown_strategy(strategy, &strategy_path, path));
     };
-    for key in obj.keys() {
-        if allowed.contains(&key.as_str()) {
-            continue;
-        }
+    if let Some(key) = obj.keys().find(|key| !allowed.contains(&key.as_str())) {
         let owner = LINKER_STRATEGY_KEYS
             .iter()
             .find(|(_, keys)| keys.contains(&key.as_str()));
@@ -1239,47 +1159,51 @@ fn validate_linker(v: &Value, path: &str) -> Result<LinkerConfig> {
                     "not valid with `strategy: \"{strategy}\"` — it configures the \
                      \"{owner}\" layout. Either switch to `strategy: \"{owner}\"` or drop this key."
                 ),
-                None => format!("unknown key (`strategy: \"{strategy}\"` accepts {})", {
-                    let mut names = allowed.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>();
+                None => {
+                    let mut names: Vec<_> = allowed.iter().map(|k| format!("`{k}`")).collect();
                     names.sort();
-                    names.join(", ")
-                }),
+                    format!(
+                        "unknown key (`strategy: \"{strategy}\"` accepts {})",
+                        names.join(", ")
+                    )
+                }
             },
         });
     }
 
-    Ok(match strategy.as_str() {
-        "global-virtual-store" => LinkerConfig::Global {
-            eject: match obj.get("eject") {
-                Some(v) => Some(as_string_array(v, &child(path, "eject"))?),
-                None => None,
-            },
-        },
-        "isolated" => LinkerConfig::Isolated {
-            hoist: match obj.get("hoist") {
-                Some(v) => {
-                    let p = child(path, "hoist");
-                    Some(match v {
-                        Value::Bool(b) => Hoist::Bool(*b),
-                        Value::Array(_) => Hoist::Patterns(as_string_array(v, &p)?),
-                        _ => {
-                            return Err(ConfigError::Type {
-                                path: p,
-                                expected: "a boolean or array of strings",
-                            });
-                        }
-                    })
-                }
-                None => None,
-            },
-        },
-        "hoisted" => LinkerConfig::Hoisted,
-        "pnp" => LinkerConfig::Pnp,
-        _ => unreachable!("strategy validated against LINKER_STRATEGY_KEYS above"),
-    })
+    match strategy {
+        "global-virtual-store" => Ok(LinkerConfig::Global {
+            eject: obj
+                .get("eject")
+                .map(|eject| as_string_array(eject, &child(path, "eject")))
+                .transpose()?,
+        }),
+        "isolated" => Ok(LinkerConfig::Isolated {
+            hoist: obj
+                .get("hoist")
+                .map(|hoist| validate_hoist(hoist, &child(path, "hoist")))
+                .transpose()?,
+        }),
+        // `hoisted` and `pnp`, already checked against LINKER_STRATEGY_KEYS —
+        // an object carrying nothing but `strategy` means what the shorthand means.
+        knobless => linker_without_options(knobless, &strategy_path, path),
+    }
 }
 
-/// The string shorthand — every strategy with its knob left unset.
+/// `linker.hoist` — pnpm-literal `boolean | string[]`.
+fn validate_hoist(v: &Value, path: &str) -> Result<Hoist> {
+    match v {
+        Value::Bool(b) => Ok(Hoist::Bool(*b)),
+        Value::Array(_) => Ok(Hoist::Patterns(as_string_array(v, path)?)),
+        _ => Err(ConfigError::Type {
+            path: path.into(),
+            expected: "a boolean or array of strings",
+        }),
+    }
+}
+
+/// Every strategy with its knob left unset — the string shorthand, and the two
+/// strategies for which that is the only reachable shape.
 fn linker_without_options(strategy: &str, value_path: &str, at: &str) -> Result<LinkerConfig> {
     match strategy {
         "global-virtual-store" => Ok(LinkerConfig::Global { eject: None }),
@@ -1312,20 +1236,15 @@ fn validate_install(v: &Value, path: &str) -> Result<InstallConfig> {
         install.linker = Some(validate_linker(v, &child(path, "linker"))?);
     }
     if let Some(v) = obj.get("publicHoist") {
-        let p = child(path, "publicHoist");
-        install.public_hoist = Some(as_string_array(v, &p)?);
+        install.public_hoist = Some(as_string_array(v, &child(path, "publicHoist"))?);
     }
     if let Some(v) = obj.get("minimumReleaseAge") {
-        install.minimum_release_age = Some(parse_duration(
-            as_str(v, &child(path, "minimumReleaseAge"))?,
-            &child(path, "minimumReleaseAge"),
-        )?);
+        let p = child(path, "minimumReleaseAge");
+        install.minimum_release_age = Some(parse_duration(as_str(v, &p)?, &p)?);
     }
     if let Some(v) = obj.get("minimumReleaseAgeExclude") {
-        install.minimum_release_age_exclude = Some(as_string_array(
-            v,
-            &child(path, "minimumReleaseAgeExclude"),
-        )?);
+        let p = child(path, "minimumReleaseAgeExclude");
+        install.minimum_release_age_exclude = Some(as_string_array(v, &p)?);
     }
     Ok(install)
 }
@@ -1382,9 +1301,9 @@ fn parse_duration(s: &str, path: &str) -> Result<Duration> {
     if !digits.bytes().all(|b| b.is_ascii_digit()) {
         return Err(invalid("the amount must be a non-negative integer"));
     }
-    let amount: u64 = digits
-        .parse()
-        .map_err(|_| invalid("the amount must be a non-negative integer"))?;
+    // Every non-digit form is already rejected above, so the only way either of
+    // these two steps can still fail is a value too large for the seconds count.
+    let amount: u64 = digits.parse().map_err(|_| invalid("overflows"))?;
     per_unit
         .checked_mul(amount)
         .map(Duration::from_secs)

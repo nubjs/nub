@@ -25,12 +25,9 @@ use anyhow::Result;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> Result<()> {
-    // A `node` PATH-shim re-entry continues its parent's logical invocation and
-    // must keep the inherited runtime snapshot + augmentation. An explicitly
-    // nested `nub`/`nubx`/PM shim is a fresh user invocation: restore the ambient
-    // environment captured by the parent before config discovery or logging can
-    // observe it. Hidden internal re-entries belong to their parent and are
-    // deliberately exempt.
+    // First: a fresh invocation's ambient environment must be restored before
+    // config discovery or logging can observe it, and the restore mutates the
+    // process environment, which is only sound while nub is single-threaded.
     cli::normalize_invocation_environment();
 
     // Embedder identity before any subsystem initialization. Every

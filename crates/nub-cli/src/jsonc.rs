@@ -1,21 +1,12 @@
 //! The guarded JSONC reader every externally-authored file goes through.
 //!
-//! `jsonc_parser` descends recursively, as does the `Drop` of the
-//! `serde_json::Value` it produces, so a deeply-nested document exhausts the
-//! stack. That is not a catchable failure — it aborts the process
-//! (`STATUS_STACK_OVERFLOW` on Windows, `SIGSEGV` elsewhere), and it happens
-//! before any validation can reject the file. Windows is where it bites first:
-//! its default thread stack is ~1 MiB against ~8 MiB on Linux and macOS.
-//!
-//! Depth is therefore capped on the RAW TEXT, before the parser is handed it —
-//! the only point at which the recursion can still be bounded, since the parser
-//! exposes no depth option. `jsonc_parser` 0.32.4 does stop at 512 levels of its
-//! own accord, but that is an upstream detail a version bump can remove, and it
-//! sits above what a 1 MiB stack survives, so nub does not rely on it.
-//!
-//! [`read_guarded`] is the other half of the same job: these files arrive by a
-//! path the user chose, so obtaining the bytes is itself unbounded work unless
-//! the read is bounded too.
+//! Two bounds, each applied before the unbounded work it stands in front of.
+//! Nesting depth is capped on the RAW TEXT by [`nub_json_guard`], whose module
+//! doc carries the measured stack-overflow rationale: the parser exposes no
+//! depth option, so the text is the last point at which its recursion can still
+//! be stopped. [`read_guarded`] is the other half — these files arrive by a path
+//! the user chose, so obtaining the bytes is itself unbounded work unless the
+//! read is bounded too.
 
 use std::io::Read;
 use std::path::Path;
@@ -113,10 +104,9 @@ pub(crate) fn read_guarded(path: &Path) -> std::io::Result<String> {
     // it. Stripping it here covers every reader and the CST writer alike, so a
     // BOM'd file round-trips instead of being rejected wholesale. Only a LEADING
     // one is a marker; anywhere else U+FEFF is data and must survive verbatim.
-    let bytes = bytes
-        .strip_prefix(UTF8_BOM)
-        .map_or(bytes.as_slice(), |rest| rest)
-        .to_vec();
+    if bytes.starts_with(UTF8_BOM) {
+        bytes.drain(..UTF8_BOM.len());
+    }
     String::from_utf8(bytes)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.utf8_error()))
 }
@@ -154,19 +144,17 @@ pub(crate) fn check_nesting_depth(text: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn depth_ok(text: &str) -> bool {
-        check_nesting_depth(text).is_ok()
-    }
-
     fn nest(depth: usize) -> String {
         format!("{}1{}", "[".repeat(depth), "]".repeat(depth))
     }
 
+    /// What the scan itself counts as nesting is pinned in `nub-json-guard`;
+    /// this is the boundary as `parse_to_value` applies it.
     #[test]
     fn rejects_nesting_past_the_limit_before_the_parser_recurses() {
         // The depth that aborted the Windows test binary must now be a clean Err,
         // and the limit itself must still parse.
-        assert!(depth_ok(&nest(MAX_NESTING_DEPTH)));
+        assert!(check_nesting_depth(&nest(MAX_NESTING_DEPTH)).is_ok());
         assert!(parse_to_value(&nest(MAX_NESTING_DEPTH)).is_ok());
 
         let over = parse_to_value(&nest(MAX_NESTING_DEPTH + 1)).unwrap_err();
@@ -175,6 +163,10 @@ mod tests {
             parse_to_value(&nest(2000)).is_err(),
             "the CI-crashing input"
         );
+
+        // Breadth is not depth: siblings nest independently, so an arbitrarily
+        // wide document is still within the bound and still parses.
+        assert!(parse_to_value(&format!("[{}]", "[1],".repeat(500))).is_ok());
     }
 
     /// `Ok(None)` means "the document held no value", never "the value was
@@ -192,21 +184,6 @@ mod tests {
             parse_to_value(r#"{ "a": null }"#).unwrap(),
             Some(serde_json::json!({ "a": null }))
         );
-    }
-
-    #[test]
-    fn depth_counts_only_real_delimiters() {
-        // Brackets inside strings, escapes, and both comment forms are not nesting.
-        assert!(depth_ok(&format!(r#"{{ "a": "{}" }}"#, "[".repeat(500))));
-        assert!(depth_ok(&format!(r#"{{ "a": '{}' }}"#, "{".repeat(500))));
-        assert!(depth_ok(r#"{ "a": "he said \"[[[\"" }"#));
-        assert!(depth_ok(&format!("// {}\n{{}}", "[".repeat(500))));
-        assert!(depth_ok(&format!("/* {} */ {{}}", "[".repeat(500))));
-
-        // Sibling blocks nest independently — depth is a maximum, not a total.
-        let siblings = format!("[{}]", "[1],".repeat(500));
-        assert!(depth_ok(&siblings));
-        assert!(parse_to_value(&siblings).is_ok());
     }
 
     /// The guard is only worth as much as its coverage: a single direct call to a
@@ -274,25 +251,21 @@ mod tests {
         // the preceding twelve lines. The local window catches a new unguarded
         // call or a reordered/removed guard without attempting to parse Rust
         // braces inside strings and comments.
-        let offenders: Vec<_> = files
-            .iter()
-            .flat_map(|path| {
-                let text = std::fs::read_to_string(path).expect("readable source file");
-                GUARDED_PARSERS
-                    .iter()
-                    .flat_map(|&(parser, guards)| {
-                        let source = text.as_str();
-                        source
-                            .match_indices(parser)
-                            .filter_map(move |(call_at, _)| {
-                                let preflight = preceding_lines(source, call_at, 12);
-                                (!guards.iter().any(|guard| preflight.contains(guard)))
-                                    .then_some((path, parser, guards))
-                            })
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
+        let mut offenders = Vec::new();
+        for path in &files {
+            let source = std::fs::read_to_string(path).expect("readable source file");
+            for (parser, guards) in GUARDED_PARSERS {
+                for (call_at, _) in source.match_indices(parser) {
+                    let preflight = preceding_lines(&source, call_at, 12);
+                    if !guards.iter().any(|guard| preflight.contains(guard)) {
+                        offenders.push(format!(
+                            "{}: `{parser}` with none of {guards:?} above it",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+        }
 
         assert!(
             offenders.is_empty(),
@@ -317,11 +290,12 @@ mod tests {
         assert!(over.to_string().contains("1 MiB limit"), "{over}");
     }
 
+    /// A file truncated mid-string or mid-comment leaves the depth scanner in a
+    /// non-Code state at EOF, which `nub-json-guard` pins as ending the scan
+    /// rather than failing it. Here that shows up as the parser — not the guard
+    /// — deciding the outcome.
     #[test]
     fn truncated_input_passes_through_to_the_parser_verdict() {
-        // A file truncated mid-string or mid-comment leaves the scanner in a
-        // non-Code state at EOF. That must simply end the scan, so the parser --
-        // not the depth guard -- decides the outcome.
         assert!(parse_to_value("{ \"a\": \"unterminated").is_err());
         assert!(parse_to_value("/* unterminated").is_err());
         assert!(parse_to_value("// unterminated").is_ok_and(|v| v.is_none()));

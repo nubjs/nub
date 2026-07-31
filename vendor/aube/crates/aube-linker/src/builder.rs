@@ -66,8 +66,8 @@ impl Linker {
     /// Force a set of packages to materialize as real project-local directories
     /// even under the global virtual store (see the field docs on [`Linker`]).
     /// Entries are matched as package-name patterns against each graph package.
-    /// Standalone aube and
-    /// every test omit this → the set is empty and the GVS pass is unchanged.
+    /// Standalone aube and every test omit this → the set is empty and the GVS
+    /// pass is unchanged.
     pub fn with_disk_materialize(mut self, names: &[String]) -> Self {
         self.disk_materialize = crate::PackageNameMatcher::new(names);
         self

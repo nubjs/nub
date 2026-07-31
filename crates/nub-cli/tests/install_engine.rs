@@ -96,16 +96,11 @@ fn install_dir_initializes_one_project_snapshot_from_final_cwd() {
     .unwrap();
     std::fs::write(target.join("nub.jsonc"), r#"{ "conditions": [] }"#).unwrap();
 
-    for (idx, args) in [
-        vec!["install", "--dir", "target", "--lockfile-only", "--offline"],
-        vec!["install", "-C", "target", "--lockfile-only", "--offline"],
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let log = outer.join(format!("snapshot-{idx}.log"));
+    // `--dir` and its `-C` alias are the same verb-local chdir.
+    for flag in ["--dir", "-C"] {
+        let log = outer.join(format!("snapshot-{}.log", flag.trim_start_matches('-')));
         let output = Command::new(nub_binary())
-            .args(args)
+            .args(["install", flag, "target", "--lockfile-only", "--offline"])
             .current_dir(&outer)
             .env("XDG_DATA_HOME", pm_tmpdir("dir-snapshot-data"))
             .env("XDG_CACHE_HOME", pm_tmpdir("dir-snapshot-cache"))
@@ -115,7 +110,7 @@ fn install_dir_initializes_one_project_snapshot_from_final_cwd() {
         assert_eq!(
             output.status.code(),
             Some(0),
-            "install should succeed; stderr: {}",
+            "install {flag} should succeed; stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         let lines: Vec<_> = std::fs::read_to_string(&log)
@@ -123,7 +118,11 @@ fn install_dir_initializes_one_project_snapshot_from_final_cwd() {
             .lines()
             .map(str::to_owned)
             .collect();
-        assert_eq!(lines.len(), 1, "exactly one snapshot init: {lines:?}");
+        assert_eq!(
+            lines.len(),
+            1,
+            "install {flag}: one snapshot init: {lines:?}"
+        );
         let logged = lines[0]
             .strip_prefix("cwd=")
             .and_then(|rest| rest.strip_suffix(" project=loaded"))
@@ -136,7 +135,7 @@ fn install_dir_initializes_one_project_snapshot_from_final_cwd() {
         assert_eq!(
             Path::new(logged).canonicalize().expect("logged cwd exists"),
             target.canonicalize().expect("target exists"),
-            "snapshot must resolve from the verb-local cwd"
+            "install {flag}: snapshot must resolve from the verb-local cwd"
         );
     }
 }

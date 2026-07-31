@@ -1925,10 +1925,8 @@ impl Linker {
             }
             crate::validate_package_link_name(name)?;
             let link_path = root_nm.join(name);
-            if let Some(parent) = link_path.parent() {
-                mkdirp(parent)?;
-            }
             let link_parent = link_path.parent().unwrap_or(root_nm);
+            mkdirp(link_parent)?;
             let target =
                 pathdiff::diff_paths(ws_dir, link_parent).unwrap_or_else(|| ws_dir.clone());
             if reconcile_top_level_link(&link_path, &target)? {

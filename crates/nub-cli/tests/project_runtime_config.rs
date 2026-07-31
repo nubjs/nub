@@ -1,33 +1,91 @@
 //! End-to-end coverage for project `nub.jsonc` runtime consumers.
 //!
-//! Runs on Windows too, deliberately. This file was `#![cfg(unix)]` when it
-//! landed, which meant the Windows leg verified NONE of the project runtime
-//! plumbing — and Windows is exactly where it diverges: `NODE_OPTIONS` is a
-//! single tokenized string whose quoting rules differ, and every path in the
-//! snapshot is anchored differently. A `nodeOptions` quoting bug that survived
-//! four separate producers on this branch is the shape of defect that gap hides.
-//!
-//! Two constructs genuinely need unix and are guarded per-test rather than
-//! per-file: a `#!/usr/bin/env node` shim in `node_modules/.bin` (Windows uses
-//! `.cmd` shims, a different resolution path with its own coverage), and the
-//! mode bit that makes it executable. Everything else — the config parse, the
-//! snapshot, `nodeOptions`/`v8Flags`/`envFile`/`loader`/`conditions`/`tsconfig`
-//! — is platform-independent by construction and now runs on both.
+//! Deliberately NOT `#![cfg(unix)]`. Windows is exactly where this plumbing
+//! diverges — `NODE_OPTIONS` is a single tokenized string with its own quoting
+//! rules, and every path in the snapshot is anchored differently — so gating the
+//! whole file would leave that leg verifying none of it. Only the two constructs
+//! that genuinely need unix are gated per-test: a `#!/usr/bin/env node` shim in
+//! `node_modules/.bin` (Windows resolves local bins through `.cmd` shims, a
+//! different path with its own coverage) and the mode bit that makes it
+//! executable.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn nub_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop();
-    path.pop();
-    path.push(format!("nub{}", std::env::consts::EXE_SUFFIX));
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_nub"))
+}
+
+/// The `nub-node-shim-*` PATH entries this test process already carries. A
+/// nested launch must end up with exactly these plus its own: the outer run's
+/// shim is replaced, never accumulated on top.
+fn ambient_shim_entries() -> Vec<String> {
+    let Some(path) = std::env::var_os("PATH") else {
+        return Vec::new();
+    };
+    std::env::split_paths(&path)
+        .map(|entry| entry.to_string_lossy().into_owned())
+        .filter(|entry| entry.contains("nub-node-shim-"))
+        .collect()
+}
+
+/// Run `command` to completion, require success, and parse the probe's JSON
+/// object. The line is located rather than assumed to be the whole stream: the
+/// dlx routes fetch a package first and print progress ahead of it.
+fn probe_json(label: &str, mut command: Command) -> serde_json::Value {
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{label} exited {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with('{'))
+        .unwrap_or_else(|| panic!("{label}: no JSON line in output: {stdout}"));
+    serde_json::from_str(line).unwrap_or_else(|err| panic!("{label}: {err} in {line}"))
+}
+
+/// The observations every route shares: the config's `envFile`, its `loader`
+/// map, its `tsconfig` paths and JSX factory, and its `conditions` all reached
+/// the child.
+fn assert_config_applied(label: &str, value: &serde_json::Value) {
+    assert_eq!(value["env"], "from-config", "{label}: {value}");
+    assert_eq!(value["text"], "loaded-text", "{label}: {value}");
+    assert_eq!(value["alias"], "aliased", "{label}: {value}");
+    assert_eq!(value["condition"], "condition", "{label}: {value}");
+    assert_eq!(value["jsxMode"], "classic", "{label}: {value}");
+}
+
+/// Spawn a `nub watch` run — which never exits on its own — and return the first
+/// line its watched child prints. The reader thread drains the rest so the child
+/// never blocks on a full pipe, and the child is killed before the line is
+/// unwrapped so a timeout cannot strand a watcher.
+fn watch_first_line(mut command: Command) -> String {
+    use std::io::BufRead;
+
+    let mut child = command.stdout(Stdio::piped()).spawn().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut lines = std::io::BufReader::new(stdout).lines();
+        let _ = tx.send(lines.next().transpose());
+        for _ in lines {}
+    });
+    let first = rx.recv_timeout(Duration::from_secs(15));
+    let _ = child.kill();
+    let _ = child.wait();
+    first
+        .expect("watch child produced no output within the budget")
+        .expect("reading the watch child's first line")
+        .expect("watch child closed stdout without printing")
 }
 
 struct Fixture {
-    _temp: tempfile::TempDir,
+    temp: tempfile::TempDir,
     project: PathBuf,
     xdg_config: PathBuf,
     cache: PathBuf,
@@ -40,14 +98,11 @@ impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");
-        let xdg_config = temp.path().join("config");
-        let config_root = project.clone();
-        let cache = temp.path().join("cache");
         let node = temp
             .path()
             .join(format!("node{}", std::env::consts::EXE_SUFFIX));
         // Nub dispatches on argv0, so this alias reaches its `node` shim; the
-        // same alias mechanism supplies the unix-only `nubx` route below.
+        // same mechanism supplies the unix-only `nubx` route below.
         #[cfg(unix)]
         std::os::unix::fs::symlink(nub_binary(), &node).unwrap();
         #[cfg(windows)]
@@ -62,10 +117,9 @@ impl Fixture {
         };
         std::fs::create_dir_all(project.join("node_modules/.bin")).unwrap();
         std::fs::create_dir_all(project.join("node_modules/conditional-pkg")).unwrap();
-        std::fs::create_dir_all(&config_root).unwrap();
 
         std::fs::write(
-            config_root.join("nub.jsonc"),
+            project.join("nub.jsonc"),
             r#"{
               "preload": ["./preload.mjs"],
               "nodeOptions": ["--stack-trace-limit=23"],
@@ -78,18 +132,18 @@ impl Fixture {
         )
         .unwrap();
         std::fs::write(
-            config_root.join("preload.mjs"),
+            project.join("preload.mjs"),
             "globalThis.__runtimePreload = 'preloaded';\n",
         )
         .unwrap();
-        std::fs::write(config_root.join("runtime.env"), "RUNTIME_ENV=from-config\n").unwrap();
+        std::fs::write(project.join("runtime.env"), "RUNTIME_ENV=from-config\n").unwrap();
         std::fs::write(
-            config_root.join("alias.ts"),
+            project.join("alias.ts"),
             "export const alias = 'aliased';\n",
         )
         .unwrap();
         std::fs::write(
-            config_root.join("tsconfig.runtime.jsonc"),
+            project.join("tsconfig.runtime.jsonc"),
             r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "runtime-alias": ["./alias.ts"] }, "jsx": "react", "jsxFactory": "make" } }"#,
         )
         .unwrap();
@@ -155,10 +209,10 @@ console.log(JSON.stringify({
         }
 
         Self {
-            _temp: temp,
+            xdg_config: temp.path().join("config"),
+            cache: temp.path().join("cache"),
+            temp,
             project,
-            xdg_config,
-            cache,
             node,
             #[cfg(unix)]
             nubx,
@@ -178,23 +232,18 @@ console.log(JSON.stringify({
         command
     }
 
+    /// Every entrypoint that runs `main.ts` applies the whole config and routes
+    /// the two runtime-option channels the same way.
     fn assert_probe(&self, args: &[&str]) {
-        let output = self.command().args(args).output().unwrap();
-        assert!(
-            output.status.success(),
-            "route {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let value: serde_json::Value =
-            serde_json::from_slice(output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout))
-                .unwrap();
-        assert_eq!(value["env"], "from-config");
-        assert_eq!(value["preload"], "preloaded");
-        assert_eq!(value["text"], "loaded-text");
-        assert_eq!(value["alias"], "aliased");
-        assert_eq!(value["condition"], "condition");
-        assert_eq!(value["jsxMode"], "classic");
-        assert_eq!(value["stack"], 23);
+        let label = format!("nub {}", args.join(" "));
+        let mut command = self.command();
+        command.args(args);
+        let value = probe_json(&label, command);
+
+        assert_config_applied(&label, &value);
+        assert_eq!(value["preload"], "preloaded", "{label}: {value}");
+        assert_eq!(value["stack"], 23, "{label}: {value}");
+
         // The two runtime option fields ride DIFFERENT channels, and the split is
         // the whole point: Node refuses most V8-only flags in `NODE_OPTIONS`
         // ("is not allowed in NODE_OPTIONS", exit 9) but accepts them on argv, so
@@ -202,17 +251,18 @@ console.log(JSON.stringify({
         let exec_argv = value["execArgv"].to_string();
         assert!(
             exec_argv.contains("--max-old-space-size=256"),
-            "v8Flags must reach the child on argv: {exec_argv}"
+            "{label}: v8Flags must reach the child on argv: {exec_argv}"
         );
         let options = value["nodeOptions"].as_str().unwrap_or_default();
         assert!(
             !options.contains("--max-old-space-size=256"),
-            "v8Flags must not be routed through NODE_OPTIONS: {options}"
+            "{label}: v8Flags must not be routed through NODE_OPTIONS: {options}"
         );
         assert!(
             options.contains("--stack-trace-limit=23"),
-            "nodeOptions must still travel through NODE_OPTIONS: {options}"
+            "{label}: nodeOptions must still travel through NODE_OPTIONS: {options}"
         );
+
         let snapshot: serde_json::Value = serde_json::from_str(
             value["runtimeSnapshot"]
                 .as_str()
@@ -222,171 +272,9 @@ console.log(JSON.stringify({
         for key in ["install", "dlx"] {
             assert!(
                 snapshot.get(key).is_none(),
-                "runtime transport must exclude {key}: {snapshot}"
+                "{label}: runtime transport must exclude {key}: {snapshot}"
             );
         }
-    }
-
-    #[cfg(unix)]
-    fn assert_nubx_probe(&self) {
-        let output = self.command_for(&self.nubx).arg("probe").output().unwrap();
-        assert!(
-            output.status.success(),
-            "nubx route: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let value: serde_json::Value =
-            serde_json::from_slice(output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout))
-                .unwrap();
-        assert_eq!(value["env"], "from-config");
-        assert_eq!(value["text"], "loaded-text");
-        assert_eq!(value["alias"], "aliased");
-        assert_eq!(value["condition"], "condition");
-        assert_eq!(value["jsxMode"], "classic");
-    }
-
-    /// A `file:` package OUTSIDE the project — forces the nubx registry-
-    /// fallback fetch path (not the `node_modules/.bin` local-bin path
-    /// `assert_nubx_probe` covers), with no network involved. Its bin has a
-    /// `#!/usr/bin/env node` shebang, which is what re-enters nub's `node`
-    /// PATH shim and is the ONLY place augmentation reaches a fetched tool.
-    #[cfg(unix)]
-    fn assert_nubx_dlx_fallback_node_flag(&self) {
-        let pkg_dir = self._temp.path().join("dlx-fallback-pkg");
-        std::fs::create_dir_all(&pkg_dir).unwrap();
-        std::fs::write(
-            pkg_dir.join("package.json"),
-            r#"{ "name": "rtc-dlx-probe", "version": "1.0.0", "bin": { "rtc-dlx-probe": "./bin.js" } }"#,
-        )
-        .unwrap();
-        std::fs::write(
-            pkg_dir.join("bin.js"),
-            "#!/usr/bin/env node\nconsole.log(JSON.stringify({ stack: Error.stackTraceLimit, snapshot: process.env.__NUB_RUNTIME_CONFIG || null }));\n",
-        )
-        .unwrap();
-
-        let package_spec = format!("file:{}", pkg_dir.to_string_lossy().replace('\\', "/"));
-        let run = |extra: &[&str]| {
-            // Three-position rule: a flag BEFORE the bin positional is nubx's
-            // own; after it, the flag would forward to the bin verbatim.
-            let mut args: Vec<&str> = extra.to_vec();
-            args.extend(["-y", "-p", package_spec.as_str(), "rtc-dlx-probe"]);
-            let output = self.command_for(&self.nubx).args(args).output().unwrap();
-            assert!(
-                output.status.success(),
-                "nubx dlx-fallback route {extra:?}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let line = stdout
-                .lines()
-                .find(|l| l.starts_with('{'))
-                .unwrap_or_else(|| panic!("no JSON line in: {stdout}"));
-            serde_json::from_str::<serde_json::Value>(line).unwrap()
-        };
-
-        let augmented = run(&[]);
-        assert_eq!(
-            augmented["stack"], 23,
-            "fetched bin should be augmented by default: {augmented}"
-        );
-        assert!(
-            !augmented["snapshot"].is_null(),
-            "fetched bin should see the runtime snapshot by default: {augmented}"
-        );
-
-        let compat = run(&["--node"]);
-        assert_eq!(
-            compat["stack"], 10,
-            "--node must reach the fetched bin's re-entrant node shim: {compat}"
-        );
-        assert!(
-            compat["snapshot"].is_null(),
-            "--node must suppress the runtime snapshot on the dlx-fallback path: {compat}"
-        );
-    }
-
-    /// The `dlx` / `x` spellings of the same ephemeral runner. They reach the
-    /// engine verb instead of `nubx`'s clap surface, so `--node` gets its own
-    /// argv handling there — and dlx's positional is `trailing_var_arg` +
-    /// `allow_hyphen_values`, which used to make an unrecognized `--node` the
-    /// package name rather than a usage error.
-    fn assert_dlx_verb_node_flag(&self) {
-        let pkg_dir = self._temp.path().join("dlx-verb-pkg");
-        std::fs::create_dir_all(&pkg_dir).unwrap();
-        std::fs::write(
-            pkg_dir.join("package.json"),
-            r#"{ "name": "rtc-dlx-verb-probe", "version": "1.0.0", "bin": { "rtc-dlx-verb-probe": "./bin.js" } }"#,
-        )
-        .unwrap();
-        std::fs::write(
-            pkg_dir.join("bin.js"),
-            "#!/usr/bin/env node\nconsole.log(JSON.stringify({ stack: Error.stackTraceLimit, snapshot: process.env.__NUB_RUNTIME_CONFIG || null, argv: process.argv.slice(2) }));\n",
-        )
-        .unwrap();
-
-        let package_spec = format!("file:{}", pkg_dir.to_string_lossy().replace('\\', "/"));
-        // `[pre] <verb> [post] -p <spec> rtc-dlx-verb-probe [tail]` — `pre`
-        // covers `nub --node dlx`, `post` covers `nub dlx --node`, and `tail`
-        // is the fetched tool's own argv.
-        let run = |pre: &[&str], verb: &str, post: &[&str], tail: &[&str]| {
-            let mut args: Vec<&str> = pre.to_vec();
-            args.push(verb);
-            args.extend(post);
-            args.extend(["-p", package_spec.as_str(), "rtc-dlx-verb-probe"]);
-            args.extend(tail);
-            let output = self.command().args(&args).output().unwrap();
-            assert!(
-                output.status.success(),
-                "nub {args:?}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let line = stdout
-                .lines()
-                .find(|l| l.starts_with('{'))
-                .unwrap_or_else(|| panic!("no JSON line in: {stdout}"));
-            serde_json::from_str::<serde_json::Value>(line).unwrap()
-        };
-
-        let augmented = run(&[], "dlx", &[], &[]);
-        assert_eq!(
-            augmented["stack"], 23,
-            "a dlx-fetched bin is augmented by default: {augmented}"
-        );
-        assert!(
-            !augmented["snapshot"].is_null(),
-            "a dlx-fetched bin sees the runtime snapshot by default: {augmented}"
-        );
-
-        for (verb, pre, post) in [
-            ("dlx", &["--node"][..], &[][..]),
-            ("dlx", &[][..], &["--node"][..]),
-            ("x", &["--node"][..], &[][..]),
-            ("x", &[][..], &["--node"][..]),
-        ] {
-            let compat = run(pre, verb, post, &[]);
-            assert_eq!(
-                compat["stack"], 10,
-                "nub {pre:?} {verb} {post:?} must reach the fetched bin's node shim: {compat}"
-            );
-            assert!(
-                compat["snapshot"].is_null(),
-                "nub {pre:?} {verb} {post:?} must suppress the runtime snapshot: {compat}"
-            );
-        }
-
-        // Three-position rule: past the tool name the flag is the tool's.
-        let forwarded = run(&[], "dlx", &[], &["--node"]);
-        assert_eq!(
-            forwarded["argv"],
-            serde_json::json!(["--node"]),
-            "a post-tool --node forwards verbatim: {forwarded}"
-        );
-        assert_eq!(
-            forwarded["stack"], 23,
-            "a post-tool --node must not disable augmentation: {forwarded}"
-        );
     }
 }
 
@@ -399,38 +287,150 @@ fn runtime_snapshot_reaches_the_file_run_and_script_entrypoints() {
 
 /// The `node_modules/.bin` routes, split out because they ride a
 /// `#!/usr/bin/env node` shim. Windows resolves local bins through `.cmd`
-/// shims instead — a different path that this fixture does not build — so
-/// gating these two keeps the entrypoints above running on both platforms
-/// rather than losing the whole file to one construct.
+/// shims instead — a different path this fixture does not build — so gating
+/// these keeps the entrypoints above running on both platforms rather than
+/// losing the whole file to one construct.
 #[cfg(unix)]
 #[test]
 fn runtime_snapshot_reaches_the_local_bin_routes() {
     let fixture = Fixture::new();
     fixture.assert_probe(&["exec", "probe"]);
-    fixture.assert_nubx_probe();
+
+    let mut nubx_run = fixture.command_for(&fixture.nubx);
+    nubx_run.arg("probe");
+    assert_config_applied("nubx probe", &probe_json("nubx probe", nubx_run));
 }
 
-/// `nubx --node <tool>` on a bin NOT present locally (the registry/`-p`
-/// fetch fallback, not `assert_nubx_probe`'s local-bin path) must disable
-/// augmentation exactly like every other runtime entrypoint. The fetched
-/// bin's `node` shebang re-enters nub as a PATH shim rather than reading
-/// `--node` from argv, so this exercises a genuinely different code path
-/// (`dlx_child_env` stamping `NODE_COMPAT` for the child) than the local-bin
-/// case above.
+/// `nubx --node <tool>` on a bin NOT present locally: the registry/`-p` fetch
+/// fallback rather than the `node_modules/.bin` route above. A `file:` package
+/// outside the project forces that path with no network involved. The fetched
+/// bin's `#!/usr/bin/env node` shebang re-enters nub as a PATH shim rather than
+/// reading `--node` from argv, so augmentation is disabled by `dlx_child_env`
+/// stamping `NODE_COMPAT` for the child — a genuinely different mechanism.
 #[cfg(unix)]
 #[test]
 fn nubx_node_flag_reaches_the_dlx_fallback_fetch_path() {
     let fixture = Fixture::new();
-    fixture.assert_nubx_dlx_fallback_node_flag();
+    let pkg_dir = fixture.temp.path().join("dlx-fallback-pkg");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::write(
+        pkg_dir.join("package.json"),
+        r#"{ "name": "rtc-dlx-probe", "version": "1.0.0", "bin": { "rtc-dlx-probe": "./bin.js" } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        pkg_dir.join("bin.js"),
+        "#!/usr/bin/env node\nconsole.log(JSON.stringify({ stack: Error.stackTraceLimit, snapshot: process.env.__NUB_RUNTIME_CONFIG || null }));\n",
+    )
+    .unwrap();
+
+    let package_spec = format!("file:{}", pkg_dir.to_string_lossy().replace('\\', "/"));
+    let run = |extra: &[&str]| {
+        // Three-position rule: a flag BEFORE the bin positional is nubx's own;
+        // after it, the flag would forward to the bin verbatim.
+        let mut args: Vec<&str> = extra.to_vec();
+        args.extend(["-y", "-p", package_spec.as_str(), "rtc-dlx-probe"]);
+        let mut command = fixture.command_for(&fixture.nubx);
+        command.args(args);
+        probe_json(&format!("nubx {extra:?} dlx-fallback"), command)
+    };
+
+    let augmented = run(&[]);
+    assert_eq!(
+        augmented["stack"], 23,
+        "fetched bin should be augmented by default: {augmented}"
+    );
+    assert!(
+        !augmented["snapshot"].is_null(),
+        "fetched bin should see the runtime snapshot by default: {augmented}"
+    );
+
+    let compat = run(&["--node"]);
+    assert_eq!(
+        compat["stack"], 10,
+        "--node must reach the fetched bin's re-entrant node shim: {compat}"
+    );
+    assert!(
+        compat["snapshot"].is_null(),
+        "--node must suppress the runtime snapshot on the dlx-fallback path: {compat}"
+    );
 }
 
-/// `nubx`, `nub dlx`, and `nub x` are the same command, so `--node` must work
-/// on all three — in either flag order, and without being stolen from the
-/// fetched tool when it appears after the tool name.
+/// `nubx`, `nub dlx`, and `nub x` are the same command, so `--node` must work on
+/// all three, in either flag order, and must not be stolen from the fetched tool
+/// when it appears after the tool name. These spellings reach the engine verb
+/// rather than `nubx`'s clap surface, and dlx's positional is `trailing_var_arg` +
+/// `allow_hyphen_values`, which used to make an unrecognized `--node` the package
+/// name instead of a usage error.
 #[test]
 fn node_flag_works_on_the_dlx_and_x_spellings_in_either_order() {
     let fixture = Fixture::new();
-    fixture.assert_dlx_verb_node_flag();
+    let pkg_dir = fixture.temp.path().join("dlx-verb-pkg");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::write(
+        pkg_dir.join("package.json"),
+        r#"{ "name": "rtc-dlx-verb-probe", "version": "1.0.0", "bin": { "rtc-dlx-verb-probe": "./bin.js" } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        pkg_dir.join("bin.js"),
+        "#!/usr/bin/env node\nconsole.log(JSON.stringify({ stack: Error.stackTraceLimit, snapshot: process.env.__NUB_RUNTIME_CONFIG || null, argv: process.argv.slice(2) }));\n",
+    )
+    .unwrap();
+
+    let package_spec = format!("file:{}", pkg_dir.to_string_lossy().replace('\\', "/"));
+    // `[pre] <verb> [post] -p <spec> rtc-dlx-verb-probe [tail]` — `pre` covers
+    // `nub --node dlx`, `post` covers `nub dlx --node`, and `tail` is the fetched
+    // tool's own argv.
+    let run = |pre: &[&str], verb: &str, post: &[&str], tail: &[&str]| {
+        let mut args: Vec<&str> = pre.to_vec();
+        args.push(verb);
+        args.extend(post);
+        args.extend(["-p", package_spec.as_str(), "rtc-dlx-verb-probe"]);
+        args.extend(tail);
+        let mut command = fixture.command();
+        command.args(&args);
+        probe_json(&format!("nub {args:?}"), command)
+    };
+
+    let augmented = run(&[], "dlx", &[], &[]);
+    assert_eq!(
+        augmented["stack"], 23,
+        "a dlx-fetched bin is augmented by default: {augmented}"
+    );
+    assert!(
+        !augmented["snapshot"].is_null(),
+        "a dlx-fetched bin sees the runtime snapshot by default: {augmented}"
+    );
+
+    for (verb, pre, post) in [
+        ("dlx", &["--node"][..], &[][..]),
+        ("dlx", &[][..], &["--node"][..]),
+        ("x", &["--node"][..], &[][..]),
+        ("x", &[][..], &["--node"][..]),
+    ] {
+        let compat = run(pre, verb, post, &[]);
+        assert_eq!(
+            compat["stack"], 10,
+            "nub {pre:?} {verb} {post:?} must reach the fetched bin's node shim: {compat}"
+        );
+        assert!(
+            compat["snapshot"].is_null(),
+            "nub {pre:?} {verb} {post:?} must suppress the runtime snapshot: {compat}"
+        );
+    }
+
+    // Three-position rule: past the tool name the flag is the tool's.
+    let forwarded = run(&[], "dlx", &[], &["--node"]);
+    assert_eq!(
+        forwarded["argv"],
+        serde_json::json!(["--node"]),
+        "a post-tool --node forwards verbatim: {forwarded}"
+    );
+    assert_eq!(
+        forwarded["stack"], 23,
+        "a post-tool --node must not disable augmentation: {forwarded}"
+    );
 }
 
 #[test]
@@ -472,13 +472,11 @@ fn inherited_runtime_snapshot_tolerates_a_field_this_binary_does_not_know() {
 #[test]
 fn fresh_nested_nub_rediscovers_config_and_preserves_replaced_node_options() {
     let fixture = Fixture::new();
-    let nested = fixture._temp.path().join("nested-project");
+    let nested = fixture.temp.path().join("nested-project");
     std::fs::create_dir_all(&nested).unwrap();
     std::fs::write(
         nested.join("nub.jsonc"),
-        r#"{
-          "nodeOptions": ["--stack-trace-limit=41"]
-        }"#,
+        r#"{ "nodeOptions": ["--stack-trace-limit=41"] }"#,
     )
     .unwrap();
     std::fs::write(
@@ -515,14 +513,7 @@ process.exit(child.status ?? 1);
     )
     .unwrap();
 
-    let inherited_shim_entries: Vec<String> = std::env::var_os("PATH")
-        .map(|path| {
-            std::env::split_paths(&path)
-                .filter(|entry| entry.to_string_lossy().contains("nub-node-shim-"))
-                .map(|entry| entry.to_string_lossy().into_owned())
-                .collect()
-        })
-        .unwrap_or_default();
+    let ambient_shims = ambient_shim_entries();
     let run = |replace_node_options: bool| {
         let mut command = fixture.command();
         command
@@ -533,16 +524,14 @@ process.exit(child.status ?? 1);
         if replace_node_options {
             command.env("REPLACE_NODE_OPTIONS", "1");
         }
-        let output = command.output().unwrap();
-        assert!(
-            output.status.success(),
-            "nested fresh Nub invocation failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        serde_json::from_slice::<serde_json::Value>(
-            output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout),
+        probe_json(
+            if replace_node_options {
+                "nested fresh Nub invocation (NODE_OPTIONS replaced)"
+            } else {
+                "nested fresh Nub invocation (NODE_OPTIONS inherited)"
+            },
+            command,
         )
-        .unwrap()
     };
 
     let inherited = run(false);
@@ -566,14 +555,14 @@ process.exit(child.status ?? 1);
         let shim_entries = value["shimEntries"].as_array().unwrap();
         assert_eq!(
             shim_entries.len(),
-            inherited_shim_entries.len() + 1,
+            ambient_shims.len() + 1,
             "fresh child must replace the parent shim, not accumulate it: {value}"
         );
         let inherited_tail: Vec<&str> = shim_entries[1..]
             .iter()
             .map(|entry| entry.as_str().unwrap())
             .collect();
-        let expected_tail: Vec<&str> = inherited_shim_entries.iter().map(String::as_str).collect();
+        let expected_tail: Vec<&str> = ambient_shims.iter().map(String::as_str).collect();
         assert_eq!(
             inherited_tail, expected_tail,
             "pre-existing unrelated shim entries must be preserved: {value}"
@@ -603,7 +592,7 @@ fn fresh_nested_nub_and_nubx_keep_the_parent_project_bin_path() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let fixture = Fixture::new();
-    let nested = fixture._temp.path().join("nested-bin-path");
+    let nested = fixture.temp.path().join("nested-bin-path");
     std::fs::create_dir_all(&nested).unwrap();
     let outer_bin = fixture.project.join("node_modules/.bin");
     let probe = r#"
@@ -648,23 +637,14 @@ console.log(JSON.stringify({ file, nubx }));
     )
     .unwrap();
 
-    let output = fixture
-        .command()
+    let mut command = fixture.command();
+    command
         .env("NESTED_NUB", nub_binary())
         .env("NESTED_NUBX", &fixture.nubx)
         .env("NESTED_PROJECT", &nested)
         .env("PARENT_BIN", &outer_bin)
-        .args(["run", "nested-bin-path"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "nested bin-path probes failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let value: serde_json::Value =
-        serde_json::from_slice(output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout))
-            .unwrap();
+        .args(["run", "nested-bin-path"]);
+    let value = probe_json("nested bin-path probes", command);
     assert_eq!(value["file"]["hasParentBin"], true, "{value}");
     assert_eq!(value["nubx"]["hasParentBin"], true, "{value}");
 }
@@ -672,7 +652,7 @@ console.log(JSON.stringify({ file, nubx }));
 #[test]
 fn fresh_nested_nub_node_mode_keeps_descendant_node_vanilla() {
     let fixture = Fixture::new();
-    let nested = fixture._temp.path().join("nested-compat-project");
+    let nested = fixture.temp.path().join("nested-compat-project");
     std::fs::create_dir_all(&nested).unwrap();
     std::fs::write(
         nested.join("grandchild.cjs"),
@@ -733,16 +713,9 @@ process.exit(child.status ?? 1);
     )
     .unwrap();
 
-    let inherited_shim_entries: Vec<String> = std::env::var_os("PATH")
-        .map(|path| {
-            std::env::split_paths(&path)
-                .filter(|entry| entry.to_string_lossy().contains("nub-node-shim-"))
-                .map(|entry| entry.to_string_lossy().into_owned())
-                .collect()
-        })
-        .unwrap_or_default();
-    let path_addition = fixture._temp.path().join("user-path-addition");
-    let replacement_compile_cache = fixture._temp.path().join("user-compile-cache");
+    let ambient_shims = ambient_shim_entries();
+    let path_addition = fixture.temp.path().join("user-path-addition");
+    let replacement_compile_cache = fixture.temp.path().join("user-compile-cache");
     std::fs::create_dir_all(&path_addition).unwrap();
     let run = |mutate_after_augmentation: bool| {
         let mut command = fixture.command();
@@ -762,22 +735,20 @@ process.exit(child.status ?? 1);
             // Rust's Windows PATH parser unquotes entries. Keep a quoted entry with
             // a semicolon in the ambient PATH to prove the fresh boundary restores
             // the parent's raw PATH instead of reconstructing it lossily.
-            let quoted = fixture._temp.path().join("quoted;path");
+            let quoted = fixture.temp.path().join("quoted;path");
             std::fs::create_dir_all(&quoted).unwrap();
             let mut path = std::ffi::OsString::from(format!("\"{}\";", quoted.display()));
             path.push(std::env::var_os("PATH").unwrap_or_default());
             command.env("PATH", path);
         }
-        let output = command.output().unwrap();
-        assert!(
-            output.status.success(),
-            "fresh nested --node invocation failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        serde_json::from_slice::<serde_json::Value>(
-            output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout),
+        probe_json(
+            if mutate_after_augmentation {
+                "fresh nested --node invocation (env mutated after augmentation)"
+            } else {
+                "fresh nested --node invocation"
+            },
+            command,
         )
-        .unwrap()
     };
 
     let unchanged = run(false);
@@ -799,7 +770,7 @@ process.exit(child.status ?? 1);
     );
     assert_eq!(
         unchanged["shimEntries"],
-        serde_json::to_value(&inherited_shim_entries).unwrap(),
+        serde_json::json!(ambient_shims),
         "the outer shim must not survive the fresh compat boundary: {unchanged}"
     );
 
@@ -840,58 +811,35 @@ process.exit(child.status ?? 1);
     );
     assert_eq!(
         mutated["shimEntries"],
-        serde_json::to_value(&inherited_shim_entries).unwrap(),
+        serde_json::json!(ambient_shims),
         "the old shim must still be removed from a user-modified PATH: {mutated}"
     );
 }
 
 #[test]
 fn runtime_snapshot_reaches_watch_child() {
-    use std::io::BufRead;
-
     let fixture = Fixture::new();
-    let mut child = fixture
-        .command()
-        .args(["watch", "main.ts"])
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut lines = std::io::BufReader::new(stdout).lines();
-        let _ = tx.send(lines.next().transpose());
-        for _ in lines {}
-    });
-    let line = rx
-        .recv_timeout(Duration::from_secs(15))
-        .expect("watch child produced no output")
-        .unwrap()
-        .unwrap();
-    let _ = child.kill();
-    let _ = child.wait();
+    let mut command = fixture.command();
+    command.args(["watch", "main.ts"]);
+    let line = watch_first_line(command);
     let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(value["env"], "from-config");
-    assert_eq!(value["text"], "loaded-text");
-    assert_eq!(value["alias"], "aliased");
-    assert_eq!(value["condition"], "condition");
-    assert_eq!(value["jsxMode"], "classic");
+    assert_config_applied("nub watch main.ts", &value);
 }
 
 #[test]
 fn node_compat_config_is_zero_augmentation_and_environment_false_overrides_it() {
     let fixture = Fixture::new();
-    let config = fixture.project.join("nub.jsonc");
     std::fs::write(
         fixture.project.join("compat.js"),
         "console.log(globalThis.__runtimePreload ?? 'vanilla');\n",
     )
     .unwrap();
     std::fs::write(
-        &config,
+        fixture.project.join("nub.jsonc"),
         r#"{ "nodeCompat": true, "preload": ["./preload.mjs"] }"#,
     )
     .unwrap();
+
     let vanilla = fixture.command().arg("compat.js").output().unwrap();
     assert!(
         vanilla.status.success(),
@@ -961,37 +909,23 @@ process.exit(child.status ?? 1);
 "#,
     )
     .unwrap();
+
     let user_compile_cache = fixture.project.join("user-compile-cache");
-    // The nested Node process may surface an equivalent Windows path with
-    // forward slashes; this assertion is about preserving the path, not its
-    // separator spelling.
+    // The nested Node process may surface an equivalent Windows path with forward
+    // slashes; this assertion is about preserving the path, not its separator
+    // spelling.
     let user_compile_cache_text = user_compile_cache.to_string_lossy().replace('\\', "/");
-    let inherited_shim_entries: Vec<String> = std::env::var_os("PATH")
-        .map(|path| {
-            std::env::split_paths(&path)
-                .filter(|entry| entry.to_string_lossy().contains("nub-node-shim-"))
-                .map(|entry| entry.to_string_lossy().into_owned())
-                .collect()
-        })
-        .unwrap_or_default();
+    let ambient_shims = ambient_shim_entries();
     for script in ["nested-env", "nested-cli"] {
-        let output = fixture
-            .command()
+        let mut command = fixture.command();
+        command
             .env("NODE_OPTIONS", "--trace-warnings")
             .env("NODE_PATH", "/user/node-path")
             .env("NODE", "/user/node")
             .env("NODE_COMPILE_CACHE", &user_compile_cache)
-            .args(["run", script])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{script}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let value: serde_json::Value =
-            serde_json::from_slice(output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout))
-                .unwrap();
+            .args(["run", script]);
+        let value = probe_json(script, command);
+
         assert_eq!(
             value["preload"],
             serde_json::Value::Null,
@@ -1013,7 +947,7 @@ process.exit(child.status ?? 1);
         assert_eq!(value["nubVersion"], serde_json::Value::Null, "{script}");
         assert_eq!(
             value["shimEntries"],
-            serde_json::json!(inherited_shim_entries),
+            serde_json::json!(ambient_shims),
             "{script}"
         );
     }
@@ -1021,18 +955,15 @@ process.exit(child.status ?? 1);
 
 #[test]
 fn watch_composes_explicit_config_env_sources_before_cli_env_file() {
-    use std::io::BufRead;
-
     let fixture = Fixture::new();
-    let config_root = fixture.project.clone();
     std::fs::write(
-        config_root.join("first.env"),
+        fixture.project.join("first.env"),
         "CONFIG_ONLY=first\nSHARED=first\n",
     )
     .unwrap();
-    std::fs::write(config_root.join("second.env"), "SHARED=second\n").unwrap();
+    std::fs::write(fixture.project.join("second.env"), "SHARED=second\n").unwrap();
     std::fs::write(
-        config_root.join("nub.jsonc"),
+        fixture.project.join("nub.jsonc"),
         r#"{ "envFile": ["./first.env", "./second.env"] }"#,
     )
     .unwrap();
@@ -1044,27 +975,11 @@ fn watch_composes_explicit_config_env_sources_before_cli_env_file() {
     )
     .unwrap();
 
-    let mut child = fixture
-        .command()
+    let mut command = fixture.command();
+    command
         .arg(format!("--env-file={}", cli_env.display()))
-        .args(["watch", "env-probe.js"])
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut lines = std::io::BufReader::new(stdout).lines();
-        let _ = tx.send(lines.next().transpose());
-        for _ in lines {}
-    });
-    let line = rx
-        .recv_timeout(Duration::from_secs(15))
-        .expect("watch child produced no output")
-        .unwrap()
-        .unwrap();
-    let _ = child.kill();
-    let _ = child.wait();
+        .args(["watch", "env-probe.js"]);
+    let line = watch_first_line(command);
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&line).unwrap(),
         serde_json::json!({ "config": "first", "shared": "cli", "cli": "cli" })
