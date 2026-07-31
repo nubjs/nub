@@ -31,6 +31,7 @@ struct Fixture {
     project: PathBuf,
     xdg_config: PathBuf,
     cache: PathBuf,
+    node: PathBuf,
     #[cfg(unix)]
     nubx: PathBuf,
 }
@@ -42,6 +43,15 @@ impl Fixture {
         let xdg_config = temp.path().join("config");
         let config_root = project.clone();
         let cache = temp.path().join("cache");
+        let node = temp
+            .path()
+            .join(format!("node{}", std::env::consts::EXE_SUFFIX));
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(nub_binary(), &node).unwrap();
+        #[cfg(windows)]
+        if std::fs::hard_link(nub_binary(), &node).is_err() {
+            std::fs::copy(nub_binary(), &node).unwrap();
+        }
         #[cfg(unix)]
         let nubx = {
             let nubx = temp.path().join("nubx");
@@ -147,6 +157,7 @@ console.log(JSON.stringify({
             project,
             xdg_config,
             cache,
+            node,
             #[cfg(unix)]
             nubx,
         }
@@ -443,7 +454,7 @@ fn inherited_runtime_snapshot_tolerates_a_field_this_binary_does_not_know() {
       "fieldFromANewerNub": { "unrecognized": true }
     }"#;
     let output = fixture
-        .command()
+        .command_for(&fixture.node)
         .env("__NUB_RUNTIME_CONFIG", snapshot)
         .arg("inherited.js")
         .output()
@@ -454,6 +465,228 @@ fn inherited_runtime_snapshot_tolerates_a_field_this_binary_does_not_know() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "inherited");
+}
+
+#[test]
+fn fresh_nested_nub_rediscovers_config_and_preserves_replaced_node_options() {
+    let fixture = Fixture::new();
+    let nested = fixture._temp.path().join("nested-project");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(
+        nested.join("nub.jsonc"),
+        r#"{
+          "nodeOptions": ["--stack-trace-limit=41"]
+        }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        nested.join("child.ts"),
+        r#"console.log(JSON.stringify({
+  stack: Error.stackTraceLimit,
+  nodeOptions: process.env.NODE_OPTIONS,
+  snapshotOptions: JSON.parse(process.env.__NUB_RUNTIME_CONFIG).nodeOptions,
+  shimEntries: (process.env.PATH ?? '')
+    .split(require('node:path').delimiter)
+    .filter((entry) => entry.includes('nub-node-shim-')),
+}));"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("nested-launcher.cjs"),
+        r#"const { spawnSync } = require('node:child_process');
+const env = { ...process.env };
+if (process.env.REPLACE_NODE_OPTIONS === '1') env.NODE_OPTIONS = '--trace-warnings';
+const child = spawnSync(process.env.NESTED_NUB, ['child.ts'], {
+  cwd: process.env.NESTED_PROJECT,
+  encoding: 'utf8',
+  env,
+});
+process.stdout.write(child.stdout);
+process.stderr.write(child.stderr);
+process.exit(child.status ?? 1);
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("package.json"),
+        r#"{ "scripts": { "nested-fresh": "node nested-launcher.cjs" } }"#,
+    )
+    .unwrap();
+
+    let inherited_shim_entries: Vec<String> = std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path)
+                .filter(|entry| entry.to_string_lossy().contains("nub-node-shim-"))
+                .map(|entry| entry.to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    let run = |replace_node_options: bool| {
+        let mut command = fixture.command();
+        command
+            .env("NODE_OPTIONS", "--no-warnings")
+            .env("NESTED_NUB", nub_binary())
+            .env("NESTED_PROJECT", &nested)
+            .args(["run", "nested-fresh"]);
+        if replace_node_options {
+            command.env("REPLACE_NODE_OPTIONS", "1");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "nested fresh Nub invocation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(
+            output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout),
+        )
+        .unwrap()
+    };
+
+    let inherited = run(false);
+    let replaced = run(true);
+    for value in [&inherited, &replaced] {
+        assert_eq!(value["stack"], 41, "{value}");
+        assert_eq!(
+            value["snapshotOptions"],
+            serde_json::json!(["--stack-trace-limit=41"]),
+            "{value}"
+        );
+        let node_options = value["nodeOptions"].as_str().unwrap();
+        assert!(
+            node_options.contains("--stack-trace-limit=41"),
+            "child config did not win: {node_options}"
+        );
+        assert!(
+            !node_options.contains("--stack-trace-limit=23"),
+            "parent config leaked into the fresh child: {node_options}"
+        );
+        let shim_entries = value["shimEntries"].as_array().unwrap();
+        assert_eq!(
+            shim_entries.len(),
+            inherited_shim_entries.len() + 1,
+            "fresh child must replace the parent shim, not accumulate it: {value}"
+        );
+        let inherited_tail: Vec<&str> = shim_entries[1..]
+            .iter()
+            .map(|entry| entry.as_str().unwrap())
+            .collect();
+        let expected_tail: Vec<&str> = inherited_shim_entries.iter().map(String::as_str).collect();
+        assert_eq!(
+            inherited_tail, expected_tail,
+            "pre-existing unrelated shim entries must be preserved: {value}"
+        );
+    }
+
+    let inherited_options = inherited["nodeOptions"].as_str().unwrap();
+    assert!(
+        inherited_options.contains("--no-warnings"),
+        "the pre-augmentation ambient value was not restored: {inherited_options}"
+    );
+
+    let replaced_options = replaced["nodeOptions"].as_str().unwrap();
+    assert!(
+        replaced_options.contains("--trace-warnings"),
+        "a user-replaced NODE_OPTIONS must survive the fresh boundary: {replaced_options}"
+    );
+    assert!(
+        !replaced_options.contains("--no-warnings"),
+        "the captured ambient value overwrote the user's replacement: {replaced_options}"
+    );
+}
+
+#[test]
+fn fresh_nested_nub_node_mode_keeps_descendant_node_vanilla() {
+    let fixture = Fixture::new();
+    let nested = fixture._temp.path().join("nested-compat-project");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(
+        nested.join("grandchild.cjs"),
+        r#"console.log(JSON.stringify({
+  nubVersion: process.versions.nub ?? null,
+  runtimeSnapshot: process.env.__NUB_RUNTIME_CONFIG ?? null,
+  nodeOptions: process.env.NODE_OPTIONS ?? null,
+  shimEntries: (process.env.PATH ?? '')
+    .split(require('node:path').delimiter)
+    .filter((entry) => entry.includes('nub-node-shim-')),
+}));"#,
+    )
+    .unwrap();
+    std::fs::write(
+        nested.join("compat-parent.cjs"),
+        r#"const { spawnSync } = require('node:child_process');
+const child = spawnSync('node', ['grandchild.cjs'], {
+  encoding: 'utf8',
+  env: process.env,
+});
+process.stdout.write(child.stdout);
+process.stderr.write(child.stderr);
+process.exit(child.status ?? 1);
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("nested-compat-launcher.cjs"),
+        r#"const { spawnSync } = require('node:child_process');
+const child = spawnSync(process.env.NESTED_NUB, ['--node', 'compat-parent.cjs'], {
+  cwd: process.env.NESTED_PROJECT,
+  encoding: 'utf8',
+  env: process.env,
+});
+process.stdout.write(child.stdout);
+process.stderr.write(child.stderr);
+process.exit(child.status ?? 1);
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("package.json"),
+        r#"{ "scripts": { "nested-compat": "node nested-compat-launcher.cjs" } }"#,
+    )
+    .unwrap();
+
+    let inherited_shim_entries: Vec<String> = std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path)
+                .filter(|entry| entry.to_string_lossy().contains("nub-node-shim-"))
+                .map(|entry| entry.to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut command = fixture.command();
+    command
+        .env("NODE_OPTIONS", "--trace-warnings")
+        .env("NESTED_NUB", nub_binary())
+        .env("NESTED_PROJECT", &nested)
+        .args(["run", "nested-compat"]);
+    #[cfg(windows)]
+    {
+        // Rust's Windows PATH parser unquotes entries. Keep a quoted entry with
+        // a semicolon in the ambient PATH to prove the fresh boundary restores
+        // the parent's raw PATH instead of reconstructing it lossily.
+        let quoted = fixture._temp.path().join("quoted;path");
+        std::fs::create_dir_all(&quoted).unwrap();
+        let mut path = std::ffi::OsString::from(format!("\"{}\";", quoted.display()));
+        path.push(std::env::var_os("PATH").unwrap_or_default());
+        command.env("PATH", path);
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "fresh nested --node invocation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout))
+            .unwrap();
+    assert_eq!(value["nubVersion"], serde_json::Value::Null, "{value}");
+    assert_eq!(value["runtimeSnapshot"], serde_json::Value::Null, "{value}");
+    assert_eq!(value["nodeOptions"], "--trace-warnings", "{value}");
+    assert_eq!(
+        value["shimEntries"],
+        serde_json::to_value(inherited_shim_entries).unwrap(),
+        "the outer shim must not survive the fresh compat boundary: {value}"
+    );
 }
 
 #[test]

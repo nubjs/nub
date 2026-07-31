@@ -602,6 +602,25 @@ impl Argv0 {
     }
 }
 
+/// Establish the logical invocation boundary before any subsystem can spawn a
+/// thread or discover configuration. `node` is Nub's PATH-shim continuation;
+/// every other public argv0 starts a fresh invocation and must not inherit the
+/// parent invocation's runtime snapshot or augmentation.
+pub fn normalize_invocation_environment() {
+    let internal_reentry = env::args_os().nth(1).is_some_and(|arg| {
+        (cfg!(unix) && arg == "__pdeath-watch") || arg == "__node-gyp-bootstrap"
+    });
+    if internal_reentry || matches!(Argv0::detect(), Argv0::Node) {
+        return;
+    }
+
+    // SAFETY: `main` calls this before logging, config initialization, or any
+    // thread-capable Nub subsystem. No other thread exists yet.
+    unsafe {
+        nub_core::node::spawn::restore_fresh_invocation_environment();
+    }
+}
+
 /// Nub — TypeScript-first developer supertool.
 ///
 /// A Rust CLI that augments your Node.js with TypeScript execution,
@@ -3019,7 +3038,7 @@ fn runtime_v8_flags(runtime: &crate::project_config::RuntimeConfig) -> Result<Ve
     Ok(runtime.v8_flags.clone())
 }
 
-fn runtime_node_options(
+pub(crate) fn runtime_node_options(
     runtime: &crate::project_config::RuntimeConfig,
     node: &nub_core::node::discovery::ResolvedNode,
 ) -> Result<Vec<String>> {
@@ -3089,7 +3108,9 @@ fn validate_runtime_node_option(
     Ok(())
 }
 
-fn runtime_config_json(runtime: &crate::project_config::RuntimeConfig) -> Result<String> {
+pub(crate) fn runtime_config_json(
+    runtime: &crate::project_config::RuntimeConfig,
+) -> Result<String> {
     serde_json::to_string(runtime).context("could not serialize the resolved runtime config")
 }
 
@@ -4487,7 +4508,7 @@ fn build_script_command(
     // localStorage-neutralize signal for the script subtree's node children (webstorage
     // flag-needed band, no user --localstorage-file): the preload reads + deletes it.
     if let Some(aug) = aug.as_ref() {
-        aug.apply_compat_restore_markers(|key, value| {
+        aug.apply_restore_markers(|key, value| {
             command.env(key, value);
         });
         aug.apply_localstorage_env(|k, v| {
@@ -5466,6 +5487,13 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
     cmd.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
+    if let Some(token) = nub_preload_token.as_deref() {
+        // Watch assembles NODE_OPTIONS directly instead of using AugmentationEnv,
+        // so it must stamp the same fresh-invocation restoration metadata itself.
+        nub_core::node::spawn::apply_augmentation_restore_markers(token, None, |key, value| {
+            cmd.env(key, value);
+        });
+    }
     // Node's Windows watch supervisor first registers the long-spelled env-file
     // directory, then registers module paths reported by the watched child. If
     // the inherited cwd contains an 8.3 component (for example RUNNER~1), those
@@ -5930,7 +5958,7 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
     cmd.env("NODE", node_env);
     // localStorage-neutralize signal (webstorage flag-needed band, no user
     // --localstorage-file); applied before the partial moves of aug below.
-    aug.apply_compat_restore_markers(|key, value| {
+    aug.apply_restore_markers(|key, value| {
         cmd.env(key, value);
     });
     aug.apply_localstorage_env(|k, v| {

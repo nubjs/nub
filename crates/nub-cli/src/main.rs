@@ -25,7 +25,15 @@ use anyhow::Result;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> Result<()> {
-    // Embedder identity FIRST, before any other line of nub runs. Every
+    // A `node` PATH-shim re-entry continues its parent's logical invocation and
+    // must keep the inherited runtime snapshot + augmentation. An explicitly
+    // nested `nub`/`nubx`/PM shim is a fresh user invocation: restore the ambient
+    // environment captured by the parent before config discovery or logging can
+    // observe it. Hidden internal re-entries belong to their parent and are
+    // deliberately exempt.
+    cli::normalize_invocation_environment();
+
+    // Embedder identity before any subsystem initialization. Every
     // brand-scoped path the engine derives — cache root, data root, config
     // home — flows from `aube_util::embedder()`, which falls back to the
     // *aube* profile whenever the OnceLock is unset. Registering only inside

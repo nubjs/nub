@@ -878,7 +878,7 @@ fn engine_session_inner(
     // share one source. Closes the ABI bug where dep build scripts (node-gyp)
     // compiled against ambient Node instead of the project's. Default-empty
     // overlay when augmentation can't engage ⇒ behavior preserved.
-    apply_lifecycle_augmentation(&cwd);
+    apply_lifecycle_augmentation(&cwd)?;
     Ok(EngineSession {
         detected,
         runtime: build_runtime()?,
@@ -1609,6 +1609,7 @@ fn compose_lifecycle_ua(
 fn augmentation_to_lifecycle_overlay(
     aug: &nub_core::node::spawn::AugmentationEnv,
     node_execpath: &str,
+    runtime_json: Option<&str>,
 ) -> (Vec<(std::ffi::OsString, std::ffi::OsString)>, Vec<PathBuf>) {
     use std::ffi::OsString;
     let mut overlay: Vec<(OsString, OsString)> = Vec::new();
@@ -1623,9 +1624,15 @@ fn augmentation_to_lifecycle_overlay(
     if let Some(node_path) = &aug.node_path {
         overlay.push((OsString::from("NODE_PATH"), node_path.clone()));
     }
-    aug.apply_compat_restore_markers(|key, value| {
+    aug.apply_restore_markers(|key, value| {
         overlay.push((OsString::from(key), value.to_os_string()));
     });
+    if let Some(runtime_json) = runtime_json {
+        overlay.push((
+            OsString::from(crate::project_config::RUNTIME_CONFIG_ENV),
+            OsString::from(runtime_json),
+        ));
+    }
     // localStorage-neutralize signal for dependency build scripts' node children
     // (webstorage flag-needed band, no user --localstorage-file); preload reads + deletes.
     aug.apply_localstorage_env(|k, v| {
@@ -1672,7 +1679,7 @@ fn lifecycle_node_anchor(cwd: &Path) -> PathBuf {
 /// (behavior preserved) when augmentation can't be computed (compat /
 /// re-entrant / broken install); the resolved Node *version* is published to the
 /// engine either way. Called once per command from [`engine_session`].
-fn apply_lifecycle_augmentation(cwd: &Path) {
+fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
     let anchor = lifecycle_node_anchor(cwd);
     // The project's Node — pin-aware (`.nvmrc`/`.node-version`/`engines`), NOT
     // the ambient PATH node. This resolved version drives flag injection and its
@@ -1691,20 +1698,24 @@ fn apply_lifecycle_augmentation(cwd: &Path) {
         aube_util::update_engine_context(|c| c.runtime_node_version = Some(version));
     }
     let Ok(nub_binary) = nub_core::node::spawn::current_nub_binary() else {
-        return;
+        return Ok(());
     };
     let node = discovered.unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
+    let runtime = crate::project_config::runtime_config()?;
+    let runtime_node_options = crate::cli::runtime_node_options(&runtime, &node)?;
+    let runtime_json = crate::cli::runtime_config_json(&runtime)?;
     let pnp_ctx = nub_core::pnp::detect(cwd);
-    let Some(mut aug) = nub_core::node::spawn::compute_augmentation_env(
+    let Some(mut aug) = nub_core::node::spawn::compute_augmentation_env_with_options(
         &nub_binary,
         node.path.as_std_path(),
-        node.version,
+        node.version.clone(),
         // Lifecycle scripts are never compat: PM verbs run augmented (there is
         // no `--node` lifecycle path).
         false,
         pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
+        &runtime_node_options,
     ) else {
-        return;
+        return Ok(());
     };
     // npm/pnpm parity: `npm_config_node_options` seeds a lifecycle script's
     // NODE_OPTIONS only when the ambient env carries none of its own.
@@ -1722,7 +1733,8 @@ fn apply_lifecycle_augmentation(cwd: &Path) {
             }
         }
     }
-    let (env_overlay, path_prepends) = augmentation_to_lifecycle_overlay(&aug, node.path.as_str());
+    let (env_overlay, path_prepends) =
+        augmentation_to_lifecycle_overlay(&aug, node.path.as_str(), Some(&runtime_json));
     // The shim dir + provisioned node for the engine's runtime spawn helpers —
     // the boundary the transient bin-exec paths (dlx / create / `nubx <tool>`)
     // read but the lifecycle overlay above never reaches. `runtime_switching`
@@ -1748,6 +1760,7 @@ fn apply_lifecycle_augmentation(cwd: &Path) {
         c.runtime_node_dir = runtime_node_dir;
         c.runtime_node_bin = runtime_node_bin;
     });
+    Ok(())
 }
 
 /// `--dir` / `-C` (and the global `--cwd`, which dispatch applies earlier):
@@ -4687,9 +4700,12 @@ mod tests {
             node_options: Some("--require=/rt/preload.cjs".to_string()),
             shim_dir: Some("/shim".to_string()),
             node_path: Some(OsString::from("/rt/node_path")),
+            augmentation_token: "--require=/rt/preload.cjs".to_string(),
             neutralize_localstorage: true,
         };
-        let (overlay, prepends) = augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node");
+        let runtime_json = r#"{"nodeCompat":false}"#;
+        let (overlay, prepends) =
+            augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node", Some(runtime_json));
 
         let find = |k: &str| {
             overlay
@@ -4711,6 +4727,16 @@ mod tests {
             Some("--require=/rt/preload.cjs")
         );
         assert_eq!(find("NODE_PATH").as_deref(), Some("/rt/node_path"));
+        assert_eq!(
+            find(crate::project_config::RUNTIME_CONFIG_ENV).as_deref(),
+            Some(runtime_json),
+            "the Node-shim continuation must inherit the source-anchored runtime snapshot"
+        );
+        assert_eq!(
+            find("__NUB_AUGMENTATION_TOKEN").as_deref(),
+            Some("--require=/rt/preload.cjs"),
+            "a fresh nested Nub needs the exact parent-owned token"
+        );
         assert_eq!(
             find("npm_node_execpath").as_deref(),
             Some("/pinned/bin/node"),
@@ -4739,9 +4765,10 @@ mod tests {
             node_options: None,
             shim_dir: None,
             node_path: None,
+            augmentation_token: "--require=/rt/preload.cjs".to_string(),
             neutralize_localstorage: false,
         };
-        let (overlay, prepends) = augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node");
+        let (overlay, prepends) = augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node", None);
         assert!(prepends.is_empty());
         assert!(
             !overlay
