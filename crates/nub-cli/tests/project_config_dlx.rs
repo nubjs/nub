@@ -97,13 +97,13 @@ fn a_project_dlx_block_aborts_the_command_and_names_the_global_file() {
     let message = stderr
         .trim()
         .strip_prefix("Error: `dlx` in ")
-        .expect("scope error prefix");
+        .unwrap_or_else(|| panic!("scope error prefix: {stderr}"));
     let (reported_source, message) = message
         .split_once(" is configured globally: move it to ")
-        .expect("scope error source/destination separator");
+        .unwrap_or_else(|| panic!("scope error source/destination separator: {stderr}"));
     let (reported_destination, _) = message
         .split_once(". Settings that configure")
-        .expect("scope error destination suffix");
+        .unwrap_or_else(|| panic!("scope error destination suffix: {stderr}"));
     assert_eq!(
         PathBuf::from(reported_source).canonicalize().unwrap(),
         project_file.canonicalize().unwrap(),
