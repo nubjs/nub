@@ -1,0 +1,6 @@
+# shard-d5e — a quarter of shard-default5, split 2026-07-31.
+# default5 carries the npm package `node`, whose generated `.bin/node` shim
+# self-execs (BUG-N) and hangs every window that shells a bare `node`; as one
+# 57-package shard it did not finish. `node` is isolated in shard-d5e so the
+# other members are measurable. Run these INSTEAD of shard-default5, not beside it.
+node	26.5.0	self-configuring	

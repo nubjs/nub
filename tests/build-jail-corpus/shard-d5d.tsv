@@ -1,0 +1,16 @@
+# shard-d5d — a quarter of shard-default5, split 2026-07-31.
+# default5 carries the npm package `node`, whose generated `.bin/node` shim
+# self-execs (BUG-N) and hangs every window that shells a bare `node`; as one
+# 57-package shard it did not finish. `node` is isolated in shard-d5e so the
+# other members are measurable. Run these INSTEAD of shard-default5, not beside it.
+nodegit	0.27.0	native-build-prebuilt	
+egg-ci	2.2.0	self-configuring	
+pngquant-bin	9.0.0	native-build-prebuilt	
+gatsby	5.16.1	self-configuring	
+segfault-handler	1.3.0	native-build-prebuilt	
+keccak	3.0.4	self-configuring	
+ursa-optional	0.10.2	native-build-prebuilt	
+microtime	3.1.1	self-configuring	
+ref-napi	3.0.3	self-configuring	
+subrequests-express	3.3.2	self-configuring	
+truffle	5.11.5	self-configuring	

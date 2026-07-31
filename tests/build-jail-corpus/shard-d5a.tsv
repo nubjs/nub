@@ -1,0 +1,17 @@
+# shard-d5a — a quarter of shard-default5, split 2026-07-31.
+# default5 carries the npm package `node`, whose generated `.bin/node` shim
+# self-execs (BUG-N) and hangs every window that shells a bare `node`; as one
+# 57-package shard it did not finish. `node` is isolated in shard-d5e so the
+# other members are measurable. Run these INSTEAD of shard-default5, not beside it.
+msw	2.15.0	codegen	msw-manifest
+prisma	7.9.1	codegen	prisma-schema
+@evilmartians/lefthook	2.1.10	hook-installer	git-repo,lefthook-config
+puppeteer	25.4.0	binary-downloader	
+faunadb	4.8.2	telemetry-nag	
+canvas	3.2.3	native-build-prebuilt	
+@datadog/native-metrics	3.1.2	self-configuring	
+@appsignal/nodejs	3.8.1	binary-downloader	
+@bufbuild/buf	1.72.0	binary-downloader	
+@pnpm/exe	11.17.0	self-configuring	
+@serialport/bindings	9.2.9	native-build-prebuilt	
+@pact-foundation/pact-node	10.18.0	binary-downloader	

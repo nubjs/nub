@@ -1,0 +1,17 @@
+# shard-d5b — a quarter of shard-default5, split 2026-07-31.
+# default5 carries the npm package `node`, whose generated `.bin/node` shim
+# self-execs (BUG-N) and hangs every window that shells a bare `node`; as one
+# 57-package shard it did not finish. `node` is isolated in shard-d5e so the
+# other members are measurable. Run these INSTEAD of shard-default5, not beside it.
+@bazel/cypress	5.8.1	self-configuring	
+contextify	1.0.0	native-build-prebuilt	
+@shopify/ngrok	4.3.2	binary-downloader	
+@bazel/typescript	5.8.1	self-configuring	
+dtrace-provider	0.8.8	native-build-prebuilt	
+azure-streamanalytics-cicd	4.0.0	binary-downloader	
+@ffmpeg-installer/linux-arm	4.1.3	self-configuring	
+gcstats.js	1.0.0	native-build-prebuilt	
+dugite	3.2.2	binary-downloader	
+@ffprobe-installer/linux-arm64	5.2.0	self-configuring	
+hnswlib-node	3.0.0	native-build-prebuilt	
+git-win	2.3.0	binary-downloader	
