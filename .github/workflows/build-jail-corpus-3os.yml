@@ -138,10 +138,19 @@ jobs:
           OFF=$(grep -c 'APPDATA redirect DROPPED' "${{ runner.temp }}/ad-off/winappdata-PROD/run.log" || true)
           echo "arm banners — redirect-on cell: ${ON:-0} (must be 0), redirect-off cell: ${OFF:-0} (must be >0)" \
             | tee -a "$GITHUB_STEP_SUMMARY"
-          { echo '| cell | npm-cache EPERM lines |'; echo '| --- | --- |'
+          # MECHANISM TALLY, per cell, from each cell's OWN log. The previous version of
+          # this table counted the echoed command line in the CI console rather than the
+          # run log, so every cell read exactly 1 and the table said nothing. Counted with
+          # fixed strings (-F) so a backslash in a Windows path is never regex syntax.
+          { echo '| cell | npm-cache EPERM | no-Python | gyp ERR | AC profile |'
+            echo '| --- | --- | --- | --- | --- |'
             for c in ad-base:A0 ad-on:PROD ad-off:PROD; do
               L="${{ runner.temp }}/${c%%:*}/winappdata-${c##*:}/run.log"
-              echo "| ${c%%:*} | $(grep -c 'AppData\\Roaming\\npm-cache' "$L" 2>/dev/null || echo 0) |"
+              n1=$(grep -cF 'npm-cache' "$L" 2>/dev/null || true)
+              n2=$(grep -cF 'Could not find any Python installation' "$L" 2>/dev/null || true)
+              n3=$(grep -cF 'gyp ERR' "$L" 2>/dev/null || true)
+              n4=$(grep -cF 'AppData\Local\Packages' "$L" 2>/dev/null || true)
+              echo "| ${c%%:*} | ${n1:-0} | ${n2:-0} | ${n3:-0} | ${n4:-0} |"
             done; } | tee -a "$GITHUB_STEP_SUMMARY"
           [ -z "$FAILED" ] || exit 1
           [ "${ON:-0}" -eq 0 ] && [ "${OFF:-0}" -gt 0 ] || { echo "ARM DID NOT ENGAGE AS BUILT"; exit 1; }
@@ -153,11 +162,29 @@ jobs:
           for c in ad-base ad-on ad-off; do
             echo "### $c"; node aggregate.mjs "${{ runner.temp }}/$c" 2>&1 | tail -25
           done | tee -a "$GITHUB_STEP_SUMMARY"
+      # COLLECT BY COPY, NOT BY GLOB. Uploading `ad-*` wholesale walks each run's
+      # private HOME, and Windows materializes `AppData\Local\Microsoft\Windows\
+      # INetCache\Content.IE5` inside it — a system cache directory `upload-artifact`
+      # cannot scandir, so the step died EPERM and discarded the run.logs that carry
+      # the per-package detail. The console only ever gets the summary, so losing the
+      # artifact loses the mechanism.
+      - name: Stage the evidence
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p ad-evidence
+          for c in ad-base ad-on ad-off; do
+            for d in "${{ runner.temp }}/$c"/*/; do
+              n="$c-$(basename "$d")"; mkdir -p "ad-evidence/$n"
+              cp "$d"/report.json "$d"/verdicts.json "$d"/windows.json "ad-evidence/$n/" 2>/dev/null || true
+              tail -c 4000000 "$d"/run.log > "ad-evidence/$n/run.log" 2>/dev/null || true
+            done
+          done
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: appdata-control
-          path: ${{ runner.temp }}/ad-*
+          path: ad-evidence
           retention-days: 7
 
   # Nine corpus rows fail PROD naming `…\Packages\<profile>\AC\Temp`. This job asks
