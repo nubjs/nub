@@ -1,0 +1,7 @@
+{
+  // Plain JS pointed at a CODE dialect. `.js` is owned by the plain-JS wrapper,
+  // whose syntax gate detects with lang "ts" and so cannot parse JSX — without an
+  // explicit bypass it answers "nothing to lower" and hands raw JSX to Node.
+  "loader": { ".js": "jsx" },
+  "tsconfig": "./tsconfig.json"
+}

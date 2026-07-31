@@ -763,10 +763,21 @@ export function loadTranspile(url, ext) {
 // break), and oxc would reformat it (quotes/semicolons/whitespace + a sourcemap
 // footer) if we ran it through anyway. The verdict rides ONE parse (the same one
 // `detectModuleInfo` does for format detection). node_modules is gated at the call
-// sites (the byte-parity boundary). JSX-in-`.js` is out of scope (lang is "ts",
-// which does not parse JSX); use `.jsx`.
+// sites (the byte-parity boundary). JSX-in-`.js` is out of scope for the syntax
+// gate (lang is "ts", which does not parse JSX); use `.jsx`, or say so explicitly
+// with a `loader` entry, which takes the unconditional path below instead.
 export function maybeTranspilePlainJs(url, ext) {
   __ensureBuiltins();
+  // An explicit `loader` entry pointing this extension at a code dialect moved it
+  // into TRANSPILE_EXTS, which for every other member means "always compile". Only
+  // a plain-JS extension can reach here, so this is true ONLY when the project
+  // configured one, and it must not fall through to the syntax gate below: that
+  // gate asks "does this file NEED lowering", answers no for JSX (it detects with
+  // lang "ts", which cannot parse it), and hands raw JSX to Node for V8 to reject —
+  // while the ESM path transpiles the same file on both tiers. The registration
+  // loop deliberately skips `.js`/`.cjs` because this wrapper owns them, so there
+  // is nothing else downstream to catch it.
+  if (TRANSPILE_EXTS.has(ext)) return loadTranspile(url, ext);
   const filePath = fileURLToPath(url);
   let source;
   try {
