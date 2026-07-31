@@ -62,18 +62,12 @@ jobs:
           path: stage
           retention-days: 7
 
-  # ONE VARIABLE: the LOCALAPPDATA the confined child is handed. Everything else —
-  # binary, shard, arm, fixture construction — is byte-identical between the two
-  # cells, which is what makes a difference attributable to that variable and
-  # nothing else.
-  #
-  # The hypothesis under test is that nine corpus rows whose PROD failure names
-  # `…\Packages\<profile>\AC\Temp` are an artifact of this harness rather than a jail
-  # defect: `CreateAppContainerProfile` takes a name and no path, so the OS creates
-  # the profile under the CALLING user's real %LOCALAPPDATA%, while the harness hands
-  # the child a synthetic one and the two compose different paths. If the signature
-  # disappears when the host's own LOCALAPPDATA is passed through, the rows are ours.
-  localappdata-differential:
+  # Nine corpus rows fail PROD naming `…\Packages\<profile>\AC\Temp`. This job asks
+  # whether that is a jail defect or a path disagreement this harness manufactures,
+  # by reproducing the signature on the affected nine and then LOOKING at where the
+  # AppContainer profile actually landed. See the observation step for why the
+  # obvious differential — vary LOCALAPPDATA — is not available.
+  appcontainer-profile-location:
     needs: build
     runs-on: windows-latest
     timeout-minutes: 60
@@ -104,28 +98,48 @@ jobs:
           # confined-path concern, so an unconfined arm per cell would measure nothing.
           OUTROOT="${{ runner.temp }}/lad-base" ./run-shard.sh winlad shard-winlad.tsv A0 || FAILED="$FAILED A0"
           OUTROOT="${{ runner.temp }}/lad-synth" ./run-shard.sh winlad shard-winlad.tsv PROD || FAILED="$FAILED PROD-synthetic"
-          WIN_HOST_LOCALAPPDATA=1 OUTROOT="${{ runner.temp }}/lad-host" \
-            ./run-shard.sh winlad shard-winlad.tsv PROD || FAILED="$FAILED PROD-host"
+          # WHERE THE PROFILE ACTUALLY LANDS — an OBSERVATION, not a second cell.
+          #
+          # The first attempt varied LOCALAPPDATA and was invalid: on Windows nub's own
+          # STORE lives at `%LOCALAPPDATA%\nub\pm\store`, so repointing the variable moved
+          # the store outside every snapshot root and the run died
+          # `FAILED-attribution-wipeout(installed=8,cells=0)`. LOCALAPPDATA is not
+          # independent of the measurement and cannot be the variable.
+          #
+          # It does not need to be. `CreateAppContainerProfile` takes a name and no path,
+          # so the claim is falsifiable by looking: if the profile is on disk under the
+          # REAL user's LOCALAPPDATA while the child's synthetic one holds no `Packages`
+          # entry, the ENOENT is a path disagreement this harness manufactures. Both
+          # listings, no variable moved.
+          echo '### Where the AppContainer profile actually is' | tee -a "$GITHUB_STEP_SUMMARY"
+          REAL="$(cygpath -u "${LOCALAPPDATA}")/Packages"
+          SYNTH="${{ runner.temp }}/lad-synth/winlad-PROD/home/AppData/Local/Packages"
+          for label in "real:$REAL" "synthetic:$SYNTH"; do
+            p="${label#*:}"
+            n=$(ls "$p" 2>/dev/null | grep -c '^nub_sbx_' || true)
+            echo "- ${label%%:*} \`$p\` → nub_sbx_* entries: ${n:-0} (dir exists: $([ -d "$p" ] && echo yes || echo no))" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          done
           echo "INADMISSIBLE:${FAILED:-none}" | tee -a "$GITHUB_STEP_SUMMARY"
           {
             echo '| cell | AC\Temp ENOENT/EPERM lines | packages naming the AC profile |'
             echo '| --- | --- | --- |'
-            for c in lad-base:A0 lad-synth:PROD-synthetic lad-host:PROD-host; do
-              d="${{ runner.temp }}/${c%%:*}/winlad-${c##*:}"; d="${d/-synthetic/}"; d="${d/-host/}"
+            for c in lad-base:A0 lad-synth:PROD; do
+              d="${{ runner.temp }}/${c%%:*}/winlad-${c##*:}"
               L="$d/run.log"
               n=$(grep -c 'AppData\\Local\\Packages' "$L" 2>/dev/null || echo 0)
               p=$(grep -oE '^--- window: [^ ]+' "$L" 2>/dev/null | sed 's/--- window: //' | sort -u | tr '\n' ' ')
               echo "| ${c##*:} | $n | $(grep -l 'AppData\\Local\\Packages' "$L" >/dev/null 2>&1 && echo "$p" || echo none) |"
             done
           } | tee -a "$GITHUB_STEP_SUMMARY"
-          # The differential's own exit: a cell that produced no data cannot be compared.
+          # A cell that produced no data cannot be read.
           [ -z "$FAILED" ] || exit 1
       - name: Collect
         if: always()
         shell: bash
         run: |
           mkdir -p lad-evidence
-          for c in lad-base lad-synth lad-host; do
+          for c in lad-base lad-synth; do
             for d in "${{ runner.temp }}/$c"/*/; do
               n="$c-$(basename "$d")"; mkdir -p "lad-evidence/$n"
               cp "$d"/report.json "$d"/verdicts.json "$d"/windows.json "lad-evidence/$n/" 2>/dev/null || true
@@ -135,17 +149,12 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: localappdata-differential
+          name: appcontainer-profile-location
           path: tests/build-jail-corpus/lad-evidence
           retention-days: 7
 
   corpus:
     needs: build
-    # HELD OFF for the LOCALAPPDATA differential pass only. Run 30651475914 already
-    # measured this matrix on this catalog, and the differential must run on a binary
-    # that carries no other pending change or its one variable is no longer one.
-    # Flip back to `true` for the next full sweep.
-    if: ${{ false }}
     strategy:
       fail-fast: false
       # A ceiling on how much of the shared runner pool this one probe may hold.

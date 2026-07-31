@@ -756,11 +756,39 @@ pub fn compile_build_jail(
     // empty and destroyed per LAUNCH — Windows tooling that caches there never hard-fails,
     // it just gets zero reuse, ever. The `USERPROFILE` jail-home below IS persistent, so
     // the two axes do not behave alike.
+    // `APPDATA` RIDES WITH THEM, and the `LOCALAPPDATA` rationale above does NOT transfer:
+    // nothing in the launch path reads `APPDATA` (it appears only as an `OS_ESSENTIAL_ENV`
+    // passthrough name), so repointing it cannot break process creation the way repointing
+    // `LOCALAPPDATA` would.
+    //
+    // It has to move because npm on Windows resolves its cache to `%APPDATA%\npm-cache`,
+    // not to `$HOME/.npm` as on POSIX. Redirecting only HOME/USERPROFILE fixes the POSIX
+    // spelling and leaves the Windows one addressing the real user profile — outside the
+    // jail's writable set — so every lifecycle script shelling out to npm or
+    // prebuild-install takes `EPERM: mkdir …\AppData\Roaming\npm-cache`. That was 14 of 63
+    // Windows corpus breaks, the largest single mechanism (run 30651475914).
+    //
+    // The value keeps Windows' real `AppData\Roaming` shape instead of collapsing onto the
+    // home root, so a package that walks relative to `%APPDATA%` sees the layout it
+    // expects. It sits INSIDE `private_home`, which is already granted read-write, so it
+    // rides that grant and emits no new rule — no inheritable ACE, no DACL propagation,
+    // the same cost argument the `$tmp` mode change rests on.
     if let Some(home) = &private_home {
-        let value = home.to_string_lossy().into_owned();
-        for key in ["HOME", "USERPROFILE"] {
+        let home_value = home.to_string_lossy().into_owned();
+        let appdata = home.join("AppData").join("Roaming");
+        // Materialized for the reason `private_home_dir` materializes its own leaf: a
+        // redirect onto a path that does not exist trades one failure for another.
+        let _ = std::fs::create_dir_all(&appdata);
+        let appdata_value = appdata.to_string_lossy().into_owned();
+        for (key, value) in [
+            ("HOME", &home_value),
+            ("USERPROFILE", &home_value),
+            ("APPDATA", &appdata_value),
+        ] {
             // Matched the way `insert_env` replaces (case-insensitively on Windows, where
             // the ambient may spell it `Userprofile`), so presence and replacement agree.
+            // Presence-gating is also what keeps this Windows-only without a `cfg`: a POSIX
+            // ambient carries no `APPDATA`, so the key is never introduced.
             let present = policy.env.constructed.keys().any(|k| {
                 if cfg!(windows) {
                     k.eq_ignore_ascii_case(key)
