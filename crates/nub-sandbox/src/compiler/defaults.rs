@@ -447,9 +447,16 @@ const BUILD_JAIL_EXTRA_PREFIXES: &[&str] = &["npm_package_", "npm_lifecycle_"];
 /// `npm_config_node_gyp` shim can trampoline back through the PM binary
 /// (`<exe> __node-gyp-bootstrap <dir>`), but that trampoline is neither needed nor safe
 /// here: the engine bootstraps the real node-gyp OUTSIDE the jail and prepends its
-/// `$tooldirs`-readable bin dir to the lifecycle PATH, and the shim's own fallback then
-/// resolves `node-gyp` from that PATH — measured end-to-end, a from-source addon links
-/// under the jail through both the bare-`node-gyp` and the `npm_config_node_gyp` route.
+/// `$tooldirs`-readable bin dir to the lifecycle PATH, and the shim resolves that
+/// bootstrapped copy DIRECTLY from its own location, never by a PATH lookup — measured
+/// end-to-end, a from-source addon links under the jail through both the bare-`node-gyp`
+/// and the `npm_config_node_gyp` route.
+///
+/// A PATH lookup is the LAST-RESORT branch, not the mechanism, and `8f7ac1033f` is why:
+/// PATH is exactly the namespace npm's run-script rewrites, so resolving `node-gyp` by
+/// name walked into npm's own stub, which re-exports the inherited `npm_config_node_gyp`
+/// — i.e. back into this shim. Withholding the var is what made that cycle the ONLY
+/// reachable branch here, so the jail was causal for BUG-C via this very scrub.
 /// Admitting the var would REPLACE that working fallback with an exec of the PM binary,
 /// which no read grant covers, and the shim does not guard that call. Whether that is
 /// survivable is BACKEND-DEPENDENT, so it must not be assumed: under macOS Seatbelt the
