@@ -80,7 +80,7 @@ curl https://PROJECT.vercel.app/api/alive
 
 ### Verify Nub ran the build
 
-The build log names the version it installed and the Node it picked up:
+The build log names the version it installed and the Node it picked up. This fixture's `"build"` script is `"nub build.ts"`, so `nub run build` expands to the `$ nub build.ts` line:
 
 ```console
 Installed nub v{{NUB_VERSION}} (with nubx) to /vercel/.nub/bin/nub
