@@ -1,5 +1,5 @@
 {
   "title": "Deployment",
   "defaultOpen": false,
-  "pages": ["index", "github-action", "docker"]
+  "pages": ["index", "github-action", "docker", "cloudflare", "vercel"]
 }

@@ -6,7 +6,9 @@ description: Getting the Nub CLI into a deploy or build environment — the GitH
 A Nub project needs the `nub` CLI present wherever it builds. How you get it there depends on whether the environment gives you a setup step:
 
 - **You control a setup step** — a CI workflow or a Dockerfile. Install Nub explicitly: the [GitHub Action](/docs/deployment/github-action) on GitHub Actions, or the [Docker](/docs/deployment/docker) images in a container.
-- **A hosted builder runs the install for you** — Cloudflare Workers Builds, Netlify, some Vercel setups. There's no seam to add a setup step, so Nub rides in as a devDependency.
+- **You control the install command** — [Vercel](/docs/deployment/vercel) lets you replace it, so one line installs Nub before the build runs.
+- **A hosted builder runs the install for you** — Netlify, Cloudflare Pages. There's no seam to add a setup step, so Nub rides in as a devDependency.
+- **The builder ships Nub already** — [Cloudflare Workers Builds](/docs/deployment/cloudflare) preinstalls it, so scripts that call it need nothing.
 
 ## Hosted builds
 
@@ -21,7 +23,7 @@ Add `@nubjs/nub` as a devDependency and call it from your scripts:
 ```json
 {
   "devDependencies": {
-    "@nubjs/nub": "^0.1.0"
+    "@nubjs/nub": "^0.6.0"
   },
   "scripts": {
     "build": "nubx vite build"
@@ -45,6 +47,8 @@ The builder still provisions Node from your version pin — set it so the build 
 - **GitHub Actions** — the [GitHub Action](/docs/deployment/github-action). It installs Nub, eagerly provisions the pinned Node, and fronts it on PATH.
 - **A Dockerfile you control** — the [Docker](/docs/deployment/docker) images, or one line to layer Nub onto your own `node` base.
 - **A hosted builder with no setup step** — the devDependency pattern above.
+- **Cloudflare** — [Workers Builds and Pages](/docs/deployment/cloudflare) differ; Workers Builds needs no setup.
+- **Vercel** — [an install-command override](/docs/deployment/vercel), or the devDependency pattern.
 
 ## Version managers
 
