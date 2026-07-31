@@ -90,6 +90,30 @@ fn readable_value(meta: &aube_settings::SettingMeta, raw: &str) -> Option<String
     Some(raw.to_string())
 }
 
+/// The list representation the report passes to its comma-splitting rows.
+/// This mirrors aube's `parse_string_list`: JSON-ish arrays and bare lists both
+/// collapse to comma-separated items, with empty and quoted entries removed.
+fn render_string_list(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let items = if let Some(inner) = trimmed
+        .strip_prefix('[')
+        .and_then(|raw| raw.strip_suffix(']'))
+    {
+        inner
+            .split(',')
+            .map(|item| item.trim().trim_matches(|ch: char| ch == '"' || ch == '\''))
+            .filter(|item| !item.is_empty())
+            .collect::<Vec<_>>()
+    } else {
+        trimmed
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .collect::<Vec<_>>()
+    };
+    items.join(",")
+}
+
 /// The toolchain's own name for the package that triggered the opt-out. The two
 /// nub seeds are frameworks whose proper names are not their package ids, and
 /// the row is prose the reader is meant to recognize — "react-native projects"
@@ -142,10 +166,11 @@ pub(super) struct SourceIndex {
     cli: Vec<(String, String)>,
     env: Vec<(String, String)>,
     project_config: Vec<(String, String)>,
-    /// Settings a `pnpm-workspace.yaml` claims, each with its value when the
-    /// setting's type renders as a scalar string. Resolved eagerly at load: the
-    /// raw YAML map's element type belongs to aube's yaml crate, which is not a
-    /// nub dependency, so it cannot be held in a field here.
+    /// Settings a `pnpm-workspace.yaml` claims, each normalized to the scalar
+    /// representation this report consumes (including comma-rendered string
+    /// lists). Resolved eagerly at load: the raw YAML map's element type belongs
+    /// to aube's yaml crate, which is not a nub dependency, so it cannot be held
+    /// in a field here.
     workspace_yaml: Vec<(&'static str, String)>,
     /// Settings supplied by pnpm v11's global `config.yaml`, loaded through
     /// aube's context-gated loader and interpreted with the same YAML helpers as
@@ -183,17 +208,28 @@ impl SourceIndex {
         // Keep the foreign YAML value local to this loader: nub-cli does not
         // depend on aube's YAML crate, but can still normalize it before this
         // index stores an owned string.
-        let workspace_yaml_scalar = |meta: &aube_settings::SettingMeta, raw| {
-            if meta.type_ != "bool" {
-                return aube_settings::values::string_from_workspace_yaml(meta.name, raw);
-            }
-            meta.workspace_yaml_keys.iter().find_map(|key| {
+        let workspace_yaml_scalar = |meta: &aube_settings::SettingMeta, raw| match meta.type_ {
+            "bool" => meta.workspace_yaml_keys.iter().find_map(|key| {
                 let value = aube_settings::workspace_yaml_value(raw, key)?;
                 value
                     .as_bool()
                     .or_else(|| value.as_str().and_then(aube_settings::values::parse_bool))
                     .map(|value| value.to_string())
-            })
+            }),
+            "list<string>" => meta.workspace_yaml_keys.iter().find_map(|key| {
+                let value = aube_settings::workspace_yaml_value(raw, key)?;
+                if let Some(items) = value.as_sequence() {
+                    return Some(
+                        items
+                            .iter()
+                            .filter_map(|item| item.as_str())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    );
+                }
+                value.as_str().map(render_string_list)
+            }),
+            _ => aube_settings::values::string_from_workspace_yaml(meta.name, raw),
         };
         let workspace_yaml = aube_settings::all()
             .iter()
@@ -267,7 +303,7 @@ impl SourceIndex {
         // rule within that alias. An invalid boolean masks its env tier and lets
         // a lower tier decide; it must not be credited to a different alias.
         for var in meta.env_vars.iter().rev() {
-            if var.starts_with("AUBE_") {
+            if !aube_util::env::branded_env_alias_enabled(var) {
                 continue;
             }
             if let Some((_, value)) = self.env.iter().rev().find(|(key, _)| key == var) {
@@ -1695,6 +1731,88 @@ mod tests {
         );
     }
 
+    /// pnpm v11's workspace and global YAML list accessors return lists, while
+    /// this report stores renderable strings. Their comma representation must
+    /// preserve the same winning tier for the hoisting row rather than falling
+    /// through to a lower `.npmrc` setting.
+    #[test]
+    fn pnpm_v11_yaml_list_tiers_preserve_hoisting_provenance() {
+        let index = SourceIndex {
+            cli: Vec::new(),
+            env: Vec::new(),
+            project_config: Vec::new(),
+            workspace_yaml: vec![("publicHoistPattern", "vitest,@types/*".to_string())],
+            global_config_yaml: vec![("publicHoistPattern", "eslint".to_string())],
+            project_npmrc: vec![("public-hoist-pattern".to_string(), "lodash".to_string())],
+            user_npmrc: Vec::new(),
+            embedder_defaults: Vec::new(),
+            declared_packages: Vec::new(),
+            branded_layout_ignored: false,
+            ci: false,
+        };
+        let hoisting = |index: &SourceIndex| {
+            resolved_rows(index)
+                .into_iter()
+                .find(|row| row.label == "hoisting")
+                .unwrap()
+        };
+        let workspace = hoisting(&index);
+        assert_eq!(workspace.values, vec!["vitest", "@types/*"]);
+        assert_eq!(workspace.note.as_deref(), Some("(pnpm-workspace.yaml)"));
+
+        let global = hoisting(&SourceIndex {
+            workspace_yaml: Vec::new(),
+            ..index
+        });
+        assert_eq!(global.values, vec!["eslint"]);
+        assert_eq!(global.note.as_deref(), Some("(pnpm global config.yaml)"));
+    }
+
+    /// Exercise the actual pnpm-workspace.yaml reader too: YAML sequences use
+    /// the same string-list representation as the resolver, so the report can
+    /// both show every pattern and keep its source rather than falling through.
+    #[test]
+    fn pnpm_v11_workspace_yaml_sequences_keep_list_provenance() {
+        let _guard = crate::pm_engine::ENGINE_GLOBAL_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        struct RestoreContext(aube_util::EngineContext);
+        impl Drop for RestoreContext {
+            fn drop(&mut self) {
+                aube_util::set_engine_context(self.0.clone());
+            }
+        }
+        let _restore = RestoreContext(aube_util::engine_context());
+        aube_util::update_engine_context(|context| {
+            context.read_branded_pnpm_config = true;
+            context.read_layout_from_workspace_yaml = true;
+            context.read_pnpm_global_config = false;
+        });
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("package.json"),
+            r#"{"name":"app","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("pnpm-workspace.yaml"),
+            "publicHoistPattern:\n  - vitest\n  - '@types/*'\n",
+        )
+        .unwrap();
+
+        let index = SourceIndex::load(project.path(), &[]);
+        assert_eq!(
+            index.resolve("publicHoistPattern"),
+            Some(("vitest,@types/*".to_string(), Some(Source::WorkspaceYaml)))
+        );
+        let hoisting = resolved_rows(&index)
+            .into_iter()
+            .find(|row| row.label == "hoisting")
+            .unwrap();
+        assert_eq!(hoisting.values, vec!["vitest", "@types/*"]);
+        assert_eq!(hoisting.note.as_deref(), Some("(pnpm-workspace.yaml)"));
+    }
+
     /// Within either `.npmrc` scope, the last assignment wins. This is distinct
     /// from scope precedence: project still outranks user after each scope has
     /// selected its own final entry.
@@ -1800,6 +1918,51 @@ mod tests {
         assert_eq!(
             index.resolve("nodeLinker"),
             Some(("isolated".to_string(), Some(Source::Default)))
+        );
+    }
+
+    /// The same aube gate that skips pnpm-branded aliases under a non-pnpm
+    /// incumbent must govern this provenance pass; otherwise the report names a
+    /// value the resolver did not read.
+    #[test]
+    fn pnpm_branded_env_aliases_follow_the_engine_context_gate() {
+        let _guard = crate::pm_engine::ENGINE_GLOBAL_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        struct RestoreContext(aube_util::EngineContext);
+        impl Drop for RestoreContext {
+            fn drop(&mut self) {
+                aube_util::set_engine_context(self.0.clone());
+            }
+        }
+        let _restore = RestoreContext(aube_util::engine_context());
+        let index = SourceIndex {
+            cli: Vec::new(),
+            env: vec![("PNPM_CONFIG_NODE_LINKER".to_string(), "hoisted".to_string())],
+            project_config: Vec::new(),
+            workspace_yaml: Vec::new(),
+            global_config_yaml: Vec::new(),
+            project_npmrc: Vec::new(),
+            user_npmrc: Vec::new(),
+            embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
+            declared_packages: Vec::new(),
+            branded_layout_ignored: false,
+            ci: false,
+        };
+
+        aube_util::update_engine_context(|context| context.read_branded_pnpm_config = false);
+        assert_eq!(
+            index.resolve("nodeLinker"),
+            Some(("isolated".to_string(), Some(Source::Default)))
+        );
+
+        aube_util::update_engine_context(|context| context.read_branded_pnpm_config = true);
+        assert_eq!(
+            index.resolve("nodeLinker"),
+            Some((
+                "hoisted".to_string(),
+                Some(Source::Env("PNPM_CONFIG_NODE_LINKER".to_string()))
+            ))
         );
     }
 
