@@ -151,7 +151,8 @@ pub use compiler::{
     CommandRunner, CompileCtx, CompileError, CompileWarning, DOWNLOAD_HOSTS,
     PACKAGE_NETWORK_ALLOWED, ScopeCapabilities, build_jail_net_allowed, build_jail_node_options,
     build_jail_stdio_preload_js, compile, compile_build_jail, compile_with_warnings,
-    download_hosts, net_gate_node_options, package_network_allowed, realpath_shim_node_options,
+    download_hosts, esm_resolve_repair_node_options, net_gate_node_options,
+    package_network_allowed, realpath_shim_node_options,
 };
 #[cfg(windows)]
 pub use compiler::{

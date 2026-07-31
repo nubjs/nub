@@ -169,15 +169,30 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // it did. Its roots are the anchors the jail actually grants, which is what scopes the
         // tolerance rule; the interpreter is among them so a `require()` of npm's own modules out
         // of the Node install tree resolves too.
+        //
+        // THE FOURTH TERM repairs ES-MODULE resolution, which the realpath preload cannot reach:
+        // `esm/resolve.js` DESTRUCTURES `realpathSync` at module-load time on 18.19-24.16, 25.x
+        // and 26.0, so it captured the jail's broken one before any `--import` ran, and every
+        // relative or bare `import` in a lifecycle script dies EPERM (31 of 354 corpus packages
+        // have an ESM lifecycle entry). Upstream's fix is not in the v22 line, so waiting does not
+        // cover the floor. Rationale and the seam inventory are on
+        // `nub_sandbox::esm_resolve_repair_node_options`; the loader gate is
+        // [`has_sync_module_hooks`].
         #[cfg(windows)]
-        if super::build_prefetch::node_version(&ambient, &probe).is_some_and(supports_import) {
+        if let Some(version) =
+            super::build_prefetch::node_version(&ambient, &probe).filter(|v| supports_import(v))
+        {
             let mut realpath_roots = vec![spawn.project_root.clone(), spawn.package_dir.clone()];
             realpath_roots.extend(interpreter.iter().cloned());
             let realpath = nub_sandbox::realpath_shim_node_options(&realpath_roots);
+            let esm = nub_sandbox::esm_resolve_repair_node_options(
+                &realpath_roots,
+                !has_sync_module_hooks(version),
+            );
             ambient.insert(
                 "NODE_OPTIONS".to_string(),
                 format!(
-                    "{} {realpath}",
+                    "{} {realpath} {esm}",
                     nub_sandbox::windows_build_jail_node_options(spawn.package_name.as_deref())
                 )
                 .trim_end()
@@ -738,6 +753,24 @@ fn supports_import(version: &str) -> bool {
     let mut parts = version.split('.').map(str::parse::<u32>);
     match (parts.next(), parts.next()) {
         (Some(Ok(major)), Some(Ok(minor))) => major > 20 || (major == 20 && minor >= 6),
+        _ => false,
+    }
+}
+
+/// Whether this interpreter has the SYNC `module.registerHooks` (22.15+ / 23.5+), which decides
+/// whether the ESM repair registers in-thread or has to carry a `module.register` loader.
+///
+/// Unparseable ⇒ `false`, i.e. carry the loader — the safe direction in BOTH senses. The loader is
+/// inert where `registerHooks` exists (the shim prefers the sync surface and never reads it),
+/// while omitting it where it was needed would leave `--preserve-symlinks` with no ESM repair;
+/// the shim aborts rather than accept that, so guessing wrong costs an install, not a wrong build.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn has_sync_module_hooks(version: &str) -> bool {
+    let mut parts = version.split('.').map(str::parse::<u32>);
+    match (parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => {
+            major > 23 || (major == 23 && minor >= 5) || (major == 22 && minor >= 15)
+        }
         _ => false,
     }
 }

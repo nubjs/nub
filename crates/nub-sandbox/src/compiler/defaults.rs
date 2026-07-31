@@ -629,6 +629,22 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
 /// beside it. (`preserve_symlinks_isolated_layout` is the standing regression test; if it ever
 /// stops reproducing, this becomes available again and the test says so.)
 ///
+/// UPDATE — THE FLAG NOW SHIPS, AND THIS FUNCTION IS STILL NOT WHAT SHIPS IT. The paragraph above
+/// treats the wrong-version hazard as INTRINSIC to `--preserve-symlinks`. It is not; it is a
+/// consequence of the flag removing the realpath from `Module._findPath` and from
+/// `finalizeResolution`, and both are re-appliable through the tolerant walk.
+/// [`esm_resolve_repair_node_options`] does exactly that, at both seams, and measures the fixture
+/// below back at `bar@2.0.0` on 13 Node versions with the flag stamped. So the string this
+/// function returns remains disqualified — it is the flag pair with NOTHING putting the realpath
+/// back — while the flag itself is now part of the production stamp, paired with its repair.
+///
+/// The escape clause this doc already carried is what was exercised: the hazard is measured, not
+/// argued, and it stopped reproducing once the seams were closed. Two things it turned out to be
+/// worth: the repair ALSO fixes a silent wrong-version case the current stamp has today (an entry
+/// point reached through a symlink keeps its link path under `--preserve-symlinks-main`, which
+/// roots the `node_modules` walk outside the store cell), and it is the only route that covers the
+/// v22 line, where upstream's ESM fix was not backported.
+///
 /// AND THE OBVIOUS SALVAGE IS CLOSED TOO — do not re-derive it. The wrong-version hazard above is
 /// attributable to `--preserve-symlinks` ALONE (`preserve_symlinks_isolated_layout` measures
 /// main-only leaving the same fixture correct), so `--preserve-symlinks-main` by itself looks like
@@ -864,10 +880,10 @@ fn with_alternate_spellings(roots: &[std::path::PathBuf]) -> Vec<std::path::Path
     }
 }
 
-pub fn realpath_shim_node_options(roots: &[std::path::PathBuf]) -> String {
-    if roots.is_empty() {
-        return String::new();
-    }
+/// The realpath shim's delivered source, roots substituted. Shared with
+/// [`esm_resolve_repair_node_options`], whose loader thread needs the SAME walk rather than a
+/// second implementation of the tolerance rule.
+fn realpath_shim_js(roots: &[std::path::PathBuf]) -> String {
     let roots = with_alternate_spellings(roots);
     let json = serde_json::to_string(
         &roots
@@ -883,7 +899,93 @@ pub fn realpath_shim_node_options(roots: &[std::path::PathBuf]) -> String {
         !js.contains(REALPATH_ROOTS_PLACEHOLDER),
         "windows_realpath_shim.js must contain exactly one {REALPATH_ROOTS_PLACEHOLDER}"
     );
-    format!("--preserve-symlinks-main {}", data_url_import(&js))
+    js
+}
+
+pub fn realpath_shim_node_options(roots: &[std::path::PathBuf]) -> String {
+    if roots.is_empty() {
+        return String::new();
+    }
+    format!(
+        "--preserve-symlinks-main {}",
+        data_url_import(&realpath_shim_js(roots))
+    )
+}
+
+/// The ES-module half of the resolution repair. Kept as FILES for the same reasons the other
+/// shims are.
+const WINDOWS_ESM_RESOLVE_SHIM: &str = include_str!("../backend/windows_esm_resolve_shim.js");
+const WINDOWS_ESM_RESOLVE_LOADER: &str = include_str!("../backend/windows_esm_resolve_loader.js");
+
+/// Substituted with the compat-tier loader's `data:` URL, or with `null` where the interpreter
+/// has `module.registerHooks` and no loader thread exists. A bare initializer, so a missing
+/// placeholder aborts the confined Node rather than degrading to an unrepaired resolver.
+const ESM_LOADER_URL_PLACEHOLDER: &str = "__NUB_ESM_LOADER_URL_JSON__";
+
+/// Substituted with [`realpath_shim_js`]. Same failure posture as above.
+const ESM_REALPATH_SOURCE_PLACEHOLDER: &str = "__NUB_REALPATH_SHIM_SOURCE__";
+
+/// The `--import` term that makes ES-module resolution work inside the jail, plus the
+/// `--preserve-symlinks` it is the repair FOR.
+///
+/// THE DEFECT THIS ANSWERS, and why [`realpath_shim_node_options`] alone does not. That shim
+/// replaces `fs.realpathSync`, which CommonJS reads as a property at call time and therefore
+/// picks up. `internal/modules/esm/resolve.js` does not: on 18.19-24.16, 25.x and 26.0 it opens
+/// with `const { realpathSync } = require('fs')`, capturing the binding before any `--import`
+/// preload exists, so ESM keeps calling the jail's refused realpath. Every relative or bare
+/// `import` then dies EPERM at rc=1 with no output. Measured across 50 installed Node builds:
+/// the source form predicted the behaviour 50/50.
+///
+/// WAITING FOR NODE DOES NOT COVER THE FLOOR. nodejs/node#62835 restores patchability, and is in
+/// 24.17+ and 26.1+ — but NOT in v22.x, which is nub's fast-tier floor.
+///
+/// WHY THE PAIR IS SAFE HERE, when `windows_realpath_node_options` next door is disqualified for
+/// stamping the same flag. That rejection was correct about the flag and wrong to treat the
+/// hazard as intrinsic to it: `--preserve-symlinks` binds the wrong dependency version because it
+/// removes the realpath from `Module._findPath` and from `finalizeResolution`, and both are
+/// re-appliable. This term puts the walk back at BOTH — a `Module._resolveFilename` wrapper and a
+/// resolve hook — through the tolerant shim, so the answer returns to the no-flag control's.
+///
+/// TWO SEAMS, NOT ONE, and the second was found by a falsify sweep rather than by reading:
+/// `require.resolve()` and `createRequire()` reach `Module._resolveFilename`, which is a
+/// DIFFERENT function from the `resolveForCJSWithHooks` a resolve hook sees. A hook-only repair
+/// measured `dep 1.0.0` against the correct `2.0.0`. `.node` addon paths ride the same seam (the
+/// path reaches `process.dlopen` through it, and `bindings` / `node-gyp-build` derive theirs from
+/// the resulting `__dirname`), and `import.meta.resolve` rides the hook.
+///
+/// IT ALSO REPAIRS A HAZARD THE CURRENT STAMP HAS. `--preserve-symlinks-main` leaves an entry
+/// point reached THROUGH a link on its link path, which roots the `node_modules` walk outside the
+/// store cell — measured silently answering `dep@1.0.0` today, and answering `2.0.0` with this
+/// term added, for both a CJS and an ESM entry. nub does not currently produce that shape
+/// (`materialized_pkg_dir` hands lifecycle scripts a real path), so this closes a latent one.
+///
+/// `needs_loader` — whether the interpreter LACKS `module.registerHooks` (below 22.15), so the
+/// ESM half must go through `module.register` and a loader thread. The loader carries the
+/// tolerant walk itself because `--import` preloads do not run on that thread. Getting this wrong
+/// does not silently degrade: the shim throws at startup when it has neither hook surface.
+pub fn esm_resolve_repair_node_options(roots: &[std::path::PathBuf], needs_loader: bool) -> String {
+    if roots.is_empty() {
+        return String::new();
+    }
+    let loader_url = needs_loader.then(|| {
+        let loader = strip_js_comments(WINDOWS_ESM_RESOLVE_LOADER)
+            .replace(ESM_REALPATH_SOURCE_PLACEHOLDER, &realpath_shim_js(roots));
+        debug_assert!(
+            !loader.contains(ESM_REALPATH_SOURCE_PLACEHOLDER),
+            "windows_esm_resolve_loader.js must contain exactly one \
+             {ESM_REALPATH_SOURCE_PLACEHOLDER}"
+        );
+        data_url(&loader)
+    });
+    let js = strip_js_comments(WINDOWS_ESM_RESOLVE_SHIM).replace(
+        ESM_LOADER_URL_PLACEHOLDER,
+        &serde_json::to_string(&loader_url).expect("an optional string always serializes"),
+    );
+    debug_assert!(
+        !js.contains(ESM_LOADER_URL_PLACEHOLDER),
+        "windows_esm_resolve_shim.js must contain exactly one {ESM_LOADER_URL_PLACEHOLDER}"
+    );
+    format!("--preserve-symlinks {}", data_url_import(&js))
 }
 
 /// The JS enforcing per-package egress inside the confined Node. Kept as a FILE rather than a
@@ -962,9 +1064,15 @@ pub fn net_gate_node_options(package_name: Option<&str>) -> String {
 /// percent-encoded pair and armed the gate (run 30503464536), which is why the "payload exceeds
 /// the cap" blocker was retracted. Do not reintroduce it.
 fn data_url_import(js: &str) -> String {
+    format!("--import {}", data_url(js))
+}
+
+/// The `data:` URL alone, for a payload that is EMBEDDED in another module rather than handed to
+/// `--import` (the compat-tier ESM loader, which `module.register` takes as a URL).
+fn data_url(js: &str) -> String {
     use base64::Engine as _;
     format!(
-        "--import data:text/javascript;base64,{}",
+        "data:text/javascript;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(js)
     )
 }
@@ -1399,7 +1507,14 @@ mod tests {
     /// budget — the cheap reclaim (comments) is already spent, so growth here is real payload.
     #[test]
     fn stamped_node_options_fits_the_env_block() {
-        const BUDGET: usize = 36_000;
+        // Raised from 36,000 when the ESM resolution repair joined the stamp. That term is
+        // ~1,800 chars on an interpreter with `module.registerHooks` and ~11,800 below it, where
+        // the `module.register` loader has to carry the tolerant walk itself because `--import`
+        // preloads do not run on the loader thread. Sized just over the four-term compat-tier
+        // composition (measured 45,636 with these roots), on the same principle as before: track
+        // the payload, not the ceiling. The ceiling is unchanged and still far above — 56,790
+        // chars launched a confined child with all three sentinels reported from inside it.
+        const BUDGET: usize = 48_000;
         let roots: Vec<std::path::PathBuf> = [
             r"C:\Users\runneradmin\AppData\Local\nub\store\v1\registry.npmjs.org\esbuild\0.21.5\node_modules\esbuild",
             r"C:\Users\runneradmin\work\monorepo\packages\web-app\node_modules\.pnpm\esbuild@0.21.5\node_modules\esbuild",
@@ -1408,10 +1523,26 @@ mod tests {
         .iter()
         .map(std::path::PathBuf::from)
         .collect();
+        // The COMPAT-tier composition, which is the larger of the two and therefore the one worth
+        // budgeting; the fast tier is asserted below to stay under the old number, so a regression
+        // that inflates the shared payload is caught even where the loader is absent.
         let stamped = format!(
-            "{} {}",
+            "{} {} {}",
             build_jail_node_options(Some("esbuild")),
-            realpath_shim_node_options(&roots)
+            realpath_shim_node_options(&roots),
+            esm_resolve_repair_node_options(&roots, true)
+        );
+        let fast_tier = format!(
+            "{} {} {}",
+            build_jail_node_options(Some("esbuild")),
+            realpath_shim_node_options(&roots),
+            esm_resolve_repair_node_options(&roots, false)
+        );
+        assert!(
+            fast_tier.len() <= 36_000,
+            "the fast-tier stamp is {} chars; it carries no loader and must stay under the \
+             pre-ESM budget",
+            fast_tier.len()
         );
         assert!(
             stamped.len() <= BUDGET,
@@ -1431,11 +1562,16 @@ mod tests {
             .filter(|t| t.starts_with("data:"))
             .map(decode_import)
             .collect();
-        assert_eq!(payloads.len(), 3, "stdio, net gate and realpath: {stamped}");
+        assert_eq!(
+            payloads.len(),
+            4,
+            "stdio, net gate, realpath and the ESM repair: {stamped}"
+        );
         for (payload, tail) in payloads.iter().zip([
             "writableScratchDir",
             "origCpSpawnSync",
             "fs.promises.realpath",
+            "register(LOADER_URL)",
         ]) {
             assert!(payload.contains(tail), "{tail} missing from a payload");
             assert!(
