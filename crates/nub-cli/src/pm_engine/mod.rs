@@ -551,7 +551,7 @@ pub(crate) fn run_node_gyp_bootstrap(args: &[String]) -> Result<i32> {
     // Register nub's static identity FIRST so the bootstrap's cache lands under
     // nub's namespace (`$XDG_CACHE/nub/pm/tools/node-gyp`, via the `set_cache_root`
     // the identity carries) rather than aube's. This re-entry runs as a fresh
-    // child process spawned by the engine's lazy shim (`AUBE_NODE_GYP_EXE
+    // child process spawned by the engine's lazy shim (`__NUB_NODE_GYP_EXE
     // __node-gyp-bootstrap <dir>`, where `current_exe()` is nub) before any other
     // preflight, so the namespace registration has to happen here.
     engine_brand_preflight();

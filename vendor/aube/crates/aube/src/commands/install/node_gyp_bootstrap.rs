@@ -260,31 +260,62 @@ pub async fn print_bootstrapped_binary(project_dir: &Path) -> miette::Result<()>
     Ok(())
 }
 
-/// Token both generated shims carry in place of [`BUCKET`], substituted at write
-/// time. The shims sit in `<tool_root>/lazy-bin`, so the bootstrapped tree is a
-/// `../<BUCKET>` sibling — derived from the shim's own location rather than baked
-/// as an absolute path, so a relocated or re-homed cache still resolves.
-const BUCKET_TOKEN: &str = "__AUBE_NODE_GYP_BUCKET__";
+/// Write-time placeholders the shim templates carry. Deliberately BRAND-FREE:
+/// what they stand in for is chosen by the active embedder, so a token spelled
+/// with one tool's brand would misread as fixed.
+///
+/// [`BUCKET_TOKEN`] stands in for [`BUCKET`] — the shims sit in
+/// `<tool_root>/lazy-bin`, so the bootstrapped tree is a `../<BUCKET>` sibling,
+/// derived from the shim's own location rather than baked as an absolute path, so
+/// a relocated or re-homed cache still resolves.
+///
+/// The `*_VAR` tokens stand in for the cross-process plumbing var NAMES, composed
+/// through the embedder's `internal_env_prefix` (`AUBE_NODE_GYP_EXE` standalone,
+/// `__NUB_NODE_GYP_EXE` under nub). The brand is load-bearing here rather than
+/// cosmetic: an embedding host's build-jail env policy withholds these BY NAME, so
+/// the engine's brand must not be the spelling that policy reasons about.
+const BUCKET_TOKEN: &str = "__NODE_GYP_BUCKET__";
+const EXE_VAR_TOKEN: &str = "__NODE_GYP_EXE_VAR__";
+const PROJECT_DIR_VAR_TOKEN: &str = "__NODE_GYP_PROJECT_DIR_VAR__";
+const SHIM_DEPTH_VAR_TOKEN: &str = "__NODE_GYP_SHIM_DEPTH_VAR__";
+const TOOL_VAR_TOKEN: &str = "__NODE_GYP_TOOL_VAR__";
+const REAL_VAR_TOKEN: &str = "__REAL_NODE_GYP_VAR__";
+
+/// Substitute every write-time placeholder in a shim template. One function so the
+/// three shims cannot drift into substituting different subsets — a missed token
+/// is not a lookup miss, it is a shell/JS syntax error in a file written weeks
+/// before anything runs it.
+fn render_shim(template: &str) -> String {
+    let var = aube_util::env::internal_env_name;
+    template
+        .replace(BUCKET_TOKEN, BUCKET)
+        .replace(EXE_VAR_TOKEN, &var("NODE_GYP_EXE"))
+        .replace(PROJECT_DIR_VAR_TOKEN, &var("NODE_GYP_PROJECT_DIR"))
+        .replace(SHIM_DEPTH_VAR_TOKEN, &var("NODE_GYP_SHIM_DEPTH"))
+        .replace(TOOL_VAR_TOKEN, &var("NODE_GYP_TOOL"))
+        .replace(REAL_VAR_TOKEN, &var("REAL_NODE_GYP"))
+}
 
 fn write_lazy_shims(shim_dir: &Path) -> miette::Result<()> {
     // Resolution order is the same in both shims and in the same priority:
     // bootstrapped tree, then the PM trampoline. A bare `node-gyp` PATH lookup is
     // NOT an option here — this file is itself on `PATH`, so the lookup resolves
     // straight back into it.
-    let sh = r#"#!/usr/bin/env sh
+    let sh = render_shim(
+        r#"#!/usr/bin/env sh
 set -eu
-tool="$(dirname "$0")/../__AUBE_NODE_GYP_BUCKET__/node_modules"
+tool="$(dirname "$0")/../__NODE_GYP_BUCKET__/node_modules"
 if [ -f "$tool/node-gyp/package.json" ] && [ -x "$tool/.bin/node-gyp" ]; then
   exec "$tool/.bin/node-gyp" "$@"
 fi
-if [ -z "${AUBE_NODE_GYP_EXE:-}" ]; then
+if [ -z "${__NODE_GYP_EXE_VAR__:-}" ]; then
   echo "aube: no bootstrapped node-gyp under $tool and no bootstrap entry point" >&2
   exit 1
 fi
-real="$("$AUBE_NODE_GYP_EXE" __node-gyp-bootstrap "${AUBE_NODE_GYP_PROJECT_DIR:-$PWD}")"
+real="$("$__NODE_GYP_EXE_VAR__" __node-gyp-bootstrap "${__NODE_GYP_PROJECT_DIR_VAR__:-$PWD}")"
 exec "$real" "$@"
-"#
-    .replace(BUCKET_TOKEN, BUCKET);
+"#,
+    );
     let sh_path = shim_dir.join("node-gyp");
     aube_util::fs_atomic::atomic_write(&sh_path, sh.as_bytes()).into_diagnostic()?;
     #[cfg(unix)]
@@ -304,7 +335,8 @@ exec "$real" "$@"
     // shim is lazy rather than terminal, so it must reach a terminal target by a
     // route npm cannot redirect — which rules out resolving by NAME, since `PATH`
     // is exactly what npm's run-script rewrites. See the cycle note below.
-    let js = r#"#!/usr/bin/env node
+    let js = render_shim(
+        r#"#!/usr/bin/env node
 "use strict";
 // aube lazy node-gyp stand-in for npm_config_node_gyp. Resolves (and
 // bootstraps on first use) aube's node-gyp, then forwards argv. Kept
@@ -323,7 +355,7 @@ const isWin = process.platform === "win32";
 // `.bin` entry outlives a global-store purge that takes its target with it, so a
 // bin-only hit would exec straight into `Cannot find module`.
 function bootstrapped() {
-  const tool = join(__dirname, "..", "__AUBE_NODE_GYP_BUCKET__", "node_modules");
+  const tool = join(__dirname, "..", "__NODE_GYP_BUCKET__", "node_modules");
   if (!existsSync(join(tool, "node-gyp", "package.json"))) return null;
   for (const name of isWin ? ["node-gyp.cmd", "node-gyp"] : ["node-gyp"]) {
     const p = join(tool, ".bin", name);
@@ -333,9 +365,9 @@ function bootstrapped() {
 }
 
 let real = bootstrapped();
-if (!real && process.env.AUBE_NODE_GYP_EXE) {
-  const dir = process.env.AUBE_NODE_GYP_PROJECT_DIR || process.cwd();
-  real = execFileSync(process.env.AUBE_NODE_GYP_EXE, ["__node-gyp-bootstrap", dir], {
+if (!real && process.env.__NODE_GYP_EXE_VAR__) {
+  const dir = process.env.__NODE_GYP_PROJECT_DIR_VAR__ || process.cwd();
+  real = execFileSync(process.env.__NODE_GYP_EXE_VAR__, ["__node-gyp-bootstrap", dir], {
     encoding: "utf8",
   }).trim();
 } else if (!real) {
@@ -348,7 +380,7 @@ if (!real && process.env.AUBE_NODE_GYP_EXE) {
   // not self-limiting (measured under nub's build jail: ~1500 processes, 15 GB, load
   // ~1). Bound the RE-ENTRY, not any single build's nesting: a genuine nested native
   // build is a couple of hops deep, a cycle is unbounded.
-  const depth = Number(process.env.AUBE_NODE_GYP_SHIM_DEPTH || 0) + 1;
+  const depth = Number(process.env.__NODE_GYP_SHIM_DEPTH_VAR__ || 0) + 1;
   if (depth > 3) {
     console.error(
       "aube: node-gyp shim re-entered " + depth + " times without reaching a real " +
@@ -356,7 +388,7 @@ if (!real && process.env.AUBE_NODE_GYP_EXE) {
     );
     process.exit(1);
   }
-  process.env.AUBE_NODE_GYP_SHIM_DEPTH = String(depth);
+  process.env.__NODE_GYP_SHIM_DEPTH_VAR__ = String(depth);
   real = isWin ? "node-gyp.cmd" : "node-gyp";
 }
 const result = spawnSync(real, process.argv.slice(2), { stdio: "inherit", shell: isWin });
@@ -365,8 +397,8 @@ if (result.error) {
   process.exit(1);
 }
 process.exit(result.status === null ? 1 : result.status);
-"#
-    .replace(BUCKET_TOKEN, BUCKET);
+"#,
+    );
     let js_path = shim_dir.join("node-gyp.js");
     aube_util::fs_atomic::atomic_write(&js_path, js.as_bytes()).into_diagnostic()?;
     #[cfg(unix)]
@@ -378,17 +410,18 @@ process.exit(result.status === null ? 1 : result.status);
 
     #[cfg(windows)]
     {
-        let cmd = r#"@echo off
-set "AUBE_NODE_GYP_TOOL=%~dp0..\__AUBE_NODE_GYP_BUCKET__\node_modules"
-if exist "%AUBE_NODE_GYP_TOOL%\node-gyp\package.json" if exist "%AUBE_NODE_GYP_TOOL%\.bin\node-gyp.cmd" (
-  "%AUBE_NODE_GYP_TOOL%\.bin\node-gyp.cmd" %*
+        let cmd = render_shim(
+            r#"@echo off
+set "__NODE_GYP_TOOL_VAR__=%~dp0..\__NODE_GYP_BUCKET__\node_modules"
+if exist "%__NODE_GYP_TOOL_VAR__%\node-gyp\package.json" if exist "%__NODE_GYP_TOOL_VAR__%\.bin\node-gyp.cmd" (
+  "%__NODE_GYP_TOOL_VAR__%\.bin\node-gyp.cmd" %*
   exit /b %ERRORLEVEL%
 )
-for /f "usebackq delims=" %%i in (`"%AUBE_NODE_GYP_EXE%" __node-gyp-bootstrap "%AUBE_NODE_GYP_PROJECT_DIR%"`) do set "AUBE_REAL_NODE_GYP=%%i"
-if not defined AUBE_REAL_NODE_GYP exit /b 1
-"%AUBE_REAL_NODE_GYP%" %*
-"#
-        .replace(BUCKET_TOKEN, BUCKET);
+for /f "usebackq delims=" %%i in (`"%__NODE_GYP_EXE_VAR__%" __node-gyp-bootstrap "%__NODE_GYP_PROJECT_DIR_VAR__%"`) do set "__REAL_NODE_GYP_VAR__=%%i"
+if not defined __REAL_NODE_GYP_VAR__ exit /b 1
+"%__REAL_NODE_GYP_VAR__%" %*
+"#,
+        );
         aube_util::fs_atomic::atomic_write(&shim_dir.join("node-gyp.cmd"), cmd.as_bytes())
             .into_diagnostic()?;
     }
@@ -589,6 +622,41 @@ mod tests {
         assert!(tool_tree_usable(&tool_dir, &bin_dir));
     }
 
+    /// Every write-time placeholder is substituted, and the plumbing vars are
+    /// spelled with the ACTIVE embedder's `internal_env_prefix` rather than a
+    /// hardcoded brand — the property the build jail's withhold policy depends on,
+    /// since it scrubs those vars by name.
+    ///
+    /// Asserting "no `__…__` token survives" rather than listing the expected
+    /// substitutions is the point: a token that goes unreplaced is not a lookup
+    /// miss the shim recovers from, it is a shell/JS syntax error in a file
+    /// written weeks before anything executes it, so the failure has no line back
+    /// to `render_shim`. This catches a template that grows a placeholder the
+    /// renderer does not know.
+    #[test]
+    fn generated_shims_leave_no_unsubstituted_placeholder() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_lazy_shims(tmp.path()).expect("write shims");
+
+        let exe_var = aube_util::env::internal_env_name("NODE_GYP_EXE");
+        let names: &[&str] = if cfg!(windows) {
+            &["node-gyp", "node-gyp.js", "node-gyp.cmd"]
+        } else {
+            &["node-gyp", "node-gyp.js"]
+        };
+        for name in names {
+            let body = std::fs::read_to_string(tmp.path().join(name)).expect("read shim");
+            assert!(
+                !body.contains("__NODE_GYP") && !body.contains("__REAL_NODE_GYP"),
+                "{name} still carries an unsubstituted placeholder:\n{body}"
+            );
+            assert!(
+                body.contains(&exe_var),
+                "{name} must name the trampoline var as {exe_var}"
+            );
+        }
+    }
+
     /// Stage the real generated `node-gyp.js` plus a `node-gyp` on PATH that
     /// tallies each invocation, and return `(shim, bin_dir, tally)`. `body` is
     /// the tallying shim's payload after it records itself.
@@ -662,9 +730,12 @@ mod tests {
         let mut cmd = std::process::Command::new("node");
         cmd.arg(shim)
             .arg("rebuild")
-            // No AUBE_NODE_GYP_EXE: this is the bare-PATH fallback branch.
-            .env_remove("AUBE_NODE_GYP_EXE")
-            .env_remove("AUBE_NODE_GYP_SHIM_DEPTH")
+            // No trampoline entry point: this is the bare-PATH fallback branch.
+            // Named through the embedder so the removal tracks whatever brand the
+            // shim was RENDERED with — a hardcoded spelling would silently stop
+            // clearing the var under a host profile and leave the branch untested.
+            .env_remove(aube_util::env::internal_env_name("NODE_GYP_EXE"))
+            .env_remove(aube_util::env::internal_env_name("NODE_GYP_SHIM_DEPTH"))
             // `bin_dir` FIRST so a bare `node-gyp` hits the staged stub, but the
             // ambient PATH must stay reachable or the stub cannot find `node`.
             .env(

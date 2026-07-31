@@ -137,6 +137,28 @@ pub struct Embedder {
     /// the general toggle family (`env_prefix = None`) can still opt the
     /// diagnostics layer in by setting this to its own brand.
     pub diag_env_prefix: Option<&'static str>,
+    /// Env-var prefix for the tool's *cross-process plumbing* — the vars the tool
+    /// STAMPS on its own children and its own generated shims read back on the far
+    /// side of an exec (`{prefix}_NODE_GYP_EXE`, `{prefix}_NODE_GYP_PROJECT_DIR`,
+    /// `{prefix}_NODE_GYP_SHIM_DEPTH`), composed through
+    /// [`internal_env_name`](crate::env::internal_env_name).
+    ///
+    /// Not an `Option`, unlike the three prefixes above, because this family is
+    /// never a *config surface*: the tool owns both ends: it writes the var and it
+    /// reads it back. `None` would not close a surface, it would sever the
+    /// plumbing. What the prefix decides is only whose brand the mechanism wears.
+    ///
+    /// That matters because an embedding host reasons about these names in its own
+    /// policy: nub's build jail withholds the node-gyp trampoline vars BY NAME, so
+    /// an `AUBE_*` spelling would make the engine's brand load-bearing inside the
+    /// host's security decisions (AGENTS.md: "the embedded engine's brand is never
+    /// nub's config surface"). Standalone aube: `"AUBE"`; nub: `"__NUB"` — the
+    /// double underscore marking it as nub-internal plumbing rather than a knob.
+    ///
+    /// Must be a valid env-var identifier: it is substituted VERBATIM into the
+    /// generated POSIX/cmd node-gyp shims, where an invalid name is a shell syntax
+    /// error rather than a lookup miss. Checked in [`set_embedder`].
+    pub internal_env_prefix: &'static str,
     /// Leaf directory name under the OS cache root, e.g. `"aube"` →
     /// `<XDG_CACHE_HOME>/aube`.
     pub cache_namespace: &'static str,
@@ -443,6 +465,7 @@ pub const AUBE: Embedder = Embedder {
     // Defaults to `env_prefix` so the `AUBE_DIAG_*` / `AUBE_BENCH_PHASES_FILE`
     // surface is byte-for-byte unchanged for standalone aube.
     diag_env_prefix: Some("AUBE"),
+    internal_env_prefix: "AUBE",
     cache_namespace: "aube",
     data_namespace: "aube",
     virtual_store_subdir: "virtual-store",
@@ -532,7 +555,27 @@ pub fn set_embedder(embedder: &'static Embedder) {
             "embedder lockfile_legacy_basenames entry {legacy:?} aliases a foreign package manager's lockfile",
         );
     }
+    // The plumbing prefix is substituted verbatim into generated shell/cmd shims,
+    // so an invalid identifier is a SYNTAX error in a script written weeks earlier
+    // — a failure with no useful line back to here. Catch it at registration.
+    debug_assert!(
+        is_env_identifier(embedder.internal_env_prefix),
+        "embedder internal_env_prefix {:?} must be a valid env-var identifier; it is \
+         substituted verbatim into the generated node-gyp shims",
+        embedder.internal_env_prefix,
+    );
     let _ = ACTIVE.set(embedder);
+}
+
+/// Is `s` usable as the leading segment of an environment-variable name in a
+/// POSIX shell, `cmd.exe`, and a JS property access alike — i.e. non-empty,
+/// `[A-Za-z_][A-Za-z0-9_]*`?
+fn is_env_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Foreign package-manager lockfile names an embedder's `lockfile_basename`
@@ -658,6 +701,7 @@ mod tests {
         assert_eq!(id.env_prefix, Some("AUBE"));
         assert_eq!(id.config_env_prefix, Some("AUBE"));
         assert_eq!(id.diag_env_prefix, Some("AUBE"));
+        assert_eq!(id.internal_env_prefix, "AUBE");
         assert_eq!(id.cache_namespace, "aube");
         assert_eq!(id.data_namespace, "aube");
         assert_eq!(id.virtual_store_subdir, "virtual-store");

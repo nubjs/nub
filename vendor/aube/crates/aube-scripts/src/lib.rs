@@ -803,7 +803,7 @@ fn apply_script_settings_env(cmd: &mut tokio::process::Command, settings: &Scrip
     // Tools (and pnpm's own `$npm_execpath run …` postinstalls) read it
     // to re-invoke the *same* PM. `current_exe()` is the aube binary;
     // ignore the rare resolution failure rather than abort the script.
-    // Reused below for `AUBE_NODE_GYP_EXE` (same binary), so resolve once.
+    // Reused below for the node-gyp trampoline var (same binary), so resolve once.
     let aube_exe = std::env::current_exe().ok();
     if let Some(exe) = aube_exe.as_deref() {
         cmd.env("npm_execpath", exe);
@@ -831,17 +831,20 @@ fn apply_script_settings_env(cmd: &mut tokio::process::Command, settings: &Scrip
     // `npm_config_node_gyp`: path to a runnable node-gyp. npm/pnpm bundle
     // node-gyp and point this at its `bin/node-gyp.js`; aube hands out a
     // lazy shim that resolves the bootstrapped node-gyp on first use. The
-    // shim trampolines back into aube via `AUBE_NODE_GYP_EXE`, so always
-    // stamp the running aube — it must be a real aube that implements
+    // shim trampolines back into the PM via `{internal_env_prefix}_NODE_GYP_EXE`,
+    // so always stamp the running binary — it must be one that implements
     // `__node-gyp-bootstrap`, never an inherited/user-set value (which
-    // could be stale or wrong). `aube run` stamps the same value at its
-    // own spawn site; keeping both unconditional holds the two paths in
-    // lockstep. `AUBE_NODE_GYP_PROJECT_DIR` is optional — the shim falls
-    // back to the script's cwd.
+    // could be stale or wrong). `run` stamps the same value at its own
+    // spawn site; keeping both unconditional holds the two paths in
+    // lockstep. The var name follows the embedder rather than the engine's
+    // brand: a host's build jail withholds it BY NAME, and the shim was
+    // rendered with the same prefix, so both ends must be composed the same way.
+    // `…_NODE_GYP_PROJECT_DIR` is optional — the shim falls back to the
+    // script's cwd.
     if let Some(node_gyp_js) = settings.node_gyp_js.as_deref() {
         cmd.env("npm_config_node_gyp", node_gyp_js);
         if let Some(exe) = aube_exe.as_deref() {
-            cmd.env("AUBE_NODE_GYP_EXE", exe);
+            cmd.env(aube_util::env::internal_env_name("NODE_GYP_EXE"), exe);
         }
     }
     if let Some(node_options) = settings.node_options.as_deref() {

@@ -1156,11 +1156,18 @@ async fn build_script_command(
     command
         .env("PATH", &new_path)
         .current_dir(cwd)
+        // Composed through the embedder, not hardcoded: the lazy node-gyp shim was
+        // RENDERED with the same prefix, and a host's build jail withholds these by
+        // name — so a fixed spelling would put the engine's brand inside the host's
+        // env policy and desync the two ends of the trampoline.
         .env(
-            "AUBE_NODE_GYP_EXE",
+            aube_util::env::internal_env_name("NODE_GYP_EXE"),
             std::env::current_exe().into_diagnostic()?,
         )
-        .env("AUBE_NODE_GYP_PROJECT_DIR", node_gyp_project_dir)
+        .env(
+            aube_util::env::internal_env_name("NODE_GYP_PROJECT_DIR"),
+            node_gyp_project_dir,
+        )
         .env("npm_lifecycle_event", script)
         // `npm_command` is "run-script" for every script-running command
         // (run/test/start/stop/restart). `spawn_shell` already stamped it

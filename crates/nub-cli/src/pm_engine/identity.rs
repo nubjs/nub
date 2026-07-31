@@ -75,6 +75,22 @@
 ///   knobs here lets nub reach the diagnostics layer without also exposing
 ///   aube's ~30 unrelated internal `AUBE_*` toggles under `NUB_*`. The `AUBE_*`
 ///   forms are never read under nub.
+/// - `internal_env_prefix` = `"__NUB"` — the cross-process plumbing family nub
+///   STAMPS on its own children and its own generated shims read back:
+///   `__NUB_NODE_GYP_EXE`, `__NUB_NODE_GYP_PROJECT_DIR`,
+///   `__NUB_NODE_GYP_SHIM_DEPTH`. Not a knob and not documented as one — the
+///   `__NUB_*` spelling marks it as mechanism, matching `__NUB_VALIDATE_RESOURCE_BUNDLE`
+///   and the other internal sentinels AGENTS.md exempts. Unlike the three
+///   prefixes above this one is not optional: nub owns both ends of the exec, so
+///   `None` would sever the trampoline rather than close a surface.
+///
+///   The reason it is a PROFILE field and not a literal at each stamp site: nub's
+///   build jail withholds these vars BY NAME from a dependency's lifecycle env, so
+///   under the old `AUBE_*` spelling the engine's brand was load-bearing inside
+///   nub's own sandbox policy — the sharpest form of the boundary violation. One
+///   composition point now keeps the stamp, the shim's rendering, and the jail's
+///   withhold list on a single spelling; they cannot drift apart into a shim that
+///   silently never finds its trampoline.
 /// - `cache_namespace` = `"nub/pm"` — engine cache lands at
 ///   `$XDG_CACHE_HOME/nub/pm` (a `/pm` sibling of nub's own runtime caches
 ///   under `$XDG_CACHE_HOME/nub/`), reproducing the old
@@ -168,6 +184,11 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     // family that `env_prefix: None` shuts off. Off by default — zero hot-path
     // cost when unset.
     diag_env_prefix: Some("NUB"),
+    // Cross-process plumbing only (`__NUB_NODE_GYP_EXE`, …) — nub stamps these on
+    // its children and its own shims read them back. Never `AUBE_*`: nub's build
+    // jail withholds them by name, so the engine's brand would otherwise sit inside
+    // nub's sandbox policy.
+    internal_env_prefix: "__NUB",
     cache_namespace: "nub/pm",
     data_namespace: "nub",
     // Machine-global store named `store` (→ `~/.cache/nub/pm/store/`). It is the
@@ -283,6 +304,9 @@ const _: () = {
     assert!(NUB.env_prefix.is_none());
     assert!(matches!(NUB.config_env_prefix, Some(p) if matches!(p.as_bytes(), b"NUB")));
     assert!(matches!(NUB.diag_env_prefix, Some(p) if matches!(p.as_bytes(), b"NUB")));
+    // The build jail's withheld-env test pins the same spelling from the other
+    // side; both must move together or the trampoline vars stop being scrubbed.
+    assert!(matches!(NUB.internal_env_prefix.as_bytes(), b"__NUB"));
     assert!(NUB.vendor.is_some());
     assert!(!NUB.self_engines_check);
     assert!(!NUB.canonical_lockfile_always_wins);

@@ -443,7 +443,7 @@ const BUILD_JAIL_EXTRA_PREFIXES: &[&str] = &["npm_package_", "npm_lifecycle_"];
 /// [`baseline_allows`]; of those, only PATH/HOME/TMPDIR were EMPIRICALLY load-bearing
 /// for a from-source node-gyp compile (HOME anchors the header cache on a clean host).
 ///
-/// `AUBE_NODE_GYP_EXE` is DELIBERATELY absent. The engine stamps it so its lazy
+/// `__NUB_NODE_GYP_EXE` is DELIBERATELY absent. The engine stamps it so its lazy
 /// `npm_config_node_gyp` shim can trampoline back through the PM binary
 /// (`<exe> __node-gyp-bootstrap <dir>`), but that trampoline is neither needed nor safe
 /// here: the engine bootstraps the real node-gyp OUTSIDE the jail and prepends its
@@ -1873,21 +1873,28 @@ mod tests {
         }
     }
 
-    /// `AUBE_NODE_GYP_EXE` stays WITHHELD, and that is what keeps offline compiles working
+    /// `__NUB_NODE_GYP_EXE` stays WITHHELD, and that is what keeps offline compiles working
     /// — see [`BUILD_JAIL_EXTRA_EXACT`]. The engine's `npm_config_node_gyp` shim only
     /// trampolines back through the PM binary when this var is present; withheld, it falls
     /// back to `node-gyp` on the lifecycle PATH, which the jail does grant. Admitting it
     /// without a matching read grant for the PM binary would turn a working fallback into
     /// an exec of an ungranted path, so this assertion is a tripwire on that pairing, not
     /// incidental coverage of the default-deny shape.
+    ///
+    /// The names are nub's own (`__NUB_*`, from the embedder profile's
+    /// `internal_env_prefix`), NOT the engine's `AUBE_*`: the jail reasons about them by
+    /// name, and the embedded engine's brand is never nub's env surface. This crate has
+    /// no aube dependency by design, so the spelling is duplicated here rather than
+    /// imported — the profile's compile-time assertion in `pm_engine::identity` pins the
+    /// other side.
     #[test]
     fn build_jail_withholds_the_node_gyp_trampoline_exe() {
         let ambient = ambient(&[
-            ("AUBE_NODE_GYP_EXE", "/usr/local/bin/nub"),
-            ("AUBE_NODE_GYP_PROJECT_DIR", "/proj"),
+            ("__NUB_NODE_GYP_EXE", "/usr/local/bin/nub"),
+            ("__NUB_NODE_GYP_PROJECT_DIR", "/proj"),
         ]);
         let p = lifecycle_scrubbed_env(&ambient);
-        for withheld in ["AUBE_NODE_GYP_EXE", "AUBE_NODE_GYP_PROJECT_DIR"] {
+        for withheld in ["__NUB_NODE_GYP_EXE", "__NUB_NODE_GYP_PROJECT_DIR"] {
             assert!(
                 !p.constructed.contains_key(withheld),
                 "{withheld} must stay withheld unless the PM binary is read-granted too"

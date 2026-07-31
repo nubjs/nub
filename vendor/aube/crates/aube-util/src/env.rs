@@ -147,6 +147,23 @@ pub fn diag_env(suffix: &str) -> Option<std::ffi::OsString> {
     std::env::var_os(format!("{prefix}_{suffix}"))
 }
 
+/// Compose the NAME of a cross-process plumbing var through the active
+/// embedder's
+/// [`internal_env_prefix`](crate::identity::Embedder::internal_env_prefix) —
+/// `internal_env_name("NODE_GYP_EXE")` is `AUBE_NODE_GYP_EXE` for standalone
+/// aube and `__NUB_NODE_GYP_EXE` under nub.
+///
+/// A *name* rather than a read, because both ends of this family are ours: the
+/// tool stamps the var on a child, and its own generated shim reads it back on
+/// the far side of an exec (see `node_gyp_bootstrap`). Distinct from the three
+/// read helpers above — those gate what the tool consumes from a USER's
+/// environment and are optional so a host can hide a surface; this one always
+/// resolves, since hiding it would sever the plumbing rather than close a
+/// surface.
+pub fn internal_env_name(suffix: &str) -> String {
+    format!("{}_{suffix}", embedder().internal_env_prefix)
+}
+
 /// Parse a primer-TTL env value into an *override* of the embedder's default.
 ///
 /// Returns:
@@ -426,6 +443,9 @@ mod tests {
                 Some(std::ffi::OsStr::new("/tmp/p.json")),
             );
         });
+        // The plumbing family composes the same way, and unlike the three above it
+        // has no `None` branch to hide it — only a different brand.
+        assert_eq!(internal_env_name("NODE_GYP_EXE"), "AUBE_NODE_GYP_EXE");
     }
 
     /// `parse_primer_ttl` distinguishes the three outcomes the gate needs:

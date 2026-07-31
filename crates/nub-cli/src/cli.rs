@@ -4950,17 +4950,30 @@ fn build_script_command(
     // (their bundled `node-gyp/bin/node-gyp.js`) so a script's `node
     // $npm_config_node_gyp …` resolves without a global node-gyp install. nub
     // hands out the engine's lazy `node-gyp.js` shim, which trampolines back
-    // into nub via `AUBE_NODE_GYP_EXE` (handled by `__node-gyp-bootstrap`) to
+    // into nub via `__NUB_NODE_GYP_EXE` (handled by `__node-gyp-bootstrap`) to
     // bootstrap the real node-gyp on first use. Mirrors what the engine's
     // lifecycle path stamps (`aube-scripts::apply_script_settings_env`) so the
     // run and lifecycle paths agree. Set before the `npm_env` loop so a
-    // user-set value still wins; the bootstrap markers are nub-internal env
-    // (brand-exempt) and only meaningful to the shim. Failure to write the
-    // (cheap) shim degrades to leaving the var unset — same as a plain Node.
+    // user-set value still wins; the bootstrap markers are nub-internal
+    // cross-process plumbing (brand-exempt as `__NUB_*`) and only meaningful to
+    // the shim. Failure to write the (cheap) shim degrades to leaving the var
+    // unset — same as a plain Node.
+    //
+    // Composed through `internal_env_name` rather than written literally: it is
+    // the one call that keeps this stamp, the shim's own rendering, and the build
+    // jail's withhold policy on a single spelling. The names are `__NUB_*` and
+    // never `AUBE_*` — the embedded engine's brand is never nub's env surface,
+    // least of all inside nub's sandbox decisions (AGENTS.md, brand boundary).
     if let Ok(node_gyp_js) = aube::commands::install::node_gyp_bootstrap::lazy_js_shim_path() {
         command.env("npm_config_node_gyp", node_gyp_js);
-        command.env("AUBE_NODE_GYP_EXE", &nub_binary);
-        command.env("AUBE_NODE_GYP_PROJECT_DIR", &project.root);
+        command.env(
+            aube_util::env::internal_env_name("NODE_GYP_EXE"),
+            &nub_binary,
+        );
+        command.env(
+            aube_util::env::internal_env_name("NODE_GYP_PROJECT_DIR"),
+            &project.root,
+        );
     }
 
     // `npm_config_registry`: pnpm always exports the resolved registry to a
