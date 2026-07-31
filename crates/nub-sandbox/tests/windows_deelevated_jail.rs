@@ -1105,6 +1105,18 @@ mod win {
             }
         }
 
+        // (9) DOES ES-MODULE RESOLUTION SURVIVE THE JAIL — the repair measured against the real
+        //     AppContainer rather than the macOS simulation, which cannot model a native realpath
+        //     refusal. Same dependence on (7) as (8), and for the same reason.
+        match &staged {
+            Some((exe, root)) => esm_resolution(&mut r, &f, exe, root),
+            None => {
+                for prop in ESM_PROPS {
+                    r.record(prop, false, "(no staged interpreter — nothing measured)");
+                }
+            }
+        }
+
         println!(
             "ARM done elevated={} failures={}",
             u8::from(elevated),
@@ -2310,6 +2322,650 @@ flush();
             &format!(
                 "(a difference here is the ONE argument that keeps the ace half; identical \
                  {identical})"
+            ),
+        );
+    }
+
+    // ── does ES-MODULE resolution survive the jail? ───────────────────────────────────
+    //
+    // THE DEFECT. `internal/modules/esm/resolve.js` DESTRUCTURES `realpathSync` at module-load
+    // time on Node 18.19-24.16, 25.x and 26.0 — before any `--import` preload exists — so the
+    // realpath shim `realpath_shim_node_options` stamps never reaches it. CommonJS picks the shim
+    // up (its `toRealPath` reads the property at call time); ESM does not, and every relative or
+    // bare `import` in a lifecycle script dies EPERM at rc=1 with no output. 31 of 354 corpus
+    // packages have an ESM lifecycle entry, so this is not a corner. Upstream's restoration
+    // (nodejs/node#62835) is in 24.17+ and 26.1+ and was NOT backported to v22, the fast-tier
+    // floor, so waiting does not cover us.
+    //
+    // WHY THIS GROUP EXISTS AND WHY IT IS HERE. Every measurement of the repair so far was taken
+    // on macOS against a SIMULATED jail that patches `fs.lstatSync`/`fs.realpathSync` at the JS
+    // layer. That simulation cannot model the AppContainer's NATIVE realpath refusal — the
+    // kernel refusing an ancestor open is a different failure from a JS function throwing — and
+    // it cannot reach a `module.register` loader thread at all. This binary already builds the
+    // two principals, launches a real AppContainer, and stamps the production realpath term, so
+    // it is the only place the repair can be measured rather than modelled.
+    //
+    // THE FIVE THINGS THE GROUP HAS TO PRODUCE, and none of them is "the treatment passed":
+    //
+    //  1. A POSITIVE CONTROL. In a jail with NOTHING repairing the realpath, the ESM entry must
+    //     DIE. If it runs, this runner's Node is outside the affected band and every other cell
+    //     here is inadmissible — a green treatment against a defect that is not reproducing
+    //     measures nothing. That reading is a LOUD failure, not good news, which is why it is a
+    //     gated property rather than a fact.
+    //
+    //     THE CONTROL IS `--preserve-symlinks-main` ALONE, and the spelling is load-bearing in
+    //     both directions. With no flag at all the ENTRY POINT's own `resolveMainPath` dies first
+    //     — that is the ancestor-reachability defect the sibling group owns, and it would confound
+    //     this one by killing the process before the ESM resolver is reached. The main flag alone
+    //     skips exactly that walk and nothing else, so what remains is the ESM resolver's own
+    //     realpath and the arm isolates it. It is also the one control that CANNOT DRIFT: it names
+    //     no nub function, so it keeps measuring the unrepaired defect no matter what lands inside
+    //     the shim.
+    //  2. The TREATMENT running the same entry to completion. The treatment is whatever
+    //     `realpath_shim_node_options` is on the branch under test — the repair replaces its
+    //     internals and keeps its name, so this group does not encode which seam is inside and a
+    //     run's provenance (branch + SHA) is what says which implementation it measured.
+    //  3. A WRONG-VERSION DISCRIMINATOR. Whatever disarms the realpath also moves dependency
+    //     resolution off the store cell, and the resulting answer is a DIFFERENT version of a
+    //     real package with no error at all. A silent wrong answer is worse than the loud
+    //     failure it replaces, so the treatment must report `bar@2.0.0` — the private dep — and
+    //     `bar@1.0.0` means the repair has become the flag and must not ship. Asked in three
+    //     forms because they are three different functions: CJS `require`, ESM `import`, and
+    //     `require.resolve` from inside the cell (which reaches `Module._resolveFilename`, NOT
+    //     the `resolveForCJSWithHooks` a resolve hook sees).
+    //  4. A REJECTED-CANDIDATE CONTROL: `--preserve-symlinks`, which clears the EPERM by stopping
+    //     the resolver calling realpath at all, must answer `bar@1.0.0` — the WRONG version, and
+    //     specifically the unrelated top-level one, not merely a different string. This arm is why
+    //     the flag was refused, kept in the record so the refusal stays evidenced rather than
+    //     remembered; it doubles as the proof that the discriminator CAN produce a wrong answer,
+    //     and a fixture that cannot produce one cannot detect one.
+    //  5. AN ANTI-HOLLOW GATE. Two rounds of Windows conclusions on this project were retracted
+    //     because they were measured on launches reproducing none of nub's repairs. A stamped
+    //     `NODE_OPTIONS` is not evidence that Node saw it, so the confined child reports its own
+    //     state — see [`EsmCells::probe`] for what it reports and why an observable rather than a
+    //     name is what the gate keys on.
+    //
+    // AND TWO SURFACES A NAIVE REPAIR REGRESSES SILENTLY. `fs.realpathSync.native` and
+    // `fs.promises.realpath` do not reach the same binding entry point the resolver's own walk
+    // does, so a wrapper installed on one leaves the others refused — and a lifecycle script that
+    // calls either gets an EPERM the resolver cells would never have shown. They are measured
+    // separately for that reason.
+    //
+    // NOT COVERED, deliberately: the `module.register` loader thread. It is a real worker with its
+    // own realm and no `--import` preload reaches it on 18.19 through 26.5, so a repair delivered
+    // that way cannot serve it. That is an accepted residual rather than a gap in this probe —
+    // 0 of 354 corpus packages register an ESM loader during a lifecycle script.
+
+    /// Every property this group reports, so the parent can require the SAME set from both
+    /// principals and a silently-vanished cell reads as missing rather than as a pass.
+    const ESM_PROPS: &[&str] = &[
+        "esm-gate-shim-installed-in-the-shipping-arm",
+        "esm-gate-unrepaired-control-leaves-the-shim-absent",
+        "esm-control-unrepaired-jail-leaves-the-esm-entry-dead",
+        "esm-control-unrepaired-jail-leaves-the-cjs-require-dead",
+        "esm-shipping-esm-entry-completes-relative-and-bare-imports",
+        "esm-shipping-cjs-require-binds-the-private-version",
+        "esm-shipping-esm-import-binds-the-private-version",
+        "esm-shipping-require-resolve-returns-the-store-cell-path",
+        "esm-shipping-fs-realpathsync-native-survives-the-jail",
+        "esm-shipping-fs-promises-realpath-survives-the-jail",
+        "esm-control-preserve-symlinks-binds-the-wrong-version",
+    ];
+
+    /// The interpreter that will actually run the cells, read by RUNNING it rather than by
+    /// trusting the workflow's `setup-node` pin — the arms launch the STAGED copy, and the band
+    /// the defect lives in is a version fact, so a probe reporting a version it did not measure is
+    /// how an inadmissible run gets read as a green one.
+    /// Whether `version` is one where `esm/resolve.js` still captures `realpathSync` at module
+    /// load, i.e. where the unrepaired positive control below can actually die. nodejs/node#62835
+    /// restored the late property read on 24.17+ and 26.1+ and was NOT backported to v22 or v20,
+    /// so the band is everything below 24.17 plus 25.x plus 26.0. Reported rather than enforced:
+    /// a runner image that moves outside it makes the group inadmissible, and the point is that
+    /// the log should say WHY rather than leave a reader to infer it from a control that no
+    /// longer fires.
+    fn esm_defect_band(version: &str) -> bool {
+        let parts: Vec<u32> = version
+            .trim_start_matches('v')
+            .split('.')
+            .filter_map(|p| p.parse().ok())
+            .collect();
+        match parts.as_slice() {
+            [major, minor, ..] => match (*major, *minor) {
+                (0..=23, _) => true,
+                (24, m) => m < 17,
+                (25, _) => true,
+                (26, m) => m < 1,
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn interpreter_version(exe: &Path) -> String {
+        std::process::Command::new(exe)
+            .arg("--version")
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    }
+
+    /// One arm's readings. The verdict cells carry the CHILD'S OWN LINE rather than a boolean,
+    /// because for the discriminator the interesting thing is not whether it answered but WHICH
+    /// version answered — a boolean would collapse `bar@1.0.0` and a crash into the same cell.
+    struct EsmCells {
+        probe: EsmProbe,
+        /// The ESM lifecycle entry: a relative import AND a bare import, from the store cell.
+        /// Empty ⇒ it never reached its own write, which is the defect's shape.
+        esm_entry: String,
+        /// `require('bar').v` plus `require.resolve('bar')`, from inside the store cell.
+        cjs_entry: String,
+        /// The wrong-version discriminator, reached THROUGH the top-level link — CJS then ESM.
+        disc_cjs: String,
+        disc_esm: String,
+    }
+
+    /// What the confined child reported ABOUT ITSELF, which is the whole anti-hollow contract:
+    /// every field is something the child observed from inside the jail, never something the
+    /// harness inferred from an exit code or from having stamped a string.
+    struct EsmProbe {
+        /// The shim's own `globalThis` sentinel. Necessary but NOT sufficient — it says the
+        /// preload ran, not that it repaired anything.
+        shim: bool,
+        /// `require.resolve` of the LINK spelling of a store-cell file: did the resolver hand
+        /// back the REAL path?
+        ///
+        /// THIS IS THE GATE, and it is deliberately an OBSERVABLE rather than a name. Whether a
+        /// repair publishes a sentinel of its own is a property of the repair, so keying the
+        /// group on one would make it silently unfalsifiable the moment the internals are
+        /// replaced — which is exactly what happened to this design mid-flight. Asking the
+        /// resolver what it returns works against any implementation.
+        resolver_real: bool,
+        /// `fs.realpathSync.native` and `fs.promises.realpath`, verbatim: a path, or
+        /// `threw:<code>`. Reported as strings because "which error" is the finding when they
+        /// fail, and separately from each other because they are separate binding entry points.
+        realpath_native: String,
+        realpath_promise: String,
+        version: String,
+    }
+
+    impl EsmCells {
+        fn detail(&self) -> String {
+            let p = &self.probe;
+            format!(
+                "(node {} | shim {} resolver-real {} native {:?} promise {:?} | esm {:?} cjs {:?} \
+                 disc-cjs {:?} disc-esm {:?})",
+                p.version,
+                p.shim,
+                p.resolver_real,
+                p.realpath_native,
+                p.realpath_promise,
+                self.esm_entry,
+                self.cjs_entry,
+                self.disc_cjs,
+                self.disc_esm
+            )
+        }
+    }
+
+    /// `foo`'s PRIVATE dependency is `bar@2.0.0`, wired as a junction inside its own store cell;
+    /// an unrelated `bar@1.0.0` sits at the fixture's top level, which is where a link-path walk
+    /// lands. That is nub's default `Isolated` layout (`aube-linker/src/lib.rs`) and the shape
+    /// `preserve_symlinks_isolated_layout` measures off-Windows — reproduced here because the
+    /// question this group asks is whether the answer survives the REAL jail, and that file's
+    /// fixture needs none.
+    ///
+    /// Junctions rather than symlinks: `mklink /J` needs no privilege, so the fixture is buildable
+    /// by the de-elevated arm — which is the only arm whose reading means anything.
+    fn build_esm_fixture(dir: &Path) -> PathBuf {
+        let store = dir.join("node_modules").join(".aube");
+        for (cell, version) in [("bar@2.0.0", "2.0.0"), ("bar@1.0.0", "1.0.0")] {
+            let bar = store.join(cell).join("node_modules").join("bar");
+            std::fs::create_dir_all(&bar).expect("bar cell");
+            std::fs::write(
+                bar.join("package.json"),
+                format!("{{\"name\":\"bar\",\"version\":\"{version}\",\"main\":\"index.js\"}}\n"),
+            )
+            .expect("bar manifest");
+            std::fs::write(
+                bar.join("index.js"),
+                format!("module.exports={{v:'{version}'}};\n"),
+            )
+            .expect("bar index");
+        }
+        let foo_dir = store
+            .join("foo@1.0.0")
+            .join("node_modules")
+            .join("foo")
+            .to_path_buf();
+        std::fs::create_dir_all(&foo_dir).expect("foo cell");
+        std::fs::write(
+            foo_dir.join("package.json"),
+            b"{\"name\":\"foo\",\"version\":\"1.0.0\",\"main\":\"index.js\"}\n",
+        )
+        .expect("foo manifest");
+        // No `"type"`, so `.js` is CJS and `.mjs` is ESM in the same package — which is what lets
+        // one fixture answer the CJS and the ESM form of every question.
+        std::fs::write(
+            foo_dir.join("index.js"),
+            b"module.exports={barVersion:require('bar').v};\n",
+        )
+        .expect("foo cjs");
+        std::fs::write(
+            foo_dir.join("index.mjs"),
+            b"import bar from 'bar';\nexport const barVersion = bar.v;\n",
+        )
+        .expect("foo esm");
+        std::fs::write(foo_dir.join("rel.mjs"), b"export const REL = 'ok';\n").expect("foo rel");
+        std::fs::write(dir.join("package.json"), b"{\"name\":\"esm-fixture\"}\n")
+            .expect("fixture manifest");
+
+        for (link, target) in [
+            (
+                store.join("foo@1.0.0").join("node_modules").join("bar"),
+                store.join("bar@2.0.0").join("node_modules").join("bar"),
+            ),
+            (dir.join("node_modules").join("foo"), foo_dir.clone()),
+            (
+                dir.join("node_modules").join("bar"),
+                store.join("bar@1.0.0").join("node_modules").join("bar"),
+            ),
+        ] {
+            // `raw_arg` and the output PRINTED, for the reason the sibling group records: building
+            // the command line through `Command::arg` applies Rust's quoting on the way to a shell
+            // that does not parse it that way, and a silently-uncreated junction fails every cell
+            // INCLUDING the controls — which is the tell that separates a harness defect from a
+            // finding, and is unreadable without the output.
+            let out = std::process::Command::new(comspec_path())
+                .raw_arg(format!(
+                    "/c mklink /J \"{}\" \"{}\"",
+                    link.display(),
+                    target.display()
+                ))
+                .output();
+            match &out {
+                Ok(o) => println!(
+                    "  fact:esm-mklink {} status={:?} err={}",
+                    link.display(),
+                    o.status.code(),
+                    String::from_utf8_lossy(&o.stderr)
+                        .trim()
+                        .replace('\n', " | ")
+                ),
+                Err(e) => println!("  fact:esm-mklink {} spawn-failed={e}", link.display()),
+            }
+            println!(
+                "  fact:esm-link-created {}={}",
+                link.display(),
+                link.is_dir()
+            );
+        }
+        foo_dir
+    }
+
+    /// The per-arm entry points. Rewritten per arm rather than shared, because every marker path
+    /// is baked in as an absolute LITERAL: the jail resolves the child's whole environment, so a
+    /// marker arriving through an env var would make a control vacuous.
+    fn write_esm_entries(dir: &Path, cell: &Path, tag: &str) {
+        let m = |name: &str| js_literal(&dir.join(format!("{tag}.{name}")));
+        // The ESM lifecycle entry, and both import forms are load-bearing: the RELATIVE one is
+        // `finalizeResolution`'s realpath and the BARE one is `packageResolve`'s, which are
+        // different call sites in the resolver. A static import that throws writes nothing, so an
+        // empty marker is the defect's own signature and the reason the sink is read for the cause.
+        std::fs::write(
+            cell.join("esm.mjs"),
+            format!(
+                "import {{ REL }} from './rel.mjs';\n\
+                 import bar from 'bar';\n\
+                 import fs from 'node:fs';\n\
+                 fs.writeFileSync({m}, `rel=${{REL}} bar@${{bar.v}}`);\n",
+                m = m("esm")
+            ),
+        )
+        .expect("esm entry");
+        // `require.resolve` is asked HERE rather than folded into the discriminator because it
+        // reaches `Module._resolveFilename` — a different function from the one a resolve hook
+        // sees, and the seam a hook-only repair was measured missing.
+        std::fs::write(
+            cell.join("cjs.js"),
+            format!(
+                "const fs = require('fs');\n\
+                 fs.writeFileSync({m}, 'bar@' + require('bar').v + ' resolve=' + \
+                 require.resolve('bar'));\n",
+                m = m("cjs")
+            ),
+        )
+        .expect("cjs entry");
+        // The discriminator entries sit at the fixture ROOT and reach `foo` through the top-level
+        // junction, which is what puts a link in the walk the resolver performs. A store-cell entry
+        // would find the private `bar` by the shortest path even with the realpath disarmed, so it
+        // cannot produce a wrong answer — and a fixture that cannot produce one cannot detect one.
+        std::fs::write(
+            dir.join("disc.js"),
+            format!(
+                "require('fs').writeFileSync({m}, 'bar@' + require('foo').barVersion);\n",
+                m = m("disc-cjs")
+            ),
+        )
+        .expect("disc cjs");
+        std::fs::write(
+            dir.join("disc.mjs"),
+            format!(
+                "import {{ barVersion }} from 'foo/index.mjs';\n\
+                 import fs from 'node:fs';\n\
+                 fs.writeFileSync({m}, 'bar@' + barVersion);\n",
+                m = m("disc-esm")
+            ),
+        )
+        .expect("disc esm");
+    }
+
+    /// Whether a path the CHILD reported passes through `segment` — which is how this group asks
+    /// "was the realpath applied", because the store cell a resolution lands in names the answer:
+    /// `bar@2.0.0` is the private dependency, `foo@1.0.0\node_modules\bar` is the link spelling.
+    ///
+    /// A SUBSTRING rather than [`same_file`], and that is not laziness. `std::env::temp_dir()`
+    /// hands back the 8.3 SHORT form (`C:\Users\RUNNER~1\…`) while a realpath returns the LONG
+    /// one (`C:\Users\runneradmin\…`) — measured on this runner, and the reason
+    /// `realpath_term_longform` exists next door. Every fixture path here descends from
+    /// `temp_dir`, so a whole-path equality would compare two spellings of the same file and fail
+    /// on a run where the repair worked. The store-cell segment carries no such prefix.
+    fn went_through(reported: &str, segment: &str) -> bool {
+        let norm = |s: &str| s.replace('/', "\\").to_ascii_lowercase();
+        !reported.trim().is_empty() && norm(reported).contains(&norm(segment))
+    }
+
+    /// One line of a marker, or `""` when the cell never reached its own write.
+    fn marker_line(dir: &Path, tag: &str, name: &str) -> String {
+        std::fs::read_to_string(dir.join(format!("{tag}.{name}")))
+            .unwrap_or_default()
+            .replace(['\r', '\n'], " ")
+            .trim()
+            .to_string()
+    }
+
+    /// Run every cell of one arm under one policy.
+    fn esm_cells(
+        f: &Fixture,
+        policy: &SandboxPolicy,
+        tag: &str,
+        exe: &Path,
+        dir: &Path,
+        cell: &Path,
+    ) -> EsmCells {
+        for name in ["esm", "cjs", "disc-cjs", "disc-esm", "probe"] {
+            let _ = std::fs::remove_file(dir.join(format!("{tag}.{name}")));
+        }
+        write_esm_entries(dir, cell, tag);
+
+        // `-e` for the probe cell, deliberately: it has no main module and therefore never
+        // touches `resolveMainPath`, which is the only shape that can read the child's state in an
+        // arm where an entry file itself would be refused.
+        //
+        // The write is inside the promise continuation so all five readings land in ONE file: a
+        // partial marker would leave the parser assigning `threw:` strings to the wrong field,
+        // which is a wrong answer rather than a missing one.
+        let probe_marker = dir.join(format!("{tag}.probe"));
+        let link_entry = dir.join("node_modules").join("foo").join("index.js");
+        let link_dir = dir.join("node_modules").join("foo");
+        confined_exec(
+            f,
+            policy,
+            &format!("esm-{tag}-probe"),
+            30,
+            exe,
+            &[
+                "-e".into(),
+                format!(
+                    "const fs=require('fs');\
+                     const t=(g)=>{{try{{return String(g())}}\
+                     catch(e){{return 'threw:'+(e.code||e.message)}}}};\
+                     const out=[String(!!globalThis.__nubJailRealpathShim),\
+                     t(()=>require.resolve({entry})),t(()=>fs.realpathSync.native({d}))];\
+                     fs.promises.realpath({d}).then(p=>String(p),\
+                     e=>'threw:'+(e.code||e.message)).then(p=>{{out.push(p);\
+                     out.push(process.version);fs.writeFileSync({m},out.join('\\n'))}})",
+                    entry = js_literal(&link_entry),
+                    d = js_literal(&link_dir),
+                    m = js_literal(&probe_marker),
+                ),
+            ],
+        );
+        let raw = std::fs::read_to_string(&probe_marker).unwrap_or_default();
+        let field = |i: usize| raw.lines().nth(i).unwrap_or_default().trim().to_string();
+        let probe = EsmProbe {
+            shim: field(0) == "true",
+            resolver_real: went_through(&field(1), "foo@1.0.0"),
+            realpath_native: field(2),
+            realpath_promise: field(3),
+            version: field(4),
+        };
+        println!("  fact:esm-{tag}-probe={raw:?}");
+
+        for (name, entry) in [
+            ("esm", cell.join("esm.mjs")),
+            ("cjs", cell.join("cjs.js")),
+            ("disc-cjs", dir.join("disc.js")),
+            ("disc-esm", dir.join("disc.mjs")),
+        ] {
+            confined_exec(
+                f,
+                policy,
+                &format!("esm-{tag}-{name}"),
+                30,
+                exe,
+                &[entry.to_string_lossy().into_owned()],
+            );
+        }
+
+        EsmCells {
+            probe,
+            esm_entry: marker_line(dir, tag, "esm"),
+            cjs_entry: marker_line(dir, tag, "cjs"),
+            disc_cjs: marker_line(dir, tag, "disc-cjs"),
+            disc_esm: marker_line(dir, tag, "disc-esm"),
+        }
+    }
+
+    /// THE GROUP. Three arms over one fixture, differing ONLY in `NODE_OPTIONS`.
+    ///
+    /// The SHIPPING arm and the CONTROL arm are not two spellings of one repair: the control
+    /// names no nub function at all, so it keeps measuring the unrepaired defect however the shim
+    /// is reimplemented, while the shipping arm measures whatever is on the branch. That is what
+    /// makes this group survive a redesign — it already survived one.
+    fn esm_resolution(r: &mut Report, f: &Fixture, exe: &Path, root: &Path) {
+        let dir = f.package.join("esm");
+        std::fs::create_dir_all(&dir).expect("esm fixture dir");
+        let cell = build_esm_fixture(&dir);
+
+        // THE INTERPRETER IS THE STAGED COPY AND MUST STAY THAT WAY. Substituting another one here
+        // — even a correctly-versioned `setup-node` install — makes the de-elevated arm measure
+        // NOTHING: `interpreter_group` stages a copy precisely because de-elevated nub can only
+        // publish read to an AppContainer where it holds `WRITE_DAC`, which is `%USERPROFILE%` and
+        // below, and `C:\hostedtoolcache` is not. Tried in run 30598144544: every cell in arm B
+        // came back empty and the shim sentinel read false, while every sibling group passed.
+        //
+        // The version still has to be watched, because this group's positive control is a VERSION
+        // fact — nodejs/node#62835 restored the resolver's late property read on 24.17+ and 26.1+,
+        // and on such an image the unrepaired control cannot die. So the band is REPORTED rather
+        // than forced, and the control gates on it honestly.
+        let version = interpreter_version(exe);
+        println!("  fact:esm-interpreter={version} path={}", exe.display());
+        println!(
+            "  fact:esm-interpreter-in-affected-band={}",
+            u8::from(esm_defect_band(&version))
+        );
+
+        let roots = [f.project.clone(), f.package.clone(), exe.to_path_buf()];
+        let shim = nub_sandbox::realpath_shim_node_options(&roots);
+        println!(
+            "  fact:esm-node-options-chars shipping={} rejected-candidate={} (a CreateProcessW \
+             environment block holds 32767 characters IN TOTAL)",
+            shim.len(),
+            shim.len() + 21
+        );
+
+        // `--title` in the control arm rather than an empty value: the jail's env allowlist admits
+        // `NODE_OPTIONS` on Windows, and a key present with an empty value is not the same launch
+        // shape as one carrying a flag. Mirrors the sibling group's own control.
+        let arms = [
+            (
+                "ctl",
+                "--preserve-symlinks-main --title=nub-esm-control".to_string(),
+            ),
+            ("shp", shim.clone()),
+            ("flg", format!("{shim} --preserve-symlinks")),
+        ];
+        let mut cells = Vec::new();
+        for (tag, options) in &arms {
+            println!(
+                "── esm arm: {tag} ({options_len} chars) ──",
+                options_len = options.len()
+            );
+            let policy = build_jail_with_env(f, exe, root, &[("NODE_OPTIONS", options.clone())]);
+            let c = esm_cells(f, &policy, tag, exe, &dir, &cell);
+            println!("  fact:esm-{tag}={}", c.detail());
+            cells.push(c);
+        }
+        let [control, ship, flag] = match <[EsmCells; 3]>::try_from(cells) {
+            Ok(a) => a,
+            Err(_) => unreachable!("three arms in, three arms out"),
+        };
+
+        // ── the gates. No arm counts as evidence unless these pass.
+        r.record(
+            "esm-gate-shim-installed-in-the-shipping-arm",
+            ship.probe.shim && flag.probe.shim,
+            &format!(
+                "(shipping {} rejected-candidate {}, observed from inside the confined child; a \
+                 FALSE means the stamp never reached Node and neither arm is comparable)",
+                ship.probe.shim, flag.probe.shim
+            ),
+        );
+        // The other direction, without which the sentinel above is not a gate: an arm carrying no
+        // preload must NOT observe the shim. A reading that can only ever come back true measures
+        // the harness rather than the launch.
+        r.record(
+            "esm-gate-unrepaired-control-leaves-the-shim-absent",
+            !control.probe.shim,
+            &format!(
+                "(control sentinel {}; if the shim were present here the differential would be \
+                 vacuous)",
+                control.probe.shim
+            ),
+        );
+
+        // ── THE POSITIVE CONTROL. A pass here is the group's own inadmissibility, not good news:
+        //    it says this runner's Node is outside the affected band, and a treatment measured
+        //    against a defect that is not reproducing has measured nothing.
+        let control_dead = control.esm_entry.is_empty();
+        if !control_dead {
+            println!(
+                "  fact:esm-POSITIVE-CONTROL-DID-NOT-FIRE the ESM entry RAN in an UNREPAIRED jail \
+                 on {version} ({:?}) — every shipping cell below is INADMISSIBLE, not green",
+                control.esm_entry
+            );
+        }
+        r.record(
+            "esm-control-unrepaired-jail-leaves-the-esm-entry-dead",
+            control_dead,
+            &format!(
+                "(THE POSITIVE CONTROL on {version}: {}; a PASS means the defect reproduces here \
+                 and the arms below are comparable)",
+                control.detail()
+            ),
+        );
+
+        // ── THE CJS CONTROL, and it settles something no simulated arm can. A jail simulated by a
+        //    `--require` preload installs its refusal only AFTER its own module has been resolved,
+        //    by which point Node's CJS `realpathCache` already holds every ancestor — so a CJS
+        //    require succeeds there with no repair whatsoever, and every simulated CJS cell is
+        //    unfalsifiable. The real jail refuses from process start and has no such warm cache,
+        //    so this is the one venue where "the fs-layer shim is what repairs CJS" can be
+        //    evidence rather than an artifact of the harness.
+        r.record(
+            "esm-control-unrepaired-jail-leaves-the-cjs-require-dead",
+            !control.cjs_entry.starts_with("bar@"),
+            &format!(
+                "(THE CJS CONTROL on {version}: {:?}; a FAIL means CJS resolved with no repair at \
+                 all, which makes the shipping CJS cell below unfalsifiable rather than green)",
+                control.cjs_entry
+            ),
+        );
+
+        // ── the verdict cells.
+        r.record(
+            "esm-shipping-esm-entry-completes-relative-and-bare-imports",
+            ship.esm_entry.starts_with("rel=ok"),
+            &format!("({:?}; expected `rel=ok bar@2.0.0`)", ship.esm_entry),
+        );
+        r.record(
+            "esm-shipping-cjs-require-binds-the-private-version",
+            ship.cjs_entry.starts_with("bar@2.0.0"),
+            &format!(
+                "({:?}; `bar@1.0.0` is the SILENT wrong answer this fixture exists to catch)",
+                ship.cjs_entry
+            ),
+        );
+        r.record(
+            "esm-shipping-esm-import-binds-the-private-version",
+            ship.disc_esm == "bar@2.0.0" && ship.esm_entry.ends_with("bar@2.0.0"),
+            &format!(
+                "(through-the-link {:?}, store-cell {:?})",
+                ship.disc_esm, ship.esm_entry
+            ),
+        );
+        r.record(
+            "esm-shipping-require-resolve-returns-the-store-cell-path",
+            ship.cjs_entry
+                .split("resolve=")
+                .nth(1)
+                .is_some_and(|p| went_through(p, "bar@2.0.0")),
+            &format!(
+                "({:?}; the LINK spelling passes through foo@1.0.0\\node_modules\\bar instead, \
+                 and `Module._resolveFilename` is a different function from the one a resolve \
+                 hook sees)",
+                ship.cjs_entry
+            ),
+        );
+        // The two `binding.realpath` surfaces, reported against the control so a FAIL reads as a
+        // regression rather than as a jail that was never going to serve them. `went_through` and
+        // not merely "did not throw": a tolerant walk that fell back to its INPUT returns the link
+        // path without erroring, which is the silent-wrong-answer shape in a different costume.
+        for (prop, ship_value, control_value) in [
+            (
+                "esm-shipping-fs-realpathsync-native-survives-the-jail",
+                &ship.probe.realpath_native,
+                &control.probe.realpath_native,
+            ),
+            (
+                "esm-shipping-fs-promises-realpath-survives-the-jail",
+                &ship.probe.realpath_promise,
+                &control.probe.realpath_promise,
+            ),
+        ] {
+            r.record(
+                prop,
+                went_through(ship_value, "foo@1.0.0"),
+                &format!(
+                    "(shipping {ship_value:?} vs unrepaired control {control_value:?}; these \
+                     reach binding.realpath, NOT the entry point the resolver's own walk uses, so \
+                     a wrapper on one leaves these refused)"
+                ),
+            );
+        }
+        // The CJS and ESM discriminators are folded into one property rather than gated
+        // separately: they reach the same walk through different resolvers, so they answer the
+        // same question and splitting them would inflate one finding into two.
+        r.record(
+            "esm-control-preserve-symlinks-binds-the-wrong-version",
+            flag.disc_cjs == "bar@1.0.0",
+            &format!(
+                "(THE REJECTED CANDIDATE: --preserve-symlinks cjs {:?} esm {:?} vs shipping cjs \
+                 {:?} esm {:?}. `bar@1.0.0` is the unrelated TOP-LEVEL copy — the specific wrong \
+                 answer, not merely a different one. Without it here the discriminator could not \
+                 detect one)",
+                flag.disc_cjs, flag.disc_esm, ship.disc_cjs, ship.disc_esm
             ),
         );
     }
