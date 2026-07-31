@@ -2455,7 +2455,11 @@ fn build_runtime() -> Result<tokio::runtime::Runtime> {
     // happened to run first sticking. Start from the CPU budget (None → raw cores).
     let mut rayon_target = cpu;
 
-    if let Some(headroom) = resource_limits::spawn_headroom() {
+    // Captured for the diagnostic seam below, which cannot otherwise distinguish "no
+    // constraint detected" from "detected, but every derived pool saturated its own cap".
+    let detected_headroom = resource_limits::spawn_headroom();
+
+    if let Some(headroom) = detected_headroom {
         // ONE headroom budget split across the four concurrent OS-thread/process
         // consumers (tokio workers + tokio blocking pool + rayon GLOBAL pool +
         // parallel build-scripts) so their SUM stays under the ceiling — capping
@@ -2497,9 +2501,17 @@ fn build_runtime() -> Result<tokio::runtime::Runtime> {
     // boundary's internal exemption): when set, print the resolved pool sizing to
     // real stderr, BEFORE the install's fd-capture can swallow a `tracing` line.
     // Lets a constrained-box test assert the detected budget deterministically.
+    //
+    // `headroom` is printed RAW because the derived pool sizes are lossy: every one of
+    // them saturates its own cap, so `blocking=128` means "no constraint detected" OR
+    // "detected, with headroom >= 384" (`min(128, max(h/3, 4))`), and `workers`/`rayon`
+    // clamp against the core count on top of that. Reading detection state off the
+    // derived numbers alone is ambiguous above that band and cost a verification round
+    // — a successful read of a large limit was briefly mistaken for lost detection, and
+    // only strace resolved it. The raw value makes the seam self-sufficient.
     if std::env::var_os("__NUB_PRINT_CPU_BUDGET").is_some() {
         eprintln!(
-            "__nub_cpu_budget raw_cpu={raw_cpu} cpu_budget={cpu_budget:?} workers={workers} blocking={blocking} rayon={rayon_target}"
+            "__nub_cpu_budget raw_cpu={raw_cpu} cpu_budget={cpu_budget:?} headroom={detected_headroom:?} workers={workers} blocking={blocking} rayon={rayon_target}"
         );
     }
 
