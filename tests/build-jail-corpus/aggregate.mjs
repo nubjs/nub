@@ -211,7 +211,17 @@ for (const r of rows) {
 }
 
 rows.sort((a, b) => (a.shard + a.platform + a.pkg).localeCompare(b.shard + b.platform + b.pkg));
-fs.writeFileSync(path.join(root, '../verdict-table.json'), JSON.stringify({ runs: ok.map((r) => ({ shard: r.shard, arm: r.arm, platform: r.platform, lever: r.lever, arm_effect: r.arm_effect, node_gyp: r.node_gyp_identity, rc_install: r.rc_install, rc_script: r.rc_script, isolated: r.isolated, scheduling_truncated: r.scheduling_truncated, approved_jobs: r.approved_jobs, failed_packages: r.failed_packages })), rows }, null, 2));
+const serialized = JSON.stringify({ runs: ok.map((r) => ({ shard: r.shard, arm: r.arm, platform: r.platform, lever: r.lever, arm_effect: r.arm_effect, node_gyp: r.node_gyp_identity, rc_install: r.rc_install, rc_script: r.rc_script, isolated: r.isolated, scheduling_truncated: r.scheduling_truncated, approved_jobs: r.approved_jobs, failed_packages: r.failed_packages })), rows }, null, 2);
+// TWO COPIES, and the one INSIDE the out-dir is the authoritative one. The parent
+// path is keyed to the out-dir's PARENT, so two out-dirs under one parent — a sweep
+// and an isolated control beside it, which is the normal way a finding gets chased —
+// silently overwrite each other's table, with no error and no clue in the output.
+// That happened: a four-package control aggregated next to a 26-arm sweep replaced
+// the sweep's table, and the loss was only visible because the next read returned
+// four rows. The parent write stays because selftest.mjs and the README recipe both
+// address it there, and each selftest scenario has its own parent so it cannot collide.
+fs.writeFileSync(path.join(root, 'verdict-table.json'), serialized);
+fs.writeFileSync(path.join(root, '../verdict-table.json'), serialized);
 
 const pad = (s, n) => String(s).padEnd(n).slice(0, n);
 console.log('\n' + pad('package', 34) + pad('class', 22) + pad('shard', 10) + pad('plat', 7) + pad('A0 (jail off)', 25) + pad('PROD (jail on)', 25) + 'admissible / note');
@@ -243,3 +253,4 @@ const worklist = [...new Set(rows.filter((r) => !r.isolated && r.inconclusive).m
 const wf = path.join(root, '../inconclusive.txt');
 fs.writeFileSync(wf, worklist.join('\n') + (worklist.length ? '\n' : ''));
 console.log(`\n  inconclusive, needs isolation: ${worklist.length} -> ${wf}`);
+console.log(`  verdict table: ${path.join(root, 'verdict-table.json')} (also copied to ${path.join(root, '../verdict-table.json')})`);

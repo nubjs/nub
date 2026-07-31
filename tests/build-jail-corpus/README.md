@@ -364,6 +364,120 @@ packages BUG-J's own control fixed — a binary difference wearing a platform's 
   this is worse here than on a machine with a warm `~/.cache/nub`; it is a real path, not an
   artifact.
 
+## macOS on the granted catalog, 2026-07-31 (supersedes the 158 / 91 / 67 table above)
+
+Fresh sweep, binary `f63d3c62c3`, sha256 `e2c1adec…`, **no catalog override** — the compiled catalog,
+which now carries 48 `packageNetwork.full` entries and 10 `packageGrants`. 26 arms, every one
+`arm_effect=confirmed`, `PER_PKG=1`, 0 inconclusive, 0 denominator-suspect.
+
+| | baseline (`27d383ef2e`, override, re-scored) | **this run (`f63d3c62c3`, compiled)** |
+| --- | --- | --- |
+| rows | 389 | 372 |
+| admissible | 158 | **163** |
+| survives the jail | 91 (57.6%) | **157 (96.3%)** |
+| breaks | 67 | **6** |
+| inconclusive | 0 | 0 |
+
+**Enforcement was proved in the same binary, both directions.** A local `file:` package with no
+catalog entry: under `PROD` `write_own=OK` — the positive control that the script ran — with
+`write_outerhome`, `read_secret`, `write_project` all denied and `net_connect=DENIED(EPERM)`; under
+`A0` all five `OK`, and the two files it was asked to plant outside its cell were on disk afterwards.
+
+**The A0 arm did not weaken, which is what makes the movement attributable.** Every closed row still
+scores `DID-WORK-AND-SUCCEEDED` unconfined, and none has an A0 delta under half the baseline's. The
+closures are the confined arm improving, not the denominator eroding.
+
+Sixty-one break rows closed, over 57 distinct packages, and they split cleanly by mechanism:
+
+| closed by | packages |
+| --- | --- |
+| a new `packageNetwork.full` entry | 40 |
+| a new `packageGrants` entry (the hook installers) | 6 |
+| **no new grant** — the store-entry write and the project-root cwd node | **11** |
+
+The 11 are the fix classes rather than the catalog: `@vscode/sqlite3`, `mongodb-crypt-library-version`,
+`node-mac-contacts`, `node-zopfli-es`, `os-dns-native`, `ref-napi`, `sse4_crc32`, `tree-sitter-kotlin`,
+`nice-napi`, `weak-napi` (store-entry write root) and `@arkweid/lefthook` (project-root cwd node).
+
+Artifact bytes rather than presence, on the rows the earlier run scored off linker bin symlinks:
+`azure-functions-core-tools` 601,659,764 B in both arms; `cldr-data` 276,427,271 B over 12,908 files;
+`tree-sitter-cli` 20,208,016 B against the earlier control's 0 B; `taiko` 351 MB; `dugite` 147 MB.
+
+### A granted hook installer now manufactures a PASS for its ungranted shard-mates
+
+The shared-project-delta gate corrects one direction only. It refuses a manufactured BREAK — a row
+whose two arms print the same thing — and that was the only direction that could be wrong while no
+hook installer succeeded under the jail. Granting six of them created the other direction: one
+granted installer writes `.git/hooks`, and the project delta it leaves satisfies the predicate for
+every project-scoped row in the shard, confined arm included.
+
+The differential is inside this one run. `lefthook@2.1.10` **breaks** in `pilot`, where it is the only
+hook installer, and **passes** in `default7`, where the granted `shared-git-hooks` writes 17 symlinks —
+same package, same version, same binary. Its own `default7` window prints `fatal: not a git repository`
+and `exit status 128` while the row reads `DID-WORK-AND-SUCCEEDED`.
+
+Four packages re-run alone settle it, and the control runs in both directions:
+
+| package | in its batch shard | alone |
+| --- | --- | --- |
+| `ghooks@2.0.4` (granted) | SURVIVE | **SURVIVE** |
+| `@arkweid/lefthook@0.7.7` | SURVIVE | **BREAK** |
+| `yorkie@2.0.0` | SURVIVE | **NO-OP-BY-DESIGN, inadmissible** |
+| `simple-git-hooks@2.13.1` | SURVIVE | **NO-OP-BY-DESIGN, inadmissible** |
+
+So the headline carries four spurious passes. Corrected by hand for the isolated results: **161
+admissible, 153 survive, 8 break — 95.0%.** The gate is not yet fixed in `aggregate.mjs`; the
+unclassified-line fallback in `errsig.mjs` suppresses a window's failure text whenever the window
+returned 0 and the row scored `DID-WORK-AND-SUCCEEDED`, which is exactly the evidence a
+manufactured-pass gate would need, so closing this is a scoring change with its own differential
+rather than a one-line edit. Every hook-installer survivor carries `project_scope_shared`.
+
+### The six remaining breaks
+
+- **`handbrake-js@8.0.2` (twice) — the grant worked and the break moved.** It now downloads all
+  38,059,875 bytes under the jail, byte-identical to the unconfined arm, and dies on
+  `hdiutil attach mac.dmg` → `attach failed - Device not configured`. Mounting a disk image is not a
+  filesystem or network capability, so no catalog entry expresses it.
+- **`ssh2@1.17.0` — node-gyp cannot find Python, and only here.** Reproduced in isolation. `ssh2`
+  builds an optional second binding; under `PROD` that node-gyp run reports `"python3" is not in PATH
+  or produced an error` for both candidates, while unconfined it resolves `/usr/local/bin/python3`.
+  Measured directly with a `file:` probe: bare `python3` and `/usr/local/bin/python3` both return
+  `EPERM` under the jail while `/usr/bin/python3` runs — `/usr/local/bin/python3` is a symlink into
+  `/Library/Frameworks`, and an ungranted symlink read is what aborts libuv's PATH walk. Unexplained:
+  node-gyp resolves Python in 104 of the 105 other `PROD` windows in this sweep, including nub's own
+  earlier node-gyp invocation inside `ssh2`'s own window. Whether that first invocation is confined at
+  all is not established.
+- **`esbuild@0.28.1` on `default1` — the row is two versions.** `windows.json` records the window's
+  jobs as `esbuild@0.11.23` + `esbuild@0.28.1`, and the failure is 0.11.23's postinstall shelling
+  `npm` at `registry.npmjs.org`, which is deliberately not granted. `esbuild@0.28.1` alone survives,
+  in `pilot` and in an isolated re-run. The bare-name-with-two-pending-versions window is the
+  documented limit of `PER_PKG=1`; here it mislabels a real break with the wrong version.
+- **`@evilmartians/lefthook@2.1.10` and `lefthook@2.1.10`** — `fatal: not a git repository`. Neither is
+  in `packageGrants`, so neither gets the two `.git` file reads the granted installers have.
+
+### This is still not a platform comparison
+
+The Linux table above ran `92ed4cc78f`, whose catalog holds **5** `packageNetwork.full` entries and
+**3** `packageGrants` against this run's 48 and 10, and which predates the project-root cwd node. The
+follow-up on the Linux section asked for a macOS re-run on "`92ed4cc78f`-or-later"; later is where the
+grants landed, so the variables have swapped sides rather than been removed. 96.3% beside 63.9% is not
+a platform result either.
+
+Of 97 package-level divergences, 42 are Linux breaks on packages granted after `92ed4cc78f`. Of the
+remaining 55, about 35 are `linux=SURVIVE / macOS=INADMISSIBLE` native builds whose fixture is invalid
+on macOS arm64 unconfined — a toolchain difference, not a jail one, and the reason the macOS
+denominator is 141 admissible packages against Linux's 171. The three that are genuinely jail-side all
+have macOS-specific mechanisms: `handbrake-js` (`hdiutil`), `ssh2` (Seatbelt on an ungranted symlink),
+`esbuild` (the two-version window). `re2` and `keytar`, Linux breaks, pass here — the Linux
+Node-provisioning-inside-the-jail failure did not reproduce on macOS.
+
+Coverage: 163 of the census's 387 packages by row (42.1%), 141 of 387 by distinct admissible package
+(36.4%). The `$HOME`-cache downloader class stays outside the denominator on both platforms —
+`cypress@15.19.0` scores `NO-OP-BY-DESIGN` here as it does on Linux, because the artifact never enters
+a store cell. `duckdb@1.4.4` passes in both arms on macOS, with the same blind spot the Linux section
+records: the verdict machinery judges tree delta, so a denied prebuilt falling back to a source build
+reads as clean.
+
 ## Running it
 
 ```sh
