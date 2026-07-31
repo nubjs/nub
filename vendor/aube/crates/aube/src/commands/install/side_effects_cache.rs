@@ -65,13 +65,36 @@ impl<'a> SideEffectsCacheConfig<'a> {
     }
 }
 
+/// Whether the lifecycle spawn this entry describes runs confined.
+///
+/// Part of the cache key because it decides WHERE a build's writes outside its own
+/// package tree land, and the entry captures only the tree. Confined, `$HOME` is a
+/// private per-package directory; unconfined it is the user's own, which is
+/// machine-wide and therefore still there on the next install — so an unconfined
+/// entry replays soundly and a confined one does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Confinement {
+    Confined,
+    Unconfined,
+}
+
+impl Confinement {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Confined => "confined",
+            Self::Unconfined => "unconfined",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct SideEffectsCacheEntry {
     /// Everything about the build environment an entry is only valid under:
-    /// the Node engine that compiled its addons, plus the shell that ran the
-    /// build. One string because both are the same kind of fact — "this output
-    /// is only meaningful under X" — and both must appear in the path AND the
-    /// marker or a mismatched directory gets skipped instead of rebuilt.
+    /// the Node engine that compiled its addons, the shell that ran the
+    /// build, and whether it ran confined. One string because all three are
+    /// the same kind of fact — "this output is only meaningful under X" — and
+    /// all must appear in the path AND the marker or a mismatched directory
+    /// gets skipped instead of rebuilt.
     build_env: String,
     input_hash: String,
     path: std::path::PathBuf,
@@ -89,6 +112,7 @@ impl SideEffectsCacheEntry {
         name: &str,
         version: &str,
         package_dir: &std::path::Path,
+        confinement: Confinement,
     ) -> miette::Result<Self> {
         // Take only the hash half of the marker: it fingerprints the
         // package *before* its scripts ran, which is what keys this entry
@@ -115,7 +139,26 @@ impl SideEffectsCacheEntry {
         // under cmd.exe must be rebuilt — not restored — once the lifecycle
         // shell becomes POSIX `sh`. Read from the same `ScriptSettings` the
         // spawn resolves, so a user `script-shell` participates too.
-        let build_env = format!("{engine}-{}", aube_scripts::resolved_shell_id());
+        //
+        // Confinement joins them for the same reason one step out: a script
+        // that writes OUTSIDE its own package tree — a browser into
+        // `$HOME/Library/Caches`, the shape `cypress`/`puppeteer`/`*driver`
+        // all have — puts that artifact somewhere the entry does not capture,
+        // and confinement decides where. Under a jail it is a private
+        // per-package HOME; unconfined it is the user's own. Restoring a
+        // jail-built entry into an unconfined install therefore SKIPS the
+        // script and lands the artifact NOWHERE, which made the per-package
+        // opt-out (`dependenciesMeta.<pkg>.sandbox: false`) non-functional on
+        // any machine that had once installed the package jailed — the miss
+        // that healed it was purging this directory by hand. Naming it here
+        // makes the two modes different entries instead of one poisoned one,
+        // and busts every entry written before this existed, which is what
+        // heals an already-poisoned machine without the user knowing to.
+        let build_env = format!(
+            "{engine}-{}-{}",
+            aube_scripts::resolved_shell_id(),
+            confinement.id()
+        );
         Ok(Self {
             path: location
                 .root
@@ -170,8 +213,9 @@ impl SideEffectsCacheEntry {
     /// entry. Both halves are load-bearing: entries segregate by build
     /// environment, so several now share one input hash, and matching on the
     /// hash alone would let the skip above fire for a build made under a
-    /// different Node ABI (a runtime `NODE_MODULE_VERSION` failure) or a
-    /// different shell (bytes the shell mis-expanded). A marker naming a
+    /// different Node ABI (a runtime `NODE_MODULE_VERSION` failure), a
+    /// different shell (bytes the shell mis-expanded), or a different
+    /// confinement (out-of-tree writes that went to a private HOME). A marker naming a
     /// different — or no — build environment never matches, so it degrades to
     /// a restore or a rebuild, never to a silent skip.
     fn marker_matches(&self, package_dir: &std::path::Path) -> bool {
@@ -541,11 +585,21 @@ mod tests {
         package_dir: &std::path::Path,
         node_version: Option<&str>,
     ) -> SideEffectsCacheEntry {
+        entry_confined(root, package_dir, node_version, Confinement::Unconfined)
+    }
+
+    fn entry_confined(
+        root: &std::path::Path,
+        package_dir: &std::path::Path,
+        node_version: Option<&str>,
+        confinement: Confinement,
+    ) -> SideEffectsCacheEntry {
         SideEffectsCacheEntry::new(
             SideEffectsCacheLocation { root, node_version },
             "p",
             "1.0.0",
             package_dir,
+            confinement,
         )
         .unwrap()
     }
@@ -598,8 +652,44 @@ mod tests {
             .into_owned();
         let shell = aube_scripts::resolved_shell_id();
         assert!(
-            build_env.ends_with(&format!("-{shell}")),
+            build_env.contains(&format!("-{shell}-")),
             "build-env segment {build_env} does not name the resolved shell {shell}"
+        );
+    }
+
+    /// A build's writes OUTSIDE its own package tree — the `cypress`/`puppeteer` shape,
+    /// a browser into `$HOME` — are not in the entry, and confinement decides where they
+    /// went: a private per-package HOME, or the user's own. So a jail-built entry must
+    /// not be restorable into an unconfined install, which would skip the script and
+    /// land that artifact nowhere at all, making
+    /// `dependenciesMeta.<pkg>.sandbox: false` non-functional.
+    #[test]
+    fn cache_path_segregates_by_confinement() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = package_fixture(dir.path());
+        let root = dir.path().join("cache");
+
+        let confined = entry_confined(&root, &pkg, Some("26.5.0"), Confinement::Confined);
+        let unconfined = entry_confined(&root, &pkg, Some("26.5.0"), Confinement::Unconfined);
+        assert_ne!(
+            confined.path, unconfined.path,
+            "a jail-built entry must not be reachable from an unconfined install"
+        );
+
+        confined.save(&pkg, false).unwrap();
+        assert!(
+            matches!(
+                unconfined.restore_if_available(&pkg).unwrap(),
+                SideEffectsCacheRestore::Miss
+            ),
+            "the opt-out must miss the jail-built entry and rebuild"
+        );
+        // The marker the confined save stamped names the confined build env, so the skip
+        // cannot fire off it either — the path alone would still let `AlreadyApplied`
+        // return for a directory the other mode built.
+        assert!(
+            !unconfined.marker_matches(&pkg),
+            "a confined marker must not satisfy an unconfined entry"
         );
     }
 
@@ -643,7 +733,7 @@ mod tests {
 
         std::fs::write(
             &marker_path,
-            format!("darwin-arm64-node26-sh:{}", "z".repeat(128)),
+            format!("darwin-arm64-node26-sh-confined:{}", "z".repeat(128)),
         )
         .unwrap();
         assert!(
@@ -658,11 +748,14 @@ mod tests {
 
         std::fs::write(
             &marker_path,
-            format!("darwin-arm64-node26-sh:{}\n", "A".repeat(128)),
+            format!("darwin-arm64-node26-sh-confined:{}\n", "A".repeat(128)),
         )
         .unwrap();
         let current = read_valid_side_effects_marker(dir.path()).unwrap();
-        assert_eq!(current.build_env.as_deref(), Some("darwin-arm64-node26-sh"));
+        assert_eq!(
+            current.build_env.as_deref(),
+            Some("darwin-arm64-node26-sh-confined")
+        );
         assert_eq!(current.input_hash, "a".repeat(128));
     }
 

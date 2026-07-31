@@ -114,18 +114,38 @@ pub trait LifecycleSandbox: Send + Sync + std::fmt::Debug {
     /// Spawn `spawn` fully confined, wait for it, and return its exit status.
     fn run(&self, spawn: LifecycleSandboxSpawn) -> std::io::Result<std::process::ExitStatus>;
 
-    /// Whether this hook wants to confine `package_name`'s script at all. `false` routes
-    /// the spawn back through aube's ORDINARY unconfined path — the identical spawn +
-    /// descendant-reaping wait an uninterposed aube performs — rather than asking the
-    /// embedder to reimplement it.
+    /// Whether this hook wants to confine `package_name`'s script at all — the
+    /// DECISION, and the one method an embedder overrides to make it.
+    ///
+    /// MUST BE PURE. aube also asks this during PLANNING, for packages that may never
+    /// spawn: a build's writes OUTSIDE its own package tree land somewhere else under
+    /// confinement (a private HOME rather than the user's), so the side-effects cache
+    /// keys its entries on the answer and must have it before it decides whether to
+    /// restore. Announcing or recording here would fire for a package whose cached tree
+    /// is about to be restored without running anything. [`confines`] is the spawn-time
+    /// call and is where an embedder puts a user-visible notice.
     ///
     /// A `None` name means `project_root` is NOT the consumer's own project, so an
     /// embedder keying policy off the root manifest must read it as "no policy" rather
     /// than "no confinement". Defaults to `true`: an embedder that does not override this
     /// confines everything exactly as before.
-    fn confines(&self, package_name: Option<&str>, project_root: &std::path::Path) -> bool {
+    ///
+    /// [`confines`]: LifecycleSandbox::confines
+    fn would_confine(&self, package_name: Option<&str>, project_root: &std::path::Path) -> bool {
         let _ = (package_name, project_root);
         true
+    }
+
+    /// The same question at SPAWN time. `false` routes the spawn back through aube's
+    /// ORDINARY unconfined path — the identical spawn + descendant-reaping wait an
+    /// uninterposed aube performs — rather than asking the embedder to reimplement it.
+    ///
+    /// Delegates to [`would_confine`] so the two cannot disagree; override it only to add
+    /// a side effect the planning call must not have.
+    ///
+    /// [`would_confine`]: LifecycleSandbox::would_confine
+    fn confines(&self, package_name: Option<&str>, project_root: &std::path::Path) -> bool {
+        self.would_confine(package_name, project_root)
     }
 }
 
@@ -602,5 +622,37 @@ mod tests {
         assert_eq!(ctx.embedder_package_extensions, None);
         assert!(!ctx.enforce_package_extensions_checksum);
         assert!(ctx.lifecycle_sandbox.is_none());
+    }
+
+    /// The planning query and the spawn query must answer the SAME question — the cache
+    /// keys entries on one and the spawn obeys the other, and a hook that confines while
+    /// the key says otherwise re-poisons exactly the cell this split exists to separate.
+    /// So `confines` delegates, and an embedder overriding only the decision gets both.
+    #[test]
+    fn confines_follows_would_confine() {
+        #[derive(Debug)]
+        struct Declines;
+        impl LifecycleSandbox for Declines {
+            fn run(&self, _: LifecycleSandboxSpawn) -> std::io::Result<std::process::ExitStatus> {
+                unreachable!("not spawned in this test")
+            }
+            fn would_confine(&self, name: Option<&str>, _: &std::path::Path) -> bool {
+                name != Some("opted-out")
+            }
+        }
+        let root = std::path::Path::new("/proj");
+        assert!(!Declines.confines(Some("opted-out"), root));
+        assert!(Declines.confines(Some("other"), root));
+        assert!(Declines.confines(None, root));
+
+        #[derive(Debug)]
+        struct Defaults;
+        impl LifecycleSandbox for Defaults {
+            fn run(&self, _: LifecycleSandboxSpawn) -> std::io::Result<std::process::ExitStatus> {
+                unreachable!("not spawned in this test")
+            }
+        }
+        assert!(Defaults.would_confine(Some("anything"), root));
+        assert!(Defaults.confines(Some("anything"), root));
     }
 }

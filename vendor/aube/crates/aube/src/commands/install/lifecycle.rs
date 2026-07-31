@@ -3,7 +3,7 @@ use miette::{Context, IntoDiagnostic, miette};
 use super::bin_linking::materialized_pkg_dir;
 use super::node_gyp_bootstrap;
 use super::side_effects_cache::{
-    SideEffectsCacheConfig, SideEffectsCacheEntry, SideEffectsCacheRestore,
+    Confinement, SideEffectsCacheConfig, SideEffectsCacheEntry, SideEffectsCacheRestore,
 };
 
 /// Run a root-package lifecycle hook, announcing it to the user if defined
@@ -129,6 +129,38 @@ fn merge_allow_build(
 /// unit-testable without a settings `ResolveCtx` or the process-global embedder.
 fn jail_enabled(embedder_owns_lifecycle_sandbox: bool, jail_builds: bool, paranoid: bool) -> bool {
     !embedder_owns_lifecycle_sandbox && (jail_builds || paranoid)
+}
+
+/// Whether this package's build will run confined, asked at PLANNING time.
+///
+/// The side-effects cache needs it before anything spawns, because it decides whether to
+/// RESTORE — and a restore is exactly what skips the spawn. Mirrors the two mechanisms
+/// `run_dep_hook` chooses between: aube's own `ScriptJail`, and an embedder that owns
+/// confinement via the `EngineContext::lifecycle_sandbox` hook. They are mutually
+/// exclusive — `jail_enabled` gates aube's off whenever the embedder owns it — so either
+/// one confining is the answer.
+///
+/// `would_confine` rather than `confines`: this runs for packages that may never spawn,
+/// and the spawn-time call is the one allowed to announce.
+fn dep_confinement(
+    jail_policy: &JailBuildPolicy,
+    name: &str,
+    version: &str,
+    source_key: Option<&str>,
+    git_repository_key: Option<&str>,
+    package_name: Option<&str>,
+    project_dir: &std::path::Path,
+) -> Confinement {
+    let embedder_confines = aube_util::embedder().embedder_owns_lifecycle_sandbox
+        && aube_util::engine_context()
+            .lifecycle_sandbox
+            .as_ref()
+            .is_some_and(|hook| hook.would_confine(package_name, project_dir));
+    if embedder_confines || jail_policy.should_jail(name, version, source_key, git_repository_key) {
+        Confinement::Confined
+    } else {
+        Confinement::Unconfined
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -570,9 +602,24 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         if !aube_scripts::has_dep_lifecycle_work(&package_dir, &dep_manifest) {
             continue;
         }
+        // The SAME identity `run_dep_hook` will hand the confinement hook below, so the
+        // key and the spawn cannot disagree about which package this is — including the
+        // withholding under a fetched root, which is what makes a checkout's builds key
+        // as confined.
+        let confinement = dep_confinement(
+            &jail_policy,
+            pkg.registry_name(),
+            &pkg.version,
+            pkg.source_approval_key().as_deref(),
+            pkg.git_repository_approval_key().as_deref(),
+            root_is_user_authored.then_some(pkg.registry_name()),
+            project_dir,
+        );
         let cache_entry = side_effects_cache
             .location()
-            .map(|loc| SideEffectsCacheEntry::new(loc, &pkg.name, &pkg.version, &package_dir))
+            .map(|loc| {
+                SideEffectsCacheEntry::new(loc, &pkg.name, &pkg.version, &package_dir, confinement)
+            })
             .transpose()?;
         if via_floor {
             floor_trusted.push(pkg.spec_key());

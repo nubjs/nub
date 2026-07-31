@@ -68,10 +68,18 @@ pub(crate) fn install(runtime: &'static RuntimeCapability) {
 }
 
 impl aube_util::LifecycleSandbox for NubBuildJail {
-    /// The per-package opt-out gate. `false` sends the script back to aube's ordinary
-    /// unconfined spawn.
+    /// The per-package opt-out gate, side-effect-free. aube also asks this while
+    /// PLANNING, to key the side-effects cache for packages whose cached tree it may
+    /// restore without spawning anything — so the notice lives in `confines` below, not
+    /// here.
+    fn would_confine(&self, package_name: Option<&str>, project_root: &Path) -> bool {
+        should_confine(package_name, project_root)
+    }
+
+    /// The spawn-time call. `false` sends the script back to aube's ordinary unconfined
+    /// spawn, and is announced — a script really is about to run.
     fn confines(&self, package_name: Option<&str>, project_root: &Path) -> bool {
-        if should_confine(package_name, project_root) {
+        if self.would_confine(package_name, project_root) {
             return true;
         }
         let name = package_name.unwrap_or_default();
