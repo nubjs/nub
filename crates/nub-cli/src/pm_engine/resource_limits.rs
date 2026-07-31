@@ -354,6 +354,17 @@ fn cgroup_v1_pids_max() -> Option<u64> {
 /// MOUNT POINT (field 5). `num_cpus` already does this for the cpu controller,
 /// which is why the CPU axis never exhibited this bug.
 ///
+/// PRIOR ART — this is the OCI reference behaviour, not an invention here.
+/// `opencontainers/cgroups/v1_utils.go` (vendored by runc) does the same thing,
+/// `filepath.Rel(root, cgroup)` then `filepath.Join(mnt, rel)`, under the comment
+/// *"This is needed for nested containers, because in /proc/self/cgroup we see paths
+/// from host, which don't exist in container."* Two deliberate differences, both
+/// because nub reads this from INSIDE the container while runc manages containers
+/// from the host: runc takes the FIRST matching mount, where we take the
+/// longest-matching root and retry the others; and `filepath.Rel` happily emits a
+/// `../`-traversing path when the root is not a prefix, where the component-wise
+/// `starts_with` filter below rejects that candidate outright.
+///
 /// Returns CANDIDATES rather than one path, most-specific first, with the pre-fix
 /// location last. A single "best" answer looks right and is not: committing to the
 /// longest-matching mount loses detection outright whenever that mount happens to be
