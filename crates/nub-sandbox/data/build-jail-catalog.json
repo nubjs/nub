@@ -628,6 +628,12 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "faunadb",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 both=0. Postinstall is `node ./tools/printReleaseNotes`, which GETs api.github.com/repos/.../releases/tags/<v> solely to print a release-notes box — egress for a cosmetic nag, the same shape as `ip-num`. Granted anyway, for the reason ip-num was: refusing costs a per-package mechanism and a maintainer round-trip, while the grant is one line and the residual is bounded (env scrubbed, no secret paths). Consistency with the ip-num precedent is the argument, not need.",
+        "platform": "linux-x64"
+      },
+      {
         "package": "ffmpeg-static",
         "evidence": "measured",
         "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
