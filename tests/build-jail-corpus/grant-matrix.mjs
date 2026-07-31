@@ -143,6 +143,14 @@ function cellCatalog(pkg, cell) {
 const slug = (s) => s.replace(/[^A-Za-z0-9]+/g, '-');
 
 // ── one cell ──────────────────────────────────────────────────────────────────
+// Paths that change on EVERY run whether or not the lifecycle script did anything: npm's
+// log directory, and the manifest/lockfile that `approve-builds` itself rewrites to record
+// the approval. Left in, they keep the measured delta permanently non-zero, which disables
+// the no-op detector — a pure nag script then looks like it produced output, is admitted as
+// measurable, and trivially "passes" every cell. Excluding them is what lets CONTROL-NOOP
+// mean "the script genuinely did nothing".
+const NOISE = /(\/_logs\/|\/\.npm\/|\/package\.json$|\/nub\.lock$|\/package-lock\.json$|\/\.modules\.yaml$)/;
+
 function walk(dir, acc) {
   let ents;
   try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return acc; }
@@ -150,13 +158,71 @@ function walk(dir, acc) {
     const p = path.join(dir, e.name);
     if (e.isSymbolicLink()) continue;
     if (e.isDirectory()) walk(p, acc);
-    else if (e.isFile()) { try { acc.bytes += fs.statSync(p).size; acc.files++; } catch { /* raced */ } }
+    else if (e.isFile() && !NOISE.test(p)) { try { acc.bytes += fs.statSync(p).size; acc.files++; } catch { /* raced */ } }
   }
   return acc;
 }
 const measure = (...roots) => roots.reduce((a, r) => walk(r, a), { files: 0, bytes: 0 });
 
-function runCell(pkg, version, cell, nonce) {
+// ── fixture provisioning — the difference between a measurement and a false pass ──
+//
+// A package whose INPUT is absent exits 0 having done nothing, in EVERY cell, and the
+// ladder then reports NEEDS-NOTHING for a package that in fact needs a project write.
+// Run against the shipped catalog it is worse: the grant reads as REDUNDANT, and acting
+// on that would strip a grant a package genuinely needs — the one direction this whole
+// effort is trying not to move in. (Caught here after an unprovisioned minimality pass
+// called 8 project-shaped grants redundant, every one of them a script that no-opped in
+// both arms for want of a `.git` or a schema.)
+//
+// Capabilities are named per package in the worklist's third column, matching the corpus
+// manifests' NEED column so the two harnesses agree on what a fixture owes a package.
+function provision(proj, need, nonce) {
+  for (const cap of (need || '').split(',').map((s) => s.trim()).filter(Boolean)) {
+    const pj = path.join(proj, 'package.json');
+    switch (cap) {
+      case 'git-repo': {
+        // A real repository, not just the directory: some installers check validity.
+        const git = (...a) => spawnSync('git', ['-C', proj, ...a], { encoding: 'utf8' });
+        git('init', '-q');
+        git('config', 'user.email', 'probe@example.com');
+        git('config', 'user.name', 'probe');
+        git('commit', '-qm', 'probe', '--allow-empty');
+        break;
+      }
+      case 'prisma-schema': {
+        fs.mkdirSync(path.join(proj, 'prisma'), { recursive: true });
+        // The nonce rides IN the generator input, so generated output carrying it cannot
+        // have come from a cache — no cache could supply a name invented this run.
+        fs.writeFileSync(path.join(proj, 'prisma/schema.prisma'),
+          `generator client {\n  provider = "prisma-client-js"\n}\ndatasource db {\n  provider = "sqlite"\n  url      = "file:./dev.db"\n}\nmodel ${nonce} {\n  id Int @id @default(autoincrement())\n}\n`);
+        break;
+      }
+      case 'lefthook-config':
+        fs.writeFileSync(path.join(proj, 'lefthook.yml'), `pre-commit:\n  commands:\n    probe:\n      run: echo ${nonce}\n`);
+        break;
+      case 'msw-manifest': {
+        fs.mkdirSync(path.join(proj, 'public'), { recursive: true });
+        const j = JSON.parse(fs.readFileSync(pj, 'utf8'));
+        j.msw = { workerDirectory: ['public'] };
+        fs.writeFileSync(pj, JSON.stringify(j, null, 2));
+        break;
+      }
+      case 'nx-json':
+        fs.writeFileSync(path.join(proj, 'nx.json'), '{ "affected": { "defaultBase": "main" } }\n');
+        break;
+      case 'vue-dep': {
+        const j = JSON.parse(fs.readFileSync(pj, 'utf8'));
+        j.dependencies.vue = '3.5.13';
+        fs.writeFileSync(pj, JSON.stringify(j, null, 2));
+        break;
+      }
+      default:
+        throw new Error(`unknown fixture capability '${cap}'`);
+    }
+  }
+}
+
+function runCell(pkg, version, cell, nonce, need) {
   const jailOff = cell === 'off';
   const dir = path.join(ROOT, 'fx', `${slug(pkg)}-${cell}-${nonce}`);
   const proj = path.join(dir, 'proj'), home = path.join(dir, 'home'), tmp = path.join(dir, 'tmp');
@@ -169,6 +235,7 @@ function runCell(pkg, version, cell, nonce) {
   const manifest = { name: `mx-${nonce}`, version: '1.0.0', private: true, dependencies: { [pkg]: version } };
   if (jailOff) manifest.dependenciesMeta = { [pkg]: { sandbox: false } };
   fs.writeFileSync(path.join(proj, 'package.json'), JSON.stringify(manifest, null, 2));
+  provision(proj, need, nonce);
   // minimumReleaseAge blocks ~70 packages at RESOLUTION. side-effects-cache=false is what
   // makes a grant iteration mean anything: the cache otherwise replays the PREVIOUS
   // cell's postinstall result when only the catalog changed.
@@ -223,16 +290,16 @@ function verdictFor(ctrl, r) {
   return { pass: true, why: 'rc=0' };
 }
 
-function ladder(pkg, version) {
+function ladder(pkg, version, need) {
   const nonce = `N${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
   const cells = {};
-  const ctrl = runCell(pkg, version, 'off', nonce);
+  const ctrl = runCell(pkg, version, 'off', nonce, need);
   cells.off = { outcome: ctrl.outcome, rc: ctrl.rc, delta: ctrl.delta };
   if (ctrl.outcome !== 'RAN' || ctrl.rc !== 0) { prune(ctrl); return { pkg, version, requirement: 'CONTROL-FAILED', detail: `${ctrl.outcome} rc=${ctrl.rc}`, cells, log: ctrl.log }; }
   if (ctrl.delta.files === 0) { prune(ctrl); return { pkg, version, requirement: 'CONTROL-NOOP', detail: 'script produced nothing even unconfined — nothing to measure', cells }; }
   prune(ctrl);
 
-  const run = (cell) => { const r = runCell(pkg, version, cell, nonce); const v = verdictFor(ctrl, r); cells[cell] = { outcome: r.outcome, rc: r.rc, delta: r.delta, pass: v.pass, why: v.why }; const log = r.log; prune(r); return { v, log }; };
+  const run = (cell) => { const r = runCell(pkg, version, cell, nonce, need); const v = verdictFor(ctrl, r); cells[cell] = { outcome: r.outcome, rc: r.rc, delta: r.delta, pass: v.pass, why: v.why }; const log = r.log; prune(r); return { v, log }; };
 
   const none = run('none');
   if (none.v.pass) return { pkg, version, requirement: 'NEEDS-NOTHING', detail: 'passes ungranted', cells };
@@ -256,15 +323,15 @@ function ladder(pkg, version) {
 // A pass means the shipped grant is not doing anything and should be dropped. The
 // control still runs, because a package that no-ops unconfined would "pass" ungranted
 // for a reason that has nothing to do with the grant.
-function minimality(pkg, version) {
+function minimality(pkg, version, need) {
   const nonce = `N${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
   const cells = {};
-  const ctrl = runCell(pkg, version, 'off', nonce);
+  const ctrl = runCell(pkg, version, 'off', nonce, need);
   cells.off = { outcome: ctrl.outcome, rc: ctrl.rc, delta: ctrl.delta };
   if (ctrl.outcome !== 'RAN' || ctrl.rc !== 0) { prune(ctrl); return { pkg, version, requirement: 'CONTROL-FAILED', detail: `${ctrl.outcome} rc=${ctrl.rc}`, cells }; }
   if (ctrl.delta.files === 0) { prune(ctrl); return { pkg, version, requirement: 'CONTROL-NOOP', detail: 'no-op unconfined', cells }; }
   prune(ctrl);
-  const r = runCell(pkg, version, 'none', nonce);
+  const r = runCell(pkg, version, 'none', nonce, need);
   const v = verdictFor(ctrl, r);
   cells.none = { outcome: r.outcome, rc: r.rc, delta: r.delta, pass: v.pass, why: v.why };
   const log = r.log; prune(r);
@@ -278,7 +345,7 @@ function worklist() {
   const list = arg('--list');
   if (list) {
     return fs.readFileSync(list, 'utf8').split('\n').filter((l) => l.trim() && !l.startsWith('#'))
-      .map((l) => { const [name, version] = l.split('\t'); return { name: name.trim(), version: (version || 'latest').trim() }; });
+      .map((l) => { const [name, version, need] = l.split('\t'); return { name: name.trim(), version: (version || 'latest').trim(), need: (need || '').split('#')[0].trim() }; });
   }
   if (MINIMALITY) {
     // Everything the catalog grants, egress and project alike.
@@ -292,20 +359,112 @@ function worklist() {
     for (const e of baseCatalog.packageNetwork.full || []) names.add(e.package);
     for (const h of baseCatalog.networkHosts || []) for (const n of h.fetchedBy || []) names.add(n);
     for (const e of baseCatalog.packageGrants || []) names.add(e.package);
-    return [...names].sort().map((name) => ({ name, version: 'latest' }));
+    return [...names].sort().map((name) => ({ name, version: 'latest', need: '' }));
   }
   console.error('--list <file.tsv> required (name<TAB>version per line)');
   process.exit(2);
+}
+
+// ── the emitted record ────────────────────────────────────────────────────────
+//
+// THE RECORD IS THE DELIVERABLE, not the table. A verdict transcribed by hand into the
+// catalog loses its evidence and does not scale past a few dozen packages, so every run
+// emits something `apply-matrix.mjs` can ingest without a human in the middle. Three
+// things make a record ingestible rather than merely informative:
+//
+//   the CELLS that produced the verdict — so the ingester can re-derive the verdict and
+//     refuse a record whose cells contradict it, which is what stops a bad run poisoning
+//     the catalog;
+//   the exact GRANT implied, in the catalog's own vocabulary, so applying it is a merge
+//     and not an interpretation;
+//   PROVENANCE — binary, platform, host, time — because a grant measured on one platform
+//     against one binary is not a fact about every platform forever, and a later reader
+//     needs to be able to tell whether it still holds.
+const PROVENANCE = {
+  binary_sha256: (() => { try { return spawnSync('shasum', ['-a', '256', NUB], { encoding: 'utf8' }).stdout?.trim().split(/\s+/)[0] ?? null; } catch { return null; } })(),
+  nub_version: (() => { const r = spawnSync(NUB, ['--version'], { encoding: 'utf8' }); return (r.stdout || '').trim().split('\n')[0] || null; })(),
+  platform: `${process.platform}-${process.arch}`,
+  node: process.version,
+  host: os.hostname(),
+  harness: 'grant-matrix.mjs',
+};
+
+// The first line that looks like the reason, for a human triaging the table and for the
+// `observed` string the ingester writes into the catalog. Best-effort by design: a
+// missing line weakens a record's readability, never its verdict, which rests on cells.
+function failingLine(log) {
+  if (!log) return null;
+  for (const l of log.split('\n')) {
+    if (/EPERM|EACCES|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|operation not permitted|Permission denied|not a git repository|getwd:|uv_cwd|Error:|error:|npm error/.test(l)) {
+      const t = l.trim();
+      if (t && t.length < 400) return t;
+    }
+  }
+  return null;
+}
+
+// Cell results as a flat pass/fail map: 0 = passed, 1 = failed, null = not run because
+// the ladder exited early. The names are the ladder's, not the internal keys, so a
+// reader of the JSON does not need this file open beside it.
+const CELL_NAMES = { off: 'jail_off', none: 'no_grants', project: 'project_write', net: 'network', both: 'both' };
+
+function shapeRecord(raw, meta) {
+  const cells = { jail_off: null, no_grants: null, project_write: null, network: null, both: null };
+  for (const [k, v] of Object.entries(raw.cells || {})) {
+    const name = CELL_NAMES[k];
+    if (!name) continue;
+    cells[name] = k === 'off' ? (v.outcome === 'RAN' && v.rc === 0 ? 0 : 1) : (v.pass ? 0 : 1);
+  }
+  // The grant the verdict implies, in the catalog's vocabulary. `null` for every verdict
+  // that implies no catalog change — including the failures, which are a worklist for a
+  // human rather than something to apply.
+  const grant =
+    raw.requirement === 'NEEDS-EGRESS' ? { packageNetwork: 'full' }
+      : raw.requirement === 'NEEDS-PROJECT' ? { packageGrant: { projectReads: ['.'], projectWrites: { literal: ['.'] }, projectCwd: true } }
+        : raw.requirement === 'NEEDS-BOTH' ? { packageNetwork: 'full', packageGrant: { projectReads: ['.'], projectWrites: { literal: ['.'] }, projectCwd: true } }
+          : raw.requirement === 'GRANT-REDUNDANT' ? { remove: true }
+            : null;
+  return {
+    package: raw.pkg,
+    version: raw.version,
+    weekly_downloads: meta.weekly ?? null,
+    fixture_capabilities: meta.need || null,
+    verdict: raw.requirement,
+    mode: MINIMALITY ? 'minimality' : 'ladder',
+    cells,
+    cell_detail: raw.cells || {},
+    grant,
+    evidence: {
+      detail: raw.detail || null,
+      failing_line: failingLine(raw.log),
+      control_artifact: raw.cells?.off?.delta ?? null,
+      ungranted_artifact: raw.cells?.none?.delta ?? null,
+    },
+    ...PROVENANCE,
+    measured_at: new Date().toISOString(),
+    secs: meta.secs,
+  };
 }
 
 // ── driver ────────────────────────────────────────────────────────────────────
 // Packages are independent, so several run at once; the cells WITHIN a package stay
 // sequential because they share a fixture root and the ladder's early exit depends on
 // the previous cell's answer.
+const CENSUS = arg('--census');
+const weeklyOf = (() => {
+  if (!CENSUS || !fs.existsSync(CENSUS)) return () => null;
+  const m = new Map();
+  for (const l of fs.readFileSync(CENSUS, 'utf8').split('\n')) {
+    if (!l.trim()) continue;
+    try { const o = JSON.parse(l); m.set(o.name, o.package_weekly_downloads ?? null); } catch { /* skip */ }
+  }
+  return (n) => m.get(n) ?? null;
+})();
+
 const work = worklist().slice(0, LIMIT || undefined);
 const done = new Set();
 if (fs.existsSync(RESULTS)) {
-  for (const l of fs.readFileSync(RESULTS, 'utf8').split('\n')) { if (!l.trim()) continue; try { done.add(JSON.parse(l).pkg); } catch { /* partial line */ } }
+  for (const l of fs.readFileSync(RESULTS, 'utf8').split('\n')) { if (!l.trim()) continue; try { done.add(JSON.parse(l).package); } catch { /* partial line */ } }
 }
 const pending = work.filter((w) => !done.has(w.name));
 console.log(`${MINIMALITY ? 'minimality' : 'ladder'}: ${pending.length} to run (${done.size} already recorded) -> ${RESULTS}`);
@@ -315,15 +474,16 @@ console.log(`${MINIMALITY ? 'minimality' : 'ladder'}: ${pending.length} to run (
 const slot = Number(arg('--slot', '-1'));
 if (slot >= 0) {
   for (let i = slot; i < pending.length; i += JOBS) {
-    const { name, version } = pending[i];
+    const { name, version, need } = pending[i];
     const t = Date.now();
-    let out;
-    try { out = MINIMALITY ? minimality(name, version) : ladder(name, version); }
-    catch (e) { out = { pkg: name, version, requirement: 'ERROR', detail: String(e && e.message) }; }
-    out.secs = Math.round((Date.now() - t) / 1000);
-    fs.appendFileSync(RESULTS, JSON.stringify(out) + '\n');
-    if (out.log) { fs.writeFileSync(path.join(ROOT, 'logs', `${slug(name)}.log`), out.log); delete out.log; }
-    console.log(`[${slot}] ${name}@${version}\t${out.requirement}\t${out.secs}s\t${out.detail || ''}`);
+    let raw;
+    try { raw = MINIMALITY ? minimality(name, version, need) : ladder(name, version, need); }
+    catch (e) { raw = { pkg: name, version, requirement: 'ERROR', detail: String(e && e.message), cells: {} }; }
+    const secs = Math.round((Date.now() - t) / 1000);
+    const rec = shapeRecord(raw, { weekly: weeklyOf(name), need, secs });
+    fs.appendFileSync(RESULTS, JSON.stringify(rec) + '\n');
+    if (raw.log) fs.writeFileSync(path.join(ROOT, 'logs', `${slug(name)}.log`), raw.log);
+    console.log(`[${slot}] ${name}@${version}\t${rec.verdict}\t${secs}s\t${rec.evidence.detail || ''}`);
   }
   process.exit(0);
 }
