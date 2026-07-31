@@ -1686,12 +1686,12 @@ fn apply_lifecycle_augmentation(cwd: &Path, configured_node_options: Option<&str
 /// 3. ROBUSTNESS UNDER THE SANDBOX. Confined in an AppContainer with no
 ///    ancestor repair at all, busybox's `cd`, globbing, redirection, reads and
 ///    whole spawn battery are byte-identical to unconfined. `cmd.exe` instead
-///    depends on the sandbox's ancestor repair (`nub-sandbox`'s traverse ACEs
-///    plus the capability SIDs it harvests off each ancestor's DACL) to report
-///    the filesystem correctly — and that repair is best-effort BY DESIGN: a
-///    refused ACE write is skipped rather than fatal, and an ancestor whose
-///    DACL names no harvestable capability yields nothing to request. A shell
-///    that needs no repair cannot be degraded by one that partially failed.
+///    depends on the sandbox's ancestor repair (`nub-sandbox`'s traverse ACEs)
+///    to report the filesystem correctly — and that repair is best-effort BY
+///    DESIGN: a refused ACE write is skipped rather than fatal, and above the
+///    user profile there is no repair at all, since no standard user can
+///    re-ACE `C:\` or `C:\Users`. A shell that needs no repair cannot be
+///    degraded by one that partially failed.
 ///
 /// A user's explicit `script-shell` still wins — aube consults this only when
 /// that is unset. A missing sidecar (a broken install; `nub run` is equally

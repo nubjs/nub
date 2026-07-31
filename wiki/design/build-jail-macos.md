@@ -27,6 +27,7 @@ Each approach carries a status, what it would have bought, the evidence with its
 | the real compiled build jail against a real `nub install` | end-to-end behaviour, broker bypasses included | **Clear `~/.cache/nub/pm/side-effects-v1/` between arms and check marker mtime** — it replays build side effects without re-running the script, and produced a false negative that nearly yielded a wrong conclusion. |
 | Seatbelt denial lines (`Sandbox: node(NNNN) deny(1) <op> <path>`) | which operation and path was refused | a message-less abort names nothing; that is what made the stdio `fstat` case hard |
 | byte-count diffs against an unconfined control | whether a broker read the real thing | an exit code cannot see it — `defaults read` returned **byte-identical** output under the jail |
+| the dev-only catalog override (`src/catalog_override.rs`) | which grants an arm actually ran with, without a rebuild between iterations | it REPLACES the compiled catalog rather than merging over it, and a build without the `build-jail-catalog-override` cargo feature REFUSES a set `NUB_BUILD_JAIL_CATALOG` rather than ignoring it — so an arm cannot silently measure the shipped tables under an override's name |
 
 ---
 
@@ -48,11 +49,11 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 ## The pure allowlist under `(deny default)` — ADOPTED, and macOS is NOT an exception to it
 
-**What it is.** The build jail on macOS is a **pure allowlist that emits zero deny rules**, exactly as on Linux and Windows. `compiler/preset.rs:424-428` states it directly: *"NO `/etc/shadow` deny here any more. The build jail is a PURE ALLOWLIST — it emits no deny rules at all — so the password-hash files are protected by not being granted … on macOS by the Seatbelt base granting the specific `/private/etc` files it needs instead of the whole subpath."*
+**What it is.** The build jail on macOS is a **pure allowlist that emits zero deny rules**, exactly as on Linux and Windows. `compiler/preset.rs:458-462` states it directly: *"NO `/etc/shadow` deny here any more. The build jail is a PURE ALLOWLIST — it emits no deny rules at all — so the password-hash files are protected by not being granted … on macOS by the Seatbelt base granting the specific `/private/etc` files it needs instead of the whole subpath."*
 
-**A premise to correct, because it is easy to form and it is wrong.** The generous-read base `(allow file-read* (subpath "/"))` is emitted **only** when `default_effect == Allow` (`macos.rs:12-14`, `:737`), which is the `nub sandbox` / `sandbox: true` shape — **not** the build jail's. **macOS is a pure allowlist on the read axis too**, with the same guarantee shape as Linux and Windows. Anyone reading "macOS uses a generous read base with secrets carved out by deny" is reading the agent-sandbox product, not the build jail.
+**A premise to correct, because it is easy to form and it is wrong.** The generous-read base `(allow file-read* (subpath "/"))` is emitted **only** when `default_effect == Allow` (`macos.rs:12-14`, `:738`), which is the `nub sandbox` / `sandbox: true` shape — **not** the build jail's. **macOS is a pure allowlist on the read axis too**, with the same guarantee shape as Linux and Windows. Anyone reading "macOS uses a generous read base with secrets carved out by deny" is reading the agent-sandbox product, not the build jail.
 
-**What the build jail's read set actually is** (`preset.rs:250-341`, `grant_build_jail_dependency_reads`), and it is measured rather than reasoned — a 34-package read-ladder study plus a 311-package trust-list corpus, of which 217 of 219 passing packages were unaffected by the narrowing:
+**What the build jail's read set actually is** (`preset.rs:269-360`, `grant_build_jail_dependency_reads`), and it is measured rather than reasoned — a 34-package read-ladder study plus a 311-package trust-list corpus, of which 217 of 219 passing packages were unaffected by the narrowing:
 
 - The consumer's `node_modules` (**not** the whole project). A lifecycle script's own dependencies are hoisted there, so `node-gyp-build` and `prebuild-install` resolve out of `<project>/node_modules/.bin`; dropping the project read outright fails **27 of 33** packages, and keeping only `node_modules` costs nothing.
 - The consumer's top-level `package.json` **as one file, never the directory that holds it**. Two packages at scale crash with an uncaught `ENOENT` without it — `@sentry/capacitor` cross-checks its version against sibling `@sentry/*` entries, and `simple-git-hooks` looks for its own config field.
@@ -77,6 +78,8 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **What it buys.** Real per-host containment at zero privilege — the one platform where the build jail's host allowlist is an actual boundary rather than a hint.
 
+**The allowlist is PER-HOST, not per-package, and the difference matters.** The net axis is built by `build_jail_net()`, which returns a flat `["$downloads"]` on every non-Windows platform (`compiler/preset.rs:482-490`) and takes no package argument — so **every jailed script on macOS gets the same curated artifact-host set**, whatever the catalog says about that package. The catalog's per-package `packageNetwork` boolean is read by exactly one consumer, `net_gate_node_options` (`compiler/defaults.rs:929`), which is stamped into `NODE_OPTIONS` only by the Windows path in `build_jail.rs`. **So package identity gates egress on Windows and hostname gates it on macOS; neither platform does both.** Threat-model consequence: on macOS a package the catalog never admitted still reaches every `$downloads` host, and the hosts are curated to be wildcard-free and write-incapable precisely because that is the property doing the work there.
+
 **End-to-end under a real `nub install`, macOS 26.5.2 arm64**. A jailed `postinstall` sees `HTTP_PROXY`/`HTTPS_PROXY`/`http_proxy`/`https_proxy`/`npm_config_proxy`/`npm_config_https_proxy = http://<per-session-token>@127.0.0.1:<port>` (`macos.rs:135` → `set_proxy_env`), and the cells separate cleanly:
 
 | cell | jail OFF | jail ON |
@@ -94,7 +97,7 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 ## The `TmpMode::Private` per-run scratch — ADOPTED
 
-**What it is.** A fresh per-run tmp directory granted read-write, with the shared host tmp hidden. Set by the `$tmp` surface key (`preset.rs:385-387`), which sets the MODE rather than emitting an ordinary fs rule.
+**What it is.** A fresh per-run tmp directory granted read-write, with the shared host tmp hidden. Set by the `$tmp` surface key (`preset.rs:420-421`), which sets the MODE rather than emitting an ordinary fs rule. The key is `#[cfg(not(windows))]`: the AppContainer backend cannot enforce a private tmp at all, so Windows takes the shared mode by the key's absence.
 
 **One shipped bug, and it is an instance of the precedence footgun below.** The private-dir grant was emitted in a different SBPL node from the shared-tmp deny it had to override, so the grant was a silent no-op. Fixed on `fix/tmpmode-private-writable` `5788301649` — cypress went to exit 0. The general lesson is the [SBPL precedence rule](#the-sbpl-precedence-rule--the-footgun-that-shipped-twice).
 
@@ -153,7 +156,7 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 ---
 
-# SBPL semantics — three footguns, each of which shipped a silent no-op
+# SBPL semantics — four silent no-ops
 
 ## The SBPL precedence rule — the footgun that shipped twice
 
@@ -185,6 +188,20 @@ Each approach carries a status, what it would have bought, the evidence with its
 ## Metadata reads are evaluated against an fd's vnode
 
 **What it is.** `file-read-metadata` is evaluated against an fd's **vnode** on `fstat()`, even for a descriptor the process never opened by path. **Only WRITE-ONLY fds are affected** — an `O_RDWR` stdio fd stats fine ungranted. That is why an interactive terminal and a pipe pass and only a `>` redirect aborted Node — see the next section.
+
+## The `(trace …)` directive is inert
+
+**What it is.** SBPL's documented policy-authoring aid: `(trace "<path>")` in an `(allow default)` profile is supposed to log every operation the child performs, so a profile can be generated from a real run instead of hand-written. **It writes nothing on darwin 25.5.**
+
+**Measured, with the positive control that makes the negative mean something** — macOS 26.5.2 / darwin 25.5.0, stock `/usr/bin/sandbox-exec`:
+
+| profile | result |
+| --- | --- |
+| `(allow default)` + `(trace "/private/tmp/…/trace.out")` | rc=0, child runs, **no file created** |
+| the same with the `/tmp` spelling | rc=0, **no file created** |
+| `(allow default)` + `(deny file-read* (literal …))` | **`Operation not permitted`, rc=1** |
+
+**The deny row is the control**: the same profile shape, loaded by the same binary in the same run, changes behaviour — so the profile is being parsed and applied, and `(trace …)` is inert rather than silently rejected. **Do not plan a trace-driven policy generator on this platform**; the read set here was derived by run-log mining and denial lines instead, which is why the read-ladder study was expensive.
 
 ---
 
@@ -287,18 +304,19 @@ libc execvp (/usr/bin/env): rc=0 ← skips the entry, finds /usr/bin/make
 
 Two recorded traps where a macOS-only measurement produced a broken cross-platform grant:
 
-- **`projectCwd` was load-bearing on Seatbelt and a NO-OP on Landlock** (`chdir` is not a Landlock-handled access) — *"which is exactly how the Prisma entry shipped broken after being measured only on macOS."* The field was removed from the settled grant schema.
-- **`@prisma/client`'s grant is recorded `macos-arm64` and does not work on Linux** — the differential `DIFFERS` identically with and without it.
+- **`projectCwd` is load-bearing on Seatbelt and a NO-OP on Landlock**, because `chdir` is not a Landlock-handled access. **Correction to an earlier reading: the field was NOT removed.** It is part of the settled catalog schema (`catalog.rs`'s `PackageGrant.project_cwd`, parsed from `projectCwd`, codegen'd by `build.rs`) and `curated.rs:269-273` turns it into a read rule on the project root — the node alone, never `subtree_globs`, or a cwd grant would widen into a whole-project read. Two entries carry it today, `@prisma/client` and `msw`, and both are recorded `platform: macos-arm64`.
+- **All three catalog `packageGrants` are recorded `platform: macos-arm64`, and that field is provenance rather than a gate.** The parser validates it and drops it; nothing carries it into the generated table, so **every grant applies on every OS** — a known, deliberate schema gap (`data/README.md`, "Platform-conditional entries"). The consequence to hold: a grant measured on macOS is already in force on Linux and Windows, where its evidence does not reach. For `@prisma/client` the Linux differential `DIFFERS` identically with and without it.
 
 **⇒ Never ship a build-jail grant measured only on macOS.** macOS is the most permissive platform to measure on and the least representative.
 
 ## Contradictions in the record, unresolved
 
-1. **The generous-read premise.** Any statement that the macOS build jail uses a generous read base with secrets carved out by deny is **false** — that is the `nub sandbox` shape (`default_effect == Allow`), while the build jail is a pure allowlist on the read axis (`preset.rs:424-428`, `macos.rs:737`). The confusion is easy because the same backend serves both products and the module doc describes both in one paragraph.
+1. **The generous-read premise.** Any statement that the macOS build jail uses a generous read base with secrets carved out by deny is **false** — that is the `nub sandbox` shape (`default_effect == Allow`), while the build jail is a pure allowlist on the read axis (`preset.rs:458-462`, `macos.rs:738`). The confusion is easy because the same backend serves both products and the module doc describes both in one paragraph.
 2. **Two different SIGABRTs are recorded under one name.** The stdio `fstat` abort has a mechanism, a denial line and a fix (`emit_stdio_grants`); the load-dependent abort is a separate, unexplained item marked "do not chase". Reading the second alone leads to the conclusion that the fixed one is still open.
-3. **A per-host claim that only holds here.** Grouping Linux and Windows together as best-effort egress via `HTTP(S)_PROXY` is accurate for Windows (via the userland net gate) and **false for Linux**, where no proxy env reaches the child at all — so the macOS/not-macOS split is binary, not a three-way gradient. Cross-referenced in both sibling documents.
+3. **A per-host claim that only holds here, and a proxy claim that holds nowhere else.** macOS is the only platform whose child is pointed at a real filtering proxy. Linux stamps no proxy env at all (measured). Windows' net gate does stamp `http_proxy`/`https_proxy` on every child, but at `http://127.0.0.1:1` — a **blackhole**, so a proxy-honouring non-Node child fails to connect rather than being filtered (`backend/net_gate_shim.js`, `forceEnv`). Describing the three platforms as a gradient of proxy-mediated egress is wrong in both directions: the split is macOS-proxy / Linux-nothing / Windows-blackhole. Cross-referenced in both sibling documents.
 
 ## Changelog
 
+- 2026-07-30 — Reconciled against the tree. **REVERSAL:** `projectCwd` was recorded as removed from the grant schema; it is live, carried by two catalog entries, and `curated.rs` emits it as a project-root read node. Recorded that the catalog's `platform` field is provenance and does not scope a grant, so every entry applies on every OS. Made the egress claim precise — the `$downloads` allowlist is flat for every jailed script here, and the per-package `packageNetwork` boolean reaches only the Windows-stamped net gate — and corrected the sibling-platform proxy claim (Linux stamps none, Windows stamps a blackhole). Added the measured `(trace …)` inertness and the dev-only catalog override.
 - 2026-07-30 — Moved into tracked `research/design/` so code comments can link here, and scrubbed of pointers into untracked documents. Every measurement, table and verdict is unchanged.
 - 2026-07-29 — Initial consolidation.

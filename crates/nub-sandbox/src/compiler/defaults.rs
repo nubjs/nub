@@ -784,10 +784,11 @@ const REALPATH_ROOTS_PLACEHOLDER: &str = "__NUB_REALPATH_ROOTS_JSON__";
 /// absolute path dies `EPERM` on a file the same process can `readFileSync`.
 ///
 /// WHY THIS EXISTS ALONGSIDE THE BACKEND'S ANCESTOR REPAIR, not instead of it. `windows.rs`
-/// makes the ancestor chain openable from both ends — a non-inherited traverse ACE where the
-/// unprivileged user can write one, the capability SIDs Windows already granted where it cannot
-/// — and that repair is best-effort BY DESIGN: a refused ACE write is skipped, and a path whose
-/// DACL names no harvestable capability yields nothing to request. This term is what keeps the
+/// writes a non-inherited traverse ACE on each ancestor the unprivileged user can write one
+/// on, and that repair is best-effort BY DESIGN: a refused ACE write is skipped. Above the
+/// profile nothing repairs the chain at all — no standard user can re-ACE `C:\` or `C:\Users`,
+/// and the capability-SID route that once covered them is kernel-refused and has since been
+/// deleted rather than kept as an inert hedge. This term is what keeps the
 /// jail working in exactly those cases, and it costs nothing when the ancestor repair did land:
 /// with every `lstat` succeeding, the tolerance rule never fires and the walk is Node's own.
 ///

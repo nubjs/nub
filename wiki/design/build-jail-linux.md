@@ -29,6 +29,7 @@ Each approach carries a status, what it would have bought, the evidence with its
 | run-log mining (`ENOENT`/`EROFS`/`getaddrinfo` naming the path or host) | broad coverage across hundreds of packages | only works where the denial names the thing — Landlock's `EACCES` is less informative than bwrap's `ENOENT` |
 | `bwrap --unshare-user` on a freshly created VM, with the sysctl printed beside the result | whether an unprivileged userns is usable | **`unshare --user true` is a BROKEN control** — see the bubblewrap section |
 | a real Landlock enforcement test inside Docker `--cap-drop=ALL` | whether the mechanism survives a container | Docker returns `ENOSYS` for unlisted syscalls, so "no Landlock" and "seccomp blocked it" are indistinguishable without a control |
+| the dev-only catalog override (`src/catalog_override.rs`) | which grants an arm actually ran with, without a rebuild between iterations | it REPLACES the compiled catalog rather than merging over it, and a build without the `build-jail-catalog-override` cargo feature REFUSES a set `NUB_BUILD_JAIL_CATALOG` rather than ignoring it — so an arm cannot silently measure the shipped tables under an override's name |
 
 ---
 
@@ -42,7 +43,9 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **Why it is expressible at all.** Landlock rules UNION; there is no deny primitive at any ABI, so "deny inside allow" cannot be written. The build jail is a **pure allowlist that emits zero deny rules** (`preset::enforce_pure_allowlist`), so the objection that once disqualified Landlock does not bind here. It still binds `nub sandbox`, which is why that product keeps bubblewrap and its escalation.
 
-**Measured.** ABI 4 / kernel 6.8 unless noted; Enforcement verified inside Docker `--cap-drop=ALL --security-opt=no-new-privileges`, in both classic `docker build` and BuildKit `RUN` — Docker's default seccomp permits syscalls **444–446**. Kernel floor is 5.13 for filesystem rules; ABI 7 is 6.15.
+**Measured.** ABI 4 / kernel 6.8 unless noted; Enforcement verified inside Docker `--cap-drop=ALL --security-opt=no-new-privileges`, in both classic `docker build` and BuildKit `RUN` — Docker's default seccomp permits syscalls **444–446**. Kernel floor is 5.13 for filesystem rules (`MIN_FS_ABI = 1`).
+
+**Where the ABI stands, and it moves without changing anything here.** Upstream now documents ABI **10**, which added UDP support and `LANDLOCK_ADD_RULE_QUIET`; the intervening versions added `REFER` (2), `TRUNCATE` (3), TCP network rules (4), `IOCTL_DEV` (5), scope flags (6), logging control (7), `RESTRICT_SELF_TSYNC` (8) and `RESOLVE_UNIX` (9). **No version at any point introduced a deny or subtract primitive**, so every verdict in this document is unchanged by the movement — the number is what was stale, not the mechanism. Nub declares the filesystem rights through ABI 5 (`handled_access_fs` in `linux_landlock.rs`) and sizes the ruleset attribute by probed ABI (`RulesetAttr::size_for`, whose open arm already accepts a later kernel's struct), so a newer kernel is used, not merely tolerated.
 
 **Cost is a non-issue.** 100,000 rules accepted at ~2.3 µs/rule; jail construction **0.168 ms** versus bwrap's **1.917 ms** (~11×).
 
@@ -133,7 +136,7 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **What it was.** Get an AppArmor profile for Nub's own digest-pinned `bwrap` copy into Ubuntu and Debian, so the path-keyed restriction exempts it the way it exempts `/usr/bin/bwrap` on 26.04.
 
-**Why it is dead.** Maintainer, 2026-07-28: *"We are not gonna be able to ship a default Nub profile in the distro for many years. That is not feasible."* Multi-year lead time; **not a path.**
+**Why it is dead.** Getting a profile into Ubuntu and Debian is a multi-year lead time, and the build jail needs to work on the machines people have now. **Not a path.**
 
 **What survives.** On a restricted-userns host the only route for `nub sandbox` is the local one-time `sudo nub setup-sandbox`, which installs a root-owned helper plus a path-keyed profile (D5). That is `nub sandbox`'s escalation and is never the build jail's.
 
@@ -167,7 +170,9 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **What it was.** Express "grant this subtree, deny this file inside it" — the shape `nub sandbox` needs and the `.env*` secret floor was originally written against.
 
-**Measured refutation** — probe `landlock_deny.c`, ABI 7. `allowed_access = 0` → **`ENOMSG`**. `EXECUTE`-only and `WRITE_FILE`-only rules are **accepted with zero restricting effect**. Rules UNION; they never subtract. **The only deny is a non-grant.**
+**Measured refutation** — probe `landlock_deny.c`, on ABI 7. `allowed_access = 0` → **`ENOMSG`**. `EXECUTE`-only and `WRITE_FILE`-only rules are **accepted with zero restricting effect**. Rules UNION; they never subtract. **The only deny is a non-grant.**
+
+**Still true at the current ceiling.** ABI 8, 9 and 10 have since landed (`RESTRICT_SELF_TSYNC`, `RESOLVE_UNIX`, UDP plus `LANDLOCK_ADD_RULE_QUIET`), and **none of them adds a deny or precedence primitive** — the quiet flag suppresses audit records for a denial, it does not create one. Re-reading the ABI list is not a way to reopen this.
 
 **Consequence, and it is the design's central fact.** The build jail is grant-only and emits **zero** deny rules; a secret is protected by **not being granted**. Denies inside a broader allow grant need escalation, which is the separate `nub sandbox` product's concern and not the build jail's. So the question is never "can this deny be expressed?" but "what is the smallest grant set that works?"
 
@@ -206,7 +211,7 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 ## The `stat` and `access` reconnaissance gap — OPEN, accepted
 
-**What it is.** Landlock has no `stat` right, so ungranted paths are **refused-but-visible** (`EACCES`, not `ENOENT`). Landlock governs `open`, **not `access`/`stat`**, and `chmod`/`chown`/`utime`/`setxattr`/`ioctl`/`fcntl` are unmediated at every ABI — ABI 7 governs file content and directory ops only.
+**What it is.** Landlock has no `stat` right, so ungranted paths are **refused-but-visible** (`EACCES`, not `ENOENT`). Landlock governs `open`, **not `access`/`stat`**, and `chmod`/`chown`/`utime`/`setxattr`/`ioctl`/`fcntl` are unmediated at every ABI — the filesystem rights cover file content and directory operations only, and that is as true at the current ABI 10 as it was at 7.
 
 **Quantified, and more precise than "ungranted paths are visible"** — pen-test PT3. `access()`/`stat()` unmediated ⇒ **existence and mode of any path the script can NAME leaks** (`~/.ssh/id_rsa` → `mode=600`, `/etc/shadow` → `640`); but `readdir`/`opendir` **are** mediated (home, `/home`, `/proc` all `EACCES`). ⇒ **an attacker can CONFIRM A GUESS but cannot ENUMERATE or DISCOVER. Content never leaks.** macOS Seatbelt is stricter — even `stat` is `EPERM`.
 
@@ -297,20 +302,22 @@ All four closed in `890476426c`, listed because each is the kind of thing a port
 
 ## The `$downloads` host allowlist on Linux — DEAD (mechanism), and it is inert rather than permissive
 
-**What it was.** The IR emits `net: ["$downloads"]` on non-Windows (`compiler/preset.rs:446-455`), and `fold.rs:620-629` turns the list into `NetPolicy { enforce: true, rules: <one Allow per host> }`. The intent is a curated per-host allowlist.
+**What it was.** The IR emits `net: ["$downloads"]` on non-Windows (`compiler/preset.rs:482-490`), and `fold_net` (`fold.rs:621`) turns the list into `NetPolicy { enforce: true, rules: <one Allow per host> }`. The intent is a curated per-host allowlist.
 
 **What actually happens, traced end to end plus measured**, `sandbox/integration` @ `58973b881a`:
 
-- `backend/mod.rs:895-904` `proxy_needed()` is TRUE, so `mod.rs:1177` **does** start an `EgressProxy` and `mod.rs:1213` **does** try a `linux_net_bridge`. **Both are then discarded.**
-- `apply_landlock` takes **no proxy port** and passes `per_host: false`, so the full twelve families are denied.
+- `backend/mod.rs:906` `proxy_needed()` is TRUE, so `mod.rs:1188` **does** start an `EgressProxy` and `mod.rs:1224` **does** try a `linux_net_bridge`. **Both are then discarded.**
+- `apply_landlock` (`linux.rs:2989`) takes **no proxy port** and hard-codes `per_host: false`, so the full twelve families are denied.
 - **No proxy env is injected.** `insert_proxy_env` has exactly one Linux caller, inside `target_environment()`, reached only from the **bubblewrap** path. `apply_landlock` builds env from `policy.env.constructed` alone.
-- `apply_landlock` returns `Degradation::full()`, so **the lost per-host capability is not reported.**
+- `apply_landlock` returns `Degradation::full()`. That is now stated in the code as the intended reading rather than an omission: the build jail's network axis is BINARY, so coarse deny is the model and not a reduction of one, and a package needing a specific host is served by prefetch before the jail starts.
 
 **The measurement that settles it.** The **allowlisted** and **non-allowlisted** cells are **bit-identical** (`EPERM errno=-1 connect` both), and no proxy env vars reach the child in either arm, so no proxy-mediated fetch is even attemptable. **The host list buys a package nothing.**
 
 **⇒ On Linux the real primitive is coarse on/off, OS-enforced, needing no privilege. A catalog entry granting hosts is functionally inert here.** Per-host egress filtering is enforced on **macOS only**. **Do not document per-host enforcement as cross-platform.**
 
-**A cross-platform claim to correct.** Describing Linux and Windows together as best-effort egress via `HTTP(S)_PROXY` env vars is false for Linux as implemented: **no proxy env reaches the Linux child at all** (measured). It is now accurate for Windows via the userland net gate, which Linux does not stamp.
+**The catalog's OTHER network table is inert here too, and for a different reason.** The per-package `packageNetwork` boolean — the ratified defense — is read by exactly one consumer, `net_gate_node_options` (`compiler/defaults.rs:929`), and that term is stamped into `NODE_OPTIONS` only by the Windows branch of `build_jail.rs`. The gate's own JS is deliberately platform-independent and its tests run everywhere, but **nothing stamps it on Linux**, so a Linux jailed script's egress is decided entirely by the seccomp family ceiling, which denies every family for every package alike. Both catalog network tables are therefore Windows-or-macOS surface as things stand, and neither varies a Linux run.
+
+**A cross-platform claim to correct.** Describing Linux and Windows together as best-effort egress via `HTTP(S)_PROXY` is wrong about both. **No proxy env reaches the Linux child at all** (measured). Windows' net gate does stamp those variables, but at `http://127.0.0.1:1` — a closed port, so the effect is a refusal for a proxy-honouring non-Node child, not a filtered route. macOS is the only platform whose proxy variables name something that answers.
 
 **Two consequences already recorded elsewhere.** `$downloads` is flagged as *"possibly dead surface under the binary network model — retire or reinterpret"*, and a corpus arm measured **only `prisma` recovered** by `$downloads` out of 8 network-tier breaks, with `wasm-pack` unrescuable by any host allowlist because it ignores proxy env entirely.
 
@@ -371,20 +378,31 @@ control: gyp info ok (unjailed, same dir, same node-gyp)
 
 **A related and genuinely upstream defect, resolved as a doc caveat.** The escaping-`base_path` sibling write in `gyp/pylib/gyp/generator/make.py:2434` — `output_file = os.path.join(options.depth, options.generator_output, base_path, base_name)` with `depth="."` and `generator_output="build"` — prepends `build/` in a way that cancels only the FIRST `..`, so the write lands one level short. **Reproduces byte-for-byte under real pnpm's `.pnpm` virtual store**, so it is not nub-specific and pnpm has not special-cased it. **~29% of a 35-package sample use the vulnerable idiom** (`bcrypt`, `sqlite3`, `ffi-napi`, `ref-napi`, `node-pty`, `tree-sitter`) — it is node-addon-api's **own documented boilerplate**; `include_dirs`/`.include_dir` is the safe form. Flag-injection is **not viable** (`--depth`/`--generator-output` are hardcoded in node-gyp's `configure.js`, and a package running `node-gyp rebuild` directly resolves via bare PATH, bypassing `npm_config_node_gyp`). Root-cause fix is genuinely infeasible in Nub, so the documented workaround is correct under the prefer-root-cause rule's stated exception. Doc shipped on `main` @ `dc27843e26`.
 
-## Stale comments that produced wrong conclusions — OPEN
+## Stale comments that produced wrong conclusions — CLOSED
 
-Three separate rounds drew wrong conclusions from these, so they are worth fixing as a defect class:
+Three separate rounds drew wrong conclusions from four comments that described the code as it had stopped being. All four now read correctly, verified against the tree:
 
-- `linux_monitor.rs:644-651` / `:692-697` claim the socket seccomp is not installed for per-host — **it is**, gated at `:905-907`.
-- `linux_monitor.rs:901-904` claims per-host permits `AF_UNIX` — **it does not**; `linux.rs:2502` permits two families and `:3329-3347` asserts the denial.
-- `linux_monitor.rs:8-9` says the production launcher "remains deliberately uninstalled" while `linux.rs:364`/`:423` construct it unconditionally.
-- `fold.rs:96` says "four env bands" where `:283` documents two.
+- The `BootstrapSpec::per_host` comment (`linux_monitor.rs:~692`) states that the socket-blocking seccomp **stays installed** under per-host and narrows to `AF_INET`/`AF_INET6`, rather than being dropped.
+- The same comment states that **`AF_UNIX` stays denied** under per-host, matching `PER_HOST_PERMITTED` (`linux.rs:2671`), which names exactly two families.
+- The module doc (`linux_monitor.rs:8-9`) states that the production confined-Linux path **constructs and adopts the launcher unconditionally**, replacing "remains deliberately uninstalled".
+- The env-band comment (`fold.rs:~96`) says **two** env-deny bands, agreeing with the band-by-band emission record at `:278-292`.
 
-## CI gates that do not gate — OPEN
+**Kept as a section rather than deleted**, because the defect class is the point: each of these was a comment that outlived the code it described, and each cost a round. The check that catches the next one is reading the symbol, not the sentence above it.
 
-**`ci.yml` runs ZERO of the 70 Linux enforcement tests** — no bubblewrap install, no require-gate, so all hit `skip_without_bwrap()` and silently return. `sandbox-conformance.yml` never fires (`push: branches: [sandbox-primitives]`), so the designated done-gate has never run on the sandbox branch. Clippy is Ubuntu-only, which is why `unused variable: d` at `tests/ir.rs:395` never reddened CI despite failing on Windows. **The branch has shipped undetected breaks in both directions; single-platform gates are the structural cause.**
+## CI gates that do not gate — mostly CLOSED, one residual
 
-**Two gate-shaped traps.** Linux enforcement tests silently skip without bwrap, and a hollow "38 passed in 0.01s" reads as success — set `NUB_SANDBOX_REQUIRE_BWRAP=1` and report wall-clock. And **`docker … | tail` returns TAIL's exit status**, so a container gate written that way silently reports success on a failing build — redirect to a file, capture `$?`, `exit $RC`. That one caught a real Linux break on its first correct use.
+The gates were the structural cause of breaks shipping undetected in both directions, and three of the four holes are now shut in `ci.yml`:
+
+| hole | state |
+| --- | --- |
+| Linux enforcement tests all hit `skip_without_bwrap()` and silently returned | **closed** — a `bwrap-resource` job builds the digest-pinned helper, the `test` job downloads it, pins `NUB_BWRAP_VERSION`/`NUB_BWRAP_SHA256` before every `cargo` invocation that compiles `nub-sandbox`, and runs `nub setup-sandbox --all-users` to repair the runner's restricted userns |
+| no require-gate, so a hollow "N passed in 0.01 s" read as success | **closed** — `NUB_SANDBOX_REQUIRE_BWRAP: "1"` is set job-wide, turning a skip into a hard failure; the workflow records the repair as taking the Linux enforcement suite from 2 of 38 running to 38 of 38 in ~6 s |
+| clippy was Ubuntu-only, so an OS-specific `#[cfg]` arm was invisible | **closed** — the clippy job is a matrix over `ubuntu-latest`, `windows-latest` and `macos-14`, with `nub-native` linted separately from inside the crate |
+| the `unused variable: d` at `tests/ir.rs` that the Ubuntu-only gate missed | **closed** — the binding carries `#[cfg_attr(target_os = "windows", allow(unused_variables))]`, with the comment stating it is genuinely unused on that target rather than accidentally dropped |
+
+**The residual, and it is the designated done-gate.** `sandbox-conformance.yml` fires on `workflow_dispatch`, on a `push` to `sandbox-primitives`, and on a path-filtered `pull_request` against `main`. **None of those is a push to this branch**, and prerelease work here opens no PRs — so the cross-platform conformance matrix, the one gate that pairs every axis with a negative control, still does not run on the branch the feature is built on. Dispatch it by hand or widen the push filter; do not read a green `ci.yml` as covering it.
+
+**One gate-shaped trap worth keeping.** **`docker … | tail` returns TAIL's exit status**, so a container gate written that way silently reports success on a failing build — redirect to a file, capture `$?`, `exit $RC`. That one caught a real Linux break on its first correct use.
 
 ---
 
@@ -400,9 +418,10 @@ Recorded because a negative needs its positive controls named. Against `sandbox/
 
 1. **Linux per-host is described as best-effort via `HTTP(S)_PROXY`, and no proxy env reaches the child at all** (measured). The honest Linux statement is coarse deny with an inert host list.
 2. **Corpus figures disagree by a wide margin and by construction.** The Landlock P0 row reports "corpus 121→2→**0 genuine**"; a later corpus run reports "**~26% of measurable P2 breaks** under the production policy" and "default-on is NOT supportable on this evidence". Different arms and different dates, and the reconciliation is: **every published corpus figure predates the curated carve-outs entirely** (Linux numbers measured 07-28 16:46–18:38; `curated.rs` grants landed 22:24, catalog wired 23:52). Neither figure is quotable without its arm.
-3. **A harness defect makes the above hard to settle retroactively.** `PROVENANCE.txt` records only `version: v0.6.0` — no git sha, no preset, no catalog state — which is why a run's configuration had to be inferred from file mtimes after the fact. Every result artifact must stamp the sha, the arm, and whether curated grants were compiled in.
+3. **A harness defect makes the above hard to settle retroactively.** `PROVENANCE.txt` records only `version: v0.6.0` — no git sha, no preset, no catalog state — which is why a run's configuration had to be inferred from file mtimes after the fact. Every result artifact must stamp the sha, the arm, and whether curated grants were compiled in. **Half of that is now available rather than needing to be built**: the catalog override prints a banner naming the file it loaded and its entry counts, or naming the rejection and the fallback, so a run's catalog state is a line the harness can capture instead of a mtime it has to reconstruct. The sha and the preset still are not stamped.
 
 ## Changelog
 
+- 2026-07-30 — Reconciled against the tree. Corrected the ABI ceiling: upstream now documents ABI 10 (UDP plus `LANDLOCK_ADD_RULE_QUIET`), and since no version has ever added a deny or subtract primitive, no verdict here moves — the number was stale, the mechanism is not. Closed the "stale comments" section (all four now read correctly) and most of the CI-gate section (`ci.yml` builds and stages the pinned bwrap, repairs the runner's userns, sets the require-gate, and lints on three OSes), leaving the conformance workflow's branch coverage as the one live residual. Recorded that the per-package `packageNetwork` table reaches only the Windows-stamped net gate, so neither catalog network table varies a Linux run, and added the dev-only catalog override.
 - 2026-07-30 — Moved into tracked `research/design/` so code comments can link here, and scrubbed of pointers into untracked documents. Every measurement, table and verdict is unchanged.
 - 2026-07-29 — Initial consolidation.
