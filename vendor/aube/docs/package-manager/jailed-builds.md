@@ -103,11 +103,17 @@ The jail uses the same lightweight strategy as mise:
 
 - macOS: generate a Seatbelt profile and run scripts through `sandbox-exec` to
   deny network access and writes outside the package / temporary directories.
-- Linux: apply Landlock write restrictions (kernel ≥ 5.19, Landlock ABI v2) and
-  a seccomp network filter in the child process before it execs the script. If
-  the kernel cannot enforce the requested jail, the script fails instead of
-  running unsandboxed. Landlock v2 does not gate `truncate()` on otherwise
-  read-only paths; build scripts that need that protection require kernel ≥ 6.2.
+- Linux: apply Landlock write restrictions and a seccomp filter in the child
+  process before it execs the script. Landlock ABI v2 (kernel ≥ 5.19) is a hard
+  floor — if the kernel cannot enforce all of it, the script fails instead of
+  running unsandboxed. `LANDLOCK_ACCESS_FS_TRUNCATE`, which arrived in ABI v3
+  (kernel ≥ 6.2), is requested best-effort on top: on 6.2+ a script cannot
+  truncate a file it has no write grant for, and on 5.19–6.1 that one right is
+  dropped rather than refusing to confine the LTS kernels. The seccomp filter
+  denies the socket families (unless the grant asks for network) and the
+  `chown`/`setxattr` families. `chmod` and `utimes` stay unmediated: Landlock
+  has no metadata hook at any ABI, and denying them via seccomp breaks real
+  packages.
 - Windows: start with environment scrubbing, a temporary home directory, and an
   unsupported-native-jail warning until there is a good OS-native policy.
 

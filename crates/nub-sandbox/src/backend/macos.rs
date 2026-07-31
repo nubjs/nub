@@ -864,7 +864,9 @@ fn emit_move_block(policy: &SandboxPolicy, out: &mut String) {
             continue;
         }
         let probe = match to_match_term(rule.matcher.as_str()) {
-            MatchTerm::Subpath(denied) => denied,
+            // Both anchored shapes probe the same path; a deny arrives as the pair
+            // `[P, P/**]`, whose halves now classify differently and must not diverge here.
+            MatchTerm::Literal(denied) | MatchTerm::Subpath(denied) => denied,
             MatchTerm::Regex(_) => {
                 let Some(prefix) = regex_literal_dir_prefix(rule.matcher.as_str()) else {
                     continue;
@@ -911,6 +913,10 @@ fn write_grant_roots(policy: &SandboxPolicy) -> Vec<String> {
             if is_dangerous_write_root(&m) {
                 continue;
             }
+            // `Subpath` only: these roots bound how far the ancestor move-block walks, and
+            // the thing that makes a rename possible is a writable CONTAINER. A `Literal`
+            // rw grant is the node alone and contains nothing. The subtree pair still
+            // contributes its root via the `/**` half, so no real grant is lost.
             if let MatchTerm::Subpath(p) = m {
                 roots.push(p);
             }
@@ -972,7 +978,11 @@ fn parent_dir(p: &str) -> Option<&str> {
 /// too (harmless, self-documenting); `/private/tmp` is deliberately absent — it is
 /// the legitimate temp firmlink target, not a broad system root.
 fn is_dangerous_write_root(term: &MatchTerm) -> bool {
-    let MatchTerm::Subpath(p) = term else {
+    // `Literal` is checked alongside `Subpath` because a subtree arrives as the PAIR
+    // `[P, P/**]` and only the second half classifies as `Subpath` — guarding one half
+    // would hand out `(allow file-write* (literal "/private"))`, i.e. permission to
+    // rename or unlink the root itself.
+    let (MatchTerm::Literal(p) | MatchTerm::Subpath(p)) = term else {
         return false;
     };
     matches!(
@@ -1137,24 +1147,42 @@ fn confstr_dir(name: libc::c_int) -> Option<PathBuf> {
     }
 }
 
-/// A translated SBPL match term: an absolute-literal subtree, or a glob rendered as
-/// an anchored Seatbelt regex.
+/// A translated SBPL match term: one exact path, an absolute-literal subtree, or a
+/// glob rendered as an anchored Seatbelt regex.
 enum MatchTerm {
+    Literal(String),
     Subpath(String),
     Regex(String),
 }
 
 /// Translate one canonical IR glob into an SBPL match term. An absolute literal
-/// (or a literal + trailing `/**`) becomes `(subpath …)` — exact and cheap; a
-/// whole-fs `**` becomes `(subpath "/")`; anything with embedded globs becomes an
-/// anchored regex (Seatbelt has no glob syntax).
+/// becomes `(literal …)` — the ONE path, see below; its `/**` twin becomes
+/// `(subpath …)`; a whole-fs `**` becomes `(subpath "/")`; anything with embedded
+/// globs becomes an anchored regex (Seatbelt has no glob syntax).
+///
+/// THE IR SPELLS A SUBTREE AS THE PAIR `[P, P/**]` (`compiler::defaults::subtree_globs`), so a
+/// bare `P` NAMES THE DIRECTORY NODE AND NOTHING UNDER IT. Rendering it `(subpath P)`
+/// — which this did — silently widened it in both directions at once, because `emit_fs`
+/// runs the same term through two loops with opposite polarity: the read loop turned
+/// `curated::project_cwd`'s node grant into a read of the consumer's WHOLE project, and
+/// the write loop turned it into `(deny file-write* (subpath P))`, a subtree write-deny
+/// emitted after every grant it encloses. Under Seatbelt's within-node last-match-wins
+/// that deny beat `package_dir` and `siblingDirs`, so the flagship catalog grant revoked
+/// itself (measured: `EPERM mkdir <cell>/node_modules/.prisma` on a path the policy
+/// granted rw; flipping `projectCwd` alone made it succeed). `(literal P)` matches only
+/// operations whose target IS `P`, so the node stays listable and renameable-blocked
+/// while writes BELOW it are governed by the rules that actually name them.
+///
+/// Emitting the pair as `(literal P)` + `(subpath P)` is the same coverage it always
+/// had — `(subpath P)` already includes `P` — so nothing that spells a subtree the IR's
+/// way changes shape.
 fn to_match_term(glob: &str) -> MatchTerm {
     if glob == "**" || glob == "/**" || glob == "/" {
         return MatchTerm::Subpath("/".to_string());
     }
     let has_meta = glob.contains(['*', '?', '[', ']', '{', '}']);
     if !has_meta && glob.starts_with('/') {
-        return MatchTerm::Subpath(glob.to_string());
+        return MatchTerm::Literal(glob.to_string());
     }
     // Literal prefix + trailing `/**` (the common subtree twin) → subpath of prefix.
     if let Some(prefix) = glob.strip_suffix("/**")
@@ -1169,6 +1197,7 @@ fn to_match_term(glob: &str) -> MatchTerm {
 /// Render a [`MatchTerm`] as its SBPL fragment.
 fn emit_term(term: &MatchTerm) -> String {
     match term {
+        MatchTerm::Literal(p) => format!("(literal \"{}\")", sbpl_escape(p)),
         MatchTerm::Subpath(p) => format!("(subpath \"{}\")", sbpl_escape(p)),
         MatchTerm::Regex(r) => format!("(regex #\"{}\")", r.replace('"', "\\\"")),
     }
@@ -1832,11 +1861,14 @@ mod tests {
         assert_eq!(term_str("/"), "(subpath \"/\")");
     }
 
+    /// The node and its subtree twin are DIFFERENT terms, because the IR spells a subtree
+    /// as the pair and therefore spells a node as the bare path alone. Emitting `(subpath)`
+    /// for both is what let `projectCwd` grant a whole-project read and revoke every write
+    /// under it; the pair together still covers the subtree, so nothing spelled the IR's
+    /// way changed.
     #[test]
-    fn absolute_literal_and_subtree_twin_become_subpath() {
-        assert_eq!(term_str("/proj/data"), "(subpath \"/proj/data\")");
-        // The `/**` subtree twin collapses to the same subpath (subpath already
-        // covers descendants) — the two IR rows map to one grant.
+    fn a_bare_path_is_the_node_and_only_its_twin_is_the_subtree() {
+        assert_eq!(term_str("/proj/data"), "(literal \"/proj/data\")");
         assert_eq!(term_str("/proj/data/**"), "(subpath \"/proj/data\")");
     }
 
@@ -2167,31 +2199,52 @@ mod tests {
     fn read_confine_has_no_global_read_allow() {
         // default_effect Deny + explicit project allow = read-confine; unmatched
         // paths fall through to the base `(deny default)`, not a global read allow.
+        //
+        // The grant is spelled as the compiler's subtree PAIR. Hand-writing only `/proj`
+        // names the directory NODE, which is a different rule and emits `(literal …)`.
         let p = fs_policy(
             Effect::Deny,
-            vec![rule("/proj", Effect::Allow, FsAccess::ReadWrite)],
+            vec![
+                rule("/proj", Effect::Allow, FsAccess::ReadWrite),
+                rule("/proj/**", Effect::Allow, FsAccess::ReadWrite),
+            ],
         );
         let prof = build_profile(&p, &spec(), None, None, None);
         assert!(!prof.contains("(allow file-read* (subpath \"/\"))\n"));
         assert!(prof.contains("(allow file-read* (subpath \"/proj\"))"));
     }
 
+    /// rw → write allow; read-only allow → write deny (caps a broader grant); deny → write
+    /// deny. Base denies writes, so only rw opens one.
+    ///
+    /// The cap's REACH is the regression this pins. A read-only allow spelled as a subtree
+    /// pair caps the subtree; one spelled as a bare NODE must cap the node alone. Emitting
+    /// the node as `(subpath …)` put a subtree write-deny after every grant it enclosed, and
+    /// SBPL resolves position within one operation node, so it revoked them — that is how
+    /// `curated::project_cwd` disabled the catalog's own `package_dir` and `siblingDirs`
+    /// writes. Both spellings are asserted together so neither can drift into the other.
     #[test]
     fn write_axis_maps_access_to_allow_or_capping_deny() {
-        // rw → write allow; read-only allow → write deny (caps a broader grant);
-        // deny → write deny. Base denies writes, so only rw opens one.
         let p = fs_policy(
             Effect::Deny,
             vec![
                 rule("/proj", Effect::Allow, FsAccess::ReadWrite),
+                rule("/proj/**", Effect::Allow, FsAccess::ReadWrite),
                 rule("/proj/ro", Effect::Allow, FsAccess::Read),
+                rule("/proj/ro/**", Effect::Allow, FsAccess::Read),
+                rule("/proj/cwd", Effect::Allow, FsAccess::Read),
                 rule("/proj/secret", Effect::Deny, FsAccess::Read),
             ],
         );
         let prof = build_profile(&p, &spec(), None, None, None);
         assert!(prof.contains("(allow file-write* (subpath \"/proj\"))"));
         assert!(prof.contains("(deny file-write* (subpath \"/proj/ro\"))"));
-        assert!(prof.contains("(deny file-write* (subpath \"/proj/secret\"))"));
+        assert!(prof.contains("(deny file-write* (literal \"/proj/secret\"))"));
+        assert!(prof.contains("(deny file-write* (literal \"/proj/cwd\"))"));
+        assert!(
+            !prof.contains("(deny file-write* (subpath \"/proj/cwd\"))"),
+            "a node-only read allow must not revoke writes BELOW it:\n{prof}"
+        );
     }
 
     #[test]
@@ -2276,7 +2329,10 @@ mod tests {
             Effect::Deny,
             vec![
                 rule("**", Effect::Allow, FsAccess::Read),
+                // The rw grant root is the compiler's subtree PAIR; the bare node alone is a
+                // different rule and bounds no writable container for the ancestor walk.
                 rule("/root", Effect::Allow, FsAccess::ReadWrite),
+                rule("/root/**", Effect::Allow, FsAccess::ReadWrite),
                 rule("/root/proj/.env", Effect::Deny, FsAccess::Read),
             ],
         );
@@ -2297,7 +2353,10 @@ mod tests {
             Effect::Deny,
             vec![
                 rule("**", Effect::Allow, FsAccess::Read),
+                // The rw grant root is the compiler's subtree PAIR; the bare node alone is a
+                // different rule and bounds no writable container for the ancestor walk.
                 rule("/root", Effect::Allow, FsAccess::ReadWrite),
+                rule("/root/**", Effect::Allow, FsAccess::ReadWrite),
                 rule("**/.env", Effect::Deny, FsAccess::Read),
             ],
         );
@@ -2315,7 +2374,10 @@ mod tests {
             Effect::Deny,
             vec![
                 rule("**", Effect::Allow, FsAccess::Read),
+                // The rw grant root is the compiler's subtree PAIR; the bare node alone is a
+                // different rule and bounds no writable container for the ancestor walk.
                 rule("/root", Effect::Allow, FsAccess::ReadWrite),
+                rule("/root/**", Effect::Allow, FsAccess::ReadWrite),
                 rule("/root/secrets/*.key", Effect::Deny, FsAccess::Read),
             ],
         );
@@ -2353,7 +2415,10 @@ mod tests {
             Effect::Deny,
             vec![
                 rule("**", Effect::Allow, FsAccess::Read),
+                // The rw grant root is the compiler's subtree PAIR; the bare node alone is a
+                // different rule and bounds no writable container for the ancestor walk.
                 rule("/root", Effect::Allow, FsAccess::ReadWrite),
+                rule("/root/**", Effect::Allow, FsAccess::ReadWrite),
                 rule("**/secrets/**", Effect::Deny, FsAccess::Read),
             ],
         );
@@ -2491,6 +2556,7 @@ mod tests {
             Effect::Deny,
             vec![
                 rule(&work, Effect::Allow, FsAccess::ReadWrite),
+                rule(&format!("{work}/**"), Effect::Allow, FsAccess::ReadWrite),
                 rule("**/.env*", Effect::Deny, FsAccess::Read),
             ],
         );
@@ -2514,7 +2580,10 @@ mod tests {
     fn the_tmp_regrant_still_refuses_a_dangerous_write_root() {
         let mut p = fs_policy(
             Effect::Deny,
-            vec![rule("/private/tmp", Effect::Allow, FsAccess::ReadWrite)],
+            vec![
+                rule("/private/tmp", Effect::Allow, FsAccess::ReadWrite),
+                rule("/private/tmp/**", Effect::Allow, FsAccess::ReadWrite),
+            ],
         );
         p.fs.tmp = TmpMode::Private;
         let private = build_profile(&p, &spec(), None, None, None);
@@ -2556,11 +2625,20 @@ mod tests {
         // write allow (filesystem-wide write hole). Read of `/` stays legal.
         let p = fs_policy(
             Effect::Deny,
-            vec![rule("/private", Effect::Allow, FsAccess::ReadWrite)],
+            vec![
+                rule("/private", Effect::Allow, FsAccess::ReadWrite),
+                rule("/private/**", Effect::Allow, FsAccess::ReadWrite),
+            ],
         );
         let prof = build_profile(&p, &spec(), None, None, None);
         assert!(!prof.contains("(allow file-write* (subpath \"/private\"))"));
+        // The pair's node half too: a `(literal)` write grant on a top-level root permits
+        // renaming or unlinking the root itself, so both halves of the pair must be dropped.
+        assert!(!prof.contains("(allow file-write* (literal \"/private\"))"));
         assert!(is_dangerous_write_root(&MatchTerm::Subpath(
+            "/private".to_string()
+        )));
+        assert!(is_dangerous_write_root(&MatchTerm::Literal(
             "/private".to_string()
         )));
         // The canonical forms of firmlink roots (`/var`→`/private/var`) — what the

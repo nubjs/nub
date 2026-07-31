@@ -39,8 +39,8 @@ fn add_rule_with_canonical(
 pub(crate) fn apply_landlock(jail: &ScriptJail, home: &Path) -> Result<(), String> {
     // Must run before restrict_self() so a setuid exec inside the jail
     // cannot pick up privileges that would shadow the Landlock domain.
-    // Also needed on the network: true path, where the seccomp filter
-    // (which used to set this) is skipped.
+    // Both restrict_self() and seccomp's SET_MODE_FILTER refuse to load
+    // without it for an unprivileged caller.
     let ret = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
     if ret != 0 {
         return Err(format!(
@@ -48,15 +48,37 @@ pub(crate) fn apply_landlock(jail: &ScriptJail, home: &Path) -> Result<(), Strin
             std::io::Error::last_os_error()
         ));
     }
-    // ABI v2 (kernel >= 5.19) covers every write-restriction this policy
-    // needs and unblocks the LTS kernels that ship 5.15-6.1 (Ubuntu 22.04,
-    // Debian 12, RHEL 9). v3 only adds LANDLOCK_ACCESS_FS_TRUNCATE.
-    let abi = ABI::V2;
-    let read_access = AccessFs::from_read(abi);
-    let full_access = read_access | AccessFs::from_write(abi);
+    // Two compat tiers, and the split is the whole design.
+    //
+    // ABI v2 (kernel >= 5.19) is the HARD FLOOR: it carries every write
+    // restriction this policy's threat model depends on, and a kernel that
+    // cannot enforce all of it must fail the script rather than run it
+    // half-confined.
+    //
+    // v3 (kernel >= 6.2) adds exactly one right, LANDLOCK_ACCESS_FS_TRUNCATE,
+    // and without it a confined script can truncate any file it can name --
+    // Landlock's other write hooks never see truncate(2)/ftruncate(2)/O_TRUNC.
+    // Requiring v3 outright would fix that at the cost of refusing to confine
+    // the LTS kernels still shipping 5.15-6.1 (Ubuntu 22.04, Debian 12, RHEL 9),
+    // which is not a trade a package manager gets to make. So it is requested
+    // BEST-EFFORT on top of the floor: enforced wherever the kernel has it,
+    // silently dropped where it does not, which is Landlock's own stated
+    // design intent for feature adoption.
+    //
+    // The ordering matters: set_compatibility applies to subsequent calls, so
+    // the floor is handled under HardRequirement and everything after -- the
+    // truncate bit and every add_rule below -- is best-effort. That is what
+    // makes the relaxed restrict_self() check at the bottom safe to write.
+    let floor_abi = ABI::V2;
+    let read_access = AccessFs::from_read(floor_abi);
+    let floor_access = read_access | AccessFs::from_write(floor_abi);
+    let full_access = floor_access | AccessFs::Truncate;
     let mut ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)
-        .handle_access(full_access)
+        .handle_access(floor_access)
+        .map_err(|e| format!("failed to create jail ruleset: {e}"))?
+        .set_compatibility(CompatLevel::BestEffort)
+        .handle_access(AccessFs::Truncate)
         .map_err(|e| format!("failed to create jail ruleset: {e}"))?
         .create()
         .map_err(|e| format!("failed to create jail ruleset: {e}"))?;
@@ -77,18 +99,29 @@ pub(crate) fn apply_landlock(jail: &ScriptJail, home: &Path) -> Result<(), Strin
     let status = ruleset
         .restrict_self()
         .map_err(|e| format!("failed to apply jail filesystem rules: {e}"))?;
-    if status.ruleset != RulesetStatus::FullyEnforced {
+    // PartiallyEnforced can only mean a BEST-EFFORT right was dropped, never a
+    // floor one: the floor is a HardRequirement, so a kernel missing any of it
+    // returns Err above and never reaches here. Insisting on FullyEnforced would
+    // therefore turn the best-effort truncate request into a hard v3 floor --
+    // failing shut on exactly the 5.19-6.1 LTS kernels the split exists to keep.
+    // NotEnforced still refuses to run the script.
+    if status.ruleset == RulesetStatus::NotEnforced {
         return Err(format!(
-            "jail filesystem rules were not fully enforced: {:?}",
+            "jail filesystem rules were not enforced: {:?}",
             status.landlock
         ));
     }
     Ok(())
 }
 
-pub(crate) fn apply_seccomp_net_filter() -> Result<(), String> {
+/// Installs the jail's seccomp filter: the metadata-mutation denials always,
+/// and the socket-family denials only when the grant did not ask for network.
+///
+/// Both families share one filter because `SeccompFilter`'s match action is
+/// global, and EPERM is the right answer for both.
+pub(crate) fn apply_seccomp_filter(network_allowed: bool) -> Result<(), String> {
     let target_arch = TargetArch::try_from(std::env::consts::ARCH)
-        .map_err(|e| format!("unsupported architecture for jail network filter: {e}"))?;
+        .map_err(|e| format!("unsupported architecture for jail seccomp filter: {e}"))?;
     // seccompiler's mismatch_action is the default for every syscall
     // the BPF program sees, not just the ones in `rules`. Setting it
     // to Errno would make every non-socket syscall (open, write, mmap,
@@ -113,9 +146,9 @@ pub(crate) fn apply_seccomp_net_filter() -> Result<(), String> {
     let mk_family_rule = |family: i32| -> Result<SeccompRule, String> {
         SeccompRule::new(vec![
             SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, family as u64)
-                .map_err(|e| format!("failed to build jail network filter: {e}"))?,
+                .map_err(|e| format!("failed to build jail seccomp filter: {e}"))?,
         ])
-        .map_err(|e| format!("failed to build jail network filter: {e}"))
+        .map_err(|e| format!("failed to build jail seccomp filter: {e}"))
     };
     let denied_families = [
         libc::AF_INET,
@@ -138,9 +171,53 @@ pub(crate) fn apply_seccomp_net_filter() -> Result<(), String> {
     }
 
     let mut rules = BTreeMap::new();
+    if !network_allowed {
+        #[allow(clippy::useless_conversion)]
+        for syscall in [libc::SYS_socket, libc::SYS_socketpair].map(i64::from) {
+            rules.insert(syscall, family_rules.clone());
+        }
+    }
+
+    // Metadata mutation. Landlock has no metadata hook at ANY ABI, so
+    // ownership and xattr changes are otherwise entirely unmediated inside
+    // the jail; seccomp is the only lever available without a mount namespace.
+    //
+    // The list is exactly what a denial matrix over five real native installs
+    // (better-sqlite3, sqlite3, esbuild, simple-git-hooks, bufferutil) on
+    // kernel 6.8 showed to be free, at BOTH uid 1000 and root. Two families
+    // that measured zero calls are NOT here, because denying them broke
+    // things anyway -- absence of calls in a sample is not absence of use:
+    //   - `chmod`/`fchmodat` breaks 4 of the 5 with EPERM; node-gyp chmods the
+    //     built addon from inside a make recipe, so denying it kills every
+    //     from-source native build.
+    //   - `utimensat` breaks sqlite3 and bufferutil, path or fd form alike.
+    // Adding to this list therefore requires re-running that matrix, not just
+    // an strace showing no calls.
+    //
+    // Be honest about the value: the two safe families are also the two with
+    // the least attacker leverage (chown to another uid already fails under
+    // DAC; `user.*` xattrs are inert), while `chmod` -- the one with teeth --
+    // is the one packages genuinely need. This narrows the metadata surface;
+    // it does not close it. See wiki/design/build-jail-linux.md.
+    //
+    // Errno, never KILL: unprivileged tar implementations already treat EPERM
+    // from chown as routine, and SIGSYS would break what an errno does not.
+    #[allow(unused_mut)] // arm64 takes no conditional extend below
+    let mut metadata_denied = vec![
+        libc::SYS_setxattr,
+        libc::SYS_lsetxattr,
+        libc::SYS_removexattr,
+        libc::SYS_lremovexattr,
+        libc::SYS_fchownat,
+    ];
+    // x86_64 keeps the legacy path-based chown/lchown; the arm64 generic
+    // syscall ABI dropped them, leaving fchownat as the only entry point.
+    #[cfg(target_arch = "x86_64")]
+    metadata_denied.extend([libc::SYS_chown, libc::SYS_lchown]);
     #[allow(clippy::useless_conversion)]
-    for syscall in [libc::SYS_socket, libc::SYS_socketpair].map(i64::from) {
-        rules.insert(syscall, family_rules.clone());
+    for syscall in metadata_denied.into_iter().map(i64::from) {
+        // No conditions: match every call to these syscalls.
+        rules.insert(syscall, Vec::new());
     }
 
     // SeccompFilter::new arg order: rules, mismatch_action, match_action,
@@ -154,10 +231,10 @@ pub(crate) fn apply_seccomp_net_filter() -> Result<(), String> {
         SeccompAction::Errno(libc::EPERM as u32),
         target_arch,
     )
-    .map_err(|e| format!("failed to build jail network filter: {e}"))?
+    .map_err(|e| format!("failed to build jail seccomp filter: {e}"))?
     .try_into()
-    .map_err(|e| format!("failed to compile jail network filter: {e}"))?;
+    .map_err(|e| format!("failed to compile jail seccomp filter: {e}"))?;
     seccompiler::apply_filter(&filter)
-        .map_err(|e| format!("failed to apply jail network filter: {e}"))?;
+        .map_err(|e| format!("failed to apply jail seccomp filter: {e}"))?;
     Ok(())
 }

@@ -507,27 +507,30 @@ fn keys_inside_an_axis_object_do_not_implicitly_inherit() {
 
 #[test]
 fn build_jail_preset_expands() {
-    // The STATIC `--sandbox build-jail` preset (v2): tight, default-deny read of the
+    // The STATIC `--sandbox build-jail` preset: tight, default-deny read of the
     // project + `$tooldirs` (the OS backends supply the system/toolchain closure under a
-    // minimal root), a private tmp, egress curated to `$downloads`, strip-all env. The
-    // per-package WRITE grant + provisioned-interpreter read + scrubbed lifecycle env are
-    // the interposition's job (see `build_jail_interposition_*`), NOT this static preset.
+    // minimal root), a private tmp, NO egress, strip-all env. The per-package WRITE grant +
+    // provisioned-interpreter read + scrubbed lifecycle env are the interposition's job (see
+    // `build_jail_interposition_*`), NOT this static preset.
+    //
+    // Egress is DENY-ALL here because this arm carries no package identity, and identity is
+    // the gate: `--sandbox build-jail` names no package, which resolves the same way as the
+    // `None` aube hands over for a fetched checkout. The catalogued arm is
+    // `build_jail_interposition_gates_egress_on_package_identity`.
     let ctx = common::ctx(true, &[("PATH", "/bin"), ("NPM_TOKEN", "t")]);
     let p = compile(&json!("build-jail"), &ctx).unwrap();
     assert!(p.net.enforce, "build-jail enforces the net axis");
-    let hosts = nub_sandbox::matcher::HostMatcher::new(&p.net);
-    // Windows cannot enforce a per-host policy (its backend refuses one outright), so the
-    // jail keeps the strictly-tighter deny-all there; everywhere else a lifecycle script
-    // reaches the install-time artifact hosts and nothing else.
-    assert_eq!(
-        hosts.admits("nodejs.org"),
-        !cfg!(windows),
-        "build-jail admits a $downloads host off Windows, and nothing on Windows"
-    );
     assert!(
-        !hosts.admits("api.github.com") && !hosts.admits("storage.googleapis.com"),
-        "build-jail must not admit a write-capable or multi-tenant host"
+        p.net.rules.is_empty(),
+        "the static preset carries no package identity, so it grants no egress"
     );
+    let hosts = nub_sandbox::matcher::HostMatcher::new(&p.net);
+    for host in ["nodejs.org", "evil.test", "api.github.com", "ghcr.io"] {
+        assert!(
+            !hosts.admits(host),
+            "the identity-less preset must admit nothing, not even a $downloads host: `{host}`"
+        );
+    }
     assert!(
         p.env.enforce && p.env.constructed.is_empty(),
         "static build-jail strips env"
@@ -535,7 +538,7 @@ fn build_jail_preset_expands() {
     // Windows takes the SHARED tmp: `Private` was never enforced there — `tmp_lost_axis`
     // reported it lost on every confined spawn while `make_private_tmp` allocated a dir the
     // confined path never used, because the OS redirects an AppContainer's TEMP into its own
-    // profile regardless. Same cfg-split shape as the `$downloads` assertion above.
+    // profile regardless.
     assert_eq!(
         matches!(p.fs.tmp, nub_sandbox::policy::TmpMode::Private),
         !cfg!(windows),
@@ -715,6 +718,118 @@ fn build_jail_reaches_an_interpreter_living_under_opt() {
     }
 }
 
+/// EGRESS IS GATED ON PACKAGE IDENTITY — the whole resolution rule, in one place.
+///
+/// Asserted through `compile_build_jail` rather than against the catalog accessor, because the
+/// accessor was already correct while nothing consumed it: the defect this pins is that the
+/// compiled POLICY ignored the package. Each row therefore names a real catalog fact, so a
+/// catalog edit that moved a package between classes would fail here rather than silently
+/// change what a user gets.
+#[test]
+fn build_jail_interposition_gates_egress_on_package_identity() {
+    use std::collections::BTreeMap;
+    let homes = common::homes();
+    let proj = homes.project.clone();
+    let ambient: BTreeMap<String, String> = [("PATH".to_string(), "/bin".to_string())]
+        .into_iter()
+        .collect();
+
+    let compile_for = |name: Option<&str>| {
+        let dir = proj.join("node_modules/.aube/x@1.0.0/node_modules/x");
+        nub_sandbox::compile_build_jail(
+            homes.clone(),
+            &dir,
+            name,
+            Vec::new(),
+            Vec::new(),
+            ambient.clone(),
+        )
+        .expect("compile build-jail")
+    };
+
+    // GRANTED — named in `networkHosts[].fetchedBy`, which is what an entry means. Both are
+    // real catalog facts (`cypress` fetches its binary, `@prisma/engines` its query engines),
+    // so a catalog edit that moved either out would fail here rather than silently change what
+    // a user gets.
+    //
+    // THE GRANT IS COARSE ON EVERY PLATFORM, and the host list is gone. Per-host was withdrawn
+    // because only macOS could enforce it — Linux needs a netns it cannot require, Windows'
+    // loopback exemption is admin-only — so gating the platform most developers use meant an
+    // incomplete list erroring for them alone. The product fact is therefore asserted in BOTH
+    // directions: a catalogued package reaches a `$downloads` host AND a host that was never on
+    // any list. The second is the behaviour change, and asserting only the first would keep
+    // passing if per-host enforcement came back.
+    //
+    // The SPELLING still diverges, and that is load-bearing rather than incidental (see
+    // `preset::build_jail_net`). macOS and Windows compile to coarse-allow: it is the only
+    // spelling that reaches the AppContainer `internetClient` capability, which the backend grants
+    // on exactly `!net.enforce`. Linux keeps `enforce` with a catch-all naming no host, because
+    // `build_seccomp` hangs the whole socket-family ceiling and the io_uring block on that flag —
+    // relaxing it to grant egress would also re-permit AF_UNIX, AF_VSOCK and AF_PACKET.
+    for admitted in ["cypress", "@prisma/engines"] {
+        let p = compile_for(Some(admitted));
+        let hosts = nub_sandbox::matcher::HostMatcher::new(&p.net);
+        assert!(
+            hosts.admits("nodejs.org"),
+            "{admitted} is catalogued, so it reaches the network"
+        );
+        assert!(
+            hosts.admits("evil.test"),
+            "{admitted}: the grant is COARSE — a host no list ever carried is admitted too. \
+             Per-host enforcement was dropped deliberately; do not restore it here"
+        );
+        // NO PER-HOST RULE, in either spelling. A concrete hostname in a build-jail policy would
+        // be a gate two of three backends cannot honour, so the only shapes permitted here are no
+        // rule at all (coarse-allow) or a single catch-all.
+        for rule in &p.net.rules {
+            match &rule.target {
+                nub_sandbox::policy::NetTarget::Host(h) => assert_eq!(
+                    h, "*",
+                    "{admitted}: the build jail must emit no per-host rule, found `{h}`"
+                ),
+                other => {
+                    panic!("{admitted}: unexpected non-host build-jail net target: {other:?}")
+                }
+            }
+        }
+        if cfg!(target_os = "linux") {
+            assert!(
+                p.net.enforce,
+                "{admitted}: Linux keeps enforcing so the socket-family ceiling and the \
+                 io_uring block stay in place; only AF_INET/AF_INET6 are lifted"
+            );
+        } else {
+            assert!(
+                !p.net.enforce,
+                "{admitted}: coarse-allow is what hands Windows' AppContainer its \
+                 internetClient capability, and what keeps macOS from starting a proxy"
+            );
+        }
+    }
+
+    // DENIED — the default, and the case that matters. `left-pad` is an ordinary dependency
+    // with no catalog entry: exactly the Shai-Hulud shape, a package that could acquire a
+    // lifecycle script nobody reviewed. `None` is what aube hands over when the spawn root is
+    // a checkout it fetched. The third clause — a package both observed in `fetchedBy` and
+    // refused in `notGranted.packages` — is pinned at `catalog::parse` instead, where the
+    // subtraction happens: this catalog lists no refused package, so asserting it here would
+    // pass against a generator that had stopped subtracting at all.
+    //
+    // UNIFORM ACROSS PLATFORMS, unlike the granted arm above: deny-all is expressible everywhere,
+    // so there is no spelling to branch on and no platform where this may weaken.
+    for denied in [Some("left-pad"), None] {
+        let p = compile_for(denied);
+        assert!(
+            p.net.enforce && p.net.rules.is_empty(),
+            "{denied:?} has no admitted entry, so it must compile to deny-all egress"
+        );
+        assert!(
+            !nub_sandbox::matcher::HostMatcher::new(&p.net).admits("nodejs.org"),
+            "{denied:?} must reach no host at all, $downloads included"
+        );
+    }
+}
+
 #[test]
 fn build_jail_interposition_confines_write_grants_interpreter_and_scrubs_env() {
     use std::collections::BTreeMap;
@@ -815,14 +930,13 @@ fn build_jail_interposition_confines_write_grants_interpreter_and_scrubs_env() {
         ),
         "the home secret set stays denied"
     );
-    // Egress curated: the install-time artifact hosts, nothing else. Windows cannot
-    // enforce a per-host policy, so its jail keeps the tighter deny-all.
-    assert!(p.net.enforce);
-    let hosts = nub_sandbox::matcher::HostMatcher::new(&p.net);
-    assert_eq!(hosts.admits("nodejs.org"), !cfg!(windows));
+    // Egress: NONE. `left-pad` carries no catalog entry, and egress is gated on package
+    // identity — the axis is exercised across all three resolution classes in
+    // `build_jail_interposition_gates_egress_on_package_identity`.
+    assert!(p.net.enforce && p.net.rules.is_empty());
     assert!(
-        !hosts.admits("api.github.com"),
-        "a write-capable host is never admitted"
+        !nub_sandbox::matcher::HostMatcher::new(&p.net).admits("nodejs.org"),
+        "an uncatalogued package reaches no host, $downloads included"
     );
     // Env: the constructed lifecycle env is KEPT minus credential-shaped keys.
     assert!(p.env.enforce);

@@ -1397,9 +1397,18 @@ mod tests {
     ///
     /// If a future edit trips this, the first question is what grew, not whether to raise the
     /// budget — the cheap reclaim (comments) is already spent, so growth here is real payload.
+    ///
+    /// IT TRIPPED ONCE, and the answer is recorded here so the next reader need not re-derive it.
+    /// The binding seam (`installBindingSeam` in `windows_realpath_shim.js`) took the realpath
+    /// payload from 6,588 to 9,468 base64 characters and the whole stamp from 33,834 to 36,714,
+    /// against a budget of 36,000. That growth IS the repair — it is the layer that reaches the
+    /// ESM resolver, which the fs-layer replacement provably cannot — so the ratchet moved rather
+    /// than the code. Slack over the composition is kept at roughly what it was (~2.2k), and the
+    /// EMPIRICAL ceiling is untouched and still far away: 56,790 characters launched a confined
+    /// child with all three sentinels reported.
     #[test]
     fn stamped_node_options_fits_the_env_block() {
-        const BUDGET: usize = 36_000;
+        const BUDGET: usize = 39_000;
         let roots: Vec<std::path::PathBuf> = [
             r"C:\Users\runneradmin\AppData\Local\nub\store\v1\registry.npmjs.org\esbuild\0.21.5\node_modules\esbuild",
             r"C:\Users\runneradmin\work\monorepo\packages\web-app\node_modules\.pnpm\esbuild@0.21.5\node_modules\esbuild",
@@ -1432,10 +1441,13 @@ mod tests {
             .map(decode_import)
             .collect();
         assert_eq!(payloads.len(), 3, "stdio, net gate and realpath: {stamped}");
+        // The realpath marker tracks the LAST thing in that shim, which is now the binding seam's
+        // Node-18 ctx branch — `fs.promises.realpath` moved into the middle when the seam landed
+        // and would no longer catch a truncation of everything after it.
         for (payload, tail) in payloads.iter().zip([
             "writableScratchDir",
             "origCpSpawnSync",
-            "fs.promises.realpath",
+            "ctx.syscall = \"realpath\"",
         ]) {
             assert!(payload.contains(tail), "{tail} missing from a payload");
             assert!(

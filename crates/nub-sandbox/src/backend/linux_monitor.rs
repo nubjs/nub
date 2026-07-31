@@ -4714,9 +4714,18 @@ fn create_stopped_target(
     let prepared_exec = PreparedTargetExec::new(spec)?;
     let seccomp = super::linux::build_seccomp(
         spec.network_filter,
-        spec.per_host,
+        // Per-host means the empty netns is the boundary and the child must be able to speak IP
+        // to the in-netns bridge; the ceiling's other families stay denied either way.
+        if spec.per_host {
+            super::linux::IpEgress::Permitted
+        } else {
+            super::linux::IpEgress::Denied
+        },
         spec.deny_keyring,
         spec.permit_keyring_join,
+        // This is the bubblewrap/nesting path — `nub sandbox`, which runs commands the
+        // user chose. Metadata denial is build-jail-scoped; see `apply_landlock`.
+        false,
     )
     .map_err(|error| io::Error::other(format!("building target seccomp: {error}")))?;
     let (gate_reader, gate_writer) = pipe_files(false)?;

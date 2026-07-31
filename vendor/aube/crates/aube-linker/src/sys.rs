@@ -179,6 +179,26 @@ pub struct ResolvedBinShim {
     pub node_path: Option<OsString>,
 }
 
+/// Mark the executable bit on a bin TARGET — but only when it is a regular file.
+///
+/// `set_permissions` is `chmod(2)`, which FOLLOWS symlinks, and `target` is
+/// package content a lifecycle script can replace with a symlink AFTER it has
+/// run — so a planted `<pkg>/bin/x -> /outside/secret` would redirect this chmod
+/// out of the package tree (an arbitrary 0o755 on any file the user can reach,
+/// and a setuid/setgid strip on a non-shebang victim). `validate_bin_target`
+/// contains the path only lexically; `symlink_metadata` is what contains the
+/// final component — it reports the link itself, not its target, so a symlinked
+/// bin is skipped. Requiring a regular file also keeps the chmod off a
+/// directory, fifo, or device node. Legitimate bins are regular files, so no
+/// real bin loses its executable bit.
+#[cfg(unix)]
+fn chmod_bin_target_exec(target: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if std::fs::symlink_metadata(target).is_ok_and(|md| md.is_file()) {
+        let _ = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
 /// Create bin shims for a package binary.
 ///
 /// - Unix (default / `prefer_symlinked_executables != Some(false)`):
@@ -225,15 +245,12 @@ pub fn create_bin_shim(
             )?;
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&link_path, std::fs::Permissions::from_mode(0o755))?;
-            if matches!(launch, BinLaunch::Direct) && target.exists() {
-                let _ = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755));
+            if matches!(launch, BinLaunch::Direct) {
+                chmod_bin_target_exec(target);
             }
         } else {
             std::os::unix::fs::symlink(symlink_bin_target(link_parent, target), &link_path)?;
-            use std::os::unix::fs::PermissionsExt;
-            if target.exists() {
-                let _ = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755));
-            }
+            chmod_bin_target_exec(target);
         }
     }
     #[cfg(windows)]
@@ -1542,6 +1559,97 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(&script).unwrap().permissions().mode();
         assert_eq!(mode & 0o755, 0o755);
+    }
+
+    /// A lifecycle script confined to its own package dir can still plant a
+    /// symlink AT its declared bin target and rewrite its own manifest to point
+    /// `bin` there. The post-build bin relink then chmods the target — and
+    /// `chmod(2)` follows symlinks — so an unguarded relink turns an in-package
+    /// write into an arbitrary 0o755 (and setuid/setgid strip) on whatever the
+    /// symlink points at, outside the jail. BOTH shim branches chmod the target:
+    /// the symlink branch (default opts) and the shell-shim `BinLaunch::Direct`
+    /// branch that the isolated linker takes for a `.exe`-extension target. The
+    /// earlier fix covered only the first; this pins both.
+    #[cfg(unix)]
+    #[test]
+    fn create_bin_shim_never_chmods_through_a_symlinked_bin_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("node_modules/.bin");
+        let pkg_dir = dir.path().join("pkg");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+
+        // The out-of-package victim: not a bin, not part of the package tree.
+        // 0o600 with no shebang, so a stray 0o755 is unmistakable and the `.exe`
+        // target below classifies as Direct (its content is read via the link).
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "secret material, no shebang\n").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // (a) symlink branch — default opts (prefer_symlinked_executables = None).
+        let planted = pkg_dir.join("planted");
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+        create_bin_shim(&bin_dir, "planted", &planted, BinShimOptions::default()).unwrap();
+        assert_eq!(
+            std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "symlink-branch chmod followed the planted bin symlink out of the package tree",
+        );
+
+        // (b) shell-shim Direct branch — prefer_symlinked_executables = Some(false),
+        // `.exe` target ⇒ BinLaunch::Direct. This is the isolated-linker default
+        // path and the one the earlier fix left uncovered.
+        let planted_exe = pkg_dir.join("planted.exe");
+        std::os::unix::fs::symlink(&victim, &planted_exe).unwrap();
+        create_bin_shim(
+            &bin_dir,
+            "planted-exe",
+            &planted_exe,
+            BinShimOptions {
+                prefer_symlinked_executables: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "shim/Direct-branch chmod followed the planted bin symlink out of the package tree",
+        );
+
+        // Controls: a REAL (non-symlink) bin target in each branch must still be
+        // made executable, so the asserts above cannot pass merely because the
+        // chmod stopped firing for everything.
+        let real = pkg_dir.join("real.js");
+        std::fs::write(&real, "#!/usr/bin/env node\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        create_bin_shim(&bin_dir, "real", &real, BinShimOptions::default()).unwrap();
+        assert_eq!(
+            std::fs::metadata(&real).unwrap().permissions().mode() & 0o755,
+            0o755,
+            "a regular bin target must still be made executable (symlink branch)",
+        );
+
+        let real_exe = pkg_dir.join("real.exe");
+        std::fs::write(&real_exe, b"MZ not really, just no shebang\n").unwrap();
+        std::fs::set_permissions(&real_exe, std::fs::Permissions::from_mode(0o600)).unwrap();
+        create_bin_shim(
+            &bin_dir,
+            "real-exe",
+            &real_exe,
+            BinShimOptions {
+                prefer_symlinked_executables: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(&real_exe).unwrap().permissions().mode() & 0o755,
+            0o755,
+            "a regular .exe bin target must still be made executable (Direct branch)",
+        );
     }
 
     #[test]

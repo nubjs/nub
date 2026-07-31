@@ -1,12 +1,11 @@
 {
-  "catalogVersion": 1,
   "networkHosts": [
     {
       "host": "nodejs.org",
       "artifact": "Node headers and libs for a from-source native compile",
-      "fetchedBy": ["node-gyp (any native-build package, including an implicit `node-gyp rebuild` for a root binding.gyp)"],
+      "fetchedBy": ["node-gyp"],
       "evidence": "source-read",
-      "observed": "node-gyp's default dist URL, reached whenever the header cache is cold. NOT observed in the 311-package corpus run: that harness sets `npm_config_nodedir` to the provisioned Node root, as nub does, so node-gyp never fetched. Absence there is not evidence the entry is unnecessary — it is evidence the corpus did not exercise a cold header cache.",
+      "observed": "node-gyp's default dist URL, reached whenever the header cache is cold. NOT observed in the 311-package corpus run: that harness sets `npm_config_nodedir` to the provisioned Node root, as nub does, so node-gyp never fetched. Absence there is not evidence the entry is unnecessary — it is evidence the corpus did not exercise a cold header cache. `fetchedBy` is matched against aube's INSTALLER-RESOLVED name, so this entry admits the `node-gyp` package's own lifecycle spawn and nothing else: a native-build dependency that shells `node-gyp rebuild` is spawned under ITS OWN name and needs its own entry. The demand is real for that whole class and this table cannot express it as a class — recorded here rather than widened, because `npm_config_nodedir` means the cold-cache fetch does not arise under nub.",
       "platform": "any"
     },
     {

@@ -29,16 +29,22 @@ A PR that widens an existing entry needs its own measurement.
 
 ## `networkHosts` — the egress allowlist
 
-The hosts a confined lifecycle script may reach. Also exposed to policy authors as the
-`$downloads` token, and used as the allowlist for nub's own out-of-jail prefetch.
+Exposed to policy authors as the `$downloads` token, and used as the allowlist for nub's own
+out-of-jail prefetch. Adding a host widens THAT allowlist, which runs unconfined on
+manifest-controlled URLs — so an entry here is an addition of trust, not the reduction a jail
+grant is.
 
-**It is the second of two gates, and adding a host here does not on its own unblock a
-package.** A script must clear both: the per-package boolean in
-`src/compiler/package_network.rs` — derived from `fetchedBy` below and from
-`packageNetwork.full`, and denying every package the catalog does not name — and then this
-host list, enforced by the proxy on the CONNECT authority and the SNI. Windows clears neither,
-keeping the deny-all, because its backend refuses a per-host policy outright. So a package
-that fetches an admitted host still reaches nothing until some entry names it.
+**The build jail no longer gates on this list.** Its egress is a per-package BOOLEAN, resolved
+by `src/compiler/package_network.rs`: a package the catalog names may reach the network, a
+package it does not name reaches nothing. Per-host was withdrawn because only macOS could
+enforce it — Linux needs a network namespace it cannot require, and Windows' loopback exemption
+is admin-only — so a list that gated one platform meant an incomplete list erroring for the
+platform most developers use. The hosts remain as PROVENANCE: a package that used to fetch its
+own CDN and now reaches somewhere else shows up as a reviewable diff on this file.
+
+**So `fetchedBy` is where a package is admitted, and `host` is not.** Naming a package in
+`fetchedBy` grants it egress; adding a host without naming a package grants no script anything,
+and only widens the prefetcher.
 
 ```json
 {
@@ -177,10 +183,18 @@ this grant both die in `uv_cwd` before running a line of their own logic.
 Node-only is what keeps this from being a project read: the project's *contents* stay
 ungranted, and anything the package then reads there must still be named in `projectReads`.
 
-It is not zero disclosure, and the platforms differ — stated rather than glossed. A Landlock
-read rule on a directory carries `READ_DIR`, so on Linux a granted package can list the
-project root's top-level entry names. macOS grants metadata only. Filenames, never contents,
-and only for the packages in this table.
+It is not zero disclosure — stated rather than glossed. Both backends let a granted package
+list the project root's top-level entry names: Landlock grants `READ_DIR` on the node,
+Seatbelt a `(literal …)` read of it. Filenames, never contents, and only for the packages in
+this table.
+
+Holding that line is the backends' job, and both once lost it in the widening direction.
+Seatbelt rendered the node as `(subpath …)`, which read the whole project *and* revoked every
+write grant under it; the Linux mount plan collapsed it into a subtree grant whose rights
+each file below inherits. Reach for the backend before assuming a bare path stays a node.
+
+On Linux the grant is inert: `chdir` is not a Landlock-handled access, so the operation it
+exists to permit was never denied there. It stays because Seatbelt does gate it.
 
 ## `notGranted`
 

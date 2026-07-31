@@ -20,6 +20,14 @@ pub(crate) struct MountGrant {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MountAccess {
+    /// LIST the directory node, and open NOTHING under it — the IR's node-only read.
+    ///
+    /// The compiler spells a subtree as the PAIR `[P, P/**]` (`defaults::subtree_globs`),
+    /// so a bare `P` with no twin names the directory NODE alone; `curated::project_cwd`
+    /// is the one grant that authors it. Collapsing that into `ReadOnly` handed the
+    /// granted package a read of the CONSUMER'S WHOLE PROJECT, because a Landlock rule's
+    /// rights are inherited by everything beneath the path it is attached to.
+    ListOnly,
     ReadOnly,
     ReadWrite,
 }
@@ -69,7 +77,27 @@ pub(crate) fn compile_mount_plan(policy: &SandboxPolicy) -> Result<Vec<MountGran
                 path.display()
             ));
         }
+        // A subtree is the PAIR `[P, P/**]`, so a bare `P` whose own twin does not follow
+        // it names the directory NODE. Match the twin on effect and access too: an
+        // adjacent `P/**` that denies, or grants differently, is a different rule and
+        // does not make `P` a subtree head.
+        let twin_pattern = format!("{pattern}/**");
+        let node_only = !pattern.ends_with("/**")
+            && policy
+                .fs
+                .rules
+                .entries
+                .get(rule_index + 1)
+                .is_none_or(|twin| {
+                    twin.matcher.as_str() != twin_pattern.as_str()
+                        || twin.effect != rule.effect
+                        || twin.access != rule.access
+                });
         let access = match rule.access {
+            // A node-only read is exactly the path itself. For a directory that is the
+            // listing right and nothing below; for a file, `ReadOnly` already IS the file,
+            // since a file has no subtree to over-grant.
+            FsAccess::Read if node_only && path.is_dir() => MountAccess::ListOnly,
             FsAccess::Read => MountAccess::ReadOnly,
             FsAccess::ReadWrite => {
                 if is_unsafe_write_root(&path) {
@@ -241,11 +269,24 @@ mod tests {
         let child = parent.join("child");
         let grandchild = child.join("grandchild");
         std::fs::create_dir_all(&grandchild).unwrap();
-        let plan = compile_mount_plan(&policy(vec![
-            allow(parent.to_string_lossy(), FsAccess::ReadWrite),
-            allow(child.to_string_lossy(), FsAccess::Read),
-            allow(grandchild.to_string_lossy(), FsAccess::ReadWrite),
-        ]))
+        // Each level is spelled as the compiler's subtree PAIR. A bare path with no twin
+        // is the directory NODE, which is a different grant — see `MountAccess::ListOnly`.
+        let subtree = |p: &std::path::Path, access| {
+            [
+                allow(p.to_string_lossy(), access),
+                allow(format!("{}/**", p.to_string_lossy()), access),
+            ]
+        };
+        let plan = compile_mount_plan(&policy(
+            [
+                subtree(&parent, FsAccess::ReadWrite),
+                subtree(&child, FsAccess::Read),
+                subtree(&grandchild, FsAccess::ReadWrite),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+        ))
         .unwrap();
         assert_eq!(
             plan,
@@ -258,12 +299,12 @@ mod tests {
                 MountGrant {
                     path: child,
                     access: MountAccess::ReadOnly,
-                    rule_index: 1,
+                    rule_index: 2,
                 },
                 MountGrant {
                     path: grandchild,
                     access: MountAccess::ReadWrite,
-                    rule_index: 2,
+                    rule_index: 4,
                 },
             ]
         );
@@ -278,9 +319,35 @@ mod tests {
             allow(format!("{path}/**"), FsAccess::Read),
             deny(format!("{path}/secret")),
             allow(&path, FsAccess::Read),
+            allow(format!("{path}/**"), FsAccess::Read),
         ]))
         .unwrap();
         assert_eq!(plan.len(), 2);
+    }
+
+    /// A read grant with no `/**` twin is the directory NODE, and must not widen into the
+    /// subtree. Its one author is `curated::project_cwd`, where the widening handed the
+    /// granted package a read of the consumer's entire project — Landlock inherits a rule's
+    /// rights down the whole hierarchy beneath the path it is attached to.
+    ///
+    /// Paired with the twin arm so the assertion cannot pass against a compiler that
+    /// classifies every read as node-only, which would break every dependency-tree grant.
+    #[test]
+    fn a_read_with_no_subtree_twin_grants_the_node_only() {
+        let dir = tempdir().unwrap();
+        let node = dir.path().join("project");
+        std::fs::create_dir_all(node.join("src")).unwrap();
+        let node = node.to_string_lossy().into_owned();
+
+        let plan = compile_mount_plan(&policy(vec![allow(&node, FsAccess::Read)])).unwrap();
+        assert_eq!(plan[0].access, MountAccess::ListOnly);
+
+        let with_twin = compile_mount_plan(&policy(vec![
+            allow(&node, FsAccess::Read),
+            allow(format!("{node}/**"), FsAccess::Read),
+        ]))
+        .unwrap();
+        assert_eq!(with_twin[0].access, MountAccess::ReadOnly);
     }
 
     #[test]
@@ -332,7 +399,9 @@ mod tests {
 
         let plan = compile_mount_plan(&policy(vec![
             speculative_allow(absent.to_string_lossy(), FsAccess::Read),
+            speculative_allow(format!("{}/**", absent.to_string_lossy()), FsAccess::Read),
             speculative_allow(present.to_string_lossy(), FsAccess::Read),
+            speculative_allow(format!("{}/**", present.to_string_lossy()), FsAccess::Read),
         ]))
         .unwrap_or_else(|error| {
             panic!("an absent speculated source must not abort the mount plan: {error}")
@@ -342,7 +411,7 @@ mod tests {
             vec![MountGrant {
                 path: present,
                 access: MountAccess::ReadOnly,
-                rule_index: 1,
+                rule_index: 2,
             }],
             "only the present speculated path binds; {} is not on this machine",
             absent.display()

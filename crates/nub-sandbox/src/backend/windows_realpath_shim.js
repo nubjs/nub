@@ -28,9 +28,19 @@
 // runs INSIDE `executeUserEntryPoint`, i.e. AFTER `resolveMainPath` (`run_main.js`), so it cannot
 // repair the entry point's own realpath — `--preserve-symlinks-main` covers that one, and is
 // measured clean on the wrong-version axis (only the tree-wide flag moves dependency resolution).
+// `--import file://…` is NOT interchangeable here: the preload's own resolution walks the same
+// refused ancestors and EPERMs before it loads, so the `data:` channel is load-bearing.
+//
+// TWO LAYERS, AND BOTH ARE REQUIRED. Replacing the `fs.realpath*` PROPERTIES repairs CommonJS,
+// because `helpers.js`'s `toRealPath` reads the property at call time. It does not repair ES
+// modules: `internal/modules/esm/resolve.js` DESTRUCTURES `realpathSync` at module-load time on
+// 18.19-24.16, 25.x and 26.0, and on 25.7-26.0 the resolver lives in the V8 startup snapshot,
+// where no preload of any kind reaches it. So the repair is ALSO applied one layer down, at the
+// `fs` binding — see `installBindingSeam`.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { getSystemErrorName } from "node:util";
 
 // The jail's granted anchors, substituted by `windows_realpath_node_options`. A refused component
 // is tolerated only if it is a strict ancestor of one of these.
@@ -243,4 +253,149 @@ function install(roots) {
   async_.native = async_;
   fs.realpath = async_;
   if (fs.promises) fs.promises.realpath = async (p, options) => walk(p, options);
+
+  installBindingSeam(ancestorOfARoot, stripLongPrefix, refused, walk);
+}
+
+// The same repair one layer down, at the `fs` binding, which is what reaches ES modules.
+//
+// WHY THE LAYER ABOVE CANNOT. `internal/modules/esm/resolve.js` binds `const { realpathSync } =
+// require('fs')` at module-load time, before any `--import` preload exists, so replacing the
+// property leaves ESM calling the original; and on 25.7-26.0 the resolver is baked into the V8
+// startup snapshot, where not even `--require` reaches it. `lib/fs.js` looks `binding.lstat` up
+// on the binding object AT CALL TIME (~3273/3315/3357), so the destructured and snapshotted
+// copies of `realpathSync` both observe a patch made here.
+//
+// WHAT THE SEAM IS ACTUALLY LOAD-BEARING FOR, measured layer-by-layer against a fs-layer-only
+// stamp rather than assumed. A bare `import` under the simulated refusal dies with the fs layer
+// alone on 18.19, 20.19, 22.15, 24.14, 25.9 and 26.0 and survives with this seam; on 24.17, 26.1
+// and 26.5 the fs layer already suffices, because nodejs/node#62835 restored the resolver's late
+// property read there. So this carries the whole 18.19-24.16 / 25.x / 26.0 band — which includes
+// the 22 LTS line, where the fix was never backported. It ALSO carries, on every version, any
+// caller holding a binding captured before the preload ran: a builtin's ESM named exports are
+// snapshotted at first instantiation, so `import { realpathSync } from "node:fs"` is the
+// pre-patch function and reaches `binding.lstat` directly.
+//
+// ADDITIVE, NEVER A REPLACEMENT. `fs.realpathSync.native` and `fs.promises.realpath` reach
+// `binding.realpath`, a different native function the `lstat` patch does not touch, and the
+// fs-layer substitutions above are what serve them — deleting those in favour of this seam is
+// measured to break them (`esm_binding_seam_semantics`). An earlier reading said the two were
+// interchangeable; its simulation refused only `binding.lstat`, i.e. it modelled less than the OS
+// refuses, and a simulation that under-models produces a confident false pass.
+function installBindingSeam(ancestorOfARoot, stripLongPrefix, refused, walk) {
+  // GUARDED rather than assumed. `process.binding` is deprecated (DEP0111) and its removal must
+  // not abort every confined child at startup — without it the fs-layer repair still stands and
+  // only ESM regresses to failing loudly, which is the behaviour that ships today.
+  let binding = null;
+  try {
+    binding = process.binding("fs");
+  } catch {
+    return;
+  }
+  if (!binding || typeof binding.lstat !== "function") return;
+
+  // The realpath walk reaches `binding.lstat` in exactly two shapes, and `fs.lstatSync` reaches
+  // the SAME function with the caller's own arguments — so the tolerance is scoped to those two
+  // or it silently changes `fs.lstatSync` semantics for every path:
+  //   `(base, true,  undefined, …)` — once per path component
+  //   `(root, false, undefined, …)` — the Windows-only volume-root probe
+  // The second one is `lstat 'C:\'`, i.e. the defect's primary Windows spelling, so scoping on
+  // `bigint === true` alone would leave the headline case refused while every macOS simulation
+  // stayed green (the root probe is guarded by `if (isWindows)`). The third argument separates
+  // sync from the async form (an `FSReqCallback`) and the promises form (`kUsePromises`, a
+  // symbol); a realpath walk is only ever the sync one.
+  const isFsRoot = (p) => {
+    const s = stripLongPrefix(path.resolve(String(p)));
+    return path.parse(s).root === s;
+  };
+  const onRealpathWalk = (p, bigint, req) =>
+    req === undefined && (bigint === true || (bigint === false && isFsRoot(p)));
+
+  // A zeroed stats ARRAY, not a Stats instance: `lib/fs.js` reads the binding's result as a raw
+  // indexable, and mode 0 is not S_IFLNK, so the walk treats the component as a plain directory
+  // and keeps going — the same assertion `TOLERATED` makes one layer up. Returning `undefined`
+  // instead would be read as "no entry" and make `realpathSync` return `undefined` SILENTLY.
+  const fakeStats = (bigint) => (bigint ? new BigUint64Array(36) : new Float64Array(36));
+
+  // The ctx convention carries a raw libuv `errno` and NO `code`, so `refused` — which reads
+  // `e.code` — cannot be used there. The numbers are platform-specific (`UV_EPERM` is -4048 on
+  // Windows, -1 on POSIX), hence the lookup rather than a comparison against literals.
+  const refusedErrno = (errno) => {
+    try {
+      const name = getSystemErrorName(errno);
+      return name === "EPERM" || name === "EACCES";
+    } catch {
+      return false;
+    }
+  };
+
+  const origLstat = binding.lstat;
+  binding.lstat = function (p, bigint, req, ctxOrThrow) {
+    // Node 18 passes a ctx object in this position and returns `undefined` on failure; 20+
+    // passes `throwIfNoEntry`, a boolean, and throws. Handling one convention and not the other
+    // leaves that half of the version range silently unrepaired.
+    if (ctxOrThrow !== null && typeof ctxOrThrow === "object") {
+      const out = origLstat.call(this, p, bigint, req, ctxOrThrow);
+      if (
+        ctxOrThrow.errno !== undefined &&
+        refusedErrno(ctxOrThrow.errno) &&
+        onRealpathWalk(p, bigint, req) &&
+        ancestorOfARoot(p)
+      ) {
+        delete ctxOrThrow.errno;
+        delete ctxOrThrow.error;
+        delete ctxOrThrow.syscall;
+        return fakeStats(bigint);
+      }
+      return out;
+    }
+    try {
+      return origLstat.call(this, p, bigint, req, ctxOrThrow);
+    } catch (e) {
+      if (refused(e) && onRealpathWalk(p, bigint, req) && ancestorOfARoot(p)) {
+        return fakeStats(bigint);
+      }
+      throw e;
+    }
+  };
+
+  if (typeof binding.realpath !== "function") return;
+  // The other half of the seam. `fs.realpathSync.native` and `fs.promises.realpath` reach
+  // `binding.realpath` — refused outright by the jail (`GetFinalPathNameByHandleW`) and untouched
+  // by the `lstat` patch. Replacing the fs properties covers a caller that reads them at call
+  // time; this covers one that captured them earlier, which is how a builtin ESM named import
+  // (`import { realpath } from "node:fs/promises"`) reaches it, since those bindings are
+  // snapshotted when the builtin's ESM facade is first instantiated. Delegating to the JS walk
+  // loses the OS's own canonical spelling, the same trade the `.native` substitution above makes.
+  binding.realpath = function (p, encoding, reqOrPromises, ctx) {
+    if (typeof reqOrPromises === "symbol") {
+      try {
+        return Promise.resolve(walk(p, encoding));
+      } catch (e) {
+        return Promise.reject(e);
+      }
+    }
+    if (reqOrPromises !== null && typeof reqOrPromises === "object") {
+      let out;
+      let err = null;
+      try {
+        out = walk(p, encoding);
+      } catch (e) {
+        err = e;
+      }
+      process.nextTick(() => reqOrPromises.oncomplete(err, out));
+      return undefined;
+    }
+    if (ctx !== null && typeof ctx === "object") {
+      try {
+        return walk(p, encoding);
+      } catch (e) {
+        ctx.errno = e.errno;
+        ctx.syscall = "realpath";
+        ctx.path = String(p);
+        return undefined;
+      }
+    }
+    return walk(p, encoding);
+  };
 }
