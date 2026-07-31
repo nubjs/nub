@@ -140,9 +140,9 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         // These land AFTER assemble_app's payload-name and collision gates. Safe
         // for the NAME gate because both are fixed constants legal on every
         // target; a shim name derived from user input would have to move it here.
-        // The COLLISION gate is a weaker story: `external::shim` refuses a bundle
-        // file of the same name, but only exact-case, so an `--include` differing
-        // from a shim name in case alone still overwrites on a folding target.
+        // Safe for the COLLISION gate because `external::shim` refuses a payload
+        // entry matching either shim name case-insensitively, on every target —
+        // it reserves the two names rather than relying on the later gate.
         let shim = external::shim(&app_files, &entry_name, &shim_plan)?;
         entry_name = shim.entry;
         app_files.extend(shim.files);
