@@ -30,10 +30,7 @@ fn ambient_shim_entries() -> Vec<String> {
         .collect()
 }
 
-/// Run `command` to completion, require success, and parse the probe's JSON
-/// object. The line is located rather than assumed to be the whole stream: the
-/// dlx routes fetch a package first and print progress ahead of it.
-fn probe_json(label: &str, mut command: Command) -> serde_json::Value {
+fn probe_output(label: &str, mut command: Command) -> std::process::Output {
     let output = command.output().unwrap();
     assert!(
         output.status.success(),
@@ -41,6 +38,24 @@ fn probe_json(label: &str, mut command: Command) -> serde_json::Value {
         output.status.code(),
         String::from_utf8_lossy(&output.stderr)
     );
+    output
+}
+
+/// Parse a probe whose only stdout is one JSON object plus its trailing newline.
+fn probe_json(label: &str, command: Command) -> serde_json::Value {
+    let output = probe_output(label, command);
+    let json = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+    serde_json::from_slice(json).unwrap_or_else(|err| {
+        panic!(
+            "{label}: stdout was not exactly one JSON object: {err}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
+}
+
+/// Locate the JSON line for dlx probes, which may print fetch progress first.
+fn probe_json_after_progress(label: &str, command: Command) -> serde_json::Value {
+    let output = probe_output(label, command);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let line = stdout
         .lines()
@@ -332,7 +347,7 @@ fn nubx_node_flag_reaches_the_dlx_fallback_fetch_path() {
         args.extend(["-y", "-p", package_spec.as_str(), "rtc-dlx-probe"]);
         let mut command = fixture.command_for(&fixture.nubx);
         command.args(args);
-        probe_json(&format!("nubx {extra:?} dlx-fallback"), command)
+        probe_json_after_progress(&format!("nubx {extra:?} dlx-fallback"), command)
     };
 
     let augmented = run(&[]);
@@ -390,7 +405,7 @@ fn node_flag_works_on_the_dlx_and_x_spellings_in_either_order() {
         args.extend(tail);
         let mut command = fixture.command();
         command.args(&args);
-        probe_json(&format!("nub {args:?}"), command)
+        probe_json_after_progress(&format!("nub {args:?}"), command)
     };
 
     let augmented = run(&[], "dlx", &[], &[]);

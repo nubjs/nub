@@ -873,7 +873,12 @@ mod tests {
                 std::fs::write(&path, junk).unwrap();
                 let err = set_implicit_dlx(ImplicitDlx::Never)
                     .expect_err("a scalar intermediate must be refused");
-                assert!(err.to_string().contains("exec"), "names the parent: {err}");
+                let message = err.to_string();
+                assert!(message.contains("exec"), "names the parent: {err}");
+                assert!(
+                    message.contains("must be an object"),
+                    "pins object_value_or_create's non-object refusal: {err}"
+                );
                 assert_eq!(std::fs::read_to_string(&path).unwrap(), junk, "{err}");
             }
         });

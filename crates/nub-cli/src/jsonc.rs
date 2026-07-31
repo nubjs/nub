@@ -144,6 +144,20 @@ pub(crate) fn check_nesting_depth(text: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("readable source dir") {
+            let path = entry.expect("readable dir entry").path();
+            if path.file_name().is_some_and(|name| name == "target") {
+                continue;
+            }
+            if path.is_dir() {
+                rs_files(&path, out);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
     fn nest(depth: usize) -> String {
         format!("{}1{}", "[".repeat(depth), "]".repeat(depth))
     }
@@ -198,20 +212,6 @@ mod tests {
     /// gap as closed while three unguarded calls sat one directory over.
     #[test]
     fn no_module_parses_json_without_bounding_its_nesting() {
-        fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            for entry in std::fs::read_dir(dir).expect("readable source dir") {
-                let path = entry.expect("readable dir entry").path();
-                if path.file_name().is_some_and(|n| n == "target") {
-                    continue;
-                }
-                if path.is_dir() {
-                    rs_files(&path, out);
-                } else if path.extension().is_some_and(|e| e == "rs") {
-                    out.push(path);
-                }
-            }
-        }
-
         // The entry points that recurse on nesting with no bound of their own, or
         // with one too loose to survive a 1 MiB stack. Each CALL must have its
         // preflight immediately above it: file-wide co-occurrence would let one
@@ -271,6 +271,43 @@ mod tests {
             offenders.is_empty(),
             "these parser call sites lack their required preflight, so a deep \
              document can abort the process; add the guard before parsing: {offenders:#?}"
+        );
+    }
+
+    /// The native addon is the only library target in this tree with
+    /// `test = false`: its N-API symbols cannot link into a Rust test harness.
+    /// Any local `#[cfg(test)]` block there is therefore dead code that reads as
+    /// coverage while Cargo and CI silently skip it. Keep those tests in a
+    /// testable helper crate or exercise them through the built addon instead.
+    #[test]
+    fn native_addon_contains_no_dead_cfg_test_blocks() {
+        let native = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates dir")
+            .join("nub-native/src");
+        let mut files = Vec::new();
+        rs_files(&native, &mut files);
+        assert!(!files.is_empty(), "source walk found nothing at {native:?}");
+
+        let offenders = files
+            .iter()
+            .filter_map(|path| {
+                let source = std::fs::read_to_string(path).expect("readable source file");
+                source
+                    .lines()
+                    .enumerate()
+                    .find(|(_, line)| {
+                        line.chars()
+                            .filter(|ch| !ch.is_whitespace())
+                            .collect::<String>()
+                            .starts_with("#[cfg(test)]")
+                    })
+                    .map(|(line, _)| format!("{}:{}", path.display(), line + 1))
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            offenders.is_empty(),
+            "nub-native has `test = false`, so these test blocks never compile; move their coverage to a testable crate or an addon integration fixture: {offenders:#?}"
         );
     }
 
