@@ -78,10 +78,23 @@ fn gen_grants(catalog: &catalog::Catalog) -> String {
             None => "ProjectWrites::None".to_string(),
             Some(keys) => format!("ProjectWrites::ManifestField(&{keys:?})"),
         };
+        // Each chain gets its own `&` so the outer literal is a slice OF SLICES: the derived
+        // `Debug` of a `Vec<Vec<String>>` emits a bare `[[..]]`, an array of ARRAYS, and only
+        // the inner `&` gives the unsizing coercion something to apply to. Written as a plain
+        // `&[..]` reference rather than a `&[..][..]` reslice so the whole literal stays a
+        // coercion — the target type is the struct field, which is known — and needs no
+        // indexing operation inside a `static` initializer.
+        let chains = grant
+            .dependency_dirs
+            .iter()
+            .map(|c| format!("&{c:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let _ = write!(
             src,
             "    (\n        {name:?},\n        CuratedGrant {{\n            \
-             sibling_dirs: &{siblings:?},\n            project_reads: &{reads:?},\n            \
+             sibling_dirs: &{siblings:?},\n            dependency_dirs: &[{chains}],\n            \
+             project_reads: &{reads:?},\n            \
              project_writes: {writes},\n            project_cwd: {cwd},\n        }},\n    ),\n"
         );
     }

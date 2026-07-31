@@ -69,6 +69,29 @@ struct CuratedGrant {
     /// project's under a hoisted one, which is the same directory the package's own
     /// `path.resolve(cwd, '../..')` arithmetic lands on either way.
     sibling_dirs: &'static [&'static str],
+    /// Chains of package NAMES whose resolved directories the package may write.
+    ///
+    /// The shape `sibling_dirs` cannot express. A sibling is a name JOINED to the package's
+    /// own enclosing `node_modules`; under the isolated layout a package's DEPENDENCIES do
+    /// not live there at all — each resolves through a symlink into its own store cell — so
+    /// a package that legitimately writes into another package's directory has no spelling.
+    /// `@prisma/client`'s postinstall re-execs the `prisma` CLI, which downloads the query
+    /// engine into `@prisma/engines`' package dir; measured, that write is the difference
+    /// between a generated client and none (see the catalog entry's `observed`).
+    ///
+    /// A CHAIN, not a flat list, because resolution is relative: `@prisma/engines` is not
+    /// resolvable from `@prisma/client` under an isolated linker — only from `prisma`. So
+    /// `[["prisma"], ["prisma", "@prisma/engines"]]` reads "the `prisma` this package
+    /// resolves, and the `@prisma/engines` THAT one resolves", and each hop is the ordinary
+    /// `node_modules` ancestor walk Node itself would do. That makes the field
+    /// linker-agnostic for free: under a hoisted layout both hops land on
+    /// `<project>/node_modules/<name>`.
+    ///
+    /// THE AUTHORSHIP INVARIANT SURVIVES because a name is not a path. nub authors the
+    /// names; the tree decides what they resolve to; a dependency can therefore only be
+    /// reached if the granted package could already `require` it. Nothing a package writes
+    /// into its own manifest enters here.
+    dependency_dirs: &'static [&'static [&'static str]],
     /// Project-relative subtrees it may READ — a codegen INPUT the consumer authored, and
     /// the reason this is a separate field from `project_writes`: a generator needs its
     /// schema readable, not writable.
@@ -134,28 +157,37 @@ include!(concat!(env!("OUT_DIR"), "/curated_grants.rs"));
 impl CuratedGrant {
     const NONE: Self = Self {
         sibling_dirs: &[],
+        dependency_dirs: &[],
         project_reads: &[],
         project_writes: ProjectWrites::None,
         project_cwd: false,
     };
 }
 
-/// The table EXACTLY as it was hand-written before the catalog, frozen as the equivalence
-/// baseline for `the_catalog_reproduces_the_pre_catalog_table`. It is deliberately a
-/// verbatim copy rather than a paraphrase: its whole job is to fail if the JSON round-trip
-/// changed a single grant, so it must not be re-derived from the same source it checks.
-/// Its comments are the original provenance, kept here as the record of what was frozen.
+/// The grant table written out BY HAND, as the independent mirror of the catalog for
+/// `the_catalog_matches_the_hand_written_mirror`. It is deliberately a hand-authored literal
+/// rather than a re-read of the JSON: its whole job is to fail if the parse-and-codegen path
+/// changed a single grant, so it must not be derived from the same source it checks. That is
+/// what keeps the check non-circular even though both sides are now maintained together — one
+/// side arrives through `catalog::parse` plus `build.rs`, the other through `rustc`.
+///
+/// It began life as the frozen PRE-CATALOG table, proving the migration to JSON was lossless.
+/// That proof is done and in the past; the mirror kept its value and gained a maintenance
+/// cost, which is the trade taken deliberately. A catalog edit updates both.
 #[cfg(test)]
 static GOLDEN_PRE_CATALOG_GRANTS: &[(&str, CuratedGrant)] = &[
-    // THREE needs, and they are staged — each one masks the next, which is why the first
-    // fix looked complete and was not. `scripts/postinstall.js`:
+    // FOUR needs, and they are staged — each one masks the next, which is why the first fix
+    // looked complete and was not. `scripts/postinstall.js`:
     //   1. `process.chdir(INIT_CWD)` — the consumer's project. Needs `project_cwd`.
     //   2. `createDefaultGeneratedThrowFiles` mkdirs
     //      `path.join(__dirname, '../../../.prisma')`, a SIBLING of `@prisma` in the
     //      package's own enclosing `node_modules`, one level ABOVE the granted
     //      `package_dir`. UNCONDITIONAL — it runs before any schema is looked at.
-    //   3. it re-execs the `prisma` CLI as `prisma generate`, which READS the consumer's
-    //      `prisma/` schema directory.
+    //   3. it looks for the `prisma` CLI and re-execs it as `prisma generate`, which READS
+    //      the consumer's `prisma/` schema directory.
+    //   4. that CLI writes the query engine into `@prisma/engines`' package directory and
+    //      copies it into its own — two directories belonging to OTHER packages, which is
+    //      what `dependency_dirs` exists for.
     // Granting only (2) makes the script exit 0 having written nothing but the throw-stubs
     // it writes unconditionally — a green run with no generated client. The nonce test
     // (a model name invented per run, which must appear in the OUTPUT) is what separates
@@ -170,6 +202,12 @@ static GOLDEN_PRE_CATALOG_GRANTS: &[(&str, CuratedGrant)] = &[
         "@prisma/client",
         CuratedGrant {
             sibling_dirs: &[".prisma"],
+            // Why (4) is unavoidable rather than a race worth losing: `require.resolve
+            // ('prisma')` ALWAYS throws on 6.19.3 — the package's `exports` map points `.`
+            // at `./build/types.js`, which its published tarball does not contain — so the
+            // script always falls through to `exec('prisma -v')` and the CLI, not
+            // `@prisma/engines`, is what fetches and places the engine on a cold store.
+            dependency_dirs: &[&["prisma"], &["prisma", "@prisma/engines"]],
             // `prisma/` is Prisma's own convention for the schema directory and holds the
             // generator's INPUT. Read, not write: `generate` emits into the client package,
             // never back into the schema.
@@ -248,10 +286,13 @@ fn curated_table() -> &'static [(&'static str, CuratedGrant)] {
                     let strs = |v: &'static [String]| -> &'static [&'static str] {
                         Vec::leak(v.iter().map(String::as_str).collect())
                     };
+                    let chains: &'static [&'static [&'static str]] =
+                        Vec::leak(g.dependency_dirs.iter().map(|c| strs(c)).collect());
                     (
                         g.package.as_str(),
                         CuratedGrant {
                             sibling_dirs: strs(&g.sibling_dirs),
+                            dependency_dirs: chains,
                             project_reads: strs(&g.project_reads),
                             project_writes: match &g.project_writes {
                                 None => ProjectWrites::None,
@@ -289,6 +330,11 @@ fn grant_from_table(
             push_rw(&mut rules, &path);
         }
     }
+    for chain in grant.dependency_dirs {
+        if let Some(path) = resolve_dependency_dir(project_root, package_dir, chain) {
+            push_rw(&mut rules, &path);
+        }
+    }
     if grant.project_cwd {
         // The NODE alone — `subtree_globs` would add `/**` and turn a cwd grant into a
         // project read.
@@ -305,6 +351,76 @@ fn grant_from_table(
         push_rw(&mut rules, &path);
     }
     policy.fs.rules.entries.extend(rules);
+}
+
+/// Resolve one [`CuratedGrant::dependency_dirs`] chain to a REAL directory, or `None`.
+///
+/// THE CANONICALIZATION QUESTION, answered explicitly because getting it backwards makes the
+/// grant inert rather than wrong-and-loud. Two facts decide it:
+///
+///  1. **The grant that reaches the backend is the REALPATH, always.** [`rule`] runs every
+///     matcher through `canonicalize_glob_prefix`, and both enforcing backends match on the
+///     canonicalized path of what the process touched (stated at
+///     [`super::preset::grant_build_jail_dependency_reads`]: a `node_modules/<name>` symlink
+///     out of the project is NOT reached by the project grant).
+///  2. **Under the isolated linker every dependency edge IS a symlink.** `<cell>/node_modules/
+///     prisma` points at `<store>/prisma@<v>/node_modules/prisma`.
+///
+/// So resolving the link is not an optimisation, it is the only thing that makes the rule
+/// match at all — a literal term for the link path would compile to a grant no access can
+/// hit. And BECAUSE the emitted term is the realpath, the containment clamp below runs on the
+/// realpath too: clamping the literal path while granting the resolved one would check a
+/// different path than it permits, which is how two Windows checks were once made inert.
+///
+/// This is deliberately the OPPOSITE of [`super::preset`]'s `private_home_dir`, which
+/// canonicalizes its root and appends the leaf literally. That rule is right when the leaf may
+/// not exist and a symlinked leaf would REDIRECT the grant somewhere unintended; here the leaf
+/// is a symlink by construction and its target is the thing being granted. Do not unify them.
+///
+/// THE RESIDUAL, stated plainly: a chain resolving into the machine-global virtual store
+/// (`$cache/nub/pm/store/<cell>`) would grant write on a directory every project on the host
+/// shares — so it is DROPPED, and the package then fails exactly as it does with no exception,
+/// which is the conservative direction and the same choice [`contained`] makes. aube
+/// materializes a cell project-locally when its package carries a lifecycle script (it must,
+/// or an in-place build would write through the shared CAS inode), and the peerless
+/// script-free cells that DO stay as store symlinks are not ones a curated grant names.
+/// Measured on the `@prisma/client` fixture: both hops resolve inside the project.
+fn resolve_dependency_dir(
+    project_root: &Path,
+    package_dir: &Path,
+    chain: &[&str],
+) -> Option<PathBuf> {
+    let mut current = package_dir.to_path_buf();
+    for name in chain {
+        current = resolve_package_from(&current, name)?;
+    }
+    // Never the container itself: `node_modules` holds `.bin` (run UNCONFINED by later
+    // tooling) and the virtual store (every dependency's source before it executes). The
+    // catalog rejects the literal name, but a symlink could still land here.
+    if current.file_name().is_some_and(|n| n == "node_modules") {
+        return None;
+    }
+    inside_project(project_root, &current).then_some(current)
+}
+
+/// One `node_modules` hop, exactly as Node's own `Module._nodeModulePaths` walks it: try
+/// `<ancestor>/node_modules/<name>` for each ancestor of `from`, skipping any ancestor that is
+/// itself a `node_modules` (Node skips those, and so must this or a chain could name a
+/// directory no `require` could reach). The first hit wins, resolved through its symlink.
+fn resolve_package_from(from: &Path, name: &str) -> Option<PathBuf> {
+    from.ancestors()
+        .filter(|a| a.file_name().is_some_and(|n| n != "node_modules"))
+        .map(|a| a.join("node_modules").join(name))
+        .find(|c| c.exists())
+        .map(|c| crate::matcher::path::canonicalize_including_nonexistent(&c))
+}
+
+/// Whether an ALREADY-RESOLVED absolute path stays inside the project root. The sibling of
+/// [`contained`], which takes a relative string; both compare canonical forms, because that is
+/// the form the backends match on.
+fn inside_project(project_root: &Path, path: &Path) -> bool {
+    let root = crate::matcher::path::canonicalize_including_nonexistent(project_root);
+    path != root && path.starts_with(&root)
 }
 
 /// Create a sibling-dir grant's target if it is absent, so LINUX can attach a rule to it.
@@ -460,8 +576,16 @@ mod tests {
     }
 
     fn policy_for(package_dir: &Path, name: Option<&str>) -> SandboxPolicy {
+        policy_for_project(&project(), package_dir, name)
+    }
+
+    fn policy_for_project(
+        project_root: &Path,
+        package_dir: &Path,
+        name: Option<&str>,
+    ) -> SandboxPolicy {
         let mut policy = SandboxPolicy::default();
-        grant_curated_package(&mut policy, &project(), package_dir, name);
+        grant_curated_package(&mut policy, project_root, package_dir, name);
         policy
     }
 
@@ -479,15 +603,15 @@ mod tests {
         project().join(format!("node_modules/.store/{pkg}@1/node_modules/{pkg}"))
     }
 
-    /// The catalog changed WHERE the grants are written, and must not have changed WHAT
-    /// they are. Compared against the frozen pre-catalog literal rather than against a
-    /// re-read of the JSON, so this cannot pass by both sides agreeing on the same bad
-    /// parse — the baseline predates the parser entirely.
+    /// The catalog decides WHERE the grants are written; it must not change WHAT they are.
+    /// Compared against a hand-authored literal rather than a re-read of the JSON, so this
+    /// cannot pass by both sides agreeing on the same bad parse — only one side goes through
+    /// `catalog::parse` and `build.rs`.
     #[test]
-    fn the_catalog_reproduces_the_pre_catalog_table() {
+    fn the_catalog_matches_the_hand_written_mirror() {
         assert_eq!(
             CURATED_GRANTS, GOLDEN_PRE_CATALOG_GRANTS,
-            "the generated table diverged from the hand-written one it replaced"
+            "the generated table diverged from the hand-written mirror"
         );
     }
 
@@ -556,7 +680,131 @@ mod tests {
                     "{name}: project read `{rel}` must stay inside the project"
                 );
             }
+            for chain in grant.dependency_dirs {
+                assert!(!chain.is_empty(), "{name}: an empty dependency chain");
+                for dep in *chain {
+                    // A chain element is a NAME the walk looks up, never a path it joins.
+                    // `node_modules` in particular would resolve to `.bin` and the virtual
+                    // store — the two directories this whole table is bounded away from.
+                    assert!(
+                        !dep.is_empty()
+                            && *dep != "node_modules"
+                            && !dep.starts_with('.')
+                            && !dep.contains('\\')
+                            && dep.matches('/').count() <= usize::from(dep.starts_with('@')),
+                        "{name}: dependency `{dep}` must be `name` or `@scope/name`"
+                    );
+                }
+            }
         }
+    }
+
+    /// A dependency chain resolves through the isolated store's symlinks to the REAL package
+    /// directories, which is the only form the backends match — a term naming the link path
+    /// would compile to a rule no access can hit.
+    ///
+    /// The fixture is the layout aube actually produces: the client sits in a peer-specialized
+    /// cell whose `node_modules/prisma` is a symlink into the `prisma` cell, and `@prisma/
+    /// engines` is reachable only from THERE. Both hops are asserted, because a walk that
+    /// resolved only the first would still satisfy a "some rule was added" check.
+    // Symlinked cells are how the isolated linker expresses a dependency edge on POSIX;
+    // Windows uses a different materialization, so asserting this layout there would be
+    // asserting a tree aube does not build.
+    #[cfg(unix)]
+    #[test]
+    fn a_dependency_chain_resolves_through_the_stores_symlinks() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let project = root.path();
+        let store = project.join("node_modules/.store");
+        let client_nm = store.join("@prisma+client@1_prisma@1/node_modules");
+        let prisma_nm = store.join("prisma@1/node_modules");
+        let engines = store.join("@prisma+engines@1/node_modules/@prisma/engines");
+        std::fs::create_dir_all(client_nm.join("@prisma/client")).expect("client cell");
+        std::fs::create_dir_all(prisma_nm.join("prisma")).expect("prisma cell");
+        std::fs::create_dir_all(prisma_nm.join("@prisma")).expect("prisma cell scope dir");
+        std::fs::create_dir_all(&engines).expect("engines cell");
+        symlink_dir(&prisma_nm.join("prisma"), &client_nm.join("prisma"));
+        symlink_dir(&engines, &prisma_nm.join("@prisma/engines"));
+
+        let mut policy = SandboxPolicy::default();
+        grant_curated_package(
+            &mut policy,
+            project,
+            &client_nm.join("@prisma/client"),
+            Some("@prisma/client"),
+        );
+        let granted = globs(&policy);
+        let real = |p: &Path| {
+            crate::matcher::path::canonicalize_including_nonexistent(p)
+                .to_string_lossy()
+                .into_owned()
+        };
+        for (label, want) in [
+            ("the prisma CLI's own dir", real(&prisma_nm.join("prisma"))),
+            ("the @prisma/engines dir", real(&engines)),
+        ] {
+            assert!(
+                granted.contains(&want),
+                "{label}: expected the RESOLVED path {want}, got {granted:?}"
+            );
+        }
+        // The link path itself must not be what was emitted — that is the inert-grant shape.
+        assert!(
+            !granted.contains(&client_nm.join("prisma").to_string_lossy().into_owned()),
+            "the unresolved symlink path was granted; the backends would never match it: \
+             {granted:?}"
+        );
+        // The control: without the peer symlink neither hop resolves, so the assertions
+        // above are the WALK firing rather than a compiler that grants unconditionally.
+        std::fs::remove_file(client_nm.join("prisma")).expect("drop the peer link");
+        let without = globs(&policy_for_project(
+            project,
+            &client_nm.join("@prisma/client"),
+            Some("@prisma/client"),
+        ));
+        // Matched on the cell's full path, not a substring: the CLIENT cell is named
+        // `@prisma+client@1_prisma@1`, so a `contains("prisma@1")` control would be
+        // satisfied by the `.prisma` sibling grant and pass without testing anything.
+        let prisma_cell = real(&store.join("prisma@1"));
+        assert!(
+            !without.iter().any(|g| g.starts_with(&prisma_cell)),
+            "with the peer link gone nothing in {prisma_cell} may be granted: {without:?}"
+        );
+    }
+
+    /// The clamp runs on the RESOLVED path, because the resolved path is what is granted.
+    /// A cell symlinked into the machine-global virtual store is outside the project, and a
+    /// write grant there would reach every project on the host — so it is dropped.
+    #[cfg(unix)]
+    #[test]
+    fn a_dependency_chain_leaving_the_project_is_dropped() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let project = root.path().join("proj");
+        let global_store = root.path().join("global-store");
+        let client_nm = project.join("node_modules/.store/@prisma+client@1_prisma@1/node_modules");
+        std::fs::create_dir_all(client_nm.join("@prisma/client")).expect("client cell");
+        std::fs::create_dir_all(global_store.join("prisma@1/node_modules/prisma")).expect("store");
+        // The link is inside the project; its TARGET is not. Clamping the link path would
+        // admit this, which is the whole point of clamping the resolved one.
+        symlink_dir(
+            &global_store.join("prisma@1/node_modules/prisma"),
+            &client_nm.join("prisma"),
+        );
+
+        let granted = globs(&policy_for_project(
+            &project,
+            &client_nm.join("@prisma/client"),
+            Some("@prisma/client"),
+        ));
+        assert!(
+            !granted.iter().any(|g| g.contains("global-store")),
+            "a chain resolving into the shared store must be dropped: {granted:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn symlink_dir(target: &Path, link: &Path) {
+        std::os::unix::fs::symlink(target, link).expect("symlink");
     }
 
     /// The sibling grant lands one level ABOVE `package_dir`, which is the whole point —

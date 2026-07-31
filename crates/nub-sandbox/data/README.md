@@ -152,6 +152,7 @@ fetching — recording the observation must not become a grant.
   "package": "@prisma/client",
   "versions": "6.x (7.0.0 dropped the postinstall entirely)",
   "siblingDirs": [".prisma"],
+  "dependencyDirs": [["prisma"], ["prisma", "@prisma/engines"]],
   "projectReads": ["prisma"],
   "projectCwd": true,
   "mechanism": "scripts/postinstall.js ... mkdirs path.join(__dirname, '../../../.prisma')",
@@ -166,6 +167,7 @@ fetching — recording the observation must not become a grant.
 | `package` | The installer-resolved package name. Matched exactly: no prefix, suffix or case folding. |
 | `versions` | Which versions the measurement covers. |
 | `siblingDirs` | Named entries of the package's own enclosing `node_modules` it may read and write. |
+| `dependencyDirs` | Chains of package *names* whose resolved directories it may read and write. See below. |
 | `projectReads` | Project-relative subtrees it may read. |
 | `projectWrites` | Where its project write targets come from. See below. |
 | `projectCwd` | Grant read on the project root directory node alone. |
@@ -186,6 +188,46 @@ The dot-entries at a `node_modules` root are not scratch space — they are the 
 itself. `.store`/`.pnpm` hold every materialized dependency's source *before it is
 executed*, and `.bin` is the shim directory that later tooling runs **unconfined**. Naming
 `.prisma` grants one directory; a dot-entry pattern would grant those.
+
+### `dependencyDirs`
+
+For a package that writes into **another package's** directory. `@prisma/client`'s postinstall
+re-execs the `prisma` CLI, and that CLI downloads the query engine into `@prisma/engines`'
+package directory and copies it into its own — neither of which `package_dir` covers.
+
+Each entry is a **chain of package names**, resolved by the ordinary `node_modules` ancestor
+walk Node itself performs, starting at the granted package and continuing from each name it
+resolves:
+
+```json
+"dependencyDirs": [["prisma"], ["prisma", "@prisma/engines"]]
+```
+
+reads *"the `prisma` this package resolves, and the `@prisma/engines` that one resolves."* A
+chain rather than a flat list because resolution is relative: under the isolated layout
+`@prisma/engines` is not reachable from `@prisma/client` at all, only from `prisma`. Writing it
+as names is also what makes the field linker-agnostic — under a hoisted layout both hops land
+on `<project>/node_modules/<name>` with no change here.
+
+**A name, never a path.** A separator (beyond the single `@scope/` one), a traversal component,
+a leading `.`, or the literal `node_modules` is rejected at build time. That is the security
+property: nub authors the names, the installed tree decides what they resolve to, so a chain can
+only reach a package the granted package could already `require`, and never the `node_modules`
+container itself — which holds `.bin` (run **unconfined** by later tooling) and the virtual
+store (every dependency's source before it executes).
+
+**Symlinks are resolved, and the containment clamp runs on the resolved path.** Under the
+isolated layout every dependency edge *is* a symlink into another store cell, and both enforcing
+backends match on the canonicalized path — so a rule naming the link would compile to a grant no
+access can hit. Because the emitted term is therefore the realpath, the clamp checks the realpath
+too; clamping the link while granting its target would test a different path than it permits.
+
+The consequence, stated rather than glossed: a chain that resolves **out of the project** — into
+the machine-global virtual store, where a write would reach every project on the host — is
+**dropped**, and the package then fails exactly as it would with no entry at all. aube
+materializes a cell project-locally when its package carries a lifecycle script (it must, or an
+in-place build would write through the shared store inode), so the cells a curated grant names
+are the local ones; the peerless, script-free cells that stay as store symlinks are not.
 
 ### `projectReads` vs `projectWrites`
 

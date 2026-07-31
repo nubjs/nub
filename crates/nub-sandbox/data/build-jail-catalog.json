@@ -11,9 +11,9 @@
     {
       "host": "binaries.prisma.sh",
       "artifact": "Prisma query/schema engine binaries",
-      "fetchedBy": ["@prisma/engines"],
-      "evidence": "vendor-documented",
-      "observed": "Named in Prisma's own firewall-allowlist documentation. A grep of the fetched postinstall bundle found no literal match, so the constant lives in a helper chunk that pass did not fetch. Not independently confirmed from source.",
+      "fetchedBy": ["@prisma/engines", "@prisma/client"],
+      "evidence": "measured",
+      "observed": "Named in Prisma's own firewall-allowlist documentation, and since MEASURED under the jail (macOS arm64, 2026-07-31). `@prisma/client` is on this list because the download does not only happen under `@prisma/engines`' identity: @prisma/client's postinstall re-execs the `prisma` CLI, whose bundled `@prisma/fetch-engine` downloads the engines itself whenever they are not already on disk — the ordinary cold-store case, because aube runs the two postinstalls CONCURRENTLY (measured: both START within 3ms) and the client's routinely reaches the check first. Traced with DEBUG=prisma:* inside the confined spawn: `prisma:fetch-engine:download https://binaries.prisma.sh/all_commits/<sha>/darwin-arm64/libquery_engine.dylib.node.gz will be downloaded to <store>/@prisma+engines@6.19.3/...`; without the grant the same request returns `getaddrinfo ENOTFOUND binaries.prisma.sh`. npm on the identical fixture, with a cold npm cache AND a cold HOME, performs the same download from the same script — so this matches npm rather than widening past it.",
       "platform": "any"
     },
     {
@@ -73,11 +73,12 @@
       "package": "@prisma/client",
       "versions": "6.x (7.0.0 dropped the postinstall entirely)",
       "siblingDirs": [".prisma"],
+      "dependencyDirs": [["prisma"], ["prisma", "@prisma/engines"]],
       "projectReads": ["prisma"],
       "projectCwd": true,
-      "mechanism": "scripts/postinstall.js does three things, and each masks the next: it calls process.chdir(INIT_CWD); createDefaultGeneratedThrowFiles unconditionally mkdirs path.join(__dirname, '../../../.prisma'), a sibling of @prisma in the package's own enclosing node_modules; then it re-execs the prisma CLI as `prisma generate`, which reads the consumer's prisma/ schema directory. The generated client lands inside package_dir and needs no grant.",
+      "mechanism": "scripts/postinstall.js does four things, and each masks the next: it calls process.chdir(INIT_CWD); createDefaultGeneratedThrowFiles unconditionally mkdirs path.join(__dirname, '../../../.prisma'), a sibling of @prisma in the package's own enclosing node_modules; it looks for the prisma CLI; then it re-execs that CLI as `prisma generate`, which reads the consumer's prisma/ schema directory. The CLI lookup is why the dependencyDirs are here and not the schema: `require.resolve('prisma')` ALWAYS throws on 6.19.3 (its exports map points `.` at ./build/types.js, which the published tarball does not contain — reproduced on plain node with no sandbox), so the script always falls through to `exec('prisma -v')`, and the CLI it then runs writes the query engine into `@prisma/engines`' package directory and copies it into its own. Those two directories belong to OTHER packages, so package_dir does not cover them. The generated client itself lands inside package_dir and needs no grant.",
       "evidence": "measured",
-      "observed": "EPERM mkdir <own node_modules>/.prisma, then EPERM uv_cwd on chdir(INIT_CWD), then EPERM reading the consumer's prisma/ schema. Verified by artifact, not exit code: a generated client of 71282 B carrying a per-run schema nonce, against absent output and 2 EPERMs without the grants. Presence alone is not a valid check here — the script writes throw-stubs before every guard, so it exits 0 having generated nothing.",
+      "observed": "EPERM mkdir <own node_modules>/.prisma, then EPERM uv_cwd on chdir(INIT_CWD), then EPERM reading the consumer's prisma/ schema. The dependencyDirs were measured separately (macOS arm64, 2026-07-31) with a write probe run INSIDE the real confined spawn: writes to the `prisma` CLI cell and the `@prisma/engines` cell both returned EPERM while the package's own dir returned OK, and the resulting failure was `ENOENT copyfile <store>/prisma@6.19.3/node_modules/prisma/libquery_engine-darwin-arm64.dylib.node`. Verified by artifact, not exit code: 6 files carrying a per-run schema nonce, identical to the unconfined arm, against 0 without the grants — on a COLD store with no artificial delay. Presence alone is not a valid check here — the script writes throw-stubs before every guard, so it exits 0 having generated nothing; and neither is the absence of the `please install Prisma CLI` warning, which a warm store suppresses on its own.",
       "platform": "macos-arm64"
     },
     {

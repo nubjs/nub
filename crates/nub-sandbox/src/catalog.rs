@@ -27,6 +27,10 @@ use std::path::{Component, Path};
 pub struct PackageGrant {
     pub package: String,
     pub sibling_dirs: Vec<String>,
+    /// Chains of package NAMES whose resolved directories the package may write.
+    /// `[["prisma"], ["prisma", "@prisma/engines"]]` means "the `prisma` this package
+    /// resolves, and the `@prisma/engines` THAT package resolves".
+    pub dependency_dirs: Vec<Vec<String>>,
     pub project_reads: Vec<String>,
     /// The dotted field path of a `projectWrites.manifestField`, if the entry has one.
     pub project_writes: Option<Vec<String>>,
@@ -155,6 +159,8 @@ fn parse_grants(catalog: &serde_json::Value) -> Result<Vec<PackageGrant>, String
             }
         }
 
+        let dependency_dirs = parse_dependency_dirs(entry, &at)?;
+
         let project_reads = opt_strings(entry, "projectReads", &at)?;
         for rel in &project_reads {
             require_project_relative(rel, "projectReads", &at)?;
@@ -199,6 +205,7 @@ fn parse_grants(catalog: &serde_json::Value) -> Result<Vec<PackageGrant>, String
         grants.push(PackageGrant {
             package,
             sibling_dirs,
+            dependency_dirs,
             project_reads,
             project_writes,
             project_cwd,
@@ -206,6 +213,73 @@ fn parse_grants(catalog: &serde_json::Value) -> Result<Vec<PackageGrant>, String
     }
 
     Ok(grants)
+}
+
+/// Validate `dependencyDirs` — a list of package-NAME chains, never paths.
+///
+/// The distinction from `siblingDirs` is the whole security argument. A sibling is a name
+/// JOINED to a directory, so a separator in it escapes that directory and the check above
+/// rejects one. A dependency chain is never joined: each element is looked up the way Node
+/// would, so the only directories it can reach are ones the granted package can already
+/// `require`. Rejecting a separator here therefore enforces "this is a name, not a path" —
+/// the single scoped `@scope/name` slash is the one exception, because that IS the name.
+fn parse_dependency_dirs(entry: &serde_json::Value, at: &str) -> Result<Vec<Vec<String>>, String> {
+    let Some(value) = entry.get("dependencyDirs") else {
+        return Ok(Vec::new());
+    };
+    let chains = value
+        .as_array()
+        .ok_or_else(|| format!("{at}: dependencyDirs must be an array of package-name chains"))?;
+    let mut out = Vec::with_capacity(chains.len());
+    for (j, chain) in chains.iter().enumerate() {
+        let at = format!("{at}.dependencyDirs[{j}]");
+        let names = chain
+            .as_array()
+            .ok_or_else(|| format!("{at}: each chain is an ARRAY of names, e.g. [\"prisma\"]"))?;
+        if names.is_empty() {
+            return Err(format!("{at}: a chain must name at least one package"));
+        }
+        let mut resolved = Vec::with_capacity(names.len());
+        for n in names {
+            let name = n
+                .as_str()
+                .ok_or_else(|| format!("{at}: chain entries must be strings"))?;
+            require_package_name(name, &at)?;
+            resolved.push(name.to_string());
+        }
+        out.push(resolved);
+    }
+    Ok(out)
+}
+
+/// Reject anything that is not an ordinary npm package name.
+///
+/// `node_modules` is refused by name: the walk joins `node_modules/<name>`, so admitting it
+/// would grant the virtual store and `.bin` — the two directories the whole grant table is
+/// bounded away from (`.bin` is run UNCONFINED later; the store holds every dependency's
+/// source before it executes).
+fn require_package_name(name: &str, at: &str) -> Result<(), String> {
+    let bad =
+        |why: &str| -> Result<(), String> { Err(format!("{at}: package name `{name}` {why}")) };
+    if name.is_empty() {
+        return bad("is empty");
+    }
+    if name == "node_modules" {
+        return bad("names the virtual store and `.bin`, never a package");
+    }
+    if name.starts_with('.') || name.contains('\\') {
+        return bad("must be a plain package name — no traversal, no backslash");
+    }
+    let segments: Vec<&str> = name.split('/').collect();
+    let unscoped = match segments.as_slice() {
+        [one] => *one,
+        [scope, rest] if scope.starts_with('@') && scope.len() > 1 => *rest,
+        _ => return bad("must be `name` or `@scope/name`"),
+    };
+    if unscoped.is_empty() || unscoped.starts_with('.') {
+        return bad("must be `name` or `@scope/name`");
+    }
+    Ok(())
 }
 
 // ── the per-package egress table ───────────────────────────────────────────────
@@ -386,5 +460,55 @@ mod tests {
             vec!["admitted-pkg".to_string()],
             "the refusal must remove `refused-pkg` and leave its `fetchedBy` sibling admitted"
         );
+    }
+
+    /// `dependencyDirs` entries are NAMES the resolver looks up, never paths it joins — so a
+    /// spelling that would turn one into a path has to be refused here, where both the build
+    /// and the dev override run the same check.
+    ///
+    /// Paired with an accepted control in the same shape, because a validator that rejected
+    /// everything would satisfy the rejection half on its own.
+    #[test]
+    fn a_dependency_chain_entry_must_be_a_package_name() {
+        let catalog = |chain: &str| {
+            super::parse(&format!(
+                r#"{{
+                  "networkHosts": [],
+                  "packageGrants": [{{
+                    "package": "pkg",
+                    "dependencyDirs": [{chain}],
+                    "mechanism": "re-execs a sibling CLI that writes into its own package dir",
+                    "evidence": "measured",
+                    "observed": "EPERM writing the resolved dir",
+                    "platform": "macos-arm64"
+                  }}],
+                  "notGranted": {{}}
+                }}"#
+            ))
+        };
+
+        let ok = catalog(r#"["prisma", "@prisma/engines"]"#)
+            .expect("a plain name and a scoped name are both valid");
+        assert_eq!(
+            ok.package_grants[0].dependency_dirs,
+            vec![vec!["prisma".to_string(), "@prisma/engines".to_string()]],
+            "the accepted control must actually carry the chain"
+        );
+
+        // `..` and `a/b` would escape the resolver's one-hop lookup; `node_modules` names the
+        // virtual store and `.bin` rather than any package; a bare chain is not an array.
+        for rejected in [
+            r#"[".."]"#,
+            r#"["a/b"]"#,
+            r#"["node_modules"]"#,
+            r#"["@scope/a/b"]"#,
+            r#"[]"#,
+            r#""prisma""#,
+        ] {
+            assert!(
+                catalog(rejected).is_err(),
+                "dependencyDirs [{rejected}] must be rejected"
+            );
+        }
     }
 }
