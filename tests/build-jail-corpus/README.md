@@ -550,8 +550,10 @@ inspection: with `NUB_BUILD_JAIL_CATALOG` set to a readable file the binary exit
 "was not built with the `build-jail-catalog-override` feature, so it cannot honour it". An override is
 not expressible, and **zero `OVERRIDDEN` banners appear across all 46 runs.** Ubuntu 24.04 on GCE
 `n2-standard-16`, kernel `6.17.0-1021-gcp`, **Landlock ABI 7**, `landlock` present in
-`/sys/kernel/security/lsm`. 26 batch arms plus 20 isolated, every one `arm_effect=confirmed`,
-`PER_PKG=1`, 0 inconclusive, 0 denominator-suspect.
+`/sys/kernel/security/lsm`. 26 sweep arms (13 shards x 2) plus 20 isolated re-run arms — 46 in total,
+every one `arm_effect=confirmed` — with `PER_PKG=1`, 0 inconclusive and 0 denominator-suspect. (The
+table reports 22 "isolated" runs rather than 20: `shard-d5e` holds a single package, so it is flagged
+the same way an isolated re-run is.)
 
 | | prior Linux (`92ed4cc78f`, re-scored) | **this run (`77e3b74afe`)** |
 | --- | --- | --- |
