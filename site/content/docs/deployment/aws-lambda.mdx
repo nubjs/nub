@@ -73,10 +73,6 @@ Verify the result with the URL Lambda returns:
 curl https://FUNCTION_ID.lambda-url.us-east-1.on.aws/
 ```
 
-```text
-Hello from Nub on Lambda
-```
-
 ## GitHub Actions
 
 The setup action can run tests before the image build. Deployment still needs AWS authentication, an ECR login, and a Lambda update through AWS's standard actions or CLI; those are provider credentials rather than another Nub artifact.
