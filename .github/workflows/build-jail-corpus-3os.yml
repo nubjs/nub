@@ -280,11 +280,6 @@ jobs:
 
   corpus:
     needs: build
-    # Held off: run 30662499497 is already sweeping these eight shards on this commit's
-    # DEFAULT build, and the only change since is a cargo feature that is off in that
-    # build (`cfg!` false leaves the redirect exactly as it was). Its corpus delta stands;
-    # this push exists to add the control, not to re-measure. Flip back for the next sweep.
-    if: ${{ false }}
     strategy:
       fail-fast: false
       # A ceiling on how much of the shared runner pool this one probe may hold.
