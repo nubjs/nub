@@ -475,6 +475,14 @@ const BUILD_JAIL_EXTRA_EXACT: &[&str] = &[
     // nub's runtime dir, so preload discovery found nothing and degraded); Landlock leaves
     // the dir VISIBLE-but-unreadable, so discovery succeeded and the read then hard-failed.
     "NODE_COMPAT",
+    // Also STAMPED by the jail, and in the same silent-if-dropped class as the MSVC trio
+    // below: it names the Node the package's own pin chain asked for, resolved OUT of the
+    // jail because the confined shim can reach none of discovery's answers — not `~/.nvm`,
+    // not nub's store, not nodejs.org. Withheld, the child re-runs that walk and fails
+    // closed on a version the host may already have unpacked. The value is one nub itself
+    // resolved, never an ambient a dependency could aim elsewhere: `build_jail.rs`
+    // overwrites the key unconditionally whenever the pin chain yields a pin.
+    "NODE_EXECUTABLE",
     "npm_node_execpath",
     "INIT_CWD",
     "http_proxy",
@@ -1701,6 +1709,20 @@ mod tests {
                 "{key} must reach node-gyp or the Visual Studio pre-resolution is inert"
             );
         }
+    }
+
+    /// `NODE_EXECUTABLE` fails the same silent way, and its symptom is worse than inertness:
+    /// the child re-runs nub's version discovery inside the jail, where the only granted
+    /// interpreter is the one that already failed to satisfy the pin and every other answer
+    /// — `~/.nvm`, nub's store, nodejs.org — is out of reach, so it hard-errors
+    /// `ERR_NUB_NODE_PROVISION_FAILED` on a version the host may already have. Withholding it
+    /// turns the out-of-jail resolution into a download nothing consumes.
+    #[test]
+    fn the_pre_resolved_node_reaches_the_jailed_child() {
+        assert!(
+            build_jail_env_allowed("NODE_EXECUTABLE"),
+            "NODE_EXECUTABLE must reach the child or the confined shim re-resolves and fails closed"
+        );
     }
 
     #[test]

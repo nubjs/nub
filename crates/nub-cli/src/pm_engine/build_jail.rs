@@ -149,6 +149,33 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             staged.redirect_env(&mut ambient);
         }
 
+        // NODE VERSION RESOLUTION — the same move prefetch makes below, applied to nub's
+        // OWN runtime: settle it out here so the confined child never has to. A package
+        // whose `engines.node` (or a pin file above it) names a version the ambient
+        // interpreter does not satisfy sends the in-jail `node` shim back through nub's
+        // discovery, and inside the jail that walk can reach NONE of its answers — not
+        // `~/.nvm`, not nub's store, and not nodejs.org. It failed closed on all three,
+        // which reads as a network break but is not one: a version this host already had
+        // unpacked under `~/.nvm` was as unreachable as one it had never downloaded.
+        // Resolving here reuses the ordinary order (PATH → store → nvm → download), so
+        // the network is touched only when a real download is the only remaining answer,
+        // and it is nub fetching its own runtime rather than a dependency opening a socket.
+        //
+        // Gated on a pin EXISTING, so the unpinned majority keeps the ambient interpreter
+        // and pays nothing; a resolution failure leaves the spawn byte-identical, i.e. the
+        // pre-existing break rather than a new one.
+        if let Some(node) = pinned_interpreter(&spawn.cwd) {
+            // Both spellings, because they are read by different consumers and a split
+            // between them is its own silent wrong answer: `NODE_EXECUTABLE` is the one
+            // key nub's discovery honours BEFORE reading any pin file, so it is what stops
+            // the in-jail re-resolution; `npm_node_execpath` is what npm, node-gyp and the
+            // shim's re-exec follow, and it is the input `node_layout` derives the headers
+            // node-gyp compiles against from — leaving it on the ambient interpreter would
+            // build a pinned package's addon against the wrong Node's headers.
+            ambient.insert("NODE_EXECUTABLE".to_string(), node.clone());
+            ambient.insert("npm_node_execpath".to_string(), node);
+        }
+
         // The interpreter closure to grant READ. nub provisions its own Node under its
         // store (not `/usr`), so the tight-read base can't reach it. Under nub a bare
         // `node` resolves via the PATH-prepended shim (`NODE`) which re-execs the real
@@ -786,6 +813,28 @@ fn node_layout(exec: &Path) -> Option<NodeLayout> {
 fn npm_builtin_config_deny_root_for(global_modules: &Path) -> Option<PathBuf> {
     let npm_dir = global_modules.join("npm");
     npm_dir.is_dir().then_some(npm_dir)
+}
+
+/// The Node the confined script's pin chain asks for, resolved OUT of the jail —
+/// `None` when nothing is pinned from `cwd` (leave the ambient interpreter alone) or
+/// when resolution fails.
+///
+/// The gate is deliberately "is there a pin at all", not "does the ambient interpreter
+/// satisfy it": answering the second question requires the same resolution as answering
+/// the first, and the ambient interpreter satisfying the pin makes this a no-op anyway
+/// (discovery returns that same binary, which is already granted).
+///
+/// FAILURE IS SILENT AND LEAVES THE SPAWN UNCHANGED. This runs on every lifecycle spawn
+/// of a pinned package, including offline; surfacing an error here would convert a
+/// package that installs fine today — one whose script never invokes `node` — into a hard
+/// install failure over a version it was never going to use.
+fn pinned_interpreter(cwd: &Path) -> Option<String> {
+    let chain = nub_core::node::discovery::resolve_pin_chain(cwd).ok()?;
+    // The pin's VALUE is unused — `discover_or_provision_node` re-derives it. Only its
+    // existence is the gate, and bailing here is what keeps the unpinned majority free.
+    chain.pin.as_ref()?;
+    let node = nub_core::node::discovery::discover_or_provision_node(cwd).ok()?;
+    Some(node.path.into_string())
 }
 
 /// node-gyp's one Python key that outranks `--python` / `npm_config_python`.
