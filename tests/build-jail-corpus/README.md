@@ -290,6 +290,80 @@ Movement, per fix:
 The hook-installer count remains an upper bound for the reason above: the surviving 11 rows still
 share one project delta.
 
+## First Linux numbers, 2026-07-31
+
+Full corpus at `92ed4cc78f` — the first Linux run of this harness, and the first on any platform to
+include BUG-J's store-entry grant. Ubuntu 24.04 on GCE `n2-standard-16`, kernel `6.17.0-1021-gcp`,
+**Landlock ABI 7**, `landlock` present in `/sys/kernel/security/lsm`. 30 arms, every one
+`arm_effect=confirmed`, `PER_PKG=1`, `shard-default5` and `shard-d5d` split further so the sweep
+could finish.
+
+| | as run (harness at `92ed4cc78f`) | **re-scored (harness at `e45b8f8321`)** |
+| --- | --- | --- |
+| rows | 372 | 372 |
+| admissible | 192 | **169** |
+| survives the jail | 130 (67.7%) | **108 (63.9%)** |
+| breaks | 62 | **61**, across 57 distinct packages |
+| inconclusive (scheduling) | 0 | 0 |
+| denominator possibly under-counted | 0 | 0 |
+
+Re-scored breaks by class: binary-downloader 34 · hook-installer 11 · native-build-prebuilt 9 ·
+self-configuring 7. `PER_PKG=1` decided every cell from the batch screen; no isolated re-run was
+needed on either scoring.
+
+**Enforcement was proved inside the same run rather than assumed.** A local `file:` package with no
+catalog entry, PROD and A0 back to back: `write_own=OK` in both — the positive control, so the
+script did run — and under PROD `write_outerhome=DENIED(EACCES)`, `read_secret=DENIED(EACCES)`,
+`write_project=DENIED(EACCES)`, `net_connect=DENIED(EPERM)`, all four `OK` under A0.
+
+### Do not read this against the macOS table as a platform comparison
+
+The macOS sweep ran a **pre-`92ed4cc78f` binary** (`expect_git_sha` `2005bc8229` / `96491a134d`, so
+without BUG-J) **and** a catalog override, `mac-catalog.json`, that carries **no `packageNetwork` key
+at all** — 0 per-package egress grants against this run's 5. Three variables move between the two
+tables, only one of which is the operating system, so `63.9%` beside `57.6%` is not a measurement of
+either platform. Every per-package divergence is a lead. The clearest instance: `@vscode/sqlite3`,
+`drivelist` and `cmark-gfm` break on macOS and pass on Linux, and those are exactly the three
+packages BUG-J's own control fixed — a binary difference wearing a platform's clothes.
+
+### Two Linux-specific results
+
+- **The per-package egress grant works, and the artifact lands in the wrong home.**
+  `cypress@15.19.0` completed its download under the jail at **771,299,496 bytes — byte-identical to
+  the unconfined arm** — into
+  `<home>/.cache/nub/jail-home/cypress-<hash>/.cache/Cypress/`, while `~/.cache/Cypress` stayed
+  absent. `private_home_dir`'s own doc comment already states that tradeoff ("It does NOT make those
+  artifacts resolvable at RUN time"); what is new is that the harness scores the row
+  `NO-OP-BY-DESIGN` on **both** platforms, because the artifact never enters a store cell. The whole
+  `$HOME`-cache downloader class is therefore outside the denominator rather than counted as
+  surviving.
+- **A denied prebuilt becomes a source build, and the verdict cannot see the cost.** `duckdb@1.4.4`
+  was refused `npm.duckdb.org`, fell back to node-gyp, and produced a 66,587,160 B `duckdb.node`
+  against the unconfined arm's 65,367,392 B — `DID-WORK-AND-SUCCEEDED` in both arms, at ~35 minutes
+  of single-threaded compile instead of a seconds-long download. The measurement judges the tree
+  delta, so a 700× slowdown reads as a clean pass.
+
+### Harness notes from the Linux port
+
+- **Nothing needed porting.** `run-shard.sh` already branches on `uname -s`; `selftest.mjs` passes
+  unchanged on Linux.
+- **The header's Linux network claim was stale** and is corrected in place. It read "BINARY DENY …
+  `socket()` is refused outright"; `apply_landlock` reads the catalog verdict off the compiled IR,
+  so egress is a per-package boolean — a catalogued package gets `AF_INET`/`AF_INET6` lifted out of
+  the socket ceiling and reaches any host.
+- **`npm_config_cache` masked the real failure signature** in the run above; it was independently
+  removed at `8bf9df691a`, so no fix is needed, only a caveat on these numbers. Seven of the 61
+  re-scored break rows lead with `EACCES: permission denied, mkdir …/cache/npm` rather than the
+  denial that mattered. One was chased down: on `keytar@7.9.0`, one variable, with the pin `EACCES`
+  and without it `getaddrinfo EAI_AGAIN github.com` — same verdict, different reason. The other six
+  are unverified under the fixed runner.
+- **nub's own Node provisioning runs inside the jail and fails closed.** `re2@1.26.1` and
+  `redis-memory-server@0.17.0` hit `ERR_NUB_NODE_PROVISION_FAILED` fetching
+  `https://nodejs.org/dist/index.json` — a package whose `engines.node` needs a Node the machine has
+  not provisioned cannot get one from inside the jail. The corpus gives each run a fresh `HOME`, so
+  this is worse here than on a machine with a warm `~/.cache/nub`; it is a real path, not an
+  artifact.
+
 ## Running it
 
 ```sh

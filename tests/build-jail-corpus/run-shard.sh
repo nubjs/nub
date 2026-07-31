@@ -11,9 +11,16 @@
 #         difference is what supplies two arms for free:
 #           macOS   net = the curated $downloads allowlist, enforced through the proxy
 #                   (Seatbelt pins egress to exactly the proxy port)  => the A3 cell
-#           Linux   net = BINARY DENY. linux.rs passes per_host=false to build_seccomp
-#                   unconditionally on the Landlock path, so $downloads is inert and
-#                   socket() is refused outright                      => the A2 cell
+#           Linux   net = PER-PACKAGE BOOLEAN, not a blanket deny. Landlock is the build
+#                   jail's only Linux mechanism and there is no netns to route a proxy
+#                   through, so apply_landlock reads the catalog verdict off the compiled
+#                   IR: a package the catalog names gets AF_INET/AF_INET6 lifted out of the
+#                   seccomp socket ceiling and reaches ANY host, one it does not name gets
+#                   socket() EPERM. $downloads adds no host granularity => the A2 cell
+#                   (Measured 2026-07-31: an uncatalogued package reports
+#                   net_connect=DENIED(EPERM) under PROD and OK under A0, same fixture,
+#                   same run; cypress, which the catalog names, downloaded 771,299,496 B
+#                   under PROD — byte-identical to its unconfined arm.)
 #
 # `NUB_CORPUS_NO_JAIL` and `NUB_CORPUS_NET_ARM` HAVE ZERO READERS on this line. A prior
 # harness selected its arms with them and measured jail-on against jail-on. Hence the
