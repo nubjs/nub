@@ -93,14 +93,25 @@ fn a_project_dlx_block_aborts_the_command_and_names_the_global_file() {
 
     let output = run_nubx(&alias, &cwd, &config_home, &["any-tool"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let project_source = project_file.canonicalize().unwrap();
     assert!(!output.status.success(), "the run must abort: {stderr}");
-    assert!(
-        stderr.contains(&format!(
-            "`dlx` in {} is configured globally: move it to {}",
-            project_source.display(),
-            global_root.join("nub.jsonc").display()
-        )),
-        "the abort must name both the misplaced project file and its global destination: {stderr}"
+    let message = stderr
+        .trim()
+        .strip_prefix("Error: `dlx` in ")
+        .expect("scope error prefix");
+    let (reported_source, message) = message
+        .split_once(" is configured globally: move it to ")
+        .expect("scope error source/destination separator");
+    let (reported_destination, _) = message
+        .split_once(". Settings that configure")
+        .expect("scope error destination suffix");
+    assert_eq!(
+        PathBuf::from(reported_source).canonicalize().unwrap(),
+        project_file.canonicalize().unwrap(),
+        "the abort must name the misplaced project file: {stderr}"
+    );
+    assert_eq!(
+        PathBuf::from(reported_destination).canonicalize().unwrap(),
+        global_root.join("nub.jsonc").canonicalize().unwrap(),
+        "the abort must name the global destination: {stderr}"
     );
 }
