@@ -5,3 +5,14 @@
 # (import_text_attribute_any_extension). See #290.
 tests/fixtures/import-text/*        text eol=lf
 tests/fixtures/import-text-named/*  text eol=lf
+
+# The `text` data loader returns bytes verbatim too, so the same trap applies to
+# the classic-tier require() fixtures: `data-loaders-require` asserts
+# `txt:"plain text body\n"` and `loader-redirect-both-ways` reads a source line
+# back through `.split("\n")[0]`, which a CRLF checkout would leave a trailing
+# `\r` on. These tests skip on Windows CI today — the side-installed 22.13 the
+# tier suite needs is provisioned on Linux only — so this guards a Windows
+# developer running them locally, and keeps the assertions honest if that
+# provisioning ever widens.
+tests/fixtures/data-loaders-require/*       text eol=lf
+tests/fixtures/loader-redirect-both-ways/*  text eol=lf
