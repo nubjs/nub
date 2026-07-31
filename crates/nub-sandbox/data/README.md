@@ -262,7 +262,11 @@ for the package to work at all, so their manifest is the only place the answer e
 
 `literal` names the path outright, for a package that writes where *it* decides. `.git/hooks`
 is the worked case: git owns that path, the consumer configures nothing, and a hook
-installer's entire function is to write there.
+installer's entire function is to write there. Pair it with `projectReads` when the package
+also has to *find* the repository — `shared-git-hooks` shells `git rev-parse`, and git's
+detection reads `.git/HEAD` and `.git/config`. Name those two files; do **not** reach for the
+`.git` subtree, which was measured to reach the same result while additionally granting
+`objects/`, the consumer's entire source history.
 
 Both are clamped back inside the project root and silently dropped if they escape, so the
 shapes differ in provenance rather than in reach. A `literal` that traverses out is rejected
@@ -274,7 +278,7 @@ file written there runs **unconfined**, as the developer, on their next `git com
 after the install that planted it. That makes it persistent code execution, not a
 configuration write, so it is granted **per package** and never as a class rule: "looks like
 a hook installer" is a shape any dependency can adopt, and the jail exists because a
-lifecycle script is attacker-authored. The five hook installers in the table earned their
+lifecycle script is attacker-authored. The six hook installers in the table earned their
 entries by being packages whose stated function is writing that file, which is the thing the
 consumer installed them to do.
 
@@ -388,7 +392,7 @@ Things the current schema cannot express. Each is unbuilt because no shipped ent
 needed it yet; adding a field ahead of a real case would be guessing at its shape.
 
 - ~~**A literal project write path.**~~ **Built 2026-07-31** as `projectWrites.literal`, for
-  the five `.git/hooks` installers; see the `projectReads` vs `projectWrites` section.
+  the six `.git/hooks` installers; see the `projectReads` vs `projectWrites` section.
 - **Platform-conditional entries.** Every grant applies on every OS. A package that needs a
   carve-out only on Windows currently gets it everywhere, which is wider than necessary.
   The corpus that produced these entries ran on one platform per measurement, so a

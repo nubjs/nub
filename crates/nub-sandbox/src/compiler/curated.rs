@@ -255,25 +255,25 @@ static GOLDEN_PRE_CATALOG_GRANTS: &[(&str, CuratedGrant)] = &[
             ..CuratedGrant::NONE
         },
     ),
-    // THE HOOK-INSTALLER COHORT — five packages, one grant, and the reason it is FIVE
-    // ENTRIES rather than one class rule. A `.git/hooks` write is persistent arbitrary code
-    // execution: the file runs, UNCONFINED, on the developer's next `git commit`, long
-    // after the install that planted it. A class grant keyed on "looks like a hook
-    // installer" would hand that to any dependency able to make itself look like one, which
-    // is every dependency — the jail exists precisely because a lifecycle script is
-    // attacker-authored. Per-package review is what ties the grant to a package whose
-    // ENTIRE STATED FUNCTION is writing that file, which is also the thing the consumer
-    // installed it to do.
+    // THE HOOK-INSTALLER COHORT — six packages, and the reason it is SIX ENTRIES rather
+    // than one class rule. A `.git/hooks` write is persistent arbitrary code execution: the
+    // file runs, UNCONFINED, on the developer's next `git commit`, long after the install
+    // that planted it. A class grant keyed on "looks like a hook installer" would hand that
+    // to any dependency able to make itself look like one, which is every dependency — the
+    // jail exists precisely because a lifecycle script is attacker-authored. Per-package
+    // review is what ties the grant to a package whose ENTIRE STATED FUNCTION is writing
+    // that file, which is also the thing the consumer installed it to do.
     //
-    // The grant is the hooks DIRECTORY, not a hook file, because the five write at least
-    // four different names between them (`pre-commit`, `pre-push`, `commit-msg`, and
-    // ghooks' full seventeen) plus `.old`/`.backup`/`.bkp` copies of whatever was there.
-    // It is NOT `.git`: none of them needs `config`, `objects` or refs, and `.git` is
-    // already READABLE under the baseline — every one of the five located `<proj>/.git`
-    // under the jail and failed only on the open. Two residuals, both measured rather than
-    // reasoned: all five fall back to `mkdirSync(<git>/hooks)` when that directory is
-    // absent and that mkdir stays denied, and none of them needs a project-root cwd grant,
-    // because a lifecycle script's cwd is its own store cell.
+    // The grant is the hooks DIRECTORY, not a hook file, because the six write at least four
+    // different names between them (`pre-commit`, `pre-push`, `commit-msg`, and two of them
+    // git's full seventeen) plus `.old`/`.backup`/`.bkp` copies of whatever was there.
+    //
+    // THE FIRST FIVE NEED ONLY THE WRITE. Each locates `<proj>/.git` itself and fails only
+    // on the open, so `.git` is already readable enough under the baseline, and none needs a
+    // project-root cwd grant because a lifecycle script's cwd is its own store cell — both
+    // measured per package, not inferred from the class. `shared-git-hooks` is the exception
+    // and carries its own note below. One residual applies to all six: they fall back to
+    // `mkdirSync(<git>/hooks)` when that directory is absent, and that mkdir stays denied.
     (
         "pre-commit",
         CuratedGrant {
@@ -305,6 +305,27 @@ static GOLDEN_PRE_CATALOG_GRANTS: &[(&str, CuratedGrant)] = &[
     (
         "ghooks",
         CuratedGrant {
+            project_writes: ProjectWrites::Literal(&[".git/hooks"]),
+            ..CuratedGrant::NONE
+        },
+    ),
+    // The sixth installer, and the one that needs a READ as well — it locates the repository
+    // by shelling `git rev-parse`, which the write grant alone leaves failing at
+    // `fatal: not a git repository`. git's detection reads `.git/HEAD` and then
+    // `.git/config`, staged, so both files are named.
+    //
+    // TWO FILES, NEVER THE `.git` SUBTREE, and the difference is measured rather than
+    // stylistic: a subtree read reaches `objects/`, which is the consumer's entire source
+    // history, and it was measured to reach exactly the same rc 0 that the two files do.
+    // Granting it would trade the whole repository for nothing.
+    //
+    // This row was filed under BUG-CWD by the corpus triage. The project-root cwd grant is
+    // NECESSARY — nothing here works without it — and is NOT sufficient: with that grant and
+    // no entry here the package still reports `not a git repository` and writes zero hooks.
+    (
+        "shared-git-hooks",
+        CuratedGrant {
+            project_reads: &[".git/HEAD", ".git/config"],
             project_writes: ProjectWrites::Literal(&[".git/hooks"]),
             ..CuratedGrant::NONE
         },
