@@ -2396,8 +2396,8 @@ fn restored_node_options(
 /// One restoration's stable identity for the randomized parent PATH shim.
 /// Most PATH entries cannot be a Nub shim, so [`Self::matches`] rejects them by
 /// basename before opening or canonicalizing anything. Windows prepares the
-/// reference identity once, preserving 8.3-alias correctness without repeated
-/// I/O over unrelated or unreachable PATH entries.
+/// reference identity once so paths that cannot be canonicalized still compare
+/// without repeated I/O over unrelated or unreachable PATH entries.
 struct ShimPathMatcher {
     component: std::ffi::OsString,
     #[cfg(windows)]
@@ -2479,11 +2479,10 @@ fn remove_parent_shim_from_path(
     original: &std::ffi::OsStr,
 ) -> Option<std::result::Result<std::ffi::OsString, std::env::JoinPathsError>> {
     // The parent captures PATH before adding its randomized shim. Compare the
-    // current candidate shims to that snapshot instead of trusting a second
-    // spelling of the added directory: Windows may expose one through an 8.3
-    // alias while preserving the other as a long/verbatim path. Preparing only
-    // the original shim identities keeps pre-existing unrelated Nub shims while
-    // the new candidate is the parent-owned augmentation to remove.
+    // current candidate shims to that snapshot instead of depending on a
+    // separately captured spelling of the added directory. Preparing only the
+    // original shim identities keeps pre-existing unrelated Nub shims while the
+    // new candidate is the parent-owned augmentation to remove.
     let original_shims = env::split_paths(original)
         .filter(|entry| is_path_shim_candidate(entry))
         .map(|entry| ShimPathMatcher::new(entry.as_os_str()))
