@@ -254,6 +254,13 @@ pub struct PathMatcher {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FsDecision {
     pub effect: Effect,
+    /// LAST-MATCH-WINS, which models the EFFECT axis and NOT the write axis —
+    /// no production code reads this field, and a test that treats it as the
+    /// access a backend would grant is asserting a model none of them share.
+    /// Since `f43aab575f` an Allow never subtracts: every backend UNIONS write
+    /// (Seatbelt was the last holdout, synthesizing a `(deny file-write*)` out
+    /// of an allow). Kept last-match because `tests/compiler.rs` uses it as a
+    /// strict IR-ordering check, which a union would silently weaken.
     pub access: FsAccess,
 }
 

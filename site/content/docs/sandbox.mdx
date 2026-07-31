@@ -69,7 +69,9 @@ Exempting a package does not approve it. Build scripts still run only for packag
 
 ## Rule order
 
-A rule set is an array or an object, and either way the rules apply in order — the last matching rule wins. (JSON preserves key order, so an object's keys are ordered too.) A broad rule early in the set becomes a default that a later, narrower rule overrides. An empty set, or an omitted axis, allows nothing — but a set of *only* deny rules is rejected as a likely mistake: it also allows nothing, so write `[]` if that is the intent, or add the allow rule you meant.
+A rule set is an array or an object, and either way the rules apply in order — the last matching rule wins. (JSON preserves key order, so an object's keys are ordered too.) A broad rule early in the set becomes a default that a later deny rule overrides. An empty set, or an omitted axis, allows nothing — but a set of *only* deny rules is rejected as a likely mistake: it also allows nothing, so write `[]` if that is the intent, or add the allow rule you meant.
+
+Order decides whether a path is allowed at all, not how much access it gets. A read rule never takes write away from a path an earlier rule made writable, so nesting a read-only path inside a writable one does not make it read-only. Deny it instead — which takes away read as well.
 
 ## `fs`
 
