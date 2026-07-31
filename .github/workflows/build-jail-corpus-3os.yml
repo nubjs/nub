@@ -70,13 +70,13 @@ jobs:
       max-parallel: 9
       matrix:
         os: [windows-latest]
-        # PILOT ONLY on this pass, and deliberately so. The previous Windows sweep
-        # ran without PER_PKG and is therefore truncation-contaminated end to end
-        # (see the step below); this pass changes that variable and adds the
-        # enforcement probe, so it re-establishes that the driver works before
-        # eight jobs are spent on the strength of an assumption. Widen the list
-        # once this shard returns a confirmed arm effect on both arms.
-        shard: [pilot]
+        # The pilot pass (run 30646319862) returned a confirmed arm effect on both
+        # arms, 11 per-package windows with none multi-job — so zero truncation —
+        # and a failure signature on a break row, which the `--all` archive could
+        # not produce at all. The driver is established; widen to the same eight
+        # shards the prior Windows sweep used, so this table is directly comparable
+        # to it with PER_PKG as the variable that moved.
+        shard: [pilot, default1, default2, default3, default4, default5, default6, default7]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
