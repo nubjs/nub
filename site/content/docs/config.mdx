@@ -315,7 +315,7 @@ tsx
 jsx
 ```
 
-One pairing is rejected: `ts` on `.tsx` or `.jsx`. Those extensions are always parsed as JSX, so the entry could not take effect, and Nub reports it rather than accepting a setting that does nothing.
+An entry may also point an extension Nub already knows at something else — `".ts": "text"` imports TypeScript sources as strings, and `".ts": "tsx"` turns JSX on for them. One pairing is rejected: `ts` on `.tsx` or `.jsx`. Those extensions are always parsed as JSX, so the entry could not take effect, and Nub reports it rather than accepting a setting that does nothing.
 
 ### `conditions`
 

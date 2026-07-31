@@ -944,8 +944,57 @@ function installCjsRequireHooks(core, withClassicTranspile) {
     if (format === "module") throw requireEsmError(filename);
     mod._compile(source, filename);
   };
-  for (const ext of [".ts", ".cts", ".mts", ".tsx", ".jsx"]) {
+  // Driven by the config-aware transpile set, not a fixed list. A project's
+  // `loader` can move a TS-family extension onto a data loader (`{".ts":"text"}`),
+  // which the ESM path already honors through this same set; a hardcoded list
+  // transpiled the file anyway and silently discarded the setting.
+  for (const ext of core.TRANSPILE_EXTS) {
     module_._extensions[ext] = transpileExtension;
+  }
+
+  // The classic-tier equivalent of the load hook's `dataExtsFor` branch. Without
+  // it Node has no handler for `.yaml`/`.toml`/`.json5`/`.jsonc`/`.txt`, so
+  // `findLongestRegisteredExtension` falls back to `.js` and compiles the document
+  // AS JavaScript — `a: 1` is a valid labeled statement, so `require("./x.yaml")`
+  // silently produced `{}` instead of the parsed document.
+  //
+  // NON-ENUMERABLE, which is the whole trick. Node builds EXTENSIONLESS
+  // resolution from `ObjectKeys(Module._extensions)` (cjs/loader.js
+  // `tryExtensions`), so a plain assignment would ALSO make `require("./config")`
+  // start resolving `config.yaml` here, while the fast tier — which registers
+  // nothing and serves these through require(esm) — still throws
+  // MODULE_NOT_FOUND. That trades one tier divergence for another. Dispatch reads
+  // the property directly (`findLongestRegisteredExtension`,
+  // `Module.prototype.load`), so hiding it from `ObjectKeys` serves an explicit
+  // `require("./x.yaml")` while leaving resolution identical on both tiers.
+  //
+  // Node's own `.js`/`.json`/`.node` are never replaced: a project `loader` may
+  // redefine how nub reads a file, not how Node reads `package.json`.
+  const dataExtension = (mod, filename) => {
+    const url = pathToFileURL(filename).href;
+    const ext = pathExtname(filename);
+    if (!(ext in core.dataExtsFor(url))) {
+      return nativeJs.call(module_._extensions, mod, filename);
+    }
+    // Round-tripped through JSON because the ESM path emits
+    // `export default ${JSON.stringify(parsed)}` — a TOML date reaches an
+    // `import` as a string, so `require()` must not hand back something richer.
+    // `{__esModule, default}` is the shape require(esm) already yields on the
+    // fast tier, so the same file destructures identically on both.
+    const value = core.dataValue(url, ext);
+    mod.exports = {
+      __esModule: true,
+      default: value === undefined ? undefined : JSON.parse(JSON.stringify(value)),
+    };
+  };
+  for (const ext of core.allDataExts()) {
+    if (ext === ".js" || ext === ".json" || ext === ".node") continue;
+    Object.defineProperty(module_._extensions, ext, {
+      value: dataExtension,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
   }
 
   // Project-source plain JS (`.js`/`.cjs`) routes through the SAME pipeline so

@@ -823,27 +823,39 @@ function stripJsonComments(text) {
   return result;
 }
 
-export function loadData(url, ext) {
-  const filePath = fileURLToPath(url);
-  const raw = readFileSync(filePath, "utf8");
+/// Every data extension either tier may serve — the built-ins plus whatever this
+/// project's `loader` added. The classic `require.extensions` shim registers from
+/// this so the CJS path covers exactly what the ESM path does; `dataExtsFor` still
+/// decides per-URL which of them is live inside `node_modules`.
+export function allDataExts() {
+  return new Set([...Object.keys(BUILTIN_DATA_EXTS), ...Object.keys(PROJECT_DATA_EXTS)]);
+}
+
+/// The value a data module exposes as its default export. Split out of
+/// [`loadData`] so the classic `require()` handler resolves a file through the
+/// SAME parser dispatch and the same `dataExtsFor` node_modules pinning — two
+/// tiers cannot disagree about what a document means if only one function reads it.
+export function dataValue(url, ext) {
+  const raw = readFileSync(fileURLToPath(url), "utf8");
   const kind = dataExtsFor(url)[ext];
+  if (kind === "txt") return raw;
 
-  if (kind === "txt") {
-    return { format: "module", source: `export default ${JSON.stringify(raw)};\n`, shortCircuit: true };
-  }
-
-  let parsed;
   if (nubNative) {
-    if (kind === "yaml") parsed = nubNative.parseYaml(raw);
-    else if (kind === "toml") parsed = nubNative.parseToml(raw);
-    else if (kind === "json5") parsed = nubNative.parseJson5(raw);
-    else if (kind === "jsonc") parsed = nubNative.parseJsonc(raw);
+    if (kind === "yaml") return nubNative.parseYaml(raw);
+    if (kind === "toml") return nubNative.parseToml(raw);
+    if (kind === "json5") return nubNative.parseJson5(raw);
+    if (kind === "jsonc") return nubNative.parseJsonc(raw);
   } else {
-    if (kind === "yaml") parsed = lazyRequire("yaml").parse(raw);
-    else if (kind === "toml") parsed = lazyRequire("@iarna/toml").parse(raw);
-    else if (kind === "json5") parsed = lazyRequire("json5").parse(raw);
-    else if (kind === "jsonc") parsed = JSON.parse(stripJsonComments(raw));
+    if (kind === "yaml") return lazyRequire("yaml").parse(raw);
+    if (kind === "toml") return lazyRequire("@iarna/toml").parse(raw);
+    if (kind === "json5") return lazyRequire("json5").parse(raw);
+    if (kind === "jsonc") return JSON.parse(stripJsonComments(raw));
   }
+  return undefined;
+}
+
+export function loadData(url, ext) {
+  const parsed = dataValue(url, ext);
 
   if (parsed == null) {
     return { format: "module", source: "export default undefined;\n", shortCircuit: true };

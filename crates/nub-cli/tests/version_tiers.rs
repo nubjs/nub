@@ -196,6 +196,76 @@ fn import_text_works_on_compat_tier() {
     );
 }
 
+/// Data-format `require()` on the COMPAT tier — the CJS twin of the `import`
+/// coverage next door, and the case that had none.
+///
+/// Below the require(esm) floor a data file is served by the classic
+/// `require.extensions` shim, not the load hook. Nub registered handlers only for
+/// the TS family, so `findLongestRegisteredExtension` fell through to `.js` and
+/// compiled the document AS JavaScript: `host: example.test` is a valid labeled
+/// statement, so `require("./config.yaml")` returned `{}` — a silent wrong
+/// answer, not an error. Every other data-loader fixture is a `main.ts` entered
+/// through `import`, which is exactly why nothing caught it.
+///
+/// Asserts the parsed VALUES, so a handler that resolves but yields an empty
+/// module fails here instead of passing on a zero exit.
+#[test]
+fn data_formats_load_through_require_on_the_compat_tier() {
+    let Some((stdout, stderr, code)) =
+        run_nub_against_node((22, 13, 0), "data-loaders-require", "main.cjs")
+    else {
+        eprintln!(
+            "skipping: Node 22.13.0 not installed (set TEST_NODE_BIN_22_13_0 or nvm install)"
+        );
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "compat-tier data require() must succeed: stderr={stderr}"
+    );
+    for expected in [
+        r#"yaml:{"host":"example.test","port":8080}"#,
+        r#"toml:{"title":"from toml"}"#,
+        r#"jsonc:{"ok":true}"#,
+        r#"txt:"plain text body\n""#,
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "compat tier require() must parse the document, not compile it as JS \
+             (missing {expected:?}): stdout={stdout:?}"
+        );
+    }
+}
+
+/// Registering those handlers must change LOADING only, never RESOLUTION. Node
+/// builds extensionless resolution from `ObjectKeys(Module._extensions)`, so a
+/// plain assignment would make `require("./config")` newly find `config.yaml`
+/// here while the fast tier — which registers nothing — still throws. The
+/// handlers are non-enumerable for that reason, and this pins it.
+#[test]
+fn data_handlers_do_not_join_extensionless_resolution() {
+    let Some((stdout, stderr, code)) =
+        run_nub_against_node((22, 13, 0), "data-loaders-require", "resolution.cjs")
+    else {
+        eprintln!(
+            "skipping: Node 22.13.0 not installed (set TEST_NODE_BIN_22_13_0 or nvm install)"
+        );
+        return;
+    };
+    assert_eq!(code, 0, "resolution probe must succeed: stderr={stderr}");
+    for expected in [
+        "sibling-js-wins:true",
+        "extensionless-data:MODULE_NOT_FOUND",
+        "enumerable-data-exts:0",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "registering data handlers must leave resolution identical to the fast \
+             tier (missing {expected:?}): stdout={stdout:?}"
+        );
+    }
+}
+
 /// Import Text on the FAST tier BELOW 26.5 (Node 24.x): sync `module.registerHooks`,
 /// but native `--experimental-import-text` does not exist yet, so nub serves text imports
 /// via its own `loadTextImport` short-circuit (the `NATIVE_IMPORT_TEXT=false` arm of the
