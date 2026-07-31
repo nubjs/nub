@@ -103,11 +103,10 @@ fn entries_from_bunfig(root: &Value) -> Vec<(String, String)> {
             );
         }
     }
-    // `[install].linker` is deliberately not mapped. Nub's compatibility
-    // guarantee covers version resolution, module resolution, and the project's
-    // lockfile — not node_modules LAYOUT, which is nub's own axis configured
-    // through `nub.jsonc`. A Bun-branded file therefore never directs how the
-    // tree is arranged; every other key below is resolution or network.
+    // `[install].linker` is deliberately not mapped. Nub cannot reproduce Bun's
+    // linker modes from that branded setting; a Bun-owned project uses the
+    // neutral `.npmrc` key or CLI flag instead. Every other key below is
+    // resolution or network config that the compat layer mirrors.
     //
     // Bun's supply-chain age gate: `[install].minimumReleaseAge` → the engine's
     // `minimumReleaseAge` setting (same gate nub reads from `.npmrc`/pnpm

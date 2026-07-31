@@ -1,13 +1,7 @@
-//! Layout is nub's own axis, so it is never taken from another package
-//! manager's branded config file.
-//!
-//! The compatibility guarantee covers version resolution, module resolution,
-//! and the project's lockfile — not how `node_modules` is physically arranged.
-//! Each case below is a differential: the branded file is proven READ (a
-//! resolution or registry key from the very same file lands) while its layout
-//! key does not, and the neutral `.npmrc` spelling of that same layout key
-//! still lands. Asserting only "layout is nub's default" would pass just as
-//! well if the file were never opened at all.
+//! Layout config follows the incumbent package manager and its major version.
+//! Pnpm 10 and below use `.npmrc`; pnpm 11 and later use
+//! `pnpm-workspace.yaml`. Yarn and Bun layout keys remain unsupported, with the
+//! neutral `.npmrc` spelling available instead.
 //!
 //! Yarn PnP is deliberately not retested here — refusing to build a tree nub
 //! cannot produce is not the same as honoring a layout preference, and
@@ -108,13 +102,10 @@ fn a_pnpm_workspace_yaml_supplies_resolution_config_but_not_layout() {
     assert_eq!(config_get(&neutral, "shamefullyHoist"), "true");
 }
 
-/// pnpm 11 reads behavior settings from its workspace YAML rather than
-/// `.npmrc`, and Nub mirrors that for resolution config. Layout is exempt from
-/// the mirror in both directions at once: Nub refuses the YAML as a layout
-/// source, so `.npmrc` has to stay open for it or the axis would be reachable
-/// from no config file at all.
+/// Pnpm 11 reads behavior and layout settings from workspace YAML rather than
+/// `.npmrc`; Nub mirrors the same source.
 #[test]
-fn a_pnpm_11_project_keeps_the_npmrc_open_for_layout_only() {
+fn a_pnpm_11_project_reads_layout_from_workspace_yaml() {
     let files = [
         (
             "package.json",
@@ -122,7 +113,7 @@ fn a_pnpm_11_project_keeps_the_npmrc_open_for_layout_only() {
         ),
         ("pnpm-lock.yaml", PNPM_LOCK),
         ("pnpm-workspace.yaml", "nodeLinker: hoisted\n"),
-        (".npmrc", "nodeLinker=hoisted\nauto-install-peers=false\n"),
+        (".npmrc", "nodeLinker=isolated\nauto-install-peers=false\n"),
     ];
 
     let dir = project("pnpm11", &files);

@@ -629,6 +629,7 @@ pub(crate) fn engine_session(dir: Option<&Path>) -> Result<EngineSession> {
         ConfigScopeNoise::Warn,
         IdentityStrictness::Strict,
         VirtualStoreLocality::Default,
+        ProjectInstallConfig::Apply,
     )
 }
 
@@ -650,6 +651,7 @@ pub(crate) fn engine_session_ci(dir: Option<&Path>) -> Result<EngineSession> {
         ConfigScopeNoise::Warn,
         IdentityStrictness::Strict,
         VirtualStoreLocality::ProjectLocal,
+        ProjectInstallConfig::Apply,
     )
 }
 
@@ -670,6 +672,7 @@ pub(crate) fn engine_session_transient(dir: Option<&Path>) -> Result<EngineSessi
         ConfigScopeNoise::Silent,
         IdentityStrictness::Lenient,
         VirtualStoreLocality::Default,
+        ProjectInstallConfig::Ignore,
     )
 }
 
@@ -690,6 +693,7 @@ pub(crate) fn engine_session_quiet(dir: Option<&Path>) -> Result<EngineSession> 
         ConfigScopeNoise::Silent,
         IdentityStrictness::Strict,
         VirtualStoreLocality::Default,
+        ProjectInstallConfig::Apply,
     )
 }
 
@@ -714,6 +718,7 @@ pub(crate) fn engine_session_global(dir: Option<&Path>) -> Result<EngineSession>
         ConfigScopeNoise::Silent,
         IdentityStrictness::Lenient,
         VirtualStoreLocality::Default,
+        ProjectInstallConfig::Ignore,
     )
 }
 
@@ -754,11 +759,21 @@ enum VirtualStoreLocality {
     ProjectLocal,
 }
 
+/// Whether this command consumes the CWD project's nub-native `install` block.
+/// Transient and global commands have their own scratch/global state and must
+/// not inherit the project's layout or resolution preferences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectInstallConfig {
+    Apply,
+    Ignore,
+}
+
 fn engine_session_inner(
     dir: Option<&Path>,
     noise: ConfigScopeNoise,
     strictness: IdentityStrictness,
     store_locality: VirtualStoreLocality,
+    project_install_config: ProjectInstallConfig,
 ) -> Result<EngineSession> {
     // Register the embedder profile BEFORE initializing diagnostics: the diag
     // recorder reads its toggles through the active profile's `diag_env_prefix`
@@ -841,34 +856,24 @@ fn engine_session_inner(
     let setting_defaults =
         nub_setting_defaults(detected.as_ref(), truly_fresh, &cwd, store_locality);
     let native_mode = native_pm_mode(detected.as_ref(), truly_fresh, &cwd);
-    // The project's `install` block is scoped by AXIS, not by identity.
-    //
-    // LAYOUT (`linker`, `publicHoist`) is nub's OWN axis: how `node_modules` is
-    // arranged appears in no lockfile, so honoring it under an incumbent cannot
-    // perturb round-trip fidelity with that PM. It applies in EVERY project.
-    // RESOLUTION (`minimumReleaseAge*`) changes which VERSION a range selects,
-    // and that is where the compatibility guarantee lives — under an incumbent
-    // nub mirrors that PM's resolution, so those stay scoped to nub identity.
-    //
-    // `noise` gates only whether a dropped resolution field is ANNOUNCED, never
-    // whether the block applies: the read-only families (`why`, `outdated`,
-    // `list`) run Silent precisely so they can report what a real install would
-    // produce.
-    let install = crate::project_config::effective_config().map(|config| &config.values.install);
-    let native_install = install
-        .map(|install| lower_native_install_settings(install, &setting_defaults))
-        .transpose()?
-        .unwrap_or_default();
+    // `nub.jsonc` is nub-native config, not a cross-tool input. Its `install`
+    // block therefore reaches the engine only under nub identity. The quiet
+    // project-graph readers still apply it (without warning) so they report the
+    // same graph as a real nub install; transient/global commands opt out
+    // explicitly because their scratch/global work must not be shaped by CWD.
+    let install = (project_install_config == ProjectInstallConfig::Apply)
+        .then(crate::project_config::effective_config)
+        .flatten()
+        .map(|config| &config.values.install);
+    let native_install =
+        lower_native_install_settings_for_mode(install, native_mode, &setting_defaults)?;
     if !native_mode
         && noise == ConfigScopeNoise::Warn
         && let Some(install) = install
     {
-        warn_resolution_scoped_out(install, detected.as_ref(), &cwd);
+        warn_install_config_scoped_out(install, detected.as_ref(), &cwd);
     }
-    if noise == ConfigScopeNoise::Warn {
-        warn_layout_override_conflict(&cwd);
-    }
-    let scoped = scoped_install_settings(&native_install, native_mode);
+    let scoped = scoped_install_settings(&native_install, native_mode, store_locality);
     aube_settings::set_embedder_defaults(setting_defaults);
     aube_util::update_engine_context(move |c| c.project_config_settings = scoped);
     phantom_closure::set_native_config_seed(native_install.eject);
@@ -887,13 +892,12 @@ fn engine_session_inner(
     })
 }
 
-/// The project `install` block, lowered to engine settings and SPLIT BY AXIS.
-/// The split is the whole point: the two halves have different scoping rules
-/// (see [`scoped_install_settings`]), so they are produced separately rather
-/// than filtered back out of one flat list by key name.
+/// The project `install` block, lowered into layout and resolution settings.
+/// Keeping the groups explicit lets CI override store locality and keeps the
+/// linker eject seed separate from ordinary engine settings.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct NativeInstallSettings {
-    /// How `node_modules` is arranged. nub's own axis — no lockfile records it.
+    /// How `node_modules` is arranged.
     layout: Vec<(String, String)>,
     /// Which version a range selects. The compatibility guarantee.
     resolution: Vec<(String, String)>,
@@ -902,29 +906,35 @@ struct NativeInstallSettings {
     eject: Vec<String>,
 }
 
-/// Compose the engine-visible settings: layout unconditionally, resolution only
-/// under nub identity.
+/// Compose the engine-visible settings only under nub identity. `nub.jsonc`
+/// is nub-native config; compat projects retain their incumbent's settings.
+/// `nub ci` additionally keeps its virtual store project-local so its frozen
+/// tree remains COPY-relocatable even when the project spells `linker: global`.
 fn scoped_install_settings(
     lowered: &NativeInstallSettings,
     native_mode: bool,
+    store_locality: VirtualStoreLocality,
 ) -> Vec<(String, String)> {
+    if !native_mode {
+        return Vec::new();
+    }
     let mut settings = lowered.layout.clone();
-    if native_mode {
-        settings.extend(lowered.resolution.iter().cloned());
+    settings.extend(lowered.resolution.iter().cloned());
+    if store_locality == VirtualStoreLocality::ProjectLocal {
+        settings.retain(|(key, value)| key != "enableGlobalVirtualStore" || value != "true");
     }
     settings
 }
 
-/// Announce a RESOLUTION-axis `install` field dropped because the project has an
-/// incumbent package manager. Named in nub's own vocabulary — the author wrote
-/// `minimumReleaseAge`, not the engine key it lowers to — and dim-styled to sit
-/// alongside the config-scoping warnings.
-fn warn_resolution_scoped_out(
+/// Announce a nub-native `install` field dropped because the project has an
+/// incumbent package manager. Named in nub's own vocabulary and dim-styled to
+/// sit alongside the config-scoping warnings.
+fn warn_install_config_scoped_out(
     install: &crate::project_config::InstallConfig,
     detected: Option<&DetectedLockfile>,
     cwd: &Path,
 ) {
-    let written = resolution_fields_written(install);
+    let written = install_fields_written(install);
     if written.is_empty() {
         return;
     }
@@ -934,7 +944,7 @@ fn warn_resolution_scoped_out(
     let dim = scope_warning_uses_dim();
     for field in written {
         let line = format!(
-            "nub: `{field}` ignored — it selects package versions, and this project resolves as \
+            "nub: `{field}` ignored — it is nub-native install config, and this project resolves as \
              {pm}. Run `nub pm use nub` to make nub the project's package manager."
         );
         if dim {
@@ -945,9 +955,15 @@ fn warn_resolution_scoped_out(
     }
 }
 
-/// Which RESOLUTION-axis fields the project actually wrote, in nub's vocabulary.
-fn resolution_fields_written(install: &crate::project_config::InstallConfig) -> Vec<&'static str> {
+/// Which nub-native `install` fields the project actually wrote, in nub's vocabulary.
+fn install_fields_written(install: &crate::project_config::InstallConfig) -> Vec<&'static str> {
     let mut written = Vec::new();
+    if install.linker.is_some() {
+        written.push("install.linker");
+    }
+    if install.public_hoist.is_some() {
+        written.push("install.publicHoist");
+    }
     if install.minimum_release_age.is_some() {
         written.push("install.minimumReleaseAge");
     }
@@ -1027,30 +1043,20 @@ fn lower_native_install_settings(
                 }
             }
             LinkerConfig::Global { eject } => {
-                // An injected dependency resolves through the hidden hoist tree,
-                // which exists only under a project-local store — so the engine
-                // pushes an explicit `hoist=true` for one and then refuses that
-                // pair outright. Reject it here instead, naming the two things
-                // the user actually wrote; otherwise the install aborts quoting
-                // `enableGlobalVirtualStore` and `hoist`, neither of which
-                // appears in their config.
-                if embedder_defaults
+                // Injected dependencies require the hidden hoist tree, which in
+                // turn requires a project-local store. That unconditional engine
+                // default wins over a request for the ordinary global layout:
+                // never emit an explicit GVS=true that would turn the compatible
+                // combination into the engine's `hoist`/GVS contradiction.
+                let injected = embedder_defaults
                     .iter()
-                    .any(|(key, value)| key == "hoist" && value == "true")
-                {
-                    anyhow::bail!(
-                        "nub: `install.linker: \"global-virtual-store\"` cannot be combined with \
-                         `dependenciesMeta.*.injected` — an injected dependency resolves through a \
-                         hidden tree that only a project-local store has. Use \
-                         `\"linker\": \"isolated\"` [ERR_NUB_CONFIG_UNSUPPORTED]"
-                    );
+                    .any(|(key, value)| key == "hoist" && value == "true");
+                if !injected {
+                    // Written explicitly rather than left to the engine default.
+                    // The projectConfig tier outranks lower settings, so silence
+                    // here could quietly turn an explicit global request local.
+                    layout.push(("enableGlobalVirtualStore".to_string(), "true".to_string()));
                 }
-                // Written explicitly rather than left to the engine default. The
-                // projectConfig tier outranks `.npmrc`, so staying silent here
-                // let a lower-tier `enableGlobalVirtualStore=false` quietly
-                // produce a project-local store under a config that asks for the
-                // shared one. `isolated` pins its half; this is the other.
-                layout.push(("enableGlobalVirtualStore".to_string(), "true".to_string()));
                 eject_patterns = eject.clone();
             }
             LinkerConfig::Hoisted | LinkerConfig::Pnp => {}
@@ -1114,6 +1120,23 @@ fn lower_native_install_settings(
         resolution,
         eject: eject_patterns.unwrap_or_default(),
     })
+}
+
+/// Lower nub-native install config only when nub owns the project. Compat
+/// projects ignore this entire block, including reserved values that would be
+/// errors under Nub identity; their incumbent's config remains authoritative.
+fn lower_native_install_settings_for_mode(
+    install: Option<&crate::project_config::InstallConfig>,
+    native_mode: bool,
+    embedder_defaults: &[(String, String)],
+) -> Result<NativeInstallSettings> {
+    if !native_mode {
+        return Ok(NativeInstallSettings::default());
+    }
+    install
+        .map(|install| lower_native_install_settings(install, embedder_defaults))
+        .transpose()
+        .map(Option::unwrap_or_default)
 }
 
 /// The config-derived install knobs the IMPLEMENT-wins resolve from the active
@@ -1615,8 +1638,9 @@ fn augmentation_to_lifecycle_overlay(
     let mut overlay: Vec<(OsString, OsString)> = Vec::new();
     // $NODE → the shim (→ nub) so userland `$NODE child.js` / `spawn(env.NODE)`
     // in a build script stays augmented, exactly as build_script_command sets it.
-    if let Some(node_shim) = aug.node_shim_exe() {
-        overlay.push((OsString::from("NODE"), node_shim));
+    let node_shim = aug.node_shim_exe();
+    if let Some(node_shim) = node_shim.as_ref() {
+        overlay.push((OsString::from("NODE"), node_shim.clone()));
     }
     if let Some(opts) = &aug.node_options {
         overlay.push((OsString::from("NODE_OPTIONS"), OsString::from(opts)));
@@ -1627,6 +1651,26 @@ fn augmentation_to_lifecycle_overlay(
     aug.apply_restore_markers(|key, value| {
         overlay.push((OsString::from(key), value.to_os_string()));
     });
+    let ambient_node = std::env::var_os("NODE");
+    nub_core::node::spawn::apply_expected_augmentation_marker(
+        "NODE",
+        node_shim.as_deref().or(ambient_node.as_deref()),
+        |key, value| {
+            overlay.push((OsString::from(key), value.to_os_string()));
+        },
+    );
+    // Aube composes its lifecycle `.bin` chain after this overlay, so the exact
+    // final PATH is not available here. Mark the ambient baseline: a fresh
+    // boundary will then remove only Nub's exact shim component and preserve
+    // both lifecycle `.bin` entries and any later user additions.
+    let ambient_path = std::env::var_os("PATH");
+    nub_core::node::spawn::apply_expected_augmentation_marker(
+        "PATH",
+        ambient_path.as_deref(),
+        |key, value| {
+            overlay.push((OsString::from(key), value.to_os_string()));
+        },
+    );
     if let Some(runtime_json) = runtime_json {
         overlay.push((
             OsString::from(crate::project_config::RUNTIME_CONFIG_ENV),
@@ -1952,6 +1996,9 @@ pub(crate) fn engine_brand_preflight() {
     let read_pnpm_global_config = cwd
         .as_deref()
         .is_some_and(|cwd| read_pnpm_global_config_for_surface(&surface, cwd));
+    let read_pnpm_workspace_layout = cwd
+        .as_deref()
+        .is_some_and(|cwd| read_pnpm_workspace_layout_for_surface(&surface, cwd));
     // pnpm REVERSED its env-var convention at v11: pnpm ≤10 reads `npm_config_*`
     // registry-client env vars and IGNORES `pnpm_config_*`; pnpm 11 reads
     // `pnpm_config_*` / `PNPM_CONFIG_*` and IGNORES `npm_config_*`. Honor bare
@@ -2007,23 +2054,15 @@ pub(crate) fn engine_brand_preflight() {
     aube_util::update_engine_context(|c| {
         c.read_branded_pnpm_config = read_branded_pnpm_config;
         c.npmrc_settings_allowlist = npmrc_settings_allowlist;
-        // `config.yaml` and `auth.ini` remain pnpm-NAMED global files. Standalone
-        // aube defaults this posture on, so nub must set it explicitly from the
-        // incumbent/surface decision rather than inheriting that default. Global
-        // writes remain neutral-only (`config set -g` never writes pnpm's files).
+        // `config.yaml` and `auth.ini` are pnpm-NAMED global files. Read them
+        // only for a provable pnpm-v11+ incumbent; unknown majors use the v10
+        // model and never inherit pnpm global state. Global writes remain
+        // neutral-only (`config set -g` never writes pnpm's files).
         c.read_pnpm_global_config = read_pnpm_global_config;
-        // node_modules LAYOUT is nub's own axis, configured through `nub.jsonc`.
-        // The compatibility guarantee covers version resolution, module
-        // resolution, and the project's lockfile — none of which layout touches
-        // — so a pnpm-branded YAML never directs how the tree is arranged, even
-        // under a pnpm incumbent whose resolution config nub mirrors in full.
-        // UNCONDITIONAL, unlike `read_branded_pnpm_config`: that posture is
-        // per-FILE ("is this another tool's state?"), this one is per-AXIS
-        // ("is layout theirs to decide?"), and the answer is never. The neutral
-        // `.npmrc` surface, env aliases, and CLI flags keep setting every one of
-        // these keys. Symmetric with dropping yarn's `.yarnrc.yml nodeLinker`
-        // and bun's `bunfig [install].linker`.
-        c.read_layout_from_workspace_yaml = false;
+        // Nub identity consumes only neutral config, and compat projects retain
+        // their incumbent's layout source. Pnpm 11+ reads workspace YAML; older
+        // or unknown majors retain the `.npmrc` model.
+        c.read_layout_from_workspace_yaml = read_pnpm_workspace_layout;
         c.read_pnpm_config_env_registry = read_pnpm_config_env_registry;
         c.read_yarn_config = read_yarn_config;
         c.yarn_is_classic = yarn_is_classic;
@@ -2171,78 +2210,20 @@ fn read_pnpm_global_config_for_surface(surface: &ConfigSurface, cwd: &Path) -> b
         })
 }
 
-/// Emit the one case where an explicit project `nub.jsonc` layout setting and
-/// an incumbent's layout setting would otherwise make the latter's suppression
-/// invisible. The layout remains nub's axis; this only names the collision.
-fn warn_layout_override_conflict(cwd: &Path) {
-    let Some(incumbent) = incumbent_layout_surface(&resolve_config_surface(cwd), cwd) else {
-        return;
-    };
-    let Some(config) = crate::project_config::effective_config() else {
-        return;
-    };
-    if !project_config_declares_layout(config) {
-        return;
+/// Whether pnpm's project layout settings come from `pnpm-workspace.yaml`.
+/// Pnpm 11 moved this scalar-config home from `.npmrc`; an unknown major keeps
+/// the dominant v10 `.npmrc` model.
+fn read_pnpm_workspace_layout_for_surface(surface: &ConfigSurface, cwd: &Path) -> bool {
+    if !matches!(surface, ConfigSurface::PnpmOrFresh) {
+        return false;
     }
-
-    let line = format!(
-        "nub: nub.jsonc install layout applies; this project's {incumbent} layout setting is ignored."
-    );
-    if scope_warning_uses_dim() {
-        eprintln!("\x1b[2m{line}\x1b[0m");
-    } else {
-        eprintln!("{line}");
-    }
-}
-
-fn project_config_declares_layout(config: &crate::project_config::EffectiveConfig) -> bool {
-    [
-        crate::project_config::ConfigKey::InstallLinker,
-        crate::project_config::ConfigKey::InstallPublicHoist,
-    ]
-    .iter()
-    .any(|key| {
-        config
-            .sources
-            .get(key)
-            .is_some_and(|source| source.kind == crate::project_config::ConfigSourceKind::Project)
-    })
-}
-
-/// The active incumbent's on-disk layout surface, when it actually contains a
-/// layout setting nub will not honor. A mere config file is not enough to warn.
-fn incumbent_layout_surface(surface: &ConfigSurface, cwd: &Path) -> Option<&'static str> {
-    match surface {
-        ConfigSurface::PnpmOrFresh => pnpm_workspace_declares_layout(cwd).then_some("pnpm"),
-        ConfigSurface::NonPnpmCompat { role: "yarn", dir } => yarnrc_walk_dirs(dir, cwd)
-            .iter()
-            .any(|dir| yarnrc_node_linker(dir).is_some())
-            .then_some("yarn"),
-        ConfigSurface::NonPnpmCompat { role: "bun", dir } => {
-            bun_config::declares_install_linker(dir).then_some("bun")
-        }
-        ConfigSurface::NubIdentity(_) | ConfigSurface::NonPnpmCompat { .. } => None,
-    }
-}
-
-fn pnpm_workspace_declares_layout(cwd: &Path) -> bool {
-    let mut dir = cwd.to_path_buf();
-    for _ in 0..16 {
-        if dir.join("pnpm-workspace.yaml").is_file() {
-            let raw = aube_manifest::workspace::load_raw(&dir).unwrap_or_default();
-            return aube_settings::all().iter().any(|meta| {
-                meta.layout
-                    && meta
-                        .workspace_yaml_keys
-                        .iter()
-                        .any(|key| aube_settings::workspace_yaml_value(&raw, key).is_some())
-            });
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-    false
+    nub_core::pm::resolve::declared_pm_raw(cwd)
+        .and_then(|(name, version)| (name == "pnpm").then_some(version).flatten())
+        .is_some_and(|version| {
+            parse_major_minor(&version)
+                .0
+                .is_some_and(|major| major >= 11)
+        })
 }
 
 /// Engine-free, single-walk resolution of the project's [`ConfigSurface`]
@@ -2438,7 +2419,7 @@ fn read_file_head(path: &Path, max_bytes: usize) -> std::io::Result<String> {
 /// `npm_config_node_linker`, `.npmrc`, or workspace yaml all win):
 ///
 /// - `defaultLockfileFormat` — a TRULY-fresh project (no PM-preference signal
-///   of any kind) writes nub's neutral `nub.lock` (`=aube`); every other
+///   of any kind) writes nub's neutral `nub.lock` (`=nub`); every other
 ///   surface writes `pnpm-lock.yaml` (`=pnpm`) for drop-in interop. See
 ///   [`nub_setting_defaults`]'s `truly_fresh` arm.
 /// - `virtualStoreDir` / `stateDir` = `node_modules/.store` — the isolated
@@ -2596,8 +2577,7 @@ fn strip_yarnrc_value(rest: &str) -> &str {
 ///   incumbent projects keep resolving their own PM config unchanged.
 /// - Fresh-write lockfile format: a TRULY-fresh project (no PM-preference
 ///   signal of any kind — `truly_fresh`) writes nub's neutral `nub.lock`
-///   (`defaultLockfileFormat=aube`, which under the nub embedder resolves to
-///   the `lock.yaml` basename); every other surface writes `pnpm-lock.yaml`,
+///   (`defaultLockfileFormat=nub`); every other surface writes `pnpm-lock.yaml`,
 ///   keeping a pnpm-incumbent / mixed project drop-in interoperable. A
 ///   user-set `defaultLockfileFormat` (env/.npmrc/yaml) still wins on either
 ///   path — this is only the embedder-tier default.
@@ -3301,35 +3281,26 @@ mod tests {
         }
     }
 
-    // The engine refuses `enableGlobalVirtualStore=true` alongside an explicit
-    // `hoist=true`, and injected deps are exactly what pushes that hoist. Left
-    // alone, asking for the documented default layout in a project with an
-    // injected dep aborts the install quoting two engine settings the user
-    // never wrote. Reject it in nub's vocabulary instead, and only for that
-    // pair — the same layout without injected deps must still lower cleanly.
     #[test]
-    fn global_virtual_store_is_rejected_only_when_injected_deps_force_a_hidden_tree() {
+    fn global_linker_yields_to_injected_deps_hidden_tree() {
         let injected = [("hoist".to_string(), "true".to_string())];
-        let error = lower_native_install_settings(
+        let injected = lower_native_install_settings(
             &with_linker(LinkerConfig::Global { eject: None }),
             &injected,
         )
-        .expect_err(
-            "global-virtual-store + injected deps must be rejected before the engine sees it",
-        )
-        .to_string();
-        assert!(
-            error.contains("install.linker") && error.contains("dependenciesMeta"),
-            "the error must name what the user wrote, got: {error}"
+        .expect("injected deps must not make the documented global linker fail");
+        assert_eq!(get(&injected.layout, "nodeLinker"), Some("isolated"));
+        assert_eq!(
+            get(&injected.layout, "enableGlobalVirtualStore"),
+            None,
+            "the injected-deps hidden tree must keep the store project-local"
         );
 
         let clean = lower(with_linker(LinkerConfig::Global { eject: None }), &[]);
-        assert!(
-            clean
-                .layout
-                .iter()
-                .any(|(k, v)| k == "enableGlobalVirtualStore" && v == "true"),
-            "without injected deps the same layout must still pin the shared store"
+        assert_eq!(
+            get(&clean.layout, "enableGlobalVirtualStore"),
+            Some("true"),
+            "without injected deps the same layout pins the shared store"
         );
     }
 
@@ -3461,6 +3432,23 @@ mod tests {
 
     #[test]
     fn minimum_release_age_rounds_up_to_whole_minutes() {
+        // Positive sub-minute durations must remain a full minute: rounding down
+        // would silently weaken the configured release-age gate.
+        for seconds in [1, 30, 59, 60] {
+            let lowered = lower(
+                InstallConfig {
+                    minimum_release_age: Some(std::time::Duration::from_secs(seconds)),
+                    ..InstallConfig::default()
+                },
+                &[],
+            );
+            assert_eq!(
+                get(&lowered.resolution, "minimumReleaseAge"),
+                Some("1"),
+                "{seconds}s must conservatively round up to one minute"
+            );
+        }
+
         let lowered = lower(
             InstallConfig {
                 minimum_release_age: Some(std::time::Duration::from_secs(61)),
@@ -3527,6 +3515,20 @@ mod tests {
     }
 
     #[test]
+    fn an_incumbent_ignores_even_reserved_nub_install_values() {
+        let install = with_linker(LinkerConfig::Pnp);
+        assert_eq!(
+            lower_native_install_settings_for_mode(Some(&install), false, &[]).unwrap(),
+            NativeInstallSettings::default(),
+            "compat mode must not validate or lower nub-native install settings"
+        );
+        let err = lower_native_install_settings_for_mode(Some(&install), true, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ERR_NUB_CONFIG_UNSUPPORTED"), "{err}");
+    }
+
+    #[test]
     fn install_config_mode_gate_accepts_only_nub_identity_or_truly_fresh() {
         let dir = tempfile::tempdir().unwrap();
         let detected = |kind| DetectedLockfile {
@@ -3574,33 +3576,27 @@ mod tests {
         )
     }
 
-    // LAYOUT is nub's own axis — it appears in no lockfile, so honoring it
-    // cannot perturb round-trip fidelity with the incumbent. It must survive an
-    // npm/pnpm project byte-identically to a nub one.
+    // `nub.jsonc` is nub-native config, so an incumbent project keeps every
+    // layout decision in its own config files rather than receiving an
+    // invisible projectConfig-tier override.
     #[test]
-    fn layout_settings_apply_under_an_incumbent_package_manager() {
+    fn install_settings_stay_scoped_to_nub_identity_under_an_incumbent() {
         let dir = tempfile::tempdir().unwrap();
         let lowered = lower(both_axes(), &[]);
 
         for kind in [LockfileKind::Npm, LockfileKind::Pnpm] {
             let mode = mode_for(kind, dir.path());
             assert!(!mode, "{kind:?} must not resolve as nub identity");
-            let scoped = scoped_install_settings(&lowered, mode);
-            assert_eq!(get(&scoped, "nodeLinker"), Some("hoisted"), "{kind:?}");
-            assert_eq!(
-                get(&scoped, "publicHoistPattern"),
-                Some("@types/*"),
-                "{kind:?}"
+            let scoped = scoped_install_settings(&lowered, mode, VirtualStoreLocality::Default);
+            assert!(
+                scoped.is_empty(),
+                "{kind:?} must retain its incumbent config"
             );
-            assert_eq!(get(&scoped, "shamefullyHoist"), Some("false"), "{kind:?}");
         }
 
-        // The control: identical to what nub identity gets, minus nothing.
-        assert_eq!(
-            scoped_install_settings(&lowered, false),
-            lowered.layout,
-            "an incumbent must not drop or reorder a single layout setting"
-        );
+        let native = scoped_install_settings(&lowered, true, VirtualStoreLocality::Default);
+        assert_eq!(get(&native, "nodeLinker"), Some("hoisted"));
+        assert_eq!(get(&native, "publicHoistPattern"), Some("@types/*"));
     }
 
     // RESOLUTION is the compatibility guarantee: which version a range selects
@@ -3612,7 +3608,11 @@ mod tests {
         let lowered = lower(both_axes(), &[]);
 
         for kind in [LockfileKind::Npm, LockfileKind::Pnpm] {
-            let scoped = scoped_install_settings(&lowered, mode_for(kind, dir.path()));
+            let scoped = scoped_install_settings(
+                &lowered,
+                mode_for(kind, dir.path()),
+                VirtualStoreLocality::Default,
+            );
             assert_eq!(get(&scoped, "minimumReleaseAge"), None, "{kind:?}");
             assert_eq!(get(&scoped, "minimumReleaseAgeStrict"), None, "{kind:?}");
             assert_eq!(get(&scoped, "minimumReleaseAgeExclude"), None, "{kind:?}");
@@ -3622,7 +3622,7 @@ mod tests {
         // is the scoping and not a lowering that never produced them.
         let native_mode = mode_for(LockfileKind::Aube, dir.path());
         assert!(native_mode, "nub.lock must resolve as nub identity");
-        let native = scoped_install_settings(&lowered, native_mode);
+        let native = scoped_install_settings(&lowered, native_mode, VirtualStoreLocality::Default);
         assert_eq!(get(&native, "minimumReleaseAge"), Some("60"));
         assert_eq!(get(&native, "minimumReleaseAgeStrict"), Some("true"));
         assert_eq!(
@@ -3946,6 +3946,18 @@ mod tests {
     }
 
     #[test]
+    fn ci_keeps_global_linker_project_local() {
+        let lowered = lower(with_linker(LinkerConfig::Global { eject: None }), &[]);
+        let ci = scoped_install_settings(&lowered, true, VirtualStoreLocality::ProjectLocal);
+        assert_eq!(get(&ci, "nodeLinker"), Some("isolated"));
+        assert_eq!(
+            get(&ci, "enableGlobalVirtualStore"),
+            None,
+            "nub ci's embedder default must keep the tree COPY-relocatable"
+        );
+    }
+
+    #[test]
     fn fresh_write_format_flips_with_truly_fresh() {
         let dir = tempfile::tempdir().unwrap();
         // A truly-fresh project writes nub's neutral `nub.lock`
@@ -3994,7 +4006,7 @@ mod tests {
         // Every engine command gets the `.store` store/state location and the
         // nub-namespaced global dirs regardless of detection; the non-truly-
         // fresh surfaces also get the pnpm lockfile fresh-write default (the
-        // truly-fresh `aube`/`lock.yaml` flip is covered separately). (These
+        // truly-fresh `nub`/`nub.lock` flip is covered separately). (These
         // ride the engine's
         // embedder-defaults tier, so any user source overrides them —
         // precedence is covered by the engine's own tests and the
@@ -4434,6 +4446,10 @@ mod tests {
             &ConfigSurface::PnpmOrFresh,
             root.path(),
         ));
+        assert!(!read_pnpm_workspace_layout_for_surface(
+            &ConfigSurface::PnpmOrFresh,
+            root.path(),
+        ));
         std::fs::write(
             root.path().join("package.json"),
             r#"{"packageManager":"pnpm@11.0.0"}"#,
@@ -4443,7 +4459,15 @@ mod tests {
             &ConfigSurface::PnpmOrFresh,
             root.path(),
         ));
+        assert!(read_pnpm_workspace_layout_for_surface(
+            &ConfigSurface::PnpmOrFresh,
+            root.path(),
+        ));
         assert!(!read_pnpm_global_config_for_surface(
+            &ConfigSurface::NubIdentity(dir.clone()),
+            root.path(),
+        ));
+        assert!(!read_pnpm_workspace_layout_for_surface(
             &ConfigSurface::NubIdentity(dir.clone()),
             root.path(),
         ));
@@ -4458,6 +4482,16 @@ mod tests {
                 ),
                 "{role} identity must not read pnpm's global files"
             );
+            assert!(
+                !read_pnpm_workspace_layout_for_surface(
+                    &ConfigSurface::NonPnpmCompat {
+                        role,
+                        dir: dir.clone(),
+                    },
+                    root.path(),
+                ),
+                "{role} identity must not read pnpm's workspace layout"
+            );
         }
 
         std::fs::write(
@@ -4469,6 +4503,10 @@ mod tests {
             !read_pnpm_global_config_for_surface(&ConfigSurface::PnpmOrFresh, root.path()),
             "the conservative CLI surface for an unknown tool is not pnpm incumbency"
         );
+        assert!(!read_pnpm_workspace_layout_for_surface(
+            &ConfigSurface::PnpmOrFresh,
+            root.path(),
+        ));
 
         std::fs::write(root.path().join("package.json"), "{}").unwrap();
         std::fs::write(
@@ -4480,84 +4518,9 @@ mod tests {
             !read_pnpm_global_config_for_surface(&ConfigSurface::PnpmOrFresh, root.path()),
             "a pnpm lockfile proves the incumbent name, not the major; unknown defaults to v10"
         );
-    }
-
-    #[test]
-    fn layout_conflict_requires_both_a_project_override_and_an_active_incumbent_setting() {
-        let _guard = ENGINE_GLOBAL_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        struct Restore(aube_util::EngineContext);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                aube_util::set_engine_context(self.0.clone());
-            }
-        }
-        let _restore = Restore(aube_util::engine_context());
-        aube_util::update_engine_context(|context| {
-            context.read_branded_pnpm_config = true;
-        });
-
-        let root = tempfile::tempdir().unwrap();
-        let dir = root.path().to_path_buf();
-        let source = |kind| crate::project_config::ConfigSource {
-            kind,
-            path: None,
-            root: dir.clone(),
-        };
-        let config_with = |key, kind| crate::project_config::EffectiveConfig {
-            cwd: dir.clone(),
-            values: crate::project_config::ProjectConfig::default(),
-            sources: std::collections::BTreeMap::from([(key, source(kind))]),
-            project: None,
-            global: None,
-        };
-
-        assert!(project_config_declares_layout(&config_with(
-            crate::project_config::ConfigKey::InstallLinker,
-            crate::project_config::ConfigSourceKind::Project,
-        )));
-        assert!(project_config_declares_layout(&config_with(
-            crate::project_config::ConfigKey::InstallPublicHoist,
-            crate::project_config::ConfigSourceKind::Project,
-        )));
         assert!(
-            !project_config_declares_layout(&config_with(
-                crate::project_config::ConfigKey::InstallLinker,
-                crate::project_config::ConfigSourceKind::Global,
-            )),
-            "a global nub config is not a current project override"
-        );
-
-        std::fs::write(
-            root.path().join("pnpm-workspace.yaml"),
-            "nodeLinker: hoisted\n",
-        )
-        .unwrap();
-        assert_eq!(
-            incumbent_layout_surface(&ConfigSurface::PnpmOrFresh, root.path()),
-            Some("pnpm")
-        );
-        let member = root.path().join("packages/app");
-        std::fs::create_dir_all(&member).unwrap();
-        assert_eq!(
-            incumbent_layout_surface(&ConfigSurface::PnpmOrFresh, &member),
-            Some("pnpm"),
-            "a member command must find the incumbent layout at its workspace root"
-        );
-        // The engine caches raw workspace YAML by path for the process lifetime,
-        // so use a distinct project for the negative case rather than pretending
-        // an in-process rewrite would be reloaded.
-        let no_layout = tempfile::tempdir().unwrap();
-        std::fs::write(
-            no_layout.path().join("pnpm-workspace.yaml"),
-            "autoInstallPeers: false\n",
-        )
-        .unwrap();
-        assert_eq!(
-            incumbent_layout_surface(&ConfigSurface::PnpmOrFresh, no_layout.path()),
-            None,
-            "a pnpm config file without a layout key is not a conflict"
+            !read_pnpm_workspace_layout_for_surface(&ConfigSurface::PnpmOrFresh, root.path()),
+            "an unknown pnpm major keeps the v10 .npmrc layout model"
         );
     }
 
@@ -4736,6 +4699,11 @@ mod tests {
             find("__NUB_AUGMENTATION_TOKEN").as_deref(),
             Some("--require=/rt/preload.cjs"),
             "a fresh nested Nub needs the exact parent-owned token"
+        );
+        assert_eq!(
+            find("__NUB_AUGMENTED_NODE").as_deref(),
+            Some(expected_shim_node.as_str()),
+            "a fresh boundary may restore NODE only while it still holds the lifecycle shim"
         );
         assert_eq!(
             find("npm_node_execpath").as_deref(),

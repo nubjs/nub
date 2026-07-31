@@ -107,8 +107,8 @@ fn bun_incumbent_reads_project_and_global_bunfig_install_subset() {
     // resolution config, and 3600 bunfig seconds arriving as 60 engine minutes
     // could come from nowhere else.
     assert_eq!(config_get(&dir, &xdg_config, "minimumReleaseAge"), "60");
-    // Its `linker` is NOT: layout is nub's own axis, so the setting stays at
-    // nub's default instead of the bunfig's `hoisted`.
+    // Its unsupported `linker` is not mapped, so the setting stays at Nub's
+    // default instead of the bunfig's `hoisted`.
     assert_eq!(config_get(&dir, &xdg_config, "nodeLinker"), "isolated");
 }
 

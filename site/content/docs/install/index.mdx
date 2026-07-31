@@ -55,7 +55,7 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
       href: '/docs/install/pnpm',
       items: [
         { code: 'pnpm-lock.yaml', ok: true, note: 'v6/v5.4 declined — re-lock under pnpm 9+.' },
-        { code: 'pnpm-workspace.yaml', ok: true, partial: true, note: 'Layout keys are not read — layout is configured through nub.jsonc or .npmrc.' },
+        { code: 'pnpm-workspace.yaml', ok: true, note: 'Pnpm 11+ layout and resolution settings.' },
         { code: '.pnpmfile.cjs', ok: true },
         { code: '.npmrc', ok: true },
         { code: 'package.json#pnpm', ok: true },
@@ -121,7 +121,7 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
           code: 'bunfig.toml',
           ok: true,
           partial: true,
-          note: '[install] section only, minus linker — layout is configured through nub.jsonc or .npmrc.',
+          note: '[install] section only, minus linker — use the neutral .npmrc key or CLI flag.',
         },
         { code: 'trustedDependencies', ok: true },
         { code: 'overrides', ok: true },
@@ -173,16 +173,17 @@ The installer is optional. Keep running `npm`, `pnpm`, `yarn`, or `bun` exactly 
 
 ### Resolution versus layout
 
-What the tables above guarantee is **resolution**: which version a range resolves to, and which file a specifier resolves to. Nub mirrors the incumbent on both, and respects the lockfile it finds. What they do not cover is **layout** — how those resolved packages get linked into `node_modules`. Nub takes that setting only from [`nub.jsonc`](/docs/config#installlinker) or the neutral `.npmrc` keys, never from another manager's config, and defaults to [the virtual store](/docs/install/virtual-store). No lockfile format records how `node_modules` was arranged, so the round-trip holds either way.
+The tables above cover resolution and the supported layout settings for each incumbent. A Nub-identity project reads its [`nub.jsonc`](/docs/config#installlinker) install block. A compat project keeps its incumbent settings instead; the neutral `node-linker` key in `.npmrc` remains available where that package-manager version reads it.
 
-So a layout setting in another manager's config file has no effect, whatever it asks for:
+Layout support differs by incumbent:
 
 | Incumbent | Setting | Under Nub |
 |---|---|---|
 | **npm** | `install-strategy` | No effect — except `nested`, which aborts rather than install a tree that resolves differently |
 | **npm** | `global-style` | No effect |
 | **npm** | `legacy-bundling` | No effect |
-| **pnpm** | `nodeLinker` and the hoisting keys in `pnpm-workspace.yaml` | No effect |
+| **pnpm 11+** | `nodeLinker` and the hoisting keys in `pnpm-workspace.yaml` | Honored |
+| **pnpm 10 and below** | `node-linker` and the hoisting keys in `.npmrc` | Honored |
 | **pnpm** | `symlink=false` | No effect, with a warning — the isolated layout *is* its symlink graph |
 | **Yarn** | `nodeLinker`, `nmHoistingLimits`, `nmMode` in `.yarnrc.yml` | No effect |
 | **Yarn** | `nodeLinker: pnp` | Refused — `ERR_NUB_PNP_UNSUPPORTED`, before any write |
@@ -265,7 +266,7 @@ Runtime augmentation is reversible. Passing `--node`, or setting a truthy `NODE_
 
 ### Project configuration
 
-A project [`nub.jsonc`](/docs/config) carries an [`install`](/docs/config#install) block. The layout fields shape `node_modules` and apply in every project; the version-selection fields below apply only when Nub is the project's package manager, and a project with an npm, pnpm, Yarn, or Bun lockfile resolves the way that tool would.
+A Nub-identity project carries its install settings in the [`nub.jsonc`](/docs/config#install) block. A project owned by npm, pnpm, Yarn, or Bun keeps its incumbent package-manager settings, and Nub reports any ignored `nub.jsonc` install fields.
 
 ```jsonc title="nub.jsonc"
 {

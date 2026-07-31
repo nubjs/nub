@@ -78,7 +78,7 @@ The same for a single command, without touching config:
 nub install --node-linker hoisted
 ```
 
-Nub reads `node-linker` from `.npmrc` whatever package manager owns the project, so the same key works under npm, pnpm, Yarn, Bun, and Nub-identity projects alike. Files still materialize from the global content store by reflink or hardlink, so a flat tree costs little extra disk.
+Nub reads `node-linker` from `.npmrc` under npm, pnpm 10 and below, Yarn, Bun, and Nub-identity projects. Pnpm 11 and later use `nodeLinker` in `pnpm-workspace.yaml`. Files still materialize from the global content store by reflink or hardlink, so a flat tree costs little extra disk.
 
 <Callout title="node-linker is the layout, not the hoist patterns">
 The `node-linker` setting picks the layout: `isolated` (the default symlink tree) or `hoisted` (flat). It is unrelated to `hoist`, `shamefully-hoist`, and `public-hoist-pattern`, which lift packages to the top level *within* the isolated layout. To flatten the tree, reach for `node-linker` — the hoist patterns leave the virtual store in place.
@@ -86,16 +86,17 @@ The `node-linker` setting picks the layout: `isolated` (the default symlink tree
 
 ## Per package manager
 
-Nub mirrors the incumbent on version resolution, module resolution, and the lockfile. Layout is not on that list, so a package manager's own layout setting has no effect under Nub — set the layout on the neutral surface instead, in any project:
+Nub reads the active layout source for each incumbent:
 
 | Incumbent | Its own flat-layout config | Under Nub |
 |---|---|---|
-| **pnpm** | `nodeLinker: hoisted` in `pnpm-workspace.yaml` | No effect — set `node-linker=hoisted` |
+| **pnpm 11 and later** | `nodeLinker: hoisted` in `pnpm-workspace.yaml` | Honored |
+| **pnpm 10 and below** | `node-linker=hoisted` in `.npmrc` | Honored |
 | **npm** | `install-strategy=hoisted` | No effect — set `node-linker=hoisted` |
 | **Yarn** | `nodeLinker: node-modules` in `.yarnrc.yml` | No effect — set `node-linker=hoisted` |
 | **Bun** | `linker = "hoisted"` under `[install]` in `bunfig.toml` | No effect — set `node-linker=hoisted` |
 
-The same holds for the hoisting keys, the modules directory, and the virtual-store paths: every one of them reads from `.npmrc`, its `npm_config_*` environment alias, and [`nub.jsonc`](/docs/config#installlinker) — never from another tool's config file. Resolution config in those same files is unaffected, and no lockfile format records a layout, so the round-trip with the incumbent holds either way.
+The hoisting keys, modules directory, and virtual-store paths follow the same per-major source. A `nub.jsonc` install block applies only under Nub identity; compat projects keep their incumbent package-manager settings.
 
 Yarn Plug'n'Play (PnP) is the one exception, and it is a refusal rather than an ignored preference. Nub installs a `node_modules` tree, so a project asking for PnP gets an error before anything is written:
 
@@ -123,7 +124,7 @@ The `enableGlobalVirtualStore=false` form keeps isolation and its phantom-depend
 
 ## Project configuration
 
-A project [`nub.jsonc`](/docs/config) picks the layout with one [`linker`](/docs/config#installlinker) field — `global-virtual-store` for the shared store (the default), `isolated` for a project-local one, or `hoisted` for a flat, real-directory tree. No lockfile records how `node_modules` is arranged, so this applies in every project, including one carrying an npm, pnpm, Yarn, or Bun lockfile.
+A Nub-identity project picks the layout with one [`linker`](/docs/config#installlinker) field — `global-virtual-store` for the shared store (the default), `isolated` for a project-local one, or `hoisted` for a flat, real-directory tree. A project owned by npm, pnpm, Yarn, or Bun uses its active compat setting instead.
 
 ```jsonc title="nub.jsonc"
 {
