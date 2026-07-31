@@ -13,6 +13,7 @@ export default function HomePage() {
     <div className="relative w-full overflow-x-hidden">
       <Hero />
       <Toolkit />
+      <VideoFeature />
       <RunFileBand />
       <RunScriptBand />
       <NubxBand />
@@ -20,6 +21,50 @@ export default function HomePage() {
       <FinalCta />
       <Footer />
     </div>
+  );
+}
+
+/* ------------------------------------------------------------ Video feature */
+
+function VideoFeature() {
+  return (
+    <section className="border-b border-fd-border" aria-labelledby="video-heading">
+      <Container className="py-20 md:py-28">
+        <div className="mx-auto max-w-5xl">
+          <div className="mx-auto mb-8 max-w-2xl text-center">
+            <h2
+              id="video-heading"
+              className="text-balance font-display text-3xl font-medium leading-tight md:text-4xl"
+            >
+              Watch Nub in action
+            </h2>
+            <p className="mt-4 text-lg text-fd-muted-foreground">
+              A video walkthrough by our friends at{' '}
+              <a
+                href="https://www.youtube.com/@betterstack"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-fd-foreground underline decoration-dotted decoration-fd-muted-foreground/50 underline-offset-4 hover:decoration-fd-muted-foreground"
+              >
+                Better Stack
+              </a>
+              .
+            </p>
+          </div>
+          <div className="overflow-hidden rounded-xl border border-fd-border bg-black shadow-2xl shadow-black/20">
+            <iframe
+              className="block aspect-video w-full"
+              src="https://www.youtube-nocookie.com/embed/6YRpXxbtc2c?start=2"
+              title="An Ex-Bun Dev Just Built The Anti-Bun (Nub)"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+              referrerPolicy="strict-origin-when-cross-origin"
+              loading="lazy"
+              allowFullScreen
+            />
+          </div>
+        </div>
+      </Container>
+    </section>
   );
 }
 
@@ -126,8 +171,8 @@ function Feature({
   reverse?: boolean;
 }) {
   return (
-    <div className="grid items-center gap-12 py-14 xl:grid-cols-2">
-      <div className={`min-w-0 ${reverse ? 'xl:order-2' : ''}`}>
+    <div className="grid items-center gap-12 py-14 lg:grid-cols-2">
+      <div className={`min-w-0 ${reverse ? 'lg:order-2' : ''}`}>
         <p className={`eyebrow ${ACCENT_TEXT[accent]}`}>{eyebrow}</p>
         <h3 className="mt-3 text-balance font-display text-2xl font-medium leading-snug md:text-3xl">
           {title}
@@ -136,7 +181,7 @@ function Feature({
           {body}
         </p>
       </div>
-      <div className={`min-w-0 ${reverse ? 'xl:order-1' : ''}`}>{visual}</div>
+      <div className={`min-w-0 ${reverse ? 'lg:order-1' : ''}`}>{visual}</div>
     </div>
   );
 }
