@@ -635,8 +635,22 @@ fn emit_tmp(policy: &SandboxPolicy, tmp_dir: Option<&std::path::Path>, out: &mut
     }
     if policy.fs.tmp == TmpMode::Private {
         // xcrun WRITES the db, not merely reads it, so this re-grant must clear BOTH denies.
+        //
+        // AND IT NEVER WRITES THE NAME IN PLACE — the trailing `*` is what makes this grant
+        // do anything at all. The toolchain stages through an `mkstemp`-suffixed sibling
+        // (`xcrun_db-pH2r2bhb`) and renames it over the real name, so a bare `(literal
+        // ".../xcrun_db")` denies the only write that ever happens. Measured on the macOS
+        // corpus break shard: 40 denials in ONE run — `c++: error: couldn't create cache file
+        // '/var/folders/<uid>/T/xcrun_db-XXXXXX' (errno=Operation not permitted)`, from `c++`,
+        // `make` and `libtool` — and every from-source native build behind them failed.
+        //
+        // Still FILE-level, which is the property this carve-out exists to hold: `*` does not
+        // span a path component, so the pattern reaches the cache and its own staging
+        // siblings and nothing else in the ~7.5k-entry shared scratch. Routed through
+        // `to_match_term` rather than a hand-written regex so it uses the same translator
+        // (and the same globset oracle tests) as every other matcher here.
         for file in darwin_compiler_cache_files() {
-            regrant_over_tmp_deny(&format!("(literal \"{}\")", sbpl_escape(&file)), out);
+            regrant_over_tmp_deny(&emit_term(&to_match_term(&format!("{file}*"))), out);
         }
     }
     if policy.fs.tmp == TmpMode::Private
@@ -1073,6 +1087,10 @@ fn grant_is_under(matcher: &str, roots: &[String]) -> bool {
 ///
 /// A FILE, never its parent directory — the parent is the shared scratch this narrowing
 /// exists to withhold.
+///
+/// The returned path is the cache's own name. The grant emitted from it covers that name
+/// AND its `mkstemp` staging siblings — see the emission site, where the widening and the
+/// measurement that forced it are argued.
 fn darwin_compiler_cache_files() -> Vec<String> {
     confstr_scratch_dirs()
         .into_iter()
@@ -2413,8 +2431,12 @@ mod tests {
         // — a general `(allow file* …)` loses to a specific `file-write*` deny at any position.
         for file in darwin_compiler_cache_files() {
             let dir = file.trim_end_matches("/xcrun_db");
+            // The grant is the name PLUS its mkstemp staging siblings — the toolchain only
+            // ever writes `xcrun_db-XXXXXX` and renames, so asserting the bare literal here
+            // is what let a completely inert carve-out look correct for as long as it did.
+            let term = emit_term(&to_match_term(&format!("{file}*")));
             for op in ["file-read*", "file-write*"] {
-                let grant = format!("(allow {op} (literal \"{file}\"))");
+                let grant = format!("(allow {op} {term})");
                 assert!(
                     prof.contains(&grant),
                     "the compiler-cache carve-out must be granted back per-op: {grant}"
