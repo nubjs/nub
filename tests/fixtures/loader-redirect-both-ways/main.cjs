@@ -6,3 +6,4 @@
 console.log("yaml-as-ts:" + JSON.stringify(require("./code.yaml")));
 console.log("cts-as-text:" + JSON.stringify(require("./astext.cts").default.split("\n")[0]));
 console.log("dep-yaml-is-data:" + JSON.stringify(require("dep").default));
+console.log("js-as-text:" + JSON.stringify(require("./plain.js").default.trim()));

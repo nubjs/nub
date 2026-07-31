@@ -1036,7 +1036,18 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   for (const ext of [".js", ".cjs"]) {
     const origExtension = module_._extensions[ext] || nativeJs;
     module_._extensions[ext] = (mod, filename) => {
-      if (core.isDependency(pathToFileURL(filename).href)) {
+      // (0) The project pointed this extension at a data loader (`{".js":"text"}`),
+      // which the ESM path honors. These two extensions are skipped by the
+      // registration loop above because THIS wrapper owns them and runs after it,
+      // so the check has to live here or the setting is silently dropped on this
+      // tier alone. `dataExtsFor` is URL-keyed and pins node_modules to the
+      // built-ins, so a dependency's own `.js` can never be captured this way.
+      const url = pathToFileURL(filename).href;
+      const fileExt = pathExtname(filename);
+      if (fileExt in core.dataExtsFor(url)) {
+        return dataExtension(mod, filename, url, fileExt);
+      }
+      if (core.isDependency(url)) {
         return origExtension.call(module_._extensions, mod, filename); // (1)
       }
       const r = core.maybeTranspilePlainJs(pathToFileURL(filename).href, pathExtname(filename));

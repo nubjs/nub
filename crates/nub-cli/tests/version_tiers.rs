@@ -271,6 +271,10 @@ fn loader_redirects_resolve_per_url_on_the_compat_tier() {
         r#"cts-as-text:"const x: number = 5;""#,
         // ...while the dependency's own `.yaml` keeps the built-in data loader.
         r#"dep-yaml-is-data:{"depkey":"from-dependency"}"#,
+        // Plain JS pointed at a data loader. Owned by the `.js`/`.cjs` wrapper
+        // rather than the registration loop, so it needs its own case: the loop
+        // skips those two extensions and the wrapper runs after it.
+        r#"js-as-text:"module.exports = { real: \"CODE\" };""#,
     ] {
         assert!(
             stdout.contains(expected),
