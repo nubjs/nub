@@ -124,17 +124,13 @@ fn check_yaml_depth(source: &str) -> napi::Result<()> {
 }
 
 /// yaml-rust2 clones an anchored collection for every alias reference. Limit
-/// both the collection-alias fan-out and its estimated recursive expansion
-/// before `YamlLoader` starts allocating those clones.
+/// its estimated recursive expansion before `YamlLoader` starts allocating
+/// those clones.
 ///
-/// The 50-reference limit matches SnakeYAML Engine's documented default for
-/// collection aliases. It deliberately ignores scalar aliases: a scalar clone
-/// does not amplify a tree. A raw 50-alias limit alone misses exponential
-/// chains (each level can reference its predecessor twice), so the scanner also
-/// adds the known size of each referenced collection to a 100,000-node budget.
-/// That keeps ordinary bounded anchor use intact while rejecting the low-token,
-/// high-allocation shape before yaml-rust2 materializes it.
-const MAX_YAML_COLLECTION_ALIASES: usize = 50;
+/// Scalar aliases do not amplify a tree. For each collection alias, the scanner
+/// adds the known size of the referenced collection to a 100,000-node budget.
+/// This admits flat reuse while rejecting low-token, high-allocation chains
+/// before yaml-rust2 materializes them.
 const MAX_YAML_ALIAS_MATERIALIZATION: usize = 100_000;
 
 #[derive(Clone, Copy)]
@@ -177,7 +173,6 @@ fn check_yaml_alias_expansion(source: &str) -> napi::Result<()> {
     let mut anchors = HashMap::new();
     let mut frames = Vec::new();
     let mut pending_anchor = None;
-    let mut collection_aliases = 0_usize;
     let mut materialized_nodes = 0_usize;
 
     loop {
@@ -216,12 +211,6 @@ fn check_yaml_alias_expansion(source: &str) -> napi::Result<()> {
                     collection: false,
                 });
                 if size.collection {
-                    collection_aliases += 1;
-                    if collection_aliases > MAX_YAML_COLLECTION_ALIASES {
-                        return Err(yaml_alias_error(format!(
-                            "more than the {MAX_YAML_COLLECTION_ALIASES}-collection-alias limit"
-                        )));
-                    }
                     materialized_nodes = materialized_nodes.saturating_add(size.nodes);
                     if materialized_nodes > MAX_YAML_ALIAS_MATERIALIZATION {
                         return Err(yaml_alias_error(format!(
@@ -342,6 +331,18 @@ mod tests {
             .collect::<Vec<_>>()
             .join(", ");
         check_yaml_alias_expansion(&format!("label: &label value\nitems: [{aliases}]\n")).unwrap();
+    }
+
+    #[test]
+    fn yaml_alias_preflight_allows_flat_collection_reuse() {
+        let entries = (0..64)
+            .map(|index| format!("entry{index}: *defaults"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        check_yaml_alias_expansion(&format!(
+            "defaults: &defaults {{ enabled: true }}\n{entries}\n"
+        ))
+        .unwrap();
     }
 
     #[test]
