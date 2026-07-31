@@ -491,6 +491,69 @@ mod tests {
         });
     }
 
+    /// `unset` rewrites the whole file through the same CST path `set` uses, so
+    /// it owes the same guarantees — and had none of them pinned: the test above
+    /// checks only the resolved value, on a file nub itself wrote. A delete that
+    /// flattened a hand-authored file passed.
+    #[cfg(unix)]
+    #[test]
+    fn unset_keeps_everything_it_did_not_remove() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
+        with_config_home(|home| {
+            let path = home.join("nub").join("nub.jsonc");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            // BOM, comment, CRLF, an unrelated sibling key, and a narrowed mode
+            // — every property the write path is meant to carry across.
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(crate::jsonc::UTF8_BOM).unwrap();
+            write!(
+                f,
+                "{{\r\n  // hand-authored, keep me\r\n  \"telemetry\": false,\r\n  \"exec\": {{ \"implicitDlx\": \"never\" }}\r\n}}\r\n"
+            )
+            .unwrap();
+            drop(f);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+            assert_eq!(implicit_dlx(), ImplicitDlx::Never, "precondition");
+            unset_implicit_dlx().unwrap();
+
+            let raw = std::fs::read(&path).unwrap();
+            let text = String::from_utf8_lossy(&raw);
+            assert!(raw.starts_with(crate::jsonc::UTF8_BOM), "BOM survived");
+            assert!(text.contains("hand-authored, keep me"), "comment survived");
+            assert!(text.contains("\"telemetry\""), "sibling key survived");
+            assert!(text.contains("\r\n"), "CRLF survived");
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "mode survived"
+            );
+            assert_eq!(implicit_dlx(), ImplicitDlx::Prompt, "and the key is gone");
+        });
+    }
+
+    /// The reader refuses anything that is not a regular file, so a `nub.jsonc`
+    /// that is a FIFO cannot block the process on open. The guard was covered
+    /// for `tsconfig` but never for the config file — and a hang here blocks
+    /// every command, not one resolution.
+    #[cfg(unix)]
+    #[test]
+    fn a_config_that_is_not_a_regular_file_is_refused_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("nub.jsonc");
+        let c_path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a fresh path in a tempdir nothing else holds open.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        let err = crate::jsonc::read_guarded(&fifo).expect_err("a FIFO must not be read");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
     /// A config the user narrowed stays narrowed. The write installs a NEW
     /// inode, so the mode has to be carried across deliberately — and it is
     /// carried on the temp file, before the rename, so there is no moment when
