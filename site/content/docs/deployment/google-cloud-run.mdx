@@ -1,0 +1,111 @@
+---
+title: Google Cloud Run
+description: Build the official Nub image from source and deploy it as a Cloud Run service.
+---
+
+Cloud Run accepts any image that follows its [container runtime contract](https://docs.cloud.google.com/run/docs/container-contract). The official Nub image supplies a supported `linux/amd64` variant and runs as a non-root user.
+
+## Dockerfile
+
+```dockerfile title="Dockerfile"
+FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
+
+COPY --chown=node:node package.json package-lock.json ./
+RUN nub ci
+
+COPY --chown=node:node . .
+EXPOSE 8080
+CMD ["nub", "run", "start"]
+```
+
+Change `package-lock.json` to the project's lockfile. The ingress container must listen on `0.0.0.0` at Cloud Run's `PORT`, which defaults to `8080`:
+
+```ts title="server.ts"
+import { createServer } from "node:http";
+
+const port = Number(process.env.PORT || 8080);
+createServer((request, response) => {
+  if (request.url !== "/alive") {
+    response.writeHead(404);
+    response.end();
+    return;
+  }
+
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(JSON.stringify({
+    alive: true,
+    runtime: "nub-on-node",
+  }));
+}).listen(port, "0.0.0.0");
+```
+
+## Deploy from source
+
+Authenticate the Google Cloud CLI, select a billing-enabled project, and enable the build and runtime services:
+
+```bash
+gcloud auth login
+gcloud config set project PROJECT_ID
+gcloud services enable \
+  run.googleapis.com \
+  cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com
+```
+
+The deployer needs Google's [source-deployment roles](https://docs.cloud.google.com/run/docs/deploying-source-code#before-you-begin). Source builds use the Compute Engine default service account unless the project selects another builder. A project administrator can grant the default account its required builder role:
+
+```bash
+PROJECT_NUMBER=$(gcloud projects describe PROJECT_ID --format="value(projectNumber)")
+gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --role="roles/run.builder"
+```
+
+Deploy the directory containing the Dockerfile:
+
+```bash
+gcloud run deploy nub-app \
+  --source . \
+  --region us-west1 \
+  --no-invoker-iam-check
+```
+
+Cloud Build builds the Dockerfile, stores the image in Artifact Registry, and creates a Cloud Run revision. The command prints the service URL when the revision is ready.
+
+The public-access flag disables Cloud Run's invoker IAM check without adding an `allUsers` IAM binding, so it also works with domain-restricted sharing policies. Omit the flag for a private service.
+
+Request the public service:
+
+```bash
+URL=$(gcloud run services describe nub-app \
+  --region us-west1 \
+  --format="value(status.url)")
+curl --fail "$URL/alive"
+# {"alive":true,"runtime":"nub-on-node"}
+```
+
+Authenticated callers need the Cloud Run Invoker role. Test a private service with an identity token:
+
+```bash
+URL=$(gcloud run services describe nub-app \
+  --region us-west1 \
+  --format="value(status.url)")
+TOKEN=$(gcloud auth print-identity-token)
+curl --fail -H "Authorization: Bearer $TOKEN" "$URL/alive"
+```
+
+## Architecture
+
+Cloud Run services require a `linux/amd64` image. The official Nub tag is multi-architecture and includes that manifest, while a source deployment through Cloud Build produces the required architecture.
+
+When building on an Apple Silicon computer instead, select the platform explicitly before pushing to Artifact Registry:
+
+```bash
+docker build --platform linux/amd64 -t IMAGE_URL .
+docker push IMAGE_URL
+gcloud run deploy nub-app --image IMAGE_URL --region us-west1
+```
+
+## GitHub Actions
+
+GitHub Actions can test with `setup-nub`, build the same Dockerfile, authenticate to Google through workload identity federation, and push the application image to Artifact Registry. No Cloud Run-specific Nub runtime or buildpack is required.

@@ -238,4 +238,18 @@ sweep is a transient reaction to hundreds of exits, not a Spotlight problem — 
 
 ## 8. Standing risks worth reporting
 - `~/.cache/nub/worktrees` disk growth (149 GB / 27 worktrees, 2026-07-26) — prune stale worktrees.
+  **But that figure is `du`, i.e. APPARENT size, and pruning the CHECKOUTS reclaims almost none of
+  it.** Measured 2026-07-31: removing **63 worktrees (85 → 22)** moved free space **0 GB**, because
+  `scripts/rust-build.sh` CoW-clones with `cp -c` and `du` bills shared APFS blocks to every path that
+  references them. **The `<name>-target` dirs are the real consumers** — three ORPHANED ones (whose
+  worktree was already gone) freed 2 GB by themselves. So: hunt orphaned target dirs first, judge every
+  reclaim by `df` before and after, and never size the problem with `du`.
+  Two traps met while doing exactly this, both self-inflicted: `git worktree remove … 2>/dev/null` in a
+  loop failed silently and the unchanged `df` got attributed to CoW rather than to the suppressed error
+  — **keep stderr visible when a command's failure is the thing you are diagnosing**. And a `du -sh`
+  over the worktree root **timed out at 2 minutes**, killing the whole compound command; it is both the
+  wrong tool and an expensive one.
+  Safety note that makes this cheap: **removing a CLEAN worktree is lossless** — `git worktree remove`
+  drops the directory while the branch and its commits stay in the repo. Only DIRTY worktrees hold
+  anything that can be lost, so `git status --porcelain` is the whole guard.
 - Each abandoned fixture run leaks a `nub` + `node` pair. Real fix is upstream (nub should kill its node child on exit; the harness should signal the whole process group). Until then this is recurring maintenance — and `rust-build-hygiene` is how to stop CREATING the residue.

@@ -71,6 +71,22 @@ The CI job runs the **fast, deterministic core**: unit tests + the enforcement/b
 - When the harness graduates into a permanent regression check, fold it into `main` through the normal flow (it's `tests/**` + a workflow file — a content/CI change, which AGENTS.md routes straight to `main`, no review-gate PR). Decide its steady-state trigger then (e.g. path-filtered on `main`, or `workflow_dispatch`-only).
 - If you only needed the one-time answer, leave the branch as the record (or delete it once `results.md` captures the findings) — never open a PR to "preserve" a throwaway probe.
 
+## A cross-compile CHECK is not a test run — reach for this instead
+
+`cargo check -p nub-cli --all-targets --target x86_64-pc-windows-gnu` proves the code COMPILES for
+Windows. It says nothing about whether the tests PASS there, and the gap between those is exactly
+where platform behavior lives: `.cmd` shims vs `#!/usr/bin/env node`, path separators, `NODE_OPTIONS`
+tokenizing, `process.title`, mode bits that are no-ops.
+
+So a cross-compile is a necessary pre-flight, never the evidence. If you are un-gating tests from
+`#[cfg(unix)]`, or writing anything whose behavior could differ by platform, run a branch probe
+through this skill BEFORE pushing — it needs no PR and costs one workflow run.
+
+(Burned 2026-07-31: `crates/nub-cli/tests/project_runtime_config.rs` was ported off `#![cfg(unix)]`
+so Windows would finally cover the project-config runtime plumbing. The cross-compile was clean and
+it was pushed on that basis. Six of eight tests passed on the real runner and two failed, turning a
+green PR red. The port was right — the verification was not.)
+
 ## When to reach for this vs the alternatives
 
 - **Local host probe** (`ad-hoc-test` skill) — the behavior reproduces on your dev machine. Cheapest; default for anything not platform-gated.
