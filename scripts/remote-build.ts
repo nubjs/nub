@@ -778,12 +778,24 @@ cp -R scripts/darwin-stubs/. "$HOME/.darwin-stubs/"
 # Best-effort: a warm-up failure still leaves a usable image (toolchain + registry), so it
 # must not abort the bake — but it must not be SILENT either, or a cold-building image is
 # indistinguishable from a warm one. Warn loudly rather than `|| true`.
-# NOT best-effort: this is the end-to-end smoke test for the pinned zig, the darwin target,
-# cmake and the C-compiling target deps. Masking it would publish an image whose every build
-# dies with the zero-byte, empty-\`= note:\` linker failure this file's header calls the least
-# debuggable failure in the pipeline. Let it fail the bake — no image gets created.
-cargo build -p nub-cli --profile fast || echo "WARM-WARN: linux warm-up failed; builders will cold-compile"
-(cd crates/nub-native && cargo build) || echo "WARM-WARN: addon warm-up failed"
+# A "NOT best-effort" note here once described an aarch64-apple-darwin cross-build as the
+# bake's zig/SDK smoke test. That build no longer exists — darwin artifacts come from
+# scripts/mac-build.ts on a real macOS runner, per this file's header — so the note
+# documented a command that was not here. The .darwin-stubs copy above is retained.
+#
+# Warm with the EXACT invocations jobScript() runs, not an approximation of them. Cargo
+# fingerprints on the command shape, so \`cargo build -p nub-cli --profile fast\` warmed
+# artifacts that the clippy job could not reuse for FOUR independent reasons: build vs
+# clippy is a different driver, \`fast\` vs the default \`dev\` is a different target directory
+# entirely, one package vs the whole workspace, and no --all-features. Only \`cargo fetch\`
+# carried over, so every remote clippy recompiled the entire graph from scratch — which is
+# why a run could not fit the driving harness's ceiling and the tool never completed a job.
+# Keep these lines in lockstep with jobScript() or the image silently goes cold again.
+cargo clippy --all-targets --all-features --profile fast -- -D warnings || echo "WARM-WARN: clippy warm-up failed; builders will cold-compile"
+(cd crates/nub-native && cargo clippy --all-features --profile fast -- -D warnings) || echo "WARM-WARN: addon clippy warm-up failed"
+# The test job runs on the DEFAULT profile (matching ci.yml), a separate artifact universe
+# from \`fast\`. --no-run stops at link, which is all the warming needs.
+cargo test --workspace --no-run || echo "WARM-WARN: test warm-up failed; the test job will cold-compile"
 rm -rf ~/src
 # Fail the bake if the warm compile produced nothing. Without this a truncated or skipped
 # warm step publishes a cold image that looks identical to a warm one until every builder

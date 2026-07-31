@@ -71,10 +71,14 @@ for (const job of ["clippy", "test"]) {
 // is its own workspace (panic=unwind cdylib) `exclude`d from the root, so a root-only
 // clippy goes green on code that CI then rejects — the exact --all-targets-shaped gap
 // AGENTS.md warns about.
+// `--profile fast` is part of that parity, not an optimisation. This test previously
+// asserted the invocation WITHOUT it while claiming to be verified against ci.yml, so it
+// pinned the drift in place: the job built a second dependency graph under `dev` and could
+// not reuse the golden image's `fast` artifacts, making every remote clippy fully cold.
 test("jobScript(clippy) reproduces all three legs of the CI clippy gate", () => {
   const s = jobScript("clippy", "fast");
-  assert.match(s, /cargo clippy --all-targets --all-features -- -D warnings/);
-  assert.match(s, /crates\/nub-native && cargo clippy --all-features -- -D warnings/, "root clippy does NOT cover nub-native");
+  assert.match(s, /cargo clippy --all-targets --all-features --profile fast -- -D warnings/);
+  assert.match(s, /crates\/nub-native && cargo clippy --all-features --profile fast -- -D warnings/, "root clippy does NOT cover nub-native");
   assert.match(s, /tests\/brand-lint\/check-env-reads\.sh/);
 });
 
@@ -86,7 +90,10 @@ test("jobScript(test) matches CI: whole workspace, real addon staged over the pl
   assert.match(s, /\ncargo test$/, "CI runs the whole workspace, not -p nub-cli");
   assert.match(s, /crates\/nub-native && cargo build/);
   assert.match(s, /cp "\$CARGO_TARGET_DIR\/debug\/libnub_native\.so" runtime\/addons\/nub-native\.node/);
-  assert.doesNotMatch(s, /clippy/);
+  // Anchored to a COMMAND, not the raw text: PREPARE is shared by both jobs and its
+  // comments legitimately explain decisions that mention the other gate, which a bare
+  // /clippy/ match reads as the test job running clippy.
+  assert.doesNotMatch(s, /\ncargo clippy/);
 });
 
 // The bake compiles the dependency graph then `rm -rf ~/src`. A target dir inside ~/src
