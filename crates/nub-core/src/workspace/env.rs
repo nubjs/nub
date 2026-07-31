@@ -222,12 +222,27 @@ pub fn discover_env_files(project_root: &Path) -> Vec<std::path::PathBuf> {
 /// `B=${A}_world`, `C=${B}_!`. Undefined references resolve to the empty string
 /// (consistent with [`load_env_files`]). Mutates `map` in-place and returns it
 /// for easy chaining.
+/// A self-referential value grows MULTIPLICATIVELY per round, so the 10-round
+/// bound alone does not bound the output: `A=${A}${A}${A}${A}${A}${A}${A}${A}`
+/// is 8x per pass, i.e. 8^10 ≈ a billion characters, which leaves the process
+/// thrashing swap rather than looping forever. Reachable from a cloned repo —
+/// a `.env` file has always fed this, and a `nub.jsonc` `envFile` now does too.
+///
+/// A value that would exceed the cap keeps its PRE-expansion text rather than
+/// being truncated: a truncated value is a silently wrong one, and the raw form
+/// is at least visibly literal. 128 KiB is far above any real environment
+/// variable and well under the point where this hurts.
+const MAX_EXPANDED_VALUE: usize = 128 * 1024;
+
 pub fn expand_env_map(map: &mut HashMap<String, String>) -> &mut HashMap<String, String> {
     for _ in 0..10 {
         let snapshot = map.clone();
         let mut changed = false;
         for value in map.values_mut() {
             let expanded = expand_vars(value, &snapshot);
+            if expanded.len() > MAX_EXPANDED_VALUE {
+                continue;
+            }
             if expanded != *value {
                 *value = expanded;
                 changed = true;
@@ -573,6 +588,37 @@ fn expand_vars(value: &str, env: &HashMap<String, String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A self-referential value must not be expanded into swap. The 10-round
+    /// bound does not bound the OUTPUT — each pass multiplies, so eight
+    /// self-references reach ~8^10 characters and the process thrashes long
+    /// before it terminates. Measured before the cap: `nub` on a project whose
+    /// `envFile` held this line did not finish inside 15s.
+    #[test]
+    fn a_self_referential_value_cannot_blow_up_the_expansion() {
+        let mut map = HashMap::new();
+        map.insert(
+            "A".to_string(),
+            "${A}${A}${A}${A}${A}${A}${A}${A}".to_string(),
+        );
+        map.insert("SANE".to_string(), "plain".to_string());
+
+        expand_env_map(&mut map);
+
+        assert!(
+            map["A"].len() <= MAX_EXPANDED_VALUE,
+            "runaway value grew to {} bytes",
+            map["A"].len()
+        );
+        // The control: capping the pathological value must not stop ordinary
+        // expansion happening around it.
+        assert_eq!(map["SANE"], "plain");
+        let mut chain = HashMap::new();
+        chain.insert("A".to_string(), "hello".to_string());
+        chain.insert("B".to_string(), "${A}_world".to_string());
+        expand_env_map(&mut chain);
+        assert_eq!(chain["B"], "hello_world", "normal chains still expand");
+    }
 
     #[test]
     fn parse_simple_env() {
