@@ -985,6 +985,7 @@ mod win {
             homes,
             &f.work,
             None,
+            None,
             vec![node.to_path_buf()],
             Vec::new(),
             os_essential_env(),

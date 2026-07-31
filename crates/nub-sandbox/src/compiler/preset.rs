@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 /// only preset today (the lifecycle-script baseline).
 pub fn resolve(name: &str) -> Result<Value, CompileError> {
     match name {
-        "build-jail" => Ok(build_jail_surface(None, None, None, None)),
+        "build-jail" => Ok(build_jail_surface(None, None, None, None, None)),
         other => Err(CompileError::unknown_preset(other, &["build-jail"])),
     }
 }
@@ -514,6 +514,7 @@ fn build_jail_surface(
     package_dir: Option<&Path>,
     private_home: Option<&Path>,
     package_name: Option<&str>,
+    package_version: Option<&str>,
     store_entry_root: Option<&Path>,
 ) -> Value {
     let mut fs = serde_json::Map::new();
@@ -593,7 +594,7 @@ fn build_jail_surface(
     // of the whole subpath (`macos_seatbelt_base.sbpl`).
     json!({
         "fs": Value::Object(fs),
-        "net": build_jail_net(package_name),
+        "net": build_jail_net(package_name, package_version),
         // Strip-all here; the interposition supplies the scrubbed lifecycle env.
         "vars": []
     })
@@ -659,8 +660,8 @@ fn build_jail_surface(
 ///   denied, which is the coarse grant with the non-egress protections intact. Zero named hosts
 ///   means nothing here reads as a gate, and zero *authored* hosts keeps `mode` off the
 ///   proxy-starting path (`apply_inner`'s Landlock arm skips the proxy outright).
-fn build_jail_net(package_name: Option<&str>) -> Value {
-    if !super::package_network::build_jail_net_allowed(package_name) {
+fn build_jail_net(package_name: Option<&str>, package_version: Option<&str>) -> Value {
+    if !super::package_network::build_jail_net_allowed(package_name, package_version) {
         return json!(false);
     }
     if cfg!(target_os = "linux") {
@@ -688,11 +689,14 @@ fn build_jail_net(package_name: Option<&str>) -> Value {
 ///
 /// `package_name` is aube's INSTALLER-RESOLVED identity for this spawn and the only key
 /// the curated per-package exception table ([`super::curated`]) is looked up by. `None` —
-/// aube's root is a checkout it fetched — grants no exception.
+/// aube's root is a checkout it fetched — grants no exception. `package_version` is that
+/// identity's resolved version; it narrows a matched entry that carries a semver range, on
+/// both the filesystem and the egress axis. Most entries carry none and admit every version.
 pub fn compile_build_jail(
     homes: Homes,
     package_dir: &Path,
     package_name: Option<&str>,
+    package_version: Option<&str>,
     interpreter: Vec<PathBuf>,
     extra_reads: Vec<PathBuf>,
     ambient_env: BTreeMap<String, String>,
@@ -703,6 +707,7 @@ pub fn compile_build_jail(
         Some(package_dir),
         private_home.as_deref(),
         package_name,
+        package_version,
         store_entry_root.as_deref(),
     );
     // cwd anchors diagnostics/canonicalization; the project root (homes.project) is
@@ -726,8 +731,13 @@ pub fn compile_build_jail(
     // LAST of the grants, so a curated rw wins under last-match-wins over the
     // front-inserted dependency-tree READ it nests inside. `ctx.homes.project` is the
     // consumer's project root, which aube guarantees whenever it hands over a name.
-    let home_cache_env =
-        super::curated::grant_curated_package(&mut policy, &ctx.homes, package_dir, package_name);
+    let home_cache_env = super::curated::grant_curated_package(
+        &mut policy,
+        &ctx.homes,
+        package_dir,
+        package_name,
+        package_version,
+    );
     enforce_pure_allowlist("build-jail", &mut policy);
     policy.env = defaults::lifecycle_scrubbed_env(&ambient_env);
     policy.build_jail = true;
@@ -840,6 +850,7 @@ mod tests {
         compile_build_jail(
             homes,
             Path::new("/proj/node_modules/somepkg"),
+            None,
             None,
             vec![PathBuf::from(interpreter)],
             extra_reads.iter().map(PathBuf::from).collect(),
@@ -972,6 +983,7 @@ mod tests {
                 homes.clone(),
                 &package_dir,
                 None,
+                None,
                 Vec::new(),
                 Vec::new(),
                 BTreeMap::new(),
@@ -1059,6 +1071,7 @@ mod tests {
             },
             Path::new("/proj/node_modules/.store/sqlite3@5.1.14/node_modules/sqlite3"),
             None,
+            None,
             Vec::new(),
             Vec::new(),
             BTreeMap::new(),
@@ -1116,6 +1129,7 @@ mod tests {
                 homes.clone(),
                 &package_dir,
                 name,
+                Some("1.0.0"),
                 Vec::new(),
                 Vec::new(),
                 BTreeMap::new(),
@@ -1170,6 +1184,7 @@ mod tests {
                 project,
             },
             &package_dir,
+            None,
             None,
             Vec::new(),
             Vec::new(),
@@ -1250,6 +1265,7 @@ mod tests {
             },
             &package_dir,
             Some("cypress"),
+            Some("1.0.0"),
             Vec::new(),
             Vec::new(),
             [("HOME".to_string(), "/the/users/home".to_string())]
@@ -1291,6 +1307,7 @@ mod tests {
             },
             &package_dir,
             Some("not-in-the-catalog"),
+            Some("1.0.0"),
             Vec::new(),
             Vec::new(),
             BTreeMap::new(),
@@ -1344,6 +1361,7 @@ mod tests {
         let policy = compile_build_jail(
             homes,
             &package_dir,
+            None,
             None,
             Vec::new(),
             Vec::new(),

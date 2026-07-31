@@ -106,8 +106,9 @@ fn the_override_is_inert_by_default_and_replaces_every_table_when_loaded() {
         );
         assert_eq!(
             nub_sandbox::package_network_allowed(),
-            ["override-only-pkg"],
-            "egress is derived from the override's own networkHosts[].fetchedBy"
+            [("override-only-pkg", None)],
+            "egress is derived from the override's own networkHosts[].fetchedBy, and a \
+             `fetchedBy` observation names no version so it can only be unscoped"
         );
 
         // The grant table is private, so it is measured through the policy it compiles to:
@@ -147,6 +148,7 @@ fn granted_siblings(package_name: &str) -> Vec<String> {
         homes.clone(),
         &package_dir,
         Some(package_name),
+        Some("1.0.0"),
         Vec::new(),
         Vec::new(),
         BTreeMap::new(),
@@ -157,6 +159,7 @@ fn granted_siblings(package_name: &str) -> Vec<String> {
     let baseline = nub_sandbox::compile_build_jail(
         homes,
         &package_dir,
+        None,
         None,
         Vec::new(),
         Vec::new(),

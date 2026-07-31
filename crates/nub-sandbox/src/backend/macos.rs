@@ -1711,6 +1711,7 @@ mod tests {
             homes(),
             Path::new("/proj/node_modules/somepkg"),
             None,
+            None,
             vec![PathBuf::from("/testhome/.cache/nub/node/v26/bin/node")],
             Vec::new(),
             BTreeMap::new(),

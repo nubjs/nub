@@ -101,6 +101,13 @@ impl HomePath {
 /// One package's exception. Absent fields mean the jail's baseline already suffices.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct CuratedGrant {
+    /// The semver range this entry is scoped to, or `None` for every version.
+    ///
+    /// A package that stops needing a carve-out — the ecosystem's direction, as builds give
+    /// way to prebuilt `optionalDependencies` — can have the grant withheld from the versions
+    /// that do not use it rather than kept name-wide. `None` is the default and what every
+    /// entry measured before this field existed still means. See [`super::version_scope`].
+    versions: Option<&'static str>,
     /// Named entries of the package's OWN enclosing `node_modules` it may write —
     /// ENUMERATED, never a pattern. Correct under every linker: `enclosing_node_modules`
     /// resolves to the store cell's `node_modules` under the isolated layout and to the
@@ -230,6 +237,7 @@ include!(concat!(env!("OUT_DIR"), "/curated_grants.rs"));
 #[cfg(test)]
 impl CuratedGrant {
     const NONE: Self = Self {
+        versions: None,
         sibling_dirs: &[],
         dependency_dirs: &[],
         home_paths: &[],
@@ -533,6 +541,8 @@ static GOLDEN_PRE_CATALOG_GRANTS: &[(&str, CuratedGrant)] = &[
 ///
 /// `None` — aube's root is a fetched checkout, so there is no consumer-anchored identity —
 /// grants nothing, which is the conservative direction and the reading §0e requires.
+/// `package_version` is that same identity's resolved version, consulted only by an entry
+/// that carries a range.
 ///
 /// Appended rather than front-inserted: these are the NARROWEST grants in the policy and
 /// must win under last-match-wins over the front-inserted dependency-tree READ they nest
@@ -543,8 +553,16 @@ pub fn grant_curated_package(
     homes: &Homes,
     package_dir: &Path,
     package_name: Option<&str>,
+    package_version: Option<&str>,
 ) -> Vec<(String, String)> {
-    grant_from_table(curated_table(), policy, homes, package_dir, package_name)
+    grant_from_table(
+        curated_table(),
+        policy,
+        homes,
+        package_dir,
+        package_name,
+        package_version,
+    )
 }
 
 /// The grant table in force: [`CURATED_GRANTS`], unless the dev-only catalog override
@@ -580,6 +598,7 @@ fn curated_table() -> &'static [(&'static str, CuratedGrant)] {
                     (
                         g.package.as_str(),
                         CuratedGrant {
+                            versions: g.versions.as_deref(),
                             sibling_dirs: strs(&g.sibling_dirs),
                             dependency_dirs: chains,
                             home_paths,
@@ -612,9 +631,10 @@ fn grant_from_table(
     homes: &Homes,
     package_dir: &Path,
     package_name: Option<&str>,
+    package_version: Option<&str>,
 ) -> Vec<(String, String)> {
     let project_root = homes.project.as_path();
-    let Some(grant) = package_name.and_then(|n| lookup(table, n)) else {
+    let Some(grant) = package_name.and_then(|n| lookup(table, n, package_version)) else {
         return Vec::new();
     };
     let mut rules = Vec::new();
@@ -828,10 +848,16 @@ fn restrict_to_owner(path: &Path) {
 #[cfg(not(unix))]
 fn restrict_to_owner(_path: &Path) {}
 
-fn lookup(table: &[(&str, CuratedGrant)], name: &str) -> Option<CuratedGrant> {
+/// The exact-name match, then the entry's own version scope. Both halves must hold: the name
+/// is the authorship key, and a range is a narrowing its author measured a boundary for.
+fn lookup(
+    table: &[(&str, CuratedGrant)],
+    name: &str,
+    version: Option<&str>,
+) -> Option<CuratedGrant> {
     table
         .iter()
-        .find(|(key, _)| *key == name)
+        .find(|(key, grant)| *key == name && super::version_scope::applies(grant.versions, version))
         .map(|(_, grant)| *grant)
 }
 
@@ -932,13 +958,22 @@ mod tests {
         policy_for_project(&project(), package_dir, name)
     }
 
+    /// Every shipped entry is unscoped, so the version these helpers pass is arbitrary and
+    /// only has to be a version at all — the scope itself is asserted separately, against a
+    /// synthetic table, in `a_version_scoped_entry_applies_only_within_its_range`.
     fn policy_for_project(
         project_root: &Path,
         package_dir: &Path,
         name: Option<&str>,
     ) -> SandboxPolicy {
         let mut policy = SandboxPolicy::default();
-        let _ = grant_curated_package(&mut policy, &homes_for(project_root), package_dir, name);
+        let _ = grant_curated_package(
+            &mut policy,
+            &homes_for(project_root),
+            package_dir,
+            name,
+            Some("1.0.0"),
+        );
         policy
     }
 
@@ -1021,7 +1056,14 @@ mod tests {
                 let mut p = SandboxPolicy::default();
                 // The env pairs ride into the comparison too: a `home_paths` entry the
                 // generator dropped would leave the fs rules identical and only differ here.
-                let env = grant_from_table(table, &mut p, &homes_for(project), &dir, Some(name));
+                let env = grant_from_table(
+                    table,
+                    &mut p,
+                    &homes_for(project),
+                    &dir,
+                    Some(name),
+                    Some("1.0.0"),
+                );
                 p.fs.rules
                     .entries
                     .iter()
@@ -1165,6 +1207,7 @@ mod tests {
             &homes_for(project),
             &client_nm.join("@prisma/client"),
             Some("@prisma/client"),
+            Some("6.19.3"),
         );
         let granted = globs(&policy);
         let real = |p: &Path| {
@@ -1285,6 +1328,53 @@ mod tests {
         assert!(globs(&policy_for(&cell("@prisma/client"), None)).is_empty());
     }
 
+    /// A range on an entry BINDS: inside it the grant compiles, outside it the package is
+    /// treated exactly as if it had no entry at all.
+    ///
+    /// Driven through a synthetic table because every shipped `packageGrants` entry is
+    /// deliberately unscoped — asserting against the catalog would test whatever it happens
+    /// to contain, and would go vacuous the moment that is nothing. The unscoped control in
+    /// the same table is what proves the withholding is the RANGE firing rather than the
+    /// version argument disarming the lookup wholesale.
+    #[test]
+    fn a_version_scoped_entry_applies_only_within_its_range() {
+        static TABLE: &[(&str, CuratedGrant)] = &[
+            (
+                "scoped",
+                CuratedGrant {
+                    versions: Some("<2.0.0"),
+                    sibling_dirs: &["@types"],
+                    ..CuratedGrant::NONE
+                },
+            ),
+            (
+                "unscoped",
+                CuratedGrant {
+                    sibling_dirs: &["@types"],
+                    ..CuratedGrant::NONE
+                },
+            ),
+        ];
+        let granted = |name: &str, version: Option<&str>| {
+            let mut policy = SandboxPolicy::default();
+            let _ = grant_from_table(
+                TABLE,
+                &mut policy,
+                &homes_for(&project()),
+                &cell(name),
+                Some(name),
+                version,
+            );
+            !globs(&policy).is_empty()
+        };
+
+        assert!(granted("scoped", Some("1.9.9")));
+        assert!(!granted("scoped", Some("2.0.0")));
+        assert!(!granted("scoped", None));
+        assert!(granted("unscoped", Some("2.0.0")));
+        assert!(granted("unscoped", None));
+    }
+
     /// A sibling grant is MATERIALIZED when its parent is real, because Landlock cannot
     /// attach a rule to an absent path — and is a no-op when the parent is not, so a policy
     /// compiled against a synthetic path neither builds a tree nor changes shape with the
@@ -1305,6 +1395,7 @@ mod tests {
             &homes_for(root.path()),
             &package_dir,
             Some("@prisma/client"),
+            Some("6.19.3"),
         );
         let sibling = enclosing.join(".prisma");
         assert!(
@@ -1382,6 +1473,7 @@ mod tests {
             &homes,
             &project.join("node_modules/cache-writer"),
             Some("cache-writer"),
+            Some("1.0.0"),
         );
         let real = |p: PathBuf| {
             crate::matcher::path::canonicalize_including_nonexistent(&p)
@@ -1427,7 +1519,8 @@ mod tests {
                 &mut other,
                 &homes,
                 &project.join("node_modules/evil"),
-                Some("evil")
+                Some("evil"),
+                Some("1.0.0"),
             )
             .is_empty()
         );
@@ -1467,6 +1560,7 @@ mod tests {
             &homes,
             &homes.project.join("node_modules/pkg"),
             Some("pkg"),
+            Some("1.0.0"),
         );
         assert!(env.is_empty(), "no variable may point at a dropped grant");
         assert!(
@@ -1494,6 +1588,7 @@ mod tests {
             &homes_for(project),
             &project.join("node_modules/.store/msw@1/node_modules/msw"),
             Some("msw"),
+            Some("2.11.5"),
         );
         let granted = globs(&policy);
         let canon = crate::matcher::path::canonicalize_including_nonexistent(project);

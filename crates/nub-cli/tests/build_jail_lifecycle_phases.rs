@@ -22,18 +22,24 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Default)]
 struct Recorder {
     phases: Mutex<Vec<String>>,
-    /// What the opt-out gate was asked about. The identity has to survive the whole
-    /// `run_dep_hook` → `SandboxScope` → `confines` path or nub's per-package opt-out
-    /// silently degrades to "no package ever opts out".
-    gated: Mutex<Vec<Option<String>>>,
+    /// What the opt-out gate was asked about — BOTH halves of the identity. It has to
+    /// survive the whole `run_dep_hook` → `SandboxScope` → `confines` path or nub's
+    /// per-package opt-out silently degrades to "no package ever opts out", and its version
+    /// half is what the catalog's version-scoped grants are selected by.
+    gated: Mutex<Vec<(Option<String>, Option<String>)>>,
 }
 
 impl aube_util::LifecycleSandbox for Recorder {
-    fn confines(&self, package_name: Option<&str>, _project_root: &std::path::Path) -> bool {
-        self.gated
-            .lock()
-            .expect("recorder lock")
-            .push(package_name.map(str::to_string));
+    fn confines(
+        &self,
+        package_name: Option<&str>,
+        package_version: Option<&str>,
+        _project_root: &std::path::Path,
+    ) -> bool {
+        self.gated.lock().expect("recorder lock").push((
+            package_name.map(str::to_string),
+            package_version.map(str::to_string),
+        ));
         true
     }
 
@@ -158,6 +164,7 @@ fn preinstall_install_and_postinstall_all_reach_the_build_jail() {
                 &[],
                 None,
                 Some("evil"),
+                Some("6.6.6"),
             ))
             .unwrap_or_else(|e| match e {
                 // The fixture scripts are `exit 1`, so a non-zero exit means the real
@@ -174,13 +181,14 @@ fn preinstall_install_and_postinstall_all_reach_the_build_jail() {
     assert_eq!(
         recorder.gated.lock().expect("recorder lock").clone(),
         vec![
-            Some("evil".to_string()),
-            Some("evil".to_string()),
-            Some("evil".to_string())
+            (Some("evil".to_string()), Some("6.6.6".to_string())),
+            (Some("evil".to_string()), Some("6.6.6".to_string())),
+            (Some("evil".to_string()), Some("6.6.6".to_string()))
         ],
-        "the resolved package identity must reach the opt-out gate on every phase; \
-         `None` here means nub can no longer tell which package it is being asked about \
-         and every opt-out silently stops working"
+        "the resolved package identity — name AND version — must reach the gate on every \
+         phase; `None` for the name means nub can no longer tell which package it is being \
+         asked about and every opt-out silently stops working, and `None` for the version \
+         means every version-scoped catalog entry silently stops applying"
     );
 
     let seen = recorder.phases.lock().expect("recorder lock").clone();

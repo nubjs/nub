@@ -12,8 +12,9 @@
 //! A second copy would drift, and a drifted validator on this surface is worse than none: the
 //! runtime copy would be the one silently missing a check. So `build.rs` pulls this file in
 //! with `#[path]` and the crate pulls it in as a module — one source, two compilations. That
-//! is also why it depends on nothing but `std` and `serde_json`: `build.rs` cannot see the
-//! crate, so any `crate::` reference here would break the build-script copy.
+//! is also why it depends on nothing but `std`, `serde_json` and `semver`: `build.rs` cannot
+//! see the crate, so any `crate::` reference here would break the build-script copy, and every
+//! external crate it names has to be declared as a build-dependency as well as a dependency.
 //!
 //! Parsing yields OWNED data rather than the `&'static` the compiled tables use, because a
 //! runtime-loaded catalog has no static backing. `build.rs` codegens `&'static` literals from
@@ -55,6 +56,8 @@ pub struct HomePath {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageGrant {
     pub package: String,
+    /// The semver range this grant is scoped to, or `None` for every version.
+    pub versions: Option<String>,
     pub sibling_dirs: Vec<String>,
     /// `$HOME`-anchored artifact caches, with the env var that redirects each one.
     pub home_paths: Vec<HomePath>,
@@ -66,6 +69,14 @@ pub struct PackageGrant {
     /// Where the entry's project writes come from, if it has any.
     pub project_writes: Option<ProjectWriteSource>,
     pub project_cwd: bool,
+}
+
+/// One package admitted to the network, and the versions the admission covers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageNetworkGrant {
+    pub package: String,
+    /// The semver range this grant is scoped to, or `None` for every version.
+    pub versions: Option<String>,
 }
 
 /// A parsed, fully-validated catalog. Three tables, and only TWO of them are consulted by
@@ -81,9 +92,9 @@ pub struct Catalog {
     /// In written order.
     pub download_hosts: Vec<String>,
     pub package_grants: Vec<PackageGrant>,
-    /// Packages permitted egress — ALL of it, to any host, or none. SORTED and deduplicated
-    /// so the lookup may binary-search.
-    pub package_network_allowed: Vec<String>,
+    /// Packages permitted egress — ALL of it, to any host, or none. SORTED by package name
+    /// and deduplicated so the lookup may binary-search.
+    pub package_network_allowed: Vec<PackageNetworkGrant>,
 }
 
 /// Parse and validate a catalog document. Every rejection names the offending path so a
@@ -182,6 +193,7 @@ fn parse_grants(catalog: &serde_json::Value) -> Result<Vec<PackageGrant>, String
         if !seen.insert(package.clone()) {
             return Err(format!("{at}: `{package}` is listed twice"));
         }
+        let versions = parse_version_range(entry, &at)?;
 
         let sibling_dirs = opt_strings(entry, "siblingDirs", &at)?;
         for dir in &sibling_dirs {
@@ -224,6 +236,7 @@ fn parse_grants(catalog: &serde_json::Value) -> Result<Vec<PackageGrant>, String
 
         grants.push(PackageGrant {
             package,
+            versions,
             sibling_dirs,
             home_paths,
             dependency_dirs,
@@ -234,6 +247,55 @@ fn parse_grants(catalog: &serde_json::Value) -> Result<Vec<PackageGrant>, String
     }
 
     Ok(grants)
+}
+
+/// The optional semver range scoping an entry to the versions its measurement covers.
+///
+/// ABSENT MEANS EVERY VERSION, and that default is what makes the field safe to add to a
+/// catalog whose entries were all measured on one version and granted to all of them: an
+/// unscoped entry means exactly what it meant before this field was parsed. A range is
+/// therefore an act of narrowing that someone measured a BOUNDARY for — `esbuild`'s `<0.13.0`
+/// is the version `optionalDependencies` landed in, above which the package resolves a
+/// prebuilt binary and opens no socket — never a restatement of "we happened to test 1.2.3".
+/// The version a measurement ran against is `versionsObserved`, which is prose and gates
+/// nothing.
+///
+/// A malformed range FAILS THE BUILD rather than degrading to unscoped. The two silent
+/// readings are both worse than a compile error: treating it as "all versions" widens a grant
+/// its author meant to narrow, and treating it as "no versions" makes the entry inert while
+/// still reading as present.
+fn parse_version_range(entry: &serde_json::Value, at: &str) -> Result<Option<String>, String> {
+    // A prose note is allowed to sit beside the range, but only as its own key. The two were
+    // one field until 2026-07-31, which is precisely the trap this split closes: every entry
+    // carried a `versions` string that looked like a condition and constrained nothing.
+    match entry.get("versionsObserved") {
+        None | Some(serde_json::Value::Null) => {}
+        Some(v) => {
+            v.as_str()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| format!("{at}: `versionsObserved` must be a non-empty string"))?;
+        }
+    }
+
+    let Some(value) = entry.get("versions") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let text = value
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| {
+            format!("{at}: `versions` must be a semver range string, e.g. \"<0.13.0\"")
+        })?;
+    semver::VersionReq::parse(text).map_err(|e| {
+        format!(
+            "{at}: versions `{text}` is not a semver range ({e}) — a note about which \
+             versions were measured belongs in `versionsObserved`, which constrains nothing"
+        )
+    })?;
+    Ok(Some(text.to_string()))
 }
 
 /// Validate `homePaths` — the `$HOME`-anchored artifact caches, one entry per override var.
@@ -510,7 +572,14 @@ fn require_package_name(name: &str, at: &str) -> Result<(), String> {
 /// `notGranted.packages` OVERRIDES both. A package refused on the merits gets nothing, and it
 /// can legitimately appear in `fetchedBy` as an observation of what it *did* fetch — recording
 /// the observation must not become a grant. (Real case: `install-peers` is both.)
-fn parse_package_network(catalog: &serde_json::Value) -> Result<Vec<String>, String> {
+///
+/// ONLY `packageNetwork.full` MAY BE VERSION-SCOPED. A `fetchedBy` name is an observation
+/// attached to a HOST, carrying no version of its own, so it can only ever mean "every
+/// version" — and a package spelled both ways with a range on the `full` side would be an
+/// entry that reads as narrowed while the other spelling silently re-widens it. That
+/// contradiction is rejected rather than resolved, on the same principle as the refused-host
+/// check above: a reader must not have to guess which spelling won.
+fn parse_package_network(catalog: &serde_json::Value) -> Result<Vec<PackageNetworkGrant>, String> {
     let mut refused = BTreeSet::new();
     for (i, entry) in array_at(catalog, &["notGranted", "packages"])?
         .iter()
@@ -523,10 +592,15 @@ fn parse_package_network(catalog: &serde_json::Value) -> Result<Vec<String>, Str
         )?);
     }
 
-    let mut allowed: BTreeSet<String> = BTreeSet::new();
+    // `BTreeMap` rather than a `Vec` so the result is sorted by name and deduplicated, which
+    // is what the compiled table's `binary_search` rests on. The value is the range in force.
+    let mut allowed: std::collections::BTreeMap<String, Option<String>> =
+        std::collections::BTreeMap::new();
+    let mut fetched_by: BTreeSet<String> = BTreeSet::new();
     for entry in array(catalog, "networkHosts")? {
         for pkg in opt_strings(entry, "fetchedBy", "networkHosts")? {
-            allowed.insert(pkg);
+            fetched_by.insert(pkg.clone());
+            allowed.insert(pkg, None);
         }
     }
     for (i, entry) in array_at(catalog, &["packageNetwork", "full"])?
@@ -535,13 +609,25 @@ fn parse_package_network(catalog: &serde_json::Value) -> Result<Vec<String>, Str
     {
         let at = format!("packageNetwork.full[{i}]");
         require_provenance(entry, &at)?;
-        allowed.insert(string(entry, "package", &at)?);
+        let package = string(entry, "package", &at)?;
+        let versions = parse_version_range(entry, &at)?;
+        if versions.is_some() && fetched_by.contains(&package) {
+            return Err(format!(
+                "{at}: `{package}` is version-scoped here but also named in a \
+                 networkHosts[].fetchedBy array, which is unscoped — the two spellings \
+                 disagree about which versions are admitted"
+            ));
+        }
+        allowed.insert(package, versions);
     }
     for name in &refused {
         allowed.remove(name);
     }
 
-    Ok(allowed.into_iter().collect())
+    Ok(allowed
+        .into_iter()
+        .map(|(package, versions)| PackageNetworkGrant { package, versions })
+        .collect())
 }
 
 /// A project-relative subtree, checked before the runtime clamp ever sees it. The clamp in
@@ -680,10 +766,109 @@ mod tests {
         .expect("the synthetic catalog is valid");
 
         assert_eq!(
-            catalog.package_network_allowed,
-            vec!["admitted-pkg".to_string()],
+            catalog
+                .package_network_allowed
+                .iter()
+                .map(|g| g.package.as_str())
+                .collect::<Vec<_>>(),
+            vec!["admitted-pkg"],
             "the refusal must remove `refused-pkg` and leave its `fetchedBy` sibling admitted"
         );
+    }
+
+    /// `versions` is the one field that NARROWS an entry, so a malformed one must fail the
+    /// build rather than degrade — both silent readings are wrong in a different direction
+    /// (unscoped widens what its author narrowed; inert leaves a grant that reads as present).
+    ///
+    /// The accepted control is what makes this non-vacuous, and it also pins the split that
+    /// motivated the field: a prose note in `versionsObserved` is fine, the SAME prose in
+    /// `versions` is rejected. Every entry in the shipped catalog carried exactly that prose
+    /// under the `versions` name until 2026-07-31, unparsed and constraining nothing.
+    #[test]
+    fn a_version_scope_is_a_real_range_or_the_build_fails() {
+        let catalog = |scope: &str| {
+            super::parse(&format!(
+                r#"{{
+                  "networkHosts": [],
+                  "packageGrants": [{{
+                    "package": "pkg",
+                    {scope}
+                    "siblingDirs": ["@types"],
+                    "mechanism": "copies generated typings into a sibling of its own package dir",
+                    "evidence": "measured",
+                    "observed": "EPERM writing the sibling directory under the jail",
+                    "platform": "macos-arm64"
+                  }}],
+                  "notGranted": {{}}
+                }}"#
+            ))
+        };
+
+        let scoped = catalog(r#""versions": "<0.13.0","#).expect("a semver range is valid");
+        assert_eq!(
+            scoped.package_grants[0].versions.as_deref(),
+            Some("<0.13.0")
+        );
+        let unscoped = catalog("").expect("an absent range is valid");
+        assert_eq!(
+            unscoped.package_grants[0].versions, None,
+            "an absent `versions` must stay absent — it is what makes every existing entry \
+             keep meaning every version"
+        );
+        let noted = catalog(r#""versionsObserved": "6.x (7.0.0 dropped the postinstall)","#)
+            .expect("prose in versionsObserved is provenance and constrains nothing");
+        assert_eq!(noted.package_grants[0].versions, None);
+
+        for rejected in [
+            // The prose the field used to hold, in the field that now enforces.
+            r#""versions": "6.x (7.0.0 dropped the postinstall entirely)","#,
+            r#""versions": "13.x, measured on 13.14.2","#,
+            r#""versions": "not a range","#,
+            // Shapes with nothing to enforce.
+            r#""versions": "","#,
+            r#""versions": 13,"#,
+            r#""versions": ["<0.13.0"],"#,
+            // A note that carries no note.
+            r#""versionsObserved": "","#,
+        ] {
+            assert!(catalog(rejected).is_err(), "{rejected} must be rejected");
+        }
+    }
+
+    /// A package cannot be admitted unscoped by one spelling and scoped by the other. The
+    /// `fetchedBy` observation hangs off a HOST and names no version, so it can only mean
+    /// every version — silently letting it outrank a range would make a narrowed entry inert
+    /// while it still read as narrowed.
+    #[test]
+    fn a_scoped_egress_entry_may_not_be_re_widened_by_a_fetched_by_observation() {
+        let catalog = |versions: &str| {
+            super::parse(&format!(
+                r#"{{
+                  "networkHosts": [{{
+                    "host": "cdn.example.test",
+                    "fetchedBy": ["pkg"],
+                    "evidence": "measured",
+                    "observed": "the package resolved this host during its postinstall",
+                    "platform": "linux-x64"
+                  }}],
+                  "packageGrants": [],
+                  "packageNetwork": {{ "full": [{{
+                    "package": "pkg",
+                    {versions}
+                    "evidence": "measured",
+                    "observed": "the package resolved this host during its postinstall",
+                    "platform": "linux-x64"
+                  }}] }},
+                  "notGranted": {{}}
+                }}"#
+            ))
+        };
+        assert!(catalog(r#""versions": "<2.0.0","#).is_err());
+        // The control: the same pair without a range is the ordinary both-spellings case the
+        // catalog already contains, and stays admitted exactly once.
+        let both = catalog("").expect("an unscoped entry may be spelled both ways");
+        assert_eq!(both.package_network_allowed.len(), 1);
+        assert_eq!(both.package_network_allowed[0].versions, None);
     }
 
     /// A `homePaths` entry writes into the user's REAL home, so its two halves — the anchor

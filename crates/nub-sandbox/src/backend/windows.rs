@@ -2529,6 +2529,7 @@ mod tests {
             homes,
             Path::new("/proj/node_modules/somepkg"),
             None,
+            None,
             vec![PathBuf::from("/testhome/.cache/nub/node/v26/bin/node")],
             vec![PathBuf::from(
                 "/testhome/.cache/nub/node/v26/lib/node_modules",

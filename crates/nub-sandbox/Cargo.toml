@@ -31,6 +31,12 @@ globset = "0.4"
 regex = "1"
 ipnet = { version = "2", features = ["serde"] }
 sha2 = { workspace = true }
+# The build-jail catalog's optional per-entry `versions` range: validated at BUILD time by
+# the shared parser and matched at policy-compile time against the installer-resolved
+# version. Cargo range semantics rather than npm's, because these ranges are nub-authored
+# catalog text and never a package's own dependency spec — the dialect only has to be one
+# this repo writes. Already in the workspace lockfile via nub-cli/nub-core.
+semver = "1"
 
 # Per-session egress-proxy token: getrandom mints the 256-bit bearer (OS CSPRNG, no
 # userspace-seeded PRNG); base64 decodes the client's HTTP `Proxy-Authorization: Basic`
@@ -116,6 +122,9 @@ features = [
 # written, and none of the catalog's objects carry last-match-wins semantics.
 [build-dependencies]
 serde_json = { workspace = true }
+# The shared validator (`src/catalog.rs`, pulled into build.rs with `#[path]`) parses each
+# entry's `versions` range, so the build-script copy needs the same crate the library one does.
+semver = "1"
 
 [dev-dependencies]
 tempfile = "3"

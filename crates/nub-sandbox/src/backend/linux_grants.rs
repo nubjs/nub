@@ -533,6 +533,7 @@ mod tests {
             },
             &package_dir,
             None,
+            None,
             Vec::new(),
             // The header dir a distro Node without its `-dev` package does not ship.
             vec![dir.path().join("node-root/include/node")],

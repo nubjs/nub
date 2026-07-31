@@ -20,6 +20,7 @@ mod package_network;
 mod preset;
 mod resolve;
 mod reuse;
+mod version_scope;
 
 /// Exposed on EVERY platform, unlike the stamp itself, so `stdio_shim_semantics` drives the
 /// payload that actually ships rather than the source file it is derived from — comment-stripping

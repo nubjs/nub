@@ -80,6 +80,7 @@ impl Jail {
             },
             &self.package_dir,
             None,
+            None,
             Vec::new(),
             Vec::new(),
             ambient,

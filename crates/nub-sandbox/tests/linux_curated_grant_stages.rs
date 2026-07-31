@@ -111,6 +111,7 @@ impl Fixture {
             },
             &self.package_dir,
             granted.then_some(package),
+            Some("1.0.0"),
             Vec::new(),
             Vec::new(),
             ambient,

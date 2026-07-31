@@ -58,6 +58,13 @@ pub struct LifecycleSandboxSpawn {
     /// embedder must read it as "no policy", never as "no confinement" — a fetched
     /// checkout's only name is the one it wrote into its own manifest.
     pub package_name: Option<String>,
+    /// The INSTALLER-RESOLVED version of that same package, carried so an embedder can
+    /// scope a per-package policy to the versions it was measured against rather than
+    /// to the name alone.
+    ///
+    /// Withheld exactly when `package_name` is: the two are one identity, and a version
+    /// without the name it belongs to selects nothing.
+    pub package_version: Option<String>,
     /// The command's explicit env operations (set = `Some`, removed = `None`), read
     /// back from the built command. Layered over the inherited aube-process env by the
     /// embedder to reconstruct the effective child env the unconfined spawn would have.
@@ -127,12 +134,18 @@ pub trait LifecycleSandbox: Send + Sync + std::fmt::Debug {
     ///
     /// A `None` name means `project_root` is NOT the consumer's own project, so an
     /// embedder keying policy off the root manifest must read it as "no policy" rather
-    /// than "no confinement". Defaults to `true`: an embedder that does not override this
-    /// confines everything exactly as before.
+    /// than "no confinement". `package_version` is that same identity's resolved version,
+    /// withheld on exactly the same condition. Defaults to `true`: an embedder that does
+    /// not override this confines everything exactly as before.
     ///
     /// [`confines`]: LifecycleSandbox::confines
-    fn would_confine(&self, package_name: Option<&str>, project_root: &std::path::Path) -> bool {
-        let _ = (package_name, project_root);
+    fn would_confine(
+        &self,
+        package_name: Option<&str>,
+        package_version: Option<&str>,
+        project_root: &std::path::Path,
+    ) -> bool {
+        let _ = (package_name, package_version, project_root);
         true
     }
 
@@ -144,8 +157,13 @@ pub trait LifecycleSandbox: Send + Sync + std::fmt::Debug {
     /// a side effect the planning call must not have.
     ///
     /// [`would_confine`]: LifecycleSandbox::would_confine
-    fn confines(&self, package_name: Option<&str>, project_root: &std::path::Path) -> bool {
-        self.would_confine(package_name, project_root)
+    fn confines(
+        &self,
+        package_name: Option<&str>,
+        package_version: Option<&str>,
+        project_root: &std::path::Path,
+    ) -> bool {
+        self.would_confine(package_name, package_version, project_root)
     }
 }
 
@@ -636,14 +654,22 @@ mod tests {
             fn run(&self, _: LifecycleSandboxSpawn) -> std::io::Result<std::process::ExitStatus> {
                 unreachable!("not spawned in this test")
             }
-            fn would_confine(&self, name: Option<&str>, _: &std::path::Path) -> bool {
-                name != Some("opted-out")
+            /// Keys on BOTH halves of the identity, so a `confines` that forwarded only the
+            /// name would fail here rather than pass by ignoring the version.
+            fn would_confine(
+                &self,
+                name: Option<&str>,
+                version: Option<&str>,
+                _: &std::path::Path,
+            ) -> bool {
+                (name, version) != (Some("opted-out"), Some("1.0.0"))
             }
         }
         let root = std::path::Path::new("/proj");
-        assert!(!Declines.confines(Some("opted-out"), root));
-        assert!(Declines.confines(Some("other"), root));
-        assert!(Declines.confines(None, root));
+        assert!(!Declines.confines(Some("opted-out"), Some("1.0.0"), root));
+        assert!(Declines.confines(Some("opted-out"), Some("2.0.0"), root));
+        assert!(Declines.confines(Some("other"), Some("1.0.0"), root));
+        assert!(Declines.confines(None, None, root));
 
         #[derive(Debug)]
         struct Defaults;
@@ -652,7 +678,7 @@ mod tests {
                 unreachable!("not spawned in this test")
             }
         }
-        assert!(Defaults.would_confine(Some("anything"), root));
-        assert!(Defaults.confines(Some("anything"), root));
+        assert!(Defaults.would_confine(Some("anything"), Some("1.0.0"), root));
+        assert!(Defaults.confines(Some("anything"), Some("1.0.0"), root));
     }
 }

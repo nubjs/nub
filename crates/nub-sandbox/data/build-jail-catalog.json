@@ -623,8 +623,9 @@
       },
       {
         "package": "esbuild",
+        "versions": "<0.13.0",
         "evidence": "measured",
-        "observed": "Isolated single-version shards, macOS arm64, 2026-07-31. ONLY versions BELOW 0.13.0 need this. Confined 0.11.23: `Failed to install \"esbuild-darwin-arm64\" using npm` then `npm error network request to https://registry.npmjs.org/esbuild-darwin-arm64 failed, reason: getaddrinfo ENOTFOUND registry.npmjs.org`, and the direct-fetch fallback dies on the same host; `bin/esbuild` is left as the shipped 650-byte JS shim. Unconfined A0, same fixture: a 7,951,298-byte Mach-O. With this entry the confined arm produces that same 7,951,298 bytes, against a control catalog loaded through the identical override path and differing only by this entry. 0.12.29 behaves identically (8,086,834 B). registry.npmjs.org is NOT promoted to networkHosts — it serves an authenticated publish route on the same hostname, the github.com shape; this is the third package granted here for that reason, after @paloaltonetworks/postman-code-generators and @mapbox/node-pre-gyp's caller. optionalDependencies landed in 0.13.0, so from 0.13.0 up install.js resolves the platform package and never opens a socket: 0.28.1, 0.27.7, 0.25.12 and 0.13.0 all pass CONFINED AND UNGRANTED with artifacts byte-identical to their unconfined arms. By weekly downloads the versions this entry serves are 0.125% of esbuild's 264M; the grant is keyed on the NAME, so it is inert for the other 99.87% but not withheld from them.",
+        "observed": "Isolated single-version shards, macOS arm64, 2026-07-31. ONLY versions BELOW 0.13.0 need this. Confined 0.11.23: `Failed to install \"esbuild-darwin-arm64\" using npm` then `npm error network request to https://registry.npmjs.org/esbuild-darwin-arm64 failed, reason: getaddrinfo ENOTFOUND registry.npmjs.org`, and the direct-fetch fallback dies on the same host; `bin/esbuild` is left as the shipped 650-byte JS shim. Unconfined A0, same fixture: a 7,951,298-byte Mach-O. With this entry the confined arm produces that same 7,951,298 bytes, against a control catalog loaded through the identical override path and differing only by this entry. 0.12.29 behaves identically (8,086,834 B). registry.npmjs.org is NOT promoted to networkHosts — it serves an authenticated publish route on the same hostname, the github.com shape; this is the third package granted here for that reason, after @paloaltonetworks/postman-code-generators and @mapbox/node-pre-gyp's caller. optionalDependencies landed in 0.13.0, so from 0.13.0 up install.js resolves the platform package and never opens a socket: 0.28.1, 0.27.7, 0.25.12 and 0.13.0 all pass CONFINED AND UNGRANTED with artifacts byte-identical to their unconfined arms. THE ENTRY IS SCOPED TO THAT BOUNDARY rather than keyed on the name alone. Per-version weekly downloads: below 0.13.0 is 327,496 (0.125%), 0.13.x is 136,460 (0.052%), and 0.14 and up is 261,241,226 (99.82%) — so a name-keyed grant would hand egress to 99.82% of installs measured not to need it. The corpus reached 0.11.23 only transitively, via iobroker.js-controller@7.2.2 -> @alcalzone/esbuild-register -> esbuild@^0.11.5.",
         "platform": "macos-arm64"
       },
       {
@@ -1160,7 +1161,7 @@
   "packageGrants": [
     {
       "package": "@arkweid/lefthook",
-      "versions": "0.7.7",
+      "versionsObserved": "0.7.7",
       "projectReads": [
         ".git/HEAD",
         ".git/config",
@@ -1194,7 +1195,7 @@
     },
     {
       "package": "@danmarshall/deckgl-typings",
-      "versions": "4.9.28",
+      "versionsObserved": "4.9.28",
       "siblingDirs": [
         "@types"
       ],
@@ -1205,7 +1206,7 @@
     },
     {
       "package": "@evilmartians/lefthook",
-      "versions": "2.1.10",
+      "versionsObserved": "2.1.10",
       "projectReads": [
         ".git/HEAD",
         ".git/config",
@@ -1240,7 +1241,7 @@
     },
     {
       "package": "@pact-foundation/pact-node",
-      "versions": "10.18.0",
+      "versionsObserved": "10.18.0",
       "projectReads": [
         ".npmrc"
       ],
@@ -1251,7 +1252,7 @@
     },
     {
       "package": "@prisma/client",
-      "versions": "6.x (7.0.0 dropped the postinstall entirely)",
+      "versionsObserved": "6.x (7.0.0 dropped the postinstall entirely)",
       "siblingDirs": [
         ".prisma"
       ],
@@ -1275,7 +1276,7 @@
     },
     {
       "package": "cypress",
-      "versions": "13.x, measured on 13.14.2. The CYPRESS_CACHE_FOLDER override and the cachedir() default both predate 13 and are unchanged on 14/15.",
+      "versionsObserved": "13.x, measured on 13.14.2. The CYPRESS_CACHE_FOLDER override and the cachedir() default both predate 13 and are unchanged on 14/15.",
       "homePaths": [
         {
           "env": "CYPRESS_CACHE_FOLDER",
@@ -1290,7 +1291,7 @@
     },
     {
       "package": "ghooks",
-      "versions": "2.0.4",
+      "versionsObserved": "2.0.4",
       "projectWrites": {
         "literal": [
           ".git/hooks"
@@ -1303,7 +1304,7 @@
     },
     {
       "package": "git-commit-msg-linter",
-      "versions": "5.0.8",
+      "versionsObserved": "5.0.8",
       "projectWrites": {
         "literal": [
           ".git/hooks"
@@ -1316,7 +1317,7 @@
     },
     {
       "package": "git-validate",
-      "versions": "2.2.4",
+      "versionsObserved": "2.2.4",
       "projectWrites": {
         "literal": [
           ".git/hooks"
@@ -1329,7 +1330,7 @@
     },
     {
       "package": "lefthook",
-      "versions": "2.1.10",
+      "versionsObserved": "2.1.10",
       "projectReads": [
         ".git/HEAD",
         ".git/config",
@@ -1364,7 +1365,7 @@
     },
     {
       "package": "msw",
-      "versions": "2.15.0",
+      "versionsObserved": "2.15.0",
       "projectWrites": {
         "manifestField": [
           "msw",
@@ -1379,7 +1380,7 @@
     },
     {
       "package": "pre-commit",
-      "versions": "2.0.0",
+      "versionsObserved": "2.0.0",
       "projectWrites": {
         "literal": [
           ".git/hooks"
@@ -1392,7 +1393,7 @@
     },
     {
       "package": "pre-push",
-      "versions": "0.1.4",
+      "versionsObserved": "0.1.4",
       "projectWrites": {
         "literal": [
           ".git/hooks"
@@ -1405,7 +1406,7 @@
     },
     {
       "package": "puppeteer",
-      "versions": "23.x, measured on 23.11.1. `getConfiguration.js` resolves the same way on 24.",
+      "versionsObserved": "23.x, measured on 23.11.1. `getConfiguration.js` resolves the same way on 24.",
       "homePaths": [
         {
           "env": "PUPPETEER_CACHE_DIR",
@@ -1421,7 +1422,7 @@
     },
     {
       "package": "shared-git-hooks",
-      "versions": "1.2.1",
+      "versionsObserved": "1.2.1",
       "projectReads": [
         ".git/HEAD",
         ".git/config"

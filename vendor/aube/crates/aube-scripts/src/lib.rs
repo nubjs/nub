@@ -1129,6 +1129,10 @@ pub struct SandboxScope<'a> {
     /// attacker-authored. Handing over a name there would invite the embedder to read a
     /// dependency's own manifest as if it were the consumer's.
     pub package_name: Option<&'a str>,
+    /// The resolved version of that same package, so an embedder can scope a per-package
+    /// policy to the versions it measured. Set and withheld exactly with `package_name` —
+    /// they are one identity, and a version without its name selects nothing.
+    pub package_version: Option<&'a str>,
 }
 
 /// Holds the real stderr fd saved before `aube` redirects fd 2 to
@@ -1460,7 +1464,9 @@ pub async fn run_script(
                 .lifecycle_sandbox
                 .map(|hook| (scope, hook))
         })
-        .filter(|(scope, hook)| hook.confines(scope.package_name, scope.project_root))
+        .filter(|(scope, hook)| {
+            hook.confines(scope.package_name, scope.package_version, scope.project_root)
+        })
     {
         Some((scope, hook)) => {
             let spawn = lifecycle_sandbox_spawn(
@@ -1543,6 +1549,7 @@ fn lifecycle_sandbox_spawn(
         project_root: scope.project_root.to_path_buf(),
         package_dir: scope.package_dir.to_path_buf(),
         package_name: scope.package_name.map(str::to_string),
+        package_version: scope.package_version.map(str::to_string),
         env_delta: std_cmd
             .get_envs()
             .map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string())))
@@ -1608,6 +1615,7 @@ pub async fn run_root_script_by_name(
                 // manifest, and its `project_root` is itself — so there is no consumer
                 // identity here for an embedder to key root-authored policy on.
                 package_name: None,
+                package_version: None,
             }),
     };
     run_script(
@@ -1870,6 +1878,7 @@ pub async fn run_dep_hook(
     tool_bin_dirs: &[&Path],
     jail: Option<&ScriptJail>,
     package_name: Option<&str>,
+    package_version: Option<&str>,
 ) -> Result<bool, Error> {
     let name = hook.script_name();
     let script_cmd: &str = match manifest.scripts.get(name) {
@@ -1900,6 +1909,7 @@ pub async fn run_dep_hook(
             // caller passes `None` when `project_root` is not the consumer's own, which
             // is what keeps the pair's guarantee true.
             package_name,
+            package_version,
         });
     run_script(
         package_dir,

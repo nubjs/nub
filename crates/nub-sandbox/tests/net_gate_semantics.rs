@@ -39,6 +39,10 @@ use std::process::Command;
 /// it.
 const DENIED_PACKAGE: &str = "chalk";
 
+/// A version for the denied package. Arbitrary: `chalk` has no catalog entry at all, so the
+/// denial is the NAME missing and no version can rescue it.
+const DENIED_VERSION: &str = "5.6.2";
+
 /// Unroutable by RFC 5737, and NOT loopback — the gate exempts loopback, so a `127.0.0.1` target
 /// would be permitted and every arm would pass for the wrong reason.
 const TARGET: &str = "192.0.2.1";
@@ -50,7 +54,7 @@ const TARGET: &str = "192.0.2.1";
 /// hard failure here would make `cargo test` depend on the developer's PATH.
 fn run_under_gate(driver: &str) -> Option<String> {
     assert!(
-        !nub_sandbox::build_jail_net_allowed(Some(DENIED_PACKAGE)),
+        !nub_sandbox::build_jail_net_allowed(Some(DENIED_PACKAGE), Some(DENIED_VERSION)),
         "`{DENIED_PACKAGE}` now has a catalog entry; this suite needs a DENIED package"
     );
 
@@ -62,7 +66,7 @@ fn run_under_gate(driver: &str) -> Option<String> {
     let out = Command::new(&node)
         .env(
             "NODE_OPTIONS",
-            nub_sandbox::net_gate_node_options(Some(DENIED_PACKAGE)),
+            nub_sandbox::net_gate_node_options(Some(DENIED_PACKAGE), Some(DENIED_VERSION)),
         )
         .env("TARGET", TARGET)
         .arg(&script)
@@ -285,7 +289,7 @@ fn both_shims_compose_in_either_order() {
         eprintln!("no node on PATH — skipping");
         return;
     };
-    let stamped = nub_sandbox::build_jail_node_options(Some(DENIED_PACKAGE));
+    let stamped = nub_sandbox::build_jail_node_options(Some(DENIED_PACKAGE), Some(DENIED_VERSION));
     let (a, b) = stamped.split_at(stamped.find(" --import").expect("two terms") + 1);
     let reversed = format!("{b} {}", a.trim_end());
 
@@ -350,10 +354,21 @@ fn an_admitted_package_is_not_intercepted() {
         eprintln!("no node on PATH — skipping");
         return;
     };
-    let Some(admitted) = nub_sandbox::PACKAGE_NETWORK_ALLOWED.first().copied() else {
-        eprintln!("catalog admits no package — nothing to assert");
+    // The first UNSCOPED entry, so the version handed over below cannot be the reason the
+    // gate lets it through — a version-scoped entry probed at the wrong version would assert
+    // the deny path under a test named for the allow path.
+    let Some((admitted, _)) = nub_sandbox::PACKAGE_NETWORK_ALLOWED
+        .iter()
+        .find(|(_, range)| range.is_none())
+        .copied()
+    else {
+        eprintln!("catalog admits no unscoped package — nothing to assert");
         return;
     };
+    assert!(
+        nub_sandbox::build_jail_net_allowed(Some(admitted), Some("1.0.0")),
+        "`{admitted}` was chosen as the unscoped control and must be admitted at any version"
+    );
 
     let dir = tempfile::tempdir().expect("tempdir");
     let script = dir.path().join("driver.mjs");
@@ -372,7 +387,7 @@ console.log(`patched=${/nubReason|POLICY/.test(String(net.Socket.prototype.conne
     let out = Command::new(&node)
         .env(
             "NODE_OPTIONS",
-            nub_sandbox::net_gate_node_options(Some(admitted)),
+            nub_sandbox::net_gate_node_options(Some(admitted), Some("1.0.0")),
         )
         .arg(&script)
         .output()

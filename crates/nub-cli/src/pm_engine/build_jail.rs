@@ -72,14 +72,27 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
     /// PLANNING, to key the side-effects cache for packages whose cached tree it may
     /// restore without spawning anything — so the notice lives in `confines` below, not
     /// here.
-    fn would_confine(&self, package_name: Option<&str>, project_root: &Path) -> bool {
+    fn would_confine(
+        &self,
+        package_name: Option<&str>,
+        _package_version: Option<&str>,
+        project_root: &Path,
+    ) -> bool {
+        // The opt-out is `dependenciesMeta.<name>.sandbox`, which npm's field shape keys on
+        // the NAME alone — there is no version dimension to honour here. The version reaches
+        // the catalog's version-scoped grants through `run` instead.
         should_confine(package_name, project_root)
     }
 
     /// The spawn-time call. `false` sends the script back to aube's ordinary unconfined
     /// spawn, and is announced — a script really is about to run.
-    fn confines(&self, package_name: Option<&str>, project_root: &Path) -> bool {
-        if self.would_confine(package_name, project_root) {
+    fn confines(
+        &self,
+        package_name: Option<&str>,
+        package_version: Option<&str>,
+        project_root: &Path,
+    ) -> bool {
+        if self.would_confine(package_name, package_version, project_root) {
             return true;
         }
         let name = package_name.unwrap_or_default();
@@ -221,7 +234,10 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
                 "NODE_OPTIONS".to_string(),
                 format!(
                     "{} {realpath}",
-                    nub_sandbox::windows_build_jail_node_options(spawn.package_name.as_deref())
+                    nub_sandbox::windows_build_jail_node_options(
+                        spawn.package_name.as_deref(),
+                        spawn.package_version.as_deref(),
+                    )
                 )
                 .trim_end()
                 .to_string(),
@@ -317,6 +333,7 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             homes,
             &spawn.package_dir,
             spawn.package_name.as_deref(),
+            spawn.package_version.as_deref(),
             interpreter,
             extra_reads,
             ambient,
