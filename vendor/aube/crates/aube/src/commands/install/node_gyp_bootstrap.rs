@@ -260,12 +260,31 @@ pub async fn print_bootstrapped_binary(project_dir: &Path) -> miette::Result<()>
     Ok(())
 }
 
+/// Token both generated shims carry in place of [`BUCKET`], substituted at write
+/// time. The shims sit in `<tool_root>/lazy-bin`, so the bootstrapped tree is a
+/// `../<BUCKET>` sibling — derived from the shim's own location rather than baked
+/// as an absolute path, so a relocated or re-homed cache still resolves.
+const BUCKET_TOKEN: &str = "__AUBE_NODE_GYP_BUCKET__";
+
 fn write_lazy_shims(shim_dir: &Path) -> miette::Result<()> {
+    // Resolution order is the same in both shims and in the same priority:
+    // bootstrapped tree, then the PM trampoline. A bare `node-gyp` PATH lookup is
+    // NOT an option here — this file is itself on `PATH`, so the lookup resolves
+    // straight back into it.
     let sh = r#"#!/usr/bin/env sh
 set -eu
-real="$("$AUBE_NODE_GYP_EXE" __node-gyp-bootstrap "$AUBE_NODE_GYP_PROJECT_DIR")"
+tool="$(dirname "$0")/../__AUBE_NODE_GYP_BUCKET__/node_modules"
+if [ -f "$tool/node-gyp/package.json" ] && [ -x "$tool/.bin/node-gyp" ]; then
+  exec "$tool/.bin/node-gyp" "$@"
+fi
+if [ -z "${AUBE_NODE_GYP_EXE:-}" ]; then
+  echo "aube: no bootstrapped node-gyp under $tool and no bootstrap entry point" >&2
+  exit 1
+fi
+real="$("$AUBE_NODE_GYP_EXE" __node-gyp-bootstrap "${AUBE_NODE_GYP_PROJECT_DIR:-$PWD}")"
 exec "$real" "$@"
-"#;
+"#
+    .replace(BUCKET_TOKEN, BUCKET);
     let sh_path = shim_dir.join("node-gyp");
     aube_util::fs_atomic::atomic_write(&sh_path, sh.as_bytes()).into_diagnostic()?;
     #[cfg(unix)]
@@ -277,12 +296,14 @@ exec "$real" "$@"
 
     // `node-gyp.js`: the value of `npm_config_node_gyp`. Consumers run it
     // as `node $npm_config_node_gyp …`, so it must be a Node script (not
-    // the shell `node-gyp` shim above). It resolves the real node-gyp the
-    // same way — via the hidden `__node-gyp-bootstrap` subcommand — then
-    // forwards argv. Falls back to a `node-gyp` on PATH when aube's env
-    // markers are absent (e.g. a script spawned outside aube's wrappers) —
-    // bounded by a re-entry counter, because that PATH lookup can resolve
-    // back to this shim and recurse without limit (see the fallback below).
+    // the shell `node-gyp` shim above).
+    //
+    // npm and pnpm both hold one invariant here: `npm_config_node_gyp` names a
+    // TERMINAL node-gyp entry script (`require.resolve("node-gyp/bin/node-gyp.js")`),
+    // and their PATH stub is a one-hop `node "$npm_config_node_gyp" "$@"`. aube's
+    // shim is lazy rather than terminal, so it must reach a terminal target by a
+    // route npm cannot redirect — which rules out resolving by NAME, since `PATH`
+    // is exactly what npm's run-script rewrites. See the cycle note below.
     let js = r#"#!/usr/bin/env node
 "use strict";
 // aube lazy node-gyp stand-in for npm_config_node_gyp. Resolves (and
@@ -291,21 +312,42 @@ exec "$real" "$@"
 // when something actually invokes it. Bare `require` (no `node:` prefix)
 // so the shim runs under any Node the user drives, including pre-16.
 const { execFileSync, spawnSync } = require("child_process");
+const { existsSync } = require("fs");
+const { join } = require("path");
 const isWin = process.platform === "win32";
-let real;
-const exe = process.env.AUBE_NODE_GYP_EXE;
-if (exe) {
+
+// The bootstrapped tree, as a `../<bucket>` sibling of this file. Preferred over
+// the trampoline: same binary, one fewer process, and it still resolves where the
+// PM executable is unreadable (a confining embedder need not grant its own exe).
+// Both halves are probed, mirroring Rust's `tool_tree_usable` — the generated
+// `.bin` entry outlives a global-store purge that takes its target with it, so a
+// bin-only hit would exec straight into `Cannot find module`.
+function bootstrapped() {
+  const tool = join(__dirname, "..", "__AUBE_NODE_GYP_BUCKET__", "node_modules");
+  if (!existsSync(join(tool, "node-gyp", "package.json"))) return null;
+  for (const name of isWin ? ["node-gyp.cmd", "node-gyp"] : ["node-gyp"]) {
+    const p = join(tool, ".bin", name);
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
+let real = bootstrapped();
+if (!real && process.env.AUBE_NODE_GYP_EXE) {
   const dir = process.env.AUBE_NODE_GYP_PROJECT_DIR || process.cwd();
-  real = execFileSync(exe, ["__node-gyp-bootstrap", dir], { encoding: "utf8" }).trim();
-} else {
-  // The PATH fallback can resolve back to THIS shim, and then it never terminates:
-  // npm's run-script prepends its own node-gyp bin dir to PATH *and* points
-  // npm_config_node_gyp here, so a bare `node-gyp` finds npm's stub, which re-execs
-  // this file, which falls back to a bare `node-gyp` again. Every hop holds a live
-  // synchronous spawnSync, so the cycle consumes memory rather than CPU and is not
-  // self-limiting (measured under nub's build jail: ~1500 processes, 15 GB, load ~1).
-  // Bound the RE-ENTRY, not any single build's nesting: a genuine nested native build
-  // is a couple of hops deep, a cycle is unbounded.
+  real = execFileSync(process.env.AUBE_NODE_GYP_EXE, ["__node-gyp-bootstrap", dir], {
+    encoding: "utf8",
+  }).trim();
+} else if (!real) {
+  // Nothing bootstrapped and no trampoline. A bare PATH lookup is the only route
+  // left, and it is the one that can resolve back to THIS shim and never terminate:
+  // npm's run-script prepends its own node-gyp bin dir to PATH *and* re-exports
+  // npm_config_node_gyp pointing here, so a bare `node-gyp` finds npm's stub, which
+  // re-execs this file, which falls back to a bare `node-gyp` again. Every hop holds
+  // a live synchronous spawnSync, so the cycle consumes memory rather than CPU and is
+  // not self-limiting (measured under nub's build jail: ~1500 processes, 15 GB, load
+  // ~1). Bound the RE-ENTRY, not any single build's nesting: a genuine nested native
+  // build is a couple of hops deep, a cycle is unbounded.
   const depth = Number(process.env.AUBE_NODE_GYP_SHIM_DEPTH || 0) + 1;
   if (depth > 3) {
     console.error(
@@ -323,7 +365,8 @@ if (result.error) {
   process.exit(1);
 }
 process.exit(result.status === null ? 1 : result.status);
-"#;
+"#
+    .replace(BUCKET_TOKEN, BUCKET);
     let js_path = shim_dir.join("node-gyp.js");
     aube_util::fs_atomic::atomic_write(&js_path, js.as_bytes()).into_diagnostic()?;
     #[cfg(unix)]
@@ -336,10 +379,16 @@ process.exit(result.status === null ? 1 : result.status);
     #[cfg(windows)]
     {
         let cmd = r#"@echo off
+set "AUBE_NODE_GYP_TOOL=%~dp0..\__AUBE_NODE_GYP_BUCKET__\node_modules"
+if exist "%AUBE_NODE_GYP_TOOL%\node-gyp\package.json" if exist "%AUBE_NODE_GYP_TOOL%\.bin\node-gyp.cmd" (
+  "%AUBE_NODE_GYP_TOOL%\.bin\node-gyp.cmd" %*
+  exit /b %ERRORLEVEL%
+)
 for /f "usebackq delims=" %%i in (`"%AUBE_NODE_GYP_EXE%" __node-gyp-bootstrap "%AUBE_NODE_GYP_PROJECT_DIR%"`) do set "AUBE_REAL_NODE_GYP=%%i"
 if not defined AUBE_REAL_NODE_GYP exit /b 1
 "%AUBE_REAL_NODE_GYP%" %*
-"#;
+"#
+        .replace(BUCKET_TOKEN, BUCKET);
         aube_util::fs_atomic::atomic_write(&shim_dir.join("node-gyp.cmd"), cmd.as_bytes())
             .into_diagnostic()?;
     }
@@ -572,10 +621,46 @@ mod tests {
         (shim_dir.join("node-gyp.js"), bin_dir, tally)
     }
 
+    /// A bootstrapped tool tree beside the shim dir, tallying to its OWN marker so a
+    /// test can assert WHICH node-gyp answered rather than merely that one did.
+    /// Returns the tree's `node_modules`.
+    #[cfg(unix)]
+    fn staged_bootstrapped_tree(tmp: &std::path::Path, tally: &std::path::Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let modules = tmp.join(BUCKET).join("node_modules");
+        std::fs::create_dir_all(modules.join(".bin")).expect("bin dir");
+        std::fs::create_dir_all(modules.join(PKG)).expect("pkg dir");
+        std::fs::write(modules.join(PKG).join("package.json"), b"{}").expect("pkg json");
+        let bin = modules.join(".bin").join(primary_binary_name());
+        std::fs::write(
+            &bin,
+            format!("#!/bin/sh\necho x >> '{}'\nexit 0\n", tally.display()),
+        )
+        .expect("write bootstrapped node-gyp");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        modules
+    }
+
+    #[cfg(unix)]
+    fn tally_lines(tally: &std::path::Path) -> usize {
+        std::fs::read_to_string(tally)
+            .map(|t| t.lines().count())
+            .unwrap_or(0)
+    }
+
     #[cfg(unix)]
     fn run_shim(shim: &std::path::Path, bin_dir: &std::path::Path) -> std::process::Output {
-        std::process::Command::new("node")
-            .arg(shim)
+        run_shim_with(shim, bin_dir, &[])
+    }
+
+    #[cfg(unix)]
+    fn run_shim_with(
+        shim: &std::path::Path,
+        bin_dir: &std::path::Path,
+        extra_env: &[(&str, &OsStr)],
+    ) -> std::process::Output {
+        let mut cmd = std::process::Command::new("node");
+        cmd.arg(shim)
             .arg("rebuild")
             // No AUBE_NODE_GYP_EXE: this is the bare-PATH fallback branch.
             .env_remove("AUBE_NODE_GYP_EXE")
@@ -589,8 +674,11 @@ mod tests {
                     bin_dir.display(),
                     std::env::var("PATH").unwrap_or_default()
                 ),
-            )
-            .output()
+            );
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
+        cmd.output()
             .expect("node must be on PATH to exercise the generated shim")
     }
 
@@ -643,9 +731,80 @@ mod tests {
             "the fallback must still reach a real node-gyp; stderr: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let hops = std::fs::read_to_string(&tally)
-            .map(|t| t.lines().count())
-            .unwrap_or(0);
+        let hops = tally_lines(&tally);
         assert_eq!(hops, 1, "the real node-gyp must run exactly once");
+    }
+
+    /// THE COMPAT DEFECT the re-entry guard only contained. A dependency whose install
+    /// script reaches `npm run build` gets npm's run-script PATH: it prepends npm's own
+    /// `node-gyp` stub AND re-exports `npm_config_node_gyp` pointing back here, so a
+    /// shim that resolves by NAME cycles and NO native addon ever compiles — the guard
+    /// then turns an unbounded fork bomb into a clean failure, which is still a failure.
+    /// npm and pnpm never hit this because `npm_config_node_gyp` names a terminal entry
+    /// script; this shim earns the same property by resolving the bootstrapped tree
+    /// beside it. Two separate tallies are what make the assertion non-hollow — they
+    /// say WHICH node-gyp answered, not merely that the run exited zero.
+    #[cfg(unix)]
+    #[test]
+    fn the_shim_reaches_the_bootstrapped_tree_past_a_shadowing_npm_stub() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // npm's stub verbatim (`@npmcli/run-script/lib/node-gyp-bin/node-gyp`).
+        let (shim, bin_dir, path_tally) =
+            staged_path_node_gyp(tmp.path(), "exec node \"$npm_config_node_gyp\" \"$@\"");
+        let boot_tally = tmp.path().join("bootstrapped-tally");
+        staged_bootstrapped_tree(tmp.path(), &boot_tally);
+
+        let out = run_shim_with(
+            &shim,
+            &bin_dir,
+            &[("npm_config_node_gyp", shim.as_os_str())],
+        );
+        assert!(
+            out.status.success(),
+            "a shadowing npm stub must not stop the shim reaching node-gyp; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            tally_lines(&boot_tally),
+            1,
+            "the bootstrapped node-gyp must run exactly once"
+        );
+        assert_eq!(
+            tally_lines(&path_tally),
+            0,
+            "PATH must not be consulted at all — it is the namespace npm rewrites"
+        );
+    }
+
+    /// Why the probe checks the require root and not just the `.bin` entry. A global
+    /// store purge leaves the generated shim standing and takes its target with it, so
+    /// pinning to a bin-only hit would exec into `Cannot find module` with no route
+    /// left. Falling through keeps the run recoverable — here onto a real PATH
+    /// node-gyp, in production onto the bootstrap trampoline that rebuilds the tree.
+    #[cfg(unix)]
+    #[test]
+    fn a_purged_store_does_not_pin_the_shim_to_a_dead_bootstrapped_entry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (shim, bin_dir, path_tally) = staged_path_node_gyp(tmp.path(), "exit 0");
+        let boot_tally = tmp.path().join("bootstrapped-tally");
+        let modules = staged_bootstrapped_tree(tmp.path(), &boot_tally);
+        std::fs::remove_dir_all(modules.join(PKG)).expect("purge the store-backed require root");
+
+        let out = run_shim(&shim, &bin_dir);
+        assert!(
+            out.status.success(),
+            "a purged store must fall through, not fail; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            tally_lines(&path_tally),
+            1,
+            "the fallback must still forward"
+        );
+        assert_eq!(
+            tally_lines(&boot_tally),
+            0,
+            "the dead bootstrapped entry must not be executed"
+        );
     }
 }
