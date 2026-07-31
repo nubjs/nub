@@ -42,15 +42,12 @@ impl Fixture {
         let xdg_config = temp.path().join("config");
         let config_root = project.clone();
         let cache = temp.path().join("cache");
-        // Same alias trick `project_config_dlx.rs` uses: nub dispatches on argv0,
-        // so the copy is as good as the symlink and Windows needs the `.exe`.
-        let nubx = temp
-            .path()
-            .join(if cfg!(windows) { "nubx.exe" } else { "nubx" });
         #[cfg(unix)]
-        std::os::unix::fs::symlink(nub_binary(), &nubx).unwrap();
-        #[cfg(windows)]
-        std::fs::copy(nub_binary(), &nubx).unwrap();
+        let nubx = {
+            let nubx = temp.path().join("nubx");
+            std::os::unix::fs::symlink(nub_binary(), &nubx).unwrap();
+            nubx
+        };
         std::fs::create_dir_all(project.join("node_modules/.bin")).unwrap();
         std::fs::create_dir_all(project.join("node_modules/conditional-pkg")).unwrap();
         std::fs::create_dir_all(&config_root).unwrap();
@@ -255,7 +252,7 @@ console.log(JSON.stringify({
         )
         .unwrap();
 
-        let package_spec = format!("file:{}", pkg_dir.display());
+        let package_spec = format!("file:{}", pkg_dir.to_string_lossy().replace('\\', "/"));
         let run = |extra: &[&str]| {
             // Three-position rule: a flag BEFORE the bin positional is nubx's
             // own; after it, the flag would forward to the bin verbatim.
@@ -315,7 +312,7 @@ console.log(JSON.stringify({
         )
         .unwrap();
 
-        let package_spec = format!("file:{}", pkg_dir.display());
+        let package_spec = format!("file:{}", pkg_dir.to_string_lossy().replace('\\', "/"));
         // `[pre] <verb> [post] -p <spec> rtc-dlx-verb-probe [tail]` — `pre`
         // covers `nub --node dlx`, `post` covers `nub dlx --node`, and `tail`
         // is the fetched tool's own argv.
@@ -545,21 +542,43 @@ fn inherited_runtime_snapshot_yields_to_nested_node_compat_with_zero_augmentatio
   compileCache: process.env.NODE_COMPILE_CACHE ?? null,
   runtimeConfig: process.env.__NUB_RUNTIME_CONFIG ?? null,
   nubVersion: process.versions.nub ?? null,
-  shimInPath: (process.env.PATH ?? '').includes('nub-node-shim-'),
+  shimEntries: (process.env.PATH ?? '')
+    .split(require('node:path').delimiter)
+    .filter((entry) => entry.includes('nub-node-shim-')),
 }));
 "#,
     )
     .unwrap();
     std::fs::write(
         fixture.project.join("package.json"),
-        r#"{ "scripts": {
-          "nested-env": "NODE_COMPAT=1 node nested-compat.js",
-          "nested-cli": "node --node nested-compat.js"
-        } }"#,
+        serde_json::to_vec(&serde_json::json!({ "scripts": {
+            "nested-env": "node nested-env-launcher.cjs",
+            "nested-cli": "node --node nested-compat.js",
+        }}))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("nested-env-launcher.cjs"),
+        r#"const { spawnSync } = require('node:child_process');
+const child = spawnSync('node', ['nested-compat.js'], {
+  stdio: ['ignore', 'inherit', 'inherit'],
+  env: { ...process.env, NODE_COMPAT: '1' },
+});
+process.exit(child.status ?? 1);
+"#,
     )
     .unwrap();
     let user_compile_cache = fixture.project.join("user-compile-cache");
     let user_compile_cache_text = user_compile_cache.to_string_lossy().into_owned();
+    let inherited_shim_entries: Vec<String> = std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path)
+                .filter(|entry| entry.to_string_lossy().contains("nub-node-shim-"))
+                .map(|entry| entry.to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
     for script in ["nested-env", "nested-cli"] {
         let output = fixture
             .command()
@@ -578,7 +597,11 @@ fn inherited_runtime_snapshot_yields_to_nested_node_compat_with_zero_augmentatio
         let value: serde_json::Value =
             serde_json::from_slice(output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout))
                 .unwrap();
-        assert_eq!(value["preload"], serde_json::Value::Null, "{script}");
+        assert_eq!(
+            value["preload"],
+            serde_json::Value::Null,
+            "{script}: {value}"
+        );
         assert_eq!(value["execArgv"], serde_json::json!([]), "{script}");
         assert_eq!(value["nodeOptions"], "--trace-warnings", "{script}");
         assert_eq!(value["nodePath"], "/user/node-path", "{script}");
@@ -586,7 +609,11 @@ fn inherited_runtime_snapshot_yields_to_nested_node_compat_with_zero_augmentatio
         assert_eq!(value["compileCache"], user_compile_cache_text, "{script}");
         assert_eq!(value["runtimeConfig"], serde_json::Value::Null, "{script}");
         assert_eq!(value["nubVersion"], serde_json::Value::Null, "{script}");
-        assert_eq!(value["shimInPath"], false, "{script}");
+        assert_eq!(
+            value["shimEntries"],
+            serde_json::json!(inherited_shim_entries),
+            "{script}"
+        );
     }
 }
 
