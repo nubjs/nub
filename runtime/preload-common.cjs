@@ -958,7 +958,13 @@ function installCjsRequireHooks(core, withClassicTranspile) {
     const value = core.dataValue(url, ext);
     mod.exports = {
       __esModule: true,
-      default: value === undefined ? undefined : JSON.parse(JSON.stringify(value)),
+      // `== null` mirrors `loadData`'s own guard rather than testing undefined
+      // strictly: it emits `export default undefined` for null AND undefined,
+      // so a document parsing to null — an empty `.yaml`, a `.json5`/`.jsonc`
+      // whose whole content is `null` — would otherwise default to `null` here
+      // and `undefined` through `import`. Same file, two answers, which is the
+      // divergence sharing `dataValue` exists to prevent.
+      default: value == null ? undefined : JSON.parse(JSON.stringify(value)),
     };
   };
 

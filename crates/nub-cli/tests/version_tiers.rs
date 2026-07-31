@@ -228,6 +228,11 @@ fn data_formats_load_through_require_on_the_compat_tier() {
         r#"toml:{"title":"from toml"}"#,
         r#"jsonc:{"ok":true}"#,
         r#"txt:"plain text body\n""#,
+        // A null-parsing document reads as `undefined`, matching what `loadData`
+        // emits for the ESM path — reporting `null` here would give one file two
+        // answers depending on how it was loaded.
+        "empty-yaml:undefined",
+        "null-json5:undefined",
     ] {
         assert!(
             stdout.contains(expected),
