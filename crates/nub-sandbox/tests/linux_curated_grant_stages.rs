@@ -236,15 +236,26 @@ fn project_reads_grants_the_schema_subtree() {
     );
 }
 
-/// The same absent-path mechanism, on the OTHER grant shape that meets it:
-/// `projectWrites: {"literal": [".git/hooks"]}` for the nine hook installers. A real
-/// checkout always has `.git/hooks` (git creates it with samples), so the common case is the
-/// present-directory one — but `git-commit-msg-linter` explicitly mkdirs it when missing, so
-/// both are measured. The ABSENT case is expected to FAIL, and that is recorded in the
-/// catalog rather than silently fixed: creating directories inside the consumer's `.git` as
-/// a side effect of compiling a policy is a different call from creating one inside nub's own
-/// dependency tree, and it is not mine to make here.
+/// IGNORED, AND IT NEVER PASSED — this measures a grant shape the tree does not have.
+///
+/// It was written against `projectWrites: {"literal": [".git/hooks"]}`, and at the commit
+/// that added it (`8866e5fed9`) `ProjectWrites` had exactly two variants, `None` and
+/// `ManifestField`; `data/README.md` still lists a literal project write under "Known
+/// gaps". The catalog there holds three entries — `@prisma/client`,
+/// `@danmarshall/deckgl-typings`, `msw` — and no `ghooks`. `grant_from_table` returns early
+/// on a lookup miss, so the GRANTED arm compiles a policy identical to the ungranted one:
+/// the positive assertion below fails deterministically and the two negative ones pass
+/// vacuously. Nothing about Landlock is involved.
+///
+/// The eleven literal-write entries it was written for — the nine `.git/hooks` installers
+/// plus `@cypress/snapshot` and `@nativescript/core` — exist on `161570f2f9`
+/// (`sandbox/jail-catalog-v2`), which is unlanded. Three catalog schemas are in contention
+/// there: that one, today's `manifestField`-only, and `catalog-migrate`'s (`9823d56a27`)
+/// coarse per-package `{"project": "readwrite"}` over ~160 packages. Choosing between them
+/// decides how the catalog expresses a grant at all, so un-ignoring this belongs to that
+/// decision rather than to whoever next reads the failure.
 #[test]
+#[ignore = "measures a ProjectWrites::Literal shape this tree does not implement"]
 fn a_literal_project_write_reaches_an_existing_dir_and_not_an_absent_one() {
     if skip_without_landlock() {
         return;
@@ -255,7 +266,8 @@ fn a_literal_project_write_reaches_an_existing_dir_and_not_an_absent_one() {
     assert!(
         present.reaches("ghooks", true, &format!("echo '#!/bin/sh' > {}", q(&hook))),
         "the literal write grant must reach an EXISTING .git/hooks — this is the case every \
-         real checkout presents, and all nine hook-installer grants depend on it"
+         real checkout presents. THIS IS THE ASSERTION THAT FAILS while the entry is absent \
+         from the catalog: with no `ghooks` row the granted arm compiles the ungranted policy"
     );
 
     let ungranted = Fixture::new("ghooks");
@@ -281,9 +293,10 @@ fn a_literal_project_write_reaches_an_existing_dir_and_not_an_absent_one() {
             true,
             &format!("mkdir -p {}", q(&absent.project.join(".git/hooks")))
         ),
-        "KNOWN LIMITATION, pinned so it cannot regress silently: with .git/hooks absent the \
-         literal grant cannot create it on Linux, same absent-path rule drop as siblingDirs. \
-         If this starts passing, the fix landed and the catalog note should be retired"
+        "KNOWN LIMITATION: with .git/hooks absent the literal grant cannot create it on \
+         Linux, same absent-path rule drop as siblingDirs. NOT pinned while this test is \
+         ignored — it currently passes for the wrong reason, since an absent catalog entry \
+         denies the write too. It only becomes a pin once the entry exists"
     );
 }
 
