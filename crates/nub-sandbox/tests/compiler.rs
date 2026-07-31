@@ -682,6 +682,7 @@ fn build_jail_reaches_an_interpreter_living_under_opt() {
         homes.clone(),
         &homes.project.join("node_modules/native"),
         None,
+        None,
         vec![interpreter.clone()],
         vec![
             node_root.join("include/node"),
@@ -740,6 +741,7 @@ fn build_jail_interposition_gates_egress_on_package_identity() {
             homes.clone(),
             &dir,
             name,
+            Some("1.0.0"),
             Vec::new(),
             Vec::new(),
             ambient.clone(),
@@ -830,6 +832,55 @@ fn build_jail_interposition_gates_egress_on_package_identity() {
     }
 }
 
+/// A VERSION-SCOPED EGRESS ENTRY BINDS THROUGH THE PRODUCTION COMPILE, not merely through the
+/// catalog accessor — the same distinction the identity test above exists for, applied to the
+/// other half of the key.
+///
+/// `esbuild` is the shipped case and the boundary is its own code: `optionalDependencies`
+/// landed in 0.13.0, so from there up its `install.js` resolves the prebuilt platform package
+/// and opens no socket, while below it the `npm install` shell-out is the only path. Both arms
+/// are asserted because the DENIED one is what proves the scope is real — an entry matching
+/// every version satisfies the granted arm on its own, which is the state this replaced.
+#[test]
+fn build_jail_interposition_honours_a_version_scoped_egress_entry() {
+    use std::collections::BTreeMap;
+    let homes = common::homes();
+    let dir = homes
+        .project
+        .join("node_modules/.aube/esbuild@x/node_modules/esbuild");
+    let ambient: BTreeMap<String, String> = [("PATH".to_string(), "/bin".to_string())]
+        .into_iter()
+        .collect();
+    let admits = |version: &str| {
+        let p = nub_sandbox::compile_build_jail(
+            homes.clone(),
+            &dir,
+            Some("esbuild"),
+            Some(version),
+            Vec::new(),
+            Vec::new(),
+            ambient.clone(),
+        )
+        .expect("compile build-jail");
+        nub_sandbox::matcher::HostMatcher::new(&p.net).admits("registry.npmjs.org")
+    };
+
+    for needs_it in ["0.11.23", "0.12.29"] {
+        assert!(
+            admits(needs_it),
+            "esbuild {needs_it} predates optionalDependencies and cannot install without the \
+             registry"
+        );
+    }
+    for does_not in ["0.13.0", "0.25.12", "0.28.1"] {
+        assert!(
+            !admits(does_not),
+            "esbuild {does_not} resolves a prebuilt platform package, so the catalog withholds \
+             egress it does not use"
+        );
+    }
+}
+
 #[test]
 fn build_jail_interposition_confines_write_grants_interpreter_and_scrubs_env() {
     use std::collections::BTreeMap;
@@ -864,6 +915,7 @@ fn build_jail_interposition_confines_write_grants_interpreter_and_scrubs_env() {
     let p = nub_sandbox::compile_build_jail(
         homes.clone(),
         &package_dir,
+        None,
         None,
         vec![interpreter.clone()],
         vec![include_node.clone()],

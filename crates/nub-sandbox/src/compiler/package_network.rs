@@ -33,22 +33,30 @@
 // second source free to drift.
 include!(concat!(env!("OUT_DIR"), "/package_network.rs"));
 
-/// Whether `package_name`'s build scripts may reach the network.
+/// Whether `package_name` at `package_version`'s build scripts may reach the network.
 ///
 /// `None` — aube withheld the installer-resolved identity because its root is a checkout it
 /// FETCHED — is `false`, the conservative direction and the same reading the curated filesystem
 /// table takes.
 ///
 /// The lookup is EXACT on the resolver-assigned name, which is what stops a dependency from
-/// renaming itself into an entry.
-pub fn build_jail_net_allowed(package_name: Option<&str>) -> bool {
-    package_name.is_some_and(|name| package_network_allowed().binary_search(&name).is_ok())
+/// renaming itself into an entry. A matched entry may then be scoped to a semver range: most
+/// are not, and an unscoped one admits every version exactly as before the field existed. See
+/// [`super::version_scope`] for why a scoped entry withholds when the version cannot be judged.
+pub fn build_jail_net_allowed(package_name: Option<&str>, package_version: Option<&str>) -> bool {
+    let Some(name) = package_name else {
+        return false;
+    };
+    let table = package_network_allowed();
+    table
+        .binary_search_by(|(entry, _)| (*entry).cmp(name))
+        .is_ok_and(|i| super::version_scope::applies(table[i].1, package_version))
 }
 
 /// The egress set in force: [`PACKAGE_NETWORK_ALLOWED`], unless the dev-only catalog override
-/// replaced it. Sorted either way — the shared parser sorts, which is what keeps the
-/// `binary_search` above correct for an override too.
-pub fn package_network_allowed() -> &'static [&'static str] {
+/// replaced it. Sorted by name either way — the shared parser sorts, which is what keeps the
+/// `binary_search_by` above correct for an override too.
+pub fn package_network_allowed() -> &'static [(&'static str, Option<&'static str>)] {
     crate::catalog_override::package_network_allowed().unwrap_or(PACKAGE_NETWORK_ALLOWED)
 }
 
@@ -59,32 +67,80 @@ mod tests {
     /// The authorship invariant: the key is the name the RESOLVER assigned and the lookup is
     /// exact, so a package cannot reach an entry by renaming itself into its neighbourhood.
     /// `None` and an unlisted name are both denied — the default that IS the mechanism.
+    ///
+    /// Every listed name is exercised at its own scope, so the sweep stays a real assertion
+    /// once entries carry ranges: an unscoped one must admit an arbitrary version, and a
+    /// scoped one must admit a version its own range names rather than whatever this test
+    /// happened to pick.
     #[test]
     fn no_entry_means_no_network_and_a_near_miss_does_not_match() {
-        assert!(!build_jail_net_allowed(None));
-        assert!(!build_jail_net_allowed(Some(
-            "definitely-not-in-the-catalog"
-        )));
-        assert!(!build_jail_net_allowed(Some("")));
-        for listed in PACKAGE_NETWORK_ALLOWED {
+        assert!(!build_jail_net_allowed(None, None));
+        assert!(!build_jail_net_allowed(
+            Some("definitely-not-in-the-catalog"),
+            Some("1.0.0")
+        ));
+        assert!(!build_jail_net_allowed(Some(""), Some("1.0.0")));
+        for (listed, range) in PACKAGE_NETWORK_ALLOWED {
             for impostor in [format!("{listed}-evil"), format!("evil-{listed}")] {
                 assert!(
-                    !build_jail_net_allowed(Some(&impostor)),
+                    !build_jail_net_allowed(Some(&impostor), Some("1.0.0")),
                     "`{impostor}` must not inherit `{listed}`'s entry"
                 );
             }
-            assert!(build_jail_net_allowed(Some(listed)));
+            match range {
+                None => assert!(build_jail_net_allowed(Some(listed), Some("1.2.3"))),
+                Some(range) => {
+                    let req = semver::VersionReq::parse(range).expect("build.rs validated it");
+                    let inside = ["0.0.1", "0.1.0", "1.0.0", "9999.0.0"]
+                        .into_iter()
+                        .find(|v| req.matches(&semver::Version::parse(v).expect("literal")));
+                    let inside =
+                        inside.unwrap_or_else(|| panic!("{listed}: `{range}` matches nothing"));
+                    assert!(build_jail_net_allowed(Some(listed), Some(inside)));
+                    assert!(
+                        !build_jail_net_allowed(Some(listed), None),
+                        "`{listed}` is scoped to `{range}`, so an unjudgeable version must \
+                         withhold rather than widen"
+                    );
+                }
+            }
         }
     }
 
-    /// `binary_search` is only correct on a sorted slice, and the generator's sort is what makes
-    /// it so. A future edit that emits insertion order instead would make the lookup silently
-    /// MISS admitted packages — a fail-closed direction, but a wrong one, and quiet.
+    /// `binary_search_by` is only correct on a slice sorted BY NAME, and the generator's sort
+    /// is what makes it so. A future edit that emits insertion order instead would make the
+    /// lookup silently MISS admitted packages — a fail-closed direction, but a wrong one, and
+    /// quiet.
     #[test]
     fn the_generated_allow_set_is_sorted_and_deduplicated() {
         assert!(
-            PACKAGE_NETWORK_ALLOWED.windows(2).all(|w| w[0] < w[1]),
-            "PACKAGE_NETWORK_ALLOWED must be strictly ascending: {PACKAGE_NETWORK_ALLOWED:?}"
+            PACKAGE_NETWORK_ALLOWED.windows(2).all(|w| w[0].0 < w[1].0),
+            "PACKAGE_NETWORK_ALLOWED must be strictly ascending by name: \
+             {PACKAGE_NETWORK_ALLOWED:?}"
         );
+    }
+
+    /// The measured cutoff, asserted against the SHIPPED catalog in both directions.
+    ///
+    /// `esbuild` gained `optionalDependencies` in 0.13.0 and from there resolves its platform
+    /// package without opening a socket; below it, its `install.js` shells out to `npm install`
+    /// and cannot complete without the registry. Both arms are here because the denial is the
+    /// half that proves the scope is real rather than decorative — an entry that matched
+    /// everything would satisfy the grant arm alone.
+    #[test]
+    fn esbuilds_egress_grant_stops_at_the_version_that_no_longer_needs_it() {
+        for needs_it in ["0.11.23", "0.12.29"] {
+            assert!(
+                build_jail_net_allowed(Some("esbuild"), Some(needs_it)),
+                "esbuild {needs_it} predates optionalDependencies and cannot install without \
+                 the registry"
+            );
+        }
+        for does_not in ["0.13.0", "0.25.12", "0.28.1"] {
+            assert!(
+                !build_jail_net_allowed(Some("esbuild"), Some(does_not)),
+                "esbuild {does_not} resolves a prebuilt platform package and opens no socket"
+            );
+        }
     }
 }

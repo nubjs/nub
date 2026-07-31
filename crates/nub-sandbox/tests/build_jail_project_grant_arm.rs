@@ -40,6 +40,7 @@ fn compile(homes: Homes, package_dir: &Path) -> nub_sandbox::SandboxPolicy {
         homes.clone(),
         package_dir,
         None,
+        None,
         Vec::new(),
         Vec::new(),
         BTreeMap::new(),

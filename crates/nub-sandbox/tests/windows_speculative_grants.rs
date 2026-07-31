@@ -382,6 +382,7 @@ mod win {
             homes,
             &package_dir,
             None,
+            None,
             interpreter,
             extra_reads,
             os_essential_env(),

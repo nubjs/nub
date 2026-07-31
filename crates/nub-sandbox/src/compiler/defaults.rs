@@ -757,8 +757,11 @@ pub fn build_jail_stdio_preload_js() -> String {
 /// than stamping blind — an unknown flag in `NODE_OPTIONS` aborts Node at startup, which would
 /// turn a missing repair into a broken install.
 #[cfg(windows)]
-pub fn windows_build_jail_node_options(package_name: Option<&str>) -> String {
-    build_jail_node_options(package_name)
+pub fn windows_build_jail_node_options(
+    package_name: Option<&str>,
+    package_version: Option<&str>,
+) -> String {
+    build_jail_node_options(package_name, package_version)
 }
 
 /// Both build-jail preloads on one `NODE_OPTIONS`, as two `--import` terms.
@@ -770,11 +773,14 @@ pub fn windows_build_jail_node_options(package_name: Option<&str>) -> String {
 /// Platform-independent for the same reason [`WINDOWS_STDIO_SHIM`] is: what is Windows-specific
 /// is the DECISION to stamp, which lives in [`windows_build_jail_node_options`] and in the
 /// lifecycle env allowlist that admits `NODE_OPTIONS` only there.
-pub fn build_jail_node_options(package_name: Option<&str>) -> String {
+pub fn build_jail_node_options(
+    package_name: Option<&str>,
+    package_version: Option<&str>,
+) -> String {
     format!(
         "{} {}",
         data_url_import(&strip_js_comments(WINDOWS_STDIO_SHIM)),
-        net_gate_node_options(package_name)
+        net_gate_node_options(package_name, package_version)
     )
 }
 
@@ -939,10 +945,10 @@ const NET_GATE_POLICY_PLACEHOLDER: &str = "__NUB_NET_POLICY_JSON__";
 /// macOS pins egress to nub's proxy). Nothing here branches on the OS, so serving as a
 /// defence-in-depth layer elsewhere needs no porting — and keeping it un-gated is what makes
 /// the behaviour testable off Windows.
-pub fn net_gate_node_options(package_name: Option<&str>) -> String {
+pub fn net_gate_node_options(package_name: Option<&str>, package_version: Option<&str>) -> String {
     let policy = serde_json::json!({
         "package": package_name,
-        "allow": super::build_jail_net_allowed(package_name),
+        "allow": super::build_jail_net_allowed(package_name, package_version),
     });
 
     // Stripped before substitution, for the reason given in `realpath_shim_node_options`.
@@ -1260,7 +1266,7 @@ mod tests {
     /// the encoding is asserted rather than eyeballed.
     #[test]
     fn both_shims_compose_on_one_value() {
-        let stamped = build_jail_node_options(Some("chalk"));
+        let stamped = build_jail_node_options(Some("chalk"), Some("5.6.2"));
         let terms: Vec<&str> = stamped.split(' ').collect();
         assert_eq!(
             terms.len(),
@@ -1303,7 +1309,7 @@ mod tests {
     #[test]
     fn the_compiled_policy_is_substituted_into_the_delivered_module() {
         let js = decode_import(
-            net_gate_node_options(Some("chalk"))
+            net_gate_node_options(Some("chalk"), Some("5.6.2"))
                 .split_once(' ')
                 .unwrap()
                 .1,
@@ -1319,9 +1325,9 @@ mod tests {
     }
 
     /// The compiled policy line, as the confined Node will evaluate it.
-    fn compiled_policy(package_name: Option<&str>) -> String {
+    fn compiled_policy(package_name: Option<&str>, package_version: Option<&str>) -> String {
         decode_import(
-            net_gate_node_options(package_name)
+            net_gate_node_options(package_name, package_version)
                 .split_once(' ')
                 .unwrap()
                 .1,
@@ -1339,32 +1345,46 @@ mod tests {
     #[test]
     fn an_unlisted_package_is_denied_and_a_listed_one_is_admitted_wholesale() {
         for unlisted in [None, Some("chalk"), Some("definitely-not-in-the-catalog")] {
-            let line = compiled_policy(unlisted);
+            let line = compiled_policy(unlisted, Some("1.0.0"));
             assert!(
                 line.contains(r#""allow":false"#),
                 "{unlisted:?} has no catalog entry and must be denied: {line}"
             );
         }
-        for listed in super::super::PACKAGE_NETWORK_ALLOWED {
-            let line = compiled_policy(Some(listed));
+        // Each listed name at a version its own entry admits — see
+        // `package_network::no_entry_means_no_network_and_a_near_miss_does_not_match` for the
+        // same construction and why an arbitrary version would go vacuous on a scoped entry.
+        for (listed, range) in super::super::PACKAGE_NETWORK_ALLOWED {
+            let line = compiled_policy(Some(listed), Some(admitted_version(range)));
             assert!(line.contains(r#""allow":true"#), "{listed}: {line}");
         }
 
         // Neither direction may compile a host list; per-host permissioning is out of scope,
         // and a stray `hosts` key would be the tell that it came back.
-        let mut probes = vec![None, Some("chalk")];
+        let mut probes = vec![(None, "1.0.0"), (Some("chalk"), "5.6.2")];
         probes.extend(
             super::super::PACKAGE_NETWORK_ALLOWED
                 .iter()
-                .copied()
-                .map(Some),
+                .map(|(name, range)| (Some(*name), admitted_version(range))),
         );
-        for pkg in probes {
+        for (pkg, version) in probes {
             assert!(
-                !compiled_policy(pkg).contains("hosts"),
+                !compiled_policy(pkg, Some(version)).contains("hosts"),
                 "egress is a per-package boolean; a host list must not be compiled: {pkg:?}"
             );
         }
+    }
+
+    /// A version the given catalog scope admits — any version for an unscoped entry.
+    fn admitted_version(range: &Option<&str>) -> &'static str {
+        let Some(range) = range else {
+            return "1.2.3";
+        };
+        let req = semver::VersionReq::parse(range).expect("build.rs validated it");
+        ["0.0.1", "0.1.0", "1.0.0", "9999.0.0"]
+            .into_iter()
+            .find(|v| req.matches(&semver::Version::parse(v).expect("literal")))
+            .unwrap_or_else(|| panic!("`{range}` matches none of the probe versions"))
     }
 
     /// Base64's alphabet contains no whitespace, which is the structural reason the payload
@@ -1373,7 +1393,7 @@ mod tests {
     /// encoding with a space in its alphabet) reintroduces silent truncation.
     #[test]
     fn the_delivered_term_is_whitespace_free_after_the_flag() {
-        let term = net_gate_node_options(Some("chalk"));
+        let term = net_gate_node_options(Some("chalk"), Some("5.6.2"));
         let (flag, url) = term.split_once(' ').expect("flag then payload");
         assert_eq!(flag, "--import");
         assert!(
@@ -1434,7 +1454,7 @@ mod tests {
         .collect();
         let stamped = format!(
             "{} {}",
-            build_jail_node_options(Some("esbuild")),
+            build_jail_node_options(Some("esbuild"), Some("0.21.5")),
             realpath_shim_node_options(&roots)
         );
         assert!(

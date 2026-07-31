@@ -151,11 +151,15 @@ fn dep_confinement(
     package_name: Option<&str>,
     project_dir: &std::path::Path,
 ) -> Confinement {
+    // The version reaches the hook only alongside a name: it is the same identity, and an
+    // embedder scoping a per-package policy by version must not be handed one for a package
+    // whose name was withheld.
+    let package_version = package_name.map(|_| version);
     let embedder_confines = aube_util::embedder().embedder_owns_lifecycle_sandbox
         && aube_util::engine_context()
             .lifecycle_sandbox
             .as_ref()
-            .is_some_and(|hook| hook.would_confine(package_name, project_dir));
+            .is_some_and(|hook| hook.would_confine(package_name, package_version, project_dir));
     if embedder_confines || jail_policy.should_jail(name, version, source_key, git_repository_key) {
         Confinement::Confined
     } else {
@@ -843,6 +847,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
                     // checkout, so handing over a name would invite the embedder to look
                     // this package up in a manifest the dependency wrote.
                     root_is_user_authored.then_some(job.registry_name.as_str()),
+                    root_is_user_authored.then_some(job.version.as_str()),
                 )
                 .await
                 .map_err(|e| {

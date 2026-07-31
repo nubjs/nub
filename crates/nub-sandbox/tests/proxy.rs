@@ -593,6 +593,7 @@ fn build_jail_net(package: Option<&str>) -> NetPolicy {
         },
         &package_dir,
         package,
+        Some("1.0.0"),
         Vec::new(),
         Vec::new(),
         Default::default(),

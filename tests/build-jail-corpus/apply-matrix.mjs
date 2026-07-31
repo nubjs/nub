@@ -142,7 +142,10 @@ for (const r of records) {
     const existing = (catalog.packageGrants || []).find((e) => e.package === r.package);
     const entry = {
       package: r.package,
-      ...(r.version && r.version !== 'latest' ? { versions: r.version } : {}),
+      // `versionsObserved`, never `versions`: the latter is an ENFORCED semver range, and
+      // the matrix measures one version rather than a boundary — writing it there would
+      // pin every machine-generated grant to the single version it happened to run on.
+      ...(r.version && r.version !== 'latest' ? { versionsObserved: r.version } : {}),
       ...r.grant.packageGrant,
       mechanism: 'Measured by the grant-configuration matrix: the install script fails with the jail on and no grants, and succeeds with unscoped project read/write/cwd. The grant is UNSCOPED because the matrix measures whether project access is needed, not which paths — scoping it is a follow-up that needs the specific paths observed.',
       evidence: 'measured',

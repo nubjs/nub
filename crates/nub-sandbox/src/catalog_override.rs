@@ -191,18 +191,20 @@ pub(crate) fn download_hosts() -> Option<&'static [&'static str]> {
     }
 }
 
-/// The overriding per-package egress set, or `None`. Sorted by the parser, which is what
-/// keeps the caller's `binary_search` correct.
-pub(crate) fn package_network_allowed() -> Option<&'static [&'static str]> {
+/// The overriding per-package egress set — each name with the semver range its grant is
+/// scoped to, `None` meaning every version. Sorted by name by the parser, which is what keeps
+/// the caller's `binary_search_by` correct.
+pub(crate) fn package_network_allowed() -> Option<&'static [(&'static str, Option<&'static str>)]> {
     #[cfg(feature = "build-jail-catalog-override")]
     {
-        static ALLOWED: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+        static ALLOWED: std::sync::OnceLock<Vec<(&'static str, Option<&'static str>)>> =
+            std::sync::OnceLock::new();
         let catalog = active()?;
         Some(ALLOWED.get_or_init(|| {
             catalog
                 .package_network_allowed
                 .iter()
-                .map(String::as_str)
+                .map(|g| (g.package.as_str(), g.versions.as_deref()))
                 .collect()
         }))
     }

@@ -129,6 +129,13 @@ the jail no longer gates on hostnames. `packageNetwork.full` names a package dir
       "evidence": "measured",
       "observed": "getaddrinfo ENOTFOUND github.com from its postinstall ...",
       "platform": "macos-arm64"
+    },
+    {
+      "package": "esbuild",
+      "versions": "<0.13.0",
+      "evidence": "measured",
+      "observed": "0.11.23 confined: npm error ... ENOTFOUND registry.npmjs.org ...",
+      "platform": "macos-arm64"
     }
   ]
 }
@@ -136,7 +143,11 @@ the jail no longer gates on hostnames. `packageNetwork.full` names a package dir
 
 It carries the same `evidence` / `observed` / `platform` provenance as a host, and it resolves
 to exactly the same grant as being named in a host's `fetchedBy` — the jail's egress is a
-boolean, so there is no weaker or stronger spelling.
+boolean, so there is no weaker or stronger spelling. The optional `versions` range is the one
+thing `fetchedBy` cannot express, and it is why a version-scoped package must not be spelled
+both ways: a `fetchedBy` observation hangs off a host and names no version, so the parser
+rejects a package that is scoped here and unscoped there rather than letting one silently
+outrank the other.
 
 **Prefer it over `fetchedBy` whenever the package's demand is the reason for the entry.**
 `fetchedBy` couples two decisions that are no longer related: it grants the package AND adds
@@ -153,7 +164,7 @@ fetching — recording the observation must not become a grant.
 ```json
 {
   "package": "@prisma/client",
-  "versions": "6.x (7.0.0 dropped the postinstall entirely)",
+  "versionsObserved": "6.x (7.0.0 dropped the postinstall entirely)",
   "siblingDirs": [".prisma"],
   "dependencyDirs": [["prisma"], ["prisma", "@prisma/engines"]],
   "projectReads": ["prisma"],
@@ -168,7 +179,8 @@ fetching — recording the observation must not become a grant.
 | field | meaning |
 | --- | --- |
 | `package` | The installer-resolved package name. Matched exactly: no prefix, suffix or case folding. |
-| `versions` | Which versions the measurement covers. |
+| `versions` | Optional semver range the grant is scoped to. Absent means every version. See below. |
+| `versionsObserved` | Prose: which versions the measurement covers. Constrains nothing. |
 | `siblingDirs` | Named entries of the package's own enclosing `node_modules` it may read and write. |
 | `dependencyDirs` | Chains of package *names* whose resolved directories it may read and write. See below. |
 | `homePaths` | Artifact caches under the real home it may read and write, each with the package's own variable that redirects it. See below. |
@@ -179,6 +191,43 @@ fetching — recording the observation must not become a grant.
 | `evidence` / `observed` / `platform` | As for hosts. |
 
 Omit any field that is not needed; the jail's baseline already covers it.
+
+### `versions` — scoping an entry to the versions that need it
+
+Optional on both `packageGrants` and `packageNetwork.full`, and honoured on both. Absent means
+every version, which is what every entry written before this field existed still means — a
+range is an act of narrowing, never a default.
+
+```json
+{ "package": "esbuild", "versions": "<0.13.0" }
+```
+
+Cargo range syntax (`<0.13.0`, `>=2, <3`, `1.4.2`), not npm's. These strings are ours, never a
+package's own dependency spec, so the dialect only has to be one this file writes. A malformed
+range fails the build.
+
+**Write a range only where you measured the BOUNDARY, not the version you happened to test
+on.** esbuild's is `0.13.0` because that is where `optionalDependencies` landed: from there up
+its `install.js` resolves a prebuilt platform package and opens no socket, and below it the
+`npm install` shell-out is the only path. That is a fact about the package's own code, on the
+same footing as `mechanism`. "We ran the matrix against 1.2.1" is not — it goes in
+`versionsObserved`, which is prose and gates nothing.
+
+The direction of travel makes this worth doing: packages keep migrating from building at
+install time to shipping prebuilt `optionalDependencies`, so the versions that need a
+capability are the OLD ones and a cutoff gets more accurate over time. esbuild is the measured
+case — by weekly downloads, 99.82% of its installs are above the boundary.
+
+A scoped entry needs a version it can judge, so an unknown or non-semver one does not match.
+That withholds rather than widens, which is the same reading the tables take for an absent
+package name.
+
+**A scoped entry does not reach prereleases, and a cutoff cannot be widened into one.** Cargo
+semver admits a prerelease only when a comparator carries a prerelease at the same
+major.minor.patch, so `<0.13.0`, `<0.13.0-0` and `>=0.0.0-0, <0.13.0` all refuse
+`0.12.0-rc.1` — only `>=0.12.0-rc, <0.13.0` admits it. A catalogued package installed at a
+prerelease therefore falls back to no grant. If that ever breaks a real install, drop the
+entry's scope rather than trying to spell a wider range.
 
 ### `siblingDirs`
 
@@ -457,10 +506,12 @@ needed it yet; adding a field ahead of a real case would be guessing at its shap
   carve-out only on Windows currently gets it everywhere, which is wider than necessary.
   The corpus that produced these entries ran on one platform per measurement, so a
   platform-scoped grant would today be asserting more than was measured.
-- **Version-conditional entries.** `versions` is prose, not a constraint that is enforced.
-  `@prisma/client` 7.0.0 dropped its postinstall entirely, so its grant is dead weight on 7
-  — harmless, since an unused grant confers nothing on a script that never runs, but not
-  expressible.
+- ~~**Version-conditional entries.**~~ **Built 2026-07-31** as the optional `versions` semver
+  range on `packageGrants` and `packageNetwork.full`; the prose that used to occupy the
+  `versions` name is now `versionsObserved`. See the `versions` section above. Only `esbuild`
+  is scoped so far, at the `<0.13.0` boundary where `optionalDependencies` landed; every other
+  entry is deliberately unscoped, because we have measured no boundary for them and a cutoff
+  invented from the version a matrix happened to run on is false precision.
 - **Path-scoped hosts — a gap on purpose. Do not build it.** The schema records no URL
   prefix, and this entry used to argue it was the highest-value thing to add: `github.com`
   serves `git-receive-pack` on the same hostname as its release assets, a host grant cannot

@@ -64,6 +64,7 @@ impl Jail {
             },
             &self.package_dir,
             package_name,
+            Some("1.0.0"),
             Vec::new(),
             Vec::new(),
             ambient,
