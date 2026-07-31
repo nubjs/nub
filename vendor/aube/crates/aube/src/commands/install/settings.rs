@@ -1596,6 +1596,10 @@ mod finalize_lockfile_graph_tests {
             eprintln!("skipping: `node` not on PATH");
             return;
         }
+        // Resolving `local_pnpmfile` reaches the cwd-default arm of
+        // `pnpmfile::detect`, whose gate is a process-global shared with
+        // pnpmfile's own tests across this one lib test binary.
+        let _lock = crate::pnpmfile::default_gate_lock();
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
         std::fs::write(cwd.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();

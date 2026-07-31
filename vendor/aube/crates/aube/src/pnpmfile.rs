@@ -1013,25 +1013,31 @@ pub async fn exports_hooks(pnpmfile: &Path) -> Result<bool> {
     Ok(output.stdout.first() == Some(&b'1'))
 }
 
+/// `pnpmfile_default_enabled` is a process-global embedder seam, so a test that
+/// flips it races every test that relies on its default under cargo's parallel
+/// runner — the reader observes the flipped value and `detect` returns `None`.
+/// Both sides of the seam take this lock.
+///
+/// It lives at module scope, not inside `mod tests`, because the readers are
+/// NOT all in this file: every module of this crate shares one lib test binary,
+/// so `state`'s and `commands::install::settings`'s tests reach the same seam
+/// through `detect` and have to be able to take the same lock.
+///
+/// Restoring the seam from a trailing statement is not enough on its own
+/// either: a panic mid-body would skip it and leak the flipped value into the
+/// rest of the run, which is why the writers pair this with a drop guard.
+#[cfg(test)]
+pub(crate) fn default_gate_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    match LOCK.get_or_init(|| std::sync::Mutex::new(())).lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
-
-    /// `pnpmfile_default_enabled` is a process-global embedder seam, so a test
-    /// that flips it races every test that relies on its default under cargo's
-    /// parallel runner — the reader observes the flipped value and `detect`
-    /// returns `None`. Both sides of the seam take this lock. Restoring the
-    /// seam from a trailing statement is not enough on its own either: a panic
-    /// mid-body would skip it and leak the flipped value into the rest of the
-    /// run, which is why the guard below restores on drop.
-    fn default_gate_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        match LOCK.get_or_init(|| Mutex::new(())).lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
 
     struct DefaultGateGuard {
         old: bool,
