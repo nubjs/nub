@@ -36,10 +36,20 @@ Authenticate the Google Cloud CLI, select a billing-enabled project, and enable 
 ```bash
 gcloud auth login
 gcloud config set project PROJECT_ID
-gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com
+gcloud services enable \
+  run.googleapis.com \
+  cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com
 ```
 
-The deployer and build service account also need Google's [source-deployment roles](https://docs.cloud.google.com/run/docs/deploying-source-code#before-you-begin). Ask the project administrator for those roles rather than granting broader access.
+The deployer needs Google's [source-deployment roles](https://docs.cloud.google.com/run/docs/deploying-source-code#before-you-begin). Source builds use the Compute Engine default service account unless the project selects another builder. A project administrator can grant the default account its required builder role:
+
+```bash
+PROJECT_NUMBER=$(gcloud projects describe PROJECT_ID --format="value(projectNumber)")
+gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --role="roles/run.builder"
+```
 
 Deploy the directory containing the Dockerfile:
 
@@ -47,12 +57,22 @@ Deploy the directory containing the Dockerfile:
 gcloud run deploy nub-app \
   --source . \
   --region us-west1 \
-  --allow-unauthenticated
+  --no-invoker-iam-check
 ```
 
 Cloud Build builds the Dockerfile, stores the image in Artifact Registry, and creates a Cloud Run revision. The command prints the service URL when the revision is ready.
 
-Omit `--allow-unauthenticated` for a private service. Public access changes the service's IAM policy and should be an explicit deployment choice.
+The public-access flag disables Cloud Run's invoker IAM check without adding an `allUsers` IAM binding, so it also works with domain-restricted sharing policies. Omit the flag for a private service.
+
+Authenticated callers need the Cloud Run Invoker role. Test a private service with an identity token:
+
+```bash
+URL=$(gcloud run services describe nub-app \
+  --region us-west1 \
+  --format="value(status.url)")
+TOKEN=$(gcloud auth print-identity-token --audiences="$URL")
+curl -H "Authorization: Bearer $TOKEN" "$URL"
+```
 
 ## Architecture
 
