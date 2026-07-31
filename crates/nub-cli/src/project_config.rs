@@ -1991,6 +1991,16 @@ mod tests {
                 "{extension} is always parsed as JSX, so its schema enum is LOADERS minus `ts`"
             );
         }
+        // Values alone are not enough: the loop above only visits extensions the
+        // parser pins, so a narrowed override added to the schema for one it does
+        // not — `.cts`, say — would stay invisible here while an editor rejected a
+        // `ts` loader the parser accepts on it. Compare the KEY set too, exactly
+        // as this test already does for the root/install/dlx sections.
+        assert_eq!(
+            keys(&schema, "/properties/loader/properties"),
+            expected(JSX_PINNED_EXTS),
+            "only a JSX-pinned extension may carry a narrowed loader enum"
+        );
 
         // `linker` admits both a string shorthand and a discriminated object
         // union. All three schema representations of its strategies must stay

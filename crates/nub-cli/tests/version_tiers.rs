@@ -283,6 +283,33 @@ fn loader_redirects_resolve_per_url_on_the_compat_tier() {
     }
 }
 
+/// Plain JS pointed at a CODE dialect, which is the other half of the `.js`
+/// redirect and reaches a different mechanism than the data half.
+///
+/// `.js` is owned by the plain-JS wrapper, whose job is to lower only what needs
+/// lowering — and it decides by parsing with lang "ts", which cannot parse JSX.
+/// So for `{".js": "jsx"}` it answered "nothing to lower" and handed raw JSX to
+/// Node, which rejects it with `SyntaxError: Unexpected token '<'`, while the ESM
+/// path and the fast tier transpiled the same file. A configured code dialect now
+/// takes the unconditional transpile path.
+#[test]
+fn plain_js_redirected_to_jsx_transpiles_on_the_compat_tier() {
+    let Some((stdout, stderr, code)) =
+        run_nub_against_node((22, 13, 0), "loader-js-to-jsx", "main.cjs")
+    else {
+        eprintln!(
+            "skipping: Node 22.13.0 not installed (set TEST_NODE_BIN_22_13_0 or nvm install)"
+        );
+        return;
+    };
+    assert_eq!(code, 0, "js-as-jsx fixture must run: stderr={stderr}");
+    assert!(
+        stdout.contains(r#"js-as-jsx:{"tag":"widget"}"#),
+        "a `.js` file configured as jsx must transpile rather than reach Node raw: \
+         stdout={stdout:?} stderr={stderr}"
+    );
+}
+
 /// Registering those handlers must change LOADING only, never RESOLUTION. Node
 /// builds extensionless resolution from `ObjectKeys(Module._extensions)`, so a
 /// plain assignment would make `require("./config")` newly find `config.yaml`
