@@ -4714,7 +4714,13 @@ fn create_stopped_target(
     let prepared_exec = PreparedTargetExec::new(spec)?;
     let seccomp = super::linux::build_seccomp(
         spec.network_filter,
-        spec.per_host,
+        // Per-host means the empty netns is the boundary and the child must be able to speak IP
+        // to the in-netns bridge; the ceiling's other families stay denied either way.
+        if spec.per_host {
+            super::linux::IpEgress::Permitted
+        } else {
+            super::linux::IpEgress::Denied
+        },
         spec.deny_keyring,
         spec.permit_keyring_join,
     )

@@ -715,6 +715,92 @@ fn build_jail_reaches_an_interpreter_living_under_opt() {
     }
 }
 
+/// EGRESS IS GATED ON PACKAGE IDENTITY — the whole resolution rule, in one place.
+///
+/// Asserted through `compile_build_jail` rather than against the catalog accessor, because the
+/// accessor was already correct while nothing consumed it: the defect this pins is that the
+/// compiled POLICY ignored the package. Each row therefore names a real catalog fact, so a
+/// catalog edit that moved a package between classes would fail here rather than silently
+/// change what a user gets.
+#[test]
+fn build_jail_interposition_gates_egress_on_package_identity() {
+    use std::collections::BTreeMap;
+    let homes = common::homes();
+    let proj = homes.project.clone();
+    let ambient: BTreeMap<String, String> = [("PATH".to_string(), "/bin".to_string())]
+        .into_iter()
+        .collect();
+
+    let compile_for = |name: Option<&str>| {
+        let dir = proj.join("node_modules/.aube/x@1.0.0/node_modules/x");
+        nub_sandbox::compile_build_jail(
+            homes.clone(),
+            &dir,
+            name,
+            Vec::new(),
+            Vec::new(),
+            ambient.clone(),
+        )
+        .expect("compile build-jail")
+    };
+
+    // GRANTED — named in `networkHosts[].fetchedBy`, which is what an entry means. Both are
+    // real catalog facts (`cypress` fetches its binary, `@prisma/engines` its query engines),
+    // so a catalog edit that moved either out would fail here rather than silently change what
+    // a user gets.
+    //
+    // THE SPELLING IS PLATFORM-SPECIFIC and the assertion follows it, because that divergence is
+    // load-bearing rather than incidental (see `preset::build_jail_net`). Windows compiles to
+    // coarse-allow because its only unprivileged egress lever is the `internetClient` capability,
+    // which the backend grants on exactly `!net.enforce`; everywhere else the axis keeps enforcing
+    // and names the `$downloads` hosts. What must hold in BOTH spellings is the same product
+    // fact — a catalogued package can reach the network — so that is what is asserted, once per
+    // spelling, rather than a single shape that would be wrong on one platform.
+    for admitted in ["cypress", "@prisma/engines"] {
+        let p = compile_for(Some(admitted));
+        if cfg!(windows) {
+            assert!(
+                !p.net.enforce,
+                "{admitted}: Windows grants egress by not enforcing the axis, which is what \
+                 hands the AppContainer its internetClient capability"
+            );
+        } else {
+            assert!(p.net.enforce, "{admitted}: the net axis still enforces");
+            let hosts = nub_sandbox::matcher::HostMatcher::new(&p.net);
+            assert!(
+                hosts.admits("nodejs.org"),
+                "{admitted} is catalogued, so the compiled axis admits a $downloads host"
+            );
+            assert!(
+                !hosts.admits("evil.test"),
+                "{admitted}: the compiled axis still names only the curated set"
+            );
+        }
+    }
+
+    // DENIED — the default, and the case that matters. `left-pad` is an ordinary dependency
+    // with no catalog entry: exactly the Shai-Hulud shape, a package that could acquire a
+    // lifecycle script nobody reviewed. `None` is what aube hands over when the spawn root is
+    // a checkout it fetched. The third clause — a package both observed in `fetchedBy` and
+    // refused in `notGranted.packages` — is pinned at `catalog::parse` instead, where the
+    // subtraction happens: this catalog lists no refused package, so asserting it here would
+    // pass against a generator that had stopped subtracting at all.
+    //
+    // UNIFORM ACROSS PLATFORMS, unlike the granted arm above: deny-all is expressible everywhere,
+    // so there is no spelling to branch on and no platform where this may weaken.
+    for denied in [Some("left-pad"), None] {
+        let p = compile_for(denied);
+        assert!(
+            p.net.enforce && p.net.rules.is_empty(),
+            "{denied:?} has no admitted entry, so it must compile to deny-all egress"
+        );
+        assert!(
+            !nub_sandbox::matcher::HostMatcher::new(&p.net).admits("nodejs.org"),
+            "{denied:?} must reach no host at all, $downloads included"
+        );
+    }
+}
+
 #[test]
 fn build_jail_interposition_confines_write_grants_interpreter_and_scrubs_env() {
     use std::collections::BTreeMap;

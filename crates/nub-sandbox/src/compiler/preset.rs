@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 /// only preset today (the lifecycle-script baseline).
 pub fn resolve(name: &str) -> Result<Value, CompileError> {
     match name {
-        "build-jail" => Ok(build_jail_surface(None, None)),
+        "build-jail" => Ok(build_jail_surface(None, None, None)),
         other => Err(CompileError::unknown_preset(other, &["build-jail"])),
     }
 }
@@ -400,7 +400,11 @@ fn push_read_path(out: &mut Vec<FsRule>, path: &Path, origin: FsOrigin) {
 /// the static `--sandbox build-jail` skeleton (the per-package write is a production-
 /// interposition concern), as does `private_home`. The env axis is the strip-all floor
 /// here; [`compile_build_jail`] replaces it with the scrubbed lifecycle env.
-fn build_jail_surface(package_dir: Option<&Path>, private_home: Option<&Path>) -> Value {
+fn build_jail_surface(
+    package_dir: Option<&Path>,
+    private_home: Option<&Path>,
+    package_name: Option<&str>,
+) -> Value {
     let mut fs = serde_json::Map::new();
     // `$tmp` sets the private per-run tmp MODE (TmpMode::Private) — a writable scratch,
     // shared host tmp hidden. It emits no ordinary fs rule.
@@ -462,31 +466,58 @@ fn build_jail_surface(package_dir: Option<&Path>, private_home: Option<&Path>) -
     // of the whole subpath (`macos_seatbelt_base.sbpl`).
     json!({
         "fs": Value::Object(fs),
-        "net": build_jail_net(),
+        "net": build_jail_net(package_name),
         // Strip-all here; the interposition supplies the scrubbed lifecycle env.
         "vars": []
     })
 }
 
-/// The build-jail's net axis: the curated install-time artifact hosts (`$downloads`),
-/// everything else denied. A lifecycle script that legitimately fetches its own binary —
-/// Node headers for a native compile, the Prisma engines, the Cypress binary — reaches
-/// exactly those hosts and nothing more; the set is wildcard-free and carries no host that
-/// accepts a write, so an attacker-authored postinstall gains no way to send bytes out.
+/// The build-jail's net axis, gated on PACKAGE IDENTITY: a package the catalog names may reach
+/// the network, and a package it does not name reaches nothing.
 ///
-/// WINDOWS keeps the deny-all. Its backend refuses a per-host policy outright
-/// (`WinNetPlan::PerHostUnsupported`) because the available AppContainer exemption exposes
-/// every loopback listener, so a local forwarder could bypass the hostname gate — and an
-/// unappliable jail fails the install rather than degrading. Deny-all is the STRICTER
-/// posture, so the divergence loses a capability, never enforcement.
-fn build_jail_net() -> Value {
-    #[cfg(not(windows))]
-    {
-        json!(["$downloads"])
+/// NO ENTRY MEANS NO NETWORK, and that default is the point rather than a fallback. The
+/// attack this jail exists to blunt is the Shai-Hulud shape — an attacker publishes a new
+/// `postinstall` into a package that never had one, and it runs with the user's access. That
+/// package is not one anybody vetted for network use, so it gets nothing; a package that
+/// needs egress arrives through a pull request against `data/build-jail-catalog.json` first,
+/// and that PR is the whole opt-in mechanism. Host granularity is a separate axis and a much
+/// smaller one: narrowing an admitted host would constrain a package somebody already
+/// reviewed, while doing nothing about the unvetted one, and a global egress set handed that
+/// unvetted package `github.com` — ample for exfiltration on its own.
+///
+/// The grant is therefore a BOOLEAN, deliberately. Both catalog spellings — a package named in
+/// `networkHosts[].fetchedBy` and one listed in `packageNetwork.full` — mean "this package was
+/// reviewed and admitted", so both resolve to the same grant. A package recorded in
+/// `notGranted.packages` is denied whichever way it was observed: the catalog parser subtracts
+/// the refused set from the union, so a refusal cannot be contradicted by an observation of
+/// what the package was seen fetching.
+///
+/// THE GRANT IS SPELLED PER PLATFORM, because the coarseness is real and the IR states what the
+/// mechanism actually enforces rather than a uniform promise two of three backends would break.
+/// Denial is `false` everywhere; the admitted case splits:
+///
+/// - **macOS** and **Linux** get `["$downloads"]`. Seatbelt pins the child's egress to nub's
+///   proxy, so there the host list is genuinely enforced. The Linux build jail is Landlock-only
+///   (a netns needs an unprivileged user namespace, which this product cannot require), so
+///   `backend::linux::apply_landlock` reads the Allow as its coarse per-package permit and lifts
+///   `AF_INET`/`AF_INET6` out of the seccomp socket ceiling — the hosts are provenance there, not
+///   a gate. That backend owns the comment explaining why coarse is sound.
+/// - **Windows** gets `true`. Its unprivileged egress lever is the AppContainer `internetClient`
+///   capability, which the backend grants on exactly `!net.enforce` — so coarse-allow is the ONLY
+///   spelling that reaches it. `["$downloads"]` would instead select the per-host tier, which
+///   needs an admin-registered loopback exemption, so an ordinary `nub install` would fail closed
+///   (or divert to the dedicated-account backend) for every catalogued package. `true` is not
+///   "unrestricted host networking" there either: WFP refuses an AppContainer's loopback whatever
+///   its capabilities, and `privateNetworkClientServer` stays withheld, so the grant is public
+///   outbound only — tighter than the same spelling means on any other platform.
+fn build_jail_net(package_name: Option<&str>) -> Value {
+    if !super::package_network::build_jail_net_allowed(package_name) {
+        return json!(false);
     }
-    #[cfg(windows)]
-    {
-        json!(false)
+    if cfg!(windows) {
+        json!(true)
+    } else {
+        json!(["$downloads"])
     }
 }
 
@@ -518,7 +549,7 @@ pub fn compile_build_jail(
     ambient_env: BTreeMap<String, String>,
 ) -> Result<SandboxPolicy, CompileError> {
     let private_home = private_home_dir(&homes, package_dir);
-    let surface = build_jail_surface(Some(package_dir), private_home.as_deref());
+    let surface = build_jail_surface(Some(package_dir), private_home.as_deref(), package_name);
     // cwd anchors diagnostics/canonicalization; the project root (homes.project) is
     // what `"./"` expands against, so the package dir as cwd does not affect grants.
     let cwd = homes.project.clone();
