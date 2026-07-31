@@ -47,6 +47,27 @@ createServer((request, response) => {
 
 Render uses the Dockerfile's `CMD` unless **Docker Command** overrides it. The default web-service port is `10000`, but reading `PORT` also covers a custom value.
 
+## CLI deployment
+
+The Render CLI can create the same repository-backed Docker service:
+
+```bash
+render services create \
+  --name nub-app \
+  --type web_service \
+  --repo https://github.com/OWNER/REPOSITORY \
+  --branch main \
+  --runtime docker \
+  --plan free \
+  --region oregon \
+  --health-check-path /alive \
+  --confirm \
+  --output json
+
+curl --fail https://nub-app.onrender.com/alive
+# {"alive":true,"runtime":"nub-on-node"}
+```
+
 ## Blueprint
 
 A repository can declare the same service in `render.yaml`:
