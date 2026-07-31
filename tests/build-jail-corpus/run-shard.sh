@@ -98,7 +98,15 @@ cat > "$PROJ/package.json" <<EOF
 EOF
 
 # minimumReleaseAge blocks ~70 packages at RESOLUTION; the strict flag must go too.
+#
+# `side-effects-cache=false` is what makes a GRANT ITERATION mean anything: the cache
+# replays a package's previous postinstall RESULT when only the catalog changed, so the
+# next arm scores the PREVIOUS arm's grants. The per-run private HOME is the other half
+# and is NOT a substitute — `side_effects_cache_root` derives the cache from the STORE,
+# not from HOME, so any later move to a shared store to save bandwidth would silently
+# reintroduce the replay. Disabling it in the fixture makes that structural.
 { echo "minimumReleaseAge=0"; echo "minimumReleaseAgeStrict=false"
+  echo "side-effects-cache=false"
   [ "$LEVER" = "OPTIONAL_OFF" ] && echo "optional=false"; } > "$PROJ/.npmrc"
 
 provision() {
@@ -242,10 +250,20 @@ case "$JAILED_NODE_V" in
   *) echo "FATAL: node on STUDY_PATH is unusable: '$JAILED_NODE' -> '$JAILED_NODE_V'" | tee -a "$LOG" >&2
      exit 7 ;;
 esac
+# `env -i` is what makes a run hermetic, so the dev-only catalog override must be
+# forwarded EXPLICITLY — otherwise a grant iteration silently measures the COMPILED
+# catalog and every "the grant changed nothing" verdict is an artefact of the harness.
+# Forwarded only when set; the banner nub then prints into the log is the proof of which
+# catalog the run actually read, and `catalog_override=` below records it per run.
+CAT_ENV=()
+[ -n "${NUB_BUILD_JAIL_CATALOG:-}" ] && CAT_ENV=("NUB_BUILD_JAIL_CATALOG=$(wp "$NUB_BUILD_JAIL_CATALOG")")
+echo "catalog_override=${NUB_BUILD_JAIL_CATALOG:-none}" >> "$LOG"
+
 runnub() {
   ( cd "$PROJ" && env -i \
       PATH="$STUDY_PATH" HOME="$H" TMPDIR="$TMPD" \
       ${WIN_ENV[@]+"${WIN_ENV[@]}"} \
+      ${CAT_ENV[@]+"${CAT_ENV[@]}"} \
       NUB_CACHE_DIR="$(wp "$CACHE")" npm_config_cache="$(wp "$CACHE/npm")" \
       ${FORCE:+$FORCE} ${TIMEOUT_BIN:+"$TIMEOUT_BIN" 3000} "$NUB" "$@" ) >> "$LOG" 2>&1
   return $?
@@ -279,6 +297,13 @@ elif [ "$ARM" = "A0" ]; then
   [ "$WARN_COUNT" -gt 0 ] && ARM_EFFECT=confirmed || ARM_EFFECT=FAILED-no-optout-warning
 else
   [ "$WARN_COUNT" -eq 0 ] && ARM_EFFECT=confirmed || ARM_EFFECT=FAILED-optout-leaked
+fi
+# An override that failed to load falls back to the COMPILED catalog with one stderr line
+# and otherwise runs normally — so a grant iteration would report "the grant did nothing"
+# while never having read the grant. Require the banner whenever an override was asked for.
+if [ -n "${NUB_BUILD_JAIL_CATALOG:-}" ]; then
+  OVR_COUNT=$(grep -c "build-jail catalog OVERRIDDEN from" "$LOG" || true)
+  [ "$OVR_COUNT" -gt 0 ] || ARM_EFFECT="FAILED-catalog-override-not-loaded"
 fi
 # ── node-gyp IDENTITY — three facts, because one of them alone is ambiguous ────
 # A bare-PATH `node-gyp` on this host resolves a stale global 3.8.0, so an
