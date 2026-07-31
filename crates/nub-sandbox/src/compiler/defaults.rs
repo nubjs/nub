@@ -936,7 +936,8 @@ const NET_GATE_POLICY_PLACEHOLDER: &str = "__NUB_NET_POLICY_JSON__";
 ///
 /// PLATFORM-INDEPENDENT on purpose, though only the Windows jail stamps it today (the one
 /// platform with no unprivileged OS egress lever; Linux has a seccomp `AF_INET` ceiling and
-/// macOS pins egress to nub's proxy). Nothing here branches on the OS, so serving as a
+/// macOS denies outright in Seatbelt — NO proxy on any platform, because the jail's egress
+/// decision is a per-package boolean and there is nothing to route). Nothing branches on OS, so serving as a
 /// defence-in-depth layer elsewhere needs no porting — and keeping it un-gated is what makes
 /// the behaviour testable off Windows.
 pub fn net_gate_node_options(package_name: Option<&str>) -> String {

@@ -68,13 +68,21 @@ pub struct PackageGrant {
     pub project_cwd: bool,
 }
 
-/// A parsed, fully-validated catalog: the three tables the jail actually consults.
+/// A parsed, fully-validated catalog. Three tables, and only TWO of them are consulted by
+/// the build jail — a distinction worth stating here because collapsing it has misled
+/// readers repeatedly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Catalog {
-    /// `$downloads` — the egress allowlist, in written order.
+    /// The hosts nub's own prefetcher may GET from, and the `$downloads` set in the
+    /// `nub sandbox` policy language. **NOT a build-jail egress filter**: the jail gates
+    /// egress per package as a BOOLEAN and starts no proxy, so this list neither widens nor
+    /// narrows what a confined script can reach. Expect it to stay tiny while
+    /// `package_network_allowed` grows into the hundreds — they measure different things.
+    /// In written order.
     pub download_hosts: Vec<String>,
     pub package_grants: Vec<PackageGrant>,
-    /// Packages permitted egress, SORTED and deduplicated so the lookup may binary-search.
+    /// Packages permitted egress — ALL of it, to any host, or none. SORTED and deduplicated
+    /// so the lookup may binary-search.
     pub package_network_allowed: Vec<String>,
 }
 
@@ -96,8 +104,12 @@ pub fn parse(text: &str) -> Result<Catalog, String> {
     })
 }
 
-// ── $downloads ─────────────────────────────────────────────────────────────────
+// ── networkHosts: what NUB fetches, not what a jailed script may reach ─────────
 
+/// Parse `networkHosts` — the hosts nub's own prefetcher may GET from, outside the jail.
+/// Nothing here constrains a confined script: build-jail egress is a per-package boolean
+/// (see `compiler::preset::build_jail_net`). Kept adjacent to `packageNetwork` in one file
+/// because they are edited together, NOT because one filters the other.
 fn parse_hosts(catalog: &serde_json::Value) -> Result<Vec<String>, String> {
     let entries = array(catalog, "networkHosts")?;
     let mut hosts = Vec::new();
@@ -555,8 +567,17 @@ fn require_project_relative(rel: &str, field: &str, at: &str) -> Result<(), Stri
 /// measured against a real denial from one taken on a vendor's word — the two are not
 /// equally strong, and the catalog would lose that distinction the moment an entry could
 /// be added without stating it.
+///
+/// `policy` is the odd one out and deliberately so: the other three assert an OBSERVATION,
+/// while a policy grant asserts only a JUDGEMENT — "this package is too widely depended on
+/// to risk breaking, so it gets egress before anyone measures whether it needs it." It was
+/// added 2026-07-31 when egress was granted by download rank, and it exists precisely so
+/// that widening cannot hide: `evidence` partitions the catalog into what we saw and what
+/// we decided, and a policy row is the one a later measurement should replace. Labelling
+/// such a row `measured` would be the actual harm here — it would launder a judgement call
+/// into evidence and leave nothing to audit.
 fn require_provenance(entry: &serde_json::Value, at: &str) -> Result<(), String> {
-    const KINDS: &[&str] = &["measured", "vendor-documented", "source-read"];
+    const KINDS: &[&str] = &["measured", "vendor-documented", "source-read", "policy"];
     let evidence = string(entry, "evidence", at)?;
     if !KINDS.contains(&evidence.as_str()) {
         return Err(format!(

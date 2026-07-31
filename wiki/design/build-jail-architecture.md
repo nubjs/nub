@@ -1,6 +1,6 @@
 # Build jail architecture — is the shape right?
 
-The three sibling documents record every mechanism tried on one operating system. This one asks the question above them: **the build jail pre-grants each package a set of filesystem paths, executables and network hosts from a catalog, and denies everything else — is that the right architecture, or is the steady stream of defects a symptom of the wrong one?**
+The three sibling documents record every mechanism tried on one operating system. This one asks the question above them: **the build jail pre-grants each package a set of filesystem paths and executables from a catalog, plus a single per-package network grant, and denies everything else — is that the right architecture, or is the steady stream of defects a symptom of the wrong one?**
 
 It exists because the patch rate invited that question. Five path-spelling defects, a mechanism carried for weeks that measured inert, a preload that cannot reach one of Node's two resolvers, and two harness defects that made runs read green — all inside one subsystem, all in one stretch of work. The shape of the complaint is that Nub keeps reconstructing in userland what the operating system already knows: is this path that path, is this path under that root, did this process do the work.
 
@@ -37,13 +37,13 @@ Before asking whether a different architecture would have avoided the defects, i
 
 ## Every defect but a handful lands on the read axis
 
-Counted across all three sibling ledgers, the filesystem **read** axis carries the overwhelming majority of both the adopted mechanisms and the open defects. The write axis produced two items, one of which is a package-manager linker bug reproducible with confinement entirely off. The network axis produced capability findings — a host allowlist that is inert on Linux, per-host enforcement that holds only on macOS — rather than compatibility breaks.
+Counted across all three sibling ledgers, the filesystem **read** axis carries the overwhelming majority of both the adopted mechanisms and the open defects. The write axis produced two items, one of which is a package-manager linker bug reproducible with confinement entirely off. The network axis produced capability findings — per-host egress was surveyed on all three platforms and then withdrawn, leaving a per-package boolean — rather than compatibility breaks.
 
 | axis | representative items | count of ledger sections |
 | --- | --- | --- |
 | **read / exec** | the `/etc` enumeration and its distro-shaped TLS correction, the `EACCES`-versus-`ENOENT` compatibility cost, read-must-render-as-read-plus-execute, resolved-leaf grants, the grant explosion under `ARG_MAX`, the `$HOME` over-grant through a symlink hop, the `posix_spawnp` PATH-search abort, pyenv's Python, the whole Windows bypass-traverse and ancestor-repair and canonicalization apparatus, blockers 1 and 3 | dominant |
 | **write** | the metadata-write residual on Linux, node-gyp's sibling-store write, node-gyp's store-entry-root write, a read grant synthesizing a deny that revoked write from everything it enclosed | 4 |
-| **network** | the inert `$downloads` list on Linux, the userland net gate on Windows, the netns bridge readiness race | 3 |
+| **network** | the withdrawal of per-host egress, the userland net gate on Windows, the netns bridge readiness race | 3 |
 | **neither** | the piped-stdio hang (object namespace), the descriptor sweeps, environment keys containing `=`, `getcwd` refused at an ungranted cwd | 5 |
 
 This is the single most useful fact in the document, because it means the architecture question reduces almost entirely to one narrower question: **is denying reads by default the right posture, and could it have been avoided?** The rest of the ledger below answers no on both platforms where it matters.
@@ -98,7 +98,7 @@ The string comparisons are all in the layer above: the policy compiler, and the 
 
 ## Pre-granting from a catalog keyed on package identity — ADOPTED
 
-**What it is.** Each package is granted, in advance, the paths, executables and hosts it needs; no catalog entry means no network at all.
+**What it is.** Each package is granted, in advance, the paths and executables it needs, plus network access as one all-or-nothing grant; no catalog entry means no network at all.
 
 **It is the ecosystem's converged answer, and Nub adds enforcement to it rather than replacing it.** The pnpm 10 release flipped the default in January 2025, and pnpm 11 replaced the five older settings with a single `allowBuilds` map, which additionally requires a **trusted package identity** before a name-keyed rule may approve a script — a registry-shaped dependency path — so git, tarball and directory artifacts must be approved by their lockfile path instead. Version 12 of npm flips the same default in July 2026: `allowScripts` off, with `--allow-git=none` and `--allow-remote=none` beside it. LavaMoat's `allow-scripts` is the same shape as a standalone tool, with an `auto` mode that populates the allowlist. None of these confines an allowed package at all — an approved script runs with the user's full privileges.
 
@@ -111,7 +111,7 @@ The string comparisons are all in the layer above: the policy compiler, and the 
 **What it is.** The catalog carries two things that look like one: `networkHosts`, a set of artifact hostnames, and `packageNetwork`, a per-package grant. **They are decoupled, and mistaking them for a single knob produces the wrong question.**
 
 - **`networkHosts` feeds only Nub's own PREFETCH**, which runs **unconfined, as the user, before the jail exists** (`pm_engine/build_prefetch.rs`). It is where Nub — not the script — derives an artifact URL from the package's manifest, fetches it, and writes it where the installer already looks.
-- **`packageNetwork` feeds the jail's egress grant**, which is a coarse per-package boolean on all three platforms and **names no hostname at all** (`compiler/preset.rs:615-671`).
+- **`packageNetwork` feeds the jail's egress grant**, which is a coarse per-package boolean on all three platforms and **names no hostname at all** (`compiler/preset.rs:602-671`).
 
 **So the criterion for admitting a host is *"does the PREFETCHER need it?"* — not *"is it safe for a script to reach?"*** That reframing is the finding. It was verified structurally: a 43-entry catalog change promoted **zero** hosts, and `DOWNLOAD_HOSTS` came out **byte-identical** across it (`dde33ef0…` both sides) while the per-package table's digest changed — the second half being the control that distinguishes byte-identity from a stale generated artifact. No prefetch demand was measured for any candidate, so every one went to `packageNetwork` instead.
 
@@ -209,7 +209,9 @@ The string comparisons are all in the layer above: the policy compiler, and the 
 
 **What it is.** Chromium's answer to the same allow-polarity Windows problem: the confined process gets essentially no filesystem access, and *"almost all resources that the renderer process uses have been acquired by the Browser and their handles duplicated into the renderer process."*
 
-**It works because Chromium controls the confined code.** A renderer is written to ask its broker. A dependency's install script is arbitrary third-party code running arbitrary tools, and the only seam Nub could broker through is the same Node extension surface whose reach is bounded above. Nub already ships the one broker whose cost is justified: the loopback egress proxy on macOS, where the profile permits exactly the proxy's port so every packet must traverse it and a raw socket cannot bypass it.
+**It works because Chromium controls the confined code.** A renderer is written to ask its broker. A dependency's install script is arbitrary third-party code running arbitrary tools, and the only seam Nub could broker through is the same Node extension surface whose reach is bounded above.
+
+**The build jail brokers nothing, and the one broker Nub ships belongs to the other product.** The loopback egress proxy — a Seatbelt profile permitting exactly the proxy's port, so every packet must traverse it and a raw socket cannot bypass it — is `nub sandbox`'s mechanism. The jail withdrew per-host egress and therefore starts no proxy on any platform; its net axis is the per-package boolean above.
 
 **What would change the verdict.** Nothing. The premise — that the confined code cooperates — is false here by construction.
 
@@ -308,5 +310,6 @@ Neither BuildXL nor Bazel infers whether a process did its work. A pip declares 
 
 ## Changelog
 
+- 2026-07-31 — Scrubbed the residual host-allowlist framing. The opening question, the read/write/network axis table and the pre-granting section each still described the jail as granting a package a set of network HOSTS; all three now say what it grants, which is one per-package boolean. The brokering section claimed the jail ships the macOS loopback egress proxy — it ships nothing of the kind, and that broker belongs to `nub sandbox`, so the section now states that the jail brokers nothing.
 - 2026-07-31 — Added the network-axis governance section: `networkHosts` and `packageNetwork` are decoupled, the former gating only Nub's unconfined prefetch, so the criterion for admitting a host is whether the PREFETCHER needs it rather than whether a script may safely reach it. Verified structurally — a 43-entry catalog change promoted zero hosts and left `DOWNLOAD_HOSTS` byte-identical, with a changed per-package digest as the control proving the codegen re-ran. Recorded the separate exfiltration criterion that disqualifies a host outright. Added the polarity finding: the pure-allowlist invariant was asserted on the IR and one backend synthesized a deny out of an `Allow` underneath it, which is the same measurement-gap class as the inert ancestor repair. Three rows added to the avoidable/unavoidable table.
 - 2026-07-30 — Initial write-up. Surveyed BuildXL, Bazel, Chromium's Windows sandbox, Nix, Guix, Portage, Gentoo's `sandbox`, `build-wrap`, `sandbox-runtime`, LavaMoat, Node's own permission model, and the npm/pnpm install-script defaults, against the question of whether the build jail's pre-granted per-package allowlist is the right architecture. Verdict: it is, the two-layer split it converged on is Chromium's, and the avoidable share of the patch stream reduces to an untyped canonical path plus an ambient temp directory. Measured that Seatbelt's `(trace …)` directive is inert on darwin 25.5 with a positive control on the same profile shape.
