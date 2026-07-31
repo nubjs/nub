@@ -46,10 +46,34 @@
     "comment": "Per-package egress that names no host. Identical grant to being listed in a networkHosts entry's fetchedBy, but WITHOUT adding a hostname to $downloads — which is also the allowlist for nub's own out-of-jail prefetch. Every entry below fetches a github.com release asset; github.com stays refused in notGranted for the prefetcher's sake, and these packages reach it because the review that added them here ratified them, which is the control the jail actually relies on.",
     "full": [
       {
+        "package": "@anthropic-ai/claude-code",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 9,751,898 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@apollo/protobufjs",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 4,673,197 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "@appsignal/nodejs",
         "evidence": "measured",
         "observed": "corpus-v2 shard `d5a`, 2026-07-31. Confined: `Error downloading from mirror: DownloadError: Could not connect to CDN` for `downloadUrl: https://d135dj0rjqvssy.cloudfront.net/0.36.12/appsignal-aarch64-darwin-all-static.tar.gz`, then the same for the fastly mirror `https://appsignal-agent-releases.global.ssl.fastly.net/0.36.12/...`, ending `DownloadError: Could not download agent from any mirror`. Unconfined A0, same fixture: `Installing downloaded agent and extension.` Two mirror hostnames for one artifact is the shape packageNetwork exists for — a host list would have to carry both and neither is wanted in the prefetcher.",
         "platform": "macos-arm64"
+      },
+      {
+        "package": "@biomejs/biome",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 11,734,527 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@bufbuild/buf",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,231,888 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
       },
       {
         "package": "@confluentinc/kafka-javascript",
@@ -70,10 +94,70 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "@datadog/native-appsec",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 9,052,378 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@datadog/native-iast-taint-tracking",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 9,089,237 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@datadog/native-metrics",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 8,914,810 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@datadog/pprof",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 11,508,042 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "@eversdk/lib-node",
         "evidence": "measured",
         "observed": "corpus-v2 shard `default7`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND binaries.tonlabs.io` fetching https://binaries.tonlabs.io/eversdk_1_48_nodejs_addon_arm64-darwin.gz. Unconfined A0, same fixture: the addon downloads.",
         "platform": "macos-arm64"
+      },
+      {
+        "package": "@firebase/util",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 17,983,044 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@fortawesome/fontawesome-common-types",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 4,025,084 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@fortawesome/fontawesome-free",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,391,228 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@fortawesome/fontawesome-svg-core",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,149,653 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@fortawesome/free-regular-svg-icons",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,499,818 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@fortawesome/free-solid-svg-icons",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,973,489 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
       },
       {
         "package": "@go-task/cli",
@@ -82,16 +166,46 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "@google/genai",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 16,859,427 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "@larksuite/cli",
         "evidence": "measured",
         "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 31591608 B / 1558 files. nub v0.6.0 2421ab9a700c.",
         "platform": "linux-x64"
       },
       {
+        "package": "@modelcontextprotocol/ext-apps",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,745,623 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@nestjs/core",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 12,894,852 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@newrelic/native-metrics",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,335,947 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "@notarize/qlc-cli",
         "evidence": "measured",
         "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `Unhandled error: Error: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
         "platform": "macos-arm64"
+      },
+      {
+        "package": "@openapitools/openapi-generator-cli",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,542,716 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
       },
       {
         "package": "@pact-foundation/pact-node",
@@ -104,6 +218,12 @@
         "evidence": "measured",
         "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: its postinstall shells `npm install`, which dies `npm error code ENOTFOUND / npm error syscall getaddrinfo` reaching https://registry.npmjs.org/. Unconfined A0, same fixture: the nested install completes. registry.npmjs.org is deliberately NOT promoted to networkHosts — it serves an authenticated PUT publish route on the same hostname, the github.com shape, and a project .npmrc token is routinely present in CI.",
         "platform": "macos-arm64"
+      },
+      {
+        "package": "@parcel/watcher",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 32,031,468 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
       },
       {
         "package": "@playwright/browser-chromium",
@@ -124,16 +244,28 @@
         "platform": "darwin-arm64"
       },
       {
+        "package": "@pnpm/exe",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 6,531,312 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "@posthog/cli",
         "evidence": "measured",
         "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 47986568 B / 1563 files. nub v0.6.0 2421ab9a700c.",
         "platform": "linux-x64"
       },
       {
-        "package": "puppeteer",
-        "evidence": "measured",
-        "observed": "Isolated single-package macOS arm, 2026-07-31, cold store and a private HOME. Confined: postinstall rc=1, `ERROR: Failed to set up chrome v131.0.6778.204! Set \"PUPPETEER_SKIP_DOWNLOAD\" env variable to skip download.`, cause `getaddrinfo ENOTFOUND googlechromelabs.github.io` (the version-resolution manifest; the artifact itself is on storage.googleapis.com). With egress granted, the same fixture installs rc=0 and downloads both Chrome for Testing and chrome-headless-shell. Granted HERE rather than by promoting a host: googlechromelabs.github.io and storage.googleapis.com both stay refused in notGranted — the latter as a multi-tenant bucket namespace — and this grants the package without widening the prefetcher's allowlist. It pairs with puppeteer's packageGrants homePaths entry: egress alone gets the browser downloaded but leaves it in the private jail home, where executablePath() cannot find it.",
-        "platform": "macos-arm64"
+        "package": "@prisma/client",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 15,596,290 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@prisma/engines",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 15,962,371 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
       },
       {
         "package": "@railway/cli",
@@ -142,16 +274,46 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "@reown/appkit",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,370,475 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@scarf/scarf",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 12,085,449 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "@sematext/gc-stats",
         "evidence": "measured",
         "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: node-pre-gyp `getaddrinfo ENOTFOUND github.com` on https://github.com/adnanrahic/node-gcstats/archive/refs/tags/1.5.9.tar.gz. STATED PLAINLY: this grant does NOT on its own make the package install. Verified with the grant applied — the request now REACHES github and returns `404 Not Found` on that URL, so the grant does exactly its job, but the tag is gone upstream and node-pre-gyp falls back to a source compile that dies on `aube: node-gyp shim re-entered 4 times without reaching a real node-gyp`. Two separate reasons, neither a wider grant: a dead upstream artifact (this package fails on plain npm too) and a nub defect.",
         "platform": "macos-arm64"
       },
       {
+        "package": "@sentry-internal/node-cpu-profiler",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,319,093 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@sentry/cli",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 23,134,947 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "@shopify/ngrok",
         "evidence": "measured",
         "observed": "corpus-v2 shard `d5b`, 2026-07-31. Confined: `ngrok - error downloading from URL RequestError: getaddrinfo ENOTFOUND bin.equinox.io` for https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-arm64.zip. Unconfined A0, same fixture: the download completes.",
         "platform": "macos-arm64"
+      },
+      {
+        "package": "@shopify/react-native-skia",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,213,864 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
       },
       {
         "package": "@sitespeed.io/chromedriver",
@@ -166,10 +328,46 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "@stdlib/math-base-assert-is-nan",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,001,633 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@stdlib/math-base-napi-binary",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,183,146 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@stdlib/number-float64-base-to-words",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,034,101 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@swc/core",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 37,395,886 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@temporalio/core-bridge",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,213,502 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "@tensorflow/tfjs-node",
         "evidence": "measured",
         "observed": "corpus-v2 shard `default7`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND storage.googleapis.com` fetching https://storage.googleapis.com/tf-builds/libtensorflow_r2_7_darwin_arm64_cpu.tar.gz. Unconfined A0, same fixture: libtensorflow downloads. The host stays refused in notGranted; this grants the package.",
         "platform": "macos-arm64"
+      },
+      {
+        "package": "@tree-sitter-grammars/tree-sitter-yaml",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,058,585 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
       },
       {
         "package": "@typescript-tools/rust-implementation",
@@ -178,10 +376,52 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "@vercel/speed-insights",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,392,698 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "@vscode/ripgrep",
         "evidence": "measured",
         "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 55850539 B / 1558 files. nub v0.6.0 2421ab9a700c.",
         "platform": "linux-x64"
+      },
+      {
+        "package": "@vscode/vsce-sign",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,029,224 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "agent-browser",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,178,458 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "appium",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,159,438 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "appium-chromedriver",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,453,413 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "argon2",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,808,121 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "aws-sdk",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 9,586,810 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
       },
       {
         "package": "azure-functions-core-tools",
@@ -190,16 +430,58 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "bcrypt",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 5,240,750 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "better-sqlite3",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 8,910,366 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "bootstrap-slider",
         "evidence": "measured",
         "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 60986436 B / 4503 files. nub v0.6.0 2421ab9a700c.",
         "platform": "linux-x64"
       },
       {
+        "package": "braintrust",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,273,894 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "browser-tabs-lock",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,558,374 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "bufferutil",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 6,693,016 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "bun",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,834,656 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "canvas",
         "evidence": "measured",
         "observed": "Isolated single-package macOS arm `iso-canvas`, 2026-07-31. Confined: `prebuild-install warn install getaddrinfo ENOTFOUND github.com`, after which it falls through to a from-source node-gyp build. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. ALSO A BUG-J CARRIER: it only reaches node-gyp because the prebuilt was refused, so with egress restored it takes the prebuild-install path and the gyp write never happens.",
         "platform": "macos-arm64"
+      },
+      {
+        "package": "cbor-extract",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,369,971 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
       },
       {
         "package": "chromedriver",
@@ -232,16 +514,76 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "contentful",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,376,337 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "core-js",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 67,256,753 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "core-js-pure",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 16,387,315 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "cpu-features",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 10,357,678 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "cypress",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 7,782,859 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "date-now",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,385,244 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "dd-trace",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 9,629,322 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "drivelist",
         "evidence": "measured",
         "observed": "Isolated single-package macOS arm `iso-drivelist`, 2026-07-31. Confined: `prebuild-install warn install getaddrinfo ENOTFOUND github.com`, then a from-source build. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. Also a BUG-J carrier.",
         "platform": "macos-arm64"
       },
       {
+        "package": "dtrace-provider",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,589,540 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "dugite",
         "evidence": "measured",
         "observed": "corpus-v2 shard `d5b`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND github.com` fetching the dugite-native release asset. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
         "platform": "macos-arm64"
+      },
+      {
+        "package": "edgedriver",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,002,069 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "ejs",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 38,224,673 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
       },
       {
         "package": "electron",
@@ -254,6 +596,24 @@
         "evidence": "measured",
         "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: `RequestError: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
         "platform": "macos-arm64"
+      },
+      {
+        "package": "electron-winstaller",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,393,542 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "environment",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 35,276,259 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "es5-ext",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 13,898,055 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
       },
       {
         "package": "esbuild",
@@ -272,6 +632,18 @@
         "evidence": "measured",
         "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND f.hubspotusercontent40.net`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
         "platform": "macos-arm64"
+      },
+      {
+        "package": "fsevents",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 35,935,449 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "geckodriver",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,726,270 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
       },
       {
         "package": "gl",
@@ -304,6 +676,12 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "identity-obj-proxy",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 10,795,805 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "inngest-cli",
         "evidence": "measured",
         "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 64824526 B / 1537 files. nub v0.6.0 2421ab9a700c.",
@@ -314,6 +692,54 @@
         "evidence": "measured",
         "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 16724736 B / 1557 files. nub v0.6.0 2421ab9a700c.",
         "platform": "linux-x64"
+      },
+      {
+        "package": "isolated-vm",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,074,741 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "jss",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,766,753 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "keccak",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,047,226 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "keytar",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,548,896 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "koffi",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,473,645 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "lefthook",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,376,363 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "lmdb",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 6,152,901 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "maplibre-gl",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,889,905 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
       },
       {
         "package": "mbt",
@@ -328,16 +754,52 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "mongodb-memory-server",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,948,906 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "msgpackr-extract",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 26,051,087 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "msw",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 19,534,017 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "n8n-nodes-evolution-api",
         "evidence": "measured",
         "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 16740577 B / 1568 files. nub v0.6.0 2421ab9a700c.",
         "platform": "linux-x64"
       },
       {
+        "package": "nestjs-pino",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,305,283 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "ngrok",
         "evidence": "measured",
         "observed": "corpus-v2 shard `default7`, 2026-07-31. Confined: `ngrok - error downloading from URL RequestError: getaddrinfo ENOTFOUND bin.equinox.io` for https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-arm64.zip. Unconfined A0, same fixture: the download completes.",
         "platform": "macos-arm64"
+      },
+      {
+        "package": "nice-napi",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,260,108 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "node",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,108,362 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
       },
       {
         "package": "node-jq",
@@ -352,6 +814,18 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "node-liblzma",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,524,114 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "node-pty",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 5,577,783 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "node-zopfli",
         "evidence": "measured",
         "observed": "Isolated single-package macOS arm `iso-node-zopfli`, 2026-07-31. Confined: `prebuild-install WARN install getaddrinfo ENOTFOUND github.com`, then a from-source build. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. Also a BUG-J carrier.",
@@ -364,10 +838,40 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "nx",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 10,296,200 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "odbc",
         "evidence": "measured",
         "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 18635686 B / 1444 files. nub v0.6.0 2421ab9a700c.",
         "platform": "linux-x64"
+      },
+      {
+        "package": "onnxruntime-node",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,482,571 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "openclaw",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,597,727 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "opencode-ai",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,864,020 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "package-directory",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,570,542 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
       },
       {
         "package": "pngout-bin",
@@ -376,10 +880,28 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "postinstall-postinstall",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,030,556 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "postman-code-generators",
         "evidence": "measured",
         "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 16851911 B / 1557 files. nub v0.6.0 2421ab9a700c.",
         "platform": "linux-x64"
+      },
+      {
+        "package": "prisma",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 15,261,542 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "protobufjs",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 75,665,855 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
       },
       {
         "package": "protoc-gen-grpc-web",
@@ -388,10 +910,28 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "puppeteer",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm, 2026-07-31, cold store and a private HOME. Confined: postinstall rc=1, `ERROR: Failed to set up chrome v131.0.6778.204! Set \"PUPPETEER_SKIP_DOWNLOAD\" env variable to skip download.`, cause `getaddrinfo ENOTFOUND googlechromelabs.github.io` (the version-resolution manifest; the artifact itself is on storage.googleapis.com). With egress granted, the same fixture installs rc=0 and downloads both Chrome for Testing and chrome-headless-shell. Granted HERE rather than by promoting a host: googlechromelabs.github.io and storage.googleapis.com both stay refused in notGranted — the latter as a multi-tenant bucket namespace — and this grants the package without widening the prefetcher's allowlist. It pairs with puppeteer's packageGrants homePaths entry: egress alone gets the browser downloaded but leaves it in the private jail home, where executablePath() cannot find it.",
+        "platform": "macos-arm64"
+      },
+      {
         "package": "purescript",
         "evidence": "measured",
         "observed": "corpus-v2 shard `default6`, 2026-07-31. Confined: `FetchError: request to https://github.com/purescript/purescript/releases/download/v0.15.16/macos-arm64.tar.gz failed, reason: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
         "platform": "macos-arm64"
+      },
+      {
+        "package": "re2",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,058,890 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "react-native-nitro-modules",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,711,849 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
       },
       {
         "package": "realm",
@@ -412,6 +952,24 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "secp256k1",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,272,703 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "serverless",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,520,026 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "sharp",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 79,921,607 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "skia-canvas",
         "evidence": "measured",
         "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 47186585 B / 1558 files. nub v0.6.0 2421ab9a700c.",
@@ -422,6 +980,12 @@
         "evidence": "measured",
         "observed": "corpus-v2 shard `default6`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND downloads.snyk.io` fetching https://downloads.snyk.io/cli/v1.1306.2/snyk-macos-arm64, plus denied static.snyk.io and o30291.ingest.sentry.io. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. STATED PLAINLY: egress here is a per-package BOOLEAN, so this grant also restores the sentry telemetry POST the same script makes. That endpoint would not be admissible as a networkHosts entry on its own — a telemetry sink whose POST body is the product is exactly the exfiltration shape the host criterion refuses — and it is admitted here only as part of ratifying a CLI the user installed deliberately.",
         "platform": "macos-arm64"
+      },
+      {
+        "package": "spawn-sync",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,999,911 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
       },
       {
         "package": "sqlite3",
@@ -436,6 +1000,18 @@
         "platform": "linux-x64"
       },
       {
+        "package": "ssh2",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 10,686,525 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "style-dictionary",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,954,901 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "supabase",
         "evidence": "measured",
         "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 110276485 B / 1286 files. nub v0.6.0 2421ab9a700c.",
@@ -448,10 +1024,94 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "tesseract.js",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,395,750 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "tldjs",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,421,476 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "tree-sitter",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,260,253 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "tree-sitter-bash",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,090,858 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
         "package": "tree-sitter-cli",
         "evidence": "measured",
         "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND github.com` fetching https://github.com/tree-sitter/tree-sitter/releases/download/v0.26.11/tree-sitter-macos-arm64.gz. Unconfined A0, same fixture: the gz is fetched and the binary written.",
         "platform": "macos-arm64"
+      },
+      {
+        "package": "tree-sitter-json",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,129,098 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "tree-sitter-python",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,111,809 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "unix-dgram",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,419,837 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "unrs-resolver",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 49,523,814 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "utf-8-validate",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 6,109,651 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "vue-demi",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 8,074,138 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "websocket",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,557,640 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "workerd",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 17,444,312 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "xcase",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,691,875 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "yarn",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 9,865,491 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
       }
     ]
   },

@@ -555,8 +555,17 @@ fn require_project_relative(rel: &str, field: &str, at: &str) -> Result<(), Stri
 /// measured against a real denial from one taken on a vendor's word — the two are not
 /// equally strong, and the catalog would lose that distinction the moment an entry could
 /// be added without stating it.
+///
+/// `policy` is the odd one out and deliberately so: the other three assert an OBSERVATION,
+/// while a policy grant asserts only a JUDGEMENT — "this package is too widely depended on
+/// to risk breaking, so it gets egress before anyone measures whether it needs it." It was
+/// added 2026-07-31 when egress was granted by download rank, and it exists precisely so
+/// that widening cannot hide: `evidence` partitions the catalog into what we saw and what
+/// we decided, and a policy row is the one a later measurement should replace. Labelling
+/// such a row `measured` would be the actual harm here — it would launder a judgement call
+/// into evidence and leave nothing to audit.
 fn require_provenance(entry: &serde_json::Value, at: &str) -> Result<(), String> {
-    const KINDS: &[&str] = &["measured", "vendor-documented", "source-read"];
+    const KINDS: &[&str] = &["measured", "vendor-documented", "source-read", "policy"];
     let evidence = string(entry, "evidence", at)?;
     if !KINDS.contains(&evidence.as_str()) {
         return Err(format!(
