@@ -448,6 +448,9 @@ Sixty-one break rows closed, over 57 distinct packages, and they split cleanly b
 The 11 are the fix classes rather than the catalog: `@vscode/sqlite3`, `mongodb-crypt-library-version`,
 `node-mac-contacts`, `node-zopfli-es`, `os-dns-native`, `ref-napi`, `sse4_crc32`, `tree-sitter-kotlin`,
 `nice-napi`, `weak-napi` (store-entry write root) and `@arkweid/lefthook` (project-root cwd node).
+`@arkweid/lefthook`'s membership here has since been **falsified**: isolated re-measurement puts it at
+zero hooks with the cwd node and no catalog entry, so this row was a manufactured pass. It now carries
+a `packageGrants` entry — ladders in `results/lefthook-family-macos-arm64.json`.
 
 Artifact bytes rather than presence, on the rows the earlier run scored off linker bin symlinks:
 `azure-functions-core-tools` 601,659,764 B in both arms; `cldr-data` 276,427,271 B over 12,908 files;
@@ -509,11 +512,15 @@ isolation reaches the same BREAK on `@arkweid/lefthook` that the gate did, and t
   `npm` at `registry.npmjs.org`, which is deliberately not granted. `esbuild@0.28.1` alone survives,
   in `pilot` and in an isolated re-run. The bare-name-with-two-pending-versions window is the
   documented limit of `PER_PKG=1`; here it mislabels a real break with the wrong version.
-- **`@evilmartians/lefthook@2.1.10`, `lefthook@2.1.10` (twice) and `@arkweid/lefthook@0.7.7`** — none is
-  in `packageGrants`, so none gets the two `.git` file reads the granted installers have. The first
-  two lefthook rows fail outright with `fatal: not a git repository`; the `default7` lefthook row and
-  the `@arkweid` row are the two the manufactured-pass gate recovers, and an isolated re-run confirms
-  `@arkweid/lefthook` independently.
+- **`@evilmartians/lefthook@2.1.10`, `lefthook@2.1.10` (twice) and `@arkweid/lefthook@0.7.7`** — at the
+  time of this run none was in `packageGrants`, so none got the two `.git` file reads the granted
+  installers have. The first two lefthook rows fail outright with `fatal: not a git repository`; the
+  `default7` lefthook row and the `@arkweid` row are the two the manufactured-pass gate recovers, and
+  an isolated re-run confirms `@arkweid/lefthook` independently. **All three are now granted and pass**
+  — ladders in `results/lefthook-family-macos-arm64.json`. The grant is wider than the `.git` reads
+  this paragraph assumed: the tool also reads its own project config, and creates one when the project
+  has none. `@arkweid`'s failure through a full-`.git`-subtree rung, recorded as an unexplained fourth
+  cause, was that config read.
 
 ### This is still not a platform comparison
 
