@@ -312,7 +312,7 @@ fn cgroup_v2_pids_max() -> Option<u64> {
 }
 
 /// cgroup v1: the `pids` controller is named in `/proc/self/cgroup` as a line
-/// `<id>:pids:<cgroup-path>`; [`cgroup_v1_pids_path`] resolves where that
+/// `<id>:pids:<cgroup-path>`; [`cgroup_v1_pids_candidates`] resolves where that
 /// cgroup's `pids.max` actually lives on this mount.
 ///
 /// Safe no-op on a pure cgroup v2 host: there the only line is `0::<path>`, whose
@@ -324,8 +324,15 @@ fn cgroup_v1_pids_max() -> Option<u64> {
     // An unreadable mountinfo degrades to the historical assumption (root `/`
     // at `/sys/fs/cgroup/pids`) rather than losing detection entirely.
     let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
-    let raw = std::fs::read_to_string(cgroup_v1_pids_path(&cgroup, &mountinfo)?).ok()?;
-    parse_pids_max(&raw)
+    // Fall through ONLY on a failed READ. A successful read of the literal `max` is a
+    // real answer — "this cgroup has no limit" — and consulting a further candidate
+    // there would report some OTHER cgroup's limit, which is worse than saying so.
+    for path in cgroup_v1_pids_candidates(&cgroup, &mountinfo) {
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            return parse_pids_max(&raw);
+        }
+    }
+    None
 }
 
 /// Resolve the `pids.max` path for this process's cgroup-v1 `pids` controller
@@ -347,31 +354,41 @@ fn cgroup_v1_pids_max() -> Option<u64> {
 /// MOUNT POINT (field 5). `num_cpus` already does this for the cpu controller,
 /// which is why the CPU axis never exhibited this bug.
 ///
-/// Deliberately NOT done: falling back to `<mountpoint>/pids.max` when the
-/// resolved path is unreadable. The root cgroup's `pids.max` is almost always
-/// `max`, so that would masquerade a constrained box as unconstrained — the same
-/// root-read hazard [`cgroup_v2_pids_max`] already refuses for v2.
+/// Returns CANDIDATES rather than one path, most-specific first, with the pre-fix
+/// location last. A single "best" answer looks right and is not: committing to the
+/// longest-matching mount loses detection outright whenever that mount happens to be
+/// unreadable — shadowed by a later overmount, or mode `0700` under an unprivileged
+/// process — even though a shorter-matching mount would have resolved the same cgroup.
+/// Measured on both Ubuntu 20.04 and Rocky 8: the pre-fix code read the limit and the
+/// single-answer version reported UNCONSTRAINED, which is the dangerous direction and
+/// exactly what this module exists to prevent. Trying candidates in order keeps the
+/// change no worse than its predecessor on every topology.
+///
+/// Deliberately NOT a fallback to a *bare* `<mountpoint>/pids.max`: every candidate here
+/// still resolves THIS process's own cgroup, so the root-cgroup masquerade that
+/// [`cgroup_v2_pids_max`] refuses for v2 cannot occur.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn cgroup_v1_pids_path(cgroup: &str, mountinfo: &str) -> Option<std::path::PathBuf> {
-    let base = cgroup.lines().find_map(|l| {
+fn cgroup_v1_pids_candidates(cgroup: &str, mountinfo: &str) -> Vec<std::path::PathBuf> {
+    let Some(base) = cgroup.lines().find_map(|l| {
         // Format: `hierarchy-id:controller-list:cgroup-path`.
         let mut parts = l.splitn(3, ':');
         let _id = parts.next()?;
         let controllers = parts.next()?;
         let path = parts.next()?;
         controllers.split(',').any(|c| c == "pids").then_some(path)
-    })?;
+    }) else {
+        return Vec::new();
+    };
 
     // mountinfo: `<id> <parent> <maj:min> <root> <mountpoint> <opts> [tags...] - <fstype> <src> <superopts>`.
     // The optional tag list is variable-length and terminated by ` - `, hence the
     // split rather than a fixed field index.
     //
-    // Take the mount whose ROOT is the LONGEST PREFIX of our cgroup path, not merely the
-    // first `pids` mount listed. A host can expose several — nested container runtimes, a
-    // sidecar bind-mounting a different subtree — where "first" is a positional accident and
-    // a wrong pick silently resolves ANOTHER cgroup's limit. Longest-prefix makes "which
-    // mount governs me" a real answer rather than an ordering artifact.
-    let mount = mountinfo
+    // Order by LONGEST matching root: the mount whose root is the most specific prefix of
+    // our cgroup path is the one that governs us. `Path::starts_with` is component-wise, so
+    // a mount rooted at `/tst/ab` is correctly NOT treated as a prefix of `/tst/abc` — a
+    // string-prefix comparison here would select it and resolve the wrong cgroup.
+    let mut mounts: Vec<(&str, &str)> = mountinfo
         .lines()
         .filter_map(|l| {
             let (pre, post) = l.split_once(" - ")?;
@@ -383,16 +400,27 @@ fn cgroup_v1_pids_path(cgroup: &str, mountinfo: &str) -> Option<std::path::PathB
             Some((pre.next()?, pre.next()?))
         })
         .filter(|(root, _)| std::path::Path::new(base).starts_with(root))
-        .max_by_key(|(root, _)| root.len());
-    let (root, mount_point) = mount.unwrap_or(("/", "/sys/fs/cgroup/pids"));
+        .collect();
+    mounts.sort_by_key(|(root, _)| std::cmp::Reverse(root.len()));
 
-    // The `starts_with` filter (or the `/` fallback) already guarantees this strip succeeds.
-    // The defensive arm only catches a malformed cgroup path, and degrades to the pre-fix
-    // mount-relative reading rather than losing detection outright.
-    let rel = std::path::Path::new(base)
-        .strip_prefix(root)
-        .unwrap_or_else(|_| std::path::Path::new(base.trim_start_matches('/')));
-    Some(std::path::Path::new(mount_point).join(rel).join("pids.max"))
+    let mut out: Vec<std::path::PathBuf> = mounts
+        .iter()
+        .filter_map(|(root, mount_point)| {
+            let rel = std::path::Path::new(base).strip_prefix(root).ok()?;
+            Some(std::path::Path::new(mount_point).join(rel).join("pids.max"))
+        })
+        .collect();
+
+    // The pre-fix location, last: on a host with no `pids` mount in mountinfo (or one we
+    // could not resolve) this is exactly what the old code read, so we never end up blind
+    // where it saw a limit. Deduplicated because on an ordinary host it IS the first entry.
+    let legacy = std::path::Path::new("/sys/fs/cgroup/pids")
+        .join(base.trim_start_matches('/'))
+        .join("pids.max");
+    if !out.contains(&legacy) {
+        out.push(legacy);
+    }
+    out
 }
 
 /// Parse a `pids.max` value: a decimal count, or the literal `max` (= no limit
@@ -559,85 +587,115 @@ mod tests {
          30 25 0:26 / /sys/fs/cgroup/memory rw,nosuid,nodev,noexec,relatime - cgroup cgroup rw,memory\n";
     const MOUNTINFO_DOCKER: &str = "666 665 0:31 /docker/abc123 /sys/fs/cgroup/pids ro,nosuid,nodev,noexec,relatime master:16 - cgroup cgroup rw,pids\n";
 
+    fn pb(s: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(s)
+    }
+
     #[test]
-    fn cgroup_v1_pids_path_strips_the_bind_mount_root_inside_a_container() {
-        // THE REGRESSION. Docker defaults to `--cgroupns=host` on cgroup v1, so
+    fn cgroup_v1_pids_strips_the_bind_mount_root_inside_a_container() {
+        // THE BUG. Docker defaults to `--cgroupns=host` on cgroup v1, so
         // /proc/self/cgroup reports the HOST-absolute path while the pids hierarchy
         // is bind-mounted at that very cgroup. Joining them naively produced
         // `/sys/fs/cgroup/pids/docker/abc123/pids.max` — a path that does not exist,
         // so detection failed open and a 64-PID container looked unconstrained.
         let cgroup = "9:pids:/docker/abc123\n4:cpu,cpuacct:/docker/abc123\n";
+        let got = cgroup_v1_pids_candidates(cgroup, MOUNTINFO_DOCKER);
+        assert_eq!(got.first(), Some(&pb("/sys/fs/cgroup/pids/pids.max")));
+        // The pre-fix location is retained as a last resort, never as the answer.
         assert_eq!(
-            cgroup_v1_pids_path(cgroup, MOUNTINFO_DOCKER),
-            Some(std::path::PathBuf::from("/sys/fs/cgroup/pids/pids.max"))
+            got.last(),
+            Some(&pb("/sys/fs/cgroup/pids/docker/abc123/pids.max"))
         );
     }
 
     #[test]
-    fn cgroup_v1_pids_path_keeps_the_nested_path_on_a_host() {
-        // Mount root `/` — nothing to strip, so a nested systemd scope still
-        // resolves to its own cgroup rather than the (usually `max`) root.
+    fn cgroup_v1_pids_keeps_the_nested_path_on_a_host() {
+        // Mount root `/` — nothing to strip, so a nested systemd scope still resolves
+        // to its own cgroup rather than the (usually `max`) root. Here the resolved
+        // path and the legacy path coincide, so there is exactly ONE candidate.
         let cgroup = "9:pids:/user.slice/user-1001.slice/session-3.scope\n";
         assert_eq!(
-            cgroup_v1_pids_path(cgroup, MOUNTINFO_HOST),
-            Some(std::path::PathBuf::from(
+            cgroup_v1_pids_candidates(cgroup, MOUNTINFO_HOST),
+            vec![pb(
                 "/sys/fs/cgroup/pids/user.slice/user-1001.slice/session-3.scope/pids.max"
-            ))
+            )]
         );
     }
 
     #[test]
-    fn cgroup_v1_pids_path_falls_back_when_mountinfo_is_unusable() {
-        // Degrade to the historical assumption rather than losing detection: an
-        // empty/unreadable mountinfo still resolves a host-shaped cgroup path.
+    fn cgroup_v1_pids_falls_back_when_mountinfo_is_unusable() {
+        // An empty/unreadable mountinfo still yields the historical location.
         let cgroup = "9:pids:/user.slice\n";
         assert_eq!(
-            cgroup_v1_pids_path(cgroup, ""),
-            Some(std::path::PathBuf::from(
-                "/sys/fs/cgroup/pids/user.slice/pids.max"
-            ))
+            cgroup_v1_pids_candidates(cgroup, ""),
+            vec![pb("/sys/fs/cgroup/pids/user.slice/pids.max")]
         );
     }
 
     #[test]
-    fn cgroup_v1_pids_path_picks_the_longest_matching_mount_root() {
-        // Two `pids` mounts are visible and the OUTER one is listed first. Selecting
-        // positionally would resolve a different cgroup's limit entirely; longest-prefix
-        // picks the mount that actually governs this process.
+    fn cgroup_v1_pids_orders_longest_matching_mount_root_first() {
+        // Two `pids` mounts visible, the OUTER one listed first. Selecting positionally
+        // would resolve a different cgroup's limit; longest-root-first puts the mount
+        // that actually governs this process at the head.
         let mountinfo = "20 19 0:31 / /host/sys/fs/cgroup/pids rw,relatime shared:9 - cgroup cgroup rw,pids\n\
              99 20 0:31 /docker/abc123 /sys/fs/cgroup/pids ro,relatime master:22 - cgroup cgroup rw,pids\n";
         let cgroup = "9:pids:/docker/abc123/nested\n";
+        let got = cgroup_v1_pids_candidates(cgroup, mountinfo);
         assert_eq!(
-            cgroup_v1_pids_path(cgroup, mountinfo),
-            Some(std::path::PathBuf::from(
-                "/sys/fs/cgroup/pids/nested/pids.max"
-            ))
+            got.first(),
+            Some(&pb("/sys/fs/cgroup/pids/nested/pids.max"))
+        );
+        // …and the shorter-rooted mount is RETAINED as a retry rather than discarded.
+        assert!(
+            got.contains(&pb(
+                "/host/sys/fs/cgroup/pids/docker/abc123/nested/pids.max"
+            )),
+            "shorter-rooted mount must remain a candidate: {got:?}"
         );
     }
 
     #[test]
-    fn cgroup_v1_pids_path_falls_back_when_the_mount_root_is_not_ours() {
-        // A hybrid host can expose more than one `pids` mount; if the one we match
-        // does not root our cgroup path, degrade to the pre-fix mount-relative
-        // reading rather than losing detection outright. Never worse than before.
-        let cgroup = "9:pids:/user.slice/session-3.scope\n";
+    fn cgroup_v1_pids_retries_past_an_unreadable_longest_match() {
+        // The regression this ordering exists to prevent, measured on Ubuntu 20.04 and
+        // Rocky 8: when the longest-matching mount is unreadable (shadowed by a later
+        // overmount, or mode 0700 under an unprivileged process), committing to it alone
+        // reported UNCONSTRAINED on a constrained box, while the pre-fix code read the
+        // limit through the shorter mount. Every alternative must therefore survive as a
+        // candidate, with the pre-fix location last.
+        let mountinfo = "20 19 0:31 / /sys/fs/cgroup/pids rw,relatime shared:9 - cgroup cgroup rw,pids\n\
+             99 20 0:31 /tst /mnt/gov rw,relatime master:22 - cgroup cgroup rw,pids\n";
+        let cgroup = "9:pids:/tst/abc\n";
         assert_eq!(
-            cgroup_v1_pids_path(cgroup, MOUNTINFO_DOCKER),
-            Some(std::path::PathBuf::from(
-                "/sys/fs/cgroup/pids/user.slice/session-3.scope/pids.max"
-            ))
+            cgroup_v1_pids_candidates(cgroup, mountinfo),
+            vec![
+                pb("/mnt/gov/abc/pids.max"),
+                pb("/sys/fs/cgroup/pids/tst/abc/pids.max"),
+            ]
         );
     }
 
     #[test]
-    fn cgroup_v1_pids_path_ignores_a_pure_v2_host() {
-        // A v2-only `/proc/self/cgroup` is a single `0::<path>` line whose
-        // controller field is empty, so the v1 probe must find nothing and let the
-        // v2 probe answer.
-        assert_eq!(
-            cgroup_v1_pids_path("0::/user.slice/x.scope\n", MOUNTINFO_HOST),
-            None
+    fn cgroup_v1_pids_requires_a_component_wise_prefix() {
+        // `/tst/ab` is a longer STRING prefix of `/tst/abc` than `/tst` is, so a
+        // string-prefix implementation would select the decoy and resolve the wrong
+        // cgroup. `Path::starts_with` is component-wise, so the decoy is excluded.
+        let mountinfo = "20 19 0:31 / /sys/fs/cgroup/pids rw,relatime shared:9 - cgroup cgroup rw,pids\n\
+             98 20 0:31 /tst /mnt/gov rw,relatime master:21 - cgroup cgroup rw,pids\n\
+             99 20 0:31 /tst/ab /mnt/dec rw,relatime master:22 - cgroup cgroup rw,pids\n";
+        let cgroup = "9:pids:/tst/abc\n";
+        let got = cgroup_v1_pids_candidates(cgroup, mountinfo);
+        assert_eq!(got.first(), Some(&pb("/mnt/gov/abc/pids.max")));
+        assert!(
+            !got.iter().any(|p| p.starts_with("/mnt/dec")),
+            "the /tst/ab decoy is not a component-wise prefix of /tst/abc: {got:?}"
         );
+    }
+
+    #[test]
+    fn cgroup_v1_pids_ignores_a_pure_v2_host() {
+        // A v2-only `/proc/self/cgroup` is a single `0::<path>` line whose controller
+        // field is empty, so the v1 probe must find nothing and let the v2 probe answer.
+        assert!(cgroup_v1_pids_candidates("0::/user.slice/x.scope\n", MOUNTINFO_HOST).is_empty());
     }
 
     // ─────────────────────── CPU budget ───────────────────────
