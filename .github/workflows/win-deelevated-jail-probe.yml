@@ -113,20 +113,29 @@ jobs:
           # the ancestor repair CHANGES anything, so gating its verdict cells on PASS would
           # turn "the repair is load-bearing after all" into a red build instead of an answer.
           # The GATES are different and DO bind: without them no arm is admissible evidence.
-          echo "---- ancestor-necessity: gates (these bind) ----"
+          # SPLIT THE LOG BY PRINCIPAL BEFORE SCORING ANYTHING. Both arms emit the SAME property
+          # names, so a whole-file `grep prop:NAME=PASS` scores a property PASS whenever EITHER
+          # arm passed it — which means this job cannot fail on an arm-specific failure, and can
+          # go green with one arm entirely empty. That is not hypothetical: run 30598144544 did
+          # exactly that, with the de-elevated arm producing no cells at all. 41 of the 52
+          # properties this probe emits are reported by both arms and were all scored that way.
+          awk '/^ARM .*admin=1/{f=1} /^ARM .*admin=0/{f=0} f' probe.log > armA.log
+          awk '/^ARM .*admin=0/{f=1} f' probe.log > armB.log
+          [ -s armA.log ] && [ -s armB.log ] || { echo "MISSING: could not split the arms"; fail=1; }
+          gate_in() {  # gate_in <arm-log> <label> <property>
+            if grep -qaF "prop:$3=PASS" "$1"; then echo "PASS [$2] $3"
+            elif grep -qaF "prop:$3=FAIL" "$1"; then echo "FAIL [$2] $3 — INADMISSIBLE, not merely negative"; fail=1
+            else echo "MISS [$2] $3 (never measured in this arm)"; fail=1
+            fi
+          }
+
+          echo "---- ancestor-necessity: gates (these bind, and in BOTH principals) ----"
           for p in anc-gate-preload-installs-the-realpath-shim \
                    anc-gate-no-preload-leaves-the-shim-absent \
                    anc-control-absolute-require-fails-unpreloaded-unrepaired \
                    anc-control-single-spelling-roots-still-lose-a-cell; do
-            if grep -qF "prop:$p=PASS" probe.log; then
-              echo "PASS $p"
-            elif grep -qF "prop:$p=FAIL" probe.log; then
-              echo "FAIL $p — the group's evidence is INADMISSIBLE, not merely negative"
-              fail=1
-            else
-              echo "MISS $p (never measured)"
-              fail=1
-            fi
+            gate_in armA.log elevated "$p"
+            gate_in armB.log deelevated "$p"
           done
           echo "---- ancestor-necessity: the verdict (a FAIL here is the finding) ----"
           for p in anc-node-absolute-require-works-preloaded-with-repair-off \
@@ -146,29 +155,17 @@ jobs:
           # evidence, so a FAIL there makes the group inadmissible rather than negative. The
           # REJECTED-CANDIDATE control is what proves the fixture can produce a WRONG version;
           # without it the shipping arm answering `bar@2.0.0` would be unfalsifiable.
-          # SPLIT THE LOG BY ARM BEFORE READING THE ESM CELLS. A whole-file grep cannot tell the
-          # principals apart, so a property that passes in ONE arm reads as PASS even when the
-          # other reported FAIL — which is how run 30598144544 went green with the entire
-          # de-elevated arm empty. It also matters semantically: ELEVATED, the traverse ACE makes
-          # `lstat 'C:\'` succeed, so the unrepaired positive control cannot die there and is
-          # EXPECTED to fail. The de-elevated arm is the one this group exists to measure.
-          awk '/^ARM .*admin=0/{f=1} f{print} f&&/^ARM done/{exit}' probe.log > armB.log
-          [ -s armB.log ] || { echo "MISSING: could not isolate the de-elevated arm"; fail=1; }
-          echo "---- esm-resolution: gates (these bind, read on the DE-ELEVATED arm) ----"
+          # THE ESM GATES BIND ON THE DE-ELEVATED ARM ALONE, and that is semantic rather than a
+          # shortcut: ELEVATED, the traverse ACE makes `lstat 'C:\'` succeed, so the unrepaired
+          # positive control cannot die there and is EXPECTED to fail. De-elevated is the
+          # configuration this group exists to measure.
+          echo "---- esm-resolution: gates (these bind, on the DE-ELEVATED arm) ----"
           for p in esm-gate-shim-installed-in-the-shipping-arm \
                    esm-gate-unrepaired-control-leaves-the-shim-absent \
                    esm-control-unrepaired-jail-leaves-the-esm-entry-dead \
                    esm-control-unrepaired-jail-leaves-the-cjs-require-dead \
                    esm-control-preserve-symlinks-binds-the-wrong-version; do
-            if grep -qF "prop:$p=PASS" armB.log; then
-              echo "PASS $p"
-            elif grep -qF "prop:$p=FAIL" armB.log; then
-              echo "FAIL $p — the group's evidence is INADMISSIBLE, not merely negative"
-              fail=1
-            else
-              echo "MISS $p (never measured)"
-              fail=1
-            fi
+            gate_in armB.log deelevated "$p"
           done
           echo "---- esm-resolution: the verdict (a FAIL here is the finding) ----"
           for p in esm-shipping-esm-entry-completes-relative-and-bare-imports \
