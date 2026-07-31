@@ -109,6 +109,9 @@ static JAILED: aube_util::Embedder = aube_util::Embedder {
     env_prefix: None,
     config_env_prefix: None,
     diag_env_prefix: None,
+    // Mirrors production rather than isolating like the namespaces above: this names an
+    // env FAMILY, not a resource two concurrent tests could collide on.
+    internal_env_prefix: "__NUB",
     cache_namespace: "gitdeptest",
     data_namespace: "gitdeptest",
     virtual_store_subdir: "virtual-store",
