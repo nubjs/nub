@@ -91,7 +91,7 @@ URL=$(gcloud run services describe nub-app \
   --region us-west1 \
   --format="value(status.url)")
 TOKEN=$(gcloud auth print-identity-token)
-curl -H "Authorization: Bearer $TOKEN" "$URL"
+curl --fail -H "Authorization: Bearer $TOKEN" "$URL/alive"
 ```
 
 ## Architecture

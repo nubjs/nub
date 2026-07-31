@@ -24,8 +24,18 @@ Change `package-lock.json` to the project's lockfile. Bind the server to `0.0.0.
 import { createServer } from "node:http";
 
 const port = Number(process.env.PORT || 8080);
-createServer((_request, response) => {
-  response.end("Hello from Nub");
+createServer((request, response) => {
+  if (request.url !== "/alive") {
+    response.writeHead(404);
+    response.end();
+    return;
+  }
+
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(JSON.stringify({
+    alive: true,
+    runtime: "nub-on-node",
+  }));
 }).listen(port, "0.0.0.0");
 ```
 
@@ -34,7 +44,7 @@ createServer((_request, response) => {
 1. Create an App Platform app and choose the GitHub repository.
 2. Select **Web Service** and keep the detected Dockerfile build.
 3. Set the public HTTP port to `8080` if it was not detected.
-4. Create the app and open its `*.ondigitalocean.app` URL.
+4. Create the app and request `/alive` on its `*.ondigitalocean.app` URL.
 
 App Platform web services are billed resources. Review the current [App Platform pricing](https://docs.digitalocean.com/products/app-platform/details/pricing/) before creating one.
 
@@ -62,7 +72,13 @@ ingress:
           prefix: /
 ```
 
-Create it with `doctl apps create --spec .do/app.yaml` after replacing the repository and choosing an instance size.
+After replacing the repository and choosing an instance size, create the app and wait for its deployment:
+
+```bash
+doctl apps create --spec .do/app.yaml --wait
+curl --fail https://APP.ondigitalocean.app/alive
+# {"alive":true,"runtime":"nub-on-node"}
+```
 
 ## Prebuilt image
 

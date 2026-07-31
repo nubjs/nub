@@ -43,15 +43,17 @@ createServer((request, response) => {
 1. Select **New → Web Service** and connect the repository.
 2. Set **Language** to **Docker**, even though the application runs on Node.
 3. Leave **Dockerfile Path** empty for a root `Dockerfile`.
-4. Create the service and open its assigned `*.onrender.com` URL.
+4. Set **Health Check Path** to `/alive`.
+5. Create the service and request `/alive` on its assigned `*.onrender.com` URL.
 
 Render uses the Dockerfile's `CMD` unless **Docker Command** overrides it. The default web-service port is `10000`, but reading `PORT` also covers a custom value.
 
 ## CLI deployment
 
-The Render CLI can create the same repository-backed Docker service:
+Authenticate the Render CLI, then create the same repository-backed Docker service:
 
 ```bash
+render login
 render services create \
   --name nub-app \
   --type web_service \
@@ -64,7 +66,9 @@ render services create \
   --confirm \
   --output json
 
-curl --fail https://nub-app.onrender.com/alive
+SERVICE_URL=$(render services --output json \
+  | jq -r '.[] | select(.name == "nub-app") | .serviceDetails.url')
+curl --fail "$SERVICE_URL/alive"
 # {"alive":true,"runtime":"nub-on-node"}
 ```
 
@@ -79,6 +83,7 @@ services:
     runtime: docker
     plan: free
     dockerfilePath: ./Dockerfile
+    healthCheckPath: /alive
 ```
 
 The free plan is available for web services and has platform limits. Omit `plan` only when the workspace should use Render's current default paid plan.
@@ -89,7 +94,7 @@ Select **Existing Image** to deploy an application image published to GHCR inste
 
 Prebuilt-image services do not receive automatic deploys from source commits. Trigger a redeploy after GitHub Actions publishes a new image.
 
-The Render CLI can create the same service without the dashboard:
+As an alternative to the repository-backed command, create a service from a published image:
 
 ```bash
 render services create \
@@ -101,7 +106,6 @@ render services create \
   --health-check-path /alive \
   --confirm \
   --output json
-
-curl --fail https://nub-app.onrender.com/alive
-# {"alive":true,"runtime":"nub-on-node"}
 ```
+
+Use one creation path, not both. The `render services` lookup and `/alive` request from the CLI section verify either service.

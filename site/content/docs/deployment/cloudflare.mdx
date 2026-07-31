@@ -48,14 +48,13 @@ Point Wrangler at the handler:
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "nub-app",
   "main": "src/index.ts",
-  "compatibility_date": "2026-07-30",
-  "build": {
-    "command": "nub run build"
-  }
+  "compatibility_date": "2026-07-30"
 }
 ```
 
-Workers Builds runs the configured build and deploy commands after each push. To run the same deployment from a workstation instead:
+In **Settings → Build**, set **Build command** to `nub run build`. Workers Builds does not read custom-build settings from `wrangler.jsonc`; its default deploy command is `npx wrangler deploy`.
+
+Wrangler bundles the TypeScript handler without a separate local build. Deploy it from a workstation with:
 
 ```bash
 nubx -y wrangler deploy

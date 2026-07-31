@@ -55,15 +55,15 @@ railway login
 railway init --name nub-app
 railway add --service nub-app
 railway up --service nub-app --ci
-railway domain --service nub-app
+DOMAIN=$(railway domain --service nub-app --json | jq -r .domain)
 ```
 
-The final command creates a free `*.up.railway.app` domain for the service.
+The final command creates a free `*.up.railway.app` domain for the service and captures its assigned URL.
 
 Request its aliveness endpoint:
 
 ```bash
-curl --fail https://nub-app-production.up.railway.app/alive
+curl --fail "$DOMAIN/alive"
 # {"alive":true,"runtime":"nub-on-node"}
 ```
 

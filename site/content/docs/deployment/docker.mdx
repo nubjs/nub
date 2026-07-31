@@ -60,8 +60,18 @@ import { createServer } from "node:http";
 const host = "0.0.0.0";
 const port = Number(process.env.PORT || 8080);
 
-createServer((_request, response) => {
-  response.end("Hello from Nub");
+createServer((request, response) => {
+  if (request.url !== "/alive") {
+    response.writeHead(404);
+    response.end();
+    return;
+  }
+
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(JSON.stringify({
+    alive: true,
+    runtime: "nub-on-node",
+  }));
 }).listen(port, host);
 ```
 
