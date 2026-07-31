@@ -90,10 +90,12 @@ test("jobScript(test) matches CI: whole workspace, real addon staged over the pl
   assert.match(s, /\ncargo test$/, "CI runs the whole workspace, not -p nub-cli");
   assert.match(s, /crates\/nub-native && cargo build/);
   assert.match(s, /cp "\$CARGO_TARGET_DIR\/debug\/libnub_native\.so" runtime\/addons\/nub-native\.node/);
-  // Anchored to a COMMAND, not the raw text: PREPARE is shared by both jobs and its
-  // comments legitimately explain decisions that mention the other gate, which a bare
-  // /clippy/ match reads as the test job running clippy.
-  assert.doesNotMatch(s, /\ncargo clippy/);
+  // Anchored to the COMMAND, not the raw text: PREPARE is shared by both jobs and its
+  // comments legitimately mention the other gate ("a clippy or test run"), which a bare
+  // /clippy/ match reads as the test job running clippy. NOT anchored to line-start — the
+  // clippy job's second leg is a subshell, `(cd crates/nub-native && cargo clippy …)`, and
+  // a `\ncargo clippy` pattern would let exactly that shape through.
+  assert.doesNotMatch(s, /cargo clippy/);
 });
 
 // The bake compiles the dependency graph then `rm -rf ~/src`. A target dir inside ~/src

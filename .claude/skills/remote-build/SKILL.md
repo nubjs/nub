@@ -25,12 +25,21 @@ macOS runner, with no stub TBDs, no pinned zig, and a correct deployment target.
 decision record: [`wiki/research/remote-build-offload.md`](../../../wiki/research/remote-build-offload.md).
 
 ```sh
-nub scripts/remote-build.ts --job clippy                 # the CI gate, off-box
-nub scripts/remote-build.ts --job test                   # cargo test -p nub-cli
+nub scripts/remote-build.ts --job clippy --detach        # start it, print the VM name, exit
+nub scripts/remote-build.ts --attach <vm-name>           # stream + collect; deletes the VM
+nub scripts/remote-build.ts --job clippy                 # foreground; only if you can wait
+nub scripts/remote-build.ts --job test                   # the whole-workspace test suite
 nub scripts/remote-build.ts --fanout 10 --job clippy     # 10 builders at once
 nub scripts/remote-build.ts --reap                       # delete stray builder VMs
 nub scripts/remote-build.ts --build-image                # re-bake the golden image (rare)
 ```
+
+**Driving this from an agent harness? Use `--detach`, then `--attach`.** A foreground run is
+SIGKILLed at the harness timeout — two minutes by default, ten at most — and SIGKILL cannot be
+caught, so layer 1 never runs and the VM leaks until its server-side TTL. Measured twice: a cold
+clippy killed at 2m13s, then again at 10m, each orphaning a builder. `--attach` polls in bounded
+windows and exits **75** for "still running, call again"; re-run it until it returns the job's own
+exit code.
 
 ## What goes remote, and what must NOT
 
@@ -96,8 +105,11 @@ Age *is* the definition of stray here: layer 2 guarantees a healthy instance is 
 anything older is abandoned. `--reap-all` forces the unfiltered sweep; it is not the default for a
 reason. `--reap` exits non-zero if any delete fails, so "no output, exit 0" genuinely means clean.
 
-Builds run in the ssh **foreground** and are never detached. A detached build reparents to PID 1,
-outlives its launcher, holds locks, and is not reaped — see `rust-build-hygiene`.
+A foreground build runs in the ssh foreground and is never detached LOCALLY: a detached local
+build reparents to PID 1, outlives its launcher, holds locks, and is not reaped — see
+`rust-build-hygiene`. `--detach` does not violate that rule. It detaches on the disposable REMOTE
+VM, which is single-purpose and carries a hard `--max-run-duration`, so a forgotten job cannot
+outlive its TTL or contend with anything on the dev host.
 
 ## The golden image
 

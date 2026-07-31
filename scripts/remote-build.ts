@@ -189,6 +189,14 @@ export function parseArgs(argv: string[]) {
     process.stderr.write(`remote-build: --machine must be a GCE machine type (e.g. c3-standard-8)\n`);
     process.exit(2);
   }
+  // `--attach` as the FINAL argv element leaves `argv[++i]` undefined, so `a.attach` is falsy
+  // and main() skips BOTH the attach and detach branches — a "collect my result" invocation
+  // then falls through to the ordinary path and provisions a fresh VM for a full cold job.
+  // Exactly the trap the --machine guard above exists for.
+  if (argv.includes("--attach") && !a.attach) {
+    process.stderr.write(`remote-build: --attach needs an instance name (e.g. --attach nub-builder-ms84mnyn-1-sfkm)\n`);
+    process.exit(2);
+  }
   if (!["fast", "release"].includes(a.profile)) {
     process.stderr.write(`remote-build: --profile must be fast|release\n`);
     process.exit(2);
@@ -542,25 +550,39 @@ async function findZone(name: string) {
   return z.split("\n")[0].trim();
 }
 
-async function attachToJob(name: string) {
+async function attachToJob(a: ReturnType<typeof parseArgs>, name: string) {
   const zone = await findZone(name);
   const ip = await instanceIp(name, zone);
   const t0 = Date.now();
   let seen = 0;
-  for (;;) {
-    // `tail -n +N` resumes at the first line not yet printed, so re-attaching after a kill
-    // replays nothing and drops nothing.
+  // `tail -n +N` resumes at the first line not yet printed, so re-attaching after a kill
+  // replays nothing and drops nothing.
+  //
+  // `final` is load-bearing. A poll can land while the job is mid-write, leaving a PARTIAL
+  // last line: printing it as though complete and counting it into `seen` makes the next
+  // window resume past it, so the rest of that line is lost forever. While polling, drop the
+  // trailing element unconditionally and let the next window re-read the line whole. On the
+  // terminal pass the job has exited, so whatever remains is complete and must be printed or
+  // the last line of every job would vanish.
+  const drain = async (final: boolean) => {
     const out = await ssh(ip, `tail -n +${seen + 1} ${JOB_LOG} 2>/dev/null || true`);
     const lines = out.split("\n");
-    if (lines[lines.length - 1] === "") lines.pop();
+    if (lines.length && (!final || lines[lines.length - 1] === "")) lines.pop();
     for (const l of lines) process.stdout.write(`[r] ${l}\n`);
     seen += lines.length;
+  };
+  for (;;) {
+    await drain(false);
 
     const rc = (await ssh(ip, `cat ${JOB_RC} 2>/dev/null || true`)).trim();
     if (rc !== "") {
+      await drain(true);
       const secs = ((Date.now() - t0) / 1000).toFixed(0);
       process.stdout.write(`remote-build: job finished rc=${rc} after +${secs}s attached\n`);
-      await deleteInstance(name, zone);
+      // `--keep` is documented as "do not delete the VM on exit" for post-mortem debugging;
+      // it has to reach THIS delete too, or `--attach <name> --keep` destroys the very box
+      // the operator asked to preserve.
+      if (!a.keep) await deleteInstance(name, zone);
       return Number(rc) || 0;
     }
     if (Date.now() - t0 > ATTACH_WINDOW_MS) {
@@ -585,14 +607,24 @@ async function startDetached(a: ReturnType<typeof parseArgs>, source: string, li
   );
   const zone = placement.zone;
   live.add(`${name}|${zone}`);
-  const ip = await instanceIp(name, zone);
-  await waitForSsh(name, zone, ip, 240_000);
-  log(`ssh up at ${ip} on ${zone}/${placement.machine}`);
-  syncSource(source, ip);
-  log("source synced");
-  await startDetachedJob(ip, jobScript(a.job, a.profile));
-  // Drop it from `live` LAST: registered during the fragile provision/sync window so an
-  // interrupt there still reaps it, then released once the job is running, because from that
+  // `live` is drained only by the SIGNAL handlers, so a plain throw between here and the job
+  // starting reaches `main().catch` → `process.exit(1)` with the instance still running,
+  // leaking it for the whole MAX_RUN TTL. `oneBuild` and `buildImage` both guard this same
+  // window. Deliberately a catch, not a finally: on SUCCESS the VM must survive — that is
+  // what --detach is for.
+  try {
+    const ip = await instanceIp(name, zone);
+    await waitForSsh(name, zone, ip, 240_000);
+    log(`ssh up at ${ip} on ${zone}/${placement.machine}`);
+    syncSource(source, ip);
+    log("source synced");
+    await startDetachedJob(ip, jobScript(a.job, a.profile));
+  } catch (e) {
+    if (!a.keep) await deleteInstance(name, zone);
+    live.delete(`${name}|${zone}`);
+    throw e;
+  }
+  // Released from local ownership only once the job is actually running, because from that
   // point outliving this process is the entire point. `--max-run-duration` is the backstop.
   live.delete(`${name}|${zone}`);
   process.stdout.write(
@@ -796,6 +828,13 @@ cargo clippy --all-targets --all-features --profile fast -- -D warnings || echo 
 # The test job runs on the DEFAULT profile (matching ci.yml), a separate artifact universe
 # from \`fast\`. --no-run stops at link, which is all the warming needs.
 cargo test --workspace --no-run || echo "WARM-WARN: test warm-up failed; the test job will cold-compile"
+# nub-native is an EXCLUDED workspace (panic=unwind cdylib), so --workspace never reaches it,
+# and the clippy line above is both a different profile directory and a different driver. Its
+# heavy deps (oxc with features=["full"], napi 3, oxc_napi, oxc_sourcemap[napi]) are declared
+# only in crates/nub-native/Cargo.toml, so nothing in the root workspace warms them. This is
+# jobScript("test")'s FIRST command, verbatim — without it the test job cold-compiles that
+# whole graph.
+(cd crates/nub-native && cargo build) || echo "WARM-WARN: addon warm-up failed"
 rm -rf ~/src
 # Fail the bake if the warm compile produced nothing. Without this a truncated or skipped
 # warm step publishes a cold image that looks identical to a warm one until every builder
@@ -867,7 +906,7 @@ async function main() {
   }
   // Collect-only: no provisioning, no local sampling — just stream and poll.
   if (a.attach) {
-    process.exitCode = await attachToJob(a.attach);
+    process.exitCode = await attachToJob(a, a.attach);
     return;
   }
   if (a.detach) {
