@@ -13,6 +13,15 @@
 # evidence that Node saw it, so the confined child reports the shims' own `globalThis`
 # sentinels itself.
 #
+# THE PER-PACKAGE EGRESS GROUP rides it to ask whether a CATALOGUED package reaches the network
+# at all on Windows. macOS proved three grants by byte-identical artifact size; Windows uses a
+# different mechanism entirely (the `internetClient` capability SID on the LowBox token) and had
+# only ever been measured on the DENIED side. Its cells all bind, in both principals: an inert
+# grant and an unenforced identity gate are both failures, not findings. Its two controls fail in
+# opposite directions — an UNJAILED connect, so a refused grant is not confused with a runner
+# that has no egress, and a `token` launch per policy, so a jail that cannot start a child is not
+# confused with a network block.
+#
 # THE ESM-RESOLUTION GROUP rides it for the same reason, and asks the twin question: does an ES
 # MODULE resolve inside the jail at all. Node's ESM resolver destructures `realpathSync` at
 # module-load time on 18.19-24.16, 25.x and 26.0, so the `--import` realpath shim never reaches it
@@ -33,6 +42,8 @@ on:
       # `workflow_dispatch` cannot start a workflow that is not on the default branch, so this
       # list is the ONLY thing that fires a run.
       - sandbox/esm-binding-seam
+      # The per-package-egress group's branch, same caveat as the ESM one above.
+      - sandbox/win-net-grant
   workflow_dispatch:
 
 permissions:
@@ -176,6 +187,32 @@ jobs:
                    esm-shipping-fs-promises-realpath-survives-the-jail; do
             grep -q "prop:$p=" armB.log || { echo "MISS $p (never measured)"; fail=1; }
             grep -E "prop:$p=" armB.log || true
+          done
+
+          # ── the per-package-egress group ───────────────────────────────────────────────
+          # ALL of these BIND, in BOTH principals — unlike the two groups above, none of these
+          # cells is a finding to be reported rather than satisfied. A catalogued package that
+          # cannot reach the network means every shipped grant is inert on Windows, and an
+          # uncatalogued one that CAN means the identity gate is not enforcing; either way the
+          # job must be red. The gates come first so a failure reads as "the runner had no
+          # egress" or "the jail could not start a child" rather than as a broken grant.
+          echo "---- per-package egress: gates ----"
+          for p in netgrant-gate-catalog-nonempty \
+                   netgrant-gate-unconfined-egress-reachable \
+                   netgrant-gate-catalogued-child-starts \
+                   netgrant-gate-uncatalogued-child-starts; do
+            gate_in armA.log elevated "$p"
+            gate_in armB.log deelevated "$p"
+          done
+          echo "---- per-package egress: the differential ----"
+          for p in netgrant-plan-catalogued-net-unenforced \
+                   netgrant-plan-uncatalogued-net-enforced \
+                   netgrant-catalogued-connects \
+                   netgrant-catalogued-resolves-dns \
+                   netgrant-every-catalogued-name-connects \
+                   netgrant-uncatalogued-refused; do
+            gate_in armA.log elevated "$p"
+            gate_in armB.log deelevated "$p"
           done
 
           echo "── the facts ──"
