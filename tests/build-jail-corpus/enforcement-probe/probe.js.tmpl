@@ -1,0 +1,77 @@
+// Enforcement probe. Runs as the lifecycle script of an UNCATALOGUED local `file:`
+// package, so it inherits the build jail's default (deny) policy, not a grant.
+//
+// EVERY PATH IS A BAKED-IN ABSOLUTE LITERAL, substituted by run-probe.sh before the
+// script is written. Passing them through the environment does not work and does not
+// fail honestly: the jail SCRUBS the env, so `path.join(undefined, …)` throws
+// ERR_INVALID_ARG_TYPE and the check reports DENIED having never attempted the
+// operation. A first version of this probe did exactly that and reported four clean
+// denials from a jail that had not been consulted.
+const fs = require('fs');
+const net = require('net');
+const path = require('path');
+
+const NONCE = '@@NONCE@@';
+const OUTER_HOME = '@@OUTER_HOME@@';   // the harness's per-run HOME
+const REAL_HOME = '@@REAL_HOME@@';     // the machine's real home
+const PROJECT = '@@PROJECT@@';         // the fixture project root
+const SECRET = '@@SECRET@@';           // a planted file under OUTER_HOME
+const results = [];
+
+function check(name, fn) {
+  try {
+    const v = fn();
+    results.push(`${name}=OK(${v})`);
+  } catch (e) {
+    // The errno is the whole point: EACCES/EPERM is the jail, ENOENT is a broken
+    // fixture, and a TypeError is a broken probe. They must stay distinguishable.
+    results.push(`${name}=DENIED(${e.code || e.constructor.name || e.message})`);
+  }
+}
+
+// POSITIVE CONTROL — the package's own directory is writable in both arms. An
+// all-DENIED result is otherwise indistinguishable from a script that never ran.
+check('write_own', () => {
+  const p = path.join(__dirname, `own-${NONCE}.txt`);
+  fs.writeFileSync(p, NONCE);
+  return fs.readFileSync(p, 'utf8') === NONCE ? 'verified' : 'MISMATCH';
+});
+
+check('write_outerhome', () => {
+  fs.writeFileSync(path.join(OUTER_HOME, `outerhome-${NONCE}.txt`), NONCE);
+  return 'wrote';
+});
+
+check('write_realhome', () => {
+  fs.writeFileSync(path.join(REAL_HOME, `realhome-${NONCE}.txt`), NONCE);
+  return 'wrote';
+});
+
+check('read_secret', () => {
+  const s = fs.readFileSync(SECRET, 'utf8');
+  return s.includes('TOPSECRET') ? 'read' : 'read-wrong-content';
+});
+
+check('write_project', () => {
+  fs.writeFileSync(path.join(PROJECT, `project-${NONCE}.txt`), NONCE);
+  return 'wrote';
+});
+
+// Network. Awaited explicitly so the answer is in hand before the process exits.
+new Promise((resolve) => {
+  let settled = false;
+  const done = (s) => { if (!settled) { settled = true; resolve(s); } };
+  let sock;
+  try {
+    sock = net.connect({ host: '1.1.1.1', port: 443 });
+  } catch (e) {
+    return done(`DENIED(${e.code || e.message})`);
+  }
+  sock.setTimeout(15000);
+  sock.on('connect', () => { sock.destroy(); done('OK(connected)'); });
+  sock.on('timeout', () => { sock.destroy(); done('DENIED(ETIMEDOUT)'); });
+  sock.on('error', (e) => { sock.destroy(); done(`DENIED(${e.code || e.message})`); });
+}).then((n) => {
+  results.push(`net_connect=${n}`);
+  console.log(`PROBE_RESULT ${NONCE} ` + results.join(' '));
+});

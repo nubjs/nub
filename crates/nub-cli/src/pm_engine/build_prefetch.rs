@@ -940,7 +940,14 @@ fn node_pre_gyp(
     // DISAGREE by construction: `package_name = "a#/../../../../.zshenv"` keeps the URL on
     // an allowlisted host and pointed at a real asset while the naive `Path::join` walks
     // out of the cache into $HOME. `contained_dest` is what re-couples them.
-    let dest = contained_dest(&root, [remote_path.as_str(), package_name.as_str()])?;
+    // A LEADING `./` is stripped for the PATH side only. `remote_path: "./v{version}/"` is a
+    // common node-pre-gyp spelling and the `.` is meaningful to `Url::join` above, but
+    // `contained_dest` reads it as a traversal primitive and declines — silently, so the one
+    // package in the corpus carrying a full structured `binary.*` declaration never got a
+    // prefetch attempt. Only the leading `./` goes: an INTERIOR `.` or any `..` still refuses,
+    // because those are the shapes that can walk out of the cache root.
+    let path_remote = remote_path.strip_prefix("./").unwrap_or(&remote_path);
+    let dest = contained_dest(&root, [path_remote, package_name.as_str()])?;
 
     let var = format!(
         "npm_config_{}_binary_host_mirror",
@@ -1613,6 +1620,30 @@ mod tests {
             "https://github.com/Level/leveldown/releases/download/v6.1.1/\
              leveldown-v6.1.1-node-v140-darwin-arm64.tar.gz"
         );
+    }
+
+    /// A leading `./` is the common node-pre-gyp `remote_path` spelling and must reach a
+    /// dest; every other `.`/`..` shape must still refuse. The strip lives at the
+    /// `contained_dest` CALL SITE (the URL side keeps the `.`, which `Url::join` needs), so
+    /// this pins the property rather than the wiring — end-to-end proof is a `node-libcurl`
+    /// re-measure, which is why that package is the one to check after any change here.
+    #[test]
+    fn a_leading_dot_slash_reaches_a_dest_while_real_traversal_still_refuses() {
+        let root = Path::new("/cache/prefetch/abc");
+        let strip = |s: &'static str| s.strip_prefix("./").unwrap_or(s);
+        assert_eq!(
+            contained_dest(root, [strip("./v1.0.0/"), "pkg.tar.gz"]),
+            Some(PathBuf::from("/cache/prefetch/abc/v1.0.0/pkg.tar.gz")),
+            "the one structured-declaration form in the corpus must not decline"
+        );
+        // The strip is deliberately ONLY the leading pair: these are what walk out.
+        for still_hostile in ["./../v1.0.0", "v1.0.0/./..", "./.."] {
+            assert_eq!(
+                contained_dest(root, [strip(still_hostile), "pkg.tar.gz"]),
+                None,
+                "stripping the leading `./` must not admit {still_hostile:?}"
+            );
+        }
     }
 
     #[test]

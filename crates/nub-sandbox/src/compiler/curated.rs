@@ -897,10 +897,24 @@ mod tests {
     /// Compared against a hand-authored literal rather than a re-read of the JSON, so this
     /// cannot pass by both sides agreeing on the same bad parse — only one side goes through
     /// `catalog::parse` and `build.rs`.
+    ///
+    /// COMPARED BY NAME, NOT BY POSITION, and that is a deliberate loosening. Order carries no
+    /// meaning on either side: `lookup` scans for one name, and `catalog::parse` rejects a
+    /// duplicate package outright, so the two sequences are sets with a spelling. Position
+    /// coupling cost a real red — a tooling pass alphabetized the catalog JSON while the mirror
+    /// kept the order the entries were argued in, and the assertion failed with every grant
+    /// identical. Sorting keeps the whole of what this checks (a changed, added, or dropped
+    /// grant) and drops only the part nothing relies on.
     #[test]
     fn the_catalog_matches_the_hand_written_mirror() {
+        let by_name = |table: &[(&'static str, CuratedGrant)]| {
+            let mut rows: Vec<_> = table.iter().map(|(n, g)| (*n, format!("{g:?}"))).collect();
+            rows.sort();
+            rows
+        };
         assert_eq!(
-            CURATED_GRANTS, GOLDEN_PRE_CATALOG_GRANTS,
+            by_name(CURATED_GRANTS),
+            by_name(GOLDEN_PRE_CATALOG_GRANTS),
             "the generated table diverged from the hand-written mirror"
         );
     }
