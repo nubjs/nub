@@ -1413,11 +1413,14 @@ pub(crate) const PNPM_PARITY_VERSION: &str = "11.3.0";
 /// RFC-0042, Yarn-berry's pnpm-linker `pnpmStoreFolder`, cnpm), so tools that
 /// walk `node_modules` for a project root — simple-git-hooks and its class —
 /// recognize it as an install marker; the former `.nub` leaf was invisible to
-/// them. Single source of truth for the name: `nub_setting_defaults` sets
-/// `virtualStoreDir`/`stateDir` to `node_modules/<leaf>`, and vite_compat scans
-/// it. Standalone aube is unaffected — its default stays `.aube`; this is a
-/// nub-embedder value.
-pub(crate) const PROJECT_VIRTUAL_STORE_LEAF: &str = ".store";
+/// them. `nub_setting_defaults` sets `virtualStoreDir`/`stateDir` to
+/// `node_modules/<leaf>`, and vite_compat scans it. Standalone aube is
+/// unaffected — its default stays `.aube`; this is a nub-embedder value.
+///
+/// RE-EXPORTED, not redeclared: the build jail's store-entry write grant must
+/// recognize this exact directory, and a jail holding a stale second copy of the
+/// name declines silently rather than failing loudly.
+pub(crate) const PROJECT_VIRTUAL_STORE_LEAF: &str = nub_sandbox::PROJECT_VIRTUAL_STORE_LEAF;
 
 /// Compose the lifecycle-script UA product tokens for the resolved role —
 /// everything before the `<os> <arch>` tail the engine appends. The dialect is

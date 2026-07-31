@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 /// only preset today (the lifecycle-script baseline).
 pub fn resolve(name: &str) -> Result<Value, CompileError> {
     match name {
-        "build-jail" => Ok(build_jail_surface(None, None, None)),
+        "build-jail" => Ok(build_jail_surface(None, None, None, None)),
         other => Err(CompileError::unknown_preset(other, &["build-jail"])),
     }
 }
@@ -170,7 +170,26 @@ fn grant_build_jail_extra_reads(policy: &mut SandboxPolicy, extra_reads: &[PathB
 ///   repo's fetch URL; that credential is one it was fetched with, not another project's.)
 /// - `packuments-v1`, `packuments-full-v1`, `trust-policy-v1` are registry metadata the
 ///   resolver consumes UNCONFINED, before any script spawns. No lifecycle script reads them.
-const NUB_PM_CACHE_PATTERNS: &[&str] = &["$cache/nub/pm/store", "$cache/nub/pm/tools"];
+const NUB_PM_CACHE_PATTERNS: &[&str] = &[NUB_GLOBAL_VIRTUAL_STORE_PATTERN, "$cache/nub/pm/tools"];
+
+/// The GLOBAL virtual store, as a `$cache`-anchored surface pattern — the directory aube
+/// materializes every package into when `use_global_virtual_store` is on (the default off
+/// CI). Named once so the read grant above and the store-containment guard in
+/// [`store_entry_write_root`] can never drift apart.
+const NUB_GLOBAL_VIRTUAL_STORE_PATTERN: &str = "$cache/nub/pm/store";
+
+/// The PROJECT-LOCAL virtual store's leaf under `node_modules` — the OTHER root the same
+/// package can materialize into, since `use_global_virtual_store` is a per-install toggle
+/// and `with_project_local_dep_paths` flips it per PACKAGE. A `file:` dependency takes this
+/// path on an otherwise-global install, so both roots are live in one tree.
+///
+/// THE SINGLE SOURCE OF TRUTH FOR THE NAME, which nub-cli's `nub_setting_defaults` reuses
+/// when it sets the engine's `virtualStoreDir`. It lives here rather than there so the
+/// grant and the layout cannot drift: this leaf was `.nub` until it moved to the
+/// vendor-neutral `.store`, and a jail holding its own stale copy of the name declines
+/// SILENTLY — the grant compiles to nothing and the package dies on gyp's laundered
+/// ENOENT, indistinguishable from having no fix at all.
+pub const PROJECT_VIRTUAL_STORE_LEAF: &str = ".store";
 
 /// Where the per-package private HOMEs live, as a `$cache`-anchored surface pattern.
 ///
@@ -375,6 +394,48 @@ fn enclosing_node_modules(package_dir: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+/// The package's own STORE-ENTRY ROOT — the extra subtree a confined native build must be
+/// able to write — or `None` when the package was not materialized into a virtual store.
+///
+/// THE INVARIANT, and it is arithmetic rather than a choice any tool makes: a
+/// `node-addon-api` dependant hands gyp a `..`-relative `.gyp` path (`path.relative` in
+/// that package's `index.js`), and gyp joins `depth(".") + generator_output("build") +
+/// base_path("../../../..")` — **`build/` absorbs exactly one `..`**, so the join collapses
+/// one level too shallow and lands on the package's store-entry root, scoped and unscoped
+/// alike (a scoped name's extra `..` is cancelled by its extra directory level). npm and
+/// pnpm compute the same escaping path and both build fine, so the layout is not the fault;
+/// only confinement turns it into a failure. It presented for weeks as an ABI problem
+/// because gyp's `EnsureDirExists` is a bare `except OSError: pass` one line above the
+/// `open()` that reports, laundering the jail's EPERM into a misleading ENOENT.
+///
+/// GUARDED ON STORE CONTAINMENT, because under a HOISTED linker the identical arithmetic
+/// lands on the PROJECT ROOT (or a workspace member's root), which must never be writable.
+/// The candidate qualifies only when its parent is a virtual store aube itself materializes
+/// into, so a hoisted layout declines structurally rather than by luck. `package_dir` is
+/// resolved first so the derivation does not depend on whether aube handed over the store
+/// path or the project's symlink into it — both backends match the resolved path anyway.
+///
+/// KNOWN RESIDUAL: a SCOPED package under a hoisted linker escapes into
+/// `node_modules/@scope/`, which this correctly declines and deliberately does not fix —
+/// granting the scope dir would hand a build write access to its sibling packages.
+fn store_entry_write_root(homes: &Homes, package_dir: &Path) -> Option<PathBuf> {
+    let resolved = crate::matcher::path::canonicalize_including_nonexistent(package_dir);
+    let candidate = enclosing_node_modules(&resolved)?.parent()?.to_path_buf();
+    let parent = crate::matcher::path::canonicalize_including_nonexistent(candidate.parent()?);
+    let global = PathBuf::from(crate::matcher::path::expand_symbolic(
+        NUB_GLOBAL_VIRTUAL_STORE_PATTERN,
+        homes,
+    ));
+    let project_local = homes
+        .project
+        .join("node_modules")
+        .join(PROJECT_VIRTUAL_STORE_LEAF);
+    [global, project_local]
+        .iter()
+        .any(|root| crate::matcher::path::canonicalize_including_nonexistent(root) == parent)
+        .then_some(candidate)
+}
+
 /// Push a READ-allow rule per subtree glob for `path` (the node itself + `/**`).
 ///
 /// `origin` decides what an ABSENT path means. The interpreter was resolved from the
@@ -410,6 +471,7 @@ fn build_jail_surface(
     package_dir: Option<&Path>,
     private_home: Option<&Path>,
     package_name: Option<&str>,
+    store_entry_root: Option<&Path>,
 ) -> Value {
     let mut fs = serde_json::Map::new();
     // `$tmp` sets the private per-run tmp MODE (TmpMode::Private) — a writable scratch,
@@ -434,6 +496,22 @@ fn build_jail_surface(
         fs.insert(dir.to_string_lossy().into_owned(), json!("rw"));
     }
     if let Some(dir) = package_dir {
+        // The package's own store-entry root, read-write. FIRST so the `package_dir` entry
+        // below stays last and keeps winning under last-match-wins for its own subtree.
+        // See [`store_entry_write_root`] for why gyp writes here and why this is guarded on
+        // store containment rather than emitted unconditionally.
+        //
+        // COST, weighed and accepted: the store entry also holds `node_modules/.bin` for a
+        // package with binary deps, which this makes writable. Those shims execute only
+        // while THIS package's own lifecycle scripts run — a context the attacker already
+        // owns — and it does not reach the project's `node_modules/.bin`. The store is
+        // machine-global, so it shares the cross-project reach the store already has. A
+        // tighter variant (enumerate `<store-entry-root>/<dep_dirname>` per direct dep,
+        // which nub knows at spawn time) is real machinery for a jail whose stated posture
+        // is to loosen liberally when packages break.
+        if let Some(root) = store_entry_root {
+            fs.insert(root.to_string_lossy().into_owned(), json!("rw"));
+        }
         // Own-package-dir READ-WRITE: the one subtree a dep build may write (its
         // `build/`, the compiled `.node`).
         //
@@ -577,7 +655,13 @@ pub fn compile_build_jail(
     ambient_env: BTreeMap<String, String>,
 ) -> Result<SandboxPolicy, CompileError> {
     let private_home = private_home_dir(&homes, package_dir);
-    let surface = build_jail_surface(Some(package_dir), private_home.as_deref(), package_name);
+    let store_entry_root = store_entry_write_root(&homes, package_dir);
+    let surface = build_jail_surface(
+        Some(package_dir),
+        private_home.as_deref(),
+        package_name,
+        store_entry_root.as_deref(),
+    );
     // cwd anchors diagnostics/canonicalization; the project root (homes.project) is
     // what `"./"` expands against, so the package dir as cwd does not affect grants.
     let cwd = homes.project.clone();
@@ -783,6 +867,144 @@ mod tests {
         }
     }
 
+    /// The store-entry write grant, in both directions — it FIRES for a package
+    /// materialized into a virtual store (either spelling) and DECLINES for every layout
+    /// where the same arithmetic would land on user-authored source.
+    ///
+    /// The decline half is the property, not an assertion: a hoisted package's escape
+    /// target IS the project root (or a workspace member's), so a guard that fired there
+    /// would hand a dependency build write access to the consumer's own tree. Both hoisted
+    /// rows are therefore run against the same compile path as the granted ones — a guard
+    /// that declined by accident (wrong helper, absent wiring) would show up as the granted
+    /// rows failing, and one that fired too widely as the declined rows failing.
+    #[test]
+    fn the_store_entry_write_grant_is_scoped_to_a_virtual_store() {
+        use crate::matcher::PathMatcher;
+        use crate::policy::FsAccess;
+
+        let homes = Homes {
+            home: PathBuf::from("/testhome"),
+            tmp: PathBuf::from("/testtmp"),
+            cache: PathBuf::from("/testhome/.cache"),
+            project: PathBuf::from("/proj"),
+        };
+        let escape_target = |package_dir: &str| -> (PathBuf, bool) {
+            let package_dir = PathBuf::from(package_dir);
+            let policy = compile_build_jail(
+                homes.clone(),
+                &package_dir,
+                None,
+                Vec::new(),
+                Vec::new(),
+                BTreeMap::new(),
+            )
+            .expect("build-jail compiles");
+            // Where gyp's `build/`-absorbed `..` chain actually lands: one level above the
+            // package's enclosing `node_modules`.
+            let escape = enclosing_node_modules(&package_dir)
+                .and_then(|nm| nm.parent().map(Path::to_path_buf))
+                .expect("every fixture sits under a node_modules");
+            let d = PathMatcher::new(&policy.fs.rules).decide(&escape.join("Makefile"));
+            (
+                escape,
+                d.effect == Effect::Allow && d.access == FsAccess::ReadWrite,
+            )
+        };
+
+        for (label, package_dir) in [
+            // GLOBAL virtual store — `$cache/nub/pm/store`, the default off CI.
+            (
+                "global store",
+                "/testhome/.cache/nub/pm/store/sqlite3@5.1.14/node_modules/sqlite3",
+            ),
+            // PROJECT-LOCAL virtual store — what `use_global_virtual_store(false)` and
+            // `with_project_local_dep_paths` materialize into.
+            (
+                "project-local store",
+                "/proj/node_modules/.store/sqlite3@5.1.14/node_modules/sqlite3",
+            ),
+            // SCOPED, whose extra `..` is cancelled by its extra directory level, so it
+            // lands on the same store-entry root rather than one level further out.
+            (
+                "scoped, global store",
+                "/testhome/.cache/nub/pm/store/@vscode+sqlite3@5.1.14/node_modules/@vscode/sqlite3",
+            ),
+        ] {
+            let (escape, writable) = escape_target(package_dir);
+            assert!(
+                writable,
+                "{label}: the store-entry root {} must be writable",
+                escape.display()
+            );
+        }
+
+        for (label, package_dir) in [
+            // HOISTED — the escape target IS the consumer's project root.
+            ("hoisted", "/proj/node_modules/sqlite3"),
+            // HOISTED in a WORKSPACE — the escape target is a member's source root, which
+            // a project-root check alone would miss.
+            (
+                "hoisted workspace member",
+                "/proj/packages/api/node_modules/sqlite3",
+            ),
+            // A SCOPED package under a hoisted linker escapes into `node_modules/@scope/`,
+            // the one shape this deliberately does not fix: granting the scope dir would
+            // hand the build write access to its sibling packages.
+            ("hoisted scoped", "/proj/node_modules/@vscode/sqlite3"),
+        ] {
+            let (escape, writable) = escape_target(package_dir);
+            assert!(
+                !writable,
+                "{label}: {} is user-authored source and must stay unwritable",
+                escape.display()
+            );
+        }
+    }
+
+    /// The ACCEPTED COST of the grant above, pinned so a future tightening is a deliberate
+    /// decision rather than a silent one: the store entry also holds `node_modules/.bin`
+    /// for a package with binary deps, and those shims become writable. They execute only
+    /// while THIS package's own lifecycle scripts run — a context the attacker already owns
+    /// — and the grant does not reach the project's `node_modules/.bin`, which is the shim
+    /// directory later tooling runs UNCONFINED.
+    #[test]
+    fn the_store_entry_grant_reaches_its_own_bin_but_never_the_projects() {
+        use crate::matcher::PathMatcher;
+        use crate::policy::FsAccess;
+
+        let policy = compile_build_jail(
+            Homes {
+                home: PathBuf::from("/testhome"),
+                tmp: PathBuf::from("/testtmp"),
+                cache: PathBuf::from("/testhome/.cache"),
+                project: PathBuf::from("/proj"),
+            },
+            Path::new("/proj/node_modules/.store/sqlite3@5.1.14/node_modules/sqlite3"),
+            None,
+            Vec::new(),
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .expect("build-jail compiles");
+        let m = PathMatcher::new(&policy.fs.rules);
+        let writable = |p: &str| {
+            let d = m.decide(Path::new(p));
+            d.effect == Effect::Allow && d.access == FsAccess::ReadWrite
+        };
+        assert!(
+            writable("/proj/node_modules/.store/sqlite3@5.1.14/node_modules/.bin/node-gyp"),
+            "the store entry's own .bin is inside the grant (accepted)"
+        );
+        assert!(
+            !writable("/proj/node_modules/.bin/tsc"),
+            "the project's .bin is where unconfined tooling resolves and must stay read-only"
+        );
+        assert!(
+            !writable("/proj/node_modules/.store/left-pad@1.0.0/node_modules/left-pad/index.js"),
+            "a SIBLING store entry must stay outside the grant"
+        );
+    }
+
     /// The curated exception is WIRED and ORDERED, which the `curated` unit tests cannot
     /// show: they call the granting function against an empty policy, so they would pass
     /// just as well if `compile_build_jail` never called it, or called it before the
@@ -792,6 +1014,12 @@ mod tests {
     /// `node_modules` read grant, so an ordering bug leaves it readable-but-unwritable —
     /// which is exactly the `EPERM … mkdir` the exception exists to remove, and is
     /// invisible to a rule-presence check.
+    ///
+    /// HOISTED, where it used to be store-shaped: [`store_entry_write_root`] now makes the
+    /// whole store entry writable, which SUBSUMES a `sibling_dirs` grant under the isolated
+    /// linker and leaves both of this test's controls unable to fail. Under a hoisted
+    /// linker the store grant declines, so the curated exception is again the only thing
+    /// that can produce this write — which is what the test is for.
     #[test]
     fn a_curated_exception_is_wired_into_the_production_path_and_wins_the_write() {
         use crate::matcher::PathMatcher;
@@ -803,9 +1031,8 @@ mod tests {
             cache: PathBuf::from("/testhome/.cache"),
             project: PathBuf::from("/proj"),
         };
-        let package_dir =
-            PathBuf::from("/proj/node_modules/.store/@prisma+client@6/node_modules/@prisma/client");
-        let sibling = Path::new("/proj/node_modules/.store/@prisma+client@6/node_modules/.prisma");
+        let package_dir = PathBuf::from("/proj/node_modules/@prisma/client");
+        let sibling = Path::new("/proj/node_modules/.prisma");
         let compile = |name: Option<&str>| {
             compile_build_jail(
                 homes.clone(),
@@ -831,10 +1058,7 @@ mod tests {
         // the whole enclosing node_modules writable — which is the `.bin`/virtual-store
         // hazard the enumerated form exists to avoid.
         assert!(
-            !writable(
-                &named,
-                Path::new("/proj/node_modules/.store/@prisma+client@6/node_modules/.bin/x")
-            ),
+            !writable(&named, Path::new("/proj/node_modules/.bin/x")),
             "the exception must not widen the enclosing node_modules"
         );
         assert!(
