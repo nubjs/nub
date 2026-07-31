@@ -114,6 +114,13 @@ jobs:
           grep -hF "npm_config_python=" synthetic.log || echo "(no marker line)"
 
           echo
+          echo "======== the CHILD's PATH shape, and route 2 walked from inside the jail ========"
+          # An empty `hits` with a well-formed PATH and EPERM codes is a denial; an empty
+          # `hits` with a short PATH is a delivery defect. node-gyp's own `executable path
+          # is ""` cannot tell those apart, which is the whole reason this is recorded.
+          grep -hF "child-bare-lookup=" synthetic.log || echo "(no bare-lookup line)"
+
+          echo
           echo "======== node-gyp's own Python discovery ========"
           grep -hE "Could not find any Python|is not set from environment variable PYTHON|checking if \"|Found Python" synthetic.log registry.log || echo "(no node-gyp python lines)"
 

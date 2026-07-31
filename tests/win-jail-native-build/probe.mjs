@@ -140,6 +140,45 @@ try {
 // value survived the env allowlist. Only both together tell an unresolved grant apart from
 // a resolved one that was scrubbed on the way in — a silent-drop shape this jail has hit
 // before (\`NODE_EXECUTABLE\`).
+
+// ROUTE 2, REPRODUCED WHERE IT ACTUALLY FAILS. node-gyp's second discovery route is a bare
+// name resolved against the CHILD's PATH, and under the jail it reports \`executable path
+// is ""\` for \`python3\`, \`python\` and \`py\` alike. Every prior elimination checked nub's
+// resolution logic in the parent, which is fine; none checked the shape of the environment
+// block the child receives. Win32 environments are case-insensitive and hold each name
+// once, so a block carrying both \`Path\` and \`PATH\` is not a defined shape — and an empty
+// or truncated PATH inside the child would produce exactly the observed symptom while
+// leaving every parent-side check correct.
+//
+// So this records the child's PATH SHAPE (which spellings, how long, how many entries) and
+// then walks it for the three bare names, keeping the error CODES. An empty \`hits\` with a
+// well-formed PATH and \`EPERM\` codes is a denial; an empty \`hits\` with a short PATH is a
+// delivery defect. The two are indistinguishable from node-gyp's own message.
+const PATH_KEYS = Object.keys(process.env).filter(function (k) {
+  return k.toLowerCase() === "path";
+});
+const RAW_PATH = process.env.PATH || "";
+const SEP = process.platform === "win32" ? ";" : ":";
+const EXTS = process.platform === "win32" ? [".exe", ""] : [""];
+const PATH_DIRS = RAW_PATH.split(SEP).filter(Boolean);
+const bareLookup = {};
+["python3", "python", "py"].forEach(function (name) {
+  const hits = [];
+  const codes = {};
+  PATH_DIRS.forEach(function (dir) {
+    EXTS.forEach(function (ext) {
+      const cand = path.join(dir, name + ext);
+      try {
+        if (fs.statSync(cand).isFile()) hits.push(cand);
+      } catch (err) {
+        const code = (err && err.code) || "unknown";
+        codes[code] = (codes[code] || 0) + 1;
+      }
+    });
+  });
+  bareLookup[name] = { hits: hits.slice(0, 3), codes: codes };
+});
+
 fs.writeFileSync(
   path.join(__dirname, "probe-marker.json"),
   JSON.stringify({
@@ -147,7 +186,10 @@ fs.writeFileSync(
     canaryRead,
     nodedir: process.env.npm_config_nodedir || "",
     python: process.env.npm_config_python || "",
-    pathKeys: Object.keys(process.env).filter((k) => k.toLowerCase() === "path"),
+    pathKeys: PATH_KEYS,
+    pathLen: RAW_PATH.length,
+    pathDirs: PATH_DIRS.length,
+    bareLookup: bareLookup,
     vcInstallDir: process.env.VCINSTALLDIR || "",
     vscmdVer: process.env.VSCMD_VER || "",
     sdkVersion: process.env.WindowsSDKVersion || "",
@@ -248,7 +290,10 @@ for (const shape of shapes) {
   );
   console.log(`observed ${shape.name} npm_config_nodedir=${markerData?.nodedir ?? "<no marker>"}`);
   console.log(
-    `observed ${shape.name} npm_config_python=${JSON.stringify(markerData?.python ?? "<no marker>")} child-path-keys=${JSON.stringify(markerData?.pathKeys ?? "<no marker>")}`,
+    `observed ${shape.name} npm_config_python=${JSON.stringify(markerData?.python ?? "<no marker>")} child-path-keys=${JSON.stringify(markerData?.pathKeys ?? "<no marker>")} child-path-len=${markerData?.pathLen ?? "?"} child-path-dirs=${markerData?.pathDirs ?? "?"}`,
+  );
+  console.log(
+    `observed ${shape.name} child-bare-lookup=${JSON.stringify(markerData?.bareLookup ?? "<no marker>")}`,
   );
 
   // WHICH TOOLCHAIN, not merely whether something built. `config.gypi` is node-gyp's own
