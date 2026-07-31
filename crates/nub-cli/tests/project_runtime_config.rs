@@ -597,6 +597,78 @@ process.exit(child.status ?? 1);
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn fresh_nested_nub_and_nubx_keep_the_parent_project_bin_path() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = Fixture::new();
+    let nested = fixture._temp.path().join("nested-bin-path");
+    std::fs::create_dir_all(&nested).unwrap();
+    let outer_bin = fixture.project.join("node_modules/.bin");
+    let probe = r#"
+const path = require('node:path');
+const { realpathSync } = require('node:fs');
+const entries = (process.env.PATH ?? '').split(path.delimiter);
+const parentBin = realpathSync.native(process.env.PARENT_BIN);
+console.log(JSON.stringify({
+  hasParentBin: entries.some((entry) => {
+    try {
+      return realpathSync.native(entry) === parentBin;
+    } catch {
+      return false;
+    }
+  }),
+}));
+"#;
+    std::fs::write(nested.join("file-probe.cjs"), probe).unwrap();
+    let nubx_probe = outer_bin.join("nested-bin-probe");
+    std::fs::write(&nubx_probe, format!("#!/usr/bin/env node\n{probe}")).unwrap();
+    std::fs::set_permissions(&nubx_probe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        fixture.project.join("nested-bin-launcher.cjs"),
+        r#"const { spawnSync } = require('node:child_process');
+const run = (program, args, cwd) => {
+  const child = spawnSync(program, args, { cwd, encoding: 'utf8', env: process.env });
+  if (child.status !== 0) {
+    process.stderr.write(child.stderr);
+    process.exit(child.status ?? 1);
+  }
+  return JSON.parse(child.stdout);
+};
+const file = run(process.env.NESTED_NUB, ['file-probe.cjs'], process.env.NESTED_PROJECT);
+const nubx = run(process.env.NESTED_NUBX, ['nested-bin-probe'], process.cwd());
+console.log(JSON.stringify({ file, nubx }));
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("package.json"),
+        r#"{ "scripts": { "nested-bin-path": "node nested-bin-launcher.cjs" } }"#,
+    )
+    .unwrap();
+
+    let output = fixture
+        .command()
+        .env("NESTED_NUB", nub_binary())
+        .env("NESTED_NUBX", &fixture.nubx)
+        .env("NESTED_PROJECT", &nested)
+        .env("PARENT_BIN", &outer_bin)
+        .args(["run", "nested-bin-path"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "nested bin-path probes failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout))
+            .unwrap();
+    assert_eq!(value["file"]["hasParentBin"], true, "{value}");
+    assert_eq!(value["nubx"]["hasParentBin"], true, "{value}");
+}
+
 #[test]
 fn fresh_nested_nub_node_mode_keeps_descendant_node_vanilla() {
     let fixture = Fixture::new();

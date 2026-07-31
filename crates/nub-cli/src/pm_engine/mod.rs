@@ -4663,7 +4663,6 @@ mod tests {
             node_options: Some("--require=/rt/preload.cjs".to_string()),
             shim_dir: Some("/shim".to_string()),
             node_path: Some(OsString::from("/rt/node_path")),
-            augmentation_token: "--require=/rt/preload.cjs".to_string(),
             neutralize_localstorage: true,
         };
         let runtime_json = r#"{"nodeCompat":false}"#;
@@ -4694,11 +4693,6 @@ mod tests {
             find(crate::project_config::RUNTIME_CONFIG_ENV).as_deref(),
             Some(runtime_json),
             "the Node-shim continuation must inherit the source-anchored runtime snapshot"
-        );
-        assert_eq!(
-            find("__NUB_AUGMENTATION_TOKEN").as_deref(),
-            Some("--require=/rt/preload.cjs"),
-            "a fresh nested Nub needs the exact parent-owned token"
         );
         assert_eq!(
             find("__NUB_AUGMENTED_NODE").as_deref(),
@@ -4733,7 +4727,6 @@ mod tests {
             node_options: None,
             shim_dir: None,
             node_path: None,
-            augmentation_token: "--require=/rt/preload.cjs".to_string(),
             neutralize_localstorage: false,
         };
         let (overlay, prepends) = augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node", None);

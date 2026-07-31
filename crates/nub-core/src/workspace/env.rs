@@ -30,7 +30,7 @@ const ENV_FILE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 ///   `.env` that sets it would rewrite the code nub transpiles. The watch path
 ///   in particular applies its injected `.env` values AFTER stamping this var,
 ///   so without the denylist a repo-supplied `.env` wins.
-/// - `__NUB_COMPAT_*` / `__NUB_AUGMENTATION_TOKEN` — the parent-captured ambient
+/// - `__NUB_COMPAT_*` / `__NUB_AUGMENTED_*` — the parent-captured ambient
 ///   environment and ownership metadata used when a nested Nub invocation sheds
 ///   its parent's augmentation. Script launchers apply `.env` values after these
 ///   markers, so the whole wire shape must be protected together.
@@ -51,8 +51,6 @@ const ENV_FILE_DENYLIST: &[&str] = &[
     "__NUB_COMPAT_NODE_COMPILE_CACHE",
     "__NUB_COMPAT_PATH",
     "__NUB_COMPAT_PRESENT",
-    "__NUB_COMPAT_SHIM_DIR",
-    "__NUB_AUGMENTATION_TOKEN",
     "__NUB_AUGMENTED_NODE_OPTIONS",
     "__NUB_AUGMENTED_NODE_PATH",
     "__NUB_AUGMENTED_NODE",
@@ -1218,8 +1216,6 @@ mod tests {
             "__NUB_COMPAT_NODE_COMPILE_CACHE",
             "__NUB_COMPAT_PATH",
             "__NUB_COMPAT_PRESENT",
-            "__NUB_COMPAT_SHIM_DIR",
-            "__NUB_AUGMENTATION_TOKEN",
             "__NUB_AUGMENTED_NODE_OPTIONS",
             "__NUB_AUGMENTED_NODE_PATH",
             "__NUB_AUGMENTED_NODE",

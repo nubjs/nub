@@ -4564,7 +4564,7 @@ fn build_script_command(
         );
         nub_core::node::spawn::apply_expected_augmentation_marker(
             "PATH",
-            Some(&path),
+            aug.shim_dir.as_deref().map(std::ffi::OsStr::new),
             |key, value| {
                 command.env(key, value);
             },
@@ -5554,10 +5554,10 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         .stderr(std::process::Stdio::inherit());
     cmd.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
     let mut launcher_owned_env_keys = vec![crate::project_config::RUNTIME_CONFIG_ENV.to_string()];
-    if let Some(token) = nub_preload_token.as_deref() {
+    if nub_preload_token.is_some() {
         // Watch assembles NODE_OPTIONS directly instead of using AugmentationEnv,
         // so it must stamp the same fresh-invocation restoration metadata itself.
-        nub_core::node::spawn::apply_augmentation_restore_markers(token, None, |key, value| {
+        nub_core::node::spawn::apply_augmentation_restore_markers(|key, value| {
             cmd.env(key, value);
             launcher_owned_env_keys.push(key.to_string());
         });
@@ -6091,7 +6091,8 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
     // shim dir → `.bin` chain → system PATH (`.bin` before the system PATH so a
     // local tool shadows a global one; `bin_chain` already ends with the system
     // PATH, so it appears exactly once).
-    let path = match aug.shim_dir {
+    let shim_dir = aug.shim_dir.clone();
+    let path = match shim_dir.as_deref() {
         Some(shim) => {
             let mut combined = std::ffi::OsString::from(shim);
             if !bin_chain.is_empty() {
@@ -6110,9 +6111,13 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
             cmd.env(key, value);
         },
     );
-    nub_core::node::spawn::apply_expected_augmentation_marker("PATH", Some(&path), |key, value| {
-        cmd.env(key, value);
-    });
+    nub_core::node::spawn::apply_expected_augmentation_marker(
+        "PATH",
+        shim_dir.as_deref().map(std::ffi::OsStr::new),
+        |key, value| {
+            cmd.env(key, value);
+        },
+    );
     Ok(())
 }
 
@@ -9923,7 +9928,6 @@ mod tests {
         let launcher_owned = [
             nub_core::node::spawn::RUNTIME_CONFIG_ENV,
             "__NUB_COMPAT_NODE_OPTIONS",
-            "__NUB_AUGMENTATION_TOKEN",
             "__NUB_AUGMENTED_NODE_OPTIONS",
             "__NUB_AUGMENTED_NODE_OPTIONS_PRESENT",
         ]
