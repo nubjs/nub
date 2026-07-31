@@ -110,6 +110,9 @@ const out = {
   // runner — is where a break count is finally asserted, and a break asserted
   // over a truncated window is a measurement of which sibling failed first.
   scheduling_truncated: verdicts.scheduling_truncated ?? null,
+  // Which mechanism produced that flag — so a reader can tell "no sibling failed
+  // first" from "no sibling COULD have", which is a much stronger statement.
+  per_package_windows: verdicts.per_package_windows ?? null,
   approved_jobs: verdicts.approved_jobs ?? null,
   failed_packages: verdicts.failed_packages ?? [],
   isolated: verdicts.isolated ?? false,

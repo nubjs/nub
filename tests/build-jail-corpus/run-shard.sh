@@ -272,13 +272,20 @@ CAT_ENV=()
 [ -n "${NUB_BUILD_JAIL_CATALOG:-}" ] && CAT_ENV=("NUB_BUILD_JAIL_CATALOG=$(wp "$NUB_BUILD_JAIL_CATALOG")")
 echo "catalog_override=${NUB_BUILD_JAIL_CATALOG:-none}" >> "$LOG"
 
+# NO `npm_config_cache`. Several lifecycle scripts shell out to `npm install`, and an
+# explicit cache path outside the jail's writable set made them fail with
+# `EPERM: operation not permitted, mkdir <run>/cache/npm` in the CONFINED arm only —
+# 21 packages on the 2026-07-31 macOS sweep, three of which it turned into breaks.
+# That is a property of where the harness pointed the cache, not of the jail: npm's
+# default is `$HOME/.npm`, the jail gives each script a private writable HOME, and
+# HOME is already per-run here, so leaving it unset is both hermetic and faithful.
 runnub_to() {
   local sink="$1"; shift
   ( cd "$PROJ" && env -i \
       PATH="$STUDY_PATH" HOME="$H" TMPDIR="$TMPD" \
       ${WIN_ENV[@]+"${WIN_ENV[@]}"} \
       ${CAT_ENV[@]+"${CAT_ENV[@]}"} \
-      NUB_CACHE_DIR="$(wp "$CACHE")" npm_config_cache="$(wp "$CACHE/npm")" \
+      NUB_CACHE_DIR="$(wp "$CACHE")" \
       ${FORCE:+$FORCE} ${TIMEOUT_BIN:+"$TIMEOUT_BIN" 3000} "$NUB" "$@" ) > "$sink" 2>&1
   return $?
 }
