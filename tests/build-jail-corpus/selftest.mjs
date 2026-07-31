@@ -48,6 +48,13 @@ const MANIFEST = [
   // needs it; its whole job is to be the row that did the work someone else got
   // scored for.
   ['noop-hook', '1.0.0', 'hook-installer'],
+  // The mirror pair. Once a hook installer is GRANTED, the sibling's write is
+  // present under the jail too, so every project-scoped row in the shard scores a
+  // HIT in BOTH arms — and the manufactured BREAK the two rows above encode
+  // becomes a manufactured PASS. These two are the only thing that separates a
+  // row the jail really broke from one it merely made quieter.
+  ['manufactured-pass', '1.0.0', 'hook-installer'],
+  ['quieter-under-jail', '1.0.0', 'hook-installer'],
   ['partial-build', '1.0.0', 'binary-downloader'],
   ['late-fail-prod', '1.0.0', 'binary-downloader'],
   ['opaque-fail', '1.0.0', 'binary-downloader'],
@@ -117,7 +124,11 @@ const mkLog = (arm, dir, header) => {
     + w('undersized', 0, 'done')
     // The CONTROL for the unclassified fallback: it prints a problem-shaped word
     // and is perfectly healthy, so it must pick up no signature at all.
-    + w('fullsized', 0, 'done (0 errors)')
+    // THE WORD HAS TO ACTUALLY MATCH `PROBLEM`, and for a long time it did not:
+    // this line read `done (0 errors)`, and `\berror\b` does not match `errors`,
+    // so the control passed because nothing was ever a candidate. It was found by
+    // ablation — deleting the suppression it guards left it green.
+    + w('fullsized', 0, 'download complete, 0 failed')
     + w('binlink-only', 0, 'done')
     + w('scratch-only', 0, 'done')
     + w('silent', 0, '')
@@ -135,6 +146,26 @@ const mkLog = (arm, dir, header) => {
     // ("Config was not found!"), both of which the shared project delta scored
     // as breaks off a sibling's work.
     + w('noop-hook', 0, 'setting up Git hooks\ntrying to install from sub \'node_module\' directory, skipping')
+    // MANUFACTURED-PASS is `lefthook@2.1.10`, which BREAKS in `pilot` where it is
+    // the only installer and PASSES in `default7` where a granted sibling writes
+    // 17 symlinks. Nothing in the row itself says it failed — its window exits
+    // ZERO and its shard verdict reads DID-WORK-AND-SUCCEEDED — so the exit-code
+    // veto, the artifact diff and the no-op gate all sail past it. The only
+    // evidence it holds is that under the jail it printed lines its own
+    // unconfined arm never printed.
+    + w('manufactured-pass', 0, A0
+      ? 'sync hooks: ok(pre-commit)'
+      : 'git rev-parse --show-toplevel --git-path hooks\n'
+        + 'fatal: not a git repository (or any of the parent directories): .git\n'
+        + 'exit status 128')
+    // QUIETER-UNDER-JAIL is what stops that gate degenerating into "the windows
+    // differ, so it broke". Its confined arm prints a strict SUBSET and nothing
+    // new, which is what `shared-git-hooks` (one `.bak` line fewer, because no
+    // sibling left a hook to back up) and `pre-commit` (three fewer) actually do
+    // — shard ordering, not the jail. Both are genuine survivors.
+    + w('quieter-under-jail', 0, A0
+      ? 'Symlinking runner in .git/hooks\n [ ok ] pre-commit\n [ ok ] pre-commit.bak\n [ ok ] pre-push'
+      : 'Symlinking runner in .git/hooks\n [ ok ] pre-commit\n [ ok ] pre-push')
     // PARTIAL-BUILD dies mid-compile in BOTH arms having already emitted its
     // artifact — `gl@8.1.6`, which produced 5,994 object files and then hit
     // `"C++20 or later required."`.
@@ -150,7 +181,7 @@ const mkLog = (arm, dir, header) => {
     // OUTSIDE EVERY WINDOW — the runner's epilogue, after its own end-of-windows
     // terminator. Attribution must NOT run past a window boundary and claim this
     // for whichever package happened to go last.
-    + 'per-package windows=10 worst rc=1\n'
+    + `per-package windows=${MANIFEST.length} worst rc=1\n`
     + 'request to https://registry.example.invalid failed, reason: ECONNREFUSED\n'
   );
 };
@@ -190,8 +221,8 @@ function scenario(name, header, opts) {
   return Object.fromEntries(t.rows.map((r) => [r.pkg.replace(/@[^@]+$/, ''), r]));
 }
 
-const TRUNCATED = 'Approved 10 package(s)\n  × lifecycle script postinstall failed for some-other-\n  │ package@1.0.0: script `postinstall` exited with code 1\n';
-const CLEAN = 'Approved 10 package(s)\n';
+const TRUNCATED = `Approved ${MANIFEST.length} package(s)\n  × lifecycle script postinstall failed for some-other-\n  │ package@1.0.0: script \`postinstall\` exited with code 1\n`;
+const CLEAN = `Approved ${MANIFEST.length} package(s)\n`;
 
 let failures = 0;
 const check = (label, got, want) => {
@@ -253,12 +284,41 @@ check('CONTROL: the sibling the jail really did break stays a break',
 // Paired so the check cannot pass merely because the note text matched: the
 // ambiguity that motivates the gate has to be RECORDED, not inferred.
 check('...and the row states how many rows shared the project delta',
-  clean['noop-hook'].project_scope_shared, 2);
+  clean['noop-hook'].project_scope_shared, MANIFEST.filter((r) => r[2] === 'hook-installer').length);
 // THE SECOND CONTROL, and the one that caught the gate over-firing on real data:
 // `msw` writes its service worker in BOTH arms, so nothing is manufactured and
 // the row is a genuine survivor. An unscoped gate deleted it anyway.
 check('CONTROL: identical windows do NOT strip a project-scoped row the jail passed',
   granted['noop-hook'].jail_cost, 'OK');
+
+console.log('\n— ...and it cannot manufacture a PASS either —');
+check('a project-scoped row that printed a failure its unconfined arm never printed is not a pass',
+  granted['manufactured-pass'].jail_cost, 'BREAK:MANUFACTURED-PASS');
+// PAIRED WITH THE VERDICT IN ONE ASSERTION so it cannot pass vacuously: taken
+// alone, "rc is 0" is true with the gate removed too. What has to hold jointly is
+// that every signal the row carries about ITSELF says success — zero exit code,
+// SUCCEEDED shard verdict — and it is still scored a break. That is what makes an
+// exit-code veto an unavailable substitute for this gate.
+check('...on a row whose own window exited zero and whose shard verdict says SUCCEEDED',
+  `${granted['manufactured-pass'].prod}/rc=${granted['manufactured-pass'].prod_window_rc}/${granted['manufactured-pass'].jail_cost}`,
+  'DID-WORK-AND-SUCCEEDED/rc=0/BREAK:MANUFACTURED-PASS');
+check('...and the note quotes the lines only the confined arm printed',
+  /fatal: not a git repository/.test(granted['manufactured-pass'].note), true);
+// THE CONTROL THAT STOPS "the two windows differ" FROM BECOMING THE GATE, and the
+// one that goes red under an over-broad version of this fix while the assertions
+// above stay green.
+check('CONTROL: a project-scoped row that printed LESS under the jail, and nothing new, still passes',
+  granted['quieter-under-jail'].jail_cost, 'OK');
+// THE ERRSIG HALF. For a project-scoped row the shard verdict is the thing under
+// suspicion rather than the thing that settles it, so suppressing the window's
+// failure text on that verdict destroyed the only evidence contradicting it.
+check('a project-scoped row scored SUCCEEDED still carries its window\'s failure text into triage',
+  /unclassified.*fatal: not a git repository/.test(granted['manufactured-pass'].prod_failure_signature || ''), true);
+// Paired against removing the suppression outright rather than scoping it: a
+// healthy non-project-scoped window that merely says "errors" must still pick up
+// nothing.
+check('CONTROL: a healthy row scored SUCCEEDED still carries none',
+  granted['fullsized'].prod_failure_signature, null);
 
 console.log('\n— a package\'s own exit code vetoes its own success —');
 check('an arm that emitted its full artifact and then exited non-zero is not a success',
@@ -293,7 +353,7 @@ check('CONTROL: a failure line OUTSIDE every window stays shard-level',
 check('a failure no errno rule matches still reaches triage, labelled unclassified',
   /unclassified:1 \| \[unclassified\] Chromedriver 149 could not be installed: fetch failed$/
     .test(clean['opaque-fail'].prod_failure_signature || ''), true);
-check('CONTROL: a healthy window that merely says "errors" gets no signature',
+check('CONTROL: a healthy window that merely says "failed" gets no signature',
   clean['fullsized'].prod_failure_signature, null);
 check('...and no package row absorbs it',
   Object.entries(prodReport.failure_signatures_by_package)

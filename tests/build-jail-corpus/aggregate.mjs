@@ -155,6 +155,52 @@ for (const [pkg, e] of Object.entries(table)) {
       // PASS: a verdict that already breaks needs no falsifying, and the point is
       // to catch the reassuring answer, not to add to the alarming one.
       let jail_cost = admissible && prod ? (prod.verdict === 'DID-WORK-AND-SUCCEEDED' ? 'OK' : `BREAK:${prod.verdict}`) : null;
+
+      // THE MANUFACTURED-PASS GATE — the mirror of the shared-project-delta gate
+      // above, and it exists because closing that one opened this one. Granting
+      // six hook installers means a GRANTED sibling now writes real hooks into
+      // the shared project, so every UNGRANTED project-scoped row in the same
+      // shard reads that delta as its own HIT and scores a pass off work it did
+      // not do. Measured: `lefthook@2.1.10` BREAKS in `pilot`, where it is the
+      // only installer, and PASSES in `default7`, where granted
+      // `shared-git-hooks` writes 17 symlinks — same package, same binary, and
+      // its `default7` window prints `fatal: not a git repository` and `exit
+      // status 128` while the row reads DID-WORK-AND-SUCCEEDED.
+      //
+      // THE TEST IS A DIFFERENTIAL OVER THE WINDOW'S LINES, NOT A PROSE
+      // CLASSIFIER. Asking whether a line "looks like a failure" is exactly the
+      // guess errsig.mjs refuses to make, and on this corpus it is also wrong:
+      // `pre-commit` and `pre-push` print `No .git found in …` for every parent
+      // directory while working perfectly, and `@arkweid/lefthook`'s real denial
+      // (`This command must be executed within git repository.`) contains no
+      // failure word at all. What separates them is that the broken rows printed
+      // lines their OWN unconfined arm never printed. A confined arm that printed
+      // LESS introduced no failure and keeps its pass — which is the ordinary
+      // shape here, not a corner: `shared-git-hooks` loses one `.bak` line and
+      // `pre-commit` loses three, both from shard ordering rather than the jail.
+      //
+      // SCOPED THREE WAYS, each closing a direction this could be wrong in:
+      //   - only where the project evidence is SHARED. A shard's sole
+      //     project-scoped row owns its HIT and needs no corroboration.
+      //   - only where the row would otherwise PASS, mirroring the no-op gate one
+      //     screen up, which fires only where the row would otherwise BREAK. Each
+      //     gate corrects the direction its own evidence can be wrong in, and
+      //     that scoping is what keeps `msw` — whose service worker is written in
+      //     both arms — a genuine survivor rather than a casualty.
+      //   - only where BOTH arms carried an uncapped line list, so an oversized
+      //     window makes the gate decline rather than rule on a truncated diff.
+      let manufactured_pass_lines = null;
+      if (jail_cost === 'OK' && a0?.project_scoped && prod?.project_scoped
+          && (prod.project_scope_shared ?? 0) > 1
+          && a0.window?.lines && prod.window?.lines) {
+        const seen = new Set(a0.window.lines);
+        const novel = prod.window.lines.filter((l) => !seen.has(l));
+        if (novel.length) {
+          manufactured_pass_lines = novel;
+          jail_cost = 'BREAK:MANUFACTURED-PASS';
+          note = `the confined arm printed ${novel.length} line(s) its unconfined arm never did, and its only pass evidence is a project delta shared with ${prod.project_scope_shared} rows in this shard: ${novel.slice(0, 3).map((l) => JSON.stringify(l.slice(0, 160))).join(' ')}`;
+        }
+      }
       let artifact_ratio = null;
       if (jail_cost === 'OK' && ARTIFACT_SCALED.has(e.class) && a0.artifact && prod.artifact) {
         const rb = a0.artifact.bytes > 0 ? prod.artifact.bytes / a0.artifact.bytes : null;
@@ -182,6 +228,7 @@ for (const [pkg, e] of Object.entries(table)) {
         a0: a0?.verdict ?? '-', prod: prod?.verdict ?? '-',
         a0_changed: a0?.changed ?? null, prod_changed: prod?.changed ?? null,
         admissible, note, jail_cost, artifact_ratio, inconclusive, denominator_suspect, noop_both_arms,
+        manufactured_pass_lines,
         // Per-package attribution is unavailable for these, so any count built
         // from them is an upper bound. Carried on the row rather than stated as
         // a footnote, so a reader of the table cannot miss it.

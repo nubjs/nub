@@ -113,11 +113,28 @@ for (let i = 0; i < lines.length; i++) {
 // Gated on the window having actually gone wrong, so a healthy package that
 // merely prints the word "error" in its banner picks up nothing.
 const PROBLEM = /\b(error|fail(ed|ure)?|cannot|could not|unable|denied|not permitted|fatal|invalid|refused|timed out)\b/i;
-const verdictByPkg = new Map((verdicts.results || []).map((r) => [r.pkg, r.verdict]));
+const rowByPkg = new Map((verdicts.results || []).map((r) => [r.pkg, r]));
 const classified = new Set(hits.filter((h) => h.pkg).map((h) => h.pkg));
 for (const s of segs) {
+  const row = rowByPkg.get(s.pkg);
   if (classified.has(s.pkg)) continue;
-  if (s.rc === 0 && verdictByPkg.get(s.pkg) === 'DID-WORK-AND-SUCCEEDED') continue;
+  // THE SUCCEEDED SUPPRESSION DOES NOT APPLY TO A PROJECT-SCOPED ROW, because for
+  // those the shard verdict is the thing under suspicion rather than the thing
+  // that settles it: a project-scoped HIT comes from a delta shared with every
+  // other such row in the shard, so a GRANTED sibling's `.git/hooks` write scores
+  // its ungranted shard-mates SUCCEEDED whatever they did. Suppressing on that
+  // verdict threw away the one piece of per-package evidence that contradicts it
+  // — `lefthook@2.1.10` printed `fatal: not a git repository` and `exit status
+  // 128` inside its own window and carried no signature at all into triage.
+  // Everywhere else the suppression stands: a healthy window that merely says the
+  // word "failed" in its banner must still pick up nothing.
+  //
+  // THE COST, stated rather than hidden: a HEALTHY project-scoped row that prints
+  // a problem-shaped word now picks one up too — `simple-git-hooks` declares
+  // `[ERROR] Config was not found!` identically in both arms and will carry it.
+  // That is reporting only; nothing here feeds a verdict, and the alternative is
+  // suppressing the evidence on the strength of the verdict it exists to check.
+  if (!row?.project_scoped && s.rc === 0 && row?.verdict === 'DID-WORK-AND-SUCCEEDED') continue;
   const line = lines.slice(s.from, s.to).find((l) => PROBLEM.test(l) && !/^\s*(Approved \d+|warning: )/.test(l));
   if (!line) continue;
   hits.push({ kind: 'unclassified', pkg: s.pkg, line: line.trim().slice(0, 400) });

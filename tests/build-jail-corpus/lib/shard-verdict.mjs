@@ -81,6 +81,12 @@ const truncatedFor = (pkg) => (truncatedPkgs ? truncatedPkgs.has(pkg) : scheduli
 // anything at all for a package whose delta evidence is unattributable.
 const logLines = log.split('\n');
 const winByPkg = windowsByPkg(logLines, parseWindows(logLines));
+// The real project-scoped windows on the macOS sweep run 51 to 533 bytes; a
+// native build's runs to hundreds of kilobytes. These bounds sit far above the
+// former and far below the latter, so the field is present exactly where the
+// aggregate can use it and absent where carrying it would bloat every report.
+const WINDOW_LINE_BYTES = 32 * 1024;
+const WINDOW_LINE_CAP = 400;
 const OUT_DIR = outDirFromLog(log, process.env.PROJ);
 
 const manifest = fs
@@ -335,13 +341,26 @@ for (const m of manifest) {
   // whether the jail changed it.
   const win = winByPkg.get(m.pkg) || null;
   const normalised = win ? normaliseWindow(win.text, { outDir: OUT_DIR, nonce }) : null;
+  // THE LINES THEMSELVES, for project-scoped rows only. A digest answers "did the
+  // jail change this window" and nothing sharper; the aggregate needs to ask
+  // whether the CONFINED arm printed something the unconfined one never did,
+  // which is the only per-package evidence a row whose pass rests on a sibling's
+  // project write has at all. Capped, and null rather than truncated over the
+  // cap: a partial line list would let the gate rule on evidence it does not
+  // hold, and declining is the direction that cannot invent a verdict.
+  const lines = projectScoped && normalised !== null && normalised.length <= WINDOW_LINE_BYTES
+    ? normalised.split('\n').map((l) => l.trim()).filter(Boolean)
+    : null;
 
   results.push({
     pkg: m.pkg, version: m.version, class: m.cls, kind, acted,
     changed: changed.length, effect, verdict, scheduling, reasons,
     project_scoped: projectScoped,
     own_window: win
-      ? { rc: win.rc, digest: digest(normalised), bytes: normalised.length, sample: normalised.slice(0, 300) }
+      ? {
+          rc: win.rc, digest: digest(normalised), bytes: normalised.length, sample: normalised.slice(0, 300),
+          lines: lines && lines.length <= WINDOW_LINE_CAP ? lines : null,
+        }
       : null,
     // Carried per row so the aggregate can diff the confined artifact against the
     // unconfined one. A pass is only as good as what it produced, and the two

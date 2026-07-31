@@ -121,6 +121,36 @@ attribution remains unavailable and any count built from them is an upper bound.
 Real per-package attribution here needs a per-WINDOW snapshot of the project surface. An archived
 run does not have one, and this gate is what an archived run can honestly say instead.
 
+### The mirror gate: a shared delta cannot manufacture a PASS either
+
+Closing the direction above opened the other one. Once six hook installers are GRANTED, a granted
+sibling writes real hooks under the jail too, so an ungranted shard-mate reads that same delta as its
+own HIT and scores a pass off work it did not do. `lefthook@2.1.10` breaks in `pilot`, where it is
+the only installer, and passes in `default7`, where granted `shared-git-hooks` writes 17 symlinks —
+same package, same binary.
+
+The test is a differential over the window's LINES, not a prose classifier. Asking whether a line
+looks like a failure is the guess `errsig.mjs` refuses to make, and here it is also wrong in both
+directions: `pre-commit` and `pre-push` print `No .git found in …` for every parent directory while
+working perfectly, while `@arkweid/lefthook`'s real denial (`This command must be executed within git
+repository.`) contains no failure word at all. What separates them is that the broken rows printed
+lines their own unconfined arm never printed. A confined arm that printed strictly LESS introduced no
+failure and keeps its pass — the ordinary case, not a corner: `shared-git-hooks` loses one `.bak`
+line and `pre-commit` loses three, both from shard ordering.
+
+Scoped three ways: only where the project evidence is SHARED (a shard's sole project-scoped row owns
+its HIT), only where the row would otherwise PASS (the mirror of the gate above, which fires only
+where the row would otherwise BREAK — that scoping is what keeps `msw` a survivor), and only where
+both arms carried an uncapped line list, so an oversized window makes the gate decline rather than
+rule on a truncated diff. The verdict is `BREAK:MANUFACTURED-PASS`, and the note quotes the lines.
+
+`errsig.mjs` pairs with it. Its unclassified-line fallback used to drop a window's failure text
+whenever the window returned 0 and the row scored `DID-WORK-AND-SUCCEEDED` — which for a
+project-scoped row suppresses the one piece of per-package evidence contradicting the verdict under
+suspicion. That suppression no longer applies to project-scoped rows. The cost, stated: a healthy
+project-scoped row printing a problem-shaped word now picks one up too (`simple-git-hooks` declares
+`[ERROR] Config was not found!` in both arms). It is reporting only and feeds no verdict.
+
 ## A batch run is a screen, not a result
 
 **A shard cannot attribute an ABSENCE.** aube stops *scheduling* queued lifecycle jobs once any
@@ -370,13 +400,27 @@ Fresh sweep, binary `f63d3c62c3`, sha256 `e2c1adec…`, **no catalog override** 
 which now carries 48 `packageNetwork.full` entries and 10 `packageGrants`. 26 arms, every one
 `arm_effect=confirmed`, `PER_PKG=1`, 0 inconclusive, 0 denominator-suspect.
 
-| | baseline (`27d383ef2e`, override, re-scored) | **this run (`f63d3c62c3`, compiled)** |
-| --- | --- | --- |
-| rows | 389 | 372 |
-| admissible | 158 | **163** |
-| survives the jail | 91 (57.6%) | **157 (96.3%)** |
-| breaks | 67 | **6** |
-| inconclusive | 0 | 0 |
+| | baseline (`27d383ef2e`, override, re-scored) | this run, as it scored | + manufactured-pass gate | **+ the four isolated re-runs** |
+| --- | --- | --- | --- | --- |
+| rows | 389 | 372 | 372 | 376 |
+| admissible | 158 | 163 | 163 | **161** |
+| survives the jail | 91 (57.6%) | 157 (96.3%) | 155 | **153 (95.0%)** |
+| breaks | 67 | 6 | 8 | **8** |
+| inconclusive | 0 | 0 | 0 | 0 |
+
+**Quote the right-hand column.** The 163 / 157 / 6 the run itself printed carries the manufactured-pass
+defect described below; the gate turns two of those passes into breaks, and the four isolated re-runs
+remove `yorkie` and `simple-git-hooks` as no-ops.
+
+The last two columns are *derived from a re-score*, and a re-score of this archive loses two more rows
+than the run did, so read the arithmetic rather than the totals alone. Re-scoring with the UNMODIFIED
+scorers moves six rows against the run's own table — every one a `content_nonce` row going
+`UNSIGNALLED`, because a finished run's store is gone and the operator says UNEVALUABLE rather than
+guessing — of which only `@prisma/client@6.19.3`, in two shards, was admissible. That control
+therefore lands at **161 / 155 / 6**, and nothing else moves. Against it the gate moves exactly two
+rows (**161 / 153 / 8**) and folding the isolated re-runs in gives **159 / 151 / 8**. Adding back the
+two rows the archive cannot evaluate — neither is project-scoped, so the gate cannot reach them —
+gives the run-path figures tabulated above.
 
 **Enforcement was proved in the same binary, both directions.** A local `file:` package with no
 catalog entry: under `PROD` `write_own=OK` — the positive control that the script ran — with
@@ -425,14 +469,21 @@ Four packages re-run alone settle it, and the control runs in both directions:
 | `yorkie@2.0.0` | SURVIVE | **NO-OP-BY-DESIGN, inadmissible** |
 | `simple-git-hooks@2.13.1` | SURVIVE | **NO-OP-BY-DESIGN, inadmissible** |
 
-So the headline carries four spurious passes. Corrected by hand for the isolated results: **161
-admissible, 153 survive, 8 break — 95.0%.** The gate is not yet fixed in `aggregate.mjs`; the
-unclassified-line fallback in `errsig.mjs` suppresses a window's failure text whenever the window
-returned 0 and the row scored `DID-WORK-AND-SUCCEEDED`, which is exactly the evidence a
-manufactured-pass gate would need, so closing this is a scoring change with its own differential
-rather than a one-line edit. Every hook-installer survivor carries `project_scope_shared`.
+So the run's raw table carried four spurious passes, and the corrected headline is **161 admissible,
+153 survive, 8 break — 95.0%.**
 
-### The six remaining breaks
+**That correction is now produced by the scorers rather than by hand** — see the mirror gate above.
+Against the re-score control the gate moves **two rows and no others**: `lefthook@2.1.10` in
+`default7` and `@arkweid/lefthook@0.7.7` in `default6`, both to `BREAK:MANUFACTURED-PASS`. The four
+isolated re-runs then supersede their batch rows, and the two the gate ruled on are the check on it —
+isolation reaches the same BREAK on `@arkweid/lefthook` that the gate did, and the same pass on
+`ghooks`, which the gate never touched. The arithmetic is in the headline table above.
+
+`msw`, `ghooks`, `shared-git-hooks`, `pre-commit`, `pre-push`, `git-validate` and
+`git-commit-msg-linter` are untouched by the gate. Every hook-installer survivor still carries
+`project_scope_shared`.
+
+### The eight remaining breaks
 
 - **`handbrake-js@8.0.2` (twice) — the grant worked and the break moved.** It now downloads all
   38,059,875 bytes under the jail, byte-identical to the unconfined arm, and dies on
@@ -452,8 +503,11 @@ rather than a one-line edit. Every hook-installer survivor carries `project_scop
   `npm` at `registry.npmjs.org`, which is deliberately not granted. `esbuild@0.28.1` alone survives,
   in `pilot` and in an isolated re-run. The bare-name-with-two-pending-versions window is the
   documented limit of `PER_PKG=1`; here it mislabels a real break with the wrong version.
-- **`@evilmartians/lefthook@2.1.10` and `lefthook@2.1.10`** — `fatal: not a git repository`. Neither is
-  in `packageGrants`, so neither gets the two `.git` file reads the granted installers have.
+- **`@evilmartians/lefthook@2.1.10`, `lefthook@2.1.10` (twice) and `@arkweid/lefthook@0.7.7`** — none is
+  in `packageGrants`, so none gets the two `.git` file reads the granted installers have. The first
+  two lefthook rows fail outright with `fatal: not a git repository`; the `default7` lefthook row and
+  the `@arkweid` row are the two the manufactured-pass gate recovers, and an isolated re-run confirms
+  `@arkweid/lefthook` independently.
 
 ### This is still not a platform comparison
 
@@ -471,7 +525,7 @@ have macOS-specific mechanisms: `handbrake-js` (`hdiutil`), `ssh2` (Seatbelt on 
 `esbuild` (the two-version window). `re2` and `keytar`, Linux breaks, pass here — the Linux
 Node-provisioning-inside-the-jail failure did not reproduce on macOS.
 
-Coverage: 163 of the census's 387 packages by row (42.1%), 141 of 387 by distinct admissible package
+Coverage: 161 of the census's 387 packages by row (41.6%), 141 of 387 by distinct admissible package
 (36.4%). The `$HOME`-cache downloader class stays outside the denominator on both platforms —
 `cypress@15.19.0` scores `NO-OP-BY-DESIGN` here as it does on Linux, because the artifact never enters
 a store cell. `duckdb@1.4.4` passes in both arms on macOS, with the same blind spot the Linux section
@@ -514,12 +568,22 @@ come back `UNSIGNALLED` with an explicit UNEVALUABLE reason rather than a false 
 node selftest.mjs        # the scoring gates, offline, ~1s
 ```
 
-Twenty-six assertions against synthetic snapshot pairs, driving the real scorers end to end. **Every
+Thirty-two assertions against synthetic snapshot pairs, driving the real scorers end to end. **Every
 one is a differential** — each asserted failure is paired with the nearest input that must still
 pass, because a gate that rejects everything is not a gate, and four of the five bugs these cases
 encode were originally hidden by exactly that kind of one-sided check. Each fix was verified to make
 its own assertion go red when removed, and only its own: the controls are what caught the no-op gate
 over-firing on `msw`.
+
+**Ablate the CONTROLS too, not just the fixes.** A control only earns its place if some over-broad
+version of the fix turns it red — and one here did not. `fullsized`'s window read `done (0 errors)`,
+`\berror\b` does not match `errors`, and so the assertion that a healthy row picks up no failure
+signature passed because nothing was ever a candidate. Deleting the suppression it guards left it
+green. The line now reads `download complete, 0 failed`, and the four ablations behave: removing the
+manufactured-pass gate (or its `lines` input) reddens its three assertions and no control; removing
+the `errsig` scoping reddens only the triage assertion; widening the gate to "the windows differ"
+reddens only the printed-less control; removing the `errsig` suppression outright reddens only the
+two healthy-row controls.
 
 The live counterpart withholds one project-file capability, which must move only the packages that
 depend on it:
