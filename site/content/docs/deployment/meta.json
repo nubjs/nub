@@ -6,11 +6,10 @@
     "github-action",
     "docker",
     "vercel",
+    "cloudflare",
     "railway",
     "render",
     "aws-lambda",
-    "digital-ocean",
-    "google-cloud-run",
-    "cloudflare"
+    "google-cloud-run"
   ]
 }

@@ -12,12 +12,11 @@ Choose the deployment path your platform exposes:
 | Platform | Deployment path | Where Nub runs |
 | --- | --- | --- |
 | [Vercel](/docs/deployment/vercel) | Installer or devDependency | Install and build; Vercel Functions still use Vercel's Node runtime |
+| [Cloudflare](/docs/deployment/cloudflare) | Preinstalled in Workers Builds; devDependency on Pages | Build only; Workers use Cloudflare's runtime |
 | [Railway](/docs/deployment/railway) | Dockerfile | Build and runtime |
 | [Render](/docs/deployment/render) | Dockerfile | Build and runtime |
 | [AWS Lambda](/docs/deployment/aws-lambda) | Dockerfile with Lambda Web Adapter | Build and runtime |
-| [DigitalOcean](/docs/deployment/digital-ocean) | Dockerfile or image from GHCR | Build and runtime |
 | [Google Cloud Run](/docs/deployment/google-cloud-run) | Dockerfile | Build and runtime |
-| [Cloudflare](/docs/deployment/cloudflare) | Preinstalled in Workers Builds; devDependency on Pages | Build only; Workers use Cloudflare's runtime |
 
 ## Managed builders
 
@@ -99,7 +98,7 @@ jobs:
           tags: ghcr.io/${{ github.repository }}:${{ github.sha }}
 ```
 
-Railway, DigitalOcean, and Render can pull an application image from GHCR directly. AWS Lambda requires ECR, while Google recommends Artifact Registry for Cloud Run; the provider pages show those registry-specific steps.
+Railway and Render can pull an application image from GHCR directly. AWS Lambda requires ECR, while Google recommends Artifact Registry for Cloud Run; the provider pages show those registry-specific steps.
 
 ## Node versions
 
