@@ -62,8 +62,90 @@ jobs:
           path: stage
           retention-days: 7
 
+  # ONE VARIABLE: the LOCALAPPDATA the confined child is handed. Everything else —
+  # binary, shard, arm, fixture construction — is byte-identical between the two
+  # cells, which is what makes a difference attributable to that variable and
+  # nothing else.
+  #
+  # The hypothesis under test is that nine corpus rows whose PROD failure names
+  # `…\Packages\<profile>\AC\Temp` are an artifact of this harness rather than a jail
+  # defect: `CreateAppContainerProfile` takes a name and no path, so the OS creates
+  # the profile under the CALLING user's real %LOCALAPPDATA%, while the harness hands
+  # the child a synthetic one and the two compose different paths. If the signature
+  # disappears when the host's own LOCALAPPDATA is passed through, the rows are ours.
+  localappdata-differential:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          name: nub-windows-latest
+          path: stage
+      - name: 'Both cells, then the signature counts'
+        working-directory: tests/build-jail-corpus
+        shell: bash
+        env:
+          NUB_EXPECT_GIT_SHA: ${{ github.sha }}
+          PER_PKG: '1'
+        run: |
+          set -u
+          export NUB_BIN="$PWD/../../stage/nub.exe"
+          export STUDY_PATH="/c/Windows/system32:/c/Windows:/c/Windows/System32/Wbem"
+          chmod +x run-shard.sh
+          FAILED=""
+          # A0 is the denominator and is run ONCE — the variable under test is a
+          # confined-path concern, so an unconfined arm per cell would measure nothing.
+          OUTROOT="${{ runner.temp }}/lad-base" ./run-shard.sh winlad shard-winlad.tsv A0 || FAILED="$FAILED A0"
+          OUTROOT="${{ runner.temp }}/lad-synth" ./run-shard.sh winlad shard-winlad.tsv PROD || FAILED="$FAILED PROD-synthetic"
+          WIN_HOST_LOCALAPPDATA=1 OUTROOT="${{ runner.temp }}/lad-host" \
+            ./run-shard.sh winlad shard-winlad.tsv PROD || FAILED="$FAILED PROD-host"
+          echo "INADMISSIBLE:${FAILED:-none}" | tee -a "$GITHUB_STEP_SUMMARY"
+          {
+            echo '| cell | AC\Temp ENOENT/EPERM lines | packages naming the AC profile |'
+            echo '| --- | --- | --- |'
+            for c in lad-base:A0 lad-synth:PROD-synthetic lad-host:PROD-host; do
+              d="${{ runner.temp }}/${c%%:*}/winlad-${c##*:}"; d="${d/-synthetic/}"; d="${d/-host/}"
+              L="$d/run.log"
+              n=$(grep -c 'AppData\\Local\\Packages' "$L" 2>/dev/null || echo 0)
+              p=$(grep -oE '^--- window: [^ ]+' "$L" 2>/dev/null | sed 's/--- window: //' | sort -u | tr '\n' ' ')
+              echo "| ${c##*:} | $n | $(grep -l 'AppData\\Local\\Packages' "$L" >/dev/null 2>&1 && echo "$p" || echo none) |"
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          # The differential's own exit: a cell that produced no data cannot be compared.
+          [ -z "$FAILED" ] || exit 1
+      - name: Collect
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p lad-evidence
+          for c in lad-base lad-synth lad-host; do
+            for d in "${{ runner.temp }}/$c"/*/; do
+              n="$c-$(basename "$d")"; mkdir -p "lad-evidence/$n"
+              cp "$d"/report.json "$d"/verdicts.json "$d"/windows.json "lad-evidence/$n/" 2>/dev/null || true
+              tail -c 3000000 "$d"/run.log > "lad-evidence/$n/run.log" 2>/dev/null || true
+            done
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: localappdata-differential
+          path: tests/build-jail-corpus/lad-evidence
+          retention-days: 7
+
   corpus:
     needs: build
+    # HELD OFF for the LOCALAPPDATA differential pass only. Run 30651475914 already
+    # measured this matrix on this catalog, and the differential must run on a binary
+    # that carries no other pending change or its one variable is no longer one.
+    # Flip back to `true` for the next full sweep.
+    if: ${{ false }}
     strategy:
       fail-fast: false
       # A ceiling on how much of the shared runner pool this one probe may hold.

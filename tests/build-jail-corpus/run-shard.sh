@@ -294,6 +294,28 @@ WIN_ENV=()
 if [ "$PLATFORM" = windows ]; then
   WIN_H="$(wp "$H")"; WIN_T="$(wp "$TMPD")"
   mkdir -p "$H/AppData/Roaming" "$H/AppData/Local"
+  # LOCALAPPDATA IS NOT LIKE THE OTHER MEMBERS OF THIS FLOOR, and pointing it into
+  # the private tree may be measuring the harness rather than the jail.
+  #
+  # `CreateAppContainerProfile` (backend/windows.rs) takes a NAME and no path, so
+  # Windows creates the profile under the CALLING user's real `%LOCALAPPDATA%\Packages`.
+  # The confined child, meanwhile, resolves its redirected temp from whatever
+  # LOCALAPPDATA it was handed. Point that at a synthetic tree and the two sides
+  # compose different paths: the profile exists where the OS put it, and the child
+  # looks for it somewhere nothing ever created it — which is what
+  # `ENOENT … \Packages\nub_sbx_<pid>_<nonce>_0\AC\Temp\…` is, on nine corpus rows.
+  # A real machine has one LOCALAPPDATA and both sides agree.
+  #
+  # Set WIN_HOST_LOCALAPPDATA=1 to hand the child the HOST's LOCALAPPDATA instead.
+  # That is the ONE variable of the differential that decides whether those nine rows
+  # are a jail defect or an artifact of this floor; it is off by default so the main
+  # corpus keeps its existing isolation and the two runs stay comparable.
+  if [ -n "${WIN_HOST_LOCALAPPDATA:-}" ]; then
+    WIN_LAD="${LOCALAPPDATA:-${LocalAppData:-$WIN_H\\AppData\\Local}}"
+  else
+    WIN_LAD="$WIN_H\\AppData\\Local"
+  fi
+  echo "win_localappdata=$WIN_LAD host_lad_mode=${WIN_HOST_LOCALAPPDATA:-0}" >> "$LOG"
   WIN_ENV=(
     "SystemRoot=${SystemRoot:-${SYSTEMROOT:-C:\\Windows}}"
     "windir=${windir:-${WINDIR:-C:\\Windows}}"
@@ -306,7 +328,7 @@ if [ "$PLATFORM" = windows ]; then
     "ProgramData=${ProgramData:-${PROGRAMDATA:-C:\\ProgramData}}"
     "ProgramFiles=${ProgramFiles:-${PROGRAMFILES:-C:\\Program Files}}"
     "USERPROFILE=$WIN_H" "APPDATA=$WIN_H\\AppData\\Roaming"
-    "LOCALAPPDATA=$WIN_H\\AppData\\Local"
+    "LOCALAPPDATA=$WIN_LAD"
     "TEMP=$WIN_T" "TMP=$WIN_T"
   )
 fi

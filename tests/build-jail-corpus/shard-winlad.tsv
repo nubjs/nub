@@ -1,0 +1,12 @@
+# The nine rows whose PROD failure names a path inside the AppContainer profile
+# (<LOCALAPPDATA>\Packages\<profile>\AC\Temp). Isolated so the LOCALAPPDATA
+# differential moves ONE variable over exactly the population it is about.
+electron-chromedriver	42.8.0	binary-downloader	
+chromium	3.0.3	binary-downloader	
+node-jq	6.3.1	binary-downloader	
+@cubejs-backend/cubestore	1.4.4	binary-downloader	
+@cubejs-backend/native	1.4.4	self-configuring	
+electron-prebuilt	1.4.13	binary-downloader	
+dugite	3.2.2	binary-downloader	
+@prisma/engines	7.9.1	binary-downloader	
+nodejieba	3.5.8	native-build-prebuilt	
