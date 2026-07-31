@@ -755,12 +755,15 @@ process.exit(child.status ?? 1);
         ),
         "{mutated}"
     );
+    let expected_path_addition = path_addition.canonicalize().unwrap();
     assert!(
         mutated["pathEntries"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|entry| entry.as_str() == path_addition.to_str()),
+            .filter_map(serde_json::Value::as_str)
+            .filter_map(|entry| PathBuf::from(entry).canonicalize().ok())
+            .any(|entry| entry == expected_path_addition),
         "a PATH addition made after augmentation must survive: {mutated}"
     );
     assert_eq!(
