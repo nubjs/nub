@@ -475,6 +475,14 @@ const BUILD_JAIL_EXTRA_EXACT: &[&str] = &[
     // nub's runtime dir, so preload discovery found nothing and degraded); Landlock leaves
     // the dir VISIBLE-but-unreadable, so discovery succeeded and the read then hard-failed.
     "NODE_COMPAT",
+    // Also STAMPED by the jail, and in the same silent-if-dropped class as the MSVC trio
+    // below: it names the Node the package's own pin chain asked for, resolved OUT of the
+    // jail because the confined shim can reach none of discovery's answers — not `~/.nvm`,
+    // not nub's store, not nodejs.org. Withheld, the child re-runs that walk and fails
+    // closed on a version the host may already have unpacked. The value is one nub itself
+    // resolved, never an ambient a dependency could aim elsewhere: `build_jail.rs`
+    // overwrites the key unconditionally whenever the pin chain yields a pin.
+    "NODE_EXECUTABLE",
     "npm_node_execpath",
     "INIT_CWD",
     "http_proxy",
@@ -928,7 +936,8 @@ const NET_GATE_POLICY_PLACEHOLDER: &str = "__NUB_NET_POLICY_JSON__";
 ///
 /// PLATFORM-INDEPENDENT on purpose, though only the Windows jail stamps it today (the one
 /// platform with no unprivileged OS egress lever; Linux has a seccomp `AF_INET` ceiling and
-/// macOS pins egress to nub's proxy). Nothing here branches on the OS, so serving as a
+/// macOS denies outright in Seatbelt — NO proxy on any platform, because the jail's egress
+/// decision is a per-package boolean and there is nothing to route). Nothing branches on OS, so serving as a
 /// defence-in-depth layer elsewhere needs no porting — and keeping it un-gated is what makes
 /// the behaviour testable off Windows.
 pub fn net_gate_node_options(package_name: Option<&str>) -> String {
@@ -1701,6 +1710,20 @@ mod tests {
                 "{key} must reach node-gyp or the Visual Studio pre-resolution is inert"
             );
         }
+    }
+
+    /// `NODE_EXECUTABLE` fails the same silent way, and its symptom is worse than inertness:
+    /// the child re-runs nub's version discovery inside the jail, where the only granted
+    /// interpreter is the one that already failed to satisfy the pin and every other answer
+    /// — `~/.nvm`, nub's store, nodejs.org — is out of reach, so it hard-errors
+    /// `ERR_NUB_NODE_PROVISION_FAILED` on a version the host may already have. Withholding it
+    /// turns the out-of-jail resolution into a download nothing consumes.
+    #[test]
+    fn the_pre_resolved_node_reaches_the_jailed_child() {
+        assert!(
+            build_jail_env_allowed("NODE_EXECUTABLE"),
+            "NODE_EXECUTABLE must reach the child or the confined shim re-resolves and fails closed"
+        );
     }
 
     #[test]

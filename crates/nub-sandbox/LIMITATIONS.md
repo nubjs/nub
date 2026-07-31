@@ -9,6 +9,12 @@
 > hostnames; denied globs are expanded only across declared project/workspace/package roots
 > at startup; and an existing denied regular file with multiple hard links fails setup.
 
+> **Scope: every per-host statement below is about `nub sandbox`, not the build jail.** This
+> crate is one engine serving two products, and per-host egress is a shape only the first of
+> them asks for. The build jail's net axis is a per-package boolean that names no hostname and
+> starts no proxy on any platform, so the proxy, the bridge and the allow-list rows here do not
+> describe a dependency's lifecycle script.
+
 An honest record of what the engine does NOT close, why each residual is bounded, and
 where the fix lives. The sandbox fails safe, not silent: an **axis-level** degradation a
 policy reaches (a per-host net policy with no proxy → coarse deny; per-host Windows egress

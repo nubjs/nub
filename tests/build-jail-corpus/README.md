@@ -74,8 +74,12 @@ to report numbers when that assertion fails. An earlier harness selected arms wi
 variables that nothing read, so every arm ran the identical configuration; the assertion exists so
 that cannot recur silently.
 
-`PROD` means different things per platform, which is deliberate and useful: on macOS the network
-axis is a curated per-host allowlist enforced through a proxy, while on Linux it is a binary deny.
+The network axis means the same thing on every platform, and this line used to say otherwise. It
+is a per-package boolean: a package the catalog names reaches every host it likes, a package it
+does not name reaches none, and no platform starts a proxy or gates a hostname. What differs per
+platform is only how the admitted case is spelled to the backend — see
+`crates/nub-sandbox/src/compiler/preset.rs` (`build_jail_net`). A corpus arm therefore separates
+packages by whether the catalog admits them, never by which hosts they contact.
 
 ## Attribution
 
@@ -371,7 +375,11 @@ packages BUG-J's own control fixed — a binary difference wearing a platform's 
   was refused `npm.duckdb.org`, fell back to node-gyp, and produced a 66,587,160 B `duckdb.node`
   against the unconfined arm's 65,367,392 B — `DID-WORK-AND-SUCCEEDED` in both arms, at ~35 minutes
   of single-threaded compile instead of a seconds-long download. The measurement judges the tree
-  delta, so a 700× slowdown reads as a clean pass.
+  delta, so a 700× slowdown reads as a clean pass. **The general blind spot is real and still
+  stands; this particular instance did not reproduce on the 2026-07-31 re-run**, where `duckdb`
+  compiled from source in the *unconfined* arm as well, making its cost symmetric and not a jail
+  effect. Read the blind spot as a property of the verdict machinery, not as a settled fact about
+  `duckdb`.
 
 ### Harness notes from the Linux port
 
@@ -392,7 +400,9 @@ packages BUG-J's own control fixed — a binary difference wearing a platform's 
   `https://nodejs.org/dist/index.json` — a package whose `engines.node` needs a Node the machine has
   not provisioned cannot get one from inside the jail. The corpus gives each run a fresh `HOME`, so
   this is worse here than on a machine with a warm `~/.cache/nub`; it is a real path, not an
-  artifact.
+  artifact. **Confirmed still live on the 2026-07-31 re-run with a both-arms differential, and worse
+  than recorded here: it now hits a different package set and every row it touches scores
+  *inadmissible* rather than break, so it is invisible in the headline.** See that section.
 
 ## macOS on the granted catalog, 2026-07-31 (supersedes the 158 / 91 / 67 table above)
 
@@ -442,6 +452,9 @@ Sixty-one break rows closed, over 57 distinct packages, and they split cleanly b
 The 11 are the fix classes rather than the catalog: `@vscode/sqlite3`, `mongodb-crypt-library-version`,
 `node-mac-contacts`, `node-zopfli-es`, `os-dns-native`, `ref-napi`, `sse4_crc32`, `tree-sitter-kotlin`,
 `nice-napi`, `weak-napi` (store-entry write root) and `@arkweid/lefthook` (project-root cwd node).
+`@arkweid/lefthook`'s membership here has since been **falsified**: isolated re-measurement puts it at
+zero hooks with the cwd node and no catalog entry, so this row was a manufactured pass. It now carries
+a `packageGrants` entry — ladders in `results/lefthook-family-macos-arm64.json`.
 
 Artifact bytes rather than presence, on the rows the earlier run scored off linker bin symlinks:
 `azure-functions-core-tools` 601,659,764 B in both arms; `cldr-data` 276,427,271 B over 12,908 files;
@@ -503,13 +516,21 @@ isolation reaches the same BREAK on `@arkweid/lefthook` that the gate did, and t
   `npm` at `registry.npmjs.org`, which is deliberately not granted. `esbuild@0.28.1` alone survives,
   in `pilot` and in an isolated re-run. The bare-name-with-two-pending-versions window is the
   documented limit of `PER_PKG=1`; here it mislabels a real break with the wrong version.
-- **`@evilmartians/lefthook@2.1.10`, `lefthook@2.1.10` (twice) and `@arkweid/lefthook@0.7.7`** — none is
-  in `packageGrants`, so none gets the two `.git` file reads the granted installers have. The first
-  two lefthook rows fail outright with `fatal: not a git repository`; the `default7` lefthook row and
-  the `@arkweid` row are the two the manufactured-pass gate recovers, and an isolated re-run confirms
-  `@arkweid/lefthook` independently.
+- **`@evilmartians/lefthook@2.1.10`, `lefthook@2.1.10` (twice) and `@arkweid/lefthook@0.7.7`** — at the
+  time of this run none was in `packageGrants`, so none got the two `.git` file reads the granted
+  installers have. The first two lefthook rows fail outright with `fatal: not a git repository`; the
+  `default7` lefthook row and the `@arkweid` row are the two the manufactured-pass gate recovers, and
+  an isolated re-run confirms `@arkweid/lefthook` independently. **All three are now granted and pass**
+  — ladders in `results/lefthook-family-macos-arm64.json`. The grant is wider than the `.git` reads
+  this paragraph assumed: the tool also reads its own project config, and creates one when the project
+  has none. `@arkweid`'s failure through a full-`.git`-subtree rung, recorded as an unexplained fourth
+  cause, was that config read.
 
 ### This is still not a platform comparison
+
+**Superseded 2026-07-31 by the Linux re-run below, which removes the mismatch this section
+describes.** The paragraphs that follow remain accurate about *these two tables*; the comparison
+itself is now made against a matched Linux run rather than this one.
 
 The Linux table above ran `92ed4cc78f`, whose catalog holds **5** `packageNetwork.full` entries and
 **3** `packageGrants` against this run's 48 and 10, and which predates the project-root cwd node. The
@@ -531,6 +552,127 @@ Coverage: 161 of the census's 387 packages by row (41.6%), 141 of 387 by distinc
 a store cell. `duckdb@1.4.4` passes in both arms on macOS, with the same blind spot the Linux section
 records: the verdict machinery judges tree delta, so a denied prebuilt falling back to a source build
 reads as clean.
+
+## Linux on the granted catalog, 2026-07-31 — and the first real platform comparison
+
+Binary `77e3b74afe`, sha256 `65bc2a48…`, **compiled catalog, no override** — built without the
+`build-jail-catalog-override` feature, and the absence verified behaviourally rather than by
+inspection: with `NUB_BUILD_JAIL_CATALOG` set to a readable file the binary exits 1 with
+"was not built with the `build-jail-catalog-override` feature, so it cannot honour it". An override is
+not expressible, and **zero `OVERRIDDEN` banners appear across all 46 runs.** Ubuntu 24.04 on GCE
+`n2-standard-16`, kernel `6.17.0-1021-gcp`, **Landlock ABI 7**, `landlock` present in
+`/sys/kernel/security/lsm`. 26 sweep arms (13 shards x 2) plus 20 isolated re-run arms — 46 in total,
+every one `arm_effect=confirmed` — with `PER_PKG=1`, 0 inconclusive and 0 denominator-suspect. (The
+table reports 22 "isolated" runs rather than 20: `shard-d5e` holds a single package, so it is flagged
+the same way an isolated re-run is.)
+
+| | prior Linux (`92ed4cc78f`, re-scored) | **this run (`77e3b74afe`)** |
+| --- | --- | --- |
+| admissible | 169 | **158** |
+| survives the jail | 108 (63.9%) | **146 (92.4%)** |
+| breaks | 61 | **12**, over 11 distinct packages |
+
+Breaks by class: binary-downloader 5 · hook-installer 3 · native-build-prebuilt 3 · self-configuring 1.
+Coverage: 158 of 387 by row (40.8%), 140 of 387 by distinct admissible package (36.2%).
+
+**Enforcement was proved on this exact binary, both directions, before the sweep** — see
+`enforcement-probe/`. Under `PROD`: `write_own=OK` (the positive control, so the script ran) with
+`write_outerhome`, `write_realhome`, `read_secret` and `write_project` all `EACCES` and
+`net_connect=EPERM`; under `A0` all six `OK`, with all three planted files present on disk afterwards.
+
+### The variables that make this a comparison, and the one that remains
+
+The previous attempt failed because catalog and code moved between the two tables. Here everything
+except the operating system is pinned to the macOS v3 run:
+
+| variable | state |
+| --- | --- |
+| catalog | **byte-identical** — `build-jail-catalog.json` is unchanged between `f63d3c62c3` and `77e3b74afe` (48 `packageNetwork.full`, 10 `packageGrants`, 4 `networkHosts`) |
+| scoring | **byte-identical** — `lib/*`, `run-shard.sh` and `rescore.mjs` unchanged; the only harness diff is where `aggregate.mjs` writes its table |
+| shard set | identical 13 shards, 372 rows |
+| Node | v26.5.0 on both, pinned rather than taken from the image |
+| node-gyp | same per-package resolution — `11.5.0,12.1.0,12.4.0` on the shared shard |
+| product code | **not identical**: macOS ran `f63d3c62c3`, this ran `77e3b74afe`. The delta is the side-effects cache key plus a `would_confine`/`confines` split; `should_confine` — the decision itself — is unchanged, and the cache is disabled in the fixture |
+
+Pinning the toolchain was not in the original brief and mattered: two runs on different node-gyp
+majors would have produced a "platform difference" that was a tool difference.
+
+### The comparison, with denominator differences separated out
+
+Of the 127 packages **admissible on both platforms** — the only ones a jail comparison can speak to —
+the two platforms agree on **123, or 96.9%**.
+
+| | packages |
+| --- | --- |
+| agree, both survive | 119 |
+| agree, both break | 4 — `@arkweid/lefthook`, `@evilmartians/lefthook`, `lefthook`, `esbuild` |
+| **Linux breaks only** | 3 — `keytar`, `kerberos`, `opencode-ai` |
+| **macOS breaks only** | 1 — `ssh2` |
+
+Each divergence has a named mechanism. The three Linux-only breaks are all uncatalogued egress:
+`keytar` and `kerberos` are refused their GitHub prebuild (`EAI_AGAIN github.com`) and fall back to a
+source build that fails; `opencode-ai`'s postinstall shells `npm` at `registry.npmjs.org`. The single
+macOS-only break is `ssh2`, the Seatbelt ungranted-symlink PATH-walk abort — a mechanism that does not
+exist on Linux, where an ungranted path denies with `EACCES`, inside libuv's continue set.
+
+**A further 25 packages differ for denominator reasons and are not jail findings.** 13 are admissible
+only on Linux (macOS cannot run them unconfined — `INVALID-FIXTURE` native builds such as
+`node-expat`, `lz4`, `mmmagic`, `node-rdkafka`); 12 only on macOS (`NO-OP-BY-DESIGN` on Linux —
+`keccak`, `blake-hash`, `@instana/autoprofile` — plus `handbrake-js`, whose `hdiutil` path does not
+exist here). **This class does not shrink now that the toolchains match, and it cannot:** it is macOS
+arm64 against Linux x64, an architecture difference rather than a node-gyp-version one.
+
+### The manufactured pass reproduces on Linux, with the same signature
+
+A granted hook installer satisfies the project-scoped predicate for its ungranted shard-mates on this
+platform too. `lefthook@2.1.10`'s `default7` `PROD` window prints `fatal: not a git repository` and
+`exit status 128` while the row reads `DID-WORK-AND-SUCCEEDED`, beside granted `shared-git-hooks`
+writing 17 symlinks. Ten packages were re-run alone to settle it, and the controls hold both ways:
+
+| package | granted | in its batch shard | alone |
+| --- | --- | --- | --- |
+| `ghooks`, `pre-commit`, `pre-push`, `git-validate`, `git-commit-msg-linter`, `shared-git-hooks` | yes | SURVIVE | **SURVIVE** |
+| `@arkweid/lefthook`, `lefthook` | no | SURVIVE | **BREAK** |
+| `yorkie`, `simple-git-hooks` | no | SURVIVE | **inadmissible no-ops** |
+
+All six granted installers are honest passes; the four ungranted ones were spurious. The table above
+already carries these isolated verdicts, which is the one respect in which it is not directly
+comparable to the raw macOS v3 table — that run's identical correction was applied by hand in prose
+and never written back, so it must be re-applied before the two are compared.
+
+**The `BREAK:MANUFACTURED-PASS` gate cannot correct a run recorded before it existed, and declines
+silently.** Re-scoring this sweep with the post-`fec9087e29` scorer returns **162 / 151 / 11, byte-for-
+byte what the older scorer returned** — the gate fires on nothing. The reason is structural rather
+than a defect in it: its precondition is `a0.window?.lines && prod.window?.lines`, and that per-window
+line list is recorded by the RUNNER, so an archive made with the older `run-shard.sh` does not carry
+it. `lefthook`'s row here has `project_scoped: true` and `project_scope_shared: 2` but no `window`
+field at all. So the gate's own selftest passes, the re-score exits 0, and nothing indicates that the
+correction did not happen. Any archived run — this one and the macOS v3 one alike — still has to be
+corrected by isolation; only sweeps recorded with the new runner can be corrected by re-scoring.
+
+### The Node-provisioning defect persists, and is now invisible
+
+The prior Linux sweep recorded that nub's own Node provisioning runs inside the jail and fails closed.
+It still does — five `PROD` windows hit `ERR_NUB_NODE_PROVISION_FAILED` — but **every package it now
+hits scores inadmissible rather than break, so none of them appear in the 12.** The differential on
+`@pdftron/pdfnet-node@12.0.0`, one run, one binary:
+
+```
+A0    Using Node.js 24.18.1 (resolved from package.json#engines.node)
+      Installing from nodejs.org... (31 MB)   Installed in 2.2s
+PROD  ERR_NUB_NODE_PROVISION_FAILED: failed to provision Node >=10 <=24
+      ... dns error: failed to lookup address information: Temporary failure in name resolution
+```
+
+The jail plainly breaks it. The row is scored `NO-OP-BY-DESIGN` because the unconfined arm also left
+no attributable delta, so it leaves the denominator instead of counting against the jail.
+`parse-server` and `@matteodisabatino/gc_info` are the same shape. **92.4% is therefore a slight
+overstatement**, and the fix is a real one: provisioning should not be inside the confinement.
+
+`re2@1.26.1`, a break on the prior sweep, passes here for an unrelated reason — its GitHub prebuild is
+still refused, but the local source build now succeeds. `duckdb@1.4.4` compiled from source in **both**
+arms, so its ~35-minute cost is a linux-x64 fixture property here rather than the denied-prebuilt
+asymmetry the prior section recorded.
 
 ## Running it
 

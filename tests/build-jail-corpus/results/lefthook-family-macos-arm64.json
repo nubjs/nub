@@ -1,0 +1,269 @@
+{
+  "schema": "build-jail-matrix/1",
+  "note": "One record per package. `cells` is the ladder that produced the verdict \u2014 each rung adds exactly one capability, and the row it is credited with is the failure that rung removed. Judged on the HOOK ARTIFACT, never on the exit code: every lefthook postinstall exits 0 in every rung because it wraps the spawn in try/catch and spawnSync does not propagate the child's status.",
+  "provenance": {
+    "date": "2026-07-31",
+    "platform": "macos-arm64",
+    "host": "Darwin 25.5.0 arm64",
+    "node": "v26.5.0",
+    "branch": "sandbox/integration",
+    "base_commit": "91e66ad756",
+    "nub_bin_sha256": "424caebaa35bdfd0bba929f1d72cada4b3e17f2cf6caf551d863e2a4a8e602d7",
+    "harness": "tests/build-jail-corpus/run-isolated.sh, PER_PKG=1, one package per window",
+    "isolation": "per-run private HOME + NUB_CACHE_DIR (cold store every arm) + side-effects-cache=false"
+  },
+  "packages": [
+    {
+      "package": "lefthook",
+      "version": "2.1.10",
+      "weekly_downloads": 3376363,
+      "class": "hook-installer",
+      "verdict": "NEEDS-GRANT-CLOSED",
+      "grant": {
+        "projectReads": [
+          ".git/HEAD",
+          ".git/config",
+          "lefthook.yml",
+          "lefthook.yaml",
+          "lefthook.json",
+          "lefthook.toml",
+          ".lefthook.yml",
+          ".lefthook.yaml",
+          ".lefthook.json",
+          ".lefthook.toml",
+          "lefthook-local.yml",
+          "lefthook-local.yaml",
+          "lefthook-local.json",
+          "lefthook-local.toml",
+          ".lefthook-local.yml",
+          ".lefthook-local.yaml",
+          ".lefthook-local.json",
+          ".lefthook-local.toml"
+        ],
+        "projectWrites": {
+          "literal": [
+            ".git/hooks",
+            ".git/info",
+            "lefthook.yml"
+          ]
+        }
+      },
+      "cells": [
+        {
+          "rung": "A0",
+          "arm": "jail-off",
+          "catalog": "(n/a)",
+          "result": "PASS",
+          "evidence": "sync hooks: (pre-commit); .git/hooks/pre-commit + .git/info/lefthook.checksum written"
+        },
+        {
+          "rung": "C0",
+          "arm": "jail-on",
+          "catalog": "no entry",
+          "result": "FAIL",
+          "evidence": "fatal: not a git repository (or any of the parent directories): .git \u2014 zero hooks"
+        },
+        {
+          "rung": "C1",
+          "arm": "jail-on",
+          "catalog": "+ .git/HEAD, .git/config read",
+          "result": "FAIL",
+          "evidence": "Config not found, creating... / Error: open <proj>/lefthook.yml: operation not permitted \u2014 zero hooks"
+        },
+        {
+          "rung": "C1b",
+          "arm": "jail-on",
+          "catalog": "+ lefthook.yml read",
+          "result": "FAIL",
+          "evidence": "sync hooks: FAILED / could not create a checksum file: open <proj>/.git/info/lefthook.checksum: operation not permitted \u2014 hook file written, checksum absent"
+        },
+        {
+          "rung": "C1c",
+          "arm": "jail-on",
+          "catalog": "+ .git/info write",
+          "result": "PASS",
+          "evidence": "sync hooks: (pre-commit) \u2014 matches A0"
+        },
+        {
+          "rung": "CF-no-config",
+          "arm": "jail-on",
+          "catalog": "full grant, fixture lefthook.yml withheld",
+          "result": "PASS",
+          "evidence": "Added config: <proj>/lefthook.yml; sync hooks: OK; prepare-commit-msg installed \u2014 matches the jail-off arm of the same withheld fixture"
+        },
+        {
+          "rung": "SHIP",
+          "arm": "jail-on",
+          "catalog": "landed catalog, COMPILED IN (no override)",
+          "result": "PASS",
+          "evidence": "sync hooks: (pre-commit), zero override banners"
+        }
+      ]
+    },
+    {
+      "package": "@evilmartians/lefthook",
+      "version": "2.1.10",
+      "weekly_downloads": 148134,
+      "class": "hook-installer",
+      "verdict": "NEEDS-GRANT-CLOSED",
+      "grant": {
+        "projectReads": [
+          ".git/HEAD",
+          ".git/config",
+          "lefthook.yml",
+          "lefthook.yaml",
+          "lefthook.json",
+          "lefthook.toml",
+          ".lefthook.yml",
+          ".lefthook.yaml",
+          ".lefthook.json",
+          ".lefthook.toml",
+          "lefthook-local.yml",
+          "lefthook-local.yaml",
+          "lefthook-local.json",
+          "lefthook-local.toml",
+          ".lefthook-local.yml",
+          ".lefthook-local.yaml",
+          ".lefthook-local.json",
+          ".lefthook-local.toml"
+        ],
+        "projectWrites": {
+          "literal": [
+            ".git/hooks",
+            ".git/info",
+            "lefthook.yml"
+          ]
+        }
+      },
+      "cells": [
+        {
+          "rung": "A0",
+          "arm": "jail-off",
+          "catalog": "(n/a)",
+          "result": "PASS",
+          "evidence": "sync hooks: (pre-commit)"
+        },
+        {
+          "rung": "C0",
+          "arm": "jail-on",
+          "catalog": "no entry",
+          "result": "FAIL",
+          "evidence": "fatal: not a git repository \u2014 zero hooks"
+        },
+        {
+          "rung": "CF",
+          "arm": "jail-on",
+          "catalog": "full grant",
+          "result": "PASS",
+          "evidence": "sync hooks: (pre-commit); .git/info/lefthook.checksum present"
+        },
+        {
+          "rung": "SHIP",
+          "arm": "jail-on",
+          "catalog": "landed catalog, COMPILED IN (no override)",
+          "result": "PASS",
+          "evidence": "sync hooks: (pre-commit), zero override banners"
+        }
+      ]
+    },
+    {
+      "package": "@arkweid/lefthook",
+      "version": "0.7.7",
+      "weekly_downloads": null,
+      "class": "hook-installer",
+      "verdict": "NEEDS-GRANT-CLOSED",
+      "grant": {
+        "projectReads": [
+          ".git/HEAD",
+          ".git/config",
+          "lefthook.yml",
+          "lefthook.yaml",
+          "lefthook.json",
+          "lefthook.toml",
+          ".lefthook.yml",
+          ".lefthook.yaml",
+          ".lefthook.json",
+          ".lefthook.toml",
+          "lefthook-local.yml",
+          "lefthook-local.yaml",
+          "lefthook-local.json",
+          "lefthook-local.toml",
+          ".lefthook-local.yml",
+          ".lefthook-local.yaml",
+          ".lefthook-local.json",
+          ".lefthook-local.toml"
+        ],
+        "projectWrites": {
+          "literal": [
+            ".git/hooks",
+            "lefthook.yml"
+          ]
+        }
+      },
+      "cells": [
+        {
+          "rung": "A0",
+          "arm": "jail-off",
+          "catalog": "(n/a)",
+          "result": "PASS",
+          "evidence": "SYNCING lefthook.yml / SERVED HOOKS: pre-commit, prepare-commit-msg"
+        },
+        {
+          "rung": "C0",
+          "arm": "jail-on",
+          "catalog": "no entry",
+          "result": "FAIL",
+          "evidence": "This command must be executed within git repository. \u2014 zero hooks"
+        },
+        {
+          "rung": "C2",
+          "arm": "jail-on",
+          "catalog": "+ FULL .git subtree read, .git/hooks write",
+          "result": "FAIL",
+          "evidence": "open <proj>/lefthook.yml: operation not permitted \u2014 THE FOURTH CAUSE: a project CONFIG read, which no .git grant can express"
+        },
+        {
+          "rung": "CF",
+          "arm": "jail-on",
+          "catalog": "full grant",
+          "result": "PASS",
+          "evidence": "SERVED HOOKS: pre-commit, prepare-commit-msg \u2014 matches A0"
+        },
+        {
+          "rung": "CF-trim",
+          "arm": "jail-on",
+          "catalog": "full grant minus .git/info write",
+          "result": "PASS",
+          "evidence": "MINIMALITY ABLATION: still matches A0, so .git/info is not granted for this package"
+        },
+        {
+          "rung": "CF-trim-no-config",
+          "arm": "jail-on",
+          "catalog": "CF-trim, fixture lefthook.yml withheld",
+          "result": "FAIL",
+          "evidence": "open <proj>/lefthook.yml: operation not permitted \u2014 zero hooks; this is why the config-file WRITE is granted"
+        },
+        {
+          "rung": "SHIP",
+          "arm": "jail-on",
+          "catalog": "landed catalog, COMPILED IN (no override)",
+          "result": "PASS",
+          "evidence": "SERVED HOOKS: pre-commit, prepare-commit-msg, zero override banners"
+        }
+      ]
+    }
+  ],
+  "refuted": [
+    {
+      "claim": "granting the whole .git subtree is needed, or buys anything",
+      "status": "REFUTED",
+      "detail": "Two named files (.git/HEAD, .git/config) reach the same result for all three packages, and the full-subtree rung still FAILS without the config read. The subtree adds objects/ \u2014 the consumer's entire source history \u2014 for zero measured benefit."
+    },
+    {
+      "claim": "@arkweid/lefthook has a fourth, unidentified cause inside .git",
+      "status": "REFUTED",
+      "detail": "Re-measured with the full .git subtree readable, the failure moves to `open <proj>/lefthook.yml: operation not permitted`. The missing capability was never in .git at all."
+    }
+  ],
+  "produced_by": "hand-driven ladder via run-isolated.sh, one capability added per rung. NOT a grant-matrix.mjs record: the fixed five-cell ladder cannot express a per-path grant, and these catalog entries are human-authored, so apply-matrix.mjs leaves them alone (no [grant-matrix] marker in their `observed`)."
+}

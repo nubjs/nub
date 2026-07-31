@@ -149,6 +149,33 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             staged.redirect_env(&mut ambient);
         }
 
+        // NODE VERSION RESOLUTION — the same move prefetch makes below, applied to nub's
+        // OWN runtime: settle it out here so the confined child never has to. A package
+        // whose `engines.node` (or a pin file above it) names a version the ambient
+        // interpreter does not satisfy sends the in-jail `node` shim back through nub's
+        // discovery, and inside the jail that walk can reach NONE of its answers — not
+        // `~/.nvm`, not nub's store, and not nodejs.org. It failed closed on all three,
+        // which reads as a network break but is not one: a version this host already had
+        // unpacked under `~/.nvm` was as unreachable as one it had never downloaded.
+        // Resolving here reuses the ordinary order (PATH → store → nvm → download), so
+        // the network is touched only when a real download is the only remaining answer,
+        // and it is nub fetching its own runtime rather than a dependency opening a socket.
+        //
+        // Gated on a pin EXISTING, so the unpinned majority keeps the ambient interpreter
+        // and pays nothing; a resolution failure leaves the spawn byte-identical, i.e. the
+        // pre-existing break rather than a new one.
+        if let Some(node) = pinned_interpreter(&spawn.cwd) {
+            // Both spellings, because they are read by different consumers and a split
+            // between them is its own silent wrong answer: `NODE_EXECUTABLE` is the one
+            // key nub's discovery honours BEFORE reading any pin file, so it is what stops
+            // the in-jail re-resolution; `npm_node_execpath` is what npm, node-gyp and the
+            // shim's re-exec follow, and it is the input `node_layout` derives the headers
+            // node-gyp compiles against from — leaving it on the ambient interpreter would
+            // build a pinned package's addon against the wrong Node's headers.
+            ambient.insert("NODE_EXECUTABLE".to_string(), node.clone());
+            ambient.insert("npm_node_execpath".to_string(), node);
+        }
+
         // The interpreter closure to grant READ. nub provisions its own Node under its
         // store (not `/usr`), so the tight-read base can't reach it. Under nub a bare
         // `node` resolves via the PATH-prepended shim (`NODE`) which re-execs the real
@@ -788,6 +815,28 @@ fn npm_builtin_config_deny_root_for(global_modules: &Path) -> Option<PathBuf> {
     npm_dir.is_dir().then_some(npm_dir)
 }
 
+/// The Node the confined script's pin chain asks for, resolved OUT of the jail —
+/// `None` when nothing is pinned from `cwd` (leave the ambient interpreter alone) or
+/// when resolution fails.
+///
+/// The gate is deliberately "is there a pin at all", not "does the ambient interpreter
+/// satisfy it": answering the second question requires the same resolution as answering
+/// the first, and the ambient interpreter satisfying the pin makes this a no-op anyway
+/// (discovery returns that same binary, which is already granted).
+///
+/// FAILURE IS SILENT AND LEAVES THE SPAWN UNCHANGED. This runs on every lifecycle spawn
+/// of a pinned package, including offline; surfacing an error here would convert a
+/// package that installs fine today — one whose script never invokes `node` — into a hard
+/// install failure over a version it was never going to use.
+fn pinned_interpreter(cwd: &Path) -> Option<String> {
+    let chain = nub_core::node::discovery::resolve_pin_chain(cwd).ok()?;
+    // The pin's VALUE is unused — `discover_or_provision_node` re-derives it. Only its
+    // existence is the gate, and bailing here is what keeps the unpinned majority free.
+    chain.pin.as_ref()?;
+    let node = nub_core::node::discovery::discover_or_provision_node(cwd).ok()?;
+    Some(node.path.into_string())
+}
+
 /// node-gyp's one Python key that outranks `--python` / `npm_config_python`.
 const NODE_GYP_FORCE_PYTHON: &str = "NODE_GYP_FORCE_PYTHON";
 
@@ -891,13 +940,51 @@ fn python_toolchain_grant(
     // (`node-gyp-build`, `prebuild-install || node-gyp rebuild`, `node-pre-gyp`) ships one.
     // A package that GENERATES its manifest at install time is missed and keeps the
     // pre-existing failure — no regression, and no evidence any real one does this.
-    if !spawn.package_dir.join("binding.gyp").exists() {
+    if !has_gyp_manifest(&spawn.package_dir, GYP_MANIFEST_SEARCH_DEPTH) {
         return None;
     }
     let eligible = ProbeScope::new(spawn);
     python_candidates(ambient, &eligible)
         .into_iter()
         .find_map(|candidate| probe_python(&candidate, ambient, &spawn.cwd, &eligible))
+}
+
+/// How far below the package root a gyp manifest is looked for. `ssh2` needs 3
+/// (`lib/protocol/crypto/binding.gyp`); the extra level is headroom for the same idiom one
+/// directory deeper, not a claim any package uses it.
+const GYP_MANIFEST_SEARCH_DEPTH: usize = 4;
+
+/// Does this package ship a gyp manifest node-gyp could be pointed at?
+///
+/// NOT ALWAYS AT THE PACKAGE ROOT, which is what a root-only check got wrong: `ssh2` keeps
+/// its optional crypto binding in `lib/protocol/crypto/` and its `install.js` runs node-gyp
+/// with that as the cwd. The root check therefore read "no native build here", the
+/// pre-resolve above never ran, `npm_config_python` was never set, and node-gyp fell through
+/// to its bare `python3` PATH walk — which libuv aborts at the first ungranted symlink,
+/// because Seatbelt answers a refused symlink read with `EPERM` and that is not in libuv's
+/// `ENOENT`/`ENOTDIR`/`EACCES` continue set. So Python resolution failed under the jail and
+/// ONLY under the jail, for the one corpus package whose manifest is not at its root.
+///
+/// BOUNDED, because this is a cost gate in front of an interpreter startup rather than a
+/// correctness boundary — a miss costs the pre-resolve, not safety, and [`ProbeScope`] is
+/// what bounds what may be executed. `node_modules` is skipped: a dependency's manifest
+/// describes that dependency's build, not this one's. Symlinked directories are not
+/// descended (`DirEntry::file_type` does not follow them), so the walk cannot loop.
+fn has_gyp_manifest(dir: &Path, depth: usize) -> bool {
+    if dir.join("binding.gyp").exists() {
+        return true;
+    }
+    let Some(depth) = depth.checked_sub(1) else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.filter_map(Result::ok).any(|e| {
+        e.file_name() != "node_modules"
+            && e.file_type().is_ok_and(|t| t.is_dir())
+            && has_gyp_manifest(&e.path(), depth)
+    })
 }
 
 /// What nub is willing to EXECUTE while deciding the grant.
@@ -1665,6 +1752,51 @@ mod tests {
             assert!(
                 !scope.allows(Path::new("relative/python3")),
                 "a relative candidate resolves against nub's cwd, not the child's"
+            );
+        }
+
+        /// `ssh2`'s layout, which a root-only gate missed: the manifest sits three levels
+        /// down (`lib/protocol/crypto/binding.gyp`) because `install.js` runs node-gyp with
+        /// that directory as the cwd. Missing it skipped the Python pre-resolve, so node-gyp
+        /// walked PATH by bare name and died `EPERM` on the first ungranted symlink.
+        #[test]
+        fn a_gyp_manifest_below_the_package_root_still_gates_open() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let root = tmp.path();
+
+            assert!(
+                !has_gyp_manifest(root, GYP_MANIFEST_SEARCH_DEPTH),
+                "a package with no manifest anywhere must not pay the interpreter startup"
+            );
+
+            let nested = root.join("lib/protocol/crypto");
+            std::fs::create_dir_all(&nested).expect("nested dir");
+            std::fs::write(nested.join("binding.gyp"), b"{}").expect("manifest");
+            assert!(
+                has_gyp_manifest(root, GYP_MANIFEST_SEARCH_DEPTH),
+                "ssh2 keeps binding.gyp at lib/protocol/crypto, not the package root"
+            );
+
+            // A dependency's manifest describes ITS build, not this package's, so finding
+            // one under node_modules must not open the gate.
+            let dep = tmp.path().join("dep");
+            let buried = dep.join("node_modules/other");
+            std::fs::create_dir_all(&buried).expect("dep dir");
+            std::fs::write(buried.join("binding.gyp"), b"{}").expect("dep manifest");
+            assert!(
+                !has_gyp_manifest(&dep, GYP_MANIFEST_SEARCH_DEPTH),
+                "node_modules is skipped"
+            );
+
+            // The bound is real: a manifest deeper than the cap is not found, which costs
+            // the pre-resolve rather than correctness.
+            let deep = tmp.path().join("deep");
+            let far = deep.join("a/b/c/d/e");
+            std::fs::create_dir_all(&far).expect("deep dir");
+            std::fs::write(far.join("binding.gyp"), b"{}").expect("deep manifest");
+            assert!(
+                !has_gyp_manifest(&deep, GYP_MANIFEST_SEARCH_DEPTH),
+                "the walk is bounded"
             );
         }
     }

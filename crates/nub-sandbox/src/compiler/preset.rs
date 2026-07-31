@@ -726,12 +726,8 @@ pub fn compile_build_jail(
     // LAST of the grants, so a curated rw wins under last-match-wins over the
     // front-inserted dependency-tree READ it nests inside. `ctx.homes.project` is the
     // consumer's project root, which aube guarantees whenever it hands over a name.
-    super::curated::grant_curated_package(
-        &mut policy,
-        &ctx.homes.project,
-        package_dir,
-        package_name,
-    );
+    let home_cache_env =
+        super::curated::grant_curated_package(&mut policy, &ctx.homes, package_dir, package_name);
     enforce_pure_allowlist("build-jail", &mut policy);
     policy.env = defaults::lifecycle_scrubbed_env(&ambient_env);
     policy.build_jail = true;
@@ -766,6 +762,17 @@ pub fn compile_build_jail(
                 defaults::insert_env(&mut policy.env.constructed, key.to_string(), value.clone());
             }
         }
+    }
+    // The other half of a `homePaths` grant, and it is UNCONDITIONAL where the `HOME` redirect
+    // above is presence-gated. The two differ because the redirect REPLACES a variable the
+    // script would otherwise read the user's way, while this one supplies a variable that is
+    // normally absent — gating it on presence would make the grant reachable only for a user
+    // who had already set it by hand, which is nobody. Overwriting an ambient value is
+    // deliberate and argued at `curated::CuratedGrant::home_paths`: the rule was compiled
+    // against nub's path, so a respected ambient value would aim the download at a directory
+    // the policy denies.
+    for (key, value) in home_cache_env {
+        defaults::insert_env(&mut policy.env.constructed, key, value);
     }
     Ok(policy)
 }
@@ -1211,6 +1218,87 @@ mod tests {
             case.policy.env.constructed.get("HOME").map(String::as_str),
             Some(jail_home.to_string_lossy().as_ref()),
             "the child's HOME must name the granted dir, not the ambient one"
+        );
+    }
+
+    /// A `homePaths` grant survives the env replacement, and its variable names the SAME
+    /// directory the fs rule granted.
+    ///
+    /// THIS IS THE ORDERING TEST. `compile_build_jail` assigns `policy.env` wholesale after
+    /// every grant is compiled, so a variable written during `grant_curated_package` would be
+    /// silently discarded — and the fs rule would still be there, so the policy would look
+    /// correct while the package downloaded to a path the rule does not cover. Asserted
+    /// against the SHIPPED catalog on purpose: the entry has to be reachable through the
+    /// production lookup, not only through a synthetic table.
+    ///
+    /// The real home is a tempdir, so nothing here writes to the developer's own `$HOME`.
+    #[test]
+    fn a_home_cache_grant_reaches_the_child_env_and_the_fs_rules_agree() {
+        let user_home = tempfile::tempdir().expect("user home");
+        let cache = tempfile::tempdir().expect("cache home");
+        let home = std::fs::canonicalize(user_home.path()).expect("canonical home");
+        let project = home.join("proj");
+        let package_dir = project.join("node_modules/cypress");
+        std::fs::create_dir_all(&package_dir).expect("package dir");
+
+        let policy = compile_build_jail(
+            Homes {
+                home: home.clone(),
+                tmp: PathBuf::from("/testtmp"),
+                cache: std::fs::canonicalize(cache.path()).expect("canonical cache"),
+                project,
+            },
+            &package_dir,
+            Some("cypress"),
+            Vec::new(),
+            Vec::new(),
+            [("HOME".to_string(), "/the/users/home".to_string())]
+                .into_iter()
+                .collect(),
+        )
+        .expect("build-jail compiles");
+
+        let told = policy
+            .env
+            .constructed
+            .get("CYPRESS_CACHE_FOLDER")
+            .expect("the variable must survive the env replacement")
+            .clone();
+        let matcher = crate::matcher::PathMatcher::new(&policy.fs.rules);
+        let decision = matcher.decide(&Path::new(&told).join("13.14.2/Cypress.app"));
+        assert_eq!(
+            (decision.effect, decision.access),
+            (Effect::Allow, FsAccess::ReadWrite),
+            "the directory the child is TOLD about must be the one it may write: {told}"
+        );
+        // Two controls. The first is the whole point of the grant being one directory: the
+        // parent must stay unreachable, or this is a grant on the user's cache root. The
+        // second keeps the assertion above from passing against a compiler that granted the
+        // exception to every package.
+        assert_ne!(
+            matcher
+                .decide(&Path::new(&told).parent().expect("a parent").join("Other"))
+                .effect,
+            Effect::Allow,
+            "the grant must not reach a sibling of the tool's own cache directory"
+        );
+        let unnamed = compile_build_jail(
+            Homes {
+                home: home.clone(),
+                tmp: PathBuf::from("/testtmp"),
+                cache: std::fs::canonicalize(cache.path()).expect("canonical cache"),
+                project: home.join("proj"),
+            },
+            &package_dir,
+            Some("not-in-the-catalog"),
+            Vec::new(),
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .expect("build-jail compiles");
+        assert!(
+            !unnamed.env.constructed.contains_key("CYPRESS_CACHE_FOLDER"),
+            "an unlisted package must get neither the variable nor the grant"
         );
     }
 
