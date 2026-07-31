@@ -1,7 +1,10 @@
 // Build jail, network axis: a PER-PACKAGE egress gate enforced inside the confined Node.
 //
 // WHY THIS EXISTS. Coarse egress denial is free on Linux (a seccomp AF_INET ceiling) and on
-// macOS (Seatbelt pins egress to nub's proxy port). On Windows there is no unprivileged OS
+// macOS (Seatbelt denies network outright). NO PROXY is involved on any platform — the jail's
+// egress decision is a per-package boolean, so there is nothing to route and no host to
+// inspect; see the `There is deliberately NO host filtering` note below, which this line used
+// to contradict. On Windows there is no unprivileged OS
 // lever: withholding an AppContainer's `internetClient` capability is the only one, and being
 // an AppContainer is precisely what breaks filesystem reads (a fresh LowBox profile sid is in
 // no DACL). WFP is admin-gated. So on Windows the gate is USERLAND.
