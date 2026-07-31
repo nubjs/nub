@@ -1,8 +1,19 @@
 //! End-to-end coverage for project `nub.jsonc` runtime consumers.
+//!
+//! Runs on Windows too, deliberately. This file was `#![cfg(unix)]` when it
+//! landed, which meant the Windows leg verified NONE of the project runtime
+//! plumbing — and Windows is exactly where it diverges: `NODE_OPTIONS` is a
+//! single tokenized string whose quoting rules differ, and every path in the
+//! snapshot is anchored differently. A `nodeOptions` quoting bug that survived
+//! four separate producers on this branch is the shape of defect that gap hides.
+//!
+//! Two constructs genuinely need unix and are guarded per-test rather than
+//! per-file: a `#!/usr/bin/env node` shim in `node_modules/.bin` (Windows uses
+//! `.cmd` shims, a different resolution path with its own coverage), and the
+//! mode bit that makes it executable. Everything else — the config parse, the
+//! snapshot, `nodeOptions`/`v8Flags`/`envFile`/`loader`/`conditions`/`tsconfig`
+//! — is platform-independent by construction and now runs on both.
 
-#![cfg(unix)]
-
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -20,6 +31,7 @@ struct Fixture {
     project: PathBuf,
     xdg_config: PathBuf,
     cache: PathBuf,
+    #[cfg(unix)]
     nubx: PathBuf,
 }
 
@@ -30,8 +42,15 @@ impl Fixture {
         let xdg_config = temp.path().join("config");
         let config_root = project.clone();
         let cache = temp.path().join("cache");
-        let nubx = temp.path().join("nubx");
+        // Same alias trick `project_config_dlx.rs` uses: nub dispatches on argv0,
+        // so the copy is as good as the symlink and Windows needs the `.exe`.
+        let nubx = temp
+            .path()
+            .join(if cfg!(windows) { "nubx.exe" } else { "nubx" });
+        #[cfg(unix)]
         std::os::unix::fs::symlink(nub_binary(), &nubx).unwrap();
+        #[cfg(windows)]
+        std::fs::copy(nub_binary(), &nubx).unwrap();
         std::fs::create_dir_all(project.join("node_modules/.bin")).unwrap();
         std::fs::create_dir_all(project.join("node_modules/conditional-pkg")).unwrap();
         std::fs::create_dir_all(&config_root).unwrap();
@@ -110,19 +129,28 @@ console.log(JSON.stringify({
             r#"{ "scripts": { "probe": "node main.ts" }, "dependencies": { "conditional-pkg": "*" } }"#,
         )
         .unwrap();
-        let bin = project.join("node_modules/.bin/probe");
-        std::fs::write(
-            &bin,
-            "#!/usr/bin/env node\n(async () => { await import('../../main.ts'); })();\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A shebang shim, so unix-only: Windows resolves `node_modules/.bin`
+        // through `.cmd`/`.ps1` shims instead, which is a different code path
+        // with its own coverage. Only the tests that actually route through
+        // `.bin` are gated on this; the rest of the fixture is portable.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let bin = project.join("node_modules/.bin/probe");
+            std::fs::write(
+                &bin,
+                "#!/usr/bin/env node\n(async () => { await import('../../main.ts'); })();\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         Self {
             _temp: temp,
             project,
             xdg_config,
             cache,
+            #[cfg(unix)]
             nubx,
         }
     }
@@ -189,6 +217,7 @@ console.log(JSON.stringify({
         }
     }
 
+    #[cfg(unix)]
     fn assert_nubx_probe(&self) {
         let output = self.command_for(&self.nubx).arg("probe").output().unwrap();
         assert!(
@@ -211,6 +240,7 @@ console.log(JSON.stringify({
     /// `assert_nubx_probe` covers), with no network involved. Its bin has a
     /// `#!/usr/bin/env node` shebang, which is what re-enters nub's `node`
     /// PATH shim and is the ONLY place augmentation reaches a fetched tool.
+    #[cfg(unix)]
     fn assert_nubx_dlx_fallback_node_flag(&self) {
         let pkg_dir = self._temp.path().join("dlx-fallback-pkg");
         std::fs::create_dir_all(&pkg_dir).unwrap();
@@ -351,10 +381,21 @@ console.log(JSON.stringify({
 }
 
 #[test]
-fn runtime_snapshot_reaches_file_script_node_argv0_exec_and_nubx() {
+fn runtime_snapshot_reaches_the_file_run_and_script_entrypoints() {
     let fixture = Fixture::new();
     fixture.assert_probe(&["main.ts"]);
     fixture.assert_probe(&["run", "probe"]);
+}
+
+/// The `node_modules/.bin` routes, split out because they ride a
+/// `#!/usr/bin/env node` shim. Windows resolves local bins through `.cmd`
+/// shims instead — a different path that this fixture does not build — so
+/// gating these two keeps the entrypoints above running on both platforms
+/// rather than losing the whole file to one construct.
+#[cfg(unix)]
+#[test]
+fn runtime_snapshot_reaches_the_local_bin_routes() {
+    let fixture = Fixture::new();
     fixture.assert_probe(&["exec", "probe"]);
     fixture.assert_nubx_probe();
 }
@@ -366,6 +407,7 @@ fn runtime_snapshot_reaches_file_script_node_argv0_exec_and_nubx() {
 /// `--node` from argv, so this exercises a genuinely different code path
 /// (`dlx_child_env` stamping `NODE_COMPAT` for the child) than the local-bin
 /// case above.
+#[cfg(unix)]
 #[test]
 fn nubx_node_flag_reaches_the_dlx_fallback_fetch_path() {
     let fixture = Fixture::new();
