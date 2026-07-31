@@ -54,6 +54,7 @@ Authenticate the Render CLI, then create the same repository-backed Docker servi
 
 ```bash
 render login
+render workspace set WORKSPACE_ID
 render services create \
   --name nub-app \
   --type web_service \
@@ -67,7 +68,7 @@ render services create \
   --output json
 
 SERVICE_URL=$(render services --output json \
-  | jq -r '.[] | select(.name == "nub-app") | .serviceDetails.url')
+  | jq -r '.[] | select(.service.name == "nub-app") | .service.serviceDetails.url')
 curl --fail "$SERVICE_URL/alive"
 # {"alive":true,"runtime":"nub-on-node"}
 ```

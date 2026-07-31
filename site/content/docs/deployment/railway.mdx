@@ -55,7 +55,8 @@ railway login
 railway init --name nub-app
 railway add --service nub-app
 railway up --service nub-app --ci
-DOMAIN=$(railway domain --service nub-app --json | jq -r .domain)
+DOMAIN=$(railway domain --service nub-app --json \
+  | jq -r '.domain // .domains[0]')
 ```
 
 The final command creates a free `*.up.railway.app` domain for the service and captures its assigned URL.
