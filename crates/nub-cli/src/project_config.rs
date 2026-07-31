@@ -54,6 +54,18 @@ pub(crate) const INSTALL_KEYS: &[&str] = &[
 ];
 pub(crate) const DLX_KEYS: &[&str] = &["consent"];
 
+/// Every loader a `loader` entry may name. At module scope rather than inside
+/// [`validate_loader`] so `published_schema_exposes_every_parser_key` can pin
+/// the published schema against it: the vocabulary appears three times per
+/// schema file (`additionalProperties`, plus the `.tsx` and `.jsx` overrides
+/// that drop `ts`), and a function-local const left all of them uncomparable.
+pub(crate) const LOADERS: &[&str] = &["text", "jsonc", "json5", "toml", "yaml", "ts", "tsx", "jsx"];
+
+/// The extensions whose JSX dialect comes from the extension itself, so a `ts`
+/// loader on them could not take effect and is refused. Their schema enums are
+/// therefore [`LOADERS`] minus `ts`.
+pub(crate) const JSX_PINNED_EXTS: &[&str] = &[".tsx", ".jsx"];
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Error type — fail-loud, with a JSON path so a bad file self-describes.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -935,7 +947,6 @@ fn as_string_map(v: &Value, path: &str) -> Result<BTreeMap<String, String>> {
 /// the runtime already implements. New names are capability decisions, not a
 /// permissive config-parser fallback.
 fn validate_loader(v: &Value, path: &str) -> Result<BTreeMap<String, String>> {
-    const LOADERS: &[&str] = &["text", "jsonc", "json5", "toml", "yaml", "ts", "tsx", "jsx"];
     let values = as_string_map(v, path)?;
     for (extension, loader) in &values {
         if !extension.starts_with('.') || extension.len() == 1 {
@@ -962,7 +973,7 @@ fn validate_loader(v: &Value, path: &str) -> Result<BTreeMap<String, String>> {
         // this parser is fail-loud to prevent. Every other pairing does take
         // effect: a data loader moves the extension out of the transpile set, and
         // `tsx`/`jsx` are honored verbatim.
-        if loader == "ts" && matches!(extension.as_str(), ".tsx" | ".jsx") {
+        if loader == "ts" && JSX_PINNED_EXTS.contains(&extension.as_str()) {
             return Err(ConfigError::Value {
                 path: child(path, extension),
                 message: format!(
@@ -1955,6 +1966,31 @@ mod tests {
             enum_values(&schema, "/properties/dlx/properties/consent/enum"),
             expected(&["prompt", "never"])
         );
+
+        // `loader` spells its vocabulary three times: the open map, plus a
+        // narrowed override per JSX-pinned extension. All three drift
+        // independently of the parser, and an extra value here is an editor
+        // offering a loader `validate_loader` rejects.
+        assert_eq!(
+            enum_values(&schema, "/properties/loader/additionalProperties/enum"),
+            expected(LOADERS),
+            "loader map must offer exactly the loaders the parser accepts"
+        );
+        let without_ts: std::collections::BTreeSet<String> = LOADERS
+            .iter()
+            .filter(|loader| **loader != "ts")
+            .map(|loader| (*loader).to_string())
+            .collect();
+        for extension in JSX_PINNED_EXTS {
+            assert_eq!(
+                enum_values(
+                    &schema,
+                    &format!("/properties/loader/properties/{extension}/enum")
+                ),
+                without_ts,
+                "{extension} is always parsed as JSX, so its schema enum is LOADERS minus `ts`"
+            );
+        }
 
         // `linker` admits both a string shorthand and a discriminated object
         // union. All three schema representations of its strategies must stay
