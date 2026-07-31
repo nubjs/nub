@@ -1,0 +1,39 @@
+@carbon/type	11.63.0	git-repo
+@carbon/themes	11.77.0	git-repo
+@sentry/capacitor	4.2.0	
+@pulumi/postgresql	0.18.0	git-repo
+cwebp-bin	8.0.0	
+memlab	2.0.4	
+tree-sitter-ruby	0.0.2	git-repo
+lzo	0.4.11	
+@pulumi/datadog	0.0.1-dev.1561157133	git-repo
+tree-sitter-c	0.23.6	git-repo
+exiftool-vendored	37.1.0	
+classic-level	3.0.0	
+fs-xattr	0.4.0	
+sonar-scanner	3.1.0	
+ip-num	1.6.1	git-repo
+gatsby-telemetry	1.0.0	git-repo
+@carbon/utilities	0.22.0	git-repo
+@cdktf/node-pty-prebuilt-multiarch	0.10.2	
+@carbon/motion	11.48.0	git-repo
+full-icu	1.6.0	
+esbuild-plugin-tailwindcss	1.0.0	git-repo
+@babylonlabs-io/babylon-proto-ts	0.0.1	git-repo
+microtime	3.1.1	
+tree-sitter-c-sharp	0.0.1	git-repo
+remix-i18next	0.0.1	
+sleep	6.3.0	
+@central-icons-react/round-outlined-radius-3-stroke-2	1.1.292	git-repo
+tree-sitter-cli	0.26.11	
+iltorb	2.4.5	
+@lavamoat/preinstall-always-fail	2.1.1	git-repo
+node-hid	3.4.0	
+@carbon/react	0.1.0	git-repo
+@ibm/plex-serif	2.0.0	git-repo
+ctrlc-windows	0.1.9	git-repo
+@rsuite/icons	1.0.0-0	git-repo
+@ffmpeg-installer/linux-arm64	4.1.4	
+@ibm/plex-sans-arabic	1.1.0	git-repo
+@ibm/plex-sans-devanagari	1.1.0	
+@ibm/plex-sans-thai-looped	1.1.0	git-repo

@@ -1,0 +1,39 @@
+@stdlib/math-base-special-sqrt	0.0.1	git-repo
+@pdftron/webviewer	6.0.0-beta-1	git-repo
+@stdlib/math-base-special-exp	0.1.0	git-repo
+@zowe/secrets-for-zowe-sdk	8.29.4	git-repo
+pretender	0.0.7	git-repo
+pprof	5.0.0	
+yorkie	2.0.0	
+@antv/matrix-util	2.0.0	git-repo
+@launchql/protobufjs	7.2.6	git-repo
+eckles	0.1.0	git-repo
+pngquant-bin	9.0.0	
+sse4_crc32	7.0.0	
+@github/keytar	7.10.6	git-repo
+pre-commit	2.0.0	
+angular-oauth2-oidc	1.0.0	git-repo
+zlib	1.0.5	git-repo
+@fission-ai/openspec	1.6.0	git-repo
+cucumber-expressions	5.0.18	git-repo
+@depot/cli	0.0.1-cli.2.36.3	git-repo
+jpegtran-bin	7.0.0	
+squawk-cli	0.1.3	git-repo
+@napi-rs/simple-git-linux-x64-gnu	0.1.1	git-repo
+@stdlib/math-base-assert-is-positive-zero	0.0.1	git-repo
+grapesjs	0.0.5	git-repo
+inngest-cli	0.5.1	git-repo
+@playwright/browser-webkit	1.47.0	git-repo
+mozjpeg	8.0.0	
+vue-echarts	6.7.3	git-repo
+@stdlib/number-float64-base-get-low-word	0.0.1	git-repo
+kerberos	7.0.0	
+@apollo/rover	0.0.1-rc.5	git-repo
+gatsby-cli	5.16.0	git-repo
+@embedded-postgres/linux-x64	18.1.0-beta.16	git-repo
+@ffprobe-installer/linux-x64	5.2.0	
+@contrast/fn-inspect	5.0.2	
+@google-cloud/profiler	0.0.1	git-repo
+@azure/msal-node-extensions	1.0.0-alpha.0	git-repo
+@azure/msal-node-runtime	0.20.5	git-repo
+@pulumi/aws-native	1.73.1	

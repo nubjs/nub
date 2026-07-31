@@ -1,0 +1,39 @@
+farmhash	0.0.1	git-repo
+playwright-chromium	1.62.0	
+inferno	7.4.11	git-repo
+@sap/hana-client	2.29.25	
+@railway/cli	5.30.1	
+@ibm/plex	6.4.1	git-repo
+mongodb-client-encryption	7.2.0	
+tree-sitter-rust	0.1.0	git-repo
+@serialport/bindings-cpp	13.0.1	
+free-email-domains	1.9.79	
+zeromq	6.5.0	
+hugo-extended	0.63.2	git-repo
+vis-timeline	5.0.0	git-repo
+@univerjs/sheets-conditional-formatting	0.1.5	git-repo
+device-detector-js	1.0.0	git-repo
+blake-hash	2.0.0	
+react-native-inappbrowser-reborn	3.7.0	git-repo
+zstd-napi	0.0.10	git-repo
+tree-sitter-java	0.23.5	git-repo
+xstream	1.0.0	git-repo
+duckdb	1.4.4	
+@discordjs/opus	0.10.0	
+exifreader	4.41.3	
+libpq	1.11.0	
+@memlab/cli	2.0.4	
+console-stamp	0.2.9	git-repo
+@carbon/colors	11.54.0	git-repo
+bootstrap-vue	2.23.1	git-repo
+passport-headerapikey	1.0.0	git-repo
+@braintrust/core	0.0.1	git-repo
+playwright-msw	0.0.1	git-repo
+@napi-rs/simple-git-linux-x64-musl	0.1.1	git-repo
+appium-ios-tuntap	1.1.0	git-repo
+testcafe-browser-tools	1.0.0	git-repo
+redis-memory-server	0.17.0	
+webpack-license-plugin	1.0.0	git-repo
+sats-connect	0.1.1	git-repo
+@stdlib/math-base-special-log1pmx	0.1.0	git-repo
+@sap-cloud-sdk/connectivity	2.0.0-20211015081738.0	git-repo

@@ -1,0 +1,39 @@
+edgedriver	6.3.0	
+spawn-sync	1.0.15	git-repo
+style-dictionary	4.3.0	git-repo
+mongodb-memory-server	11.2.0	
+opencode-ai	1.18.9	
+argon2	0.45.1	
+react-native-nitro-modules	0.0.4	git-repo
+xcase	1.0.0	git-repo
+ffmpeg-static	5.3.0	
+package-directory	0.2.3	git-repo
+websocket	1.0.31	git-repo
+@openapitools/openapi-generator-cli	2.39.1	git-repo
+node-liblzma	0.3.0	git-repo
+serverless	3.40.0	git-repo
+@fortawesome/free-regular-svg-icons	5.15.4	git-repo
+koffi	2.16.3	git-repo
+appium-chromedriver	5.6.69	git-repo
+tldjs	2.3.2	
+date-now	0.1.0	git-repo
+contentful	9.3.7	git-repo
+@reown/appkit	1.8.9	git-repo
+cbor-extract	2.2.2	
+n8n-nodes-evolution-api	1.0.4	git-repo
+@newrelic/native-metrics	13.1.0	
+@sentry-internal/node-cpu-profiler	2.2.0	git-repo
+braintrust	3.17.0	git-repo
+nice-napi	1.0.2	
+@playwright/browser-chromium	1.61.1	git-repo
+@shopify/react-native-skia	2.6.2	git-repo
+@stdlib/math-base-napi-binary	0.0.1	git-repo
+agent-browser	0.26.0	git-repo
+appium	2.11.2	git-repo
+tree-sitter-json	0.24.8	
+tree-sitter-python	0.23.6	git-repo
+node	26.5.1	
+grpc-tools	1.13.1	
+isolated-vm	7.0.0	
+@tree-sitter-grammars/tree-sitter-yaml	0.7.1	git-repo
+@stdlib/number-float64-base-to-words	0.0.1	git-repo
