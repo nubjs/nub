@@ -184,6 +184,31 @@ impl CuratedGrant {
 /// It began life as the frozen PRE-CATALOG table, proving the migration to JSON was lossless.
 /// That proof is done and in the past; the mirror kept its value and gained a maintenance
 /// cost, which is the trade taken deliberately. A catalog edit updates both.
+/// The lefthook family's config-file read set, shared by its three entries below because the
+/// three names are one tool. Named rather than repeated so a later extension cannot be added
+/// to two of the three and quietly diverge them from each other.
+#[cfg(test)]
+static LEFTHOOK_READS: &[&str] = &[
+    ".git/HEAD",
+    ".git/config",
+    "lefthook.yml",
+    "lefthook.yaml",
+    "lefthook.json",
+    "lefthook.toml",
+    ".lefthook.yml",
+    ".lefthook.yaml",
+    ".lefthook.json",
+    ".lefthook.toml",
+    "lefthook-local.yml",
+    "lefthook-local.yaml",
+    "lefthook-local.json",
+    "lefthook-local.toml",
+    ".lefthook-local.yml",
+    ".lefthook-local.yaml",
+    ".lefthook-local.json",
+    ".lefthook-local.toml",
+];
+
 #[cfg(test)]
 static GOLDEN_PRE_CATALOG_GRANTS: &[(&str, CuratedGrant)] = &[
     // FOUR needs, and they are staged — each one masks the next, which is why the first fix
@@ -255,7 +280,7 @@ static GOLDEN_PRE_CATALOG_GRANTS: &[(&str, CuratedGrant)] = &[
             ..CuratedGrant::NONE
         },
     ),
-    // THE HOOK-INSTALLER COHORT — six packages, and the reason it is SIX ENTRIES rather
+    // THE HOOK-INSTALLER COHORT — nine packages, and the reason it is NINE ENTRIES rather
     // than one class rule. A `.git/hooks` write is persistent arbitrary code execution: the
     // file runs, UNCONFINED, on the developer's next `git commit`, long after the install
     // that planted it. A class grant keyed on "looks like a hook installer" would hand that
@@ -264,16 +289,18 @@ static GOLDEN_PRE_CATALOG_GRANTS: &[(&str, CuratedGrant)] = &[
     // review is what ties the grant to a package whose ENTIRE STATED FUNCTION is writing
     // that file, which is also the thing the consumer installed it to do.
     //
-    // The grant is the hooks DIRECTORY, not a hook file, because the six write at least four
-    // different names between them (`pre-commit`, `pre-push`, `commit-msg`, and two of them
-    // git's full seventeen) plus `.old`/`.backup`/`.bkp` copies of whatever was there.
+    // The grant is the hooks DIRECTORY, not a hook file, because the nine write at least five
+    // different names between them (`pre-commit`, `pre-push`, `commit-msg`,
+    // `prepare-commit-msg`, and two of them git's full seventeen) plus `.old`/`.backup`/`.bkp`
+    // copies of whatever was there.
     //
     // THE FIRST FIVE NEED ONLY THE WRITE. Each locates `<proj>/.git` itself and fails only
     // on the open, so `.git` is already readable enough under the baseline, and none needs a
     // project-root cwd grant because a lifecycle script's cwd is its own store cell — both
-    // measured per package, not inferred from the class. `shared-git-hooks` is the exception
-    // and carries its own note below. One residual applies to all six: they fall back to
-    // `mkdirSync(<git>/hooks)` when that directory is absent, and that mkdir stays denied.
+    // measured per package, not inferred from the class. `shared-git-hooks` and the three
+    // lefthook names are the exceptions and carry their own notes below. One residual applies
+    // to all nine: they fall back to `mkdirSync(<git>/hooks)` when that directory is absent,
+    // and that mkdir stays denied.
     (
         "pre-commit",
         CuratedGrant {
@@ -327,6 +354,57 @@ static GOLDEN_PRE_CATALOG_GRANTS: &[(&str, CuratedGrant)] = &[
         CuratedGrant {
             project_reads: &[".git/HEAD", ".git/config"],
             project_writes: ProjectWrites::Literal(&[".git/hooks"]),
+            ..CuratedGrant::NONE
+        },
+    ),
+    // THE LEFTHOOK FAMILY — one tool under three published names, and the widest grant in the
+    // cohort, because a hook write is only the LAST of its three needs. Its postinstall spawns
+    // the bundled Go binary as `lefthook install -f`, which (1) shells `git rev-parse` to find
+    // the repository, needing the same staged `.git/HEAD` then `.git/config` reads as
+    // `shared-git-hooks`; (2) SEARCHES the project root for its own configuration and, finding
+    // none, CREATES `lefthook.yml` there rather than giving up; (3) writes the hooks and, on
+    // 2.x, a `lefthook.checksum` beside them under `.git/info`. Each masks the next, so the
+    // first two fixes both looked complete and were not.
+    //
+    // THE CONFIG READ IS NOT ABOUT GIT AT ALL, and it is why `@arkweid` stood as an unexplained
+    // failure through a rung that granted the whole `.git` SUBTREE: no `.git` grant, however
+    // wide, can express a read of `<proj>/lefthook.yml`.
+    //
+    // Sixteen config names rather than one because the tool honours four extensions across
+    // four spellings, all measured. `lefthook-local` and `.lefthook-local` are secondary
+    // configs MERGED over the main one, not alternatives to it, so leaving them out would
+    // silently drop a user's local hooks instead of failing visibly — the quiet-wrong-answer
+    // direction.
+    //
+    // The `lefthook.yml` WRITE is the create-if-absent fallback, and it is the ordinary
+    // first-install shape: the documented order is to install the package and then write the
+    // config, so a project that has not written one yet is the common case, not the corner.
+    (
+        "lefthook",
+        CuratedGrant {
+            project_reads: LEFTHOOK_READS,
+            project_writes: ProjectWrites::Literal(&[".git/hooks", ".git/info", "lefthook.yml"]),
+            ..CuratedGrant::NONE
+        },
+    ),
+    // The same tool under its former scoped name, at the same version. A separate entry rather
+    // than a shared one because the table is keyed on the installer-resolved package NAME.
+    (
+        "@evilmartians/lefthook",
+        CuratedGrant {
+            project_reads: LEFTHOOK_READS,
+            project_writes: ProjectWrites::Literal(&[".git/hooks", ".git/info", "lefthook.yml"]),
+            ..CuratedGrant::NONE
+        },
+    ),
+    // 0.7.7, under the author's original scope. Same detection and same config search; it
+    // writes no checksum, so `.git/info` is withheld — an ablation, not an inference: with the
+    // narrower write set it still reaches the jail-off arm's hooks name-for-name.
+    (
+        "@arkweid/lefthook",
+        CuratedGrant {
+            project_reads: LEFTHOOK_READS,
+            project_writes: ProjectWrites::Literal(&[".git/hooks", "lefthook.yml"]),
             ..CuratedGrant::NONE
         },
     ),
@@ -673,6 +751,7 @@ fn rule(glob: &str, access: FsAccess) -> FsRule {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn project() -> PathBuf {
         PathBuf::from(if cfg!(windows) { "C:/proj" } else { "/proj" })
@@ -710,10 +789,25 @@ mod tests {
     /// Compared against a hand-authored literal rather than a re-read of the JSON, so this
     /// cannot pass by both sides agreeing on the same bad parse — only one side goes through
     /// `catalog::parse` and `build.rs`.
+    ///
+    /// BY NAME, NOT BY POSITION, and the two orders are now genuinely independent: the
+    /// catalog's is a function of `apply-matrix.mjs`, which sorts on every ingest so a run's
+    /// finishing order cannot show up as a diff, while the mirror's is the order its comments
+    /// argue in. Neither order is semantic — `grant_from_table` reaches the table only through
+    /// `lookup(table, name)` — so comparing positionally would fail on a difference that
+    /// cannot reach a policy. It failed exactly that way once the ingester's first sort
+    /// landed. Name UNIQUENESS is asserted first, because a set comparison over duplicate
+    /// keys would let a doubled entry hide one that is missing.
     #[test]
     fn the_catalog_matches_the_hand_written_mirror() {
+        fn by_name<'a>(table: &'a [(&'a str, CuratedGrant)]) -> BTreeMap<&'a str, CuratedGrant> {
+            let map: BTreeMap<&'a str, CuratedGrant> = table.iter().copied().collect();
+            assert_eq!(map.len(), table.len(), "a package is listed twice");
+            map
+        }
         assert_eq!(
-            CURATED_GRANTS, GOLDEN_PRE_CATALOG_GRANTS,
+            by_name(CURATED_GRANTS),
+            by_name(GOLDEN_PRE_CATALOG_GRANTS),
             "the generated table diverged from the hand-written mirror"
         );
     }

@@ -451,6 +451,40 @@
   },
   "packageGrants": [
     {
+      "package": "@arkweid/lefthook",
+      "versions": "0.7.7",
+      "projectReads": [
+        ".git/HEAD",
+        ".git/config",
+        "lefthook.yml",
+        "lefthook.yaml",
+        "lefthook.json",
+        "lefthook.toml",
+        ".lefthook.yml",
+        ".lefthook.yaml",
+        ".lefthook.json",
+        ".lefthook.toml",
+        "lefthook-local.yml",
+        "lefthook-local.yaml",
+        "lefthook-local.json",
+        "lefthook-local.toml",
+        ".lefthook-local.yml",
+        ".lefthook-local.yaml",
+        ".lefthook-local.json",
+        ".lefthook-local.toml"
+      ],
+      "projectWrites": {
+        "literal": [
+          ".git/hooks",
+          "lefthook.yml"
+        ]
+      },
+      "mechanism": "The 0.7.7 predecessor of `lefthook`, under the author's original scope. Its postinstall drives the same Go binary through `install -f`, so it needs the same git detection and the same configuration search, including creating `lefthook.yml` when the project has none. It does NOT write a checksum, which is why its write set is the hooks directory and the config file and not `.git/info` — measured by ablation, not assumed.",
+      "evidence": "measured",
+      "observed": "Isolated macOS arm64 on nub ede3ac1c, 2026-07-31, four jail-ON rungs against a jail-off control. A0: `SYNCING lefthook.yml` and `SERVED HOOKS: pre-commit, prepare-commit-msg`. Jail-ON without an entry: `This command must be executed within git repository. Change working directory or initialize new repository with 'git init'.`, ZERO hooks. THE ROW HAD BEEN RECORDED AS FAILING EVEN WITH A FULL `.git` SUBTREE READ, an unexplained fourth cause; it is not a `.git` cause at all. Re-measured here with the whole `.git` subtree readable and the hooks directory writable, the failure MOVES to `open <proj>/lefthook.yml: operation not permitted` — the project CONFIG read, which no `.git` grant can express. With this entry: `SERVED HOOKS: pre-commit, prepare-commit-msg`, matching A0. Two minimality ablations on top: dropping `.git/info` from the write set still passes, so it is not granted; and withholding the fixture's `lefthook.yml` reproduces `open <proj>/lefthook.yml: operation not permitted` with ZERO hooks, which is why the config-file write is.",
+      "platform": "macos-arm64"
+    },
+    {
       "package": "@danmarshall/deckgl-typings",
       "versions": "4.9.28",
       "siblingDirs": [
@@ -459,6 +493,41 @@
       "mechanism": "Its postinstall runs `indefinitely-typed`, which computes path.resolve(cwd, '../..'), asserts that directory is named node_modules, then mkdirs @types there and copySyncs each --folder argument into it. The write target is <own node_modules>/@types — the same enclosing-node_modules sibling shape as Prisma, under a different name.",
       "evidence": "measured",
       "observed": "EPERM mkdir <own node_modules>/@types. With the grant, 20 copied type folders present; without it, absent.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "@evilmartians/lefthook",
+      "versions": "2.1.10",
+      "projectReads": [
+        ".git/HEAD",
+        ".git/config",
+        "lefthook.yml",
+        "lefthook.yaml",
+        "lefthook.json",
+        "lefthook.toml",
+        ".lefthook.yml",
+        ".lefthook.yaml",
+        ".lefthook.json",
+        ".lefthook.toml",
+        "lefthook-local.yml",
+        "lefthook-local.yaml",
+        "lefthook-local.json",
+        "lefthook-local.toml",
+        ".lefthook-local.yml",
+        ".lefthook-local.yaml",
+        ".lefthook-local.json",
+        ".lefthook-local.toml"
+      ],
+      "projectWrites": {
+        "literal": [
+          ".git/hooks",
+          ".git/info",
+          "lefthook.yml"
+        ]
+      },
+      "mechanism": "The same tool as `lefthook` under its former scoped name, at the same version and with the same three needs — git detection, the project config search with its create-if-absent fallback, and the hooks plus checksum write. It is a separate entry rather than a shared one because the catalog is keyed on the installer-resolved package NAME, and both names are still installed.",
+      "evidence": "measured",
+      "observed": "Same run and method as the `lefthook` entry, isolated macOS arm64 on nub ede3ac1c, 2026-07-31. The package is the same tool: `bin/`, `get-exe.js`, `schema.json` and the vendored `lefthook-<platform>` optional dependency have the same shape, and `postinstall.js` differs only in formatting and in hoisting the CI guard out of a function. A0 jail-off control: `sync hooks: OK(pre-commit)`. Jail-ON without an entry: `fatal: not a git repository (or any of the parent directories): .git`, ZERO hooks. Jail-ON with this entry: `sync hooks: OK(pre-commit)`, with `.git/hooks/pre-commit` and `.git/info/lefthook.checksum` both present — the checksum file is what shows the `.git/info` write is load-bearing here too.",
       "platform": "macos-arm64"
     },
     {
@@ -533,6 +602,41 @@
       "mechanism": "`bin/install.js` calls `lib/utils.js installHooks(['pre-commit','pre-push'])`, which for each name renames any existing `<hookRoot>/<hook>` to `<hook>.backup`, unlinks a broken symlink at that path, and `Fs.writeFileSync(dest, ..., { mode: 511 })`. Its `configureHook` helper also rewrites the consumer's root package.json, but that path is not reached by the postinstall this entry covers and is NOT granted.",
       "evidence": "measured",
       "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: an uncaught `Error: EPERM: operation not permitted, open '<proj>/.git/hooks/pre-commit'` with `syscall: 'open'` thrown from `lib/utils.js:259` inside `exports.installHooks`, aborting the install script. Unconfined A0, same fixture: both hooks are written.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "lefthook",
+      "versions": "2.1.10",
+      "projectReads": [
+        ".git/HEAD",
+        ".git/config",
+        "lefthook.yml",
+        "lefthook.yaml",
+        "lefthook.json",
+        "lefthook.toml",
+        ".lefthook.yml",
+        ".lefthook.yaml",
+        ".lefthook.json",
+        ".lefthook.toml",
+        "lefthook-local.yml",
+        "lefthook-local.yaml",
+        "lefthook-local.json",
+        "lefthook-local.toml",
+        ".lefthook-local.yml",
+        ".lefthook-local.yaml",
+        ".lefthook-local.json",
+        ".lefthook-local.toml"
+      ],
+      "projectWrites": {
+        "literal": [
+          ".git/hooks",
+          ".git/info",
+          "lefthook.yml"
+        ]
+      },
+      "mechanism": "Its postinstall spawns the bundled Go binary as `lefthook install -f` with cwd set to INIT_CWD, and that binary needs three distinct things in the project, each of which masks the next. It first runs `git rev-parse --path-format=absolute --show-toplevel --git-path hooks --git-path info --git-dir`, so git's repository detection must reach `.git/HEAD` and then `.git/config`. It then SEARCHES the project root for its own configuration and, finding none, CREATES `lefthook.yml` there rather than giving up — which is the ordinary first-install shape, since the documented order is to install the package and then write the config. Finally it writes the hooks it derived plus a `lefthook.checksum` into the directory that `--git-path info` resolved. The read list is sixteen config names because the configuration is honoured under four extensions across four spellings, all measured; `lefthook-local` and `.lefthook-local` are secondary configs MERGED over the main one rather than alternatives to it, so omitting them would silently drop a user's local hooks instead of failing. The reads are named FILES and not the `.git` subtree deliberately — a subtree read pulls in `objects/`, the consumer's entire source history, and the ladder below shows it buys nothing.",
+      "evidence": "measured",
+      "observed": "Isolated macOS arm64 on nub ede3ac1c (`91e66ad756` plus this change), 2026-07-31, one package per window, every arm on a cold store with `side-effects-cache=false` and a private HOME. A0 jail-off control: `sync hooks: OK(pre-commit)`, with `.git/hooks/pre-commit` and `.git/info/lefthook.checksum` written. Four jail-ON rungs, catalog the only variable: (a) no entry — `fatal: not a git repository (or any of the parent directories): .git`, ZERO hooks; (b) plus the two `.git` file reads — past detection, then `Config not found, creating...` and `Error: open <proj>/lefthook.yml: operation not permitted`, ZERO hooks; (c) plus the `lefthook.yml` read — `sync hooks: FAILED` and `could not create a checksum file: open <proj>/.git/info/lefthook.checksum: operation not permitted`, though the hook file itself is now written; (d) plus the `.git/info` write — `sync hooks: OK(pre-commit)`, matching A0. The `lefthook.yml` WRITE was measured separately by withholding the fixture's config: jail-off and jail-on both print `Added config: <proj>/lefthook.yml` and install `prepare-commit-msg`, and rung (b) is that same write being refused. THIS PACKAGE'S EXIT CODE IS 0 IN EVERY RUNG — its postinstall wraps the spawn in a try/catch and `spawnSync` does not propagate the child's status — so the entry rests on the hook artifact and the denial message, never on the status.",
       "platform": "macos-arm64"
     },
     {
