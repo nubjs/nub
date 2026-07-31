@@ -685,17 +685,14 @@ fn resolve_from_package_json(pkg_json_path: &str, subpath: &str, direct: bool) -
         }
     }
 
-    let dir = parent_dir(pkg_json_path);
+    // get-tsconfig joins `(packageJsonPath, "..", target)`, which path-normalizes
+    // to the package directory plus `target`.
     Some(
-        Path::new(&dir)
-            .join("..")
+        Path::new(&parent_dir(pkg_json_path))
             .join(&target)
             .to_string_lossy()
             .into_owned(),
     )
-    // Note: get-tsconfig joins `(pkgJsonDir, "..", target)` — the `..` cancels the
-    // package-dir segment so `target` resolves relative to the package root. We
-    // mirror that join verbatim (no lexical-normalize) to match its output shape.
 }
 
 /// Minimal subset of `resolve-pkg-maps`'s `resolveExports` covering the shapes a
@@ -781,6 +778,11 @@ fn parent_dir(p: &str) -> String {
 fn read_jsonc(path: &str) -> Result<Value, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|_| format!("Cannot resolve tsconfig at path: {path}"))?;
+    // `nub.jsonc` validation already accepts the Windows/PowerShell UTF-8 BOM,
+    // but this native reader opens a configured tsconfig (and package metadata in
+    // its extends chain) again. Normalize the same one leading marker here so a
+    // valid configuration cannot silently fall back to no matcher.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     nub_json_guard::check_nesting_depth(&text, crate::MAX_NESTING_DEPTH)
         .map_err(|e| format!("Failed to parse tsconfig at: {path}: {e}"))?;
     // The `Option` is the deserialization target, not a wrapper the parser adds:

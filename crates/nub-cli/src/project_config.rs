@@ -1953,6 +1953,50 @@ mod tests {
             enum_values(&schema, "/properties/dlx/properties/consent/enum"),
             expected(&["prompt", "never"])
         );
+
+        // `linker` admits both a string shorthand and a discriminated object
+        // union. All three schema representations of its strategies must stay
+        // aligned with the parser's one source of truth: the object-level enum
+        // determines the accepted discriminator, while each union arm's const
+        // determines the options that discriminator unlocks.
+        let linker_strategies = LINKER_STRATEGY_KEYS
+            .iter()
+            .map(|(strategy, _)| (*strategy).to_string())
+            .collect();
+        assert_eq!(
+            &enum_values(
+                &schema,
+                "/properties/install/properties/linker/oneOf/0/enum"
+            ),
+            &linker_strategies,
+            "install.linker string shorthand must accept exactly the parser strategies"
+        );
+        assert_eq!(
+            &enum_values(
+                &schema,
+                "/properties/install/properties/linker/oneOf/1/properties/strategy/enum"
+            ),
+            &linker_strategies,
+            "install.linker object strategy must accept exactly the parser strategies"
+        );
+        let linker_strategy_consts: std::collections::BTreeSet<String> = schema
+            .pointer("/properties/install/properties/linker/oneOf/1/allOf")
+            .and_then(Value::as_array)
+            .expect("linker object union arms missing from schema")
+            .iter()
+            .map(|arm| {
+                arm.pointer("/then/properties/strategy/const")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| {
+                        panic!("linker object union arm missing its strategy const: {arm}")
+                    })
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            &linker_strategy_consts, &linker_strategies,
+            "install.linker object union arms must cover exactly the parser strategies"
+        );
     }
 
     // ── discovery ──

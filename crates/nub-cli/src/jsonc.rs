@@ -219,8 +219,32 @@ mod tests {
         }
 
         // The entry points that recurse on nesting with no bound of their own, or
-        // with one too loose to survive a 1 MiB stack.
-        const UNGUARDED_PARSERS: [&str; 2] = ["parse_to_serde_value", "json5::from_str"];
+        // with one too loose to survive a 1 MiB stack. Each CALL must have its
+        // preflight immediately above it: file-wide co-occurrence would let one
+        // guarded parser bless a second unguarded parser in the same module.
+        const GUARDED_PARSERS: [(&str, &[&str]); 3] = [
+            (
+                concat!("jsonc_parser::", "parse_to_serde_value"),
+                &["check_nesting_depth", "check_depth"],
+            ),
+            (concat!("json5::", "from_str("), &["check_depth"]),
+            (
+                concat!("YamlLoader::", "load_from_str("),
+                &["check_yaml_depth"],
+            ),
+        ];
+
+        fn preceding_lines(text: &str, call_at: usize, count: usize) -> &str {
+            let mut start = call_at;
+            for _ in 0..count {
+                let Some(previous) = text[..start].rfind('\n') else {
+                    start = 0;
+                    break;
+                };
+                start = previous;
+            }
+            &text[start..call_at]
+        }
 
         let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -229,25 +253,34 @@ mod tests {
         rs_files(crates, &mut files);
         assert!(files.len() > 1, "source walk found nothing at {crates:?}");
 
-        // A file may reach one of those parsers only if it also names the bound.
-        // Co-occurrence rather than an allowlist of blessed paths: an allowlist
-        // says nothing once a file is on it, so deleting the guard from a listed
-        // file would still pass. This fails on both moves — a new unguarded call
-        // site, and the bound being dropped from an existing one.
+        // A parser call may appear only when one of its accepted guards is in
+        // the preceding twelve lines. The local window catches a new unguarded
+        // call or a reordered/removed guard without attempting to parse Rust
+        // braces inside strings and comments.
         let offenders: Vec<_> = files
             .iter()
-            .filter(|path| {
+            .flat_map(|path| {
                 let text = std::fs::read_to_string(path).expect("readable source file");
-                UNGUARDED_PARSERS.iter().any(|p| text.contains(p))
-                    && !text.contains("check_nesting_depth")
+                GUARDED_PARSERS
+                    .iter()
+                    .flat_map(|&(parser, guards)| {
+                        let source = text.as_str();
+                        source
+                            .match_indices(parser)
+                            .filter_map(move |(call_at, _)| {
+                                let preflight = preceding_lines(source, call_at, 12);
+                                (!guards.iter().any(|guard| preflight.contains(guard)))
+                                    .then_some((path, parser, guards))
+                            })
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect();
 
         assert!(
             offenders.is_empty(),
-            "these parse JSON-family text without bounding its nesting, so a deep \
-             document aborts the process; call check_nesting_depth on the source \
-             first: {offenders:#?}"
+            "these parser call sites lack their required preflight, so a deep \
+             document can abort the process; add the guard before parsing: {offenders:#?}"
         );
     }
 

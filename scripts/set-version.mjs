@@ -15,6 +15,23 @@ if (!v) {
   process.exit(1);
 }
 
+// Prepare the schema snapshot before touching any version surface. A release
+// bump must not stamp packages and Cargo manifests when its public schema
+// cannot be read or its destination cannot be prepared.
+const schemaDir = "site/public/schema";
+const pinned = `v${v.split(".").slice(0, 2).join(".")}.json`;
+let schemaSnapshot;
+try {
+  fs.mkdirSync(schemaDir, { recursive: true });
+  const schema = JSON.parse(fs.readFileSync(`${schemaDir}/latest.json`, "utf8"));
+  schema.$id = `https://nubjs.com/schema/${pinned}`;
+  schemaSnapshot = JSON.stringify(schema, null, 2) + "\n";
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`ERROR: cannot prepare schema snapshot: ${message}`);
+  process.exit(1);
+}
+
 const pkgs = [
   "npm/nub/package.json",
   "npm/nub-types/package.json",
@@ -60,12 +77,7 @@ replaceOrDie(
 // tree claims — /schema lists whatever is on disk, so a gap would be visible.
 // Patch releases reuse the minor's file: the schema describes a field surface,
 // which does not move in a patch.
-{
-  const pinned = `v${v.split(".").slice(0, 2).join(".")}.json`;
-  const schema = JSON.parse(fs.readFileSync("site/public/schema/latest.json", "utf8"));
-  schema.$id = `https://nubjs.com/schema/${pinned}`;
-  fs.writeFileSync(`site/public/schema/${pinned}`, JSON.stringify(schema, null, 2) + "\n");
-  console.log(`✓ schema snapshot site/public/schema/${pinned}`);
-}
+fs.writeFileSync(`${schemaDir}/${pinned}`, schemaSnapshot);
+console.log(`✓ schema snapshot ${schemaDir}/${pinned}`);
 
 console.log(`✓ npm packages, both Cargo.tomls, and runtime/version.mjs set to ${v}`);

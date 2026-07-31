@@ -30,6 +30,7 @@ pub use tsconfig::load_tsconfig;
 pub fn parse_yaml(source: String) -> napi::Result<serde_json::Value> {
     use yaml_rust2::YamlLoader;
 
+    check_yaml_depth(&source)?;
     let docs = YamlLoader::load_from_str(&source)
         .map_err(|e| napi::Error::from_reason(format!("YAML parse error: {e}")))?;
 
@@ -64,6 +65,45 @@ fn check_depth(source: &str, format: &str) -> napi::Result<()> {
         .map_err(|e| napi::Error::from_reason(format!("{format} parse error: {e}")))
 }
 
+/// Bound YAML collections before `YamlLoader` constructs a recursive tree.
+///
+/// YAML's block collections use indentation rather than JSON's `{` / `[` syntax,
+/// so the JSON-family text guard cannot see them. Its public scanner emits every
+/// block and flow collection boundary iteratively, without building the `Yaml`
+/// tree whose parsing, conversion, and drop can consume the Node stack.
+fn check_yaml_depth(source: &str) -> napi::Result<()> {
+    use yaml_rust2::scanner::{Scanner, TokenType};
+
+    let mut scanner = Scanner::new(source.chars());
+    let mut depth = 0_usize;
+    loop {
+        let Some(token) = scanner
+            .next_token()
+            .map_err(|e| napi::Error::from_reason(format!("YAML parse error: {e}")))?
+        else {
+            return Ok(());
+        };
+
+        match token.1 {
+            TokenType::BlockSequenceStart
+            | TokenType::BlockMappingStart
+            | TokenType::FlowSequenceStart
+            | TokenType::FlowMappingStart => {
+                depth += 1;
+                if depth > MAX_NESTING_DEPTH {
+                    return Err(napi::Error::from_reason(format!(
+                        "YAML parse error: nesting is deeper than the {MAX_NESTING_DEPTH}-level limit"
+                    )));
+                }
+            }
+            TokenType::BlockEnd | TokenType::FlowSequenceEnd | TokenType::FlowMappingEnd => {
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Parse JSON5 source into a JS value.
 #[napi]
 pub fn parse_json5(source: String) -> napi::Result<serde_json::Value> {
@@ -76,11 +116,28 @@ pub fn parse_json5(source: String) -> napi::Result<serde_json::Value> {
 #[napi]
 pub fn parse_jsonc(source: String) -> napi::Result<serde_json::Value> {
     check_depth(&source, "JSONC")?;
-    // The `Option` is the deserialization target, not a wrapper the parser adds:
-    // it is `None` for the empty document.
-    jsonc_parser::parse_to_serde_value::<Option<serde_json::Value>>(&source, &Default::default())
+    // `Option<T>` maps both an empty document and literal `null` to `None`.
+    // The data loader deliberately turns a parsed null into an undefined default
+    // export, matching its JavaScript fallback, while an absent document remains
+    // a parse error.
+    let parsed = jsonc_parser::parse_to_serde_value::<Option<serde_json::Value>>(
+        &source,
+        &Default::default(),
+    )
+    .map_err(|e| napi::Error::from_reason(format!("JSONC parse error: {e}")))?;
+    if let Some(value) = parsed {
+        return Ok(value);
+    }
+    let present = jsonc_parser::parse_to_value(&source, &Default::default())
         .map_err(|e| napi::Error::from_reason(format!("JSONC parse error: {e}")))?
-        .ok_or_else(|| napi::Error::from_reason("JSONC: empty document".to_string()))
+        .is_some();
+    if present {
+        Ok(serde_json::Value::Null)
+    } else {
+        Err(napi::Error::from_reason(
+            "JSONC: empty document".to_string(),
+        ))
+    }
 }
 
 fn yaml_to_json(yaml: &yaml_rust2::Yaml) -> serde_json::Value {

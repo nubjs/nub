@@ -865,6 +865,9 @@ fn engine_session_inner(
     {
         warn_resolution_scoped_out(install, detected.as_ref(), &cwd);
     }
+    if noise == ConfigScopeNoise::Warn {
+        warn_layout_override_conflict(&cwd);
+    }
     let scoped = scoped_install_settings(&native_install, native_mode);
     aube_settings::set_embedder_defaults(setting_defaults);
     aube_util::update_engine_context(move |c| c.project_config_settings = scoped);
@@ -1913,20 +1916,29 @@ pub(crate) fn engine_brand_preflight() {
     // own branded YAML/namespace are `None`/`""` so they never apply). In compat
     // mode (any other role, incl. fresh) nub plays the incumbent completely:
     // `pnpm-workspace.yaml` + `pnpm.*` stay live. The pnpm-branded read-sites now
-    // move together behind ONE EngineContext posture: `read_branded_pnpm_config`
-    // gates the `pnpm-workspace.yaml` candidate, the `pnpm` package.json
-    // namespace, AND pnpm's global `~/.config/pnpm/auth.ini` — true only in the
-    // PnpmOrFresh arm. `read_manifest_root_config` is true only under nub
-    // identity, where root-level config migrated by `nub pm use nub` is the
-    // native surface. `pnpmfile_default_enabled` gates the cwd-default
-    // `.pnpmfile`; true only in the PnpmOrFresh arm. The probe
+    // move together behind the same ConfigSurface decision: `read_branded_pnpm_config`
+    // gates the project-local `pnpm-workspace.yaml` candidate and `pnpm`
+    // package.json namespace; `read_pnpm_global_config` separately gates pnpm's
+    // global `config.yaml` and `~/.config/pnpm/auth.ini`. The project-local gate
+    // remains true on the conservative PnpmOrFresh surface, while the global
+    // gate additionally requires a provable pnpm-v11+ incumbent because both
+    // global files were introduced by pnpm 11; an unknown major follows the
+    // dominant v10 model and leaves them unread.
+    // `read_manifest_root_config` is true only under nub identity, where
+    // root-level config migrated by `nub pm use nub` is the native surface.
+    // `pnpmfile_default_enabled` gates the cwd-default `.pnpmfile`; true only in
+    // the PnpmOrFresh arm. The probe
     // is engine-free (plain manifest/lockfile-presence reads): ONE walk up the
     // tree, ONE `current_dir()` read (see [`resolve_config_surface`]).
-    let surface = std::env::current_dir()
-        .ok()
-        .map(|cwd| resolve_config_surface(&cwd))
+    let cwd = std::env::current_dir().ok();
+    let surface = cwd
+        .as_deref()
+        .map(resolve_config_surface)
         .unwrap_or(ConfigSurface::PnpmOrFresh);
     let read_branded_pnpm_config = matches!(surface, ConfigSurface::PnpmOrFresh);
+    let read_pnpm_global_config = cwd
+        .as_deref()
+        .is_some_and(|cwd| read_pnpm_global_config_for_surface(&surface, cwd));
     // pnpm REVERSED its env-var convention at v11: pnpm ≤10 reads `npm_config_*`
     // registry-client env vars and IGNORES `pnpm_config_*`; pnpm 11 reads
     // `pnpm_config_*` / `PNPM_CONFIG_*` and IGNORES `npm_config_*`. Honor bare
@@ -1982,17 +1994,11 @@ pub(crate) fn engine_brand_preflight() {
     aube_util::update_engine_context(|c| {
         c.read_branded_pnpm_config = read_branded_pnpm_config;
         c.npmrc_settings_allowlist = npmrc_settings_allowlist;
-        // GLOBAL config is read PM-AGNOSTICALLY and UNGATED by cwd incumbency:
-        // nub honors whatever global config the user already has from any tool —
-        // npm's `~/.npmrc`, pnpm's global `config.yaml`, pnpm's global `auth.ini`.
-        // Set `true` UNCONDITIONALLY (cwd-independent). The original bug was that
-        // these global reads were GATED on the cwd-derived `read_branded_pnpm_config`
-        // (so nub read pnpm's global config only when standing in a pnpm project);
-        // the fix is to DECOUPLE them from the cwd, not to stop reading them. The
-        // separate `read_pnpm_global_config` posture exists precisely so the GLOBAL
-        // reads don't ride the project-scoped gate. (Global WRITES are neutral-only —
-        // enforced in store_config_family: `config set -g` never writes a
-        // pnpm-branded global file.)
+        // `config.yaml` and `auth.ini` remain pnpm-NAMED global files. Standalone
+        // aube defaults this posture on, so nub must set it explicitly from the
+        // incumbent/surface decision rather than inheriting that default. Global
+        // writes remain neutral-only (`config set -g` never writes pnpm's files).
+        c.read_pnpm_global_config = read_pnpm_global_config;
         // node_modules LAYOUT is nub's own axis, configured through `nub.jsonc`.
         // The compatibility guarantee covers version resolution, module
         // resolution, and the project's lockfile — none of which layout touches
@@ -2046,8 +2052,8 @@ pub(crate) fn engine_brand_preflight() {
             // Compat mode, but the incumbent is npm/yarn/bun — NOT pnpm. The
             // pnpm-specific config surface is theirs to ignore (gated off by
             // `read_branded_pnpm_config = false`): a stray `pnpm-workspace.yaml`,
-            // a `package.json#pnpm.*` object, or pnpm's global `auth.ini` in an
-            // npm/yarn/bun project is another tool's state. The cwd-default
+            // a `package.json#pnpm.*` object, or pnpm's global `config.yaml` /
+            // `auth.ini` in an npm/yarn/bun project is another tool's state. The cwd-default
             // `.pnpmfile.cjs`/`.mjs` is pnpm-proprietary too, and unlike a
             // workspace-yaml *it shapes resolution* — gated off here by
             // `pnpmfile_default_enabled = false`. Explicit
@@ -2077,10 +2083,12 @@ pub(crate) fn engine_brand_preflight() {
         ConfigSurface::PnpmOrFresh => {
             // pnpm role (or fresh): play the incumbent completely.
             // `read_branded_pnpm_config = true` keeps `pnpm-workspace.yaml`, the
-            // `pnpm` package.json namespace, and pnpm's `auth.ini` live. nub's own
-            // branded YAML/namespace are `None`/`""` on the const, so an
-            // `aube-workspace.yaml` or `aube` manifest object some other tool left
-            // on disk is neither read nor chosen as a fresh-write target.
+            // `pnpm` package.json namespace live. The separate global gate keeps
+            // pnpm 11's `config.yaml`/`auth.ini` live only when that major is
+            // provable. nub's own branded YAML/namespace are `None`/`""` on the
+            // const, so an `aube-workspace.yaml` or `aube` manifest object some
+            // other tool left on disk is neither read nor chosen as a
+            // fresh-write target.
         }
     }
 }
@@ -2122,6 +2130,106 @@ enum ConfigSurface {
     /// pnpm-format artifacts): play the pnpm incumbent completely — the
     /// pnpm-specific surface stays live.
     PnpmOrFresh,
+}
+
+/// Whether nub may read pnpm-NAMED global files (`config.yaml` and `auth.ini`).
+/// This is deliberately a separate EngineContext field from the project-local
+/// pnpm surface, because the engine loads global files through a different
+/// path. Both files were introduced by pnpm 11, so this posture requires a
+/// provable pnpm-v11+ incumbent. An unknown major follows the dominant v10
+/// model and leaves them unread; nub, npm, yarn, and bun identities likewise
+/// must not read pnpm's global state.
+fn read_pnpm_global_config_for_surface(surface: &ConfigSurface, cwd: &Path) -> bool {
+    if !matches!(surface, ConfigSurface::PnpmOrFresh) {
+        return false;
+    }
+
+    // pnpm 10 reads settings/auth through its rc model; pnpm 11 introduced
+    // `<configDir>/config.yaml` and `<configDir>/auth.ini`. Keep this keyed on
+    // the declared major like the sibling env/npmrc policies. A lockfile or a
+    // pnpm-named project file proves the incumbent's NAME but not its major,
+    // so it correctly stays on the unknown-major v10 default.
+    nub_core::pm::resolve::declared_pm_raw(cwd)
+        .and_then(|(name, version)| (name == "pnpm").then_some(version).flatten())
+        .is_some_and(|version| {
+            parse_major_minor(&version)
+                .0
+                .is_some_and(|major| major >= 11)
+        })
+}
+
+/// Emit the one case where an explicit project `nub.jsonc` layout setting and
+/// an incumbent's layout setting would otherwise make the latter's suppression
+/// invisible. The layout remains nub's axis; this only names the collision.
+fn warn_layout_override_conflict(cwd: &Path) {
+    let Some(incumbent) = incumbent_layout_surface(&resolve_config_surface(cwd), cwd) else {
+        return;
+    };
+    let Some(config) = crate::project_config::effective_config() else {
+        return;
+    };
+    if !project_config_declares_layout(config) {
+        return;
+    }
+
+    let line = format!(
+        "nub: nub.jsonc install layout applies; this project's {incumbent} layout setting is ignored."
+    );
+    if scope_warning_uses_dim() {
+        eprintln!("\x1b[2m{line}\x1b[0m");
+    } else {
+        eprintln!("{line}");
+    }
+}
+
+fn project_config_declares_layout(config: &crate::project_config::EffectiveConfig) -> bool {
+    [
+        crate::project_config::ConfigKey::InstallLinker,
+        crate::project_config::ConfigKey::InstallPublicHoist,
+    ]
+    .iter()
+    .any(|key| {
+        config
+            .sources
+            .get(key)
+            .is_some_and(|source| source.kind == crate::project_config::ConfigSourceKind::Project)
+    })
+}
+
+/// The active incumbent's on-disk layout surface, when it actually contains a
+/// layout setting nub will not honor. A mere config file is not enough to warn.
+fn incumbent_layout_surface(surface: &ConfigSurface, cwd: &Path) -> Option<&'static str> {
+    match surface {
+        ConfigSurface::PnpmOrFresh => pnpm_workspace_declares_layout(cwd).then_some("pnpm"),
+        ConfigSurface::NonPnpmCompat { role: "yarn", dir } => yarnrc_walk_dirs(dir, cwd)
+            .iter()
+            .any(|dir| yarnrc_node_linker(dir).is_some())
+            .then_some("yarn"),
+        ConfigSurface::NonPnpmCompat { role: "bun", dir } => {
+            bun_config::declares_install_linker(dir).then_some("bun")
+        }
+        ConfigSurface::NubIdentity(_) | ConfigSurface::NonPnpmCompat { .. } => None,
+    }
+}
+
+fn pnpm_workspace_declares_layout(cwd: &Path) -> bool {
+    let mut dir = cwd.to_path_buf();
+    for _ in 0..16 {
+        if dir.join("pnpm-workspace.yaml").is_file() {
+            let raw = aube_manifest::workspace::load_raw(&dir).unwrap_or_default();
+            return aube_settings::all().iter().any(|meta| {
+                meta.layout
+                    && meta
+                        .workspace_yaml_keys
+                        .iter()
+                        .any(|key| aube_settings::workspace_yaml_value(&raw, key).is_some())
+            });
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    false
 }
 
 /// Engine-free, single-walk resolution of the project's [`ConfigSurface`]
@@ -4294,6 +4402,149 @@ mod tests {
                 role: "yarn",
                 dir: d.path().to_path_buf()
             }
+        );
+    }
+
+    #[test]
+    fn pnpm_global_config_gate_follows_the_incumbent_surface() {
+        // `config.yaml` and `auth.ini` are pnpm-NAMED even though they live in
+        // the user config home. pnpm 11 introduced both files, so their global
+        // location does not make them PM-agnostic or version-agnostic.
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().to_path_buf();
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"packageManager":"pnpm@10.0.0"}"#,
+        )
+        .unwrap();
+        assert!(!read_pnpm_global_config_for_surface(
+            &ConfigSurface::PnpmOrFresh,
+            root.path(),
+        ));
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"packageManager":"pnpm@11.0.0"}"#,
+        )
+        .unwrap();
+        assert!(read_pnpm_global_config_for_surface(
+            &ConfigSurface::PnpmOrFresh,
+            root.path(),
+        ));
+        assert!(!read_pnpm_global_config_for_surface(
+            &ConfigSurface::NubIdentity(dir.clone()),
+            root.path(),
+        ));
+        for role in ["npm", "yarn", "bun"] {
+            assert!(
+                !read_pnpm_global_config_for_surface(
+                    &ConfigSurface::NonPnpmCompat {
+                        role,
+                        dir: dir.clone(),
+                    },
+                    root.path(),
+                ),
+                "{role} identity must not read pnpm's global files"
+            );
+        }
+
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"packageManager":"vlt@1.0.0"}"#,
+        )
+        .unwrap();
+        assert!(
+            !read_pnpm_global_config_for_surface(&ConfigSurface::PnpmOrFresh, root.path()),
+            "the conservative CLI surface for an unknown tool is not pnpm incumbency"
+        );
+
+        std::fs::write(root.path().join("package.json"), "{}").unwrap();
+        std::fs::write(
+            root.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
+        )
+        .unwrap();
+        assert!(
+            !read_pnpm_global_config_for_surface(&ConfigSurface::PnpmOrFresh, root.path()),
+            "a pnpm lockfile proves the incumbent name, not the major; unknown defaults to v10"
+        );
+    }
+
+    #[test]
+    fn layout_conflict_requires_both_a_project_override_and_an_active_incumbent_setting() {
+        let _guard = ENGINE_GLOBAL_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        struct Restore(aube_util::EngineContext);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                aube_util::set_engine_context(self.0.clone());
+            }
+        }
+        let _restore = Restore(aube_util::engine_context());
+        aube_util::update_engine_context(|context| {
+            context.read_branded_pnpm_config = true;
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().to_path_buf();
+        let source = |kind| crate::project_config::ConfigSource {
+            kind,
+            path: None,
+            root: dir.clone(),
+        };
+        let config_with = |key, kind| crate::project_config::EffectiveConfig {
+            cwd: dir.clone(),
+            values: crate::project_config::ProjectConfig::default(),
+            sources: std::collections::BTreeMap::from([(key, source(kind))]),
+            project: None,
+            global: None,
+        };
+
+        assert!(project_config_declares_layout(&config_with(
+            crate::project_config::ConfigKey::InstallLinker,
+            crate::project_config::ConfigSourceKind::Project,
+        )));
+        assert!(project_config_declares_layout(&config_with(
+            crate::project_config::ConfigKey::InstallPublicHoist,
+            crate::project_config::ConfigSourceKind::Project,
+        )));
+        assert!(
+            !project_config_declares_layout(&config_with(
+                crate::project_config::ConfigKey::InstallLinker,
+                crate::project_config::ConfigSourceKind::Global,
+            )),
+            "a global nub config is not a current project override"
+        );
+
+        std::fs::write(
+            root.path().join("pnpm-workspace.yaml"),
+            "nodeLinker: hoisted\n",
+        )
+        .unwrap();
+        assert_eq!(
+            incumbent_layout_surface(&ConfigSurface::PnpmOrFresh, root.path()),
+            Some("pnpm")
+        );
+        let member = root.path().join("packages/app");
+        std::fs::create_dir_all(&member).unwrap();
+        assert_eq!(
+            incumbent_layout_surface(&ConfigSurface::PnpmOrFresh, &member),
+            Some("pnpm"),
+            "a member command must find the incumbent layout at its workspace root"
+        );
+        // The engine caches raw workspace YAML by path for the process lifetime,
+        // so use a distinct project for the negative case rather than pretending
+        // an in-process rewrite would be reloaded.
+        let no_layout = tempfile::tempdir().unwrap();
+        std::fs::write(
+            no_layout.path().join("pnpm-workspace.yaml"),
+            "autoInstallPeers: false\n",
+        )
+        .unwrap();
+        assert_eq!(
+            incumbent_layout_surface(&ConfigSurface::PnpmOrFresh, no_layout.path()),
+            None,
+            "a pnpm config file without a layout key is not a conflict"
         );
     }
 

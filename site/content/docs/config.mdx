@@ -10,7 +10,7 @@ Every setting resolves through the same chain, most specific first:
 - **Command-line option** — `nub --node app.ts`
 - **Environment variable** — `NODE_COMPAT=1`
 - **Project `nub.jsonc`** — `"nodeCompat": true`, from the nearest file walking up
-- **Global `nub.jsonc`** — the same field, for personal defaults everywhere. This file is treated leniently, because it applies to every project on your machine: a bad value is reported and that setting skipped, and an unrecognized top-level section is ignored outright — so one typo, or a key left behind by a newer Nub, never takes the rest of your defaults down with it. The strict behavior above applies to the project file, which is checked in and shared. Read from the first of:
+- **Global `nub.jsonc`** — the same field, for personal defaults everywhere. This file is treated leniently, because it applies to every project on your machine: an unrecognized top-level section is ignored outright, and a bad value is reported and the whole file skipped rather than failing the command — so a key left behind by a newer Nub never takes the rest of your defaults down with it, and a typo in your own defaults never blocks someone else's project. The strict behavior above applies to the project file, which is checked in and shared. Read from the first of:
   - `$XDG_CONFIG_HOME/nub/nub.jsonc`, on any platform, when that variable is set
   - `~/.config/nub/nub.jsonc` on every platform, including Windows, where it resolves under your user profile. Windows service and `SYSTEM` accounts, whose profile lives under the system root, fall back to `%APPDATA%\nub\nub.jsonc`
 - **Built-in default** — `false`
@@ -30,14 +30,14 @@ nub config delete install.minimumReleaseAge
 nub config path                               # the global file's location
 ```
 
-Fields are addressed by their dotted path, and each is written whole. Lists are comma-separated.
+Fields are addressed by their dotted path, and each is written whole. Pass arrays and objects as one shell-quoted JSON argument, with JSON keys and strings in double quotes.
 
 ```bash
-nub config set preload ./setup.ts,tsx/esm
-nub config set loader .graphql=text,.rules=yaml
+nub config set preload '["./setup.ts","tsx/esm"]'
+nub config set loader '{".graphql":"text",".rules":"yaml"}'
 ```
 
-An argument starting with `[` or `{` is read as JSON, which is how the object forms are written.
+Scalar values need no JSON quoting. A union field uses JSON only for its array or object form.
 
 ```bash
 nub config set install.linker '{"strategy":"isolated","hoist":["@types/*"]}'
@@ -186,6 +186,8 @@ A bare specifier resolves through the package's `exports` map, so [`conditions`]
 ### `nodeOptions`
 
 Pass Node options to runtime commands.
+
+The field stays `nodeOptions` in `nub.jsonc`. From the config command, address it as `runtime.nodeOptions` — for example, `nub config set runtime.nodeOptions '["--enable-source-maps"]'`. The bare `nub config set nodeOptions` spelling remains the pnpm-compatible package-manager setting in `.npmrc`.
 
 ```jsonc title="nub.jsonc"
 {

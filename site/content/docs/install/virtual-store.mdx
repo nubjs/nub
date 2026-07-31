@@ -97,7 +97,7 @@ Nub mirrors the incumbent on version resolution, module resolution, and the lock
 
 The same holds for the hoisting keys, the modules directory, and the virtual-store paths: every one of them reads from `.npmrc`, its `npm_config_*` environment alias, and [`nub.jsonc`](/docs/config#installlinker) — never from another tool's config file. Resolution config in those same files is unaffected, and no lockfile format records a layout, so the round-trip with the incumbent holds either way.
 
-Yarn Plug'n'Play is the one exception, and it is a refusal rather than an ignored preference. Nub installs a `node_modules` tree, so a project asking for PnP gets an error before anything is written:
+Yarn Plug'n'Play (PnP) is the one exception, and it is a refusal rather than an ignored preference. Nub installs a `node_modules` tree, so a project asking for PnP gets an error before anything is written:
 
 ```console
 $ nub install
@@ -134,7 +134,7 @@ A project [`nub.jsonc`](/docs/config) picks the layout with one [`linker`](/docs
 }
 ```
 
-Two of the strategies accept a knob, written in the object form; `hoisted` and `pnp` take none. Under `isolated` that knob is `hoist`, which fills the hidden fallback tree at `node_modules/.store/node_modules/` — the directory your dependencies reach when they import something they never declared. It takes `true`, `false`, or a pattern list.
+Two of the strategies accept a knob, written in the object form; `hoisted` takes none. Under `isolated` that knob is `hoist`, which fills the hidden fallback tree at `node_modules/.store/node_modules/` — the directory your dependencies reach when they import something they never declared. It takes `true`, `false`, or a pattern list.
 
 ```jsonc title="nub.jsonc"
 {

@@ -11,13 +11,13 @@ use super::yarnrc;
 /// the file is read on every load and its auth tokens merged into the
 /// user-scope config).
 ///
-/// This is a GLOBAL / user-scope pnpm-named file, so it is gated by
+/// This is a global / user-scope pnpm-named file, so it is gated by
 /// `read_pnpm_global_config` — NOT by the project-derived
-/// `read_branded_pnpm_config`. Global config has no project incumbent, so an
-/// embedder whose global config is its own neutral surface (e.g. nub) clears
-/// `read_pnpm_global_config` UNCONDITIONALLY and this file is never read,
-/// regardless of the cwd's incumbent PM. The `.npmrc` / `npmrcAuthFile`
-/// sources are unaffected; only the pnpm-named `auth.ini` is gated.
+/// `read_branded_pnpm_config`. The two postures are separate because these
+/// files are loaded by different readers; an embedder may still derive both
+/// from project identity. Nub enables this one only under a provable
+/// pnpm-v11+ incumbent. The `.npmrc` / `npmrcAuthFile` sources are unaffected;
+/// only the pnpm-named `auth.ini` is gated.
 fn pnpm_auth_ini_enabled() -> bool {
     aube_util::engine_context().read_pnpm_global_config
 }

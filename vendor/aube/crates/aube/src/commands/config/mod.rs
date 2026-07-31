@@ -944,11 +944,9 @@ mod tests {
     #[test]
     fn config_get_reads_global_config_yaml_independent_of_the_project_gate() {
         // GLOBAL config.yaml is gated by `read_pnpm_global_config`, NOT the
-        // project-scope `read_branded_pnpm_config`. So even with the PROJECT
-        // gate OFF (non-pnpm incumbent), the user's GLOBAL pnpm config.yaml is
-        // still read when the global gate is on (the asymmetric-read model:
-        // honor whatever global config the user has, ungated by cwd). With the
-        // global gate OFF, it goes inert.
+        // project-scope `read_branded_pnpm_config`. Prove the two controls stay
+        // independent: an embedding host may enable the global tier while
+        // suppressing the project tier. With the global gate off, it goes inert.
         let _lock = config_test_lock();
         let _gate = PnpmReadGateGuard::set(false);
         let dir = tempfile::tempdir().unwrap();

@@ -81,9 +81,9 @@ pub struct EngineContext {
     /// workspace yaml + the `pnpm` package.json namespace). The GLOBAL /
     /// user-scope pnpm-named files (`<configDir>/config.yaml` and
     /// `<configDir>/auth.ini`) are gated by the separate
-    /// [`read_pnpm_global_config`](Self::read_pnpm_global_config) posture —
-    /// they must NOT ride a project-derived (cwd-dependent) gate, since global
-    /// config has no project incumbent.
+    /// [`read_pnpm_global_config`](Self::read_pnpm_global_config) posture. The
+    /// two gates are separate because the files are loaded through different
+    /// paths; an embedder may still derive both from the active project identity.
     pub read_branded_pnpm_config: bool,
 
     /// Whether aube reads pnpm's GLOBAL / user-scope pnpm-named config files:
@@ -92,20 +92,13 @@ pub struct EngineContext {
     /// preserves upstream behavior — standalone aube IS a pnpm-compatible PM
     /// and reads pnpm's global config unconditionally.
     ///
-    /// This is DELIBERATELY SEPARATE from
+    /// This is deliberately separate from
     /// [`read_branded_pnpm_config`](Self::read_branded_pnpm_config). That
-    /// posture is derived from the project's incumbent PM (a cwd-scoped
-    /// concept) and correctly gates the PROJECT-scoped pnpm surfaces. Global
-    /// config, by contrast, has no project and no incumbent — gating it on the
-    /// cwd's incumbent would mean "read pnpm's global config only when you
-    /// happen to be standing in a pnpm project", which is incoherent. This
-    /// separate posture lets an embedder read the global pnpm-named files
-    /// UNGATED by the cwd. nub sets this `true` unconditionally: it honors
-    /// whatever global config the user already has from any tool (npm's
-    /// `~/.npmrc`, pnpm's global `config.yaml` / `auth.ini`), independent of
-    /// the cwd. (nub keeps global WRITES neutral — never writing back a
-    /// pnpm-branded global file — but that is the embedder's write-path
-    /// concern, not this read gate.)
+    /// posture gates the PROJECT-scoped pnpm surfaces, while this one gates
+    /// pnpm-named user files loaded by the global readers. An embedder can keep
+    /// the upstream unconditional behavior or set this from its own identity
+    /// policy. Nub enables it only for a provable pnpm-v11+ incumbent; its
+    /// global writes remain neutral and are a separate write-path concern.
     pub read_pnpm_global_config: bool,
 
     /// Whether LAYOUT settings — the ones flagged `layout = true` in

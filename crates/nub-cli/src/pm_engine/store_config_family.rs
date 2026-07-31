@@ -46,17 +46,12 @@
 //!   `package.json#aube.<map>` field, and `.npmrc` lines for map entries are
 //!   unread). A free-form unknown key has no workspace-yaml schema, so it goes
 //!   to `.npmrc` verbatim even under a pnpm-v11 incumbent.
-//! - **GLOBAL config is ASYMMETRIC — read broad, write neutral** (decision
-//!   2026-06-20):
-//!     - **Reads:** nub honors WHATEVER global config the user already has,
-//!       from any tool — npm's `~/.npmrc`, pnpm's global `config.yaml`, pnpm's
-//!       global `auth.ini` — PM-AGNOSTICALLY and UNGATED by the cwd's
-//!       incumbent PM. The original bug was that these global reads were GATED
-//!       on the cwd-derived `read_branded_pnpm_config` (nub read pnpm's global
-//!       config only when standing in a pnpm project); the fix DECOUPLES them
-//!       from the cwd via the separate `read_pnpm_global_config = true` posture
-//!       (set unconditionally in `engine_brand_preflight`), NOT to stop reading
-//!       them.
+//! - **GLOBAL config reads follow identity; writes stay neutral:**
+//!     - **Reads:** the neutral user `~/.npmrc` is always eligible. Pnpm's
+//!       branded global `config.yaml` and `auth.ini` are eligible only under a
+//!       provable pnpm-v11+ incumbent, through the separate
+//!       `read_pnpm_global_config` posture. A pnpm ≤10/unknown-major, Nub, npm,
+//!       Yarn, or Bun project never imports them.
 //!     - **Writes** (`config set --location user|global`): NEVER a PM-branded
 //!       global file. In global mode there is no project → no incumbent PM → nub
 //!       can't know which PM's global file is meant, so writes go NEUTRAL:
@@ -356,7 +351,7 @@ fn project_scalar_home(pnpm_incumbent: bool) -> config_model::ScalarHome {
 /// ERROR on for unrecognized keys) — so a key naming a `nub.jsonc` field is
 /// intercepted BEFORE the engine's `.npmrc`/pnpm-yaml routing. Two tables claim
 /// keys here, both exact-match so a key nub does not own falls through
-/// unchanged: [`crate::config_fields::FIELDS`], the whole published schema; and
+/// unchanged: [`crate::config_fields::FIELDS`], the nub CLI address table; and
 /// the legacy `exec.implicitDlx` spelling below, which predates that schema and
 /// keeps its own storage location and its `prompt` default on an unset read.
 ///

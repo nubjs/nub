@@ -217,32 +217,31 @@ pub fn discover_env_files(project_root: &Path) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
+// A self-referential value grows MULTIPLICATIVELY per round, so the 10-round
+// bound alone does not bound the output: `A=${A}${A}${A}${A}${A}${A}${A}${A}`
+// is 8x per pass, i.e. 8^10 ≈ a billion characters, which leaves the process
+// thrashing swap rather than looping forever. Reachable from a cloned repo —
+// a `.env` file has always fed this, and a `nub.jsonc` `envFile` now does too.
+//
+// A value that would exceed the cap keeps its PRE-expansion text rather than
+// being truncated: a truncated value is a silently wrong one, and the raw form
+// is at least visibly literal. 128 KiB is far above any real environment
+// variable and well under the point where this hurts.
+const MAX_EXPANDED_VALUE: usize = 128 * 1024;
+
 /// Expand `${VAR}` and `$VAR` references within all values of a map, in-place.
 /// Multi-pass (up to 10 rounds) to resolve nested chains like `A=hello`,
 /// `B=${A}_world`, `C=${B}_!`. Undefined references resolve to the empty string
 /// (consistent with [`load_env_files`]). Mutates `map` in-place and returns it
 /// for easy chaining.
-/// A self-referential value grows MULTIPLICATIVELY per round, so the 10-round
-/// bound alone does not bound the output: `A=${A}${A}${A}${A}${A}${A}${A}${A}`
-/// is 8x per pass, i.e. 8^10 ≈ a billion characters, which leaves the process
-/// thrashing swap rather than looping forever. Reachable from a cloned repo —
-/// a `.env` file has always fed this, and a `nub.jsonc` `envFile` now does too.
-///
-/// A value that would exceed the cap keeps its PRE-expansion text rather than
-/// being truncated: a truncated value is a silently wrong one, and the raw form
-/// is at least visibly literal. 128 KiB is far above any real environment
-/// variable and well under the point where this hurts.
-const MAX_EXPANDED_VALUE: usize = 128 * 1024;
-
 pub fn expand_env_map(map: &mut HashMap<String, String>) -> &mut HashMap<String, String> {
     for _ in 0..10 {
         let snapshot = map.clone();
         let mut changed = false;
         for value in map.values_mut() {
-            let expanded = expand_vars(value, &snapshot);
-            if expanded.len() > MAX_EXPANDED_VALUE {
+            let Some(expanded) = expand_vars(value, &snapshot) else {
                 continue;
-            }
+            };
             if expanded != *value {
                 *value = expanded;
                 changed = true;
@@ -531,15 +530,36 @@ fn upsert_env_pair(
     }
 }
 
+/// Append `text` without ever growing an expansion past its cap.
+fn push_bounded(result: &mut String, text: &str) -> Option<()> {
+    if result.len().checked_add(text.len())? > MAX_EXPANDED_VALUE {
+        return None;
+    }
+    result.push_str(text);
+    Some(())
+}
+
+/// Append one literal character without ever growing an expansion past its cap.
+fn push_char_bounded(result: &mut String, ch: char) -> Option<()> {
+    if result.len().checked_add(ch.len_utf8())? > MAX_EXPANDED_VALUE {
+        return None;
+    }
+    result.push(ch);
+    Some(())
+}
+
 /// Expand `${VAR}` and `$VAR` references in a value.
-fn expand_vars(value: &str, env: &HashMap<String, String>) -> String {
+///
+/// `None` means the expansion would exceed [`MAX_EXPANDED_VALUE`]. Callers keep
+/// the raw value in that case rather than publishing a truncated replacement.
+fn expand_vars(value: &str, env: &HashMap<String, String>) -> Option<String> {
     let mut result = String::new();
     let chars: Vec<char> = value.chars().collect();
     let mut i = 0;
 
     while i < chars.len() {
         if chars[i] == '\\' && i + 1 < chars.len() && chars[i + 1] == '$' {
-            result.push('$');
+            push_bounded(&mut result, "$")?;
             i += 2;
             continue;
         }
@@ -549,12 +569,11 @@ fn expand_vars(value: &str, env: &HashMap<String, String>) -> String {
                 // ${VAR} form
                 if let Some(close) = chars[i + 2..].iter().position(|&c| c == '}') {
                     let var_name: String = chars[i + 2..i + 2 + close].iter().collect();
-                    let resolved = env
-                        .get(&var_name)
-                        .cloned()
-                        .or_else(|| std::env::var(&var_name).ok())
-                        .unwrap_or_default();
-                    result.push_str(&resolved);
+                    if let Some(resolved) = env.get(&var_name) {
+                        push_bounded(&mut result, resolved)?;
+                    } else if let Ok(resolved) = std::env::var(&var_name) {
+                        push_bounded(&mut result, &resolved)?;
+                    }
                     i += close + 3;
                     continue;
                 }
@@ -567,22 +586,21 @@ fn expand_vars(value: &str, env: &HashMap<String, String>) -> String {
                     end += 1;
                 }
                 let var_name: String = chars[start..end].iter().collect();
-                let resolved = env
-                    .get(&var_name)
-                    .cloned()
-                    .or_else(|| std::env::var(&var_name).ok())
-                    .unwrap_or_default();
-                result.push_str(&resolved);
+                if let Some(resolved) = env.get(&var_name) {
+                    push_bounded(&mut result, resolved)?;
+                } else if let Ok(resolved) = std::env::var(&var_name) {
+                    push_bounded(&mut result, &resolved)?;
+                }
                 i = end;
                 continue;
             }
         }
 
-        result.push(chars[i]);
+        push_char_bounded(&mut result, chars[i])?;
         i += 1;
     }
 
-    result
+    Some(result)
 }
 
 #[cfg(test)]
@@ -618,6 +636,46 @@ mod tests {
         chain.insert("B".to_string(), "${A}_world".to_string());
         expand_env_map(&mut chain);
         assert_eq!(chain["B"], "hello_world", "normal chains still expand");
+    }
+
+    #[test]
+    fn expansion_cap_stops_before_copying_oversized_literal_or_replacement() {
+        let oversized_literal = "x".repeat(MAX_EXPANDED_VALUE + 1);
+        assert_eq!(expand_vars(&oversized_literal, &HashMap::new()), None);
+
+        let mut map = HashMap::new();
+        map.insert("SOURCE".to_string(), "x".repeat(MAX_EXPANDED_VALUE + 1));
+        map.insert("FROM_SOURCE".to_string(), "${SOURCE}".to_string());
+
+        expand_env_map(&mut map);
+
+        assert_eq!(
+            map["FROM_SOURCE"], "${SOURCE}",
+            "an oversized single replacement keeps the raw value"
+        );
+    }
+
+    #[test]
+    fn expansion_cap_allows_exact_boundary_and_ordinary_escaped_values() {
+        let mut map = HashMap::new();
+        map.insert("SOURCE".to_string(), "x".repeat(MAX_EXPANDED_VALUE));
+        map.insert("AT_LIMIT".to_string(), "${SOURCE}".to_string());
+        map.insert("SMALL".to_string(), "resolved".to_string());
+        map.insert(
+            "ESCAPED".to_string(),
+            r#"\$SMALL:${MISSING}:$SMALL"#.to_string(),
+        );
+
+        assert_eq!(
+            expand_vars(&map["ESCAPED"], &map),
+            Some("$SMALL::resolved".to_string()),
+            "one pass keeps an escaped dollar literal and drops a missing variable"
+        );
+
+        expand_env_map(&mut map);
+
+        assert_eq!(map["AT_LIMIT"].len(), MAX_EXPANDED_VALUE);
+        assert_eq!(map["ESCAPED"], "resolved::resolved");
     }
 
     #[test]
@@ -901,7 +959,7 @@ mod tests {
         env.insert("HOST".to_string(), "localhost".to_string());
         assert_eq!(
             expand_vars("http://${HOST}:3000", &env),
-            "http://localhost:3000"
+            Some("http://localhost:3000".to_string())
         );
     }
 
@@ -909,13 +967,19 @@ mod tests {
     fn expand_dollar_bare() {
         let mut env = HashMap::new();
         env.insert("PORT".to_string(), "8080".to_string());
-        assert_eq!(expand_vars("port=$PORT", &env), "port=8080");
+        assert_eq!(
+            expand_vars("port=$PORT", &env),
+            Some("port=8080".to_string())
+        );
     }
 
     #[test]
     fn expand_escaped_dollar() {
         let env = HashMap::new();
-        assert_eq!(expand_vars("price=\\$5", &env), "price=$5");
+        assert_eq!(
+            expand_vars("price=\\$5", &env),
+            Some("price=$5".to_string())
+        );
     }
 
     // `discover_env_files` underpins `nub watch`'s `--env-file` precedence: it

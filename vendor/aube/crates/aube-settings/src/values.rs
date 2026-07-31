@@ -95,13 +95,11 @@ pub struct ResolveCtx<'a> {
     /// below the project-root `workspace_yaml` (a project
     /// `pnpm-workspace.yaml` overrides the user's global `config.yaml`,
     /// matching pnpm v11) and above the user `.npmrc` / aube config.
-    /// Populated under the GLOBAL-scope `read_pnpm_global_config` posture
-    /// — on-by-default for standalone aube (which IS a pnpm-compatible
-    /// PM), cleared UNCONDITIONALLY (cwd-independent) under the nub profile
-    /// (nub's global config is its own neutral home; it never reads a
-    /// pnpm-named global file); [`empty_yaml_map`] otherwise. This is a
-    /// global source, so it is NOT gated on the project-derived
-    /// `read_branded_pnpm_config`.
+    /// Populated under the separate `read_pnpm_global_config` posture —
+    /// on-by-default for standalone aube (which is a pnpm-compatible PM).
+    /// Embedders may derive that posture from project identity; Nub enables it
+    /// only for a provable pnpm-v11+ incumbent. [`empty_yaml_map`] is used
+    /// otherwise.
     pub global_config_yaml: &'a std::collections::BTreeMap<String, yaml_serde::Value>,
     /// Captured environment variables relevant to settings. In
     /// production this is populated by [`capture_env`]; tests build a

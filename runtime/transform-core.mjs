@@ -273,7 +273,9 @@ export function getPackageType(dir) {
   for (;;) {
     const pkgPath = join(current, "package.json");
     if (fileExists(pkgPath)) {
-      try { type = JSON.parse(readFileSync(pkgPath, "utf8")).type; } catch {}
+      // Keep the runtime package-type read aligned with the Rust tsconfig reader:
+      // Windows editors and PowerShell may prefix valid JSON with one UTF-8 BOM.
+      try { type = JSON.parse(readFileSync(pkgPath, "utf8").replace(/^\uFEFF/, "")).type; } catch {}
       // Watch this package.json (a `type`/script edit should restart) and the
       // `.env*` files alongside it (the package root is where they live).
       _reportDep?.(pkgPath);

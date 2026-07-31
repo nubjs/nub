@@ -136,15 +136,7 @@ pub fn implicit_dlx() -> ImplicitDlx {
 /// alive for the whole edit (the CST panics if the root is dropped while a
 /// descendant is used).
 fn root_object(path: &Path) -> std::io::Result<(CstRootNode, CstObject)> {
-    let refuse = |e: ConfigError| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "{}\n\x20\x20nothing was written — fix the file, or delete it, and retry",
-                e.in_file(path)
-            ),
-        )
-    };
+    let refuse = |error: ConfigError| refuse_edit(path, error);
     let text = match crate::jsonc::read_guarded(path) {
         Ok(text) => text,
         // Absence is the one blank slate — the file is about to be created.
@@ -178,14 +170,28 @@ fn root_object(path: &Path) -> std::io::Result<(CstRootNode, CstObject)> {
     Ok((root, obj))
 }
 
+/// Turn a configuration document error into the shared no-write refusal.
+///
+/// Set and delete both edit a CST and then atomically replace the source file,
+/// so neither may paper over a document they cannot edit faithfully.
+fn refuse_edit(path: &Path, error: ConfigError) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "{}\n\x20\x20nothing was written — fix the file, or delete it, and retry",
+            error.in_file(path)
+        ),
+    )
+}
+
 /// The dotted path of the first key some object in `object` names twice.
 ///
 /// A duplicate makes the reader and the writer disagree about which occurrence
 /// is authoritative: the value reader is `serde_json`, whose map visitor keeps
 /// the LAST, while every CST lookup here matches the FIRST. So a `set` edits an
 /// occurrence the next read ignores and reports success for a change with no
-/// effect, and a duplicated intermediate object defeats [`ensure_object`]'s
-/// remove-then-append entirely. Refusing is the same ground the rest of
+/// effect, and a duplicated intermediate object leaves no unambiguous parent
+/// for [`ensure_object`]. Refusing is the same ground the rest of
 /// [`root_object`] stands on — a file whose meaning nub cannot pin down is not
 /// one to rewrite.
 ///
@@ -228,31 +234,38 @@ fn duplicate_key(object: &CstObject, prefix: &str) -> Option<String> {
 
 /// Get-or-create the object property `name` of `obj`.
 ///
-/// A pre-existing `name` that is NOT an object (a hand-authored scalar/array) is
-/// best-effort REPLACED with a fresh object — dropping the malformed value
-/// rather than panicking or leaving a duplicate key. `get_object` matches the
-/// FIRST prop by name, so a stray non-object one must be removed before the
-/// append or the re-fetch would still find it and be `None`.
-///
-/// The re-fetch's `expect` holds only because [`root_object`] has already
-/// refused a document that names any key twice: a SECOND stray would still be
-/// matched first, leaving the freshly-appended object invisible.
-fn ensure_object(obj: &CstObject, name: &str) -> CstObject {
-    obj.object_value(name).unwrap_or_else(|| {
-        if let Some(stray) = obj.get(name) {
-            stray.remove();
-        }
-        obj.append(name, CstInputValue::Object(Vec::new()));
-        obj.object_value(name)
-            .expect("just-appended object is present")
-    })
+/// An existing scalar or array is not an absent parent. Replacing it would
+/// silently discard the author's value, so refuse the whole edit instead. The
+/// duplicate guard in [`root_object`] makes the post-append lookup unambiguous.
+fn ensure_object(
+    obj: &CstObject,
+    name: &str,
+    path: &Path,
+    dotted_path: &str,
+) -> std::io::Result<CstObject> {
+    if let Some(existing) = obj.object_value(name) {
+        return Ok(existing);
+    }
+    if obj.get(name).is_some() {
+        return Err(refuse_edit(
+            path,
+            ConfigError::Type {
+                path: dotted_path.to_string(),
+                expected: "an object",
+            },
+        ));
+    }
+    obj.append(name, CstInputValue::Object(Vec::new()));
+    Ok(obj
+        .object_value(name)
+        .expect("just-appended object is present"))
 }
 
 /// Write `value` at the object path `segments` (the last element is the leaf
 /// key), preserving every comment, trailing comma, and key order elsewhere in
 /// the file. Missing intermediate objects are created, as is the file and its
-/// parent directory. Returns an error only on an I/O failure the caller should
-/// surface — an in-memory edit never fails.
+/// parent directory. A malformed document or a non-object intermediate is an
+/// error, because changing it would discard hand-authored configuration.
 ///
 /// This is the ONE write path for both `nub.jsonc` files. `nub config set` runs
 /// through it so a hand-authored, heavily-commented file survives an edit that
@@ -266,8 +279,13 @@ pub(crate) fn set_json_path(
 
     let (leaf, parents) = segments.split_last().expect("a setting path has a leaf");
     let mut cursor = obj;
+    let mut parent_path = String::new();
     for name in parents {
-        cursor = ensure_object(&cursor, name);
+        if !parent_path.is_empty() {
+            parent_path.push('.');
+        }
+        parent_path.push_str(name);
+        cursor = ensure_object(&cursor, name, path, &parent_path)?;
     }
     match cursor.get(leaf) {
         Some(prop) => prop.set_value(value),
@@ -328,37 +346,31 @@ fn write_preserving_mode(path: &Path, text: &str) -> std::io::Result<()> {
 
 /// Remove the key at `segments`, preserving the rest of the file. An absent
 /// file, path, or key is a no-op success — nothing to clear is not an error —
-/// and leaves the file untouched rather than rewriting it. Reports whether a key
-/// was actually removed so a caller can avoid claiming a change it did not make.
+/// and leaves the file untouched rather than rewriting it. A file that cannot
+/// be parsed or edited faithfully is an error, just as it is for `set` and
+/// `get`. Reports whether a key was actually removed so a caller can avoid
+/// claiming a change it did not make.
 pub(crate) fn unset_json_path(path: &Path, segments: &[&str]) -> std::io::Result<bool> {
-    let Ok(text) = crate::jsonc::read_guarded(path) else {
-        return Ok(false);
-    };
-    // Same stack-overflow guard the setter applies: an unbounded CST descent
-    // aborts the process rather than failing, so it must not be reached even on
-    // the path whose every other failure is a benign "nothing to remove".
-    if crate::jsonc::check_nesting_depth(&text).is_err() {
-        return Ok(false);
-    }
-    let Ok(root) = CstRootNode::parse(&text, &ParseOptions::default()) else {
-        return Ok(false);
-    };
-    let Some(obj) = root.value().and_then(|v| v.as_object()) else {
-        return Ok(false);
-    };
-    // Removing the FIRST of two same-named props leaves the one the reader
-    // resolves — so the key survives while the caller reports it removed. This
-    // path has no error channel for a file it cannot act on faithfully, and
-    // "nothing was removed" is at least true; `set` refuses the same document
-    // loudly.
-    if duplicate_key(&obj, "").is_some() {
-        return Ok(false);
-    }
+    let (root, obj) = root_object(path)?;
 
     let (leaf, parents) = segments.split_last().expect("a setting path has a leaf");
     let mut cursor = obj;
+    let mut parent_path = String::new();
     for name in parents {
+        if !parent_path.is_empty() {
+            parent_path.push('.');
+        }
+        parent_path.push_str(name);
         let Some(next) = cursor.object_value(name) else {
+            if cursor.get(name).is_some() {
+                return Err(refuse_edit(
+                    path,
+                    ConfigError::Type {
+                        path: parent_path,
+                        expected: "an object",
+                    },
+                ));
+            }
             return Ok(false);
         };
         cursor = next;
@@ -495,20 +507,13 @@ mod tests {
     /// it owes the same guarantees — and had none of them pinned: the test above
     /// checks only the resolved value, on a file nub itself wrote. A delete that
     /// flattened a hand-authored file passed.
-    #[cfg(unix)]
     #[test]
     fn unset_keeps_everything_it_did_not_remove() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        if unsafe { libc::geteuid() } == 0 {
-            return;
-        }
-
         with_config_home(|home| {
             let path = home.join("nub").join("nub.jsonc");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            // BOM, comment, CRLF, an unrelated sibling key, and a narrowed mode
-            // — every property the write path is meant to carry across.
+            // BOM, comment, CRLF, and an unrelated sibling key — every portable
+            // content property the write path is meant to carry across.
             let mut f = std::fs::File::create(&path).unwrap();
             f.write_all(crate::jsonc::UTF8_BOM).unwrap();
             write!(
@@ -517,8 +522,6 @@ mod tests {
             )
             .unwrap();
             drop(f);
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-
             assert_eq!(implicit_dlx(), ImplicitDlx::Never, "precondition");
             unset_implicit_dlx().unwrap();
 
@@ -528,11 +531,6 @@ mod tests {
             assert!(text.contains("hand-authored, keep me"), "comment survived");
             assert!(text.contains("\"telemetry\""), "sibling key survived");
             assert!(text.contains("\r\n"), "CRLF survived");
-            assert_eq!(
-                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-                0o600,
-                "mode survived"
-            );
             assert_eq!(implicit_dlx(), ImplicitDlx::Prompt, "and the key is gone");
         });
     }
@@ -860,23 +858,18 @@ mod tests {
     }
 
     #[test]
-    fn set_replaces_a_non_object_exec_without_panicking() {
+    fn set_refuses_a_non_object_intermediate_and_leaves_it_byte_identical() {
         with_config_home(|home| {
-            // A hand-authored `exec` that is NOT an object (a scalar or array)
-            // must not panic the write (`get_object` returns None, so the stray
-            // prop is removed before the fresh object is appended) — best-effort
-            // config never crashes on malformed input.
+            // A hand-authored `exec` scalar or array is not an absent parent;
+            // replacing it would silently erase a user value.
             let path = home.join("nub").join("nub.jsonc");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             for junk in ["{ \"exec\": 5 }", "{ \"exec\": [1, 2] }"] {
                 std::fs::write(&path, junk).unwrap();
-                set_implicit_dlx(ImplicitDlx::Never).unwrap();
-                assert_eq!(implicit_dlx(), ImplicitDlx::Never, "recovered from {junk}");
-                let body = std::fs::read_to_string(&path).unwrap();
-                assert!(
-                    body.contains("\"implicitDlx\": \"never\""),
-                    "wrote into a fresh exec object: {body}"
-                );
+                let err = set_implicit_dlx(ImplicitDlx::Never)
+                    .expect_err("a scalar intermediate must be refused");
+                assert!(err.to_string().contains("exec"), "names the parent: {err}");
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), junk, "{err}");
             }
         });
     }
@@ -977,25 +970,62 @@ mod tests {
         );
     }
 
-    /// `unset` matches the FIRST occurrence as well, so removing it would leave
-    /// the one the reader resolves while reporting the key gone. It declines
-    /// instead — this path has no error channel, and "nothing was removed" is at
-    /// least true.
     #[test]
-    fn unset_declines_a_duplicated_key_rather_than_removing_the_wrong_one() {
+    fn unset_refuses_a_duplicated_key_and_leaves_it_byte_identical() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nub.jsonc");
         let original = r#"{ "exec": { "implicitDlx": "never", "implicitDlx": "never" } }"#;
         std::fs::write(&path, original).unwrap();
 
-        assert!(
-            !unset_json_path(&path, &[TABLE, KEY]).unwrap(),
-            "claimed no removal"
-        );
+        let err = unset_json_path(&path, &[TABLE, KEY])
+            .expect_err("a duplicated document cannot be edited faithfully");
+        assert!(err.to_string().contains("exec.implicitDlx"), "{err}");
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             original,
             "and left the file alone"
+        );
+    }
+
+    #[test]
+    fn unset_refuses_unreadable_or_unparseable_documents_and_only_noops_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nub.jsonc");
+        let over_depth = format!("{{\"a\": {}1{}}}", "[".repeat(70), "]".repeat(70));
+        let cases: [&[u8]; 5] = [
+            b"{ \"nodeCompat\": true",
+            b"[\"not an object\"]",
+            b"{ \"tsconfig\": \"caf\xe9.json\" }",
+            over_depth.as_bytes(),
+            b"{ \"exec\": 5 }",
+        ];
+        for original in cases {
+            std::fs::write(&path, original).unwrap();
+            let err = unset_json_path(&path, &[TABLE, KEY])
+                .expect_err("a malformed document is not an absent setting");
+            assert_eq!(std::fs::read(&path).unwrap(), original, "{err}");
+        }
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            !unset_json_path(&path, &[TABLE, KEY]).unwrap(),
+            "absent file"
+        );
+        assert!(!path.exists(), "an absent delete must not create a file");
+        std::fs::write(&path, r#"{ "exec": {} }"#).unwrap();
+        assert!(
+            !unset_json_path(&path, &[TABLE, KEY]).unwrap(),
+            "absent leaf"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"{ "exec": {} }"#);
+        std::fs::write(&path, r#"{ "nodeCompat": true }"#).unwrap();
+        assert!(
+            !unset_json_path(&path, &[TABLE, KEY]).unwrap(),
+            "absent parent"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"{ "nodeCompat": true }"#
         );
     }
 }

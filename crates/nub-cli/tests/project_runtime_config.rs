@@ -570,7 +570,10 @@ process.exit(child.status ?? 1);
     )
     .unwrap();
     let user_compile_cache = fixture.project.join("user-compile-cache");
-    let user_compile_cache_text = user_compile_cache.to_string_lossy().into_owned();
+    // The nested Node process may surface an equivalent Windows path with
+    // forward slashes; this assertion is about preserving the path, not its
+    // separator spelling.
+    let user_compile_cache_text = user_compile_cache.to_string_lossy().replace('\\', "/");
     let inherited_shim_entries: Vec<String> = std::env::var_os("PATH")
         .map(|path| {
             std::env::split_paths(&path)
@@ -606,7 +609,14 @@ process.exit(child.status ?? 1);
         assert_eq!(value["nodeOptions"], "--trace-warnings", "{script}");
         assert_eq!(value["nodePath"], "/user/node-path", "{script}");
         assert_eq!(value["node"], "/user/node", "{script}");
-        assert_eq!(value["compileCache"], user_compile_cache_text, "{script}");
+        let compile_cache = value["compileCache"]
+            .as_str()
+            .map(|path| path.replace('\\', "/"));
+        assert_eq!(
+            compile_cache.as_deref(),
+            Some(user_compile_cache_text.as_str()),
+            "{script}"
+        );
         assert_eq!(value["runtimeConfig"], serde_json::Value::Null, "{script}");
         assert_eq!(value["nubVersion"], serde_json::Value::Null, "{script}");
         assert_eq!(

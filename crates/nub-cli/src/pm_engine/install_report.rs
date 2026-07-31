@@ -8,16 +8,17 @@
 //!
 //! PROVENANCE IS EXACT, NOT INFERRED. Under the nub embedder profile the chain
 //! that can supply a value is short, and every tier in it is readable from here:
-//! env → project config (`nub.jsonc`) → `pnpm-workspace.yaml` (non-empty only
-//! when pnpm is the incumbent) → project `.npmrc` → user `.npmrc` → nub's
-//! embedder defaults. The tiers aube would otherwise consult are inert for nub by
-//! construction — `config_namespace = None` empties both
-//! `.config/aube/config.toml` scopes, and pnpm's global `config.yaml` is cleared
-//! unconditionally (see `identity.rs`) — so walking these six in precedence order
-//! reproduces the resolver's answer instead of approximating it. Anything this
-//! walk cannot read is reported as nothing at all: a setting with no readable
-//! source is dropped from the block rather than printed with a guessed value or a
-//! guessed origin, because a wrong provenance is worse than none.
+//! explicit install CLI flags → env → project config (`nub.jsonc`) →
+//! `pnpm-workspace.yaml` (non-empty only when pnpm is the incumbent) → pnpm's
+//! global `config.yaml` (when the engine context enables it) → project `.npmrc`
+//! → user `.npmrc` → nub's embedder defaults. The tiers aube would otherwise
+//! consult are inert for nub by construction — `config_namespace = None` empties
+//! both `.config/aube/config.toml` scopes. The global YAML is loaded through the
+//! engine's own context-gated loader, so this index follows any identity policy
+//! that makes that pnpm-named tier inert. Anything this walk cannot read is
+//! reported as nothing at all: a setting with no readable source is dropped from
+//! the block rather than printed with a guessed value or a guessed origin,
+//! because a wrong provenance is worse than none.
 
 use std::path::Path;
 use std::sync::{OnceLock, RwLock};
@@ -37,11 +38,15 @@ const FALLBACK_COLS: usize = 80;
 /// Where a resolved setting's value actually came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Source {
+    /// An explicit install flag. The value was preserved in the engine's CLI bag,
+    /// so this names the setting's canonical flag spelling and winning value.
+    Cli(String),
     /// An environment variable, named so the reader can find it.
     Env(String),
     /// The project's `nub.jsonc`, with the field the user wrote.
     ProjectConfig(&'static str),
     WorkspaceYaml,
+    GlobalConfigYaml,
     Npmrc,
     /// nub's own built-in value — nothing in the project asked for it.
     Default,
@@ -90,9 +95,11 @@ fn toolchain_display_name(package: &str) -> &str {
 impl Source {
     fn render(&self) -> String {
         match self {
+            Source::Cli(flag) => flag.clone(),
             Source::Env(var) => var.clone(),
             Source::ProjectConfig(field) => format!("nub.jsonc {field}"),
             Source::WorkspaceYaml => "pnpm-workspace.yaml".to_string(),
+            Source::GlobalConfigYaml => "pnpm global config.yaml".to_string(),
             Source::Npmrc => ".npmrc".to_string(),
             Source::Default => "default".to_string(),
             Source::Ci => "global virtual store auto-disabled in CI".to_string(),
@@ -110,13 +117,18 @@ impl Source {
     fn is_authored_layout_surface(&self) -> bool {
         matches!(
             self,
-            Source::Env(_) | Source::ProjectConfig(_) | Source::Npmrc
+            Source::Cli(_)
+                | Source::Env(_)
+                | Source::ProjectConfig(_)
+                | Source::GlobalConfigYaml
+                | Source::Npmrc
         )
     }
 }
 
 /// The readable settings tiers for one project root, loaded once per install.
 pub(super) struct SourceIndex {
+    cli: Vec<(String, String)>,
     env: Vec<(String, String)>,
     project_config: Vec<(String, String)>,
     /// Settings a `pnpm-workspace.yaml` claims, each with its value when the
@@ -124,6 +136,10 @@ pub(super) struct SourceIndex {
     /// raw YAML map's element type belongs to aube's yaml crate, which is not a
     /// nub dependency, so it cannot be held in a field here.
     workspace_yaml: Vec<(&'static str, Option<String>)>,
+    /// Settings supplied by pnpm v11's global `config.yaml`, loaded through
+    /// aube's context-gated loader and interpreted with the same YAML helpers as
+    /// the project workspace file.
+    global_config_yaml: Vec<(&'static str, Option<String>)>,
     project_npmrc: Vec<(String, String)>,
     user_npmrc: Vec<(String, String)>,
     embedder_defaults: Vec<(String, String)>,
@@ -150,7 +166,7 @@ pub(super) struct SourceIndex {
 }
 
 impl SourceIndex {
-    pub(super) fn load(cwd: &Path) -> Self {
+    pub(super) fn load(cwd: &Path, cli: &[(String, String)]) -> Self {
         let npmrc = aube_registry::config::load_npmrc_entries_split(cwd);
         let raw = aube_manifest::workspace::load_raw(cwd).unwrap_or_default();
         let workspace_yaml = aube_settings::all()
@@ -173,11 +189,29 @@ impl SourceIndex {
                 )
             })
             .collect();
+        let global_raw = aube::commands::load_global_config_yaml();
+        let global_config_yaml = aube_settings::all()
+            .iter()
+            .filter(|meta| {
+                !aube_settings::workspace_yaml_suppressed(meta)
+                    && meta
+                        .workspace_yaml_keys
+                        .iter()
+                        .any(|key| aube_settings::workspace_yaml_value(&global_raw, key).is_some())
+            })
+            .map(|meta| {
+                (
+                    meta.name,
+                    aube_settings::values::string_from_workspace_yaml(meta.name, &global_raw),
+                )
+            })
+            .collect();
         // The same walk as `workspace_yaml`, filter inverted: that field holds
         // the settings the YAML still supplies, this one asks whether the
         // layout axis threw any away.
         let yaml_layout_dropped = aube_settings::all().iter().any(|meta| {
             aube_settings::workspace_yaml_suppressed(meta)
+                && project_config_field(meta.name).is_some()
                 && meta
                     .workspace_yaml_keys
                     .iter()
@@ -185,8 +219,10 @@ impl SourceIndex {
         });
         let context = aube_util::engine_context();
         Self {
+            cli: cli.to_vec(),
             env: aube_settings::values::capture_env(),
             workspace_yaml,
+            global_config_yaml,
             project_npmrc: npmrc.project,
             user_npmrc: npmrc.user,
             embedder_defaults: aube_settings::embedder_defaults().to_vec(),
@@ -208,6 +244,22 @@ impl SourceIndex {
     /// way, since a value it cannot read is a value it must not print.
     pub(super) fn resolve(&self, setting: &str) -> Option<(String, Option<Source>)> {
         let meta = aube_settings::find(setting)?;
+        // `InstallOptions::cli_flags` contains only explicit install flags. A
+        // bag key may be a generic setting override the report cannot spell
+        // faithfully from this narrowed representation, so only name declared
+        // command flags. The engine still applies those generic keys; the report
+        // simply omits an origin it cannot attribute exactly.
+        if let Some((flag, value)) = self
+            .cli
+            .iter()
+            .rev()
+            .find(|(flag, _)| meta.cli_flags.contains(&flag.as_str()))
+        {
+            return Some((
+                value.clone(),
+                Some(Source::Cli(format!("--{flag}={value}"))),
+            ));
+        }
         // `AUBE_*` aliases are excluded deliberately: `read_branded_settings_env`
         // is off under nub, so naming one would credit a variable the engine
         // never read. Later entries win within a tier, matching the resolver.
@@ -234,6 +286,15 @@ impl SourceIndex {
                 .clone()
                 .map(|value| (value, Some(Source::WorkspaceYaml)));
         }
+        if let Some((_, value)) = self
+            .global_config_yaml
+            .iter()
+            .find(|(name, _)| *name == setting)
+        {
+            return value
+                .clone()
+                .map(|value| (value, Some(Source::GlobalConfigYaml)));
+        }
         for entries in [&self.project_npmrc, &self.user_npmrc] {
             if let Some((_, value)) = entries
                 .iter()
@@ -253,9 +314,10 @@ impl SourceIndex {
 
 /// Whether a branded config file nub reads for this project asks for a
 /// `node_modules` layout — yarn's `.yarnrc.yml nodeLinker`, bun's
-/// `bunfig.toml [install].linker`, or a layout key in `pnpm-workspace.yaml`.
-/// Layout is nub's own axis, so every one of these is dropped, and the install
-/// header is the only place that drop can surface.
+/// `bunfig.toml [install].linker`, or a `pnpm-workspace.yaml` layout key that
+/// `nub.jsonc` can actually express. Layout is nub's own axis, so those
+/// requests are dropped, and the install header is the only place that drop can
+/// surface.
 ///
 /// Each source is gated on the posture that decides whether nub opens that file
 /// AT ALL: `pnpm-workspace.yaml` through `load_raw`, which already honors it,
@@ -524,7 +586,7 @@ fn gvs_incompatible_package(index: &SourceIndex) -> Option<String> {
 /// layout in a file nub no longer takes one from. Deliberately not a warning:
 /// the reader's config is still valid for everything else in it, and the whole
 /// remedy is the name of the file that would work.
-const LAYOUT_POINTER: &str = "configurable via nub.jsonc";
+const LAYOUT_POINTER: &str = "configurable via nub.jsonc install.linker or install.publicHoist";
 
 pub(super) fn resolved_rows(index: &SourceIndex) -> Vec<Row> {
     let mut rows = Vec::new();
@@ -624,11 +686,15 @@ pub(super) fn resolved_rows(index: &SourceIndex) -> Vec<Row> {
 /// Print the resolved layout ahead of the engine's progress display. Silent
 /// under `--silent`; otherwise always prints at least the `layout` row, so a
 /// default install is one line here and one line at the end.
-pub(super) fn print_resolved_layout(cwd: &Path, output: &OutputFlags) {
+pub(super) fn print_resolved_layout(
+    cwd: &Path,
+    output: &OutputFlags,
+    cli_flags: &[(String, String)],
+) {
     if output.is_silent() {
         return;
     }
-    let rows = resolved_rows(&SourceIndex::load(cwd));
+    let rows = resolved_rows(&SourceIndex::load(cwd, cli_flags));
     eprint!("{}", render_block(&rows, stderr_cols()));
     eprintln!();
 }
@@ -920,12 +986,14 @@ mod tests {
     #[test]
     fn layout_names_the_strategy_the_project_wrote() {
         let shared = SourceIndex {
+            cli: Vec::new(),
             env: Vec::new(),
             project_config: vec![
                 ("nodeLinker".to_string(), "isolated".to_string()),
                 ("enableGlobalVirtualStore".to_string(), "true".to_string()),
             ],
             workspace_yaml: Vec::new(),
+            global_config_yaml: Vec::new(),
             project_npmrc: Vec::new(),
             user_npmrc: Vec::new(),
             embedder_defaults: Vec::new(),
@@ -997,9 +1065,11 @@ mod tests {
         // variable happened to be set — which on the leg that gates merge was
         // always. Reading it from the index instead makes both arms hermetic.
         let in_ci = SourceIndex {
+            cli: Vec::new(),
             env: Vec::new(),
             project_config: Vec::new(),
             workspace_yaml: Vec::new(),
+            global_config_yaml: Vec::new(),
             project_npmrc: Vec::new(),
             user_npmrc: Vec::new(),
             embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
@@ -1021,9 +1091,11 @@ mod tests {
     #[test]
     fn boolean_settings_are_read_the_way_the_engine_reads_them() {
         let with_npmrc = |key: &str, value: &str| SourceIndex {
+            cli: Vec::new(),
             env: Vec::new(),
             project_config: Vec::new(),
             workspace_yaml: Vec::new(),
+            global_config_yaml: Vec::new(),
             project_npmrc: vec![(key.to_string(), value.to_string())],
             user_npmrc: Vec::new(),
             embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
@@ -1074,9 +1146,11 @@ mod tests {
     #[test]
     fn a_gvs_incompatible_dependency_reports_the_project_local_store() {
         let index = SourceIndex {
+            cli: Vec::new(),
             env: Vec::new(),
             project_config: Vec::new(),
             workspace_yaml: Vec::new(),
+            global_config_yaml: Vec::new(),
             project_npmrc: Vec::new(),
             user_npmrc: Vec::new(),
             embedder_defaults: vec![
@@ -1142,9 +1216,11 @@ mod tests {
     #[test]
     fn shamefully_hoist_reports_the_pattern_it_actually_is() {
         let index = SourceIndex {
+            cli: Vec::new(),
             env: Vec::new(),
             project_config: Vec::new(),
             workspace_yaml: Vec::new(),
+            global_config_yaml: Vec::new(),
             project_npmrc: vec![
                 ("shamefully-hoist".to_string(), "true".to_string()),
                 ("public-hoist-pattern".to_string(), "ms".to_string()),
@@ -1186,9 +1262,11 @@ mod tests {
     #[test]
     fn a_dropped_branded_layout_points_at_nub_jsonc() {
         let dropped = SourceIndex {
+            cli: Vec::new(),
             env: Vec::new(),
             project_config: Vec::new(),
             workspace_yaml: Vec::new(),
+            global_config_yaml: Vec::new(),
             project_npmrc: Vec::new(),
             user_npmrc: Vec::new(),
             embedder_defaults: Vec::new(),
@@ -1205,7 +1283,7 @@ mod tests {
         };
         assert_eq!(
             note(&dropped).as_deref(),
-            Some("(configurable via nub.jsonc)")
+            Some("(configurable via nub.jsonc install.linker or install.publicHoist)")
         );
 
         let quiet = SourceIndex {
@@ -1246,7 +1324,7 @@ mod tests {
         assert_eq!(layout_row(&in_ci).1, Some(Source::Ci));
         assert_eq!(
             note(&in_ci).as_deref(),
-            Some("(configurable via nub.jsonc)"),
+            Some("(configurable via nub.jsonc install.linker or install.publicHoist)"),
             "a CI-derived layout is nothing the project wrote"
         );
 
@@ -1265,7 +1343,7 @@ mod tests {
         );
         assert_eq!(
             note(&incompatible).as_deref(),
-            Some("(configurable via nub.jsonc)"),
+            Some("(configurable via nub.jsonc install.linker or install.publicHoist)"),
             "a dependency-derived layout is nothing the project wrote either"
         );
     }
@@ -1314,7 +1392,7 @@ mod tests {
             dir
         };
         let detected =
-            |dir: &tempfile::TempDir| SourceIndex::load(dir.path()).branded_layout_ignored;
+            |dir: &tempfile::TempDir| SourceIndex::load(dir.path(), &[]).branded_layout_ignored;
 
         assert!(detected(&project(&[(
             "pnpm-workspace.yaml",
@@ -1339,6 +1417,13 @@ mod tests {
                 "autoInstallPeers: false\n"
             )])),
             "the probe keys on a layout setting, not on the file's presence"
+        );
+        assert!(
+            !detected(&project(&[(
+                "pnpm-workspace.yaml",
+                "modulesDir: vendor_modules\n"
+            )])),
+            "do not point at nub.jsonc for a layout key nub.jsonc cannot express"
         );
 
         // The gate: a file nub never opens went unread for its own reason, and
@@ -1383,6 +1468,13 @@ mod tests {
         let _guard = crate::pm_engine::ENGINE_GLOBAL_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        struct RestorePlan(Vec<Materialized>);
+        impl Drop for RestorePlan {
+            fn drop(&mut self) {
+                record_plan(std::mem::take(&mut self.0));
+            }
+        }
+        let _restore = RestorePlan(recorded_plan());
 
         let entry = |name: &str, version: &str| Materialized {
             name: name.to_string(),
@@ -1405,8 +1497,6 @@ mod tests {
             ["acorn@8.12.1", "next@14.2.0", "next@15.0.0", "zod@3.23.8"],
             "sorted by name then version, not by insertion"
         );
-
-        record_plan(Vec::new());
     }
 
     /// Provenance names the surface the reader can act on: the `nub.jsonc` field
@@ -1421,11 +1511,16 @@ mod tests {
     #[test]
     fn provenance_names_the_authored_surface() {
         assert_eq!(
+            Source::Cli("--node-linker=hoisted".to_string()).render(),
+            "--node-linker=hoisted"
+        );
+        assert_eq!(
             Source::ProjectConfig("install.publicHoist").render(),
             "nub.jsonc install.publicHoist"
         );
         assert_eq!(Source::Npmrc.render(), ".npmrc");
         assert_eq!(Source::WorkspaceYaml.render(), "pnpm-workspace.yaml");
+        assert_eq!(Source::GlobalConfigYaml.render(), "pnpm global config.yaml");
         assert_eq!(Source::Default.render(), "default");
         assert_eq!(
             Source::Env("npm_config_node_linker".to_string()).render(),
@@ -1480,9 +1575,11 @@ mod tests {
     #[test]
     fn resolution_walks_tiers_in_precedence_order() {
         let index = SourceIndex {
+            cli: Vec::new(),
             env: Vec::new(),
             project_config: vec![("nodeLinker".to_string(), "hoisted".to_string())],
             workspace_yaml: Vec::new(),
+            global_config_yaml: Vec::new(),
             project_npmrc: vec![("node-linker".to_string(), "isolated".to_string())],
             user_npmrc: Vec::new(),
             embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
@@ -1527,15 +1624,115 @@ mod tests {
         );
     }
 
+    /// Explicit install flags are the report's highest-priority tier. The
+    /// engine receives this same bag in `InstallOptions`, so `--node-linker`
+    /// must not be attributed to a lower file that it overrode.
+    #[test]
+    fn cli_flags_outrank_every_file_tier_with_the_canonical_spelling() {
+        let index = SourceIndex {
+            cli: vec![("node-linker".to_string(), "hoisted".to_string())],
+            env: vec![("npm_config_node_linker".to_string(), "isolated".to_string())],
+            project_config: vec![("nodeLinker".to_string(), "isolated".to_string())],
+            workspace_yaml: vec![("nodeLinker", Some("isolated".to_string()))],
+            global_config_yaml: vec![("nodeLinker", Some("isolated".to_string()))],
+            project_npmrc: vec![("nodeLinker".to_string(), "isolated".to_string())],
+            user_npmrc: vec![("nodeLinker".to_string(), "isolated".to_string())],
+            embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
+            declared_packages: Vec::new(),
+            branded_layout_ignored: false,
+            ci: false,
+        };
+        assert_eq!(
+            index.resolve("nodeLinker"),
+            Some((
+                "hoisted".to_string(),
+                Some(Source::Cli("--node-linker=hoisted".to_string()))
+            ))
+        );
+    }
+
+    /// pnpm v11's global config sits below the project workspace file but above
+    /// either `.npmrc` scope. SourceIndex receives it only from the engine's
+    /// `read_pnpm_global_config`-gated loader, so a disabled context leaves this
+    /// tier empty rather than inventing a global source.
+    #[test]
+    fn global_config_yaml_has_the_engine_precedence_tier() {
+        let index = SourceIndex {
+            cli: Vec::new(),
+            env: Vec::new(),
+            project_config: Vec::new(),
+            workspace_yaml: Vec::new(),
+            global_config_yaml: vec![("nodeLinker", Some("hoisted".to_string()))],
+            project_npmrc: vec![("nodeLinker".to_string(), "isolated".to_string())],
+            user_npmrc: vec![("nodeLinker".to_string(), "isolated".to_string())],
+            embedder_defaults: Vec::new(),
+            declared_packages: Vec::new(),
+            branded_layout_ignored: false,
+            ci: false,
+        };
+        assert_eq!(
+            index.resolve("nodeLinker"),
+            Some(("hoisted".to_string(), Some(Source::GlobalConfigYaml)))
+        );
+        let project_workspace = SourceIndex {
+            workspace_yaml: vec![("nodeLinker", Some("isolated".to_string()))],
+            ..index
+        };
+        assert_eq!(
+            project_workspace.resolve("nodeLinker"),
+            Some(("isolated".to_string(), Some(Source::WorkspaceYaml)))
+        );
+    }
+
+    /// Within either `.npmrc` scope, the last assignment wins. This is distinct
+    /// from scope precedence: project still outranks user after each scope has
+    /// selected its own final entry.
+    #[test]
+    fn npmrc_tiers_use_later_entry_wins_order() {
+        let index = SourceIndex {
+            cli: Vec::new(),
+            env: Vec::new(),
+            project_config: Vec::new(),
+            workspace_yaml: Vec::new(),
+            global_config_yaml: Vec::new(),
+            project_npmrc: vec![
+                ("nodeLinker".to_string(), "hoisted".to_string()),
+                ("node-linker".to_string(), "isolated".to_string()),
+            ],
+            user_npmrc: vec![
+                ("nodeLinker".to_string(), "isolated".to_string()),
+                ("node-linker".to_string(), "hoisted".to_string()),
+            ],
+            embedder_defaults: Vec::new(),
+            declared_packages: Vec::new(),
+            branded_layout_ignored: false,
+            ci: false,
+        };
+        assert_eq!(
+            index.resolve("nodeLinker"),
+            Some(("isolated".to_string(), Some(Source::Npmrc)))
+        );
+        let user_only = SourceIndex {
+            project_npmrc: Vec::new(),
+            ..index
+        };
+        assert_eq!(
+            user_only.resolve("nodeLinker"),
+            Some(("hoisted".to_string(), Some(Source::Npmrc)))
+        );
+    }
+
     /// A branded `AUBE_*` variable is not a source under nub: the profile turns
     /// that alias family off, so crediting one would name a variable the engine
     /// never read.
     #[test]
     fn branded_env_aliases_are_not_a_source() {
         let index = SourceIndex {
+            cli: Vec::new(),
             env: vec![("AUBE_NODE_LINKER".to_string(), "hoisted".to_string())],
             project_config: Vec::new(),
             workspace_yaml: Vec::new(),
+            global_config_yaml: Vec::new(),
             project_npmrc: Vec::new(),
             user_npmrc: Vec::new(),
             embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
@@ -1554,9 +1751,11 @@ mod tests {
     #[test]
     fn mixed_sources_drop_the_shared_parenthetical() {
         let index = SourceIndex {
+            cli: Vec::new(),
             env: Vec::new(),
             project_config: Vec::new(),
             workspace_yaml: Vec::new(),
+            global_config_yaml: Vec::new(),
             project_npmrc: vec![("auto-install-peers".to_string(), "false".to_string())],
             user_npmrc: vec![("strict-peer-dependencies".to_string(), "true".to_string())],
             embedder_defaults: Vec::new(),

@@ -41,6 +41,10 @@ fn commands_that_read_no_project_config_survive_an_unloadable_one() {
         // through the GitHub API).
         vec!["upgrade", "--dry-run", "--version", "0.0.0"],
         vec!["agent", "skill"],
+        // These manual command groups print their verb lists before dispatching
+        // any subcommand, so they must not initialize a project snapshot.
+        vec!["node"],
+        vec!["pm"],
     ] {
         let output = nub_in(temp.path(), &cache)
             .args(&args)

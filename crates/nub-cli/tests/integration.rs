@@ -3639,6 +3639,164 @@ fn data_format_loaders() {
 }
 
 #[test]
+fn native_data_loaders_bound_yaml_depth_and_keep_jsonc_null_fallback_semantics() {
+    // These imports must load through the staged native addon in CI, not the JS
+    // parser fallbacks: yaml/json5/toml are deliberately absent from this crate's
+    // test dependencies. Keep the fixture temporary so a hostile-depth document
+    // never becomes a checked-in source file another tool might eagerly parse.
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+    let at_limit = (0..128)
+        .map(|depth| format!("{}next:\n", "  ".repeat(depth)))
+        .collect::<String>()
+        + &format!("{}ok\n", "  ".repeat(128));
+    let over_limit = (0..129)
+        .map(|depth| format!("{}next:\n", "  ".repeat(depth)))
+        .collect::<String>()
+        + &format!("{}ok\n", "  ".repeat(129));
+    std::fs::write(project.join("at-limit.yaml"), at_limit).unwrap();
+    std::fs::write(project.join("over-limit.yaml"), over_limit).unwrap();
+    std::fs::write(project.join("null.jsonc"), "null\n").unwrap();
+    std::fs::write(
+        project.join("at-limit.ts"),
+        "import value from './at-limit.yaml';\nconsole.log(value ? 'yaml-at-limit' : 'missing');\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("null.ts"),
+        "import value from './null.jsonc';\nconsole.log(typeof value);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("over-limit.ts"),
+        "import './over-limit.yaml';\nconsole.log('must-not-run');\n",
+    )
+    .unwrap();
+
+    let run = |entry: &str| {
+        Command::new(nub_binary())
+            .arg(project.join(entry))
+            .current_dir(project)
+            .env("XDG_CACHE_HOME", unique_test_cache())
+            .output()
+            .expect("spawn nub")
+    };
+    let at_limit = run("at-limit.ts");
+    assert!(
+        at_limit.status.success(),
+        "128-level YAML must load: {}",
+        String::from_utf8_lossy(&at_limit.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&at_limit.stdout).trim(),
+        "yaml-at-limit"
+    );
+
+    let null = run("null.ts");
+    assert!(
+        null.status.success(),
+        "JSONC null must import: {}",
+        String::from_utf8_lossy(&null.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&null.stdout).trim(), "undefined");
+
+    let over_limit = run("over-limit.ts");
+    assert!(
+        !over_limit.status.success(),
+        "over-limit YAML must fail normally rather than loading"
+    );
+    let stderr = String::from_utf8_lossy(&over_limit.stderr);
+    assert!(
+        stderr.contains("YAML parse error") && stderr.contains("128-level limit"),
+        "over-limit YAML must fail before native parsing: {stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&over_limit.stdout).contains("must-not-run"),
+        "the importer must not execute after a YAML-depth error"
+    );
+}
+
+#[test]
+fn native_tsconfig_and_package_metadata_accept_a_leading_utf8_bom() {
+    // The configured tsconfig is validated by the CLI, then re-read by the native
+    // resolver; its package `extends` metadata is re-read there too. Keep all
+    // three files BOM-prefixed so either missed native boundary loses the alias.
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+    let bom = "\u{feff}";
+    std::fs::create_dir_all(project.join("node_modules/tsconfig-base")).unwrap();
+    std::fs::write(
+        project.join("nub.jsonc"),
+        r#"{ "tsconfig": "./tsconfig.runtime.jsonc" }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("tsconfig.runtime.jsonc"),
+        format!(
+            r#"{bom}{{ "extends": "tsconfig-base", "compilerOptions": {{ "baseUrl": ".", "paths": {{ "bom-alias": ["./alias.ts"] }} }} }}"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("node_modules/tsconfig-base/package.json"),
+        format!(r#"{bom}{{ "name": "tsconfig-base", "tsconfig": "./base.json" }}"#),
+    )
+    .unwrap();
+    std::fs::write(project.join("node_modules/tsconfig-base/base.json"), "{}").unwrap();
+    std::fs::write(
+        project.join("alias.ts"),
+        "export const value = 'bom-alias-ok';\n",
+    )
+    .unwrap();
+    // This one is read only by the JS module-format fallback. A BOM must not
+    // make it silently treat an ambiguous .ts file as CommonJS.
+    std::fs::create_dir_all(project.join("format")).unwrap();
+    std::fs::write(
+        project.join("format/package.json"),
+        format!(r#"{bom}{{ "type": "module" }}"#),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("main.ts"),
+        "import { value } from 'bom-alias';\nconsole.log(value);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("format/main.ts"),
+        "console.log(typeof module);\n",
+    )
+    .unwrap();
+
+    let run = |entry: &str| {
+        Command::new(nub_binary())
+            .arg(project.join(entry))
+            .current_dir(project)
+            .env("XDG_CACHE_HOME", unique_test_cache())
+            .env("XDG_CONFIG_HOME", project.join("config"))
+            .output()
+            .expect("spawn nub")
+    };
+    let alias = run("main.ts");
+    assert!(
+        alias.status.success(),
+        "BOM'd tsconfig/package metadata must preserve the alias: {}",
+        String::from_utf8_lossy(&alias.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&alias.stdout).trim(),
+        "bom-alias-ok"
+    );
+
+    let format = run("format/main.ts");
+    assert!(
+        format.status.success(),
+        "BOM'd package type must remain readable: {}",
+        String::from_utf8_lossy(&format.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&format.stdout).trim(), "undefined");
+}
+
+#[test]
 fn data_named_import_is_a_load_error() {
     // Data loaders are default-only: a named import of a data module has no
     // matching export and fails at module instantiation. Node reports it as a

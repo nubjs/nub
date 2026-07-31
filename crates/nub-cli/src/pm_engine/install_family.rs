@@ -125,6 +125,7 @@
 //!   substring backstop is gone.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::Result;
 use aube::commands::install::{DepSelection, FrozenMode, InstallArgs, InstallOptions};
@@ -194,8 +195,8 @@ pub(crate) fn run_verb(
 // root pre-dispatch; the helper is crate-private, and half-honoring the
 // flag as filter-only would silently run against the wrong directory —
 // the verb-level `-w/--workspace` on `add`/`remove` covers the use case),
-// and the output/diag flags (`--loglevel`, `--reporter`, `--diag*`, …)
-// which belong to a later output-integration slice.
+// and diagnostic flags (`--diag*`, …). Output flags (`--loglevel`,
+// `--reporter`, `--silent`) are forwarded through [`EngineGlobals::output`].
 // (Plain `//` comments: a rustdoc comment on a clap `Args` struct becomes
 // the augmented command's `--help` about-text, clobbering the verb's own.)
 #[derive(Debug, Default, clap::Args)]
@@ -537,20 +538,35 @@ fn run_ignored_builds(typed: &str, args: &[String]) -> Result<i32> {
     )
 }
 
-/// `dlx` flags whose value is a SEPARATE token (`-p left-pad`), so
-/// [`take_dlx_node_flag`]'s scan does not mistake a flag's value for the
-/// command positional. Mirrors `DlxArgs` plus its flattened network args;
-/// `--allow-build` is `require_equals` and needs no entry.
-const DLX_VALUE_FLAGS: &[&str] = &[
-    "-p",
-    "--package",
-    "--registry",
-    "--fetch-retries",
-    "--fetch-retry-factor",
-    "--fetch-retry-maxtimeout",
-    "--fetch-retry-mintimeout",
-    "--fetch-timeout",
-];
+/// Every `dlx` flag that consumes its value from the following argv token.
+///
+/// This is derived from the same augmented clap command `run_dlx` parses, so
+/// a value-taking field added to `DlxArgs`, [`EngineGlobals`], or
+/// [`super::output::OutputFlags`] cannot make `--node` stop scanning early.
+/// `require_equals` arguments intentionally stay out: their next token is a
+/// positional (or a clap error), never their value.
+fn dlx_separate_value_flags() -> &'static [String] {
+    static FLAGS: OnceLock<Vec<String>> = OnceLock::new();
+    FLAGS.get_or_init(|| {
+        let mut spellings = verb_command::<aube::commands::dlx::DlxArgs>("dlx")
+            .get_arguments()
+            .filter(|arg| arg.get_action().takes_values() && !arg.is_require_equals_set())
+            .flat_map(|arg| {
+                let mut flags = Vec::new();
+                if let Some(shorts) = arg.get_short_and_visible_aliases() {
+                    flags.extend(shorts.into_iter().map(|short| format!("-{short}")));
+                }
+                if let Some(longs) = arg.get_long_and_visible_aliases() {
+                    flags.extend(longs.into_iter().map(|long| format!("--{long}")));
+                }
+                flags
+            })
+            .collect::<Vec<_>>();
+        spellings.sort();
+        spellings.dedup();
+        spellings
+    })
+}
 
 /// Split nub's own `--node` off a `dlx`/`x` argv → `(compat_mode, rest)`.
 ///
@@ -578,7 +594,7 @@ fn take_dlx_node_flag(args: &[String]) -> (bool, Vec<String>) {
         }
         kept.push(arg.clone());
         i += 1;
-        if DLX_VALUE_FLAGS.contains(&arg.as_str()) && i < args.len() {
+        if dlx_separate_value_flags().iter().any(|flag| flag == arg) && i < args.len() {
             kept.push(args[i].clone());
             i += 1;
         }
@@ -1607,7 +1623,7 @@ fn run_engine(
     // layout prints ahead of the progress display, and the materialization
     // digest is registered here so the engine fires it after linking — above its
     // own success line, which stays last. Both are no-ops under `--silent`.
-    super::install_report::print_resolved_layout(&session.cwd, output);
+    super::install_report::print_resolved_layout(&session.cwd, output, &opts.cli_flags);
     super::install_report::register(*output);
     // Hold the output guard only across the engine run (so `--silent` suppresses
     // the progress/summary written during install) and drop it before the match
@@ -1686,6 +1702,56 @@ mod tests {
             ParsedVerb::Run(globals, verb) => (globals, verb),
             ParsedVerb::Done(code) => panic!("expected a parse, clap settled with exit {code}"),
         }
+    }
+
+    /// The pre-command scanner derives its value-taking spellings from the
+    /// parse command itself. Keep this expected set explicit so a Clap surface
+    /// change gets reviewed alongside the scanner's three-position contract.
+    #[test]
+    fn dlx_node_scanner_tracks_every_separate_value_flag() {
+        let actual = dlx_separate_value_flags();
+        let expected = [
+            "--cd",
+            "--dir",
+            "--fetch-retries",
+            "--fetch-retry-factor",
+            "--fetch-retry-maxtimeout",
+            "--fetch-retry-mintimeout",
+            "--fetch-timeout",
+            "--filter",
+            "--filter-prod",
+            "--loglevel",
+            "--package",
+            "--prefix",
+            "--registry",
+            "--reporter",
+            "-C",
+            "-F",
+            "-p",
+        ];
+        assert_eq!(
+            actual,
+            expected.map(str::to_string).as_slice(),
+            "a flattened value flag must not make --node look post-command"
+        );
+    }
+
+    #[test]
+    fn dlx_node_flag_skips_flattened_output_values_before_the_command() {
+        let args = ["--loglevel", "debug", "--node", "prisma"].map(str::to_string);
+        assert_eq!(
+            take_dlx_node_flag(&args),
+            (
+                true,
+                ["--loglevel", "debug", "prisma"]
+                    .map(str::to_string)
+                    .to_vec()
+            )
+        );
+
+        // After the command, `--node` belongs to the fetched binary unchanged.
+        let args = ["--loglevel", "debug", "prisma", "--node"].map(str::to_string);
+        assert_eq!(take_dlx_node_flag(&args), (false, args.to_vec()));
     }
 
     #[test]

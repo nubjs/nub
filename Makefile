@@ -169,6 +169,7 @@ version:
 version-check:
 	@node -e " \
 		const fs = require('fs'); \
+		const { isDeepStrictEqual } = require('node:util'); \
 		const root = JSON.parse(fs.readFileSync('npm/nub/package.json', 'utf8')); \
 		const v = root.version; \
 		const errors = []; \
@@ -200,8 +201,19 @@ version-check:
 		const om = cargo.match(/^oxc = \\{ version = \x22=([^\x22]*)\x22/m); \
 		if (!om) errors.push('Cargo.toml: oxc workspace dependency (=X.Y.Z pin) not found'); \
 		else if (rt && rt !== om[1]) errors.push('package.json @oxc-project/runtime (' + rt + ') must match the oxc crate compiled into nub-native (Cargo.toml oxc =' + om[1] + ') — the emit helpers and the transformer are one oxc release'); \
+		const pinned = 'v' + v.split('.').slice(0, 2).join('.') + '.json'; \
+		try { \
+			const latest = JSON.parse(fs.readFileSync('site/public/schema/latest.json', 'utf8')); \
+			const snapshotPath = 'site/public/schema/' + pinned; \
+			const snapshot = JSON.parse(fs.readFileSync(snapshotPath, 'utf8')); \
+			const expectedId = 'https://nubjs.com/schema/' + pinned; \
+			if (snapshot.\$$id !== expectedId) errors.push(snapshotPath + ' has \$$id ' + JSON.stringify(snapshot.\$$id) + ', expected ' + JSON.stringify(expectedId)); \
+			delete latest.\$$id; \
+			delete snapshot.\$$id; \
+			if (!isDeepStrictEqual(snapshot, latest)) errors.push(snapshotPath + ' does not equal latest.json modulo \$$id'); \
+		} catch { errors.push('missing or unreadable schema snapshot for ' + pinned); } \
 		if (errors.length) { console.error('Version mismatch:\\n  ' + errors.join('\\n  ')); process.exit(1); } \
-		else { console.log('✓ All npm packages, Cargo.toml, runtime/version.mjs at v' + v + '; @oxc-project/runtime matches nub-native oxc pin (' + (om ? om[1] : '?') + ')'); }"
+		else { console.log('✓ All npm packages, Cargo.toml, runtime/version.mjs, and schema snapshot at v' + v + '; @oxc-project/runtime matches nub-native oxc pin (' + (om ? om[1] : '?') + ')'); }"
 
 npm-build: build
 	./npm/build-local.sh
