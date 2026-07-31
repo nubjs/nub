@@ -130,12 +130,6 @@
         "platform": "linux-x64"
       },
       {
-        "package": "puppeteer",
-        "evidence": "measured",
-        "observed": "Isolated single-package macOS arm, 2026-07-31, cold store and a private HOME. Confined: postinstall rc=1, `ERROR: Failed to set up chrome v131.0.6778.204! Set \"PUPPETEER_SKIP_DOWNLOAD\" env variable to skip download.`, cause `getaddrinfo ENOTFOUND googlechromelabs.github.io` (the version-resolution manifest; the artifact itself is on storage.googleapis.com). With egress granted, the same fixture installs rc=0 and downloads both Chrome for Testing and chrome-headless-shell. Granted HERE rather than by promoting a host: googlechromelabs.github.io and storage.googleapis.com both stay refused in notGranted — the latter as a multi-tenant bucket namespace — and this grants the package without widening the prefetcher's allowlist. It pairs with puppeteer's packageGrants homePaths entry: egress alone gets the browser downloaded but leaves it in the private jail home, where executablePath() cannot find it.",
-        "platform": "macos-arm64"
-      },
-      {
         "package": "@railway/cli",
         "evidence": "measured",
         "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com` fetching https://github.com/railwayapp/cli/releases/download/v5.30.1/railway-v5.30.1-aarch64-apple-darwin.tar.gz, no artifact. Unconfined, same fixture: DID-WORK-AND-SUCCEEDED.",
@@ -256,6 +250,12 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "electron-prebuilt",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 129086576 B / 1553 files. nub v0.6.0 e45722851e34.",
+        "platform": "linux-x64"
+      },
+      {
         "package": "esbuild",
         "evidence": "measured",
         "observed": "Isolated single-version shards, macOS arm64, 2026-07-31. ONLY versions BELOW 0.13.0 need this. Confined 0.11.23: `Failed to install \"esbuild-darwin-arm64\" using npm` then `npm error network request to https://registry.npmjs.org/esbuild-darwin-arm64 failed, reason: getaddrinfo ENOTFOUND registry.npmjs.org`, and the direct-fetch fallback dies on the same host; `bin/esbuild` is left as the shipped 650-byte JS shim. Unconfined A0, same fixture: a 7,951,298-byte Mach-O. With this entry the confined arm produces that same 7,951,298 bytes, against a control catalog loaded through the identical override path and differing only by this entry. 0.12.29 behaves identically (8,086,834 B). registry.npmjs.org is NOT promoted to networkHosts — it serves an authenticated publish route on the same hostname, the github.com shape; this is the third package granted here for that reason, after @paloaltonetworks/postman-code-generators and @mapbox/node-pre-gyp's caller. optionalDependencies landed in 0.13.0, so from 0.13.0 up install.js resolves the platform package and never opens a socket: 0.28.1, 0.27.7, 0.25.12 and 0.13.0 all pass CONFINED AND UNGRANTED with artifacts byte-identical to their unconfined arms. By weekly downloads the versions this entry serves are 0.125% of esbuild's 264M; the grant is keyed on the NAME, so it is inert for the other 99.87% but not withheld from them.",
@@ -304,15 +304,33 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "iedriver",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 16590636 B / 1559 files. nub v0.6.0 e45722851e34.",
+        "platform": "linux-x64"
+      },
+      {
         "package": "inngest-cli",
         "evidence": "measured",
         "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 64824526 B / 1537 files. nub v0.6.0 2421ab9a700c.",
         "platform": "linux-x64"
       },
       {
+        "package": "iobroker.js-controller",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 9511352 B / 881 files. nub v0.6.0 e45722851e34.",
+        "platform": "linux-x64"
+      },
+      {
         "package": "ip-num",
         "evidence": "measured",
         "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 16724736 B / 1557 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "jpeg-recompress-bin",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 17087032 B / 1543 files. nub v0.6.0 e45722851e34.",
         "platform": "linux-x64"
       },
       {
@@ -370,6 +388,18 @@
         "platform": "linux-x64"
       },
       {
+        "package": "phantomjs",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 84704161 B / 1597 files. nub v0.6.0 e45722851e34.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "playwright-firefox",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 332363399 B / 1608 files. nub v0.6.0 e45722851e34.",
+        "platform": "linux-x64"
+      },
+      {
         "package": "pngout-bin",
         "evidence": "measured",
         "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `RequestError: getaddrinfo ENOTFOUND raw.github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. raw.github.com is deliberately NOT promoted to networkHosts: it 301s to raw.githubusercontent.com, which serves arbitrary repository content rather than published release assets, and the prefetcher excludes that host on purpose (see GITHUB_PREFETCH_HOSTS in pm_engine/build_prefetch.rs).",
@@ -385,6 +415,12 @@
         "package": "protoc-gen-grpc-web",
         "evidence": "measured",
         "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com` fetching https://github.com/grpc/grpc-web/releases/download/1.5.0/protoc-gen-grpc-web-1.5.0-darwin-aarch64. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "puppeteer",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm, 2026-07-31, cold store and a private HOME. Confined: postinstall rc=1, `ERROR: Failed to set up chrome v131.0.6778.204! Set \"PUPPETEER_SKIP_DOWNLOAD\" env variable to skip download.`, cause `getaddrinfo ENOTFOUND googlechromelabs.github.io` (the version-resolution manifest; the artifact itself is on storage.googleapis.com). With egress granted, the same fixture installs rc=0 and downloads both Chrome for Testing and chrome-headless-shell. Granted HERE rather than by promoting a host: googlechromelabs.github.io and storage.googleapis.com both stay refused in notGranted — the latter as a multi-tenant bucket namespace — and this grants the package without widening the prefetcher's allowlist. It pairs with puppeteer's packageGrants homePaths entry: egress alone gets the browser downloaded but leaves it in the private jail home, where executablePath() cannot find it.",
         "platform": "macos-arm64"
       },
       {
