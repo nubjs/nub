@@ -59,7 +59,7 @@ nub config set --location user envFile false   # personal default, everywhere
 nub config set dlx.consent never               # global; the flag is redundant
 ```
 
-Reads take the project file first and fall back to the global one. An unset field prints `undefined`, and `--json` prints the exact stored value.
+Reads take the project file first and fall back to the global one. Structured values print as compact JSON so they can be passed back to `set`; scalar strings print without JSON quotes. An unset field prints `undefined`, and `--json` prints the exact stored value.
 
 ```bash
 nub config get --local nodeCompat   # project file only
@@ -72,7 +72,7 @@ Keys that are not fields of this file keep their existing meaning: they read and
 
 Every field, with its full value set. Each has its own section below. Paths are resolved from the directory containing `nub.jsonc`, not the shell's current directory.
 
-```jsonc title="nub.jsonc"
+```jsonc title="~/.config/nub/nub.jsonc"
 {
   "$schema": "https://nubjs.com/schema/latest.json",
 
@@ -92,7 +92,7 @@ Every field, with its full value set. Each has its own section below. Paths are 
 
   // true = the default .env cascade
   // false = load nothing
-  // A path or an array of paths to load
+  // a path or an array of paths to load
   // "envFile": ".env.${APP_ENV}",
   "envFile": [".env", ".env.local"],
 
@@ -107,7 +107,7 @@ Every field, with its full value set. Each has its own section below. Paths are 
   // warn | error | true | false; true is warn
   "verifyDeps": "warn",
 
-  // ── installs — layout applies anywhere, release age only when Nub is the PM ──
+  // ── installs — Nub-identity projects only ──
   "install": {
     // "global-virtual-store" (default) | "isolated" | "hoisted" | "pnp"
     // "pnp" is rejected on install; the object form adds one knob:
@@ -122,8 +122,8 @@ Every field, with its full value set. Each has its own section below. Paths are 
     "minimumReleaseAgeExclude": ["@company/*"]
   },
 
-  // ── temporary package runs — GLOBAL FILE ONLY ──
-  // Reaching the registry is a decision about your machine, not one
+  // ── temporary package runs — global file only ──
+  // reaching the registry is a decision about your machine, not one
   // checkout, so a project nub.jsonc carrying this is an error.
   "dlx": {
     "consent": "prompt"            // prompt | never
@@ -395,17 +395,17 @@ Nub rejects pnpm's `"install"` and `"prompt"` values, which it does not implemen
 
 ## `install`
 
-The install block configures Nub's package manager. Its fields fall into two groups, scoped differently.
+The install block configures a Nub-identity project. A project owned by npm, pnpm, Yarn, or Bun keeps its incumbent package-manager settings instead.
 
 | what it controls | fields | applies |
 | --- | --- | --- |
-| layout | `linker`, `publicHoist` | every project, whatever lockfile is present |
-| resolution | `minimumReleaseAge`, `minimumReleaseAgeExclude` | only when Nub is the project's package manager |
+| layout | `linker`, `publicHoist` | Nub identity |
+| resolution | `minimumReleaseAge`, `minimumReleaseAgeExclude` | Nub identity |
 
-Layout shapes `node_modules`, and no lockfile records that shape, so honoring it alongside another tool's lockfile cannot change which packages you get. Resolution picks versions, which is where lockfile compatibility lives — under an `npm`, `pnpm`, `yarn`, or `bun` lockfile Nub resolves the way that tool would and names each field it skipped.
+Under an npm, pnpm, Yarn, or Bun identity, Nub names each project install field it skipped.
 
 ```text
-nub: `install.minimumReleaseAge` ignored — it selects package versions, and this project resolves as pnpm. Run `nub pm use nub` to make nub the project's package manager.
+nub: `install.minimumReleaseAge` ignored — it is nub-native install config, and this project resolves as pnpm. Run `nub pm use nub` to make nub the project's package manager.
 ```
 
 ### `install.linker`
@@ -523,9 +523,9 @@ Durations use an integer plus one unit.
 2w   # weeks
 ```
 
-The gate fails closed. When no version in a range is old enough the install stops rather than quietly resolving an older one. pnpm falls back by default; Nub does not, because a fallback resolves something other than what you asked for without saying so.
+Positive durations are stored in whole minutes and rounded up: `1s` through `1m` become one minute, while `0s` still disables the gate.
 
-Exempt the packages that need to move faster, rather than widening the window for everything.
+The gate fails closed. When no version in a range is old enough the install stops rather than quietly resolving an older one. pnpm falls back by default; Nub does not, because a fallback resolves something other than what you asked for without saying so.
 
 Exclude selected packages when they must update immediately.
 

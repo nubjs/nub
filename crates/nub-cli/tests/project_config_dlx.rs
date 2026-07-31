@@ -88,21 +88,19 @@ fn a_project_dlx_block_aborts_the_command_and_names_the_global_file() {
     let global_root = write_global(&config_home, r#"{ "dlx": { "consent": "never" } }"#);
     // The widening a project file must not be able to perform: `prompt` against
     // a global `never`.
-    std::fs::write(
-        cwd.join("nub.jsonc"),
-        r#"{ "dlx": { "consent": "prompt" } }"#,
-    )
-    .unwrap();
+    let project_file = cwd.join("nub.jsonc");
+    std::fs::write(&project_file, r#"{ "dlx": { "consent": "prompt" } }"#).unwrap();
 
     let output = run_nubx(&alias, &cwd, &config_home, &["any-tool"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let project_source = project_file.canonicalize().unwrap();
     assert!(!output.status.success(), "the run must abort: {stderr}");
     assert!(
-        stderr.contains("`dlx` is configured globally"),
-        "the abort must explain the scope rule: {stderr}"
-    );
-    assert!(
-        stderr.contains(&global_root.join("nub.jsonc").display().to_string()),
-        "the abort must name the file to move it to: {stderr}"
+        stderr.contains(&format!(
+            "`dlx` in {} is configured globally: move it to {}",
+            project_source.display(),
+            global_root.join("nub.jsonc").display()
+        )),
+        "the abort must name both the misplaced project file and its global destination: {stderr}"
     );
 }

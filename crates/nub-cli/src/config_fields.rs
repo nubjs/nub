@@ -504,11 +504,12 @@ mod tests {
         let collisions: Vec<_> = FIELDS
             .iter()
             .flat_map(|field| {
-                aube_settings::all().iter().filter_map(move |engine| {
-                    (field.address == engine.name
-                        || engine.npmrc_keys.iter().any(|key| *key == field.address))
-                    .then(|| format!("{} ↔ {}", field.address, engine.name))
-                })
+                aube_settings::all()
+                    .iter()
+                    .filter(move |engine| {
+                        field.address == engine.name || engine.npmrc_keys.contains(&field.address)
+                    })
+                    .map(move |engine| format!("{} ↔ {}", field.address, engine.name))
             })
             .collect();
         assert!(
@@ -636,13 +637,19 @@ mod tests {
     fn dlx_is_global_only_at_the_write_boundary() {
         let consent = field("dlx.consent").unwrap();
         assert!(consent.global_only);
-        let err = write_target(consent, Scope::Project)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("`dlx` is configured globally"), "{err}");
 
         crate::config::with_config_home(|home| {
             let expected = home.join("nub").join(project_config::FILE_NAME);
+            let err = write_target(consent, Scope::Project)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains(&format!(
+                    "`dlx` in nub.jsonc is configured globally: move it to {}",
+                    expected.display()
+                )),
+                "{err}"
+            );
             assert_eq!(write_target(consent, Scope::Auto).unwrap(), expected);
             assert_eq!(write_target(consent, Scope::Global).unwrap(), expected);
         });

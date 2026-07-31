@@ -135,13 +135,13 @@ impl ConfigError {
                 match crate::config::config_path() {
                     Some(path) => write!(
                         f,
-                        "`{key}` is configured globally: move it to {}. \
+                        "`{key}` in {file} is configured globally: move it to {}. \
                          Settings that configure your machine are not read from a checkout.",
                         path.display()
                     ),
                     None => write!(
                         f,
-                        "`{key}` is configured globally: move it to the global {FILE_NAME}. \
+                        "`{key}` in {file} is configured globally: move it to the global {FILE_NAME}. \
                          Settings that configure your machine are not read from a checkout."
                     ),
                 }
@@ -1860,6 +1860,31 @@ mod tests {
             Some(ImplicitDlx::Prompt),
             "the global file still accepts the section"
         );
+    }
+
+    #[test]
+    fn global_only_key_error_names_the_source_and_destination_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().join(FILE_NAME);
+        std::fs::write(&project_path, r#"{ "dlx": { "consent": "prompt" } }"#).unwrap();
+
+        let err = read_project_config_at(&project_path).unwrap_err();
+        let message = err.to_string();
+        let source_path = std::path::absolute(&project_path).unwrap();
+        assert!(
+            message.contains(&source_path.display().to_string()),
+            "scope error must name the project file containing the misplaced key: {message}"
+        );
+        match crate::config::config_path() {
+            Some(destination_path) => assert!(
+                message.contains(&destination_path.display().to_string()),
+                "scope error must name the global destination file: {message}"
+            ),
+            None => assert!(
+                message.contains(&format!("global {FILE_NAME}")),
+                "scope error must name its global-file destination: {message}"
+            ),
+        }
     }
 
     #[test]

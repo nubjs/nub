@@ -17,7 +17,23 @@ mod resolve;
 mod transform;
 mod tsconfig;
 
+use jsonc_parser::ParseOptions;
 use napi_derive::napi;
+
+/// Pin JSONC acceptance to the pre-0.32 dialect.  New parser versions default
+/// new extensions on, but tsconfig and data imports must not silently become
+/// more permissive when this dependency moves.
+pub(crate) fn jsonc_parse_options() -> ParseOptions {
+    ParseOptions {
+        allow_comments: true,
+        allow_loose_object_property_names: true,
+        allow_trailing_commas: true,
+        allow_missing_commas: false,
+        allow_single_quoted_strings: true,
+        allow_hexadecimal_numbers: false,
+        allow_unary_plus_numbers: false,
+    }
+}
 
 pub use cache::transform_cached;
 pub use detect::detect_module_info;
@@ -122,13 +138,13 @@ pub fn parse_jsonc(source: String) -> napi::Result<serde_json::Value> {
     // a parse error.
     let parsed = jsonc_parser::parse_to_serde_value::<Option<serde_json::Value>>(
         &source,
-        &Default::default(),
+        &jsonc_parse_options(),
     )
     .map_err(|e| napi::Error::from_reason(format!("JSONC parse error: {e}")))?;
     if let Some(value) = parsed {
         return Ok(value);
     }
-    let present = jsonc_parser::parse_to_value(&source, &Default::default())
+    let present = jsonc_parser::parse_to_value(&source, &jsonc_parse_options())
         .map_err(|e| napi::Error::from_reason(format!("JSONC parse error: {e}")))?
         .is_some();
     if present {
