@@ -111,12 +111,18 @@ Extracted addons are mode `644`: `dlopen` needs read, not exec. No `chmod` is re
 `process.arch` (which is how a multi-platform addon package picks the target's variant while
 building), tree-shaking, chunk layout, asset naming, worker entry chunking.
 
-**Run time, by deliberate exception:** `--external` packages and computed `import(expr)` sites
-allowed through by `--allow-dynamic-import` are resolved by a `module.registerHooks` shim the
-build installs only when something actually needs it. Resolution order is shape-dependent and
-each direction guards a different silent wrong answer — path-like specifiers try the artifact
-first (chunk-to-chunk imports are indistinguishable at run time), bare specifiers try the launch
-directory first (the app dir has no `node_modules`, so Node's walk would climb out of the cache).
+**Run time, by deliberate exception:** `--external` packages, plus computed `import(expr)` AND
+variable-specifier `import(name)` sites allowed through by `--allow-dynamic-import`, are resolved
+by a `module.registerHooks` shim the build installs only when something actually needs it.
+Resolution order is shape-dependent and each direction guards a different silent wrong answer —
+path-like specifiers try the artifact first (chunk-to-chunk imports are indistinguishable at run
+time), bare specifiers try the launch directory first (the app dir has no `node_modules`, so
+Node's walk would climb out of the cache).
+
+With the flag on there is nothing left to refuse, and a deferred import resolves from a launch
+directory that usually has no `node_modules` — so the build PRINTS the sites it deferred and what
+each resolves to. That listing is the only attribution the user gets for a later
+`Cannot find package …`, which is why it is not merely cosmetic.
 
 ## Invariants worth knowing before you change something
 
@@ -129,6 +135,19 @@ directory first (the app dir has no `node_modules`, so Node's walk would climb o
   in this subsystem is the *silent wrong answer*: a build that succeeds and produces a binary
   that resolves the wrong module, or embeds a `.ts` file as inert data. Where a case cannot be
   handled, fail the build with a diagnostic naming the file and the reason.
+  **The one deliberate exception is a JS/TS module embedded as a DATA asset, which WARNS.**
+  A refusal is only legitimate when there is a flag on the far side of it — the computed-import
+  gate has `--allow-dynamic-import`, and this would have nothing. The build also cannot
+  distinguish meaning-to-execute from a correct, currently-working read of a script's TEXT (a
+  codegen template, browser-served source, a snippet for `new Worker(src, {eval:true})`), and the
+  decidable executed case is already emitted as a chunk. The defect was the absent signal, so a
+  note is the whole fix.
+- **Clean the Rolldown module id before deriving a `SourceType` from it.** An id can carry a
+  `?query`; `SourceType::from_path` on the raw id then falls back to `mjs()`, a TypeScript module
+  fails to parse, and the scan short-circuits — silently dropping every site in that module. This
+  cost a real silent-pass bug in `scan_unresolvable`. `scan_new_urls` still has the same shape
+  (cleans the id for the parent directory but not for the parse); its failure mode is only
+  "no embedding", which is silent by design there, but it is worth fixing.
 - **Emitted chunks are excluded from entry detection.** Rolldown marks them `is_entry`, so
   without that guard a bundled worker is mistaken for the program's entry.
 - **Verification means running the produced binary**, from a foreign cwd, with the source tree
