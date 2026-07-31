@@ -2432,9 +2432,10 @@ impl ShimPathMatcher {
         }
         #[cfg(windows)]
         {
-            // PATH and environment values may reach the same directory through
-            // 8.3 short and long spellings. Compare stable file identity first,
-            // then canonical paths, with a separator/case-normalized fallback.
+            // Windows canonicalization can fail outright for real directories:
+            // an SMB component the user cannot list, a volume without a drive
+            // letter, or a mount outside the Mount Manager. Compare stable file
+            // identity first, then canonical paths, with a textual fallback.
             if let (Some(component), Ok(entry)) = (&self.identity, FileHandle::from_path(entry))
                 && &entry == component
             {
