@@ -1,0 +1,71 @@
+---
+title: DigitalOcean
+description: Deploy a Nub service to App Platform from a Git repository Dockerfile or a prebuilt GHCR image.
+---
+
+DigitalOcean App Platform [uses a root Dockerfile automatically](https://docs.digitalocean.com/products/app-platform/reference/dockerfile/). A separate DigitalOcean Container Registry is optional: App Platform can build from the repository or pull an application image from GHCR.
+
+## Dockerfile
+
+```dockerfile title="Dockerfile"
+FROM ghcr.io/nubjs/nub:0.6.0
+
+COPY --chown=node:node package.json package-lock.json ./
+RUN nub ci
+
+COPY --chown=node:node . .
+EXPOSE 8080
+CMD ["nub", "run", "start"]
+```
+
+Change `package-lock.json` to the project's lockfile. Bind the server to `0.0.0.0` and read `PORT`; App Platform defaults web services to `8080`:
+
+```ts title="server.ts"
+import { createServer } from "node:http";
+
+const port = Number(process.env.PORT || 8080);
+createServer((_request, response) => {
+  response.end("Hello from Nub");
+}).listen(port, "0.0.0.0");
+```
+
+## Repository deployment
+
+1. Create an App Platform app and choose the GitHub repository.
+2. Select **Web Service** and keep the detected Dockerfile build.
+3. Set the public HTTP port to `8080` if it was not detected.
+4. Create the app and open its `*.ondigitalocean.app` URL.
+
+App Platform web services are billed resources. Review the current [App Platform pricing](https://docs.digitalocean.com/products/app-platform/details/pricing/) before creating one.
+
+## App spec
+
+The same source deployment can be stored as an app spec:
+
+```yaml title=".do/app.yaml"
+name: nub-app
+services:
+  - name: web
+    github:
+      repo: owner/repository
+      branch: main
+      deploy_on_push: true
+    dockerfile_path: Dockerfile
+    http_port: 8080
+    instance_size_slug: apps-s-1vcpu-0.5gb
+ingress:
+  rules:
+    - component:
+        name: web
+      match:
+        path:
+          prefix: /
+```
+
+Create it with `doctl apps create --spec .do/app.yaml` after replacing the repository and choosing an instance size.
+
+## Prebuilt image
+
+App Platform supports public and private images from GitHub Container Registry. Publish the application image in [GitHub Actions](/docs/deployment#github-actions-and-registries), then choose **Container Image → GitHub Container Registry** when creating the component.
+
+A prebuilt image skips the App Platform build. Keep the image tag immutable, or trigger a new deployment after publishing a replacement tag.

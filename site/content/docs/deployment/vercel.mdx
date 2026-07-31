@@ -17,7 +17,8 @@ Add both commands to `vercel.json`. The installer fetches a static binary, then 
 
 ```json title="vercel.json"
 {
-  "installCommand": "curl -fsSL https://nubjs.com/install.sh | bash && export PATH=$HOME/.nub/bin:$PATH && nub install",
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "curl -fsSL https://nubjs.com/install.sh | bash && export PATH=$HOME/.nub/bin:$PATH && nub ci",
   "buildCommand": "export PATH=$HOME/.nub/bin:$PATH && nub run build"
 }
 ```
@@ -75,11 +76,17 @@ Overriding the install command isn't required. Adding the CLI as a devDependency
 }
 ```
 
-Vercel's auto-detected install links `nub` and `nubx` onto `node_modules/.bin`, and your scripts resolve them. Reach for it when you'd rather pin the version in the manifest than in build settings; see [Hosted builds](/docs/deployment#hosted-builds) for the full pattern.
+Vercel's auto-detected install links `nub` and `nubx` onto `node_modules/.bin`, and your scripts resolve them. Reach for it when you'd rather pin the version in the manifest than in build settings; see [Managed builders](/docs/deployment#managed-builders) for the full pattern.
 
 <Callout>
   Excluding development dependencies from the install drops the CLI along with them. Override the install command instead when a project builds without devDependencies.
 </Callout>
+
+## Runtime boundary
+
+Nub runs the install and build. A deployed Vercel Function still runs on Vercel's Node runtime because Vercel owns the function entrypoint and does not run the project's Dockerfile.
+
+Use a [container provider](/docs/deployment#container-services) when request-time code needs Nub's runtime augmentation. Static output and frameworks that emit ordinary Node-compatible functions work normally on Vercel.
 
 ## Node version
 

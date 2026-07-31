@@ -1,11 +1,11 @@
 ---
 title: Cloudflare
-description: Nub is preinstalled in the Cloudflare Workers Builds image, so package scripts that call it run with no setup step. Pages uses the devDependency pattern instead.
+description: Workers Builds preinstalls Nub. Cloudflare Pages uses the managed-builder devDependency pattern instead.
 ---
 
-Cloudflare's Workers Builds image has preinstalled Nub since July 30, 2026. Package scripts that shell out to `nub` or `nubx` run unchanged:
+Cloudflare's [Workers Builds image](https://developers.cloudflare.com/workers/ci-cd/builds/build-image/) has included Nub since July 30, 2026. A package script can call `nub` or `nubx` without an install step:
 
-```json
+```json title="package.json"
 {
   "scripts": {
     "build": "nub run i18n:compile && nubx vite build"
@@ -13,36 +13,23 @@ Cloudflare's Workers Builds image has preinstalled Nub since July 30, 2026. Pack
 }
 ```
 
-There's no setup step to add and no devDependency to carry — the binary is on PATH the way `pnpm` and `bun` already are ([tracking issue](https://github.com/cloudflare/pages-build-image/issues/13)).
+The binary is on `PATH` in Workers Builds. The change applies to the Workers image, not the separate Pages build image ([tracking issue](https://github.com/cloudflare/pages-build-image/issues/13)).
 
 ## Workers Builds
 
-Nub augments the Node the image provisions rather than bringing its own. Cloudflare's [build image](https://developers.cloudflare.com/workers/ci-cd/builds/build-image/) ships Node 22.23.2 and 24.18.0 and defaults to 24.18.0, so builds land on Nub's fast tier without configuration.
+Cloudflare runs an optional build command and then a Wrangler deploy command. Point the build command at the package script that uses Nub; no devDependency is required only for the preinstalled version.
 
-Both tools read the same version files, so a pin moves them together:
-
-- `package.json` → `devEngines.runtime`
-- `.node-version`
-- `.nvmrc`
-- `package.json` → `engines.node`
-
-Set one and the build Node matches the version Nub resolves at runtime.
+The image currently defaults to Node 24.18.0 and also preinstalls Node 22.23.2. Use `.node-version` or `.nvmrc` to select a Node version that both Cloudflare and Nub read.
 
 <Callout type="warn">
-  Cloudflare's support for `.tool-versions` is limited, and an entry it cannot resolve fails the build. Prefer `.node-version` or `.nvmrc` on Workers Builds.
+  Workers Builds does not document `.tool-versions` or the package manifest as Node-version sources. Use `.node-version` or `.nvmrc` for a shared pin.
 </Callout>
 
 ## Pages
 
-The change landed in the Workers Builds image, not the Pages one. A Pages build still reports:
+Cloudflare Pages does not include Nub. Add the npm package as a devDependency so the install links both commands into `node_modules/.bin`:
 
-```console
-sh: nub: not found
-```
-
-Add `@nubjs/nub` as a devDependency there and call it from your scripts:
-
-```json
+```json title="package.json"
 {
   "devDependencies": {
     "@nubjs/nub": "^0.6.0"
@@ -53,8 +40,10 @@ Add `@nubjs/nub` as a devDependency there and call it from your scripts:
 }
 ```
 
-The package declares `bin: { nub, nubx }`, so the install Cloudflare runs links both onto `node_modules/.bin` and your scripts resolve them. See [Hosted builds](/docs/deployment#hosted-builds) for the full pattern.
+See [Managed builders](/docs/deployment#managed-builders) for the same pattern on other hosted build systems.
 
 ## Version pinning
 
-The image carries one Nub version and moves it on Cloudflare's own cadence. To hold a project to a specific version instead, add `@nubjs/nub` as a devDependency as above — the same pattern Pages needs, and it works identically on Workers Builds.
+The preinstalled Workers version moves on Cloudflare's image cadence. Add `@nubjs/nub` as a devDependency when the project needs a lockfile-pinned Nub version; package scripts prefer `node_modules/.bin` over the image-wide binary.
+
+Nub only participates in the build. Deployed Workers execute on Cloudflare's runtime rather than Node with Nub augmentation.

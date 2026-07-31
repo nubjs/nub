@@ -1,0 +1,82 @@
+---
+title: AWS Lambda
+description: Run a Nub HTTP server from a Lambda container image by adding the AWS Lambda Web Adapter.
+---
+
+AWS Lambda runs container images from ECR rather than GHCR. Add the [AWS Lambda Web Adapter](https://github.com/aws/aws-lambda-web-adapter) to the official Nub image so Lambda events reach the application's HTTP port.
+
+## Dockerfile
+
+```dockerfile title="Dockerfile"
+FROM public.ecr.aws/awsguru/aws-lambda-adapter:1.0.0 AS lambda-adapter
+FROM ghcr.io/nubjs/nub:0.6.0
+
+COPY --from=lambda-adapter /lambda-adapter /opt/extensions/lambda-adapter
+COPY --chown=node:node package.json package-lock.json ./
+RUN nub ci
+
+COPY --chown=node:node . .
+ENV PORT=8080
+EXPOSE 8080
+CMD ["nub", "run", "start"]
+```
+
+Change `package-lock.json` to the project's lockfile. The application must listen on `0.0.0.0:8080` and return a response from its readiness path:
+
+```ts title="server.ts"
+import { createServer } from "node:http";
+
+const port = Number(process.env.PORT || 8080);
+createServer((_request, response) => {
+  response.end("Hello from Nub on Lambda");
+}).listen(port, "0.0.0.0");
+```
+
+The adapter activates inside Lambda. The same image runs as a normal HTTP server under local Docker.
+
+## Build and push
+
+[Lambda accepts one architecture per function](https://docs.aws.amazon.com/lambda/latest/dg/images-create.html). Build `linux/amd64` on any host and disable provenance so ECR receives the image manifest Lambda expects:
+
+```bash
+export AWS_REGION=us-east-1
+export ECR_REPOSITORY=nub-lambda-app
+export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+export ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+export ECR_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+
+aws ecr create-repository \
+  --repository-name "$ECR_REPOSITORY" \
+  --region "$AWS_REGION"
+
+aws ecr get-login-password --region "$AWS_REGION" \
+  | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+docker build --platform linux/amd64 --provenance=false -t "$ECR_IMAGE" .
+docker push "$ECR_IMAGE"
+```
+
+Reuse `aws ecr describe-repositories` instead of `create-repository` when the repository already exists.
+
+## Create the function
+
+1. Open Lambda in the [same region as the ECR repository](https://docs.aws.amazon.com/lambda/latest/dg/images-create.html).
+2. Select **Create function → Container image** and choose the pushed image.
+3. Select or create a Lambda execution role with only the permissions the application needs.
+4. Enable a Function URL when the service should be reachable over HTTP.
+
+A [Function URL](https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html) with auth type **NONE** is public. Use `AWS_IAM` when callers should authenticate.
+
+Verify the result with the URL Lambda returns:
+
+```bash
+curl https://FUNCTION_ID.lambda-url.us-east-1.on.aws/
+```
+
+```text
+Hello from Nub on Lambda
+```
+
+## GitHub Actions
+
+The setup action can run tests before the image build. Deployment still needs AWS authentication, an ECR login, and a Lambda update through AWS's standard actions or CLI; those are provider credentials rather than another Nub artifact.
