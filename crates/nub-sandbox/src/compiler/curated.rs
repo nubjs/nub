@@ -42,7 +42,7 @@
 //! Naming `.prisma` grants one directory; a dot-entry pattern would grant those.
 
 use crate::compiler::defaults;
-use crate::matcher::path::canonicalize_glob_prefix;
+use crate::matcher::path::{Homes, canonicalize_glob_prefix};
 use crate::policy::{CanonGlob, Effect, FsAccess, FsOrigin, FsRule, SandboxPolicy};
 use std::path::{Path, PathBuf};
 
@@ -68,6 +68,34 @@ enum ProjectWrites {
     None,
     ManifestField(&'static [&'static str]),
     Literal(&'static [&'static str]),
+}
+
+/// One `$HOME`-anchored artifact cache, and the package's own variable that redirects it.
+///
+/// PER-OS because the default is per-OS: `cachedir('Cypress')` resolves to
+/// `~/Library/Caches/Cypress` on macOS and `$XDG_CACHE_HOME/Cypress` on Linux, and Playwright
+/// splits the same way. A `None` platform means nub measured nothing there and grants nothing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HomePath {
+    env: &'static str,
+    macos: Option<&'static str>,
+    linux: Option<&'static str>,
+    windows: Option<&'static str>,
+}
+
+impl HomePath {
+    /// Everything that is not macOS or Windows takes the `linux` spelling, matching how these
+    /// packages themselves branch (`cachedir` and Playwright's registry both treat every
+    /// remaining platform as the XDG one).
+    fn pattern(&self) -> Option<&'static str> {
+        if cfg!(target_os = "macos") {
+            self.macos
+        } else if cfg!(windows) {
+            self.windows
+        } else {
+            self.linux
+        }
+    }
 }
 
 /// One package's exception. Absent fields mean the jail's baseline already suffices.
@@ -102,6 +130,42 @@ struct CuratedGrant {
     /// reached if the granted package could already `require` it. Nothing a package writes
     /// into its own manifest enters here.
     dependency_dirs: &'static [&'static [&'static str]],
+    /// `$HOME`-anchored artifact caches the package downloads into, each named by the
+    /// package's OWN documented override variable. Granted read-write, and the variable is
+    /// SET to the granted path.
+    ///
+    /// THE PROBLEM THIS EXISTS FOR IS RUN TIME, NOT INSTALL TIME. `preset::private_home_dir`
+    /// already gives every jailed script a writable private `HOME`, so a package that
+    /// downloads a browser into `$HOME/…` installs and exits 0 today. It is the app that
+    /// breaks afterwards: the user's own `HOME` is the real one, nub sets no variable outside
+    /// the install, so `cypress verify` looks in `~/Library/Caches/Cypress` and finds nothing
+    /// — measured, `No version of Cypress is installed in: …`. Pointing the package's install
+    /// at the SAME path its run-time lookup computes is what closes that, and it is why the
+    /// path has to be the tool's real default rather than a directory nub picks: nub is not in
+    /// the loop when the app runs, so a nub-chosen location would be equally unreachable.
+    ///
+    /// WHY THIS IS A NARROW GRANT AND NOT THE JAIL INVERTED. The alternative shapes both fail
+    /// on authorship. Copying the private home out into the real one publishes
+    /// DEPENDENCY-CHOSEN paths — `~/.zshrc`, `~/.config/git/config` with `core.hooksPath`,
+    /// `~/Library/LaunchAgents/*` — as nub. Dropping the `HOME` redirect returns every package
+    /// that uses the free scratch home to EPERM and reopens the `$HOME/.npmrc` cross-package
+    /// channel `private_home_dir` was built to close. This grants ONE directory, per package,
+    /// by name, read-write; it reads nothing else under `$HOME` and opens no socket. Homebrew
+    /// resolves the same tension the same way — real `$HOME`, `deny_read_home`, and a curated
+    /// allowlist of specific writable paths.
+    ///
+    /// SUBSUMPTION: a package that can write its own binary cache already has arbitrary code
+    /// execution as itself, which depending on it already grants. The grant adds the ability
+    /// to write a file the package would then run — not the ability to run one.
+    ///
+    /// THE VARIABLE IS SET UNCONDITIONALLY, overwriting an ambient value. Honoring an ambient
+    /// one would make a path the environment authored decide where nub grants write, which is
+    /// exactly the authorship channel this module's invariant closes; and the grant is
+    /// compiled against nub's path either way, so a respected ambient value would install to a
+    /// directory the policy does not permit. Accepted residual: a user who has set
+    /// `CYPRESS_CACHE_FOLDER` gets nub's default under the jail, and turns confinement off for
+    /// that package (`dependenciesMeta.<name>.sandbox: false`) if they need theirs honored.
+    home_paths: &'static [HomePath],
     /// Project-relative subtrees it may READ — a codegen INPUT the consumer authored, and
     /// the reason this is a separate field from `project_writes`: a generator needs its
     /// schema readable, not writable.
@@ -168,6 +232,7 @@ impl CuratedGrant {
     const NONE: Self = Self {
         sibling_dirs: &[],
         dependency_dirs: &[],
+        home_paths: &[],
         project_reads: &[],
         project_writes: ProjectWrites::None,
         project_cwd: false,
@@ -342,9 +407,51 @@ static GOLDEN_PRE_CATALOG_GRANTS: &[(&str, CuratedGrant)] = &[
             ..CuratedGrant::NONE
         },
     ),
+    // THE $HOME-CACHE COHORT — the one class whose break the install's exit code cannot see.
+    // Both packages install rc=0 under the jail today and fail LATER, when the app runs: the
+    // download lands in the private jail home while the app resolves the same cache path
+    // against the user's real one. Measured both ways; see each catalog entry's `observed`.
+    //
+    // Cypress omits Windows and puppeteer names it, and the asymmetry is the packages': the
+    // Cypress default comes from `cachedir()`, whose win32 branch is `%LOCALAPPDATA%`-derived
+    // and whose posix branch reads `XDG_CACHE_HOME` — so it needs the `$cache` anchor on
+    // Linux and a Windows measurement nub does not have. Puppeteer computes
+    // `join(homedir(), '.cache', 'puppeteer')` on every platform, consulting neither, so one
+    // `~/`-anchored path is correct everywhere.
+    (
+        "cypress",
+        CuratedGrant {
+            home_paths: &[HomePath {
+                env: "CYPRESS_CACHE_FOLDER",
+                macos: Some("~/Library/Caches/Cypress"),
+                linux: Some("$cache/Cypress"),
+                windows: None,
+            }],
+            ..CuratedGrant::NONE
+        },
+    ),
+    (
+        "puppeteer",
+        CuratedGrant {
+            home_paths: &[HomePath {
+                env: "PUPPETEER_CACHE_DIR",
+                macos: Some("~/.cache/puppeteer"),
+                linux: Some("~/.cache/puppeteer"),
+                windows: Some("~/.cache/puppeteer"),
+            }],
+            ..CuratedGrant::NONE
+        },
+    ),
 ];
 
-/// Grant `package_name`'s curated exception, if it has one.
+/// Grant `package_name`'s curated exception, if it has one, and return the environment
+/// variables the caller must set for the [`CuratedGrant::home_paths`] grants to be reachable.
+///
+/// THE ENV HALF IS RETURNED RATHER THAN APPLIED because the caller replaces `policy.env`
+/// wholesale AFTER every grant is compiled (`preset::compile_build_jail` assigns
+/// `defaults::lifecycle_scrubbed_env`), so anything written here would be discarded. Returning
+/// the pairs resolved during the same pass that emitted the rules is what keeps the variable
+/// and the granted path from ever naming different directories.
 ///
 /// `None` — aube's root is a fetched checkout, so there is no consumer-anchored identity —
 /// grants nothing, which is the conservative direction and the reading §0e requires.
@@ -352,19 +459,14 @@ static GOLDEN_PRE_CATALOG_GRANTS: &[(&str, CuratedGrant)] = &[
 /// Appended rather than front-inserted: these are the NARROWEST grants in the policy and
 /// must win under last-match-wins over the front-inserted dependency-tree READ they nest
 /// inside, exactly as the surface's own `package_dir` rw entry does.
+#[must_use]
 pub fn grant_curated_package(
     policy: &mut SandboxPolicy,
-    project_root: &Path,
+    homes: &Homes,
     package_dir: &Path,
     package_name: Option<&str>,
-) {
-    grant_from_table(
-        curated_table(),
-        policy,
-        project_root,
-        package_dir,
-        package_name,
-    );
+) -> Vec<(String, String)> {
+    grant_from_table(curated_table(), policy, homes, package_dir, package_name)
 }
 
 /// The grant table in force: [`CURATED_GRANTS`], unless the dev-only catalog override
@@ -385,11 +487,24 @@ fn curated_table() -> &'static [(&'static str, CuratedGrant)] {
                     };
                     let chains: &'static [&'static [&'static str]] =
                         Vec::leak(g.dependency_dirs.iter().map(|c| strs(c)).collect());
+                    let opt = |v: &'static Option<String>| v.as_deref();
+                    let home_paths: &'static [HomePath] = Vec::leak(
+                        g.home_paths
+                            .iter()
+                            .map(|h| HomePath {
+                                env: h.env.as_str(),
+                                macos: opt(&h.macos),
+                                linux: opt(&h.linux),
+                                windows: opt(&h.windows),
+                            })
+                            .collect(),
+                    );
                     (
                         g.package.as_str(),
                         CuratedGrant {
                             sibling_dirs: strs(&g.sibling_dirs),
                             dependency_dirs: chains,
+                            home_paths,
                             project_reads: strs(&g.project_reads),
                             project_writes: match &g.project_writes {
                                 None => ProjectWrites::None,
@@ -416,14 +531,31 @@ fn curated_table() -> &'static [(&'static str, CuratedGrant)] {
 fn grant_from_table(
     table: &[(&str, CuratedGrant)],
     policy: &mut SandboxPolicy,
-    project_root: &Path,
+    homes: &Homes,
     package_dir: &Path,
     package_name: Option<&str>,
-) {
+) -> Vec<(String, String)> {
+    let project_root = homes.project.as_path();
     let Some(grant) = package_name.and_then(|n| lookup(table, n)) else {
-        return;
+        return Vec::new();
     };
     let mut rules = Vec::new();
+    let mut env = Vec::new();
+
+    for home_path in grant.home_paths {
+        let Some(pattern) = home_path.pattern() else {
+            continue;
+        };
+        let Some(path) = resolve_home_path(homes, pattern) else {
+            continue;
+        };
+        materialize_home_path(homes, &path);
+        push_rw(&mut rules, &path);
+        env.push((
+            home_path.env.to_string(),
+            path.to_string_lossy().into_owned(),
+        ));
+    }
 
     if let Some(own) = enclosing_node_modules(package_dir) {
         for dir in grant.sibling_dirs {
@@ -453,6 +585,45 @@ fn grant_from_table(
         push_rw(&mut rules, &path);
     }
     policy.fs.rules.entries.extend(rules);
+    env
+}
+
+/// Expand one [`HomePath`] pattern and keep it only if it lands strictly under its anchor.
+///
+/// The clamp re-checks at run time what `catalog::require_home_anchored` already rejected at
+/// build time, for the same reason `contained` does: the anchors are ENVIRONMENT-derived
+/// (`XDG_CACHE_HOME`, `LOCALAPPDATA`, `HOME`), so the resolved path is not decided by the
+/// catalog text alone. A `$cache` that the environment has pointed at `/` yields an anchor a
+/// grant would then nest inside harmlessly — but an anchor that canonicalizes to the resolved
+/// path ITSELF would grant the whole cache root, so that case is dropped.
+fn resolve_home_path(homes: &Homes, pattern: &str) -> Option<PathBuf> {
+    let anchor = if pattern.starts_with("~/") {
+        &homes.home
+    } else {
+        &homes.cache
+    };
+    let anchor = crate::matcher::path::canonicalize_including_nonexistent(anchor);
+    let resolved = crate::matcher::path::canonicalize_including_nonexistent(Path::new(
+        &crate::matcher::path::expand_symbolic(pattern, homes),
+    ));
+    (resolved != anchor && resolved.starts_with(&anchor)).then_some(resolved)
+}
+
+/// Create a home-cache grant's target, for the same Landlock reason as
+/// [`materialize_sibling`]: a rule for a path that does not exist cannot be attached, and the
+/// directory a package is about to download into is absent on a cold machine by definition.
+///
+/// `create_dir_all`, not one level, because these paths are three deep
+/// (`~/Library/Caches/Cypress`) and the intermediate `Caches`/`.cache` may itself be missing.
+/// The gate is the same one `preset::private_home_dir` uses in the other direction — a real
+/// user home on the host — so a policy compiled against a synthetic `Homes` (every unit test
+/// uses `/testhome`) builds no tree. Default permissions on purpose: this is the user's own
+/// cache directory, not jail scratch, and the tool reads it back unconfined.
+fn materialize_home_path(homes: &Homes, path: &Path) {
+    if !homes.home.is_dir() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(path);
 }
 
 /// Resolve one [`CuratedGrant::dependency_dirs`] chain to a REAL directory, or `None`.
@@ -688,8 +859,24 @@ mod tests {
         name: Option<&str>,
     ) -> SandboxPolicy {
         let mut policy = SandboxPolicy::default();
-        grant_curated_package(&mut policy, project_root, package_dir, name);
+        let _ = grant_curated_package(&mut policy, &homes_for(project_root), package_dir, name);
         policy
+    }
+
+    /// Synthetic anchors: `/testhome` exists on no host, which is the gate
+    /// [`materialize_home_path`] reads, so a unit compile builds no tree under a real home.
+    fn homes_for(project_root: &Path) -> Homes {
+        let root = PathBuf::from(if cfg!(windows) {
+            "C:/testhome"
+        } else {
+            "/testhome"
+        });
+        Homes {
+            cache: root.join(".cache"),
+            tmp: root.join("tmp"),
+            home: root,
+            project: project_root.to_path_buf(),
+        }
     }
 
     fn globs(policy: &SandboxPolicy) -> Vec<String> {
@@ -734,20 +921,33 @@ mod tests {
         )
         .expect("write manifest");
 
-        for (name, _) in GOLDEN_PRE_CATALOG_GRANTS {
+        for (name, grant) in GOLDEN_PRE_CATALOG_GRANTS {
             let dir = project.join(format!("node_modules/.store/{name}@1/node_modules/{name}"));
             let compile = |table| {
                 let mut p = SandboxPolicy::default();
-                grant_from_table(table, &mut p, project, &dir, Some(name));
+                // The env pairs ride into the comparison too: a `home_paths` entry the
+                // generator dropped would leave the fs rules identical and only differ here.
+                let env = grant_from_table(table, &mut p, &homes_for(project), &dir, Some(name));
                 p.fs.rules
                     .entries
                     .iter()
                     .map(|r| format!("{} {:?} {:?}", r.matcher.as_str(), r.effect, r.access))
+                    .chain(env.iter().map(|(k, v)| format!("env {k}={v}")))
                     .collect::<Vec<_>>()
             };
             let from_catalog = compile(CURATED_GRANTS);
+            // An entry whose only content is a `home_paths` path this platform does not have
+            // compiles to nothing HERE, legitimately — `cypress` omits Windows, so on Windows
+            // its row is empty and the guard below would fail on a correct table. Every other
+            // row, and every row on every other platform, still has to produce something.
+            let applies_here = !grant.sibling_dirs.is_empty()
+                || !grant.dependency_dirs.is_empty()
+                || !grant.project_reads.is_empty()
+                || grant.project_writes != ProjectWrites::None
+                || grant.project_cwd
+                || grant.home_paths.iter().any(|h| h.pattern().is_some());
             assert!(
-                !from_catalog.is_empty(),
+                !applies_here || !from_catalog.is_empty(),
                 "{name} compiled to no rules — the comparison below would be vacuous"
             );
             assert_eq!(
@@ -799,6 +999,26 @@ mod tests {
                     );
                 }
             }
+            // A home-cache path is the one field that reaches OUTSIDE the project at all, so
+            // its anchor is what bounds it: an entry spelled any other way would either be
+            // dropped by `resolve_home_path` (inert) or aim at a directory the tool does not
+            // read back at run time (useless), and both look like a working grant in review.
+            for home in grant.home_paths {
+                for pattern in [home.macos, home.linux, home.windows].into_iter().flatten() {
+                    assert!(
+                        pattern.starts_with("~/") || pattern.starts_with("$cache/"),
+                        "{name}: home path `{pattern}` must be anchored at `~/` or `$cache/`"
+                    );
+                    assert!(
+                        !pattern.contains('*')
+                            && !pattern.contains('?')
+                            && !Path::new(pattern)
+                                .components()
+                                .any(|c| matches!(c, std::path::Component::ParentDir)),
+                        "{name}: home path `{pattern}` must be a literal path inside its anchor"
+                    );
+                }
+            }
             for chain in grant.dependency_dirs {
                 assert!(!chain.is_empty(), "{name}: an empty dependency chain");
                 for dep in *chain {
@@ -846,9 +1066,9 @@ mod tests {
         symlink_dir(&engines, &prisma_nm.join("@prisma/engines"));
 
         let mut policy = SandboxPolicy::default();
-        grant_curated_package(
+        let _ = grant_curated_package(
             &mut policy,
-            project,
+            &homes_for(project),
             &client_nm.join("@prisma/client"),
             Some("@prisma/client"),
         );
@@ -986,9 +1206,9 @@ mod tests {
         let enclosing = enclosing_node_modules(&package_dir).expect("the cell has a node_modules");
 
         let mut policy = SandboxPolicy::default();
-        grant_curated_package(
+        let _ = grant_curated_package(
             &mut policy,
-            root.path(),
+            &homes_for(root.path()),
             &package_dir,
             Some("@prisma/client"),
         );
@@ -1014,6 +1234,154 @@ mod tests {
         let _ = policy_for(&cell("@prisma/client"), Some("@prisma/client"));
     }
 
+    /// A home-cache grant names ONE directory under the real `$HOME`, materializes it so
+    /// Landlock can attach to it, and hands back the variable pointing at that same path.
+    ///
+    /// THE VARIABLE AND THE RULE MUST NAME THE SAME DIRECTORY or the grant is worse than
+    /// absent — the package would download to a path the policy denies. That equality is the
+    /// assertion here, not "a rule was added": the two are produced by one resolution and this
+    /// is what fails if they are ever computed twice.
+    ///
+    /// Driven through a synthetic table rather than the shipped catalog so the assertions stay
+    /// meaningful whatever the catalog says, and so the ANCHOR arms (`~/` vs `$cache/`) can
+    /// both be exercised against a `Homes` whose two roots are deliberately different
+    /// directories — with `cache` OUTSIDE `home`, which is the shape `XDG_CACHE_HOME` produces
+    /// and the one a `~/`-only implementation would silently get wrong.
+    #[test]
+    fn a_home_cache_grant_is_one_directory_and_its_own_variable() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let home = root.path().join("home");
+        let cache = root.path().join("xdg-cache");
+        std::fs::create_dir_all(&home).expect("home");
+        let project = root.path().join("proj");
+        let homes = Homes {
+            home: home.clone(),
+            cache: cache.clone(),
+            tmp: root.path().join("tmp"),
+            project: project.clone(),
+        };
+        static TABLE: &[(&str, CuratedGrant)] = &[(
+            "cache-writer",
+            CuratedGrant {
+                home_paths: &[
+                    HomePath {
+                        env: "TOOL_HOME_CACHE",
+                        macos: Some("~/Library/Caches/Tool"),
+                        linux: Some("~/Library/Caches/Tool"),
+                        windows: Some("~/Library/Caches/Tool"),
+                    },
+                    HomePath {
+                        env: "TOOL_XDG_CACHE",
+                        macos: Some("$cache/Tool"),
+                        linux: Some("$cache/Tool"),
+                        windows: Some("$cache/Tool"),
+                    },
+                ],
+                ..CuratedGrant::NONE
+            },
+        )];
+
+        let mut policy = SandboxPolicy::default();
+        let env = grant_from_table(
+            TABLE,
+            &mut policy,
+            &homes,
+            &project.join("node_modules/cache-writer"),
+            Some("cache-writer"),
+        );
+        let real = |p: PathBuf| {
+            crate::matcher::path::canonicalize_including_nonexistent(&p)
+                .to_string_lossy()
+                .into_owned()
+        };
+        let want_home = real(home.join("Library/Caches/Tool"));
+        let want_cache = real(cache.join("Tool"));
+
+        assert_eq!(
+            env,
+            vec![
+                ("TOOL_HOME_CACHE".to_string(), want_home.clone()),
+                ("TOOL_XDG_CACHE".to_string(), want_cache.clone()),
+            ],
+            "each variable must carry the path its own anchor resolved to"
+        );
+        let granted = globs(&policy);
+        for want in [&want_home, &want_cache] {
+            assert!(
+                granted.contains(want),
+                "expected a rule on {want}, got {granted:?}"
+            );
+            assert!(
+                Path::new(want).is_dir(),
+                "{want} must be materialized or Landlock cannot attach the rule"
+            );
+        }
+        // Nothing wider: neither anchor ROOT may be granted, which is the difference between
+        // one cache directory and the user's whole home.
+        for forbidden in [real(home), real(cache)] {
+            assert!(
+                !granted.contains(&forbidden),
+                "the anchor root {forbidden} must never be granted: {granted:?}"
+            );
+        }
+        // The control: an unlisted package gets neither rule nor variable, so the assertions
+        // above are the TABLE firing rather than the compiler granting unconditionally.
+        let mut other = SandboxPolicy::default();
+        assert!(
+            grant_from_table(
+                TABLE,
+                &mut other,
+                &homes,
+                &project.join("node_modules/evil"),
+                Some("evil")
+            )
+            .is_empty()
+        );
+        assert!(globs(&other).is_empty());
+    }
+
+    /// A pattern whose anchor is not a strict ancestor of the resolved path is DROPPED, so a
+    /// `$cache` the environment has aimed at the resolved directory itself cannot turn a
+    /// one-directory grant into a grant on the whole cache root.
+    #[test]
+    fn a_home_path_resolving_to_its_own_anchor_is_dropped() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let homes = Homes {
+            home: root.path().join("home"),
+            // The anchor IS the target: `$cache/Tool` resolves to exactly `homes.cache`.
+            cache: root.path().join("home/Tool"),
+            tmp: root.path().join("tmp"),
+            project: root.path().join("proj"),
+        };
+        static TABLE: &[(&str, CuratedGrant)] = &[(
+            "pkg",
+            CuratedGrant {
+                home_paths: &[HomePath {
+                    env: "TOOL_CACHE",
+                    macos: Some("$cache"),
+                    linux: Some("$cache"),
+                    windows: Some("$cache"),
+                }],
+                ..CuratedGrant::NONE
+            },
+        )];
+
+        let mut policy = SandboxPolicy::default();
+        let env = grant_from_table(
+            TABLE,
+            &mut policy,
+            &homes,
+            &homes.project.join("node_modules/pkg"),
+            Some("pkg"),
+        );
+        assert!(env.is_empty(), "no variable may point at a dropped grant");
+        assert!(
+            globs(&policy).is_empty(),
+            "the anchor root itself must never be granted: {:?}",
+            globs(&policy)
+        );
+    }
+
     /// The consumer-configured arm: nub owns the field name, the consumer owns the value,
     /// and a value that escapes the project is dropped rather than granted.
     #[test]
@@ -1027,9 +1395,9 @@ mod tests {
         .expect("write manifest");
 
         let mut policy = SandboxPolicy::default();
-        grant_curated_package(
+        let _ = grant_curated_package(
             &mut policy,
-            project,
+            &homes_for(project),
             &project.join("node_modules/.store/msw@1/node_modules/msw"),
             Some("msw"),
         );

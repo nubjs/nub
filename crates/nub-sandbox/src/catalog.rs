@@ -36,11 +36,28 @@ pub enum ProjectWriteSource {
     Literal(Vec<String>),
 }
 
+/// One `$HOME`-anchored artifact cache a package downloads into, keyed by the package's
+/// OWN documented override variable.
+///
+/// PER-OS, because the default this has to reproduce is per-OS: `cachedir('Cypress')` is
+/// `~/Library/Caches/Cypress` on macOS and `$XDG_CACHE_HOME/Cypress` on Linux. An entry may
+/// omit a platform, which means nub has measured nothing there and grants nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HomePath {
+    /// The package's own documented cache-override environment variable.
+    pub env: String,
+    pub macos: Option<String>,
+    pub linux: Option<String>,
+    pub windows: Option<String>,
+}
+
 /// One package's exception, exactly as the catalog spells it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageGrant {
     pub package: String,
     pub sibling_dirs: Vec<String>,
+    /// `$HOME`-anchored artifact caches, with the env var that redirects each one.
+    pub home_paths: Vec<HomePath>,
     /// Chains of package NAMES whose resolved directories the package may write.
     /// `[["prisma"], ["prisma", "@prisma/engines"]]` means "the `prisma` this package
     /// resolves, and the `@prisma/engines` THAT package resolves".
@@ -174,6 +191,7 @@ fn parse_grants(catalog: &serde_json::Value) -> Result<Vec<PackageGrant>, String
         }
 
         let dependency_dirs = parse_dependency_dirs(entry, &at)?;
+        let home_paths = parse_home_paths(entry, &at)?;
 
         let project_reads = opt_strings(entry, "projectReads", &at)?;
         for rel in &project_reads {
@@ -195,6 +213,7 @@ fn parse_grants(catalog: &serde_json::Value) -> Result<Vec<PackageGrant>, String
         grants.push(PackageGrant {
             package,
             sibling_dirs,
+            home_paths,
             dependency_dirs,
             project_reads,
             project_writes,
@@ -203,6 +222,144 @@ fn parse_grants(catalog: &serde_json::Value) -> Result<Vec<PackageGrant>, String
     }
 
     Ok(grants)
+}
+
+/// Validate `homePaths` — the `$HOME`-anchored artifact caches, one entry per override var.
+///
+/// THE PATH IS WRITTEN IN THE SURFACE PATTERN LANGUAGE, restricted to the two `$HOME`-family
+/// anchors. `~/…` is the user's home and `$cache/…` is the platform cache root, which is what
+/// makes an entry track `XDG_CACHE_HOME` on Linux and `%LOCALAPPDATA%` on Windows for free —
+/// the packages this exists for compute their defaults from exactly those roots, so an entry
+/// spelled any other way would aim at a directory the tool does not read back at run time.
+/// The closed anchor set is also the bound: `$tmp` is the jail's own per-run scratch, a bare
+/// absolute path would let the catalog name any directory on the machine, and a
+/// project-relative path is already `projectWrites`.
+fn parse_home_paths(entry: &serde_json::Value, at: &str) -> Result<Vec<HomePath>, String> {
+    let Some(value) = entry.get("homePaths") else {
+        return Ok(Vec::new());
+    };
+    let items = value.as_array().ok_or_else(|| {
+        format!("{at}: homePaths must be an array of {{env, macos?, linux?, windows?}}")
+    })?;
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::with_capacity(items.len());
+    for (j, item) in items.iter().enumerate() {
+        let at = format!("{at}.homePaths[{j}]");
+        let env = string(item, "env", &at)?;
+        require_env_name(&env, &at)?;
+        if !seen.insert(env.clone()) {
+            return Err(format!("{at}: `{env}` is listed twice for one package"));
+        }
+        let mut per_os = [None, None, None];
+        for (slot, key) in per_os.iter_mut().zip(["macos", "linux", "windows"]) {
+            match item.get(key) {
+                None | Some(serde_json::Value::Null) => {}
+                Some(v) => {
+                    let path = v
+                        .as_str()
+                        .filter(|s| !s.trim().is_empty())
+                        .ok_or_else(|| format!("{at}: `{key}` must be a non-empty string"))?;
+                    require_home_anchored(path, key, &at)?;
+                    *slot = Some(path.to_string());
+                }
+            }
+        }
+        let [macos, linux, windows] = per_os;
+        if macos.is_none() && linux.is_none() && windows.is_none() {
+            return Err(format!(
+                "{at}: name at least one of `macos`/`linux`/`windows` — an entry with none \
+                 grants nothing anywhere"
+            ));
+        }
+        out.push(HomePath {
+            env,
+            macos,
+            linux,
+            windows,
+        });
+    }
+    Ok(out)
+}
+
+/// An environment variable nub may SET for the confined child, refusing the names whose value
+/// the jail itself decides.
+///
+/// The reserved set is not stylistic. `HOME`/`USERPROFILE` are what
+/// `preset::compile_build_jail` points at the private jail home — a `homePaths` entry
+/// overwriting one would undo the redirect the whole build jail rests on — and the rest are
+/// the roots this very field expands against (`XDG_CACHE_HOME`, `LOCALAPPDATA`, `TMPDIR`) or
+/// resolution paths a grant has no business steering (`PATH`, `NODE_OPTIONS`, `NODE_PATH`).
+fn require_env_name(name: &str, at: &str) -> Result<(), String> {
+    const RESERVED: &[&str] = &[
+        "HOME",
+        "USERPROFILE",
+        "PATH",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "XDG_CACHE_HOME",
+        "NODE_OPTIONS",
+        "NODE_PATH",
+    ];
+    // SCREAMING_SNAKE only. Every package's documented override is spelled that way, and the
+    // restriction makes the Windows case-insensitive env insert unambiguous rather than
+    // something a catalog entry could produce two spellings of.
+    let shaped = name.starts_with(|c: char| c.is_ascii_uppercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    if !shaped {
+        return Err(format!(
+            "{at}: env `{name}` must be an UPPERCASE_SNAKE environment variable name"
+        ));
+    }
+    if RESERVED.contains(&name) {
+        return Err(format!(
+            "{at}: env `{name}` is reserved — the jail decides its value"
+        ));
+    }
+    Ok(())
+}
+
+/// A path anchored at `~/` or `$cache/`, with no traversal and no glob metacharacter.
+///
+/// The traversal check is what keeps the anchor meaningful — `~/../..` expands to a path the
+/// runtime containment check would then DROP, leaving a contributor a grant that reads as
+/// present and does nothing. The glob check is the same class of defect one layer down: these
+/// strings become `CanonGlob` matchers, so a `*` would widen the grant past the directory the
+/// entry names.
+fn require_home_anchored(path: &str, key: &str, at: &str) -> Result<(), String> {
+    let rest = path
+        .strip_prefix("~/")
+        .or_else(|| path.strip_prefix("$cache/"))
+        .ok_or_else(|| {
+            format!(
+                "{at}: {key} path `{path}` must start with `~/` or `$cache/` — those are the \
+                 only anchors a home-cache grant may hang off"
+            )
+        })?;
+    if rest.trim().is_empty() {
+        return Err(format!(
+            "{at}: {key} path `{path}` names the anchor itself, never a directory under it"
+        ));
+    }
+    if path.contains('*') || path.contains('?') || path.contains('\\') {
+        return Err(format!(
+            "{at}: {key} path `{path}` must be a literal forward-slash path — no glob \
+             metacharacter, no backslash"
+        ));
+    }
+    if Path::new(rest)
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return Err(format!(
+            "{at}: {key} path `{path}` traverses out of its anchor"
+        ));
+    }
+    Ok(())
 }
 
 /// Validate `projectWrites` — exactly one of `manifestField` or `literal`.
@@ -506,6 +663,70 @@ mod tests {
             vec!["admitted-pkg".to_string()],
             "the refusal must remove `refused-pkg` and leave its `fetchedBy` sibling admitted"
         );
+    }
+
+    /// A `homePaths` entry writes into the user's REAL home, so its two halves — the anchor
+    /// and the variable — are the ones a mistake would widen. Both are checked here, where the
+    /// build and the dev override run the same code, and both are paired with an accepted
+    /// control so a validator that rejected everything could not satisfy the rejection half.
+    #[test]
+    fn a_home_path_is_anchored_and_never_names_a_reserved_variable() {
+        let catalog = |paths: &str| {
+            super::parse(&format!(
+                r#"{{
+                  "networkHosts": [],
+                  "packageGrants": [{{
+                    "package": "pkg",
+                    "homePaths": {paths},
+                    "mechanism": "downloads its binary into a $HOME cache it reads back at run time",
+                    "evidence": "measured",
+                    "observed": "the tool cannot find its own binary after a confined install",
+                    "platform": "macos-arm64"
+                  }}],
+                  "notGranted": {{}}
+                }}"#
+            ))
+        };
+
+        let ok = catalog(
+            r#"[{"env": "TOOL_CACHE", "macos": "~/Library/Caches/Tool", "linux": "$cache/Tool"}]"#,
+        )
+        .expect("both anchors and a per-OS split are valid");
+        let got = &ok.package_grants[0].home_paths;
+        assert_eq!(got.len(), 1, "the accepted control must carry the entry");
+        assert_eq!(got[0].env, "TOOL_CACHE");
+        assert_eq!(got[0].macos.as_deref(), Some("~/Library/Caches/Tool"));
+        assert_eq!(got[0].linux.as_deref(), Some("$cache/Tool"));
+        assert_eq!(
+            got[0].windows, None,
+            "an omitted platform stays absent — it must not inherit another's path"
+        );
+
+        for rejected in [
+            // Anchors outside the closed set: an absolute path names anything on the machine,
+            // `$tmp` is the jail's own scratch, and a bare relative is `projectWrites`' job.
+            r#"[{"env": "T", "macos": "/etc"}]"#,
+            r#"[{"env": "T", "macos": "$tmp/Tool"}]"#,
+            r#"[{"env": "T", "macos": "Library/Caches/Tool"}]"#,
+            // The anchor itself, and a traversal out of it.
+            r#"[{"env": "T", "macos": "~/"}]"#,
+            r#"[{"env": "T", "macos": "~/../../etc"}]"#,
+            // A glob would widen the rule past the directory the entry names.
+            r#"[{"env": "T", "macos": "~/Library/Caches/*"}]"#,
+            // Variables the jail itself decides.
+            r#"[{"env": "HOME", "macos": "~/Library/Caches/Tool"}]"#,
+            r#"[{"env": "PATH", "macos": "~/Library/Caches/Tool"}]"#,
+            // Shapes with nothing to grant, or two spellings of one variable.
+            r#"[{"env": "T"}]"#,
+            r#"[{"env": "t", "macos": "~/Tool"}]"#,
+            r#"[{"env": "T", "macos": "~/a"}, {"env": "T", "linux": "~/b"}]"#,
+            r#"{"env": "T", "macos": "~/Tool"}"#,
+        ] {
+            assert!(
+                catalog(rejected).is_err(),
+                "homePaths {rejected} must be rejected"
+            );
+        }
     }
 
     /// `dependencyDirs` entries are NAMES the resolver looks up, never paths it joins — so a

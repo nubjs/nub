@@ -95,10 +95,32 @@ fn gen_grants(catalog: &catalog::Catalog) -> String {
             .map(|c| format!("&{c:?}"))
             .collect::<Vec<_>>()
             .join(", ");
+        // All three platforms are emitted and the choice is made at RUN time by `cfg!`,
+        // because this script runs on the HOST: selecting here would bake the machine that
+        // built the binary into a cross-compiled one.
+        let homes = grant
+            .home_paths
+            .iter()
+            .map(|h| {
+                let opt = |v: &Option<String>| match v {
+                    Some(s) => format!("Some({s:?})"),
+                    None => "None".to_string(),
+                };
+                format!(
+                    "HomePath {{ env: {:?}, macos: {}, linux: {}, windows: {} }}",
+                    h.env,
+                    opt(&h.macos),
+                    opt(&h.linux),
+                    opt(&h.windows)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         let _ = write!(
             src,
             "    (\n        {name:?},\n        CuratedGrant {{\n            \
              sibling_dirs: &{siblings:?},\n            dependency_dirs: &[{chains}],\n            \
+             home_paths: &[{homes}],\n            \
              project_reads: &{reads:?},\n            \
              project_writes: {writes},\n            project_cwd: {cwd},\n        }},\n    ),\n"
         );

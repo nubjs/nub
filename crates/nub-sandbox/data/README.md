@@ -171,6 +171,7 @@ fetching — recording the observation must not become a grant.
 | `versions` | Which versions the measurement covers. |
 | `siblingDirs` | Named entries of the package's own enclosing `node_modules` it may read and write. |
 | `dependencyDirs` | Chains of package *names* whose resolved directories it may read and write. See below. |
+| `homePaths` | Artifact caches under the real home it may read and write, each with the package's own variable that redirects it. See below. |
 | `projectReads` | Project-relative subtrees it may read. |
 | `projectWrites` | Where its project write targets come from — `manifestField` or `literal`. See below. |
 | `projectCwd` | Grant read on the project root directory node alone. |
@@ -231,6 +232,65 @@ the machine-global virtual store, where a write would reach every project on the
 materializes a cell project-locally when its package carries a lifecycle script (it must, or an
 in-place build would write through the shared store inode), so the cells a curated grant names
 are the local ones; the peerless, script-free cells that stay as store symlinks are not.
+
+### `homePaths`
+
+For a package that downloads a large binary into a cache under your **home directory** and
+reads it back later, when the app runs. Cypress and Puppeteer are the population.
+
+```json
+"homePaths": [
+  {
+    "env": "CYPRESS_CACHE_FOLDER",
+    "macos": "~/Library/Caches/Cypress",
+    "linux": "$cache/Cypress"
+  }
+]
+```
+
+nub sets `env` to the resolved path for that one lifecycle spawn and grants read-write on the
+directory it names — nothing else under your home.
+
+**The problem this solves is at run time, not install time.** A confined script already gets a
+private, writable `HOME`, so a package that downloads into `$HOME/…` installs and exits 0
+today. What breaks is the app afterwards: it runs with your real home, so it looks in
+`~/Library/Caches/Cypress` and finds nothing (`No version of Cypress is installed in: …`).
+Pointing the install at the same path the run-time lookup computes is what closes that — and it
+is why the path has to be the tool's own documented default. A directory nub picked would be
+just as unreachable, because nub is not in the loop when your app runs.
+
+**Two anchors, and no others.** `~/…` is your home; `$cache/…` is the platform cache root
+(`$XDG_CACHE_HOME` where set, `%LOCALAPPDATA%` on Windows, `~/.cache` otherwise). Between them
+they reproduce how these packages compute their own defaults — Cypress consults
+`XDG_CACHE_HOME` on Linux, so `$cache/Cypress` tracks it for free. An absolute path, `$tmp`, a
+project-relative path, a `..`, or a glob is rejected at build time.
+
+**The path is per-OS because the default is.** `cachedir('Cypress')` is
+`~/Library/Caches/Cypress` on macOS and `$XDG_CACHE_HOME/Cypress` on Linux. Omit a platform and
+the package gets nothing there — which is the right entry when nub has measured nothing there.
+
+**`env` may not name a variable the jail itself decides.** `HOME` and `USERPROFILE` are what
+point a confined script at its private home; `PATH`, `TMPDIR`, `LOCALAPPDATA`, `XDG_CACHE_HOME`
+and the `NODE_*` resolution variables steer lookups a cache grant has no business touching. All
+are refused at build time.
+
+**It overwrites an ambient value.** If you have `CYPRESS_CACHE_FOLDER` set yourself, the
+confined install still uses nub's path: the grant was compiled against that path, so honouring
+yours would aim the download at a directory the sandbox denies. Set
+`dependenciesMeta.<name>.sandbox` to `false` for that package if you need your own location.
+
+**A cache the package resolves from the temp directory does not qualify.** `geckodriver` and
+`edgedriver` default their `*_CACHE_DIR` to `os.tmpdir()`, and they compute that same default
+again when the driver is started — so redirecting the install into your home moves the artifact
+somewhere the run-time lookup never reads. The entry would be a home grant that fixes nothing.
+
+**Why this and not something broader.** Copying the private home out into your real one
+afterwards would publish *dependency-chosen* paths as nub — `~/.zshrc`, a
+`~/.config/git/config` carrying `core.hooksPath`, `~/Library/LaunchAgents/*`. Dropping the
+private home entirely would break every package that uses it as free scratch and reopen the
+`$HOME/.npmrc` channel between packages. This grants one named directory, per package, and
+reads nothing else. Homebrew resolves the same tension the same way: the real home, home reads
+denied, and a curated list of specific writable paths.
 
 ### `projectReads` vs `projectWrites`
 

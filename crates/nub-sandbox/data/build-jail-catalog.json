@@ -37,6 +37,12 @@
     "comment": "Per-package egress that names no host. Identical grant to being listed in a networkHosts entry's fetchedBy, but WITHOUT adding a hostname to $downloads — which is also the allowlist for nub's own out-of-jail prefetch. Every entry below fetches a github.com release asset; github.com stays refused in notGranted for the prefetcher's sake, and these packages reach it because the review that added them here ratified them, which is the control the jail actually relies on.",
     "full": [
       {
+        "package": "puppeteer",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm, 2026-07-31, cold store and a private HOME. Confined: postinstall rc=1, `ERROR: Failed to set up chrome v131.0.6778.204! Set \"PUPPETEER_SKIP_DOWNLOAD\" env variable to skip download.`, cause `getaddrinfo ENOTFOUND googlechromelabs.github.io` (the version-resolution manifest; the artifact itself is on storage.googleapis.com). With egress granted, the same fixture installs rc=0 and downloads both Chrome for Testing and chrome-headless-shell. Granted HERE rather than by promoting a host: googlechromelabs.github.io and storage.googleapis.com both stay refused in notGranted — the latter as a multi-tenant bucket namespace — and this grants the package without widening the prefetcher's allowlist. It pairs with puppeteer's packageGrants homePaths entry: egress alone gets the browser downloaded but leaves it in the private jail home, where executablePath() cannot find it.",
+        "platform": "macos-arm64"
+      },
+      {
         "package": "@railway/cli",
         "evidence": "measured",
         "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com` fetching https://github.com/railwayapp/cli/releases/download/v5.30.1/railway-v5.30.1-aarch64-apple-darwin.tar.gz, no artifact. Unconfined, same fixture: DID-WORK-AND-SUCCEEDED.",
@@ -420,6 +426,37 @@
       "mechanism": "standalone/install.js downloads the Pact Ruby standalone release, and before opening the socket it reads the CONSUMER's project `.npmrc` for proxy settings (`https-proxy` / `proxy`). That read is inside the download path, so it throws even though the failure surfaces as a download error. The egress half is granted separately under packageNetwork.full; this entry is only the manifest-adjacent read, and it is deliberately the single file rather than the project tree.",
       "evidence": "measured",
       "observed": "corpus-v2 shard `d5a`, 2026-07-31. Confined: `Error: Error while installing binary: Postinstalled Failed Unexpectedly: Error downloading binary from https://github.com/pact-foundation/pact-ruby-standalone/releases/download/v2.4.1/pact-2.4.1-osx-arm64.tar.gz: Error: Error while installing binary: Error: EPERM: operation not permitted, open '<proj>/.npmrc'` — the ONLY `.npmrc` EPERM in all 60 run directories. Unconfined A0, same fixture: `Checksum passed for 'pact-2.4.1-osx-arm64.tar.gz'. Extraction done.` STATED PLAINLY: a project `.npmrc` routinely carries a registry auth token, so this grant lets a lifecycle script read one. It is admitted because the script already runs as the user and reads that file on npm/pnpm/yarn today — the jail is loosening back toward the baseline it started from, not past it — and because the alternative is the package failing outright.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "cypress",
+      "versions": "13.x, measured on 13.14.2. The CYPRESS_CACHE_FOLDER override and the cachedir() default both predate 13 and are unchanged on 14/15.",
+      "homePaths": [
+        {
+          "env": "CYPRESS_CACHE_FOLDER",
+          "macos": "~/Library/Caches/Cypress",
+          "linux": "$cache/Cypress"
+        }
+      ],
+      "mechanism": "Its postinstall downloads a ~180 MB browser bundle and unzips it into `util.getCacheDir()`, which is `cachedir('Cypress')` — `~/Library/Caches/Cypress` on macOS and `$XDG_CACHE_HOME/Cypress` (else `~/.cache/Cypress`) on Linux. `state.js` consults CYPRESS_CACHE_FOLDER first and computes that same default otherwise, at INSTALL time and at RUN time alike, so redirecting the install to the real default is what makes `cypress open`/`verify` find the binary afterwards. The grant is the version-parent directory the bundle unzips into; nothing else under $HOME is named. Windows is deliberately omitted: cachedir's win32 branch is `%LOCALAPPDATA%/Cypress/Cache`, which nub's `$cache` matches only when XDG_CACHE_HOME is unset, and no Windows measurement exists.",
+      "evidence": "measured",
+      "observed": "Differential on macos-arm64, 2026-07-31, one variable (this entry present vs absent) via the dev catalog override, both arms on a per-arm private HOME/XDG_CACHE_HOME/TMPDIR and a cold store. WITHOUT: install rc=0 and cypress reports `Finished Installation <cache>/nub/jail-home/cypress-9a1706c45a41dfeb/Library/Caches/Cypress/13.14.2` — the PRIVATE jail home — then `./node_modules/.bin/cypress verify` exits 1 with `No version of Cypress is installed in: <home>/Library/Caches/Cypress/13.14.2/Cypress.app`. WITH: install rc=0 into `<home>/Library/Caches/Cypress/13.14.2` and `cypress verify` exits 0, `Verified Cypress! <home>/Library/Caches/Cypress/13.14.2/Cypress.app`. THE INSTALL EXITS 0 IN BOTH ARMS — the exit code cannot see this break, only the run-time lookup can. Egress was already granted (cdn.cypress.io fetchedBy) and is unchanged by this entry.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "puppeteer",
+      "versions": "23.x, measured on 23.11.1. `getConfiguration.js` resolves the same way on 24.",
+      "homePaths": [
+        {
+          "env": "PUPPETEER_CACHE_DIR",
+          "macos": "~/.cache/puppeteer",
+          "linux": "~/.cache/puppeteer",
+          "windows": "~/.cache/puppeteer"
+        }
+      ],
+      "mechanism": "Its postinstall downloads Chrome for Testing and chrome-headless-shell into `configuration.cacheDirectory`, which `getConfiguration.js` resolves as `PUPPETEER_CACHE_DIR ?? <config> ?? join(homedir(), '.cache', 'puppeteer')`. `executablePath()` computes the same value at RUN time, so the install and the lookup agree only if both see the same directory. All three platforms carry the same `~/`-anchored path because puppeteer's default is `homedir()`-based on every platform — it consults neither XDG_CACHE_HOME nor %LOCALAPPDATA% — which is why this entry can name Windows and the cypress one cannot.",
+      "evidence": "measured",
+      "observed": "Three-arm ladder on macos-arm64, 2026-07-31, per-arm private HOME/XDG_CACHE_HOME/TMPDIR, cold store each arm. (A) no egress, no homePaths: install rc=1, `ERROR: Failed to set up chrome v131.0.6778.204`, cause `getaddrinfo ENOTFOUND googlechromelabs.github.io` — so this package could not reach the $HOME-cache break at all before its packageNetwork.full entry. (B) egress only: install rc=0, and `require('puppeteer').executablePath()` returns `<home>/.cache/puppeteer/chrome/mac_arm-131.0.6778.204/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`, which does not exist — `ENOENT` — because the download landed in the private jail home. (C) egress + this entry: install rc=0 and the same executablePath is present and executable, with `<home>/.cache/puppeteer/chrome{,-headless-shell}` populated. B vs C is the one-variable differential for this entry.",
       "platform": "macos-arm64"
     }
   ],
