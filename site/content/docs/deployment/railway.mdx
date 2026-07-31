@@ -59,7 +59,7 @@ DOMAIN=$(railway domain --service nub-app --json \
   | jq -r '.domain // .domains[0]')
 ```
 
-The final command creates a free `*.up.railway.app` domain for the service and captures its assigned URL.
+The final command creates a free `*.up.railway.app` domain when needed and captures the assigned or existing URL.
 
 Request its aliveness endpoint:
 

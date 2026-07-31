@@ -52,7 +52,7 @@ Point Wrangler at the handler:
 }
 ```
 
-If the project has a build script such as the one above, set **Settings → Build → Build command** to `nub run build`. Leave it empty for the standalone handler shown here. Workers Builds does not read custom-build settings from `wrangler.jsonc`; its default deploy command is `npx wrangler deploy`.
+If the project defines a `build` package script, set **Settings → Build → Build command** to `nub run build`. Leave it empty for the standalone handler shown here. Workers Builds does not read custom-build settings from `wrangler.jsonc`; its default deploy command is `npx wrangler deploy`.
 
 Wrangler bundles the TypeScript handler without a separate local build. Deploy it from a workstation with:
 
