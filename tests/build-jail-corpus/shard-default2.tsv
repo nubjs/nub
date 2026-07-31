@@ -2,7 +2,7 @@ core-js	3.49.0	telemetry-nag
 core-js-pure	3.49.0	telemetry-nag	
 @firebase/util	1.15.1	self-configuring	
 ssh2	1.17.0	native-build-prebuilt	
-@prisma/client	6.19.3	codegen	
+@prisma/client	6.19.3	codegen	prisma-schema
 re2	1.26.1	binary-downloader	
 unix-dgram	2.0.7	native-build-prebuilt	
 vue-demi	0.14.10	self-configuring	vue-dep
@@ -48,4 +48,4 @@ spectron	19.0.0	self-configuring
 tree-sitter-json	0.24.8	self-configuring	
 vue-inbrowser-compiler-demi	4.71.1	self-configuring	vue-dep
 union	0.6.0	self-configuring	
-prisma	6.19.3	codegen	
+prisma	6.19.3	codegen	prisma-schema

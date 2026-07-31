@@ -64,6 +64,51 @@ package in its own cell keyed by `name@version`, and build output lands there, s
 parse. A write landing outside the writer's own cell is reported as unattributed — that is the
 interaction case worth surfacing, not noise.
 
+## A batch run is a screen, not a result
+
+**Nothing a shard reports is attributable to the jail until the package has been re-run
+alone.** aube stops *scheduling* queued lifecycle jobs once any sibling has failed; jobs
+already running drain, jobs still behind the semaphore return having done nothing. A package
+skipped that way is indistinguishable from one the jail blocked — both score
+`NEVER-RAN-ITS-REAL-PATH`.
+
+The bias is asymmetric and it points the wrong way. A tighter jail makes the first failure
+fire earlier, which skips more siblings, which manufactures more breaks. Measured 2026-07-31
+on macOS: every shard failed a lifecycle script in *both* arms and a different package failed
+first in each, so the A0 denominator and the PROD numerator were computed over two
+differently-truncated runs. Of the 18 packages that pass reported broken, **10 install
+cleanly under the same jail when run alone.**
+
+`./run-isolated.sh <package> [arm]` copies the package's manifest row verbatim into a
+one-line shard and re-runs it. Quote the batch number as a screen and the isolated number as
+the finding; never hand over one labelled as the other.
+
+## Judge a downloader by artifact SIZE, not by the verdict
+
+The `binary-downloader` predicate is `min_created: 1` over any created path, and the class
+note says the corroborating signal — that the created entry is a large executable — is
+"checkable post hoc". Run that check; it is not optional, and it had never been run.
+
+Two things satisfy the predicate without a download happening: an empty directory the package
+creates before failing, and **nub's own jail-home scratch** (`~/.cache/nub/jail-home/<pkg>-*/
+.cache/nub/node-discovery.json`, 117 B), which exists only in the confined arm — so it inflates
+PROD passes and not A0 ones. Applying the check to the 44 downloaders the macOS run scored as
+surviving the jail falsified 5, including `@go-task/cli`, recorded as a pass while its own log
+carries `getaddrinfo ENOTFOUND github.com`. A sixth, `@sitespeed.io/chromedriver`, passes only
+in the isolated re-run:
+
+| package | A0 largest | PROD largest |
+| --- | --- | --- |
+| `azure-functions-core-tools@4.12.1` | 601 MB | 310 B |
+| `@go-task/cli@3.52.0` | 49 MB | 0 |
+| `@eversdk/lib-node@1.48.0` | 22 MB | 0 |
+| `cldr-data@36.0.5` | 13,296 files | 3 files |
+| `chromium@3.0.3` | 176 files | 6 files |
+| `@sitespeed.io/chromedriver@149.0.7827` (isolated) | 16.7 MB | 0 |
+
+Diff the largest created file under the package's own store cell across the two arms. A pass
+whose confined artifact is orders of magnitude smaller than its unconfined one is a false pass.
+
 ## Running it
 
 ```sh
