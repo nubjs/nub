@@ -29,6 +29,7 @@ static STRICT: Embedder = Embedder {
     env_prefix: Some("AUBE"),
     config_env_prefix: Some("AUBE"),
     diag_env_prefix: Some("AUBE"),
+    internal_env_prefix: "AUBE",
     cache_namespace: "aube",
     data_namespace: "aube",
     virtual_store_subdir: "virtual-store",

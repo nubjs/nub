@@ -36,6 +36,7 @@ static NO_CHURN_TOOL: Embedder = Embedder {
     env_prefix: Some("NOCHURN"),
     config_env_prefix: Some("NOCHURN"),
     diag_env_prefix: Some("NOCHURN"),
+    internal_env_prefix: "AUBE",
     cache_namespace: "nochurn",
     data_namespace: "nochurn",
     virtual_store_subdir: "virtual-store",

@@ -22,6 +22,7 @@ static MYTOOL: Embedder = Embedder {
     env_prefix: Some("MYTOOL"),
     config_env_prefix: Some("MYTOOL"),
     diag_env_prefix: Some("MYTOOL"),
+    internal_env_prefix: "AUBE",
     cache_namespace: "mytool",
     data_namespace: "mytool",
     virtual_store_subdir: "virtual-store",

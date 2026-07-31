@@ -30,6 +30,7 @@ static CONFINING: Embedder = Embedder {
     env_prefix: None,
     config_env_prefix: None,
     diag_env_prefix: None,
+    internal_env_prefix: "AUBE",
     cache_namespace: "confiner",
     data_namespace: "confiner",
     virtual_store_subdir: "virtual-store",

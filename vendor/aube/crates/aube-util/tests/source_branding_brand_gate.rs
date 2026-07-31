@@ -31,6 +31,7 @@ static NUBLIKE: Embedder = Embedder {
     env_prefix: None,
     config_env_prefix: Some("NUB"),
     diag_env_prefix: None,
+    internal_env_prefix: "AUBE",
     cache_namespace: "nublike",
     data_namespace: "nublike",
     virtual_store_subdir: "virtual-store",
