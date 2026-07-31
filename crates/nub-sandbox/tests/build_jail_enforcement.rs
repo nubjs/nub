@@ -179,26 +179,37 @@ fn build_jail_confines_writes_and_hides_secrets() {
     );
 }
 
-/// Curated egress means exactly one hole in the jail's network wall: the loopback proxy,
-/// which gates every tunnel against `$downloads`. This asserts the wall — a listener the
-/// SAME probe reaches a moment earlier unconfined is unreachable from inside, so a host
-/// that is not on the list cannot be dialed directly, only offered to the proxy's gate.
+/// A CATALOGUED package gets COARSE egress on macOS — it dials any host directly, and no proxy
+/// is interposed. This is the behaviour change away from per-host: the jail used to pin the
+/// child's egress to a loopback proxy that gated every tunnel against `$downloads`, and macOS was
+/// the only platform that could enforce it. Per-host was withdrawn precisely because it was
+/// macOS-only (Linux has no netns to route a child through, Windows' loopback exemption is
+/// admin-only), so being stricter here threw errors no Linux or Windows user would ever see.
 ///
-/// The proxy-port reach is the positive control, and it is what stops this from passing
-/// vacuously: without it, "the connect failed" would equally describe a jail where
-/// networking is simply dead, which is the pre-curation posture rather than the one under
-/// test. `/bin/sh` on macOS carries the `/dev/tcp` redirection, so the probe needs no
-/// external binary that the tight read set might not reach.
+/// The listener is the positive control in the direction that now matters: the SAME probe reaches
+/// it unconfined a moment earlier, and must still reach it from INSIDE the jail. A regression
+/// that re-denied a catalogued package's egress, or restored the proxy wall, fails here rather
+/// than passing quietly.
 ///
-/// The per-host GATE (a listed host admitted, an unlisted one refused through the
-/// sanctioned path) is proven hermetically against this same policy in `tests/proxy.rs`;
-/// what only an enforcing OS can prove is that the wall around it holds.
+/// `PROXY_ENV_MISSING` is the second half, and it is what pins that no proxy is started for a
+/// build-jail policy any more: coarse `net: true` derives `ProxyMode::Disabled`, so `proxy_needed`
+/// is false and nothing binds a loopback port. That matters beyond tidiness — a bind failure is a
+/// HARD apply error, so a listener the jail could never route through was able to refuse an
+/// install it does not participate in.
+///
+/// The differential against `an_uncatalogued_package_gets_no_egress_and_no_proxy` is what makes
+/// this evidence rather than an assertion: DIRECT_CONNECTED here, DIRECT_BLOCKED there, with one
+/// variable changed (the package name). `/bin/sh` on macOS carries the `/dev/tcp` redirection, so
+/// the probe needs no external binary the tight read set might not reach.
 #[test]
-fn build_jail_blocks_direct_egress_and_leaves_only_the_proxy_reachable() {
+fn a_catalogued_package_reaches_any_host_directly_and_gets_no_proxy() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     let project = root.path().join("project");
-    let package_dir = project.join("node_modules/.aube/native@1.0.0/node_modules/native");
+    // The cell is spelled for the catalogued name below. The gate reads only the resolved
+    // NAME, so a mismatch here would still pass — and would read as if the fixture were the
+    // variable under test, which it is not.
+    let package_dir = project.join("node_modules/.aube/cypress@1.0.0/node_modules/cypress");
     std::fs::create_dir_all(&package_dir).unwrap();
 
     // Bound but never accepted: a TCP connect completes off the listen backlog, so the
@@ -209,9 +220,7 @@ fn build_jail_blocks_direct_egress_and_leaves_only_the_proxy_reachable() {
     let script = format!(
         r#"
         (exec 3<>/dev/tcp/127.0.0.1/{port}) 2>/dev/null && echo DIRECT_CONNECTED || echo DIRECT_BLOCKED
-        case "$HTTP_PROXY" in http://*) echo PROXY_ENV_SET ;; *) echo PROXY_ENV_MISSING ;; esac
-        p=${{HTTP_PROXY##*:}}
-        (exec 3<>/dev/tcp/127.0.0.1/$p) 2>/dev/null && echo PROXY_REACHED || echo PROXY_UNREACHED
+        case "${{HTTP_PROXY:-}}" in http://*) echo PROXY_ENV_SET ;; *) echo PROXY_ENV_MISSING ;; esac
         "#
     );
 
@@ -231,15 +240,109 @@ fn build_jail_blocks_direct_egress_and_leaves_only_the_proxy_reachable() {
     let ambient: BTreeMap<String, String> = [("PATH".to_string(), "/usr/bin:/bin".to_string())]
         .into_iter()
         .collect();
+    // A name the catalog DOES carry — the arm's only variable against the uncatalogued twin.
     let policy = nub_sandbox::compile_build_jail(
         homes(&home, &project),
         &package_dir,
-        None,
+        Some("cypress"),
         vec![home.join("Library/Caches/nub/node/bin/node")],
         Vec::new(),
         ambient,
     )
     .expect("compile build-jail");
+    // The IR half of the contract, asserted before the OS half so a failure names which layer
+    // moved: a catalogued package compiles to a COARSE grant carrying no host rule at all.
+    assert!(
+        !policy.net.enforce && policy.net.rules.is_empty(),
+        "a catalogued package must compile to coarse-allow with no per-host rule, got \
+         enforce={} rules={:?}",
+        policy.net.enforce,
+        policy.net.rules
+    );
+
+    let spec = nub_sandbox::CommandSpec::new("/bin/sh")
+        .arg("-c")
+        .arg(&script)
+        .cwd(&package_dir);
+    let runtime = nub_sandbox::earliest_bootstrap().expect("bootstrap");
+    let prepared = nub_sandbox::apply_with_runtime(&policy, spec, &runtime)
+        .expect("apply build-jail (fail-closed on error)");
+    let out = prepared.output().expect("run confined script");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("DIRECT_CONNECTED") && !stdout.contains("DIRECT_BLOCKED"),
+        "a catalogued package gets coarse egress — any host must be dialable directly, \
+         including one no host list would have carried:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("PROXY_ENV_MISSING"),
+        "no proxy may be started for a build-jail policy — a coarse grant needs none, and a \
+         bind failure would be a hard apply error:\n{stdout}"
+    );
+}
+
+/// The enforcing-OS twin of the test above, and the one that makes the package-identity gate real
+/// rather than asserted: the SAME jail, the SAME probe, a package the catalog does not name — and
+/// it reaches nothing. This is the whole defense, and dropping per-host did not touch it.
+///
+/// The differential is what carries it, and after the per-host withdrawal the discriminator is
+/// DIRECT reachability: the catalogued arm above connects to its listener, this one must not.
+/// Both arms assert `PROXY_ENV_MISSING` now (no build-jail policy starts a proxy), so the proxy
+/// line can no longer tell the two apart — which is exactly why this arm binds its OWN listener
+/// and proves the connect fails. Without that, a regression granting every package coarse egress
+/// would leave this test passing on a proxy assertion that is now true either way.
+#[test]
+fn an_uncatalogued_package_gets_no_egress_and_no_proxy() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let project = root.path().join("project");
+    let package_dir = project.join("node_modules/.aube/unvetted@1.0.0/node_modules/unvetted");
+    std::fs::create_dir_all(&package_dir).unwrap();
+
+    // Bound but never accepted, as in the catalogued arm: a TCP connect completes off the listen
+    // backlog, so the reachability differential needs no accept loop racing the assertions.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let script = format!(
+        r#"
+        (exec 3<>/dev/tcp/127.0.0.1/{port}) 2>/dev/null && echo DIRECT_CONNECTED || echo DIRECT_BLOCKED
+        case "${{HTTP_PROXY:-}}" in http://*) echo PROXY_ENV_SET ;; *) echo PROXY_ENV_MISSING ;; esac
+        "#
+    );
+
+    let control = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!(
+            "(exec 3<>/dev/tcp/127.0.0.1/{port}) 2>/dev/null && echo DIRECT_CONNECTED || echo DIRECT_BLOCKED"
+        ))
+        .output()
+        .expect("run the probe unconfined");
+    assert!(
+        String::from_utf8_lossy(&control.stdout).contains("DIRECT_CONNECTED"),
+        "control: the probe must reach the listener unconfined, or the confined failure \
+         below says nothing about the jail"
+    );
+
+    let ambient: BTreeMap<String, String> = [("PATH".to_string(), "/usr/bin:/bin".to_string())]
+        .into_iter()
+        .collect();
+    // A name no catalog entry carries — the Shai-Hulud shape: an ordinary package that
+    // acquired a lifecycle script nobody reviewed.
+    let policy = nub_sandbox::compile_build_jail(
+        homes(&home, &project),
+        &package_dir,
+        Some("unvetted"),
+        vec![home.join("Library/Caches/nub/node/bin/node")],
+        Vec::new(),
+        ambient,
+    )
+    .expect("compile build-jail");
+    assert!(
+        policy.net.enforce && policy.net.rules.is_empty(),
+        "an uncatalogued package must compile to coarse deny-all, not a host list"
+    );
 
     let spec = nub_sandbox::CommandSpec::new("/bin/sh")
         .arg("-c")
@@ -253,16 +356,12 @@ fn build_jail_blocks_direct_egress_and_leaves_only_the_proxy_reachable() {
 
     assert!(
         stdout.contains("DIRECT_BLOCKED") && !stdout.contains("DIRECT_CONNECTED"),
-        "a host outside $downloads must not be dialable directly:\n{stdout}"
+        "an uncatalogued package must reach nothing — this is the defense the jail exists for, \
+         and the coarse grant must not have leaked to a package no PR admitted:\n{stdout}"
     );
     assert!(
-        stdout.contains("PROXY_ENV_SET"),
-        "the jail must point the child at the gating proxy:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("PROXY_REACHED"),
-        "the proxy port must be reachable, or DIRECT_BLOCKED above just means the child \
-         has no networking at all:\n{stdout}"
+        stdout.contains("PROXY_ENV_MISSING"),
+        "no proxy may be offered to a package the catalog does not name:\n{stdout}"
     );
 }
 

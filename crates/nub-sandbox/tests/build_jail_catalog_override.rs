@@ -21,7 +21,6 @@ use nub_sandbox::catalog_override::{Decision, decide};
 /// trip `dead_code` and fail the workspace clippy gate.
 #[cfg(feature = "build-jail-catalog-override")]
 const OVERRIDE_CATALOG: &str = r#"{
-  "catalogVersion": 1,
   "networkHosts": [
     {
       "host": "example.invalid",

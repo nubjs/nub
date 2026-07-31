@@ -349,3 +349,42 @@ fn opt_strings(entry: &serde_json::Value, key: &str, at: &str) -> Result<Vec<Str
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// A REFUSAL BEATS AN OBSERVATION — the clause that decides egress when the catalog
+    /// records a package BOTH ways, and the one the binary model made load-bearing: since
+    /// `preset::build_jail_net` now compiles an entry straight into a network grant, a
+    /// `fetchedBy` observation that outranked a refusal would hand egress to a package
+    /// refused on the merits.
+    ///
+    /// Asserted against a synthetic catalog rather than the shipped one on purpose. The
+    /// shipped catalog names no refused package, so the same assertion against it would pass
+    /// against a generator that had stopped subtracting entirely — a control already at the
+    /// expected value proves nothing. The admitted sibling is what makes this non-vacuous:
+    /// it shares the `fetchedBy` array with the refused name, so a parser returning an empty
+    /// set fails here instead of looking correct.
+    #[test]
+    fn a_refused_package_gets_no_grant_however_it_was_observed() {
+        let catalog = super::parse(
+            r#"{
+              "networkHosts": [{
+                "host": "registry.example.test",
+                "fetchedBy": ["refused-pkg", "admitted-pkg"],
+                "evidence": "measured",
+                "observed": "both packages resolved this host in the same corpus arm",
+                "platform": "linux-x64"
+              }],
+              "packageGrants": [],
+              "notGranted": { "packages": [{ "package": "refused-pkg" }] }
+            }"#,
+        )
+        .expect("the synthetic catalog is valid");
+
+        assert_eq!(
+            catalog.package_network_allowed,
+            vec!["admitted-pkg".to_string()],
+            "the refusal must remove `refused-pkg` and leave its `fetchedBy` sibling admitted"
+        );
+    }
+}

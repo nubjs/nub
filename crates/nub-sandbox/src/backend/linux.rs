@@ -176,6 +176,14 @@ pub(crate) struct LinuxPreflight {
     landlock: Option<LandlockPreflight>,
 }
 
+impl LinuxPreflight {
+    /// Whether this launch will take the Landlock arm. Read by [`super::apply_inner`] BEFORE it
+    /// starts the egress proxy, because this mechanism can never route a child through one.
+    pub(crate) fn uses_landlock(&self) -> bool {
+        self.landlock.is_some()
+    }
+}
+
 struct LandlockPreflight {
     abi: u32,
 }
@@ -2608,9 +2616,27 @@ struct SandboxSyscalls {
     request_key: i64,
 }
 
+/// Whether the socket ceiling admits the IP families (`AF_INET`/`AF_INET6`). Deliberately NOT
+/// spelled `per_host`, which is what this parameter used to be called: the two callers that ask
+/// for `Permitted` want the same two families for UNRELATED reasons, and reading the flag as
+/// "the proxy/netns tier is active" is now wrong.
+///
+/// - the retained-monitor path asks because the child sits in an EMPTY netns whose only route
+///   out is a bridge to nub's proxy, so an IP socket reaches the proxy and nothing else;
+/// - the Landlock build jail asks because the catalog GRANTED this package egress and there is
+///   no netns to route through — the grant is coarse (see [`apply_landlock`]).
+///
+/// It never widens past those two families, so neither caller can turn it into a general
+/// socket escape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum IpEgress {
+    Denied,
+    Permitted,
+}
+
 pub(super) fn build_seccomp(
     restrict_network: bool,
-    per_host: bool,
+    ip_egress: IpEgress,
     deny_keyring: bool,
     permit_keyring_join: bool,
 ) -> Result<Option<BpfProgram>, String> {
@@ -2622,7 +2648,7 @@ pub(super) fn build_seccomp(
     build_seccomp_for(
         arch,
         restrict_network,
-        per_host,
+        ip_egress,
         deny_keyring,
         permit_keyring_join,
         SandboxSyscalls {
@@ -2641,7 +2667,7 @@ pub(super) fn build_seccomp(
 fn build_seccomp_for(
     arch: TargetArch,
     restrict_network: bool,
-    per_host: bool,
+    ip_egress: IpEgress,
     deny_keyring: bool,
     permit_keyring_join: bool,
     syscalls: SandboxSyscalls,
@@ -2649,26 +2675,19 @@ fn build_seccomp_for(
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
 
     if restrict_network {
-        // The private network namespace handles ordinary IP traffic. AF_UNIX sockets
-        // cross that boundary, so target-created AF_UNIX sockets remain blocked. The
-        // trusted bridge runs outside the target's seccomp filter; socketpair(2) is not
-        // restricted and remains available for in-process local IPC. AF_NETLINK remains
-        // available so nested Bubblewrap can configure its own
-        // private network namespace without reaching the host network.
-        //
-        // PER-HOST carve-out (C3): the empty netns is the boundary, but it does NOT confine
-        // every family — AF_VSOCK reaches the hypervisor (CID-addressed, not netns-scoped)
-        // and AF_BLUETOOTH/AF_RDS/AF_CAN/AF_TIPC/AF_IB/AF_NFC are global buses/transports —
-        // so those MUST stay seccomp-denied even for per-host. Per-host only lifts the IP
-        // families the target needs to reach the in-netns bridge: AF_INET and AF_INET6
-        // (loopback, which the netns confines to `lo`). AF_UNIX stays denied because a
-        // target-created filesystem socket can reach host services across the netns; the
-        // relay is trusted infrastructure outside this filter. Everything else — including
-        // AF_PACKET (no raw-socket need to reach the proxy) — stays denied, minimizing the delta from
-        // coarse-deny. `io_uring_setup` stays blocked below so a socket cannot be created off
-        // the family filter. WITHOUT this carve-out, per-host would be a strict WEAKENING of
-        // coarse-deny (which denies all these families) — the netns alone is not sufficient.
-        const PER_HOST_PERMITTED: [libc::c_int; 2] = [libc::AF_INET, libc::AF_INET6];
+        // THE SOCKET-FAMILY CEILING, and [`IpEgress::Permitted`] lifts EXACTLY the two IP
+        // families out of it — never any of the rest. That asymmetry is the invariant: the
+        // non-IP families are not an egress question, so no caller has grounds to relax them
+        // and none may. AF_UNIX reaches host daemons through a filesystem path that neither a
+        // netns nor Landlock scopes (`connect` on a socket file is not an `open`, so no fs rule
+        // mediates it); AF_VSOCK reaches the hypervisor by CID; AF_BLUETOOTH/AF_RDS/AF_CAN/
+        // AF_TIPC/AF_IB/AF_NFC are global buses. AF_PACKET/AF_XDP are refused because nothing a
+        // dependency build legitimately does needs a raw socket. AF_NETLINK is deliberately
+        // ABSENT from the list so a nested Bubblewrap can configure its own private netns
+        // without reaching the host network, and `socketpair(2)` is unfiltered so in-process
+        // local IPC still works. io_uring is blocked below at all three entry points, which is
+        // what keeps a socket from being created off this filter entirely.
+        const IP_FAMILIES: [libc::c_int; 2] = [libc::AF_INET, libc::AF_INET6];
         let all_denied = [
             libc::AF_UNIX,
             libc::AF_INET,
@@ -2685,7 +2704,7 @@ fn build_seccomp_for(
         ];
         let denied_families: Vec<libc::c_int> = all_denied
             .into_iter()
-            .filter(|family| !(per_host && PER_HOST_PERMITTED.contains(family)))
+            .filter(|family| !(ip_egress == IpEgress::Permitted && IP_FAMILIES.contains(family)))
             .collect();
         let mut socket_rules = Vec::with_capacity(denied_families.len());
         for family in denied_families {
@@ -2979,13 +2998,29 @@ unsafe fn cloexec_open_fds_from_proc() -> std::io::Result<()> {
 
 /// Launch under Landlock + seccomp — no namespace, no helper process, no bubblewrap.
 ///
-/// NETWORK IS BINARY — on or off — and coarse deny is the build jail's accepted model, not a
-/// shortfall against some richer tier. Confining egress to a per-host allowlist requires an
-/// empty network namespace whose only route out is a trusted bridge to nub's proxy; that
-/// needs a user namespace, which is exactly what this product cannot require. Re-permitting
-/// `AF_INET` without one would let a script dial any host directly and ignore the proxy,
-/// making the allowlist decorative. So every socket family is denied, and a package that
-/// genuinely needs a remote artifact is served by prefetch before the jail starts.
+/// NETWORK IS A PER-PACKAGE BOOLEAN HERE, and that boolean is the whole contract rather than a
+/// shortfall against a richer tier. A package the catalog names has `AF_INET`/`AF_INET6` lifted
+/// out of the socket ceiling; a package it does not name keeps the full ceiling and reaches
+/// nothing. Both directions are simply what `compiler::preset::build_jail_net` compiled, read
+/// back off the IR by [`ip_egress_for`].
+///
+/// WHY A COARSE FAMILY PERMIT IS SOUND WITH NO NETNS — and why the host list is not a gate.
+/// Per-host egress requires the child's ONLY route out to be nub's proxy, which requires an
+/// empty network namespace, which requires an unprivileged user namespace: the one thing this
+/// product cannot demand (Ubuntu 24.04 denies it by default, and refusing to install there is
+/// not an option). Absent a netns, a permitted `AF_INET` dials any host directly, so no host list
+/// could be enforced here — which is why `build_jail_net` emits none, on any platform. The
+/// defense that survives is the one aimed at the actual attack: an unvetted package — the
+/// Shai-Hulud shape, a `postinstall` published into something nobody reviewed — has no catalog
+/// entry and therefore gets zero egress. A coarse permit is only ever handed to a package a
+/// pull request already admitted.
+///
+/// The residual is named rather than hidden: a granted package can reach loopback and any host at
+/// all. That is accepted — the jail is defense in depth, and the exposure is bounded to the
+/// reviewed set. What is NOT accepted is what this comment used to assert,
+/// that prefetch serves every package needing a remote artifact. It does not: prefetch covers
+/// `prebuild-install`/`node-pre-gyp` artifacts, while 181 of the 344-package corpus fetch
+/// beyond that, so a blanket deny broke them instead of confining them.
 fn apply_landlock(
     policy: &SandboxPolicy,
     spec: CommandSpec,
@@ -2994,9 +3029,7 @@ fn apply_landlock(
 ) -> Result<Prepared, Degradation> {
     let seccomp = build_seccomp(
         policy.net.enforce,
-        // NEVER the per-host carve-out: it exists only because a netns bounds the IP
-        // families it re-permits, and there is no netns here.
-        false,
+        ip_egress_for(&policy.net),
         protects_ambient_credentials(policy),
         false,
     )
@@ -3040,11 +3073,11 @@ fn apply_landlock(
 
     Ok(Prepared {
         command,
-        // Fully enforced. The build jail's network axis is BINARY — on or off — so coarse
-        // deny is the model, not a reduction of one. A per-host tier was never a capability
-        // of this product (it needs a namespace to confine egress to the proxy, which this
-        // mechanism does not have by design); a package that would have needed a specific
-        // host is served by prefetch instead, before the jail starts.
+        // Fully enforced, and the per-package boolean is what "fully" means on this axis — see
+        // the fn doc. NOT reported as a lost `net-per-host`: the catalog's documented contract
+        // IS the boolean (`data/build-jail-catalog.json` `enforcementStatus`), so there is no
+        // host-granularity promise to fall short of, and a per-spawn "reduced mode" warning on
+        // every one of the 181 granted packages would be noise asserting something false.
         degradation: Degradation::full(),
         proxy: None,
         net_bridge: None,
@@ -3059,6 +3092,24 @@ fn apply_landlock(
         redact_stdout: false,
         redact_stderr: false,
     })
+}
+
+/// The socket ceiling the compiled net axis asks for, read out of the IR.
+///
+/// An Allow rule IS the catalog verdict: `build_jail_net` emits a catch-all `["*"]` for a package
+/// the catalog names and `false` for one it does not. Deriving from the IR rather than re-consulting
+/// the catalog keeps this backend a pure IR translator, so it cannot grant something the compiled
+/// policy did not. A relaxed axis (`default_effect == Allow`) counts too — it admits every host,
+/// which no build-jail policy emits, but reading it as a deny would UNDER-permit a policy that
+/// says "everything".
+fn ip_egress_for(net: &crate::policy::NetPolicy) -> IpEgress {
+    let admits_anything = net.default_effect == Effect::Allow
+        || net.rules.iter().any(|rule| rule.effect == Effect::Allow);
+    if admits_anything {
+        IpEgress::Permitted
+    } else {
+        IpEgress::Denied
+    }
 }
 
 fn base_command(spec: &CommandSpec, policy: &SandboxPolicy) -> Command {
@@ -3275,7 +3326,7 @@ mod tests {
         let x86 = build_seccomp_for(
             TargetArch::x86_64,
             true,
-            false,
+            IpEgress::Denied,
             true,
             false,
             SandboxSyscalls {
@@ -3347,7 +3398,7 @@ mod tests {
             let program = build_seccomp_for(
                 arch,
                 true,
-                false,
+                IpEgress::Denied,
                 true,
                 false,
                 SandboxSyscalls {
@@ -3412,12 +3463,16 @@ mod tests {
         let allowed = u32::from(SeccompAction::Allow);
         let killed = u32::from(SeccompAction::KillProcess);
 
-        assert!(build_seccomp(false, false, false, false).unwrap().is_none());
+        assert!(
+            build_seccomp(false, IpEgress::Denied, false, false)
+                .unwrap()
+                .is_none()
+        );
         let build = |network, keyring, permit_join| {
             build_seccomp_for(
                 TargetArch::x86_64,
                 network,
-                false,
+                IpEgress::Denied,
                 keyring,
                 permit_join,
                 SandboxSyscalls {
@@ -3537,14 +3592,14 @@ mod tests {
     }
 
     #[test]
-    fn per_host_seccomp_permits_ip_but_denies_unix_and_vsock() {
-        // C3 cross-layer regression: per-host lifts the socket ceiling ONLY for the IP
-        // families needed to reach the in-netns bridge (AF_INET/AF_INET6). The trusted
-        // bridge itself is outside the target filter, while target-created AF_UNIX sockets
-        // remain denied because filesystem paths cross the empty netns. The empty netns does
-        // NOT confine AF_VSOCK (hypervisor CID addressing) or the other
-        // global buses/transports, so those MUST stay denied — otherwise per-host would be a
-        // strict weakening of coarse-deny.
+    fn permitted_ip_egress_lifts_only_the_two_ip_families() {
+        // THE ASYMMETRY IS THE INVARIANT, and it holds for BOTH callers of `Permitted` — the
+        // netns/bridge path and the Landlock build jail's per-package grant. Lifting the IP
+        // families is the grant; lifting anything else would be an escape, because the rest of
+        // the ceiling is not an egress question: AF_UNIX reaches host daemons through a
+        // filesystem path nothing here scopes, AF_VSOCK is CID-addressed to the hypervisor, and
+        // the buses are global. This test is what stops a future caller from widening the carve-
+        // out along with it.
         const SOCKET: i64 = 41; // x86-64 socket(2)
         const IO_URING_SETUP: i64 = 425;
         const IO_URING_ENTER: i64 = 426;
@@ -3560,26 +3615,46 @@ mod tests {
             add_key: 248,
             request_key: 249,
         };
-        let per_host =
-            build_seccomp_for(TargetArch::x86_64, true, true, false, false, syscalls()).unwrap();
-        let coarse =
-            build_seccomp_for(TargetArch::x86_64, true, false, false, false, syscalls()).unwrap();
+        let permitted = build_seccomp_for(
+            TargetArch::x86_64,
+            true,
+            IpEgress::Permitted,
+            false,
+            false,
+            syscalls(),
+        )
+        .unwrap();
+        let denied_ip = build_seccomp_for(
+            TargetArch::x86_64,
+            true,
+            IpEgress::Denied,
+            false,
+            false,
+            syscalls(),
+        )
+        .unwrap();
         let sock = |program: &BpfProgram, family: libc::c_int| {
             evaluate_bpf(
                 program,
                 &seccomp_data(SOCKET as u32, AUDIT_ARCH_X86_64, family as u64),
             )
         };
-        // Per-host permits only the IP families the bridge needs — which coarse-deny denies.
+        // The two programs differ on exactly the IP families and nowhere else. This pairing is
+        // the regression guard for the defect this replaced: `Permitted` and `Denied` used to
+        // compile byte-identically on the build-jail path, so a granted package got nothing.
         for family in [libc::AF_INET, libc::AF_INET6] {
             assert_eq!(
-                sock(&per_host, family),
+                sock(&permitted, family),
                 allowed,
-                "per-host permits {family}"
+                "a granted package must reach family {family}"
             );
-            assert_eq!(sock(&coarse, family), denied, "coarse-deny denies {family}");
+            assert_eq!(
+                sock(&denied_ip, family),
+                denied,
+                "an ungranted package must not reach family {family}"
+            );
         }
-        // Per-host still denies AF_UNIX and every other netns-unconfined family.
+        // Everything else stays denied under `Permitted` too.
         for family in [
             libc::AF_UNIX,
             libc::AF_VSOCK,
@@ -3593,15 +3668,14 @@ mod tests {
             libc::AF_NFC,
         ] {
             assert_eq!(
-                sock(&per_host, family),
+                sock(&permitted, family),
                 denied,
-                "per-host must still deny netns-unconfined family {family}"
+                "permitted IP egress must still deny family {family}"
             );
         }
-        // Every io_uring entry point stays blocked under per-host so a socket cannot be
-        // created off the family filter. Blocking setup alone is not enough: an
-        // already-created ring is driven by io_uring_enter, which is the path that
-        // reaches AF_VSOCK — the family the empty netns above does not confine.
+        // Every io_uring entry point stays blocked so a socket cannot be created off the family
+        // filter. Blocking setup alone is not enough: an already-created ring is driven by
+        // io_uring_enter, which is the path that reaches AF_VSOCK.
         for (name, syscall) in [
             ("io_uring_setup", IO_URING_SETUP),
             ("io_uring_enter", IO_URING_ENTER),
@@ -3609,13 +3683,58 @@ mod tests {
         ] {
             assert_eq!(
                 evaluate_bpf(
-                    &per_host,
+                    &permitted,
                     &seccomp_data(syscall as u32, AUDIT_ARCH_X86_64, 0)
                 ),
                 denied,
-                "per-host must block {name} (io_uring can create any-family sockets)"
+                "permitted IP egress must still block {name} (io_uring creates any-family sockets)"
             );
         }
+    }
+
+    /// The IR→ceiling mapping, the other half of the fix: ANY Allow — the catch-all `["*"]` the
+    /// build jail now emits for a catalogued package, or a named host from a `nub sandbox`
+    /// policy — must reach `Permitted`, and the deny-all an uncatalogued package compiles to must
+    /// not. Pinned apart
+    /// from the BPF assertions above because a correct filter reached through the wrong verdict is
+    /// still a granted package with no network.
+    #[test]
+    fn the_ir_decides_the_ceiling_and_a_deny_all_axis_grants_nothing() {
+        use crate::policy::{NetPolicy, NetRule, NetTarget};
+        let deny_all = NetPolicy {
+            enforce: true,
+            default_effect: Effect::Deny,
+            ..NetPolicy::default()
+        };
+        assert_eq!(ip_egress_for(&deny_all), IpEgress::Denied);
+        let granted = NetPolicy {
+            rules: vec![NetRule {
+                target: NetTarget::Host("nodejs.org".to_string()),
+                effect: Effect::Allow,
+            }],
+            ..deny_all.clone()
+        };
+        assert_eq!(ip_egress_for(&granted), IpEgress::Permitted);
+        // The shape a catalogued package actually compiles to since per-host was dropped: a
+        // catch-all naming no host. It must read as a grant exactly like the named host above,
+        // or every catalogued package silently loses its egress on this backend.
+        let coarse = NetPolicy {
+            rules: vec![NetRule {
+                target: NetTarget::Host("*".to_string()),
+                effect: Effect::Allow,
+            }],
+            ..deny_all.clone()
+        };
+        assert_eq!(ip_egress_for(&coarse), IpEgress::Permitted);
+        // A deny-ONLY rule list is still a deny-all base: an entry is not a grant.
+        let deny_rule_only = NetPolicy {
+            rules: vec![NetRule {
+                target: NetTarget::Host("evil.test".to_string()),
+                effect: Effect::Deny,
+            }],
+            ..deny_all
+        };
+        assert_eq!(ip_egress_for(&deny_rule_only), IpEgress::Denied);
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -3629,7 +3748,9 @@ mod tests {
             }
         }
 
-        let program = build_seccomp(true, false, false, false).unwrap().unwrap();
+        let program = build_seccomp(true, IpEgress::Denied, false, false)
+            .unwrap()
+            .unwrap();
         let child = unsafe { libc::fork() };
         assert!(
             child >= 0,

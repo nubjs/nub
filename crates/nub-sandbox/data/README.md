@@ -29,16 +29,22 @@ A PR that widens an existing entry needs its own measurement.
 
 ## `networkHosts` — the egress allowlist
 
-The hosts a confined lifecycle script may reach. Also exposed to policy authors as the
-`$downloads` token, and used as the allowlist for nub's own out-of-jail prefetch.
+Exposed to policy authors as the `$downloads` token, and used as the allowlist for nub's own
+out-of-jail prefetch. Adding a host widens THAT allowlist, which runs unconfined on
+manifest-controlled URLs — so an entry here is an addition of trust, not the reduction a jail
+grant is.
 
-**It is the second of two gates, and adding a host here does not on its own unblock a
-package.** A script must clear both: the per-package boolean in
-`src/compiler/package_network.rs` — derived from `fetchedBy` below and from
-`packageNetwork.full`, and denying every package the catalog does not name — and then this
-host list, enforced by the proxy on the CONNECT authority and the SNI. Windows clears neither,
-keeping the deny-all, because its backend refuses a per-host policy outright. So a package
-that fetches an admitted host still reaches nothing until some entry names it.
+**The build jail no longer gates on this list.** Its egress is a per-package BOOLEAN, resolved
+by `src/compiler/package_network.rs`: a package the catalog names may reach the network, a
+package it does not name reaches nothing. Per-host was withdrawn because only macOS could
+enforce it — Linux needs a network namespace it cannot require, and Windows' loopback exemption
+is admin-only — so a list that gated one platform meant an incomplete list erroring for the
+platform most developers use. The hosts remain as PROVENANCE: a package that used to fetch its
+own CDN and now reaches somewhere else shows up as a reviewable diff on this file.
+
+**So `fetchedBy` is where a package is admitted, and `host` is not.** Naming a package in
+`fetchedBy` grants it egress; adding a host without naming a package grants no script anything,
+and only widens the prefetcher.
 
 ```json
 {

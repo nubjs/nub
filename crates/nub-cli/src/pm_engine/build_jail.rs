@@ -12,10 +12,18 @@
 //!   PM cache (where it bootstraps node-gyp), and the provisioned interpreter (the OS
 //!   backends supply the system/toolchain closure under a minimal root). The consumer's
 //!   source, config, `.git/`, and `.github/` are outside it.
-//! - egress curated to the install-time artifact hosts (`$downloads`) and denied
-//!   everywhere else. The fs axis carries NO deny rules at all — the jail compiles to a
-//!   pure allowlist (`preset::enforce_pure_allowlist`), so every secret is withheld by not
-//!   being granted rather than by a deny the allowlist backends cannot express.
+//! - egress gated on PACKAGE IDENTITY: a package the build-jail catalog names may reach the
+//!   network; a package it does not name reaches NOTHING. The grant is COARSE on every platform
+//!   — no host filtering — because only macOS could ever enforce a host list, and being stricter
+//!   there than on Linux or Windows meant an incomplete list erroring for the platform most
+//!   developers use (see `nub_sandbox::compiler::preset::build_jail_net`). The DENIAL is the
+//!   point — the attack shape is a new `postinstall` published into a package that never had
+//!   one, so an unvetted package gets no egress at all and one that needs it arrives through a
+//!   catalog PR first.
+//!   The fs axis carries NO deny rules at all —
+//!   the jail compiles to a pure allowlist (`preset::enforce_pure_allowlist`), so every secret
+//!   is withheld by not being granted rather than by a deny the allowlist backends cannot
+//!   express.
 //! - the constructed lifecycle env minus credential-shaped keys.
 //!
 //! The user's OWN root-package scripts are NOT routed here — aube passes them no

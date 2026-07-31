@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 /// only preset today (the lifecycle-script baseline).
 pub fn resolve(name: &str) -> Result<Value, CompileError> {
     match name {
-        "build-jail" => Ok(build_jail_surface(None, None)),
+        "build-jail" => Ok(build_jail_surface(None, None, None)),
         other => Err(CompileError::unknown_preset(other, &["build-jail"])),
     }
 }
@@ -392,7 +392,7 @@ fn push_read_path(out: &mut Vec<FsRule>, path: &Path, origin: FsOrigin) {
 /// this folds) plus the OS backends' minimal-root closure — with WRITE confined to a
 /// per-run tmp (private everywhere but Windows, which takes the shared tmp; see the `$tmp`
 /// comment below) and, via [`compile_build_jail`], the script's own package dir.
-/// Egress curated down to the install-time artifact hosts (see [`build_jail_net`]).
+/// Egress gated on package identity, coarsely (see [`build_jail_net`]).
 ///
 /// `package_dir` is the per-spawn WRITE grant. It stays LAST so its read-write access
 /// wins over the front-inserted dependency-tree read for the package subtree
@@ -400,7 +400,11 @@ fn push_read_path(out: &mut Vec<FsRule>, path: &Path, origin: FsOrigin) {
 /// the static `--sandbox build-jail` skeleton (the per-package write is a production-
 /// interposition concern), as does `private_home`. The env axis is the strip-all floor
 /// here; [`compile_build_jail`] replaces it with the scrubbed lifecycle env.
-fn build_jail_surface(package_dir: Option<&Path>, private_home: Option<&Path>) -> Value {
+fn build_jail_surface(
+    package_dir: Option<&Path>,
+    private_home: Option<&Path>,
+    package_name: Option<&str>,
+) -> Value {
     let mut fs = serde_json::Map::new();
     // `$tmp` sets the private per-run tmp MODE (TmpMode::Private) — a writable scratch,
     // shared host tmp hidden. It emits no ordinary fs rule.
@@ -462,31 +466,80 @@ fn build_jail_surface(package_dir: Option<&Path>, private_home: Option<&Path>) -
     // of the whole subpath (`macos_seatbelt_base.sbpl`).
     json!({
         "fs": Value::Object(fs),
-        "net": build_jail_net(),
+        "net": build_jail_net(package_name),
         // Strip-all here; the interposition supplies the scrubbed lifecycle env.
         "vars": []
     })
 }
 
-/// The build-jail's net axis: the curated install-time artifact hosts (`$downloads`),
-/// everything else denied. A lifecycle script that legitimately fetches its own binary —
-/// Node headers for a native compile, the Prisma engines, the Cypress binary — reaches
-/// exactly those hosts and nothing more; the set is wildcard-free and carries no host that
-/// accepts a write, so an attacker-authored postinstall gains no way to send bytes out.
+/// The build-jail's net axis, gated on PACKAGE IDENTITY: a package the catalog names may reach
+/// the network, and a package it does not name reaches nothing.
 ///
-/// WINDOWS keeps the deny-all. Its backend refuses a per-host policy outright
-/// (`WinNetPlan::PerHostUnsupported`) because the available AppContainer exemption exposes
-/// every loopback listener, so a local forwarder could bypass the hostname gate — and an
-/// unappliable jail fails the install rather than degrading. Deny-all is the STRICTER
-/// posture, so the divergence loses a capability, never enforcement.
-fn build_jail_net() -> Value {
-    #[cfg(not(windows))]
-    {
-        json!(["$downloads"])
+/// NO ENTRY MEANS NO NETWORK, and that default is the point rather than a fallback. The
+/// attack this jail exists to blunt is the Shai-Hulud shape — an attacker publishes a new
+/// `postinstall` into a package that never had one, and it runs with the user's access. That
+/// package is not one anybody vetted for network use, so it gets nothing; a package that
+/// needs egress arrives through a pull request against `data/build-jail-catalog.json` first,
+/// and that PR is the whole opt-in mechanism. Host granularity is a separate axis and a much
+/// smaller one: narrowing an admitted host would constrain a package somebody already
+/// reviewed, while doing nothing about the unvetted one, and a global egress set handed that
+/// unvetted package `github.com` — ample for exfiltration on its own.
+///
+/// The grant is therefore a BOOLEAN, deliberately. Both catalog spellings — a package named in
+/// `networkHosts[].fetchedBy` and one listed in `packageNetwork.full` — mean "this package was
+/// reviewed and admitted", so both resolve to the same grant. A package recorded in
+/// `notGranted.packages` is denied whichever way it was observed: the catalog parser subtracts
+/// the refused set from the union, so a refusal cannot be contradicted by an observation of
+/// what the package was seen fetching.
+///
+/// PER-HOST EGRESS IS DELIBERATELY NOT ENFORCED HERE, AND `$downloads` IS DELIBERATELY NOT
+/// REFERENCED. Do not restore either as a missing feature. Two of the three backends cannot
+/// enforce a host list at all: Linux needs a network namespace to force the child through nub's
+/// proxy, which needs an unprivileged user namespace — denied by default on Ubuntu 24.04, and
+/// requiring it is the one thing this product cannot do; Windows' loopback exemption
+/// (`NetworkIsolationSetAppContainerConfig`) is admin-only. macOS alone COULD enforce it, via
+/// Seatbelt confining egress to the proxy port, and enforcing it there was withdrawn on purpose:
+/// macOS is the platform most developers use, so being stricter there means an incomplete host
+/// list throws errors that Linux and Windows users never see, and confidence in the list is low.
+/// A host list that gates one platform and is provenance on two is a compat liability, not a
+/// defense. `$downloads` still serves `nub sandbox`, a different mechanism where per-host DOES
+/// work — this jail simply no longer consults it.
+///
+/// The catalog's per-package `hosts` arrays are retained for the same reason and enforce nothing
+/// either: a CHANGING host list is a detection signal, so a package that used to fetch from its
+/// own CDN and now reaches somewhere else shows up as a reviewable diff on
+/// `data/build-jail-catalog.json`. They are provenance, never a gate.
+///
+/// The surviving contract is uniform: no catalog entry ⇒ no egress; an entry ⇒ coarse egress.
+/// Denial is `false` everywhere. The admitted case is coarse everywhere too, but SPELLED per
+/// platform, because `enforce` carries more than egress on Linux:
+///
+/// - **macOS** and **Windows** get `true` (`enforce = false`). Seatbelt emits `(allow network*)`
+///   and starts no proxy; Windows' unprivileged egress lever is the AppContainer
+///   `internetClient` capability, which the backend grants on exactly `!net.enforce`, so
+///   coarse-allow is the ONLY spelling that reaches it. A host array there would instead select
+///   the per-host tier via `needs_account_backend` / `plan_net`, which needs an admin-registered
+///   loopback exemption, so an ordinary `nub install` would fail closed (or divert to the
+///   admin-only dedicated-account backend) for every catalogued package. `true` is still not
+///   "unrestricted" on Windows: WFP refuses an AppContainer's loopback whatever its capabilities
+///   and `privateNetworkClientServer` stays withheld, so the grant is public outbound only.
+/// - **Linux** gets `["*"]` — a catch-all Allow, naming no host. It CANNOT be `true`, because
+///   `backend::linux::build_seccomp` gates the whole socket-family ceiling and the io_uring
+///   triple-block on `net.enforce`: `enforce = false` would re-permit `AF_UNIX` (a path to host
+///   daemons like `docker.sock` that neither Landlock nor a netns scopes), `AF_VSOCK`,
+///   `AF_PACKET`, and io_uring's socket-creation side door. Keeping `enforce = true` with a
+///   catch-all Allow lifts exactly `AF_INET`/`AF_INET6` out of that ceiling and leaves the rest
+///   denied, which is the coarse grant with the non-egress protections intact. Zero named hosts
+///   means nothing here reads as a gate, and zero *authored* hosts keeps `mode` off the
+///   proxy-starting path (`apply_inner`'s Landlock arm skips the proxy outright).
+fn build_jail_net(package_name: Option<&str>) -> Value {
+    if !super::package_network::build_jail_net_allowed(package_name) {
+        return json!(false);
     }
-    #[cfg(windows)]
-    {
-        json!(false)
+    if cfg!(target_os = "linux") {
+        json!(["*"])
+    } else {
+        json!(true)
     }
 }
 
@@ -518,7 +571,7 @@ pub fn compile_build_jail(
     ambient_env: BTreeMap<String, String>,
 ) -> Result<SandboxPolicy, CompileError> {
     let private_home = private_home_dir(&homes, package_dir);
-    let surface = build_jail_surface(Some(package_dir), private_home.as_deref());
+    let surface = build_jail_surface(Some(package_dir), private_home.as_deref(), package_name);
     // cwd anchors diagnostics/canonicalization; the project root (homes.project) is
     // what `"./"` expands against, so the package dir as cwd does not affect grants.
     let cwd = homes.project.clone();
