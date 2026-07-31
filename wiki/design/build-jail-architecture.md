@@ -42,11 +42,13 @@ Counted across all three sibling ledgers, the filesystem **read** axis carries t
 | axis | representative items | count of ledger sections |
 | --- | --- | --- |
 | **read / exec** | the `/etc` enumeration and its distro-shaped TLS correction, the `EACCES`-versus-`ENOENT` compatibility cost, read-must-render-as-read-plus-execute, resolved-leaf grants, the grant explosion under `ARG_MAX`, the `$HOME` over-grant through a symlink hop, the `posix_spawnp` PATH-search abort, pyenv's Python, the whole Windows bypass-traverse and ancestor-repair and canonicalization apparatus, blockers 1 and 3 | dominant |
-| **write** | the metadata-write residual on Linux, node-gyp's sibling-store write | 2 |
+| **write** | the metadata-write residual on Linux, node-gyp's sibling-store write, node-gyp's store-entry-root write, a read grant synthesizing a deny that revoked write from everything it enclosed | 4 |
 | **network** | the inert `$downloads` list on Linux, the userland net gate on Windows, the netns bridge readiness race | 3 |
-| **neither** | the piped-stdio hang (object namespace), the descriptor sweeps, environment keys containing `=` | 4 |
+| **neither** | the piped-stdio hang (object namespace), the descriptor sweeps, environment keys containing `=`, `getcwd` refused at an ungranted cwd | 5 |
 
 This is the single most useful fact in the document, because it means the architecture question reduces almost entirely to one narrower question: **is denying reads by default the right posture, and could it have been avoided?** The rest of the ledger below answers no on both platforms where it matters.
+
+**Two later items shift the counts without shifting that conclusion.** The write axis gained a real architectural finding — a backend synthesizing a deny out of an `Allow`, discussed [below](#polarity-is-a-property-of-the-backends-not-only-of-the-ir) — and the network axis collapsed from a host list into a per-package boolean, which removed a capability rather than adding a defect. Neither is a read-axis item, and the read axis is still where the compatibility cost lives.
 
 ## The Windows read-repair layer is where the spelling defects live
 
@@ -61,6 +63,16 @@ Node's `realpathSync` walks a path component by component and, on Windows, `lsta
 The batch that fixed them names it directly: `build_jail.rs`'s `canonical()` returned Windows verbatim paths, and four consumers were wrong — node-gyp parsed `\\?\` as a plain path, a grant's `?` re-read as a glob metacharacter and was **silently dropped**, and two containment checks (`ProbeScope::allows` and the refusal of a grant at or above `$HOME`) could never fire because one side was canonicalized and the other was not.
 
 That is one bug with four blast radii, not four bugs. The fix routed the call through `canonicalize_including_nonexistent`, the single canonicalizer Nub already ships and that the Linux and macOS backends already used — which is also what the Windows canonicalization survey had independently recommended. **The remaining exposure is structural: nothing in the type system stops the next path from taking the same trip**, and the two moves that would close it are in [what the mature implementations do](#what-the-mature-implementations-do-that-nub-does-not).
+
+## Polarity is a property of the backends, not only of the IR
+
+The build jail's central guarantee is that it is a **pure allowlist that emits zero deny rules**, and the compiler enforces that on the IR (`preset::enforce_pure_allowlist`). **That is one layer too high, and a backend broke it from underneath.** The macOS `emit_fs` mapped `(Allow, Read)` to a `(deny file-write* <term>)` rule and emitted it in the write loop, so under Seatbelt's last-match-wins a *read grant* silently revoked write from everything it enclosed — measured on a real profile, where widening one grant wrote 20 files and adding a read grant alone wrote 0.
+
+**The argument that settles the polarity is stronger than the measurement, and it is worth stating in that order.** The synthesized deny had nothing to cap: Seatbelt's write base is already `(deny default)`, and a generous `default_effect` widens only reads, so the only thing that deny could ever cancel was another Nub grant. A rule that can only ever subtract from your own grants is not a boundary, it is a bug with a plausible-looking justification — and it carried one, in a comment, for as long as it survived.
+
+**The generalizable shape: an invariant asserted on an intermediate representation must be re-asserted at every rendering of it.** Four renderings existed and three were already additive — `FsPolicy`'s own contract says the write-set is the `ReadWrite` allows, Landlock unions its rules and has no deny primitive at any ABI, and `windows::derive_grants` accumulates a read set and a write set with no ordering. **Only Seatbelt, the one backend with an ordering rule, could express the mistake, and it did.** This is the same class as the [inert mechanism below](#the-inert-mechanism-was-a-measurement-gap-not-a-design-gap): a property everyone believed held, in a configuration nobody had run the deciding arm on.
+
+**It also cost a capability, and the cost is the right trade rather than a regression.** *"Readable but not writable inside a writable grant"* is now inexpressible on every backend; removing access is a `Deny`, which removes read too. Nothing in the catalog or the docs depended on the demote — but the contributor guidance did recommend the shape that produced it, advising `projectReads` as "the smaller grant", which is how a compiler bug became a documented pattern.
 
 ## The inert mechanism was a measurement gap, not a design gap
 
@@ -93,6 +105,31 @@ The string comparisons are all in the layer above: the policy compiler, and the 
 **So the catalog is not the novel part; the confinement of an approved package is.** That also settles a recurring worry: granting a catalogued package full network is not a weakening relative to the ecosystem baseline, because the baseline is full network *and* full filesystem *and* full environment.
 
 **What would change the verdict.** A registry-side attestation strong enough to make identity itself the boundary. Nothing on that path is close.
+
+## The network axis is governed by identity alone, not by a host list — ADOPTED, and the two lists are decoupled
+
+**What it is.** The catalog carries two things that look like one: `networkHosts`, a set of artifact hostnames, and `packageNetwork`, a per-package grant. **They are decoupled, and mistaking them for a single knob produces the wrong question.**
+
+- **`networkHosts` feeds only Nub's own PREFETCH**, which runs **unconfined, as the user, before the jail exists** (`pm_engine/build_prefetch.rs`). It is where Nub — not the script — derives an artifact URL from the package's manifest, fetches it, and writes it where the installer already looks.
+- **`packageNetwork` feeds the jail's egress grant**, which is a coarse per-package boolean on all three platforms and **names no hostname at all** (`compiler/preset.rs:615-671`).
+
+**So the criterion for admitting a host is *"does the PREFETCHER need it?"* — not *"is it safe for a script to reach?"*** That reframing is the finding. It was verified structurally: a 43-entry catalog change promoted **zero** hosts, and `DOWNLOAD_HOSTS` came out **byte-identical** across it (`dde33ef0…` both sides) while the per-package table's digest changed — the second half being the control that distinguishes byte-identity from a stale generated artifact. No prefetch demand was measured for any candidate, so every one went to `packageNetwork` instead.
+
+**A distinct criterion applies to the prefetch list, and it is exfiltration rather than trust.** A host can fail it outright, regardless of prefetch demand, when the *same hostname* also accepts a write or serves arbitrary tenant content — because Nub's unconfined GET is one anonymous read, but the surface is the name:
+
+| host | why it can never be a prefetch host |
+| --- | --- |
+| `github.com` | serves `git-receive-pack` — an authenticated **write** — on the same name |
+| `registry.npmjs.org` | the authenticated **publish** route is the same name, reachable with a project `.npmrc` token; the GitHub shape exactly |
+| `raw.github.com` | 301s to `raw.githubusercontent.com`, i.e. arbitrary repo content |
+| `storage.googleapis.com`, `www.googleapis.com` | multi-tenant — an attacker rents a bucket and reads back |
+| `o30291.ingest.sentry.io` | a telemetry sink **whose POST body is the product** |
+
+**There is a real argument the prefetch side could be broader** — a prefetch entry only lets Nub perform one anonymous GET whose body is written to a file and never executed, which would make `github.com` (covering essentially the whole prebuilt-binary population) cheap there and useless as a script-reachable host. That widening exists, ships inert behind an off-by-default cargo feature, and is a maintainer call rather than an implementer's, because the code path runs unconfined as the user.
+
+**What the boolean costs, stated because it is easy to under-read.** Egress is per-package, so **granting a package restores every host it talks to** — admitting `snyk` also restores its Sentry POST. The catalog's per-package `hosts` arrays are retained purely as provenance: a package that used to fetch from its own CDN and now reaches somewhere else shows up as a reviewable diff.
+
+**What would change the verdict.** An unprivileged per-host mechanism on all three platforms. macOS has one and it was withdrawn precisely because the other two do not — a list that gates one platform and is provenance on two is a compatibility liability rather than a defense.
 
 ## Observing instead of pre-granting — REJECTED (design) as a boundary, WORTH RECONSIDERING as a policy generator
 
@@ -251,8 +288,13 @@ Neither BuildXL nor Bazel infers whether a process did its work. A pip declares 
 | The `posix_spawnp` PATH-search abort on an ungranted symlinked entry | read | **no** | libuv treats `EPERM` as fatal to the whole search; the fix is to canonicalize the child's PATH |
 | Piped `child_process` stdio hanging | — | **no** | global NPFS is closed to a LowBox token and libuv spells only that namespace; no filesystem rule reaches it |
 | CRLF and backslash defects in the corpus harness | — | **yes** | ordinary harness bugs; the structural fix is stamping provenance on every artifact |
+| A backend synthesizing a deny out of an `Allow` | write | **yes** | the pure-allowlist invariant was asserted on the IR and not at each rendering; the argument that no such deny could ever cap anything was available before the measurement |
+| A confined process unable to resolve its own cwd | — | **no** | Seatbelt gates `getcwd` on the cwd's own directory node, and nothing in a path-granting model predicts that the *current directory* is itself a read subject |
+| node-gyp writing to its store-entry root | write | **no** | gyp's path arithmetic makes `build/` absorb one `..`; npm and pnpm compute the same escaping path and only confinement turns it into a failure |
 
-**Read as a whole: four of eleven were avoidable, three of those four by one change (a typed canonical path plus owning the temp directory), and the unavoidable ones are Node and kernel behaviors that no architecture on offer removes.**
+**Read as a whole: five of fourteen were avoidable, three of those five by one change (a typed canonical path plus owning the temp directory), and the unavoidable ones are Node, gyp and kernel behaviors that no architecture on offer removes.**
+
+**The two new unavoidable rows both argue the same way, and it is the strongest available defense of the shape.** In each case the correct path is one npm and pnpm compute identically, and only confinement turns into a failure — which means the defect is the price of being the only tool in the class that enforces anything, not evidence that the enforcement is modelled wrong.
 
 ---
 
@@ -266,4 +308,5 @@ Neither BuildXL nor Bazel infers whether a process did its work. A pip declares 
 
 ## Changelog
 
+- 2026-07-31 — Added the network-axis governance section: `networkHosts` and `packageNetwork` are decoupled, the former gating only Nub's unconfined prefetch, so the criterion for admitting a host is whether the PREFETCHER needs it rather than whether a script may safely reach it. Verified structurally — a 43-entry catalog change promoted zero hosts and left `DOWNLOAD_HOSTS` byte-identical, with a changed per-package digest as the control proving the codegen re-ran. Recorded the separate exfiltration criterion that disqualifies a host outright. Added the polarity finding: the pure-allowlist invariant was asserted on the IR and one backend synthesized a deny out of an `Allow` underneath it, which is the same measurement-gap class as the inert ancestor repair. Three rows added to the avoidable/unavoidable table.
 - 2026-07-30 — Initial write-up. Surveyed BuildXL, Bazel, Chromium's Windows sandbox, Nix, Guix, Portage, Gentoo's `sandbox`, `build-wrap`, `sandbox-runtime`, LavaMoat, Node's own permission model, and the npm/pnpm install-script defaults, against the question of whether the build jail's pre-granted per-package allowlist is the right architecture. Verdict: it is, the two-layer split it converged on is Chromium's, and the avoidable share of the patch stream reduces to an untyped canonical path plus an ambient temp directory. Measured that Seatbelt's `(trace …)` directive is inert on darwin 25.5 with a positive control on the same profile shape.

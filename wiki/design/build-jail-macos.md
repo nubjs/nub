@@ -72,19 +72,19 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **One concrete cost of the uniformity rule.** `deny_shadows_grant` fail-closes any policy carrying a deny whose `literal_prefix` is `""` — `**/.env*` normalises to `""`, and six floor globs trip it — so **putting a deny back into the shared IR immediately re-breaks Windows.** The build jail emitting zero denies is what keeps all three backends consistent.
 
-## The loopback egress proxy with port pinning — ADOPTED, and the only genuine per-host enforcement anywhere
+## The loopback egress proxy with port pinning — REJECTED (design) for the build jail, ADOPTED for `nub sandbox`
 
-**What it is.** Egress is permitted to **exactly** the proxy's loopback port — `(allow network* (remote ip "localhost:{port}"))` at `macos.rs:719`, deliberately **not** `localhost:*`, with a test asserting that (`macos.rs:2583-2596`). Every packet must traverse Nub's proxy, and **a raw socket cannot bypass it.**
+**What it is.** Egress is permitted to **exactly** the proxy's loopback port — `(allow network* (remote ip "localhost:{port}"))` at `macos.rs:719`, deliberately **not** `localhost:*`, with a test asserting that (`macos.rs:2583-2596`). Every packet must traverse Nub's proxy, and **a raw socket cannot bypass it.** It is the only mechanism on any of the three platforms that enforces a host list at zero privilege, and it works.
 
-**What it buys.** Real per-host containment at zero privilege — the one platform where the build jail's host allowlist is an actual boundary rather than a hint.
+**The build jail no longer reaches it, and that was a decision rather than a regression.** `build_jail_net` returns a boolean per package and never references `$downloads` (`compiler/preset.rs:615-671`): an admitted package compiles to `true` → `net.enforce = false` → `(allow network*)` with no proxy started, and an unadmitted one compiles to `false` → enforce with no Allow rule, which `proxy_needed` (`backend/mod.rs:906`) reads as coarse deny. **Neither arm of the build jail starts a proxy on macOS.**
 
-**The allowlist is PER-HOST, not per-package, and the difference matters.** The net axis is built by `build_jail_net()`, which returns a flat `["$downloads"]` on every non-Windows platform (`compiler/preset.rs:482-490`) and takes no package argument — so **every jailed script on macOS gets the same curated artifact-host set**, whatever the catalog says about that package. The catalog's per-package `packageNetwork` boolean is read by exactly one consumer, `net_gate_node_options` (`compiler/defaults.rs:929`), which is stamped into `NODE_OPTIONS` only by the Windows path in `build_jail.rs`. **So package identity gates egress on Windows and hostname gates it on macOS; neither platform does both.** Threat-model consequence: on macOS a package the catalog never admitted still reaches every `$downloads` host, and the hosts are curated to be wildcard-free and write-incapable precisely because that is the property doing the work there.
+**Why it was withdrawn, stated as the reason rather than the history.** A host list that gates one platform and is provenance on the other two is a compatibility liability rather than a defense. macOS is the platform most developers build on, so enforcing per-host *there* means an incomplete list throws errors that Linux and Windows users never see — and confidence in the list is low. The two platforms that cannot follow are blocked on privilege, not effort: Linux needs a network namespace to force the child through the proxy, which needs an unprivileged user namespace; Windows' loopback exemption (`NetworkIsolationSetAppContainerConfig`) is admin-only.
 
-**End-to-end under a real `nub install`, macOS 26.5.2 arm64**. A jailed `postinstall` sees `HTTP_PROXY`/`HTTPS_PROXY`/`http_proxy`/`https_proxy`/`npm_config_proxy`/`npm_config_https_proxy = http://<per-session-token>@127.0.0.1:<port>` (`macos.rs:135` → `set_proxy_env`), and the cells separate cleanly:
+**The measurement that established the mechanism, macOS 26.5.2 arm64, under a real `nub install` when the build jail still routed through it.** It is retained because it is what proves the mechanism works — it now describes the `nub sandbox` shape, not a jailed lifecycle script. A proxied child sees `HTTP_PROXY`/`HTTPS_PROXY`/`http_proxy`/`https_proxy`/`npm_config_proxy`/`npm_config_https_proxy = http://<per-session-token>@127.0.0.1:<port>` (`macos.rs:135` → `set_proxy_env`), and the cells separate cleanly:
 
-| cell | jail OFF | jail ON |
+| cell | unconfined | confined |
 | --- | --- | --- |
-| `CONNECT nodejs.org:443` via the proxy *(in `$downloads`)* | n/a | **HTTP 200 Connection established** |
+| `CONNECT nodejs.org:443` via the proxy *(an allowlisted host)* | n/a | **HTTP 200 Connection established** |
 | `CONNECT example.com:443` via the proxy | n/a | **HTTP 403 Forbidden** |
 | `CONNECT webhook.site:443` via the proxy | n/a | **HTTP 403 Forbidden** |
 | direct dial to the ALLOWLISTED host by raw IP:443 | CONNECTED | **EPERM connect** |
@@ -93,7 +93,23 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **⇒ Honouring the proxy is required for FUNCTIONALITY, never for SECURITY** — ignoring it yields EPERM, not a bypass.
 
-**The claim boundary this creates, and it is the most over-claimed fact here.** Per-host egress filtering is enforced on **macOS only**. On Linux the same policy collapses to coarse deny (no proxy env reaches the child, no netns exists, the seccomp family ceiling EPERMs everything) and on Windows it is coarse deny by construction. **The cross-platform floor is coarse on/off**, and the load-bearing defense is PACKAGE IDENTITY — no catalog entry means no network at all. Per-host is defense in depth on macOS and **nothing** on Linux and Windows. **A doc or catalog note promising per-host enforcement cross-platform would be false.**
+**Do not restore `$downloads` here as a missing feature.** The build jail's net axis is a per-package boolean on every platform; `$downloads` still serves `nub sandbox`, and the catalog's per-package `hosts` arrays are retained as provenance — a package that used to fetch from its own CDN and now reaches elsewhere shows up as a reviewable diff on `data/build-jail-catalog.json` — never as a gate.
+
+## The egress contract is uniform across the three platforms, and it is a per-package boolean
+
+**The rule.** **No catalog entry ⇒ no egress. An entry ⇒ coarse egress.** Denial spells `false` everywhere; the admitted case is coarse everywhere too, but **spelled per platform, because `enforce` carries more than egress on Linux** (`compiler/preset.rs:615-671`):
+
+| platform | admitted spells | why that spelling |
+| --- | --- | --- |
+| **macOS** | `true` (`enforce = false`) | Seatbelt emits `(allow network*)` and starts no proxy |
+| **Windows** | `true` (`enforce = false`) | the AppContainer `internetClient` capability is granted on exactly `!net.enforce`, so coarse-allow is the ONLY spelling that reaches it |
+| **Linux** | `["*"]` — a catch-all Allow naming no host | it CANNOT be `true`: `build_seccomp` gates the whole socket-family ceiling and the io_uring triple-block on `net.enforce`, so `false` would re-permit `AF_UNIX`, `AF_VSOCK`, `AF_PACKET` and io_uring's socket-creation side door. A catch-all Allow lifts exactly `AF_INET`/`AF_INET6` out of the ceiling and leaves the rest denied |
+
+**Only the Windows half of that contract is measured** — run 30612421934, de-elevated on a real AppContainer, where all 8 admitted names connect and an unadmitted one is refused `WSAEACCES` by the kernel with a native probe child carrying no `NODE_OPTIONS` at all. The macOS and Linux halves are read from the code, not run.
+
+**The claim boundary this creates, and it is the most over-claimed fact here.** **Per-host egress filtering is enforced nowhere in the build jail.** The load-bearing defense is PACKAGE IDENTITY, which now holds identically on all three platforms — the earlier reading that package identity gated Windows while hostname gated macOS was true of an older tree and is false at HEAD. **A doc or catalog note promising per-host enforcement, on any platform, would be false.**
+
+**A grant is a per-package BOOLEAN, so it restores every host that package talks to.** Two costs are written into the catalog entries rather than glossed: admitting `snyk` also restores its Sentry telemetry POST, and `@pact-foundation/pact-node`'s `.npmrc` read hands a lifecycle script a file that routinely holds a registry token.
 
 ## The `TmpMode::Private` per-run scratch — ADOPTED
 
@@ -219,6 +235,40 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **Not to be confused with the other SIGABRT.** A separate jail-specific `SIGABRT` in `InitializeOncePerProcessInternal` is seen **only under heavy host load**, with contention not ruled out, and is marked "do not chase". The stdio case above is the one with a mechanism and a fix. Related work: branch `jail-stdio-abort` `549564f36b` concluded the remaining stdio abort is **not worth fixing** because it is unreachable under the build jail, and shipped a `LIMITATIONS.md` note instead.
 
+## A confined process cannot resolve its own cwd — ADOPTED fix, and depth had nothing to do with it
+
+**The rule, measured.** **Seatbelt gates `getcwd(2)` on `file-read-data` of the cwd's OWN directory node.** Not on traversal of its ancestors, and not on anything a parent process held. The access class matters and splits cleanly:
+
+| grant on the cwd's node | `getcwd` |
+| --- | --- |
+| `file-read-metadata` | **FAIL** |
+| `file-test-existence` | **FAIL** |
+| `file-read-data` | **OK** |
+
+**The defect.** Nothing in the build jail's surface named the project root, so any confined process running *there* could not learn where it was — and a lifecycle script acting on the consumer's repository spawns its real work at `INIT_CWD`, which is exactly the project root. Five signatures, one cause: `uv_cwd EPERM` in Node, `getwd: invalid argument` from Go, `fatal: Unable to read current working directory: Operation not permitted` from git, `pwd: .: Operation not permitted` from coreutils, and `shell-init: error retrieving current directory` from bash.
+
+**It presented as a rule about process DEPTH, and that reading is wrong.** The script itself worked and its children did not — because the script's own cwd is its package dir, which is granted. **Depth is irrelevant:** a great-grandchild resolves a granted cwd fine, and an immediate child fails at an ungranted one. **Ancestors are irrelevant too**, measured on an L1/L2/L3 chain and again on a `proj/node_modules/pkg` cwd resolving with both ancestors ungranted. The node grant does not leak sideways either.
+
+**The fix grants the project root NODE alone, never the subtree** (`65c51530cb`). What a confined package gains is the ability to list the root's top-level entries; the project's files stay out. It renders as `(literal …)` on macOS and `MountAccess::ListOnly` on Linux — the same shape `curated::project_cwd` already used per package, now unconditional.
+
+**Differential**, macOS 15, real jail, `@arkweid/lefthook@0.7.7`: without the grant, `Couldn't discover absolute path` / `getwd: invalid argument`; with it, both gone. A synthetic `file:` dependency reproduces git's and bash's variants and clears them the same way.
+
+**Two walls behind this one, unchanged and NOT closed by it.** `.git/HEAD` and `.git/config` are unreadable, so `git rev-parse` still reports `not a git repository`; and `.git/hooks` is unwritable. A package needing those needs its own catalog grant.
+
+## An fs `Allow` must never synthesize a deny — ADOPTED fix, and Seatbelt was the outlier
+
+**The defect.** `emit_fs` mapped `(Allow, Read)` to `(deny file-write* <term>)` and emitted it in the write loop. Because Seatbelt is last-match-wins within a node, **a read grant silently revoked write from everything it enclosed.** `curated::grant_from_table` appends `projectReads` *after* `siblingDirs`, which is exactly that shape: measured on a real Seatbelt profile, widening `siblingDirs` alone wrote 20 entries under `.prisma/client`, and adding `projectReads: ["node_modules"]` alone wrote **0**.
+
+**The argument that settles the polarity, and it is stronger than the measurement.** The synthesized deny had nothing to cap. **Seatbelt's write base is already `(deny default)`, and a generous `default_effect` widens only READS** — so the only thing that deny could ever cancel was another Nub grant. Only `Effect::Deny` subtracts on the fs axis now; an `Allow` renders as permission or as nothing (`f43aab575f`). Fixing it at the mechanism rather than at a call site is what made it stick: the same root cause had been fixed once before at `curated::project_cwd`'s call site alone (`0d5dc51381`), which is why it survived everywhere else.
+
+**It also settles a semantics question the three backends disagreed on.** `FsPolicy`'s contract already says the write-set is the `ReadWrite` allows and that a `Deny` removes both; Landlock unions its rules and has no deny primitive at any ABI; `windows::derive_grants` accumulates a read set and a write set with no ordering at all. **Three of four renderings were additive already. Seatbelt was the outlier**, and `enforce_pure_allowlist` now records that its invariant binds the *backends*, not only the IR — stripping every deny from the IR is worth nothing if a backend synthesizes one back.
+
+**The cost, stated rather than glossed.** *"Readable but not writable inside a writable grant"* is now inexpressible, on every backend. Removing access is a `Deny`, which removes read too. No docs example and no catalog entry depended on the demote, and the `projectReads` guidance in `data/README.md` and on `CuratedGrant` — which said to prefer read as the smaller grant, steering contributors straight into this — now says what is true: the fields compose, and nothing in the catalog subtracts.
+
+**Backends.** macOS is the change. **Landlock is unaffected and was measured so** on 6.8.0-136-generic ABI 4 at `0d5dc51381`: a package dir nested under an enclosing node-only project rule keeps the rights its own rule grants. Windows is unaffected by construction. Bubblewrap layers binds in authored order, so a later enclosing `--ro-bind` does shadow an earlier nested `--bind` there — but the build jail never reaches it, because `linux::preflight` is Landlock-or-refuse for a build-jail policy.
+
+**A test that had been failing since `0d5dc51381` was repaired in the same change.** `macos_moveblock` hand-writes its writable container as a bare path, which now renders `(literal P)` and grants nothing inside it — so both its "a legit write still succeeds" non-regressions and its two documented relocation residuals were measuring a policy that grants no container write at all.
+
 ## Native builds failing with `spawn EPERM` on `make` — ADOPTED fix, and the stated hypothesis was refuted first
 
 **The defect.** Python discovery and Makefile generation succeeded, then `gyp.spawn('make', argv)` failed with `spawn EPERM`.
@@ -246,6 +296,30 @@ libc execvp (/usr/bin/env): rc=0 ← skips the entry, finds /usr/bin/make
 **The same canonicalization rule binds the child's `PATH` generally**, because a PATH is a path list the child hands back to the kernel (`macos.rs:29-35`, `canonicalize_path_var`). And the IR matchers must be firmlink-resolved on their literal prefix, since Seatbelt checks the **canonical** path — a `/tmp/…` allow that was not canonicalized is **inert, silently denied**.
 
 **Landed on `fix/macos-build-jail`, folded to `4f64e230d0`.** One honest caveat: the committed PATH test asserts the child's observed PATH, not end-to-end bare-program resolution — that arm needs a real libuv spawner and the test file has no node; verified manually twice against the real binary. A `tests/<probe>/` harness would close it.
+
+## A confined native build needs its own store-entry root — ADOPTED fix
+
+**The defect.** node-gyp reaches exactly one directory outside the package dir, and it reaches it by arithmetic rather than by choice: `node-addon-api` hands its `.gyp` over `..`-relative, and gyp joins `depth(".")` + `generator_output("build")` + `base_path("../../../..")`. **`build/` absorbs exactly one `..`**, so the join collapses one level too shallow and lands on the package's **store-entry root** — scoped and unscoped alike, since a scoped name's extra `..` is cancelled by its extra directory level.
+
+**npm and pnpm compute the same escaping path and both build fine, so the layout is not the fault; only confinement turns it into a failure.** It presented for weeks as an ABI problem because gyp's `EnsureDirExists` is a bare `except OSError: pass` one line above the `open()` that reports, laundering the jail's EPERM into a misleading `ENOENT`.
+
+**The fix grants that root read-write, guarded on store containment** (`46661af07c`). The candidate qualifies only when its parent is a virtual store the engine materializes into — the global `$cache/nub/pm/store` or the project-local `node_modules/.store`. **Under a hoisted linker the identical arithmetic lands on the project root** or a workspace member's root, and the guard declines there *structurally* rather than by luck. The project-local leaf has one definition, in `nub-sandbox`, which `nub-cli` re-exports; a second copy that went stale would decline silently, compiling the grant to nothing and failing the package exactly as before.
+
+**Measured against the real catalog path, isolated cache, one variable between arms:**
+
+| package | control | treatment |
+| --- | --- | --- |
+| `@vscode/sqlite3` 5.1.14-vscode | break | `vscode-sqlite3.node` **1,886,416 B** |
+| `cmark-gfm` 0.9.0 | break | `binding.node` **368,832 B** |
+| `drivelist` 12.0.2 | break | `drivelist.node` **128,416 B** |
+
+Each control arm reproduces the corpus string verbatim (`FileNotFoundError … nothing.target.mk`) and produces **no artifact**. A confined probe package confirms that writes through the store entry's own dependency symlinks are still refused with EPERM, as are the store root, a sibling entry, and the project tree.
+
+**Accepted cost.** The store entry also holds `node_modules/.bin` for a package with binary deps, which the grant makes writable. Those shims execute only while this package's own lifecycle scripts run, and the grant does not reach the project's `node_modules/.bin`.
+
+**Residual, unfixed on purpose.** A scoped package under a hoisted linker escapes into `node_modules/@scope/`. Granting the scope dir would hand the build write access to its sibling packages.
+
+**Not the same item as the CAS-store `.mk` write below**, which is a linker bug with no acceptable jail-side fix. This one has a bounded, guarded target and is fixed.
 
 ## The missing descriptor sweep — ADOPTED fix, and the leak was real
 
@@ -304,7 +378,7 @@ libc execvp (/usr/bin/env): rc=0 ← skips the entry, finds /usr/bin/make
 
 Two recorded traps where a macOS-only measurement produced a broken cross-platform grant:
 
-- **`projectCwd` is load-bearing on Seatbelt and a NO-OP on Landlock**, because `chdir` is not a Landlock-handled access. **Correction to an earlier reading: the field was NOT removed.** It is part of the settled catalog schema (`catalog.rs`'s `PackageGrant.project_cwd`, parsed from `projectCwd`, codegen'd by `build.rs`) and `curated.rs:269-273` turns it into a read rule on the project root — the node alone, never `subtree_globs`, or a cwd grant would widen into a whole-project read. Two entries carry it today, `@prisma/client` and `msw`, and both are recorded `platform: macos-arm64`.
+- **`projectCwd` is load-bearing on Seatbelt and a NO-OP on Landlock**, because `chdir` and `getcwd` are not Landlock-handled accesses. **Correction to an earlier reading: the field was NOT removed.** It is part of the settled catalog schema (`catalog.rs`'s `PackageGrant.project_cwd`, parsed from `projectCwd`, codegen'd by `build.rs`) and `curated.rs:269-273` turns it into a read rule on the project root — the node alone, never `subtree_globs`, or a cwd grant would widen into a whole-project read. Two entries carry it today, `@prisma/client` and `msw`, and both are recorded `platform: macos-arm64`. **The per-package field is now largely subsumed** by the unconditional project-root node grant that [the cwd defect](#a-confined-process-cannot-resolve-its-own-cwd--adopted-fix-and-depth-had-nothing-to-do-with-it) added, which is the same shape applied to every package.
 - **All three catalog `packageGrants` are recorded `platform: macos-arm64`, and that field is provenance rather than a gate.** The parser validates it and drops it; nothing carries it into the generated table, so **every grant applies on every OS** — a known, deliberate schema gap (`data/README.md`, "Platform-conditional entries"). The consequence to hold: a grant measured on macOS is already in force on Linux and Windows, where its evidence does not reach. For `@prisma/client` the Linux differential `DIFFERS` identically with and without it.
 
 **⇒ Never ship a build-jail grant measured only on macOS.** macOS is the most permissive platform to measure on and the least representative.
@@ -313,10 +387,11 @@ Two recorded traps where a macOS-only measurement produced a broken cross-platfo
 
 1. **The generous-read premise.** Any statement that the macOS build jail uses a generous read base with secrets carved out by deny is **false** — that is the `nub sandbox` shape (`default_effect == Allow`), while the build jail is a pure allowlist on the read axis (`preset.rs:458-462`, `macos.rs:738`). The confusion is easy because the same backend serves both products and the module doc describes both in one paragraph.
 2. **Two different SIGABRTs are recorded under one name.** The stdio `fstat` abort has a mechanism, a denial line and a fix (`emit_stdio_grants`); the load-dependent abort is a separate, unexplained item marked "do not chase". Reading the second alone leads to the conclusion that the fixed one is still open.
-3. **A per-host claim that only holds here, and a proxy claim that holds nowhere else.** macOS is the only platform whose child is pointed at a real filtering proxy. Linux stamps no proxy env at all (measured). Windows' net gate does stamp `http_proxy`/`https_proxy` on every child, but at `http://127.0.0.1:1` — a **blackhole**, so a proxy-honouring non-Node child fails to connect rather than being filtered (`backend/net_gate_shim.js`, `forceEnv`). Describing the three platforms as a gradient of proxy-mediated egress is wrong in both directions: the split is macOS-proxy / Linux-nothing / Windows-blackhole. Cross-referenced in both sibling documents.
+3. **A proxy claim that holds nowhere in the build jail.** No jailed child on any platform is pointed at a filtering proxy. macOS starts none on either arm of the per-package boolean; Linux stamps no proxy env at all (measured); Windows' net gate does stamp `http_proxy`/`https_proxy` on every child, but at `http://127.0.0.1:1` — a **blackhole**, so a proxy-honouring non-Node child fails to connect rather than being filtered (`backend/net_gate_shim.js`, `forceEnv`). Describing the three platforms as a gradient of proxy-mediated egress is wrong in every direction. Anything in the record describing a proxied jailed script on macOS predates the per-package boolean and is describing `nub sandbox`. Cross-referenced in both sibling documents.
 
 ## Changelog
 
+- 2026-07-31 — **REVERSAL:** the loopback egress proxy is no longer on the build jail's path on macOS. `build_jail_net` is a per-package boolean that never references `$downloads`, so an admitted package gets `(allow network*)` with no proxy and an unadmitted one gets coarse deny; per-host enforcement is withdrawn from the jail deliberately and survives only in `nub sandbox`. Recorded the resulting uniform three-platform egress contract, of which only the Windows half is measured. Added three fixes: the `getcwd` rule (gated on `file-read-data` of the cwd's own directory node — depth-independent, ancestor-independent), the `emit_fs` polarity fix (an `Allow` never synthesizes a deny; Seatbelt was the outlier across four renderings), and the store-entry-root grant a confined native build needs.
 - 2026-07-30 — Reconciled against the tree. **REVERSAL:** `projectCwd` was recorded as removed from the grant schema; it is live, carried by two catalog entries, and `curated.rs` emits it as a project-root read node. Recorded that the catalog's `platform` field is provenance and does not scope a grant, so every entry applies on every OS. Made the egress claim precise — the `$downloads` allowlist is flat for every jailed script here, and the per-package `packageNetwork` boolean reaches only the Windows-stamped net gate — and corrected the sibling-platform proxy claim (Linux stamps none, Windows stamps a blackhole). Added the measured `(trace …)` inertness and the dev-only catalog override.
 - 2026-07-30 — Moved into tracked `research/design/` so code comments can link here, and scrubbed of pointers into untracked documents. Every measurement, table and verdict is unchanged.
 - 2026-07-29 — Initial consolidation.
