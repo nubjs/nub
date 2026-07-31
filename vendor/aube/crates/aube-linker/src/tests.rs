@@ -2749,3 +2749,81 @@ fn create_dir_link_reclaims_a_leftover_link_but_not_a_populated_dir() {
     );
     assert!(occupied.join("node_modules/pkg").exists());
 }
+
+#[test]
+#[cfg(unix)]
+fn test_cached_entry_restores_lost_exec_bit_but_never_demotes() {
+    // A materialized file is not private to its project: under `Hardlink`
+    // it shares an inode with the CAS entry, and under the global virtual
+    // store two projects resolve to the same path. So a lifecycle script
+    // that drops `+x` corrupts the mode machine-wide, and because the
+    // warm path returns before the cold path's `make_executable`, no
+    // reinstall could recover it. The two halves below are the contract:
+    // a lost `+x` the index records is restored, and a bit the index does
+    // NOT record is left exactly as the script set it.
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let aube_dir = dir.path().join("project/node_modules/.aube");
+    std::fs::create_dir_all(&aube_dir).unwrap();
+
+    let store = Store::at(dir.path().join("store/files"));
+    let mut index = PackageIndex::default();
+    index.insert(
+        "bin/cli.js".to_string(),
+        store.import_bytes(b"#!/usr/bin/env node\n", true).unwrap(),
+    );
+    index.insert(
+        "lib/plain.js".to_string(),
+        store.import_bytes(b"module.exports = 1;\n", false).unwrap(),
+    );
+
+    let pkg = LockedPackage {
+        name: "tool".to_string(),
+        version: "1.0.0".to_string(),
+        integrity: None,
+        dependencies: BTreeMap::new(),
+        dep_path: "tool@1.0.0".to_string(),
+        ..Default::default()
+    };
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, false);
+    let materialize = || {
+        linker
+            .ensure_in_aube_dir(
+                &aube_dir,
+                "tool@1.0.0",
+                &aube_lockfile::LockfileGraph::default(),
+                &pkg,
+                &index,
+                &mut LinkStats::default(),
+                None,
+            )
+            .expect("materialization must succeed");
+    };
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+    materialize();
+    let entry = aube_dir.join("tool@1.0.0/node_modules/tool");
+    let cli = entry.join("bin/cli.js");
+    let plain = entry.join("lib/plain.js");
+    assert_ne!(mode(&cli) & 0o111, 0, "cold path must materialize bin +x");
+
+    // A lifecycle script demotes the CLI and promotes a plain file.
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    materialize(); // cache hit — the entry already exists, nothing is relinked
+
+    assert_ne!(
+        mode(&cli) & 0o111,
+        0,
+        "a cached entry whose index records `executable` must have +x restored, \
+         or the CLI stays broken for every project sharing this entry"
+    );
+    assert_eq!(
+        mode(&plain) & 0o111,
+        0o111,
+        "the heal only ever promotes: a package that legitimately chmod +x'd one \
+         of its own shipped files must keep that bit"
+    );
+}

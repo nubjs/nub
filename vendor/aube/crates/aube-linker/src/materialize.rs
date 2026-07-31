@@ -80,6 +80,42 @@ fn copy_through_transients(src: &Path, dst: &Path) -> io::Result<u64> {
     crate::sweep::with_transient_retry(|| std::fs::copy(src, dst))
 }
 
+/// Re-assert the `+x` bits the package index records, for a virtual-store
+/// entry that already existed so nothing was materialized.
+///
+/// The invariant this defends: **a materialized file is not private to its
+/// project.** Under `Hardlink` (what `auto` picks off macOS) it shares an
+/// inode with the CAS entry, and under the global virtual store two
+/// projects resolve to the *same path* — so one project's `chmod` rewrites
+/// the mode every other project on the machine sees, and the GVS entry
+/// outlives `rm -rf node_modules`. A lifecycle script that drops `+x` (14%
+/// of packages chmod from a reachable install entry) therefore left a CLI
+/// permanently non-executable machine-wide, with no reinstall able to
+/// recover it: the cold path re-asserts `+x` after linking, but the warm
+/// path returned before doing so. Same reasoning, and same seam, as the
+/// quarantine strip above it.
+///
+/// Only ever PROMOTES, exactly like the cold path — a package that
+/// legitimately `chmod +x`'d one of its own shipped files keeps that bit,
+/// and a file the index records as non-executable is never touched.
+/// Best-effort: a repair that cannot run must not fail the install.
+fn restore_index_exec_bits(pkg_dir: &Path, index: &PackageIndex) {
+    if cfg!(unix) {
+        for (rel_path, stored) in index {
+            if stored.executable {
+                let _ = xx::file::make_executable(pkg_dir.join(rel_path));
+            }
+        }
+    }
+}
+
+/// [`restore_index_exec_bits`] against a virtual-store entry, which holds
+/// the package at `node_modules/<name>` — the layout `materialize_into`
+/// writes.
+fn restore_cached_entry_exec_bits(entry_dir: &Path, pkg_name: &str, index: &PackageIndex) {
+    restore_index_exec_bits(&entry_dir.join("node_modules").join(pkg_name), index);
+}
+
 /// Test-only switch that forces the reflink attempt in
 /// [`Linker::link_file_fresh`] to be treated as failed, so the
 /// clonefile-failure fallback path can be exercised deterministically on
@@ -287,6 +323,7 @@ impl Linker {
             // build would stay quarantined forever. Stripping here is
             // what makes that removal-and-reinstall recovery heal.
             crate::quarantine::strip_from_native_binaries(&pkg_nm_dir, index);
+            restore_index_exec_bits(&pkg_nm_dir, index);
             return Ok(());
         }
 
@@ -409,6 +446,7 @@ impl Linker {
             // free. The package lives in the global entry the symlink
             // resolves to.
             crate::quarantine::strip_cached_entry(&global_entry, &pkg.name, index);
+            restore_cached_entry_exec_bits(&global_entry, &pkg.name, index);
             return Ok(());
         }
         self.ensure_in_virtual_store(dep_path, graph, pkg, index, stats, nested_link_targets)?;
@@ -456,6 +494,7 @@ impl Linker {
         if final_entry.exists() {
             stats.packages_cached += 1;
             crate::quarantine::strip_cached_entry(&final_entry, &pkg.name, index);
+            restore_cached_entry_exec_bits(&final_entry, &pkg.name, index);
             return Ok(());
         }
 
