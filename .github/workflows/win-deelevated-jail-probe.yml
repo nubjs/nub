@@ -56,21 +56,6 @@ jobs:
         with:
           node-version: 22
 
-      # THE ESM GROUP'S INTERPRETER, pinned here and nowhere else. Its positive control is a
-      # VERSION fact: nodejs/node#62835 restored the resolver's late property read on 24.17+ and
-      # 26.1+, so on an image shipping one of those the unrepaired control cannot die and the whole
-      # group returns INADMISSIBLE after a full de-elevated run. The sibling groups deliberately
-      # keep using `ambient_node()` (the all-users MSI install), because THEY are asking whether
-      # the jail can read an interpreter and that is the configuration exhibiting that defect.
-      - name: Pin the ESM group's interpreter to the setup-node install
-        shell: bash
-        run: |
-          node -p "'setup-node is ' + process.version + ' at ' + process.execPath"
-          echo "NUB_PROBE_ESM_NODE=$(node -p "process.execPath")" >> "$GITHUB_ENV"
-          if [ -f "$ProgramFiles/nodejs/node.exe" ]; then
-            echo "ambient MSI node is $("$ProgramFiles/nodejs/node.exe" --version) (used by the sibling groups)"
-          fi
-
       - name: Runner baseline
         shell: powershell
         run: |
@@ -161,15 +146,23 @@ jobs:
           # evidence, so a FAIL there makes the group inadmissible rather than negative. The
           # REJECTED-CANDIDATE control is what proves the fixture can produce a WRONG version;
           # without it the shipping arm answering `bar@2.0.0` would be unfalsifiable.
-          echo "---- esm-resolution: gates (these bind) ----"
+          # SPLIT THE LOG BY ARM BEFORE READING THE ESM CELLS. A whole-file grep cannot tell the
+          # principals apart, so a property that passes in ONE arm reads as PASS even when the
+          # other reported FAIL — which is how run 30598144544 went green with the entire
+          # de-elevated arm empty. It also matters semantically: ELEVATED, the traverse ACE makes
+          # `lstat 'C:\'` succeed, so the unrepaired positive control cannot die there and is
+          # EXPECTED to fail. The de-elevated arm is the one this group exists to measure.
+          awk '/^ARM .*admin=0/{f=1} f{print} f&&/^ARM done/{exit}' probe.log > armB.log
+          [ -s armB.log ] || { echo "MISSING: could not isolate the de-elevated arm"; fail=1; }
+          echo "---- esm-resolution: gates (these bind, read on the DE-ELEVATED arm) ----"
           for p in esm-gate-shim-installed-in-the-shipping-arm \
                    esm-gate-unrepaired-control-leaves-the-shim-absent \
                    esm-control-unrepaired-jail-leaves-the-esm-entry-dead \
                    esm-control-unrepaired-jail-leaves-the-cjs-require-dead \
                    esm-control-preserve-symlinks-binds-the-wrong-version; do
-            if grep -qF "prop:$p=PASS" probe.log; then
+            if grep -qF "prop:$p=PASS" armB.log; then
               echo "PASS $p"
-            elif grep -qF "prop:$p=FAIL" probe.log; then
+            elif grep -qF "prop:$p=FAIL" armB.log; then
               echo "FAIL $p — the group's evidence is INADMISSIBLE, not merely negative"
               fail=1
             else
@@ -184,8 +177,8 @@ jobs:
                    esm-shipping-require-resolve-returns-the-store-cell-path \
                    esm-shipping-fs-realpathsync-native-survives-the-jail \
                    esm-shipping-fs-promises-realpath-survives-the-jail; do
-            grep -q "prop:$p=" probe.log || { echo "MISS $p (never measured)"; fail=1; }
-            grep -E "prop:$p=" probe.log || true
+            grep -q "prop:$p=" armB.log || { echo "MISS $p (never measured)"; fail=1; }
+            grep -E "prop:$p=" armB.log || true
           done
 
           echo "── the facts ──"

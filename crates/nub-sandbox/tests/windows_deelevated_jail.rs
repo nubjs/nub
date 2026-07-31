@@ -2416,6 +2416,31 @@ flush();
     /// trusting the workflow's `setup-node` pin — the arms launch the STAGED copy, and the band
     /// the defect lives in is a version fact, so a probe reporting a version it did not measure is
     /// how an inadmissible run gets read as a green one.
+    /// Whether `version` is one where `esm/resolve.js` still captures `realpathSync` at module
+    /// load, i.e. where the unrepaired positive control below can actually die. nodejs/node#62835
+    /// restored the late property read on 24.17+ and 26.1+ and was NOT backported to v22 or v20,
+    /// so the band is everything below 24.17 plus 25.x plus 26.0. Reported rather than enforced:
+    /// a runner image that moves outside it makes the group inadmissible, and the point is that
+    /// the log should say WHY rather than leave a reader to infer it from a control that no
+    /// longer fires.
+    fn esm_defect_band(version: &str) -> bool {
+        let parts: Vec<u32> = version
+            .trim_start_matches('v')
+            .split('.')
+            .filter_map(|p| p.parse().ok())
+            .collect();
+        match parts.as_slice() {
+            [major, minor, ..] => match (*major, *minor) {
+                (0..=23, _) => true,
+                (24, m) => m < 17,
+                (25, _) => true,
+                (26, m) => m < 1,
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     fn interpreter_version(exe: &Path) -> String {
         std::process::Command::new(exe)
             .arg("--version")
@@ -2753,27 +2778,23 @@ flush();
         std::fs::create_dir_all(&dir).expect("esm fixture dir");
         let cell = build_esm_fixture(&dir);
 
-        // THE INTERPRETER IS PINNED FOR THIS GROUP ONLY, because its positive control is a VERSION
-        // fact. `ambient_node` deliberately prefers the all-users MSI install, since the sibling
-        // groups ask whether the jail can READ an interpreter and that is the configuration
-        // exhibiting the defect. This group asks something else — whether an ES module RESOLVES —
-        // and nodejs/node#62835 restored patchability on 24.17+ and 26.1+, so on a runner image
-        // shipping one of those the unrepaired control CANNOT die and the group returns
-        // inadmissible after a full de-elevated run. `NUB_PROBE_ESM_NODE` points this group at a
-        // `setup-node` install inside the affected band; unset, it falls back to the staged
-        // interpreter and the control still gates honestly rather than lying.
-        let pinned = std::env::var_os("NUB_PROBE_ESM_NODE")
-            .map(PathBuf::from)
-            .filter(|p| p.is_file());
-        let exe: &Path = pinned.as_deref().unwrap_or(exe);
-        println!(
-            "  fact:esm-interpreter-pinned={} path={}",
-            u8::from(pinned.is_some()),
-            exe.display()
-        );
-
+        // THE INTERPRETER IS THE STAGED COPY AND MUST STAY THAT WAY. Substituting another one here
+        // — even a correctly-versioned `setup-node` install — makes the de-elevated arm measure
+        // NOTHING: `interpreter_group` stages a copy precisely because de-elevated nub can only
+        // publish read to an AppContainer where it holds `WRITE_DAC`, which is `%USERPROFILE%` and
+        // below, and `C:\hostedtoolcache` is not. Tried in run 30598144544: every cell in arm B
+        // came back empty and the shim sentinel read false, while every sibling group passed.
+        //
+        // The version still has to be watched, because this group's positive control is a VERSION
+        // fact — nodejs/node#62835 restored the resolver's late property read on 24.17+ and 26.1+,
+        // and on such an image the unrepaired control cannot die. So the band is REPORTED rather
+        // than forced, and the control gates on it honestly.
         let version = interpreter_version(exe);
-        println!("  fact:esm-interpreter={version}");
+        println!("  fact:esm-interpreter={version} path={}", exe.display());
+        println!(
+            "  fact:esm-interpreter-in-affected-band={}",
+            u8::from(esm_defect_band(&version))
+        );
 
         let roots = [f.project.clone(), f.package.clone(), exe.to_path_buf()];
         let shim = nub_sandbox::realpath_shim_node_options(&roots);
