@@ -15,7 +15,7 @@ name: build-jail-corpus-3os
 # logs entirely, which is the one failure that costs a whole platform's result.
 on:
   push:
-    branches: [probe/corpus-3os]
+    branches: [probe/corpus-3os, probe/corpus-win]
   workflow_dispatch:
 
 permissions:
@@ -26,7 +26,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-latest, windows-latest]
+        # WINDOWS ONLY on this pass. macOS and Linux already have numbers on this
+        # catalog; re-running them would spend three times the runner pool to
+        # re-measure what is already measured, and Linux has a re-run in flight
+        # whose result a duplicate here would only muddy.
+        os: [windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
@@ -65,13 +69,14 @@ jobs:
       # A ceiling on how much of the shared runner pool this one probe may hold.
       max-parallel: 9
       matrix:
-        os: [macos-14, ubuntu-latest, windows-latest]
-        # The first pass was deliberately pilot-only, because the harness had never
-        # run on Windows and a broken driver there would have discarded 16 jobs'
-        # worth of runner time to discover it. macOS and Linux returned a confirmed
-        # arm effect on that pass and Windows failed for one located reason, so the
-        # matrix widens now. The pilot stays in it as the harness's own control.
-        shard: [pilot, default1, default2, default3, default4, default5, default6, default7]
+        os: [windows-latest]
+        # PILOT ONLY on this pass, and deliberately so. The previous Windows sweep
+        # ran without PER_PKG and is therefore truncation-contaminated end to end
+        # (see the step below); this pass changes that variable and adds the
+        # enforcement probe, so it re-establishes that the driver works before
+        # eight jobs are spent on the strength of an assumption. Widen the list
+        # once this shard returns a confirmed arm effect on both arms.
+        shard: [pilot]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
@@ -112,6 +117,16 @@ jobs:
           NUB_BIN: ${{ steps.prov.outputs.bin }}
           NUB_EXPECT_GIT_SHA: ${{ github.sha }}
           OUTROOT: ${{ runner.temp }}/build-jail-corpus
+          # PER_PKG=1 IS LOAD-BEARING AND ITS ABSENCE INVALIDATED THE ENTIRE PRIOR
+          # WINDOWS ARCHIVE. Without it the runner takes the `approve-builds --all`
+          # path: aube stops scheduling the queue once any sibling fails, so a
+          # missing delta means either "the jail blocked it" or "it never ran", and
+          # the two are indistinguishable. Run 30573923410 approved 56 packages in
+          # ONE window and exited 1 — every NEVER-RAN row in it is unattributable.
+          # It also emits no `--- window:` markers, which is why 0 of 13 break rows
+          # in that archive carried a failure signature: per-package attribution had
+          # no boundary to attribute against. One window per package fixes all three.
+          PER_PKG: '1'
         run: |
           case "$(uname -s)" in
             Darwin)              export STUDY_PATH="/usr/bin:/bin:/usr/sbin:/sbin" ;;
@@ -139,6 +154,33 @@ jobs:
           # turn its job red; the later steps still run under `if: always()`.
           [ -z "$FAILED" ] || exit 1
 
+      # Read straight out of both arms' logs and scored PER ARM. A whole-log grep is
+      # what let an earlier two-principal probe score an empty arm green: the pattern
+      # matched the other arm's line and nothing asserted that this arm had produced
+      # any output at all. Requiring a line from each arm separately is the fix.
+      - name: 'Enforcement probe — both directions, one run'
+        if: always()
+        shell: bash
+        env:
+          OUTROOT: ${{ runner.temp }}/build-jail-corpus
+        run: |
+          MISSING=""
+          for ARM in A0 PROD; do
+            L="$OUTROOT/${{ matrix.shard }}-$ARM/run.log"
+            LINE="$(grep -h '^ENFORCE ' "$L" 2>/dev/null | tail -1 || true)"
+            if [ -z "$LINE" ]; then
+              echo "$ARM: NO ENFORCE LINE — the probe produced no output in this arm" | tee -a "$GITHUB_STEP_SUMMARY"
+              MISSING="$MISSING $ARM"
+            else
+              echo "$ARM: $LINE" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            # An override is not expressible in this binary (the cargo feature is off),
+            # so any banner at all would mean the run did not read the compiled catalog.
+            echo "$ARM catalog_override_banners=$(grep -c 'build-jail catalog OVERRIDDEN from' "$L" 2>/dev/null || echo 0)" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          echo "ENFORCE_ARMS_MISSING:${MISSING:-none}" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Validity-gated verdict table
         if: always()
         working-directory: tests/build-jail-corpus
@@ -165,8 +207,11 @@ jobs:
           for d in "$OUTROOT"/*/; do
             n=$(basename "$d")
             mkdir -p "evidence/$n"
-            cp "$d"/report.json "$d"/verdicts.json "$d"/delta.json "evidence/$n/" 2>/dev/null || true
-            grep -iE 'EPERM|EACCES|EROFS|Cannot find module|not permitted|Access is denied|arm_effect|optout_warnings|node_gyp_identity|FATAL' \
+            # windows.json is what the scheduling gate rules on. Without it in the
+            # archive a re-score silently falls back to the per-shard approximation,
+            # which is the weaker fact the prior archive was stuck with.
+            cp "$d"/report.json "$d"/verdicts.json "$d"/delta.json "$d"/windows.json "evidence/$n/" 2>/dev/null || true
+            grep -iE 'EPERM|EACCES|EROFS|Cannot find module|not permitted|Access is denied|arm_effect|optout_warnings|node_gyp_identity|FATAL|^ENFORCE |WSAEACCES|EAI_AGAIN|ERR_NUB_|OVERRIDDEN' \
               "$d"/run.log > "evidence/$n/failures.txt" 2>/dev/null || true
             tail -c 4000000 "$d"/run.log > "evidence/$n/run.log" 2>/dev/null || true
           done

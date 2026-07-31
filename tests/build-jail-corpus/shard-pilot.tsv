@@ -7,3 +7,4 @@ lefthook	2.1.10	hook-installer	git-repo,lefthook-config
 @prisma/client	6.19.3	codegen	prisma-schema
 prisma	6.19.3	codegen	prisma-schema
 msw	2.15.0	codegen	msw-manifest
+nub-jail-enforce-probe	file:../enforce-pkg	telemetry-nag	enforce-probe

@@ -153,6 +153,63 @@ EOS
         j.msw={workerDirectory:["public"]};
         require("fs").writeFileSync(f, JSON.stringify(j,null,2));' "$PROJ/package.json" ;;
     nx-json) printf '{ "affected": { "defaultBase": "main" } }\n' > "$PROJ/nx.json" ;;
+    # ENFORCEMENT PROBE — the positive-and-negative control that proves the jail is
+    # actually confining THIS binary, in THIS run, rather than being assumed to.
+    #
+    # It is a local `file:` package precisely because the catalog is keyed by NAME:
+    # an invented name has no entry, so it receives the floor policy and every grant
+    # under test is absent by construction. The alternative — asserting denial on a
+    # catalogued package — measures the grant, not the floor.
+    #
+    # `write_own` is the POSITIVE control and the reason the negatives mean anything.
+    # A probe that only reports denials is indistinguishable from a probe that never
+    # ran, which is the single most common way this harness has lied (a section
+    # header printed with nothing beneath it). If write_own is not OK, the row is
+    # evidence about the harness, not about the jail.
+    #
+    # Paths are BAKED IN, not read from the environment: `runnub` runs under `env -i`,
+    # so an env-carried path would arrive empty and the probe would silently test the
+    # cwd instead of the location it names.
+    enforce-probe)
+      EP="$OUT/enforce-pkg"; mkdir -p "$EP" "$OUT/outer"
+      printf 'SECRET-%s\n' "$NONCE" > "$OUT/outer/secret.txt"
+      # Windows-form for node, with separators as `/` — Node accepts them on every
+      # platform, and it keeps the value out of JS backslash-escaping entirely.
+      jsp() { wp "$1" | tr '\\' '/'; }
+      cat > "$EP/package.json" <<EOS
+{ "name": "nub-jail-enforce-probe", "version": "1.0.0", "private": true,
+  "scripts": { "postinstall": "node probe.js" } }
+EOS
+      cat > "$EP/probe.js" <<EOS
+// Each check reports OK or DENIED(<code>) and NEVER throws: the probe's exit status
+// must stay 0 so a denial is read as a measurement rather than as a broken package.
+const fs = require('fs'), path = require('path'), net = require('net'), dns = require('dns');
+const PROJECT = '$(jsp "$PROJ")', OUTER = '$(jsp "$OUT/outer")';
+const SECRET = OUTER + '/secret.txt';
+const out = [];
+function chk(name, fn) {
+  try { fn(); out.push(name + '=OK'); }
+  catch (e) { out.push(name + '=DENIED(' + (e.code || e.errno || e.message) + ')'); }
+}
+chk('write_own', () => fs.writeFileSync(path.join(__dirname, 'probe-own.txt'), 'own'));
+chk('write_project', () => fs.writeFileSync(PROJECT + '/probe-project.txt', 'proj'));
+chk('write_outerhome', () => fs.writeFileSync(OUTER + '/probe-outer.txt', 'outer'));
+chk('read_secret', () => { const s = fs.readFileSync(SECRET, 'utf8'); if (!/SECRET-/.test(s)) throw new Error('unexpected-content'); });
+// DNS and TCP are reported separately because Windows denies BOTH and they are
+// different mechanisms — the capability refuses the socket (WSAEACCES) while name
+// resolution fails independently. Collapsing them would attribute one to the other.
+const done = () => { console.log('ENFORCE ' + out.join(' ')); };
+dns.lookup('registry.npmjs.org', (e) => {
+  out.push('dns_lookup=' + (e ? 'DENIED(' + (e.code || e.errno) + ')' : 'OK'));
+  // A literal IP, so a connect result cannot be a DNS result wearing a disguise.
+  const s = net.connect({ host: '1.1.1.1', port: 443 });
+  const fin = (v) => { if (!s.destroyed) s.destroy(); if (!fin.done) { fin.done = 1; out.push('net_connect=' + v); done(); } };
+  s.setTimeout(15000, () => fin('DENIED(ETIMEDOUT)'));
+  s.on('connect', () => fin('OK'));
+  s.on('error', (e) => fin('DENIED(' + (e.code || e.errno) + ')'));
+});
+EOS
+      ;;
     vue-dep)
       node -e '
         const f=process.argv[1], j=JSON.parse(require("fs").readFileSync(f,"utf8"));
