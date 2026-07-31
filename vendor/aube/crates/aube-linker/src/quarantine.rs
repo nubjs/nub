@@ -240,6 +240,7 @@ mod imp {
                 store_path: std::path::PathBuf::new(),
                 executable,
                 size: None,
+                checked_at: None,
             }
         }
 

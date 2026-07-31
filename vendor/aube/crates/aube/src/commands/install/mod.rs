@@ -135,16 +135,17 @@ pub(crate) fn warm_store_verify() -> bool {
 }
 
 /// Load a cached package index for a warm-relink classifier site,
-/// choosing stat depth per the process-global [`warm_store_verify`]
-/// flag: full per-file verify by default (upstream), first-file-only
-/// when an embedder opted into fast-trust. Independent of import-time
-/// SRI / `verifyStoreIntegrity`, which is enforced elsewhere on fetch.
+/// choosing check depth per the process-global [`warm_store_verify`]
+/// flag: full content-address verification by default (upstream),
+/// first-file-stat-only when an embedder opted into fast-trust.
+/// Independent of import-time SRI / `verifyStoreIntegrity`, which is
+/// enforced elsewhere on fetch.
 pub(crate) fn warm_load_index(
     store: &aube_store::Store,
     name: &str,
     version: &str,
     integrity: Option<&str>,
-) -> Option<aube_store::PackageIndex> {
+) -> aube_store::WarmLoad {
     let verify = warm_store_verify();
     // Log the selected depth exactly once per process so a `-v` warm
     // install can confirm which path is active without per-package noise.
@@ -154,16 +155,29 @@ pub(crate) fn warm_load_index(
             verify,
             "warm-relink store verification: {}",
             if verify {
-                "full (stat every cached file)"
+                "full (content-address every cached file)"
             } else {
                 "fast (first-file stat only)"
             }
         );
     });
     if verify {
-        store.load_index_verified(name, version, integrity)
+        let loaded = store.load_index_checked(name, version, integrity);
+        // Warn from the shared seam rather than at each classifier site, so
+        // every warm-relink path reports a tampered entry identically.
+        if matches!(loaded, aube_store::WarmLoad::Corrupt) {
+            tracing::warn!(
+                code = aube_codes::warnings::WARN_AUBE_STORE_ENTRY_TAMPERED,
+                "{name}@{version}: cached store content no longer matches its content \
+                 address and was discarded; re-fetching from the registry"
+            );
+        }
+        loaded
     } else {
-        store.load_index(name, version, integrity)
+        match store.load_index(name, version, integrity) {
+            Some(index) => aube_store::WarmLoad::Hit(index),
+            None => aube_store::WarmLoad::Miss,
+        }
     }
 }
 
@@ -2028,7 +2042,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                         .flatten();
                     let read_key = pkg.integrity.as_deref().or(no_integrity_key.as_deref());
                     if let Some(read_key) = read_key
-                        && let Some(index) = warm_load_index(
+                        && let aube_store::WarmLoad::Hit(index) = warm_load_index(
                             &fetch_store,
                             &pkg_registry_name,
                             &pkg.version,

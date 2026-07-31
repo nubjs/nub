@@ -17,6 +17,27 @@ pub struct StoredFile {
     /// File size in bytes when the entry was imported.
     #[serde(default)]
     pub size: Option<u64>,
+    /// mtime of the CAS file, in nanoseconds since the epoch, the last
+    /// time its bytes were confirmed to hash to `hex_hash`.
+    ///
+    /// Nanoseconds rather than a coarser unit because the resolution IS
+    /// the blind spot: a write landing inside the same tick as the last
+    /// verification is invisible. Measured on APFS, truncating to
+    /// milliseconds left 1878 of 2000 back-to-back rewrites reporting an
+    /// unchanged mtime; at nanosecond precision the timestamps separate.
+    ///
+    /// The CAS is content-addressed but its entries are *hardlinked* into
+    /// every project that installs the package, so any process that can
+    /// write a `node_modules` file can rewrite the store entry through
+    /// that link — the entry then serves bytes that no longer hash to its
+    /// own name, to every future project. This field is what makes the
+    /// tamper cheap to detect: an entry whose mtime has not moved since it
+    /// was verified needs no read, and only a moved mtime pays a re-hash.
+    ///
+    /// `None` on entries written before the field existed; those re-hash
+    /// once and are restamped.
+    #[serde(default)]
+    pub checked_at: Option<u64>,
 }
 
 /// Index of all files in a package, keyed by relative path within the package.
@@ -66,21 +87,140 @@ pub fn index_content_fingerprint(index: &PackageIndex) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-fn index_files_match_metadata(index: &PackageIndex, verify_all: bool) -> bool {
-    let mut files = index.values();
-    if verify_all {
-        return files.all(stored_file_matches_metadata);
-    }
-    // Hot install path: one metadata check catches the common crash
-    // residue class (zero-byte/missing CAS files) without turning every
-    // warm lockfile install into a full store walk.
-    files.next().is_none_or(stored_file_matches_metadata)
-}
-
 fn stored_file_matches_metadata(file: &StoredFile) -> bool {
     file.size
         .map(|size| cas_file_matches_len(&file.store_path, size))
         .unwrap_or_else(|| file.store_path.exists())
+}
+
+/// Result of a full-depth warm index load.
+pub enum WarmLoad {
+    Hit(PackageIndex),
+    /// No usable index on disk (absent, unreadable, or unparseable).
+    Miss,
+    /// The index named a CAS entry that failed its content address. The
+    /// bad entries and the index have been removed; derived caches of the
+    /// same package are now stale and must be dropped by their owner.
+    Corrupt,
+}
+
+/// Outcome of checking one CAS entry against its own content address.
+enum FileVerdict {
+    /// Metadata says the entry is untouched since it was last verified.
+    /// No read was performed.
+    Unchanged,
+    /// The entry was re-hashed and still matches; carries the mtime to
+    /// restamp `checked_at` with so the next install takes the fast path.
+    Verified(u64),
+    /// Gone, truncated, grown, or no longer hashing to its own name.
+    Corrupt,
+}
+
+/// mtime of a CAS entry that was just published, for stamping into
+/// [`StoredFile::checked_at`]. The content is trivially known-good here —
+/// it was hashed on the way in — so this only records *when* that was
+/// true. `None` on a filesystem with no usable timestamp, which costs one
+/// content re-hash on the next warm load and nothing else.
+pub(crate) fn published_mtime_ns(store_path: &std::path::Path) -> Option<u64> {
+    mtime_ns(&std::fs::metadata(store_path).ok()?)
+}
+
+fn mtime_ns(md: &std::fs::Metadata) -> Option<u64> {
+    md.modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_nanos() as u64)
+}
+
+/// Stream the file through BLAKE3 and compare against its content address.
+fn content_matches(path: &std::path::Path, expected_hex: &str) -> bool {
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut hasher = blake3::Hasher::new();
+    if std::io::copy(&mut f, &mut hasher).is_err() {
+        return false;
+    }
+    hasher.finalize().to_hex().as_str() == expected_hex
+}
+
+/// Check one CAS entry, reading its bytes only when metadata says it moved.
+///
+/// A size change is decisive on its own and needs no read, so it is
+/// checked ahead of the mtime gate rather than behind it: an entry that
+/// grew or shrank is corrupt whatever its timestamp claims.
+fn verify_stored_file(file: &StoredFile) -> FileVerdict {
+    let Ok(md) = std::fs::metadata(&file.store_path) else {
+        return FileVerdict::Corrupt;
+    };
+    if file.size.is_some_and(|size| size != md.len()) {
+        return FileVerdict::Corrupt;
+    }
+    let Some(now_ns) = mtime_ns(&md) else {
+        // No usable timestamp (exotic filesystem): fall back to reading.
+        return if content_matches(&file.store_path, &file.hex_hash) {
+            FileVerdict::Unchanged
+        } else {
+            FileVerdict::Corrupt
+        };
+    };
+    // Exact equality, with no tolerance window. `checked_at` records the
+    // entry's OWN mtime at the moment its bytes were confirmed, not a
+    // wall-clock reading taken alongside it, so an untouched entry reports
+    // a bit-identical value and any write moves it strictly forward. pnpm
+    // needs a 100ms slop here precisely because it stamps a wall clock;
+    // stamping the inode instead removes both the slop and the window it
+    // leaves open.
+    if file.checked_at == Some(now_ns) {
+        return FileVerdict::Unchanged;
+    }
+    if content_matches(&file.store_path, &file.hex_hash) {
+        FileVerdict::Verified(now_ns)
+    } else {
+        FileVerdict::Corrupt
+    }
+}
+
+/// What a full-depth check concluded about a whole package index.
+pub(crate) enum IndexVerdict {
+    Intact,
+    /// Intact, but at least one entry was re-hashed and its `checked_at`
+    /// refreshed — the index should be written back so the next install
+    /// does not pay the read again.
+    Restamped,
+    Corrupt,
+}
+
+/// Verify every entry of `index`, restamping the ones that had to be read.
+///
+/// A corrupt entry is UNLINKED from the CAS before returning. That is
+/// load-bearing for repair, not tidiness: the import path dedupes on
+/// `(path exists, length matches)`, so an equal-length overwrite left in
+/// place would be silently adopted again by the very re-fetch meant to
+/// replace it. Unlinking drops only the store's own reference — projects
+/// already holding the tampered inode keep it, exactly as pnpm behaves.
+fn verify_index_files(index: &mut PackageIndex) -> IndexVerdict {
+    let mut restamped = false;
+    let mut corrupt = false;
+    for file in index.values_mut() {
+        match verify_stored_file(file) {
+            FileVerdict::Unchanged => {}
+            FileVerdict::Verified(now_ns) => {
+                file.checked_at = Some(now_ns);
+                restamped = true;
+            }
+            FileVerdict::Corrupt => {
+                let _ = xx::file::remove_file(&file.store_path);
+                corrupt = true;
+            }
+        }
+    }
+    match (corrupt, restamped) {
+        (true, _) => IndexVerdict::Corrupt,
+        (false, true) => IndexVerdict::Restamped,
+        (false, false) => IndexVerdict::Intact,
+    }
 }
 
 impl Store {
@@ -106,15 +246,78 @@ impl Store {
         self.load_index_inner(name, version, integrity, false)
     }
 
-    /// Load a package index, optionally verifying that all store files still exist.
-    /// The verified variant is slower (stat per file) but detects a corrupted store.
+    /// Load a package index, verifying every CAS entry against its own
+    /// content address. See [`Store::load_index_checked`]; this is the
+    /// `Option` view for callers that do not distinguish a corrupt entry
+    /// from a plain cache miss.
     pub fn load_index_verified(
         &self,
         name: &str,
         version: &str,
         integrity: Option<&str>,
     ) -> Option<PackageIndex> {
-        self.load_index_inner(name, version, integrity, true)
+        match self.load_index_checked(name, version, integrity) {
+            WarmLoad::Hit(index) => Some(index),
+            WarmLoad::Miss | WarmLoad::Corrupt => None,
+        }
+    }
+
+    /// Full-depth warm load: parse the index, then check every CAS entry
+    /// it names against its own content address, repairing what fails.
+    ///
+    /// [`WarmLoad::Corrupt`] is reported separately from a miss because a
+    /// store entry that failed its content address invalidates every
+    /// *derived* copy of the same package too — notably the extracted
+    /// `trees/` tier, which is built once from the CAS and then cloned
+    /// forever without revalidation. A caller that owns a derived tier
+    /// must drop its copy on `Corrupt` or the repaired CAS is bypassed.
+    pub fn load_index_checked(
+        &self,
+        name: &str,
+        version: &str,
+        integrity: Option<&str>,
+    ) -> WarmLoad {
+        let Some(index_path) = self.index_path(name, version, integrity) else {
+            return WarmLoad::Miss;
+        };
+        let Ok(buf) = xx::file::read(&index_path) else {
+            return WarmLoad::Miss;
+        };
+        let Ok(mut index) = sonic_rs::from_slice::<PackageIndex>(&buf) else {
+            return WarmLoad::Miss;
+        };
+        match verify_index_files(&mut index) {
+            IndexVerdict::Intact => {}
+            IndexVerdict::Restamped => {
+                if let Ok(json) = serde_json::to_string(&index) {
+                    let _ = xx::file::write(&index_path, json);
+                }
+            }
+            IndexVerdict::Corrupt => {
+                let _ = xx::file::remove_file(&index_path);
+                self.mark_repaired(name, version);
+                return WarmLoad::Corrupt;
+            }
+        }
+        trace!("cache hit: {name}@{version}");
+        WarmLoad::Hit(index)
+    }
+
+    fn mark_repaired(&self, name: &str, version: &str) {
+        if let Ok(mut set) = self.repaired.lock() {
+            set.insert(format!("{name}@{version}"));
+        }
+    }
+
+    /// Whether this process discarded a tampered CAS entry for
+    /// `name@version`. Callers holding a copy of the package derived from
+    /// the store before the repair — the extracted `trees/` tier — must
+    /// rebuild it rather than reuse it. See [`Store::load_index_checked`].
+    pub fn was_repaired(&self, name: &str, version: &str) -> bool {
+        self.repaired
+            .lock()
+            .map(|set| set.contains(&format!("{name}@{version}")))
+            .unwrap_or(false)
     }
 
     fn load_index_inner(
@@ -124,10 +327,20 @@ impl Store {
         integrity: Option<&str>,
         verify_files: bool,
     ) -> Option<PackageIndex> {
+        if verify_files {
+            return self.load_index_verified(name, version, integrity);
+        }
         let index_path = self.index_path(name, version, integrity)?;
         let buf = xx::file::read(&index_path).ok()?;
         let index: PackageIndex = sonic_rs::from_slice(&buf).ok()?;
-        if !index_files_match_metadata(&index, verify_files) {
+        // Hot install path: one metadata check catches the common crash
+        // residue class (zero-byte/missing CAS files) without turning every
+        // warm lockfile install into a full store walk.
+        if !index
+            .values()
+            .next()
+            .is_none_or(stored_file_matches_metadata)
+        {
             trace!("cache stale: {name}@{version}");
             let _ = xx::file::remove_file(&index_path);
             return None;

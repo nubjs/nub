@@ -647,8 +647,12 @@ where
                     &pkg.version,
                     Some(key),
                 ) {
-                    Some(index) => (dep_path.clone(), pkg, CheckResult::Cached(index)),
-                    None => (dep_path.clone(), pkg, CheckResult::NeedsFetch),
+                    aube_store::WarmLoad::Hit(index) => {
+                        (dep_path.clone(), pkg, CheckResult::Cached(index))
+                    }
+                    aube_store::WarmLoad::Miss | aube_store::WarmLoad::Corrupt => {
+                        (dep_path.clone(), pkg, CheckResult::NeedsFetch)
+                    }
                 },
             }
         })
@@ -1401,6 +1405,7 @@ mod tests {
                 store_path: std::path::PathBuf::from("/store/de/adbeef"),
                 executable: false,
                 size: Some(2),
+                checked_at: None,
             },
         );
         index

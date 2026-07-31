@@ -24,6 +24,7 @@ pub const WARN_AUBE_DEFAULT_TRUST_BUILDS: &str = "WARN_AUBE_DEFAULT_TRUST_BUILDS
 #[rustfmt::skip] pub const WARN_AUBE_PROCESS_GROUP_UNAVAILABLE: &str = "WARN_AUBE_PROCESS_GROUP_UNAVAILABLE";
 pub const WARN_AUBE_MISSING_INTEGRITY: &str = "WARN_AUBE_MISSING_INTEGRITY";
 pub const WARN_AUBE_CACHE_WRITE_FAILED: &str = "WARN_AUBE_CACHE_WRITE_FAILED";
+#[rustfmt::skip] pub const WARN_AUBE_STORE_ENTRY_TAMPERED: &str = "WARN_AUBE_STORE_ENTRY_TAMPERED";
 pub const WARN_AUBE_CLONE_STRATEGY_FALLBACK: &str = "WARN_AUBE_CLONE_STRATEGY_FALLBACK";
 pub const WARN_AUBE_LTHASH_MISMATCH: &str = "WARN_AUBE_LTHASH_MISMATCH";
 pub const WARN_AUBE_DELTA_INVALIDATE_FAILED: &str = "WARN_AUBE_DELTA_INVALIDATE_FAILED";
@@ -233,6 +234,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_CACHE_WRITE_FAILED,
         category: category::INSTALL_LIFECYCLE,
         description: "Couldn't write a package index to the on-disk cache. Non-fatal.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_STORE_ENTRY_TAMPERED,
+        category: category::INSTALL_LIFECYCLE,
+        description: "A cached store file no longer hashes to its own content address. The entry was discarded and the package re-fetched.",
         exit_code: None,
     },
     CodeMeta {

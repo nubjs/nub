@@ -25,7 +25,7 @@ pub(crate) use cas::parse_compress_store_gate;
 use git::{
     codeload_cache_paths, extract_codeload_tarball_at, git_commit_matches, validate_git_positional,
 };
-pub use index::{PackageIndex, StoredFile, index_content_fingerprint};
+pub use index::{PackageIndex, StoredFile, WarmLoad, index_content_fingerprint};
 pub use integrity::{
     SHA512_INTEGRITY_PREFIX, integrity_to_hex, sha512_integrity, sha512_integrity_from_digest,
     shasum_to_sri, validate_and_encode_name, validate_pkg_content, validate_version,
@@ -95,6 +95,17 @@ pub struct Store {
     /// file lock taken at install start. Linux is unaffected because the
     /// O_TMPFILE+linkat path is already atomic-by-construction.
     fast_path: Arc<AtomicBool>,
+    /// `name@version` of every package whose CAS entries failed their own
+    /// content address during this process and were discarded for
+    /// re-fetch.
+    ///
+    /// The store's extracted `trees/` tier is DERIVED from the CAS: built
+    /// once per package, then cloned on every later materialization
+    /// without revalidation. A tree built before a repair still holds the
+    /// tampered bytes, so repairing the CAS alone would be silently
+    /// bypassed on that path. The linker consults this set before reusing
+    /// a tree.
+    repaired: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl Store {
@@ -140,6 +151,7 @@ impl Store {
             virtual_store_dir: cache_dir.join(aube_util::embedder().virtual_store_subdir),
             cache_dir,
             fast_path: Arc::new(AtomicBool::new(false)),
+            repaired: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         };
         store.migrate_legacy_index_dir();
         store
@@ -164,6 +176,7 @@ impl Store {
             virtual_store_dir: cache_dir.join(aube_util::embedder().virtual_store_subdir),
             cache_dir,
             fast_path: Arc::new(AtomicBool::new(false)),
+            repaired: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -409,6 +422,7 @@ mod tests {
             virtual_store_dir: cache_dir.join(aube_util::embedder().virtual_store_subdir),
             cache_dir,
             fast_path: Arc::new(AtomicBool::new(false)),
+            repaired: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -1011,6 +1025,138 @@ mod tests {
             .unwrap();
         let loaded = store.load_index("@scope/pkg", "1.0.0", Some(TEST_INTEGRITY));
         assert!(loaded.is_some());
+    }
+
+    /// Seed a one-file package; hand back the store, its tempdir, the CAS
+    /// path and the content address.
+    fn seeded_pkg(content: &[u8]) -> (Store, tempfile::TempDir, PathBuf, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().join("files"));
+        let stored = store.import_bytes(content, false).unwrap();
+        let (path, hash) = (stored.store_path.clone(), stored.hex_hash.clone());
+        let mut index = PackageIndex::default();
+        index.insert("index.js".to_string(), stored);
+        store
+            .save_index("pkg", "1.0.0", Some(TEST_INTEGRITY), &index)
+            .unwrap();
+        (store, dir, path, hash)
+    }
+
+    /// An equal-length overwrite is what a size or existence probe cannot
+    /// see, and it is what a lifecycle script writing through its
+    /// `node_modules` hardlink produces when it patches rather than appends.
+    #[test]
+    fn equal_length_overwrite_is_caught_and_the_entry_unlinked() {
+        let (store, _dir, cas, _hash) = seeded_pkg(b"AAAAAAAA");
+
+        let before = std::fs::metadata(&cas).unwrap().modified().unwrap();
+        std::fs::write(&cas, b"BBBBBBBB").unwrap();
+        assert_eq!(std::fs::metadata(&cas).unwrap().len(), 8, "same length");
+        // Detection is mtime-gated, so a rewrite inside the same timestamp
+        // tick is the documented blind spot rather than a bug. Assert the
+        // precondition explicitly: a failure here means the filesystem's
+        // timestamp resolution is too coarse, not that detection regressed.
+        assert_ne!(
+            before,
+            std::fs::metadata(&cas).unwrap().modified().unwrap(),
+            "filesystem mtime resolution too coarse to separate two writes"
+        );
+
+        assert!(
+            matches!(
+                store.load_index_checked("pkg", "1.0.0", Some(TEST_INTEGRITY)),
+                WarmLoad::Corrupt
+            ),
+            "an entry that no longer hashes to its own name must not be served"
+        );
+        // Unlinking is what makes the re-fetch a repair: the import path
+        // dedupes on (exists, length), which this tampered file satisfies.
+        assert!(
+            !cas.exists(),
+            "the tampered CAS entry must be unlinked, or the re-import adopts it again"
+        );
+        assert!(
+            store
+                .index_path("pkg", "1.0.0", Some(TEST_INTEGRITY))
+                .is_some_and(|p| !p.exists()),
+            "the index must be dropped so the package re-fetches"
+        );
+        assert!(
+            store.was_repaired("pkg", "1.0.0"),
+            "derived caches (the trees tier) must be told the CAS moved under them"
+        );
+    }
+
+    /// The steady state: nothing touched the entry, so it is served and the
+    /// index is left byte-identical — the observable proof that no content
+    /// re-hash ran and the check stayed at one stat per file.
+    #[test]
+    fn untouched_entry_is_served_without_rehashing() {
+        let (store, _dir, _cas, _hash) = seeded_pkg(b"content");
+        let index_path = store
+            .index_path("pkg", "1.0.0", Some(TEST_INTEGRITY))
+            .unwrap();
+        let before = std::fs::read(&index_path).unwrap();
+
+        assert!(matches!(
+            store.load_index_checked("pkg", "1.0.0", Some(TEST_INTEGRITY)),
+            WarmLoad::Hit(_)
+        ));
+        assert_eq!(
+            before,
+            std::fs::read(&index_path).unwrap(),
+            "an untouched entry must take the stat-only path and leave the index alone"
+        );
+        assert!(!store.was_repaired("pkg", "1.0.0"));
+    }
+
+    /// A package that legitimately `chmod +x`'s a shipped file moves the
+    /// inode's mode and ctime but not its content or mtime. Reading that as
+    /// tampering would force a needless re-fetch on one of the most common
+    /// postinstall behaviors there is.
+    #[cfg(unix)]
+    #[test]
+    fn a_mode_change_is_not_read_as_tampering() {
+        use std::os::unix::fs::PermissionsExt;
+        let (store, _dir, cas, _hash) = seeded_pkg(b"#!/bin/sh\necho hi\n");
+        std::fs::set_permissions(&cas, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            matches!(
+                store.load_index_checked("pkg", "1.0.0", Some(TEST_INTEGRITY)),
+                WarmLoad::Hit(_)
+            ),
+            "chmod is not a content change"
+        );
+        assert!(cas.exists(), "a chmod must never cost the store its entry");
+    }
+
+    /// An index written before `checked_at` existed carries no stamp, so it
+    /// verifies by content once and is restamped: the upgrade path pays a
+    /// single read per entry and then rejoins the stat-only fast path.
+    #[test]
+    fn a_legacy_unstamped_index_verifies_by_content_then_restamps() {
+        let (store, _dir, _cas, _hash) = seeded_pkg(b"content");
+        let index_path = store
+            .index_path("pkg", "1.0.0", Some(TEST_INTEGRITY))
+            .unwrap();
+
+        let mut index: PackageIndex =
+            sonic_rs::from_slice(&std::fs::read(&index_path).unwrap()).unwrap();
+        for f in index.values_mut() {
+            f.checked_at = None;
+        }
+        std::fs::write(&index_path, serde_json::to_string(&index).unwrap()).unwrap();
+
+        assert!(matches!(
+            store.load_index_checked("pkg", "1.0.0", Some(TEST_INTEGRITY)),
+            WarmLoad::Hit(_)
+        ));
+        let after: PackageIndex =
+            sonic_rs::from_slice(&std::fs::read(&index_path).unwrap()).unwrap();
+        assert!(
+            after.values().all(|f| f.checked_at.is_some()),
+            "a content-verified entry must be restamped so the next load is stat-only"
+        );
     }
 
     #[test]

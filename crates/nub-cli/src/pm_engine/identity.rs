@@ -128,9 +128,17 @@
 ///   engine's `aube.jdx.dev` update notifier never runs. (nub bypasses
 ///   `cli_main`, so this path is already unreachable through nub's dispatch;
 ///   `false` keeps it inert for any future engine path nub might touch.)
-/// - `warm_store_verify` = `false` — nub trusts the atomically-published CAS
-///   and skips the per-file warm-relink stat sweep (was
-///   `set_warm_store_verify(false)`). Import-time SHA-512 / SRI is untouched.
+/// - `warm_store_verify` = `true` — every CAS entry is checked against its own
+///   content address before it is linked into a project. Atomic publication
+///   does NOT make the store trustworthy afterwards: entries are hardlinked
+///   into every project that installs the package, they are mode 644, and so
+///   anything running as the user — a lifecycle script, a build tool patching
+///   `node_modules` — can rewrite the store through that link. The entry then
+///   serves bytes that no longer hash to its own name, to every future project,
+///   with nothing on the read path to notice. The check reads a file only when
+///   its size or mtime moved since the last verification, so the steady-state
+///   cost is one stat per file. Independent of import-time SHA-512 / SRI, which
+///   is untouched.
 /// - `no_churn_lockfile_write` = `true` — nub opts INTO the no-churn write
 ///   guard: when an install doesn't change the resolved graph, the lockfile's
 ///   bytes/mtime are left untouched. This breaks the rewrite flip-flop where
@@ -207,7 +215,7 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     runtime_switching: false,
     self_engines_check: false,
     self_update_enabled: false,
-    warm_store_verify: false,
+    warm_store_verify: true,
     no_churn_lockfile_write: true,
     read_branded_settings_env: false,
     // The GVS-incompatible auto-fallback notice (e.g. Next.js drops the install
@@ -311,7 +319,7 @@ const _: () = {
     assert!(!NUB.self_engines_check);
     assert!(!NUB.canonical_lockfile_always_wins);
     assert!(!NUB.runtime_switching);
-    assert!(!NUB.warm_store_verify);
+    assert!(NUB.warm_store_verify);
     assert!(!NUB.self_update_enabled);
     assert!(NUB.no_churn_lockfile_write);
     assert!(!NUB.read_branded_settings_env);

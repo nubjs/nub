@@ -561,6 +561,7 @@ impl Store {
         }
 
         Ok(StoredFile {
+            checked_at: crate::index::published_mtime_ns(&store_path),
             hex_hash,
             store_path,
             executable,
@@ -720,6 +721,7 @@ impl Store {
             self.write_exec_marker(&store_path)?;
         }
         Ok(StoredFile {
+            checked_at: crate::index::published_mtime_ns(&store_path),
             hex_hash,
             store_path,
             executable,

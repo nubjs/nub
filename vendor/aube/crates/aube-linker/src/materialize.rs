@@ -1300,6 +1300,16 @@ impl Linker {
                 return Ok(false);
             }
 
+            // A tree is built once from the CAS and cloned forever after
+            // without revalidation, so one built before the store
+            // discarded a tampered entry for this package still holds the
+            // tampered bytes. Drop it so the rebuild below reads the
+            // repaired CAS; otherwise the repair is silently bypassed on
+            // exactly the platform where this path is the default.
+            if self.store.was_repaired(pkg.registry_name(), &pkg.version) {
+                let _ = std::fs::remove_dir_all(tree_src);
+            }
+
             // Ensure the clone source exists. Build it once if missing.
             if !tree_src.exists() && self.build_tree(tree_src, dep_path, pkg, index).is_err() {
                 // Tree build failed (e.g. a CAS shard went missing) —
