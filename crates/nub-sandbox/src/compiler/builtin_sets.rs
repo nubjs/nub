@@ -268,11 +268,24 @@ pub fn trusted_net_rules(effect: Effect) -> Vec<NetRule> {
 // stops the two from drifting. `data/README.md` is the contributor-facing schema doc.
 //
 // Generated as a `static` rather than parsed at startup: the catalog is fixed at compile
-// time, so a malformed one is a build failure, and the jail has no runtime parse to fail.
+// time, so a malformed one is a build failure, and there is no runtime parse to fail.
+//
+// WHO READS THIS SET — and the BUILD JAIL IS NOT AMONG THEM. Two real consumers: the
+// `$downloads` token in the `nub sandbox` policy language, where a loopback proxy does
+// enforce per-host; and nub's own prefetcher, which GETs an artifact OUTSIDE the jail
+// before a script runs, making this an SSRF bound on nub's fetches. The build jail gates
+// egress per PACKAGE as a boolean and starts no proxy — an admitted package reaches every
+// host, a refused one reaches none — so nothing here narrows or widens a confined script.
+// Per-host in the jail was withdrawn because only macOS could enforce it: Linux needs a
+// netns it cannot require, and Windows' loopback exemption is admin-only, so gating on it
+// would have failed exactly the platform most developers use. Stated at this length
+// because the shorter version kept being read as "the jail's allowlist" — a four-entry
+// list sitting beside a package grant set in the hundreds invites the inference, and
+// `tests/compiler.rs` pins the real behaviour in both directions so it cannot drift back.
 //
 // Deliberately NOT `$trusted`, and never merged with it: that set is the AGENT sandbox's
 // far broader read-only surface, and it retains three write-capable hosts on
-// credential-scoping grounds. This jail confines attacker-authored dependency code, so it
+// credential-scoping grounds. The confinement of attacker-authored dependency code
 // inherits none of those exceptions — `registry.npmjs.org` is absent precisely because
 // `npm publish` is a PUT to the host that serves the read.
 include!(concat!(env!("OUT_DIR"), "/download_hosts.rs"));

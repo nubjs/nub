@@ -2,7 +2,7 @@
 
 Canonical ledger of every mechanism attempted for Nub's **build jail** on macOS, one heading per approach. The build jail confines dependency lifecycle scripts during `nub install` and must be **totally unprivileged with no setup command, ever**. macOS is the platform where that constraint costs the least: Seatbelt is unprivileged, `/usr/bin/sandbox-exec` ships with the OS, and there is no setup command to skip. **macOS is therefore where the strongest enforcement lives — and the place where over-claiming it as cross-platform is most tempting.**
 
-**This document exists because approaches keep getting re-proposed after being refuted**, and because macOS carries two capabilities the other platforms do not — deny-inside-allow and genuine per-host egress — which makes it easy to write a claim here that is false on Linux or Windows.
+**This document exists because approaches keep getting re-proposed after being refuted**, and because macOS carries two capabilities the other platforms do not — deny-inside-allow and genuine per-host egress — which makes it easy to write a claim here that is false on Linux or Windows. **The build jail uses neither of them.** Both are platform capabilities that Seatbelt affords and the jail declines, for the same reason in both cases: a rule that only one of three platforms can enforce is a compatibility liability rather than a defense. They survive in `nub sandbox`, which is a different product with a different privilege budget.
 
 ## How to use this document
 
@@ -37,7 +37,9 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **What it is.** The resolved policy IR is compiled to an SBPL profile and enforced by wrapping the child in `sandbox-exec -p <profile> -- <cmd>`. Module doc: `crates/nub-sandbox/src/backend/macos.rs:1-35`. Posture is `(deny default)`; the `MACOS_SEATBELT_BASE` block (ported from Codex/Chromium, `backend/macos_seatbelt_base.sbpl`) is the bootstrap that lets an arbitrary binary dyld-load under a deny-default profile, and Nub then appends the IR-derived read/write/net rules.
 
-**What it buys.** Deny-by-default filesystem confinement, **live evaluation** with no enumeration break, closed path-based evasion, mediated metadata ops, and — uniquely among the three platforms — **genuine per-host egress at zero privilege**.
+**What it buys.** Deny-by-default filesystem confinement, **live evaluation** with no enumeration break, closed path-based evasion, and mediated metadata ops.
+
+**What it does NOT buy the build jail, despite being able to.** Seatbelt is the only one of the three primitives that can enforce a host list at zero privilege, and the jail's net axis does not use it: an admitted package gets `(allow network*)` and an unadmitted one gets coarse deny, with no proxy started in either arm. That capability is [withdrawn from the jail on purpose](#the-loopback-egress-proxy-with-port-pinning--rejected-design-for-the-build-jail-adopted-for-nub-sandbox) and lives on in `nub sandbox`.
 
 **Zero privilege, and there is nothing to install.** `/usr/bin/sandbox-exec` is the stock unprivileged entry point and every confined launch goes through exactly that path, which is what makes its presence the only readiness question macOS has (`macos.rs`'s `SANDBOX_EXEC_PATH`, re-exported by `macos_setup::enforceable` rather than restated).
 
@@ -76,7 +78,7 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 **What it is.** Egress is permitted to **exactly** the proxy's loopback port — `(allow network* (remote ip "localhost:{port}"))` at `macos.rs:719`, deliberately **not** `localhost:*`, with a test asserting that (`macos.rs:2583-2596`). Every packet must traverse Nub's proxy, and **a raw socket cannot bypass it.** It is the only mechanism on any of the three platforms that enforces a host list at zero privilege, and it works.
 
-**The build jail no longer reaches it, and that was a decision rather than a regression.** `build_jail_net` returns a boolean per package and never references `$downloads` (`compiler/preset.rs:615-671`): an admitted package compiles to `true` → `net.enforce = false` → `(allow network*)` with no proxy started, and an unadmitted one compiles to `false` → enforce with no Allow rule, which `proxy_needed` (`backend/mod.rs:906`) reads as coarse deny. **Neither arm of the build jail starts a proxy on macOS.**
+**The build jail no longer reaches it, and that was a decision rather than a regression.** `build_jail_net` returns a boolean per package and never references `$downloads` (`compiler/preset.rs:602-671`): an admitted package compiles to `true` → `net.enforce = false` → `(allow network*)` with no proxy started, and an unadmitted one compiles to `false` → enforce with no Allow rule, which `proxy_needed` (`backend/mod.rs:906`) reads as coarse deny. **Neither arm of the build jail starts a proxy on macOS.**
 
 **Why it was withdrawn, stated as the reason rather than the history.** A host list that gates one platform and is provenance on the other two is a compatibility liability rather than a defense. macOS is the platform most developers build on, so enforcing per-host *there* means an incomplete list throws errors that Linux and Windows users never see — and confidence in the list is low. The two platforms that cannot follow are blocked on privilege, not effort: Linux needs a network namespace to force the child through the proxy, which needs an unprivileged user namespace; Windows' loopback exemption (`NetworkIsolationSetAppContainerConfig`) is admin-only.
 
@@ -97,7 +99,7 @@ Each approach carries a status, what it would have bought, the evidence with its
 
 ## The egress contract is uniform across the three platforms, and it is a per-package boolean
 
-**The rule.** **No catalog entry ⇒ no egress. An entry ⇒ coarse egress.** Denial spells `false` everywhere; the admitted case is coarse everywhere too, but **spelled per platform, because `enforce` carries more than egress on Linux** (`compiler/preset.rs:615-671`):
+**The rule.** **No catalog entry ⇒ no egress. An entry ⇒ coarse egress.** Denial spells `false` everywhere; the admitted case is coarse everywhere too, but **spelled per platform, because `enforce` carries more than egress on Linux** (`compiler/preset.rs:602-671`):
 
 | platform | admitted spells | why that spelling |
 | --- | --- | --- |

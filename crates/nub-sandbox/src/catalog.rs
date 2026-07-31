@@ -68,13 +68,21 @@ pub struct PackageGrant {
     pub project_cwd: bool,
 }
 
-/// A parsed, fully-validated catalog: the three tables the jail actually consults.
+/// A parsed, fully-validated catalog. Three tables, and only TWO of them are consulted by
+/// the build jail — a distinction worth stating here because collapsing it has misled
+/// readers repeatedly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Catalog {
-    /// `$downloads` — the egress allowlist, in written order.
+    /// The hosts nub's own prefetcher may GET from, and the `$downloads` set in the
+    /// `nub sandbox` policy language. **NOT a build-jail egress filter**: the jail gates
+    /// egress per package as a BOOLEAN and starts no proxy, so this list neither widens nor
+    /// narrows what a confined script can reach. Expect it to stay tiny while
+    /// `package_network_allowed` grows into the hundreds — they measure different things.
+    /// In written order.
     pub download_hosts: Vec<String>,
     pub package_grants: Vec<PackageGrant>,
-    /// Packages permitted egress, SORTED and deduplicated so the lookup may binary-search.
+    /// Packages permitted egress — ALL of it, to any host, or none. SORTED and deduplicated
+    /// so the lookup may binary-search.
     pub package_network_allowed: Vec<String>,
 }
 
@@ -96,8 +104,12 @@ pub fn parse(text: &str) -> Result<Catalog, String> {
     })
 }
 
-// ── $downloads ─────────────────────────────────────────────────────────────────
+// ── networkHosts: what NUB fetches, not what a jailed script may reach ─────────
 
+/// Parse `networkHosts` — the hosts nub's own prefetcher may GET from, outside the jail.
+/// Nothing here constrains a confined script: build-jail egress is a per-package boolean
+/// (see `compiler::preset::build_jail_net`). Kept adjacent to `packageNetwork` in one file
+/// because they are edited together, NOT because one filters the other.
 fn parse_hosts(catalog: &serde_json::Value) -> Result<Vec<String>, String> {
     let entries = array(catalog, "networkHosts")?;
     let mut hosts = Vec::new();
