@@ -37,7 +37,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use nub_core::compile::TargetPlatform;
 use nub_core::node::discovery;
 
@@ -225,17 +225,11 @@ fn fetch(target: &TargetPlatform, sources: &Sources) -> Result<PathBuf> {
     // an entry with nothing to check itself against is one a hit has to trust.
     commit_sidecar(dir, &dest, &actual, target)?;
 
-    // Losing the commit race is not a failure. Both racers verified the same
-    // published bytes, so whichever landed first is the artifact either would
-    // have installed. This is not merely tidiness on Windows: `MoveFileEx` takes
-    // a sharing violation when the winner's copy is open — which the very next
-    // pipeline step does, since it reads the template it just resolved.
-    if let Err(e) = fs::rename(&staged, &dest) {
-        if !dest.is_file() {
-            return Err(anyhow::Error::new(e)
-                .context(format!("installing the launcher at {}", dest.display())));
-        }
-    }
+    // Losing the commit race is harmless only when the winner is the same
+    // verified release asset. Windows refuses a rename over an existing file,
+    // which also happens when a previous crash left a corrupt cache entry: do
+    // not mistake that repair case for a good concurrent winner.
+    commit_template(&staged, &dest, &actual, fs::rename)?;
 
     // The rename itself is only durable once the directory entry is synced.
     // Best effort: a lost rename costs a refetch, not a bad cache entry. Windows
@@ -245,6 +239,48 @@ fn fetch(target: &TargetPlatform, sources: &Sources) -> Result<PathBuf> {
     let _ = fs::File::open(dir).and_then(|d| d.sync_all());
 
     Ok(dest)
+}
+
+/// Publish a verified staged launcher, repairing an existing corrupt entry.
+///
+/// A normal POSIX rename replaces `dest`; Windows instead reports that the
+/// destination exists. In that branch, an intact destination is a concurrent
+/// winner and is safe to adopt. A mismatched one is the cache-corruption path
+/// that brought us here, so remove it and retry. The retry may itself lose to a
+/// concurrent verified winner; accept that winner only when its bytes match the
+/// digest we just verified.
+fn commit_template<F>(staged: &Path, dest: &Path, expected: &str, mut rename: F) -> Result<()>
+where
+    F: FnMut(&Path, &Path) -> std::io::Result<()>,
+{
+    let install = |error: std::io::Error| {
+        anyhow::Error::new(error).context(format!("installing the launcher at {}", dest.display()))
+    };
+
+    match rename(staged, dest) {
+        Ok(()) => Ok(()),
+        Err(_first) if entry_matches_digest(dest, expected) => Ok(()),
+        Err(_first) if dest.is_file() => {
+            fs::remove_file(dest).with_context(|| {
+                format!("removing corrupt launcher cache entry {}", dest.display())
+            })?;
+            match rename(staged, dest) {
+                Ok(()) => Ok(()),
+                Err(retry) if entry_matches_digest(dest, expected) => Ok(()),
+                Err(retry) => Err(install(retry)),
+            }
+        }
+        Err(first) => Err(install(first)),
+    }
+}
+
+/// Whether `entry` is the exact launcher digest the current fetch verified.
+///
+/// This deliberately does not use [`cache_entry_is_intact`]: missing sidecars
+/// are accepted for pre-existing offline cache hits, but they cannot prove that
+/// an existing destination is the verified winner of this fetch race.
+fn entry_matches_digest(entry: &Path, expected: &str) -> bool {
+    fs::read(entry).is_ok_and(|bytes| sha256_hex(&bytes).eq_ignore_ascii_case(expected))
 }
 
 /// Record `hex` beside the cache entry, in the `sha256sum` format so the check a
@@ -695,6 +731,58 @@ mod tests {
 
         assert_eq!(fetch(&target, &sources).unwrap(), dest);
         assert_eq!(fs::read(&dest).unwrap(), body);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Windows does not overwrite an existing destination. A corrupt entry is
+    /// therefore a repair case, not a benign commit race: remove it and publish
+    /// the staged bytes on retry.
+    #[test]
+    fn a_no_overwrite_commit_repairs_a_corrupt_destination() {
+        let dir = fresh_dir("commit-repair");
+        let staged = dir.join("staged");
+        let dest = dir.join("dest");
+        let good = elf_bytes(ELF_X64);
+        fs::write(&staged, &good).unwrap();
+        let expected = sha256_hex(&good);
+        let mut calls = 0;
+
+        commit_template(&staged, &dest, &expected, |from, to| {
+            calls += 1;
+            if calls == 1 {
+                fs::write(to, b"truncated").unwrap();
+                return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+            }
+            fs::rename(from, to)
+        })
+        .expect("the retry must replace the corrupt destination");
+
+        assert_eq!(calls, 2);
+        assert_eq!(fs::read(&dest).unwrap(), good);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A no-overwrite failure can also mean a concurrent verified fetch won.
+    /// That winner is safe to adopt without deleting or retrying it.
+    #[test]
+    fn a_no_overwrite_commit_adopts_a_matching_concurrent_winner() {
+        let dir = fresh_dir("commit-winner");
+        let staged = dir.join("staged");
+        let dest = dir.join("dest");
+        let good = elf_bytes(ELF_X64);
+        fs::write(&staged, &good).unwrap();
+        fs::write(&dest, &good).unwrap();
+        let expected = sha256_hex(&good);
+        let mut calls = 0;
+
+        commit_template(&staged, &dest, &expected, |_, _| {
+            calls += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+        })
+        .expect("a matching concurrent winner is safe to use");
+
+        assert_eq!(calls, 1, "an intact winner must not be removed and retried");
+        assert_eq!(fs::read(&dest).unwrap(), good);
         let _ = fs::remove_dir_all(&dir);
     }
 
