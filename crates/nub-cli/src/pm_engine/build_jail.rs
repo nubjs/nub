@@ -958,12 +958,77 @@ fn python_toolchain_grant(
     // A package that GENERATES its manifest at install time is missed and keeps the
     // pre-existing failure — no regression, and no evidence any real one does this.
     if !has_gyp_manifest(&spawn.package_dir, GYP_MANIFEST_SEARCH_DEPTH) {
+        python_grant_diag(spawn, ambient, &[], &[], None);
         return None;
     }
     let eligible = ProbeScope::new(spawn);
-    python_candidates(ambient, &eligible)
-        .into_iter()
-        .find_map(|candidate| probe_python(&candidate, ambient, &spawn.cwd, &eligible))
+    let candidates = python_candidates(ambient, &eligible);
+    let mut rejected = Vec::new();
+    let chosen = candidates.iter().find_map(|candidate| {
+        match probe_python(candidate, ambient, &spawn.cwd, &eligible) {
+            Ok(toolchain) => Some(toolchain),
+            Err(stage) => {
+                rejected.push(format!("{}->{stage}", candidate.display()));
+                None
+            }
+        }
+    });
+    python_grant_diag(spawn, ambient, &candidates, &rejected, chosen.as_ref());
+    chosen
+}
+
+/// One `NUB_DIAG_*` line per lifecycle spawn saying why the grant did or did not resolve.
+///
+/// This is the one step of the build jail whose failure is INVISIBLE from the outside: an
+/// unresolved grant simply leaves `npm_config_python` unset, and the break then surfaces as
+/// node-gyp reporting its OWN three-route search failing — a symptom that looks identical
+/// whether the gate bailed, nothing resolved, or the probe spawn died. Windows is where
+/// that distinction has to be made and is the one platform where it cannot be reproduced
+/// locally, so the answer has to be readable off a CI log.
+///
+/// `path_keys` is spelled out rather than assumed because `ambient` is an exact-case map
+/// while Windows spells the variable `Path`: a lookup miss there would empty the candidate
+/// list without any other trace.
+fn python_grant_diag(
+    spawn: &aube_util::LifecycleSandboxSpawn,
+    ambient: &BTreeMap<String, String>,
+    candidates: &[PathBuf],
+    rejected: &[String],
+    chosen: Option<&PythonToolchain>,
+) {
+    aube_util::diag::instant_lazy(
+        aube_util::diag::Category::Script,
+        "build_jail.python_grant",
+        || {
+            let list = |v: &[String]| {
+                if v.is_empty() {
+                    "-".into()
+                } else {
+                    v.join(" ")
+                }
+            };
+            format!(
+                "pkg={} manifest={} path_keys={} candidates={} rejected={} chosen={}",
+                spawn.package_name.as_deref().unwrap_or("<root>"),
+                has_gyp_manifest(&spawn.package_dir, GYP_MANIFEST_SEARCH_DEPTH),
+                list(
+                    &ambient
+                        .keys()
+                        .filter(|k| k.eq_ignore_ascii_case("path"))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                ),
+                list(
+                    &candidates
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                ),
+                list(rejected),
+                chosen.map_or("<none>", |t| t.executable.as_str()),
+            )
+        },
+    );
 }
 
 /// How far below the package root a gyp manifest is looked for. `ssh2` needs 3
@@ -1112,12 +1177,16 @@ fn is_executable_file(path: &Path) -> bool {
 /// itself into the read set. Rejecting a pre-3.6 interpreter here is what keeps this from
 /// naming one node-gyp would go on to reject — the alternative is pinning a Python that
 /// makes the build fail where it would otherwise have fallen through to the next candidate.
+///
+/// `Err` names the STAGE that refused, which the search itself does not need — it exists
+/// only so [`python_grant_diag`] can tell an unresolvable candidate apart from one nub
+/// could not execute at all. Every variant is equally a skip to the next candidate.
 fn probe_python(
     candidate: &Path,
     ambient: &BTreeMap<String, String>,
     cwd: &Path,
     eligible: &ProbeScope,
-) -> Option<PythonToolchain> {
+) -> Result<PythonToolchain, &'static str> {
     // The candidate passing [`ProbeScope`] only covers the FIRST hop. A version-manager
     // shim re-execs `python3` and searches PATH again, so leaving the dependency-authored
     // entries on it hands the planted binary right back one hop later — measured: nub
@@ -1132,7 +1201,7 @@ fn probe_python(
         env.insert(
             "PATH".to_string(),
             std::env::join_paths(kept)
-                .ok()?
+                .map_err(|_| "path-join")?
                 .to_string_lossy()
                 .into_owned(),
         );
@@ -1152,18 +1221,19 @@ fn probe_python(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .ok()?;
-    let stdout = read_bounded(&mut child, PYTHON_PROBE_TIMEOUT)?;
+        .map_err(|_| "spawn")?;
+    let stdout = read_bounded(&mut child, PYTHON_PROBE_TIMEOUT).ok_or("no-output")?;
     // Gated on PARSING, not exit status: the four contract lines are flushed before the
     // introspection tail, so a candidate that answered them is usable even if the tail
     // died. Anything that is not a Python 3.6+ interpreter fails the parse.
-    let toolchain = python_reads(&String::from_utf8(stdout).ok()?)?;
+    let text = String::from_utf8(stdout).map_err(|_| "non-utf8")?;
+    let toolchain = python_reads(&text).ok_or("unparseable")?;
     // Re-gate what came BACK. The probe's answer decides both the interpreter nub names
     // and the tree it read-grants, so a resolution that lands inside the dependency tree
     // by any route must not become either — independent of how it got there.
     let cleared = eligible.allows(Path::new(&toolchain.executable))
         && toolchain.reads.iter().all(|p| eligible.allows(p));
-    cleared.then_some(toolchain)
+    cleared.then_some(toolchain).ok_or("scope-rejected")
 }
 
 /// Unlike node-gyp's own Python spawns, this one runs OUTSIDE the jail and outside the

@@ -134,12 +134,20 @@ try {
 // question is meaningful: nub resolving Visual Studio in the parent proves nothing if the
 // env allowlist then drops the answer on the way in. A build that succeeds without these
 // would mean node-gyp found MSVC some other way and the injection is not what fixed it.
+//
+// \`npm_config_python\` is here for exactly the same reason, and it is the DELIVERY half of
+// the answer: nub's own diagnostic says whether the grant resolved, this says whether the
+// value survived the env allowlist. Only both together tell an unresolved grant apart from
+// a resolved one that was scrubbed on the way in — a silent-drop shape this jail has hit
+// before (\`NODE_EXECUTABLE\`).
 fs.writeFileSync(
   path.join(__dirname, "probe-marker.json"),
   JSON.stringify({
     canary: CANARY,
     canaryRead,
     nodedir: process.env.npm_config_nodedir || "",
+    python: process.env.npm_config_python || "",
+    pathKeys: Object.keys(process.env).filter((k) => k.toLowerCase() === "path"),
     vcInstallDir: process.env.VCINSTALLDIR || "",
     vscmdVer: process.env.VSCMD_VER || "",
     sdkVersion: process.env.WindowsSDKVersion || "",
@@ -239,6 +247,9 @@ for (const shape of shapes) {
     `canaryRead=${canaryRead} (a pass needs exactly one of ${denials.map((c) => `refused:${c}`).join(", ")})`,
   );
   console.log(`observed ${shape.name} npm_config_nodedir=${markerData?.nodedir ?? "<no marker>"}`);
+  console.log(
+    `observed ${shape.name} npm_config_python=${JSON.stringify(markerData?.python ?? "<no marker>")} child-path-keys=${JSON.stringify(markerData?.pathKeys ?? "<no marker>")}`,
+  );
 
   // WHICH TOOLCHAIN, not merely whether something built. `config.gypi` is node-gyp's own
   // record of the installation it selected, written by `configure` before any compile — so
