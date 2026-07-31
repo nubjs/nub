@@ -33,6 +33,13 @@
 //! that is a standard user or stricter. [`deelevated_primary_token`] names the route it
 //! used, and logs why the preferred one was unavailable.
 //!
+//! THE PER-PACKAGE EGRESS GROUP rides this binary for the same reason as the two above — it
+//! needs both principals — and asks the half nothing here had ever measured: does a CATALOGUED
+//! package actually REACH the network on Windows. Every Windows egress cell before it compiled
+//! with `package_name = None`, i.e. the denied side; the granted side was asserted from the
+//! generation chain and never observed, so a break anywhere along it would have left every
+//! shipped grant silently inert on a third of the platforms. See [`win::net_grant`].
+//!
 //! THE ANTI-HOLLOW CONTRACT: an arm that never ran must never read as a pass. So the arm
 //! reports its OWN token state to a marker file as its first act, and the parent fails
 //! unless (a) both markers exist, (b) the de-elevated arm could NOT pass an access check
@@ -92,6 +99,7 @@ mod win {
                 Err(_) => 9,
             },
             Some("connect") => connect(&a[1], a[2].parse().unwrap_or(0)),
+            Some("resolve") => resolve_connect(&a[1], a[2].parse().unwrap_or(0)),
             // exec <marker> <deadline_secs> <sink> <program> [args…] — a NESTED spawn from
             // inside the AppContainer, which is the real lifecycle shape, with a deadline the
             // jail cannot outlive. The bound lives HERE rather than in the parent because a
@@ -122,6 +130,45 @@ mod win {
             Err(e) if e.raw_os_error() == Some(10013) => 5,
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => 6,
             Err(_) => 9,
+        }
+    }
+
+    /// Resolve `host` and connect. Kept SEPARATE from [`connect`] because the two fail by
+    /// different mechanisms under an AppContainer: name resolution is an RPC to the DNS Client
+    /// service rather than a socket, so it can outlive a withheld `internetClient`. A grant that
+    /// opens sockets but leaves `getaddrinfo` dead is inert for every real package, all of which
+    /// fetch by hostname — so a literal-IP connect alone would answer the wrong question.
+    /// 7 = resolution failed; the remaining codes match `connect`.
+    fn resolve_connect(host: &str, port: u16) -> i32 {
+        use std::net::ToSocketAddrs;
+        let addr = match (host, port).to_socket_addrs() {
+            Ok(mut it) => match it.next() {
+                Some(a) => a,
+                None => {
+                    println!("    [resolve] getaddrinfo({host}) returned no addresses");
+                    return 7;
+                }
+            },
+            Err(e) => {
+                println!(
+                    "    [resolve] getaddrinfo({host}) failed: {e} raw={:?}",
+                    e.raw_os_error()
+                );
+                return 7;
+            }
+        };
+        println!("    [resolve] {host} -> {addr}");
+        match TcpStream::connect_timeout(&addr, Duration::from_secs(8)) {
+            Ok(_) => 0,
+            Err(e) if e.raw_os_error() == Some(10013) => 5,
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => 6,
+            Err(e) => {
+                println!(
+                    "    [resolve] connect failed: {e} raw={:?}",
+                    e.raw_os_error()
+                );
+                9
+            }
         }
     }
 
@@ -1089,6 +1136,10 @@ mod win {
         // actually clears the jail for default-on.
         production_jail(&mut r, &f);
 
+        // (6b) the granted half of the same production path — the catalogued identity actually
+        // reaching the network, which (6) can never show because it compiles with `None`.
+        net_grant(&mut r, &f);
+
         // (7) …and with the REAL interpreter rather than the probe binary, which is the one
         // variable (6) cannot vary and the one that carried the showstopper.
         let staged = interpreter_group(&mut r, &f);
@@ -1235,6 +1286,232 @@ mod win {
             "production-jail-egress",
             egress == 5 || egress == 6,
             &format!("(child exit {egress}; 5/6 = denied)"),
+        );
+    }
+
+    // ── the per-package egress group: does a CATALOGUED grant actually work here? ──
+
+    /// A literal address, so the primitive is measured without DNS in the way. `1.1.1.1:443`
+    /// is the same target `egress-deny` uses, which is what makes the two comparable.
+    const EGRESS_IP: &str = "1.1.1.1";
+    const EGRESS_PORT: &str = "443";
+    /// The host every `packageNetwork.full` entry in the catalog actually fetches, so the DNS
+    /// cell measures the name a granted package really resolves rather than a stand-in.
+    const EGRESS_HOST: &str = "github.com";
+
+    /// Property names in the order recorded. The parent's anti-hollow contract requires the SAME
+    /// property set from both arms, so every path out of [`net_grant`] must record all of them —
+    /// this array is what a bail-out fills in.
+    const NET_GRANT_PROPS: [&str; 10] = [
+        "netgrant-gate-catalog-nonempty",
+        "netgrant-gate-unconfined-egress-reachable",
+        "netgrant-gate-catalogued-child-starts",
+        "netgrant-gate-uncatalogued-child-starts",
+        "netgrant-plan-catalogued-net-unenforced",
+        "netgrant-plan-uncatalogued-net-enforced",
+        "netgrant-catalogued-connects",
+        "netgrant-catalogued-resolves-dns",
+        "netgrant-every-catalogued-name-connects",
+        "netgrant-uncatalogued-refused",
+    ];
+
+    /// A name no catalog will ever hold, used as the paired denied identity. It differs from
+    /// [`production_jail`]'s `None` on purpose: `None` is aube withholding an identity, while
+    /// this is an identity the table does not admit — the case a real unvetted dependency is in.
+    const UNCATALOGUED: &str = "nub-probe-definitely-not-in-the-catalog";
+
+    /// DOES A CATALOGUED PACKAGE REACH THE NETWORK ON WINDOWS — the question the rest of this
+    /// binary never asked. [`production_jail`] compiles with `package_name = None`, so every
+    /// Windows egress measurement to date has been of the DENIED half; the granted half was
+    /// asserted from the generation path (`preset::build_jail_net` → `net: true` → `enforce =
+    /// false` → the backend's `allow_internet: !policy.net.enforce` → the `internetClient`
+    /// capability SID) and never observed. If that chain were broken anywhere, every catalogued
+    /// grant would be silently inert on a third of the supported platforms and the corpus would
+    /// score those packages broken for a reason with nothing to do with the catalog.
+    ///
+    /// A green positive arm alone cannot answer it, which is why this is a differential on ONE
+    /// variable — the identity handed to `compile_build_jail` — with two controls that fail in
+    /// opposite directions: an UNJAILED connect (a refused positive arm is otherwise
+    /// indistinguishable from a runner with no egress) and a `token` launch per policy (a jail
+    /// that cannot start a child at all would otherwise read as a network block).
+    fn net_grant(r: &mut Report, f: &Fixture) {
+        let allowed = nub_sandbox::package_network_allowed();
+        println!(
+            "  fact: PACKAGE_NETWORK_ALLOWED ({} entries) = {allowed:?}",
+            allowed.len()
+        );
+        r.record(
+            "netgrant-gate-catalog-nonempty",
+            !allowed.is_empty(),
+            &format!("({} entries in the compiled egress set)", allowed.len()),
+        );
+
+        let bare = std::process::Command::new(&f.child)
+            .args(["__sbxchild__", "connect", EGRESS_IP, EGRESS_PORT])
+            .status()
+            .map_or(-1, |s| s.code().unwrap_or(-1));
+        r.record(
+            "netgrant-gate-unconfined-egress-reachable",
+            bare == 0,
+            &format!("(UNJAILED connect {EGRESS_IP}:{EGRESS_PORT} exit {bare}; 0 expected)"),
+        );
+
+        let Some(&granted) = allowed.first() else {
+            for p in &NET_GRANT_PROPS[2..] {
+                r.record(p, false, "(the egress set is empty — nothing to measure)");
+            }
+            return;
+        };
+        println!("  fact: binding cells use the catalogued name `{granted}`");
+
+        let compile = |name: Option<&str>| {
+            nub_sandbox::compile_build_jail(
+                nub_sandbox::Homes {
+                    home: f.home.clone(),
+                    tmp: std::env::temp_dir(),
+                    cache: f.home.join("cache"),
+                    project: f.project.clone(),
+                },
+                &f.package,
+                name,
+                vec![f.child.clone()],
+                Vec::new(),
+                std::env::vars().collect(),
+            )
+        };
+        let (grant_policy, deny_policy) =
+            match (compile(Some(granted)), compile(Some(UNCATALOGUED))) {
+                (Ok(g), Ok(d)) => (g, d),
+                (g, d) => {
+                    let detail = format!(
+                        "(compile err granted={:?} uncatalogued={:?})",
+                        g.err(),
+                        d.err()
+                    );
+                    for p in &NET_GRANT_PROPS[2..] {
+                        r.record(p, false, &detail);
+                    }
+                    return;
+                }
+            };
+
+        let grant_start = code(&grant_policy, f, &f.package, &["__sbxchild__", "token"]);
+        r.record(
+            "netgrant-gate-catalogued-child-starts",
+            grant_start == 0,
+            &format!(
+                "(`{granted}` policy, child exit {grant_start}; 0 = launched in an AppContainer)"
+            ),
+        );
+        let deny_start = code(&deny_policy, f, &f.package, &["__sbxchild__", "token"]);
+        r.record(
+            "netgrant-gate-uncatalogued-child-starts",
+            deny_start == 0,
+            &format!("(`{UNCATALOGUED}` policy, child exit {deny_start}; 0 = launched)"),
+        );
+
+        // The compiled shape, recorded next to the behaviour it is supposed to produce. On its
+        // own it proves nothing — it is the pure-Rust half that already has host unit tests —
+        // but paired with the connect cells it localises a failure to the compiler or to the
+        // backend instead of leaving "egress does not work" undecomposed.
+        r.record(
+            "netgrant-plan-catalogued-net-unenforced",
+            !grant_policy.net.enforce,
+            &format!(
+                "(`{granted}` compiled net.enforce={}; false ⇒ the backend grants internetClient)",
+                grant_policy.net.enforce
+            ),
+        );
+        r.record(
+            "netgrant-plan-uncatalogued-net-enforced",
+            deny_policy.net.enforce,
+            &format!(
+                "(`{UNCATALOGUED}` compiled net.enforce={}; true ⇒ capability withheld)",
+                deny_policy.net.enforce
+            ),
+        );
+
+        let grant_connect = code(
+            &grant_policy,
+            f,
+            &f.package,
+            &["__sbxchild__", "connect", EGRESS_IP, EGRESS_PORT],
+        );
+        r.record(
+            "netgrant-catalogued-connects",
+            grant_connect == 0,
+            &format!("(`{granted}` → {EGRESS_IP}:{EGRESS_PORT} exit {grant_connect}; 0 expected)"),
+        );
+
+        let grant_dns = code(
+            &grant_policy,
+            f,
+            &f.package,
+            &["__sbxchild__", "resolve", EGRESS_HOST, EGRESS_PORT],
+        );
+        r.record(
+            "netgrant-catalogued-resolves-dns",
+            grant_dns == 0,
+            &format!("(`{granted}` → {EGRESS_HOST}:{EGRESS_PORT} exit {grant_dns}; 0 expected, 7 = getaddrinfo failed)"),
+        );
+
+        // EVERY admitted name, not just the first. The binding question is whether the grants
+        // WE SHIP work, and a per-name curated entry could compile to something that fails to
+        // start on Windows while its neighbour is fine — which one arbitrary name cannot see.
+        let mut broken: Vec<String> = Vec::new();
+        for &name in allowed {
+            let outcome = match compile(Some(name)) {
+                Err(e) => format!("compile-err {e:?}"),
+                Ok(p) => {
+                    let c = code(
+                        &p,
+                        f,
+                        &f.package,
+                        &["__sbxchild__", "connect", EGRESS_IP, EGRESS_PORT],
+                    );
+                    if c == 0 {
+                        "connect=0".to_string()
+                    } else {
+                        format!("connect={c}")
+                    }
+                }
+            };
+            println!("  fact: catalogued `{name}` {outcome}");
+            if outcome != "connect=0" {
+                broken.push(format!("{name} ({outcome})"));
+            }
+        }
+        r.record(
+            "netgrant-every-catalogued-name-connects",
+            broken.is_empty(),
+            &format!("({} of {} failed: {broken:?})", broken.len(), allowed.len()),
+        );
+
+        let deny_connect = code(
+            &deny_policy,
+            f,
+            &f.package,
+            &["__sbxchild__", "connect", EGRESS_IP, EGRESS_PORT],
+        );
+        r.record(
+            "netgrant-uncatalogued-refused",
+            deny_connect == 5 || deny_connect == 6,
+            &format!(
+                "(`{UNCATALOGUED}` → {EGRESS_IP}:{EGRESS_PORT} exit {deny_connect}; 5/6 = denied)"
+            ),
+        );
+        // Recorded but NOT gated: DNS is an RPC to the DNS Client service, so it surviving a
+        // withheld capability is expected rather than a leak. It is here because a denied arm
+        // that ALSO cannot resolve would mean the positive DNS cell above is measuring the
+        // capability rather than the resolver, and the pair is the only way to tell.
+        let deny_dns = code(
+            &deny_policy,
+            f,
+            &f.package,
+            &["__sbxchild__", "resolve", EGRESS_HOST, EGRESS_PORT],
+        );
+        println!(
+            "  fact: uncatalogued resolve {EGRESS_HOST} exit {deny_dns} (5/6 denied, 7 = getaddrinfo failed)"
         );
     }
 
