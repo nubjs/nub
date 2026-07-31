@@ -134,7 +134,7 @@ A project [`nub.jsonc`](/docs/config) picks the layout with one [`linker`](/docs
 }
 ```
 
-Each strategy accepts one knob, written in the object form. Under `isolated` that knob is `hoist`, which fills the hidden fallback tree at `node_modules/.store/node_modules/` — the directory your dependencies reach when they import something they never declared. It takes `true`, `false`, or a pattern list.
+Two of the strategies accept a knob, written in the object form; `hoisted` and `pnp` take none. Under `isolated` that knob is `hoist`, which fills the hidden fallback tree at `node_modules/.store/node_modules/` — the directory your dependencies reach when they import something they never declared. It takes `true`, `false`, or a pattern list.
 
 ```jsonc title="nub.jsonc"
 {

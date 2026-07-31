@@ -512,6 +512,16 @@ fn parse_global_config(text: &str) -> Result<ProjectConfig> {
                 .map(str::to_owned)
         })
         .and_then(|value| ImplicitDlx::parse(&value));
+    // DELIBERATE, and it reads like an oversight — an unknown ROOT key here is
+    // dropped rather than rejected, while the same typo one level down
+    // (`install.bogus`) is an error. The global file is BEST-EFFORT by design:
+    // it holds one person's defaults across every project on the machine, so a
+    // stale key from a newer nub, or one typo, must not take their whole config
+    // with it. `malformed_shared_schema_is_best_effort_globally` and
+    // `typed_global_layer_accepts_legacy_consent_without_schema_drift` pin that,
+    // and a project file — where the file is checked in and shared — keeps the
+    // strict behaviour. Removing this retain to "fix the inconsistency" fails
+    // both of those tests; the asymmetry is the feature.
     obj.retain(|key, _| ROOT_KEYS.contains(&key.as_str()));
     let mut config = validate_root(&obj, ConfigScope::Global)?;
     if config.dlx.consent.is_none() {
