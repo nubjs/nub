@@ -775,7 +775,13 @@ fn append_confinement_options(
             FsOp::Bind(grant) => {
                 setup
                     .arg(match grant.access {
-                        MountAccess::ReadOnly => "--ro-bind",
+                        // RESIDUAL: a bind is always a subtree, so bubblewrap cannot hold
+                        // the node-only line Landlock can and renders `ListOnly` as the
+                        // read-only subtree it used to be. The build jail runs on Landlock;
+                        // this backend is the nesting/no-Landlock fallback, so the widening
+                        // is bounded to that path rather than fixed by an empty `--dir`,
+                        // which would HIDE contents a policy elsewhere granted.
+                        MountAccess::ListOnly | MountAccess::ReadOnly => "--ro-bind",
                         MountAccess::ReadWrite => "--bind",
                     })
                     .arg(&grant.path)

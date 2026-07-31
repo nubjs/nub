@@ -354,8 +354,9 @@ fn env_prefixed_directory_allow_does_not_expose_its_secret_contents() {
     // is a secret container (`.env.d/` per-target secret files); the `.env*/**` subtree
     // deny covers its contents. Naming the DIRECTORY (`{ "./.env.d": "r" }`) must NOT
     // re-expose those contents — the `.env*` floor is unconditional (nothing reopens it).
-    // On macOS a bare path becomes a `(subpath …)` grant covering descendants, so a naive
-    // emission of the directory's subtree twin WOULD leak here — this asserts it is denied.
+    // A directory key compiles to the subtree PAIR (`.env.d` + `.env.d/**`), and on macOS
+    // that second half is a `(subpath …)` grant covering descendants, so a naive emission
+    // WOULD leak here — this asserts it is denied.
     let f = fixture();
     fs::create_dir_all(f.proj.join(".env.d")).unwrap();
     fs::write(f.proj.join(".env.d/prod"), "DIRSECRET").unwrap();
