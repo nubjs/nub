@@ -237,6 +237,43 @@ fn data_formats_load_through_require_on_the_compat_tier() {
     }
 }
 
+/// A `loader` redirect in EITHER direction, plus the dependency boundary that
+/// makes one extension mean two things at once.
+///
+/// The classic shim keys handlers by extension, but the right answer depends on
+/// the URL: with `{".yaml": "ts"}` the project's `.yaml` is TypeScript while a
+/// dependency's `.yaml` is still data, because `dataExtsFor` pins node_modules to
+/// the built-in loaders so a project's config cannot redefine how a dependency
+/// reads its own files. Registering a data handler and a transpile handler in two
+/// passes cannot express that — whichever ran second simply won, which made
+/// `{".yaml": "ts"}` compile TypeScript as raw JavaScript here while the ESM path
+/// transpiled it. One dispatcher decides per URL instead.
+#[test]
+fn loader_redirects_resolve_per_url_on_the_compat_tier() {
+    let Some((stdout, stderr, code)) =
+        run_nub_against_node((22, 13, 0), "loader-redirect-both-ways", "main.cjs")
+    else {
+        eprintln!(
+            "skipping: Node 22.13.0 not installed (set TEST_NODE_BIN_22_13_0 or nvm install)"
+        );
+        return;
+    };
+    assert_eq!(code, 0, "redirect fixture must run: stderr={stderr}");
+    for expected in [
+        // A data extension pointed at `ts` transpiles rather than parsing.
+        r#"yaml-as-ts:{"answer":42}"#,
+        // A code extension pointed at `text` yields its source.
+        r#"cts-as-text:"const x: number = 5;""#,
+        // ...while the dependency's own `.yaml` keeps the built-in data loader.
+        r#"dep-yaml-is-data:{"depkey":"from-dependency"}"#,
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "loader redirects must resolve per URL (missing {expected:?}): stdout={stdout:?}"
+        );
+    }
+}
+
 /// Registering those handlers must change LOADING only, never RESOLUTION. Node
 /// builds extensionless resolution from `ObjectKeys(Module._extensions)`, so a
 /// plain assignment would make `require("./config")` newly find `config.yaml`

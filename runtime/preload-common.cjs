@@ -944,38 +944,12 @@ function installCjsRequireHooks(core, withClassicTranspile) {
     if (format === "module") throw requireEsmError(filename);
     mod._compile(source, filename);
   };
-  // Driven by the config-aware transpile set, not a fixed list. A project's
-  // `loader` can move a TS-family extension onto a data loader (`{".ts":"text"}`),
-  // which the ESM path already honors through this same set; a hardcoded list
-  // transpiled the file anyway and silently discarded the setting.
-  for (const ext of core.TRANSPILE_EXTS) {
-    module_._extensions[ext] = transpileExtension;
-  }
-
-  // The classic-tier equivalent of the load hook's `dataExtsFor` branch. Without
-  // it Node has no handler for `.yaml`/`.toml`/`.json5`/`.jsonc`/`.txt`, so
-  // `findLongestRegisteredExtension` falls back to `.js` and compiles the document
-  // AS JavaScript — `a: 1` is a valid labeled statement, so `require("./x.yaml")`
-  // silently produced `{}` instead of the parsed document.
-  //
-  // NON-ENUMERABLE, which is the whole trick. Node builds EXTENSIONLESS
-  // resolution from `ObjectKeys(Module._extensions)` (cjs/loader.js
-  // `tryExtensions`), so a plain assignment would ALSO make `require("./config")`
-  // start resolving `config.yaml` here, while the fast tier — which registers
-  // nothing and serves these through require(esm) — still throws
-  // MODULE_NOT_FOUND. That trades one tier divergence for another. Dispatch reads
-  // the property directly (`findLongestRegisteredExtension`,
-  // `Module.prototype.load`), so hiding it from `ObjectKeys` serves an explicit
-  // `require("./x.yaml")` while leaving resolution identical on both tiers.
-  //
-  // Node's own `.js`/`.json`/`.node` are never replaced: a project `loader` may
-  // redefine how nub reads a file, not how Node reads `package.json`.
-  const dataExtension = (mod, filename) => {
-    const url = pathToFileURL(filename).href;
-    const ext = pathExtname(filename);
-    if (!(ext in core.dataExtsFor(url))) {
-      return nativeJs.call(module_._extensions, mod, filename);
-    }
+  // Serve a data document the way the ESM load hook's `dataExtsFor` branch does.
+  // Without any handler Node has none for `.yaml`/`.toml`/`.json5`/`.jsonc`/
+  // `.txt`, so `findLongestRegisteredExtension` falls back to `.js` and compiles
+  // the document AS JavaScript — `a: 1` is a valid labeled statement, so
+  // `require("./x.yaml")` silently produced `{}` instead of the parsed document.
+  const dataExtension = (mod, filename, url, ext) => {
     // Round-tripped through JSON because the ESM path emits
     // `export default ${JSON.stringify(parsed)}` — a TOML date reaches an
     // `import` as a string, so `require()` must not hand back something richer.
@@ -987,11 +961,50 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       default: value === undefined ? undefined : JSON.parse(JSON.stringify(value)),
     };
   };
-  for (const ext of core.allDataExts()) {
+
+  // ONE handler, dispatching PER URL rather than per extension — because the
+  // right answer genuinely differs between two files sharing an extension. A
+  // project that redirects `.yaml` to `ts` still has dependencies whose own
+  // `.yaml` must parse as data, since `dataExtsFor` pins node_modules to the
+  // built-in loaders so a project's `loader` cannot redefine how a dependency
+  // reads its files. Two extension-keyed loops cannot express that: whichever
+  // ran second simply won, which is how `{".yaml":"ts"}` came to compile
+  // TypeScript as raw JavaScript here while the ESM path transpiled it.
+  //
+  // Data first, then transpile: `dataExtsFor` has already resolved the config
+  // for this URL, so an extension it claims is data for this file, and anything
+  // left that the config-aware transpile set claims is code.
+  const nubExtension = (mod, filename) => {
+    const url = pathToFileURL(filename).href;
+    const ext = pathExtname(filename);
+    if (ext in core.dataExtsFor(url)) return dataExtension(mod, filename, url, ext);
+    if (core.TRANSPILE_EXTS.has(ext)) return transpileExtension(mod, filename);
+    return nativeJs.call(module_._extensions, mod, filename);
+  };
+
+  // Registered for every extension either path may claim, so the dispatcher is
+  // reached at all; `nubExtension` then decides. Node's own `.js`/`.json`/`.node`
+  // are never replaced — a project `loader` may redefine how nub reads a file,
+  // not how Node reads `package.json`.
+  //
+  // ENUMERABILITY IS THE LOAD-BEARING PART. Node builds EXTENSIONLESS resolution
+  // from `ObjectKeys(Module._extensions)` (cjs/loader.js `tryExtensions`), so a
+  // plain assignment also enrolls the extension there. The TS family keeps the
+  // enumerable registration it has always had, so extensionless `require("./m")`
+  // still finds `m.ts`. Everything else is NON-ENUMERABLE: making `.yaml`
+  // enumerable would let `require("./config")` resolve `config.yaml` on this tier
+  // while the fast tier — which registers nothing and serves these through
+  // require(esm) — still throws MODULE_NOT_FOUND, trading one tier divergence for
+  // another. Dispatch reads the property directly
+  // (`findLongestRegisteredExtension`, `Module.prototype.load`), so hiding it
+  // from `ObjectKeys` serves an explicit `require("./x.yaml")` while leaving
+  // resolution identical across tiers.
+  const CODE_EXTS = new Set([".ts", ".cts", ".mts", ".tsx", ".jsx"]);
+  for (const ext of new Set([...core.TRANSPILE_EXTS, ...core.allDataExts()])) {
     if (ext === ".js" || ext === ".json" || ext === ".node") continue;
     Object.defineProperty(module_._extensions, ext, {
-      value: dataExtension,
-      enumerable: false,
+      value: nubExtension,
+      enumerable: CODE_EXTS.has(ext),
       configurable: true,
       writable: true,
     });

@@ -1,0 +1,5 @@
+{
+  // Both directions at once: a data extension redirected to code, and a
+  // code extension redirected to data.
+  "loader": { ".yaml": "ts", ".cts": "text" }
+}
