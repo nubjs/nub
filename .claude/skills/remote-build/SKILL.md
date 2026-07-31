@@ -70,9 +70,12 @@ own disk**, which is where the relief comes from. Adding local cores would not h
   blocklist makes rsync walk ~99 GB of gitignored tree and time out at 120s.
 - **A builder can silently degrade the binary three ways** — `aube-resolver/build.rs` ships an
   *empty primer* (falling back to network packument fetches, exit code 0) if `node` is missing, if
-  `generate-primer.mjs` fails to spawn, or if it exits non-zero. A `command -v node` check catches
-  only the first, so the job script also exports **`AUBE_REQUIRE_PRIMER=1`** — the same var
-  `release.yml` sets to make `build.rs` fail loud instead of degrading.
+  `generate-primer.mjs` fails to spawn, or if it exits non-zero. The job script's `command -v node`
+  check catches only the first, and that is deliberate: it does **not** set `AUBE_REQUIRE_PRIMER=1`.
+  That guard protects a *shipped binary*, which is why `release.yml` sets it and `ci.yml` does not —
+  a lint or test gate ships nothing. Setting it here made every remote job die in `build.rs`, because
+  the primer JSON is gitignored (so the `git ls-files`-driven sync cannot carry it) and regenerating
+  it needs the networked registry crawl only the release pipeline runs.
 - **Under `--all-features`, `crates/nub-core/build.rs` panics** unless `runtime/addons/nub-native.node`
   is staged. The job script stages a placeholder, the same trick CI uses for its addon-less job.
 - **`cmake` is mandatory** on the builder — `libz-ng-sys` fails ~35s in without it.

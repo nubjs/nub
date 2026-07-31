@@ -45,8 +45,10 @@
 //      that actually holds.
 //   3. Every VM is labelled `nub-builder=1`, so `--reap` can find and delete strays with
 //      no local state at all.
-// Builds run in the ssh FOREGROUND and are never detached — a detached build reparents to
-// PID 1, outlives its launcher, and is not reaped by the harness.
+// A build is never detached LOCALLY — a detached local build reparents to PID 1, outlives its
+// launcher, and is not reaped by the harness. `--detach` is not that: it detaches on the
+// disposable REMOTE VM, which is single-purpose and carries layer 2's hard TTL, so a forgotten
+// job cannot outlive it or contend with anything here. See the DETACHED MODE block below.
 
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
@@ -554,10 +556,14 @@ async function attachToJob(a: ReturnType<typeof parseArgs>, name: string) {
   const zone = await findZone(name);
   const ip = await instanceIp(name, zone);
   const t0 = Date.now();
-  let seen = 0;
-  // `tail -n +N` resumes at the first line not yet printed, so re-attaching after a kill
-  // replays nothing and drops nothing.
-  //
+  // The offset must survive the PROCESS, not just the loop. Re-running `--attach` is the
+  // normal path, not the exception: the window below is deliberately shorter than the harness
+  // timeout that would otherwise SIGKILL the call, so a long job takes several invocations. A
+  // process-local counter would restart at 0 each time and `tail -n +1` would re-print the
+  // entire transcript on every re-attach — for the agent harness this exists for, that means
+  // re-reading thousands of lines into a context window, and it grows with each attempt.
+  const seenFile = join(tmpdir(), `remote-build-seen-${name}`);
+  let seen = (existsSync(seenFile) && Number(readFileSync(seenFile, "utf8").trim())) || 0;
   // `final` is load-bearing. A poll can land while the job is mid-write, leaving a PARTIAL
   // last line: printing it as though complete and counting it into `seen` makes the next
   // window resume past it, so the rest of that line is lost forever. While polling, drop the
@@ -570,6 +576,7 @@ async function attachToJob(a: ReturnType<typeof parseArgs>, name: string) {
     if (lines.length && (!final || lines[lines.length - 1] === "")) lines.pop();
     for (const l of lines) process.stdout.write(`[r] ${l}\n`);
     seen += lines.length;
+    writeFileSync(seenFile, String(seen));
   };
   for (;;) {
     await drain(false);
@@ -583,6 +590,9 @@ async function attachToJob(a: ReturnType<typeof parseArgs>, name: string) {
       // it has to reach THIS delete too, or `--attach <name> --keep` destroys the very box
       // the operator asked to preserve.
       if (!a.keep) await deleteInstance(name, zone);
+      // Terminal: the offset can never be needed again, so it cleans itself up rather than
+      // accumulating a file per builder in tmp.
+      rmSync(seenFile, { force: true });
       return Number(rc) || 0;
     }
     if (Date.now() - t0 > ATTACH_WINDOW_MS) {
