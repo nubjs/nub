@@ -317,7 +317,9 @@ function installBindingSeam(ancestorOfARoot, stripLongPrefix, refused, walk) {
   // instead would be read as "no entry" and make `realpathSync` return `undefined` SILENTLY.
   const fakeStats = (bigint) => (bigint ? new BigUint64Array(36) : new Float64Array(36));
 
-  // Node 18 reports through a ctx OBJECT carrying a libuv `errno` and no `code`; 20+ throws.
+  // The ctx convention carries a raw libuv `errno` and NO `code`, so `refused` — which reads
+  // `e.code` — cannot be used there. The numbers are platform-specific (`UV_EPERM` is -4048 on
+  // Windows, -1 on POSIX), hence the lookup rather than a comparison against literals.
   const refusedErrno = (errno) => {
     try {
       const name = getSystemErrorName(errno);
