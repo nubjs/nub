@@ -280,6 +280,10 @@ const PROJECT_DIR_VAR_TOKEN: &str = "__NODE_GYP_PROJECT_DIR_VAR__";
 const SHIM_DEPTH_VAR_TOKEN: &str = "__NODE_GYP_SHIM_DEPTH_VAR__";
 const TOOL_VAR_TOKEN: &str = "__NODE_GYP_TOOL_VAR__";
 const REAL_VAR_TOKEN: &str = "__REAL_NODE_GYP_VAR__";
+/// These shims write to the USER'S stderr and never pass through `present.rs`, so a
+/// hardcoded name here is the one brand leak the rebranding layer structurally cannot
+/// reach — a nub user would read `aube:` on a failed native build.
+const PROG_TOKEN: &str = "__PROG__";
 
 /// Substitute every write-time placeholder in a shim template. One function so the
 /// three shims cannot drift into substituting different subsets — a missed token
@@ -294,6 +298,7 @@ fn render_shim(template: &str) -> String {
         .replace(SHIM_DEPTH_VAR_TOKEN, &var("NODE_GYP_SHIM_DEPTH"))
         .replace(TOOL_VAR_TOKEN, &var("NODE_GYP_TOOL"))
         .replace(REAL_VAR_TOKEN, &var("REAL_NODE_GYP"))
+        .replace(PROG_TOKEN, aube_util::prog())
 }
 
 fn write_lazy_shims(shim_dir: &Path) -> miette::Result<()> {
@@ -309,7 +314,7 @@ if [ -f "$tool/node-gyp/package.json" ] && [ -x "$tool/.bin/node-gyp" ]; then
   exec "$tool/.bin/node-gyp" "$@"
 fi
 if [ -z "${__NODE_GYP_EXE_VAR__:-}" ]; then
-  echo "aube: no bootstrapped node-gyp under $tool and no bootstrap entry point" >&2
+  echo "__PROG__: no bootstrapped node-gyp under $tool and no bootstrap entry point" >&2
   exit 1
 fi
 real="$("$__NODE_GYP_EXE_VAR__" __node-gyp-bootstrap "${__NODE_GYP_PROJECT_DIR_VAR__:-$PWD}")"
@@ -383,7 +388,7 @@ if (!real && process.env.__NODE_GYP_EXE_VAR__) {
   const depth = Number(process.env.__NODE_GYP_SHIM_DEPTH_VAR__ || 0) + 1;
   if (depth > 3) {
     console.error(
-      "aube: node-gyp shim re-entered " + depth + " times without reaching a real " +
+      "__PROG__: node-gyp shim re-entered " + depth + " times without reaching a real " +
       "node-gyp — `node-gyp` on PATH resolves back to this shim. Refusing to recurse."
     );
     process.exit(1);
@@ -393,7 +398,7 @@ if (!real && process.env.__NODE_GYP_EXE_VAR__) {
 }
 const result = spawnSync(real, process.argv.slice(2), { stdio: "inherit", shell: isWin });
 if (result.error) {
-  console.error("aube: failed to run node-gyp (" + real + "): " + result.error.message);
+  console.error("__PROG__: failed to run node-gyp (" + real + "): " + result.error.message);
   process.exit(1);
 }
 process.exit(result.status === null ? 1 : result.status);
