@@ -2460,6 +2460,19 @@ fn path_component_matches(entry: &Path, component: &std::ffi::OsStr) -> bool {
     #[cfg(windows)]
     {
         let component = Path::new(component);
+        // PATH and environment values may reach the same directory through
+        // spellings that `canonicalize` does not collapse identically (notably
+        // an 8.3 short name versus the original long path). Compare the opened
+        // directory identities first; this is the same stable Windows
+        // volume/file-id primitive the shim manager uses to prevent pathname
+        // replacement races.
+        if let (Ok(entry), Ok(component)) = (
+            FileHandle::from_path(entry),
+            FileHandle::from_path(component),
+        ) && entry == component
+        {
+            return true;
+        }
         if let (Ok(entry), Ok(component)) = (entry.canonicalize(), component.canonicalize())
             && entry == component
         {
