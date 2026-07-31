@@ -17,6 +17,8 @@ mod resolve;
 mod transform;
 mod tsconfig;
 
+use std::collections::HashMap;
+
 use jsonc_parser::ParseOptions;
 use napi_derive::napi;
 
@@ -47,6 +49,7 @@ pub fn parse_yaml(source: String) -> napi::Result<serde_json::Value> {
     use yaml_rust2::YamlLoader;
 
     check_yaml_depth(&source)?;
+    check_yaml_alias_expansion(&source)?;
     let docs = YamlLoader::load_from_str(&source)
         .map_err(|e| napi::Error::from_reason(format!("YAML parse error: {e}")))?;
 
@@ -114,6 +117,131 @@ fn check_yaml_depth(source: &str) -> napi::Result<()> {
             }
             TokenType::BlockEnd | TokenType::FlowSequenceEnd | TokenType::FlowMappingEnd => {
                 depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// yaml-rust2 clones an anchored collection for every alias reference. Limit
+/// both the collection-alias fan-out and its estimated recursive expansion
+/// before `YamlLoader` starts allocating those clones.
+///
+/// The 50-reference limit matches SnakeYAML Engine's documented default for
+/// collection aliases. It deliberately ignores scalar aliases: a scalar clone
+/// does not amplify a tree. A raw 50-alias limit alone misses exponential
+/// chains (each level can reference its predecessor twice), so the scanner also
+/// adds the known size of each referenced collection to a 100,000-node budget.
+/// That keeps ordinary bounded anchor use intact while rejecting the low-token,
+/// high-allocation shape before yaml-rust2 materializes it.
+const MAX_YAML_COLLECTION_ALIASES: usize = 50;
+const MAX_YAML_ALIAS_MATERIALIZATION: usize = 100_000;
+
+#[derive(Clone, Copy)]
+struct YamlAnchorSize {
+    nodes: usize,
+    collection: bool,
+}
+
+struct YamlCollectionFrame {
+    nodes: usize,
+    anchor: Option<String>,
+}
+
+fn yaml_alias_error(message: impl Into<String>) -> napi::Error {
+    napi::Error::from_reason(format!("YAML parse error: {}", message.into()))
+}
+
+/// Estimate the nodes yaml-rust2 will clone from collection aliases using only
+/// scanner tokens. This is intentionally iterative and runs before the loader;
+/// parsing errors remain the loader's responsibility.
+fn check_yaml_alias_expansion(source: &str) -> napi::Result<()> {
+    use yaml_rust2::scanner::{Scanner, TokenType};
+
+    fn finish_node(
+        nodes: usize,
+        collection: bool,
+        anchor: Option<String>,
+        frames: &mut [YamlCollectionFrame],
+        anchors: &mut HashMap<String, YamlAnchorSize>,
+    ) {
+        if let Some(anchor) = anchor {
+            anchors.insert(anchor, YamlAnchorSize { nodes, collection });
+        }
+        if let Some(parent) = frames.last_mut() {
+            parent.nodes = parent.nodes.saturating_add(nodes);
+        }
+    }
+
+    let mut scanner = Scanner::new(source.chars());
+    let mut anchors = HashMap::new();
+    let mut frames = Vec::new();
+    let mut pending_anchor = None;
+    let mut collection_aliases = 0_usize;
+    let mut materialized_nodes = 0_usize;
+
+    loop {
+        let Some(token) = scanner
+            .next_token()
+            .map_err(|e| napi::Error::from_reason(format!("YAML parse error: {e}")))?
+        else {
+            return Ok(());
+        };
+
+        match token.1 {
+            TokenType::DocumentStart => {
+                // YAML anchors are document-local. A malformed document may
+                // leave a frame open; let YamlLoader report that syntax error.
+                anchors.clear();
+                frames.clear();
+                pending_anchor = None;
+            }
+            TokenType::Anchor(name) => pending_anchor = Some(name),
+            TokenType::Tag(..) => {}
+            TokenType::BlockSequenceStart
+            | TokenType::BlockMappingStart
+            | TokenType::FlowSequenceStart
+            | TokenType::FlowMappingStart => frames.push(YamlCollectionFrame {
+                nodes: 1,
+                anchor: pending_anchor.take(),
+            }),
+            TokenType::BlockEnd | TokenType::FlowSequenceEnd | TokenType::FlowMappingEnd => {
+                if let Some(frame) = frames.pop() {
+                    finish_node(frame.nodes, true, frame.anchor, &mut frames, &mut anchors);
+                }
+            }
+            TokenType::Alias(name) => {
+                let size = anchors.get(&name).copied().unwrap_or(YamlAnchorSize {
+                    nodes: 1,
+                    collection: false,
+                });
+                if size.collection {
+                    collection_aliases += 1;
+                    if collection_aliases > MAX_YAML_COLLECTION_ALIASES {
+                        return Err(yaml_alias_error(format!(
+                            "more than the {MAX_YAML_COLLECTION_ALIASES}-collection-alias limit"
+                        )));
+                    }
+                    materialized_nodes = materialized_nodes.saturating_add(size.nodes);
+                    if materialized_nodes > MAX_YAML_ALIAS_MATERIALIZATION {
+                        return Err(yaml_alias_error(format!(
+                            "alias expansion would materialize more than the {MAX_YAML_ALIAS_MATERIALIZATION}-node limit"
+                        )));
+                    }
+                }
+                // The parser rejects an anchor applied to an alias; retaining it
+                // here only makes this conservative preflight complete the node
+                // accounting before the loader returns that syntax error.
+                finish_node(
+                    size.nodes,
+                    false,
+                    pending_anchor.take(),
+                    &mut frames,
+                    &mut anchors,
+                );
+            }
+            TokenType::Scalar(..) => {
+                finish_node(1, false, pending_anchor.take(), &mut frames, &mut anchors)
             }
             _ => {}
         }
@@ -191,5 +319,40 @@ fn yaml_to_json(yaml: &yaml_rust2::Yaml) -> serde_json::Value {
         yaml_rust2::Yaml::Null | yaml_rust2::Yaml::BadValue | yaml_rust2::Yaml::Alias(_) => {
             serde_json::Value::Null
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_yaml_alias_expansion;
+
+    #[test]
+    fn yaml_alias_preflight_allows_bounded_collection_reuse() {
+        check_yaml_alias_expansion(
+            "defaults: &defaults { enabled: true, names: [one, two] }\n\
+             first: *defaults\n\
+             second: *defaults\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn yaml_alias_preflight_does_not_count_scalar_aliases_as_amplification() {
+        let aliases = std::iter::repeat_n("*label", 64)
+            .collect::<Vec<_>>()
+            .join(", ");
+        check_yaml_alias_expansion(&format!("label: &label value\nitems: [{aliases}]\n")).unwrap();
+    }
+
+    #[test]
+    fn yaml_alias_preflight_rejects_exponential_collection_expansion() {
+        let source = include_str!("../../../tests/fixtures/yaml-alias-budget/bomb.yaml");
+        let error = check_yaml_alias_expansion(source).unwrap_err();
+        assert!(
+            error
+                .reason
+                .contains("alias expansion would materialize more than the 100000-node limit"),
+            "{error}"
+        );
     }
 }

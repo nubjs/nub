@@ -8365,3 +8365,16 @@ fn phantom_dependency_miss_points_at_the_hoisted_opt_out() {
         "a package absent from .store is a genuine miss, not a phantom dep — no hint: {typo}"
     );
 }
+
+#[test]
+fn yaml_alias_bomb_is_rejected_before_loader_materialization() {
+    // Each anchor doubles the previous collection. The compact input would make
+    // yaml-rust2 clone well over the preflight budget, so the native loader must
+    // reject the scanner estimate rather than allocating the expanded tree.
+    let (_, stderr, code) = run_nub("yaml-alias-budget", "main.ts");
+    assert_ne!(code, 0, "the alias bomb must not run");
+    assert!(
+        stderr.contains("alias expansion would materialize more than the 100000-node limit"),
+        "the pre-loader materialization budget must reject it: {stderr}"
+    );
+}

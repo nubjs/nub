@@ -2274,6 +2274,23 @@ mod tests {
     }
 
     #[test]
+    fn project_reader_rejects_jsonc_extensions_outside_the_published_dialect() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        for body in [
+            r#"{ "nodeCompat": 0x1 }"#,
+            r#"{ "nodeCompat": +1 }"#,
+            r#"{ "nodeCompat": true "preload": [] }"#,
+        ] {
+            std::fs::write(&path, body).unwrap();
+            let err = read_project_config_at(&path).expect_err(
+                "the project reader must reject JSONC extensions absent from the schema",
+            );
+            assert!(matches!(err.kind(), ConfigError::Parse(_)), "{body}: {err}");
+        }
+    }
+
+    #[test]
     fn malformed_file_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE_NAME);

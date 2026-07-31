@@ -32,7 +32,6 @@
 
 use std::path::{Path, PathBuf};
 
-use jsonc_parser::ParseOptions;
 use jsonc_parser::cst::{CstInputValue, CstNode, CstObject, CstRootNode};
 
 use crate::project_config::ConfigError;
@@ -149,7 +148,7 @@ fn root_object(path: &Path) -> std::io::Result<(CstRootNode, CstObject)> {
     // process instead of failing. It also keeps the writer from accepting a file
     // the next read would refuse.
     crate::jsonc::check_nesting_depth(&text).map_err(|e| refuse(ConfigError::Parse(e)))?;
-    let root = CstRootNode::parse(&text, &ParseOptions::default())
+    let root = CstRootNode::parse(&text, &crate::jsonc::parse_options())
         .map_err(|e| refuse(ConfigError::Parse(e.to_string())))?;
     // `_or_create`, never `_or_set`: it creates the object only when there is NO
     // root value (the empty/comment-only document, where creating it is right and
@@ -721,7 +720,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nub.jsonc");
         let over_depth = format!("{{\"a\": {}1{}}}", "[".repeat(70), "]".repeat(70));
-        let cases: [&[u8]; 4] = [
+        let cases: [&[u8]; 7] = [
             // Malformed: a brace the author forgot to close.
             b"{\n  // hand-authored\n  \"preload\": [\"./a.ts\"],\n",
             // Parses, but the root is not an object.
@@ -729,6 +728,12 @@ mod tests {
             // Not UTF-8 at all: unreadable, which is not the same as absent.
             b"{ \"tsconfig\": \"caf\xe9.json\" }",
             over_depth.as_bytes(),
+            // These became permissive jsonc-parser 0.32 defaults, but are
+            // outside nub's published JSONC/schema dialect and must not be
+            // preserved-and-edited by the CST writer.
+            b"{ \"nodeCompat\": 0x1 }",
+            b"{ \"nodeCompat\": +1 }",
+            b"{ \"nodeCompat\": true \"preload\": [] }",
         ];
         for original in cases {
             std::fs::write(&path, original).unwrap();

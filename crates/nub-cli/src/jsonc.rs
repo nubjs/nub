@@ -29,13 +29,30 @@ use serde_json::Value;
 /// debug build survives on a 1 MiB Windows stack.
 pub(crate) const MAX_NESTING_DEPTH: usize = 64;
 
+/// Pin acceptance to the JSONC dialect nub documented before `jsonc-parser`
+/// 0.32 added more permissive defaults. Keep this as the one CLI definition:
+/// project/global readers and the comment-preserving CST writer must accept the
+/// same documents, while the separately-built native addon mirrors these fields
+/// in its standalone workspace.
+pub(crate) fn parse_options() -> ParseOptions {
+    ParseOptions {
+        allow_comments: true,
+        allow_loose_object_property_names: true,
+        allow_trailing_commas: true,
+        allow_missing_commas: false,
+        allow_single_quoted_strings: true,
+        allow_hexadecimal_numbers: false,
+        allow_unary_plus_numbers: false,
+    }
+}
+
 /// Parse JSONC after bounding its nesting. `Ok(None)` is an empty or
 /// comment-only document; the error is a human-readable message for the caller
 /// to wrap in its own error type.
 pub(crate) fn parse_to_value(text: &str) -> Result<Option<Value>, String> {
     check_nesting_depth(text)?;
-    let parsed: Option<Value> = jsonc_parser::parse_to_serde_value(text, &ParseOptions::default())
-        .map_err(|e| e.to_string())?;
+    let parsed: Option<Value> =
+        jsonc_parser::parse_to_serde_value(text, &parse_options()).map_err(|e| e.to_string())?;
     if parsed.is_some() {
         return Ok(parsed);
     }
@@ -44,7 +61,7 @@ pub(crate) fn parse_to_value(text: &str) -> Result<Option<Value>, String> {
     // empty document as a valid EMPTY CONFIG, so collapsing the two would turn a
     // file nub must reject into one it silently accepts, dropping every setting
     // in it (`dlx.consent` included). The AST reports presence, not value.
-    let present = jsonc_parser::parse_to_value(text, &ParseOptions::default())
+    let present = jsonc_parser::parse_to_value(text, &parse_options())
         .map_err(|e| e.to_string())?
         .is_some();
     Ok(present.then_some(Value::Null))
