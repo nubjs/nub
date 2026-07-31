@@ -48,16 +48,26 @@ use std::path::{Path, PathBuf};
 
 /// Where a package's project WRITE targets come from, when it has any.
 ///
-/// Only one shape exists because only one was needed: a dotted field path into the
-/// CONSUMER's root `package.json` whose value is a string or array of project-relative
-/// directories. nub owns the field NAME; the consumer owns the value, and every resolved
-/// path is clamped back inside the project root. This is the narrow alternative to
-/// granting the project tree for a package that imposes no directory convention of its
-/// own — the consumer already had to name the directory for the package to work at all.
+/// TWO SHAPES, split on WHO AUTHORED THE PATH, which is the only distinction that matters
+/// for what a reviewer has to check:
+///
+/// - [`ManifestField`](ProjectWrites::ManifestField) — a dotted field path into the
+///   CONSUMER's root `package.json` whose value is a string or array of project-relative
+///   directories. nub owns the field NAME; the consumer owns the value. For a package that
+///   imposes no directory convention of its own, the consumer's manifest is the only place
+///   the answer exists, and reading it is the narrow alternative to granting the project
+///   tree.
+/// - [`Literal`](ProjectWrites::Literal) — a path nub names outright, for a package that
+///   writes where IT decides. `.git/hooks` is the case: git owns that path, the consumer
+///   configures nothing, and a hook installer's entire function is to write there.
+///
+/// Both are clamped back inside the project root by [`contained`], so the shapes differ in
+/// provenance and not in reach.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ProjectWrites {
     None,
     ManifestField(&'static [&'static str]),
+    Literal(&'static [&'static str]),
 }
 
 /// One package's exception. Absent fields mean the jail's baseline already suffices.
@@ -245,6 +255,72 @@ static GOLDEN_PRE_CATALOG_GRANTS: &[(&str, CuratedGrant)] = &[
             ..CuratedGrant::NONE
         },
     ),
+    // THE HOOK-INSTALLER COHORT — five packages, one grant, and the reason it is FIVE
+    // ENTRIES rather than one class rule. A `.git/hooks` write is persistent arbitrary code
+    // execution: the file runs, UNCONFINED, on the developer's next `git commit`, long
+    // after the install that planted it. A class grant keyed on "looks like a hook
+    // installer" would hand that to any dependency able to make itself look like one, which
+    // is every dependency — the jail exists precisely because a lifecycle script is
+    // attacker-authored. Per-package review is what ties the grant to a package whose
+    // ENTIRE STATED FUNCTION is writing that file, which is also the thing the consumer
+    // installed it to do.
+    //
+    // The grant is the hooks DIRECTORY, not a hook file, because the five write at least
+    // four different names between them (`pre-commit`, `pre-push`, `commit-msg`, and
+    // ghooks' full seventeen) plus `.old`/`.backup`/`.bkp` copies of whatever was there.
+    // It is NOT `.git`: none of them needs `config`, `objects` or refs, and `.git` is
+    // already READABLE under the baseline — every one of the five located `<proj>/.git`
+    // under the jail and failed only on the open. Two residuals, both measured rather than
+    // reasoned: all five fall back to `mkdirSync(<git>/hooks)` when that directory is
+    // absent and that mkdir stays denied, and none of them needs a project-root cwd grant,
+    // because a lifecycle script's cwd is its own store cell.
+    (
+        "pre-commit",
+        CuratedGrant {
+            project_writes: ProjectWrites::Literal(&[".git/hooks"]),
+            ..CuratedGrant::NONE
+        },
+    ),
+    (
+        "pre-push",
+        CuratedGrant {
+            project_writes: ProjectWrites::Literal(&[".git/hooks"]),
+            ..CuratedGrant::NONE
+        },
+    ),
+    (
+        "git-validate",
+        CuratedGrant {
+            project_writes: ProjectWrites::Literal(&[".git/hooks"]),
+            ..CuratedGrant::NONE
+        },
+    ),
+    (
+        "git-commit-msg-linter",
+        CuratedGrant {
+            project_writes: ProjectWrites::Literal(&[".git/hooks"]),
+            ..CuratedGrant::NONE
+        },
+    ),
+    (
+        "ghooks",
+        CuratedGrant {
+            project_writes: ProjectWrites::Literal(&[".git/hooks"]),
+            ..CuratedGrant::NONE
+        },
+    ),
+    // Its `standalone/install.js` reads the CONSUMER's project `.npmrc` for proxy settings
+    // before it opens the socket, so the read throws from inside the download path and
+    // surfaces as a download error. Egress is granted separately in `packageNetwork.full`;
+    // this is only the read, and it is the single file rather than the project tree because
+    // a project `.npmrc` routinely carries a registry auth token.
+    (
+        "@pact-foundation/pact-node",
+        CuratedGrant {
+            project_reads: &[".npmrc"],
+            ..CuratedGrant::NONE
+        },
+    ),
 ];
 
 /// Grant `package_name`'s curated exception, if it has one.
@@ -296,7 +372,12 @@ fn curated_table() -> &'static [(&'static str, CuratedGrant)] {
                             project_reads: strs(&g.project_reads),
                             project_writes: match &g.project_writes {
                                 None => ProjectWrites::None,
-                                Some(field) => ProjectWrites::ManifestField(strs(field)),
+                                Some(crate::catalog::ProjectWriteSource::ManifestField(field)) => {
+                                    ProjectWrites::ManifestField(strs(field))
+                                }
+                                Some(crate::catalog::ProjectWriteSource::Literal(paths)) => {
+                                    ProjectWrites::Literal(strs(paths))
+                                }
                             },
                             project_cwd: g.project_cwd,
                         },
@@ -490,6 +571,7 @@ fn project_writes(writes: ProjectWrites, project_root: &Path) -> Vec<PathBuf> {
     let relatives = match writes {
         ProjectWrites::None => return Vec::new(),
         ProjectWrites::ManifestField(field) => manifest_field_paths(project_root, field),
+        ProjectWrites::Literal(paths) => paths.iter().map(|p| (*p).to_string()).collect(),
     };
     relatives
         .into_iter()
@@ -679,6 +761,22 @@ mod tests {
                             .any(|c| matches!(c, std::path::Component::ParentDir)),
                     "{name}: project read `{rel}` must stay inside the project"
                 );
+            }
+            // A `literal` project write is the one field where nub itself authors an
+            // absolute-ish path into the consumer's tree, so it is held to the same bar as
+            // a project read: escape it and the runtime clamp DROPS it, giving a
+            // contributor a grant that looks present and does nothing.
+            if let ProjectWrites::Literal(paths) = grant.project_writes {
+                for rel in paths {
+                    let p = Path::new(rel);
+                    assert!(
+                        !p.is_absolute()
+                            && !p
+                                .components()
+                                .any(|c| matches!(c, std::path::Component::ParentDir)),
+                        "{name}: literal project write `{rel}` must stay inside the project"
+                    );
+                }
             }
             for chain in grant.dependency_dirs {
                 assert!(!chain.is_empty(), "{name}: an empty dependency chain");
