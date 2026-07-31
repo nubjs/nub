@@ -76,16 +76,23 @@ product — or a multi-tenant object store where an attacker can rent a namespac
 hostname and read back what a confined script sent there, is a worse host than one that only
 serves, and the set is kept as small as the evidence allows for that reason.
 
-**But a write-capable host is not automatically disqualified, and `github.com` is the worked
-case.** It serves release assets and `git-receive-pack` on the same hostname, and it was
-refused on exactly that overlap until 2026-07-30. What changed is which control is doing the
-work: the defense is the package entry, so the only script that can reach any of these hosts
-is one a pull request already ratified for network use. Refusing the largest artifact host on
-the internet — 17 of 21 network denials in the three-OS corpus baseline — narrowed what a
-*reviewed* package could do while doing nothing about an unreviewed one, which is the actual
-threat. Weigh a write-capable host against the packages it breaks; do not treat the label as
-the end of the argument. A pure exfiltration sink with no measured install-time demand behind
-it is still a refusal, because there the trade has nothing on the other side.
+**A write-capable host is not automatically disqualified, but this list is not the place to
+settle it, and `github.com` is the worked case.** It serves release assets and
+`git-receive-pack` on the same hostname. For the JAIL that overlap stopped mattering once
+egress became package-identity-gated: the only script that reaches any host is one a pull
+request already ratified, so the hostname is not the boundary doing the work. The entry was
+promoted on that reasoning on 2026-07-30 and reverted the same day, because this list is not
+jail-local — it is also the allowlist for nub's own out-of-jail prefetch, which runs
+unconfined on manifest-controlled URLs, and whose `github.com` widening is separately fenced
+behind the off-by-default `prefetch-github-hosts` cargo feature pending ratification.
+Promoting the host here resolved that contradiction toward widening, silently.
+
+So `github.com` stays refused HERE, and a package that needs to fetch from it is admitted in
+`packageNetwork` instead — which grants the package and touches no host list. Weigh a
+write-capable host against the packages it breaks, but weigh it for the prefetcher, since that
+is the only consumer this list still gates. A pure exfiltration sink with no measured
+install-time demand behind it is still a refusal, because there the trade has nothing on the
+other side.
 
 Serving attacker-authored bytes *into* the jail is **not** disqualifying. Every host here
 delivers third-party binaries by definition; that exposure is inherent in running the
@@ -105,6 +112,38 @@ is the artifact surface for attacker-authored dependency code, and the two popul
 reason to coincide. Membership here is earned by a measured install-time fetch and nothing
 else — `registry.npmjs.org` is absent because no lifecycle script has been measured to need
 it, not because it is categorically barred.
+
+## `packageNetwork` — egress for a package whose hosts are not the point
+
+The second of the two sources of the per-package egress set, and the one to reach for now that
+the jail no longer gates on hostnames. `packageNetwork.full` names a package directly:
+
+```json
+"packageNetwork": {
+  "full": [
+    {
+      "package": "@railway/cli",
+      "evidence": "measured",
+      "observed": "getaddrinfo ENOTFOUND github.com from its postinstall ...",
+      "platform": "macos-arm64"
+    }
+  ]
+}
+```
+
+It carries the same `evidence` / `observed` / `platform` provenance as a host, and it resolves
+to exactly the same grant as being named in a host's `fetchedBy` — the jail's egress is a
+boolean, so there is no weaker or stronger spelling.
+
+**Prefer it over `fetchedBy` whenever the package's demand is the reason for the entry.**
+`fetchedBy` couples two decisions that are no longer related: it grants the package AND adds
+the hostname to `$downloads`, which is the prefetcher's allowlist. `packageNetwork.full`
+grants only the package. Use `fetchedBy` when the host itself has to be in `$downloads` for
+the prefetcher's sake, and record the demand under `packageNetwork.full` otherwise.
+
+`notGranted.packages` overrides both. A package refused on the merits gets nothing, and it may
+still legitimately appear in a `fetchedBy` array as an observation of what it was seen
+fetching — recording the observation must not become a grant.
 
 ## `packageGrants` — per-package filesystem carve-outs
 
@@ -214,15 +253,14 @@ settled verdict while carrying nothing a reviewer can re-check.
 
 | host | reason | why |
 | --- | --- | --- |
+| `github.com` | `write-capable` | It serves `git-receive-pack` on the same hostname as its release assets, and this list is the unconfined prefetcher's allowlist as well as the jail's provenance record. The jail reaches it through a `packageNetwork` entry instead. |
 | `storage.googleapis.com` | `multi-tenant` | An attacker can rent a bucket under the same hostname and read back what a confined script sends there. |
 | `package.cli.amplify.aws` | `not-blocking` | The fetch fails and the install still exits 0. A soft fetch that degrades does not earn an entry. |
 | `workers.cloudflare.com` | `undecided` | No disqualification established — a single-tenant vendor binary path. Recorded as an evidenced candidate; admitting it is a maintainer call. |
 
-`github.com` was here until 2026-07-30, refused as `write-capable`. It is the record's one
-promotion so far and the shape to copy: the entry did not become wrong because new evidence
-arrived about the host, but because the objection it rested on — that a host grant cannot
-separate the release-asset fetch from `git-receive-pack` — stopped being the question once
-package identity, not host granularity, was the control.
+There have been no promotions out of this table. `github.com` was promoted on 2026-07-30 and
+reverted the same day; the reasoning on both sides is in the `networkHosts` section above, and
+the short version is that the objection is now about the prefetcher rather than about the jail.
 
 `undecided` is a real and useful value, not a placeholder. A measured host with no
 established disqualification should be recorded as a candidate rather than silently dropped
@@ -300,8 +338,8 @@ needed it yet; adding a field ahead of a real case would be guessing at its shap
   ratified. Path-scoping would refine what an already-vetted package may do, which is the
   cheaper half of the problem, and the effort it demands is real: terminating TLS for those
   hosts, and re-checking every redirect against the prefix, since a release download 302s to
-  `release-assets.githubusercontent.com`, whose asset paths are opaque signed GUIDs.
-  `github.com` was promoted on those grounds rather than waiting for it.
+  `release-assets.githubusercontent.com`, whose asset paths are opaque signed GUIDs. A package
+  that needs `github.com` gets a `packageNetwork` entry rather than waiting for it.
 
   What follows for a reviewer: judge a host on whether an install-time fetch was measured and
   on what refusing it costs, not on whether some path under it accepts a write. A refusal

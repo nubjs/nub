@@ -5,7 +5,7 @@
       "artifact": "Node headers and libs for a from-source native compile",
       "fetchedBy": ["node-gyp"],
       "evidence": "source-read",
-      "observed": "node-gyp's default dist URL, reached whenever the header cache is cold. NOT observed in the 311-package corpus run: that harness sets `npm_config_nodedir` to the provisioned Node root, as nub does, so node-gyp never fetched. Absence there is not evidence the entry is unnecessary — it is evidence the corpus did not exercise a cold header cache. `fetchedBy` is matched against aube's INSTALLER-RESOLVED name, so this entry admits the `node-gyp` package's own lifecycle spawn and nothing else: a native-build dependency that shells `node-gyp rebuild` is spawned under ITS OWN name and needs its own entry. The demand is real for that whole class and this table cannot express it as a class — recorded here rather than widened, because `npm_config_nodedir` means the cold-cache fetch does not arise under nub.",
+      "observed": "node-gyp's default dist URL, reached whenever the header cache is cold. NOW MEASURED, superseding the earlier note here that the fetch 'does not arise under nub': the isolated single-package macOS arm of 2026-07-31 caught `gyp http GET https://nodejs.org/download/release/v26.5.0/node-v26.5.0-headers.tar.gz` returning 200 during bigint-buffer@1.1.5's unconfined arm, on a harness that does set `npm_config_nodedir`. The cold-header fetch is real, not speculative. It is also not admitted by this entry in the case that matters: `fetchedBy` is matched against aube's INSTALLER-RESOLVED name, so a native-build dependency that shells `node-gyp rebuild` is spawned under ITS OWN name and gets nothing. Whether that class needs a blanket grant is still open — it did not block in that arm, because the confined side never reached node-gyp at all (the lazy-bin shim recursed first).",
       "platform": "any"
     },
     {
@@ -33,6 +33,41 @@
       "platform": "linux-arm64"
     }
   ],
+  "packageNetwork": {
+    "comment": "Per-package egress that names no host. Identical grant to being listed in a networkHosts entry's fetchedBy, but WITHOUT adding a hostname to $downloads — which is also the allowlist for nub's own out-of-jail prefetch. Every entry below fetches a github.com release asset; github.com stays refused in notGranted for the prefetcher's sake, and these packages reach it because the review that added them here ratified them, which is the control the jail actually relies on.",
+    "full": [
+      {
+        "package": "@railway/cli",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com` fetching https://github.com/railwayapp/cli/releases/download/v5.30.1/railway-v5.30.1-aarch64-apple-darwin.tar.gz, no artifact. Unconfined, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@cubejs-backend/cubestore",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com` fetching https://github.com/cube-js/cube.js/releases/download/v1.4.4/cubestored-aarch64-apple-darwin.tar.gz, no artifact. Unconfined, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "hugo-bin",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: `Hugo binary installation failed! Error: getaddrinfo ENOTFOUND github.com`, postinstall exit 1. Unconfined, same fixture: `Hugo binary successfully installed!`, exit 0. The clearest control pair in the set — the package prints its own verdict either way.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "handbrake-js",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com` fetching https://github.com/HandBrake/HandBrake/releases/download/1.11.1/HandBrakeCLI-1.11.1.dmg, no artifact. Unconfined, same fixture: DID-WORK-AND-SUCCEEDED with a 106065024 B HandbrakeCLI. WITH THIS GRANT the download is restored (38059875 B mac.dmg on disk, verified by size against the unconfined arm) and the package STILL FAILS, at `hdiutil attach mac.dmg` -> `hdiutil: attach failed - Device not configured`. Attaching a disk image needs diskarbitrationd, which Seatbelt refuses and no catalog field can grant. The entry is earned on the measured egress denial; do not read the remaining failure as needing a wider grant, and do not count this package as fixed.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@sematext/gc-stats",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: node-pre-gyp `getaddrinfo ENOTFOUND github.com` on https://github.com/adnanrahic/node-gcstats/archive/refs/tags/1.5.9.tar.gz. STATED PLAINLY: this grant does NOT on its own make the package install. Verified with the grant applied — the request now REACHES github and returns `404 Not Found` on that URL, so the grant does exactly its job, but the tag is gone upstream and node-pre-gyp falls back to a source compile that dies on `aube: node-gyp shim re-entered 4 times without reaching a real node-gyp`. Two separate reasons, neither a wider grant: a dead upstream artifact (this package fails on plain npm too) and a nub defect.",
+        "platform": "macos-arm64"
+      }
+    ]
+  },
   "packageGrants": [
     {
       "package": "@prisma/client",
