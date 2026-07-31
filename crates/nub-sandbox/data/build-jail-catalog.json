@@ -3,7 +3,9 @@
     {
       "host": "nodejs.org",
       "artifact": "Node headers and libs for a from-source native compile",
-      "fetchedBy": ["node-gyp"],
+      "fetchedBy": [
+        "node-gyp"
+      ],
       "evidence": "source-read",
       "observed": "node-gyp's default dist URL, reached whenever the header cache is cold. NOW MEASURED, superseding the earlier note here that the fetch 'does not arise under nub': the isolated single-package macOS arm of 2026-07-31 caught `gyp http GET https://nodejs.org/download/release/v26.5.0/node-v26.5.0-headers.tar.gz` returning 200 during bigint-buffer@1.1.5's unconfined arm, on a harness that does set `npm_config_nodedir`. The cold-header fetch is real, not speculative. It is also not admitted by this entry in the case that matters: `fetchedBy` is matched against aube's INSTALLER-RESOLVED name, so a native-build dependency that shells `node-gyp rebuild` is spawned under ITS OWN name and gets nothing. Whether that class needs a blanket grant is still open — it did not block in that arm, because the confined side never reached node-gyp at all (the lazy-bin shim recursed first).",
       "platform": "any"
@@ -11,7 +13,10 @@
     {
       "host": "binaries.prisma.sh",
       "artifact": "Prisma query/schema engine binaries",
-      "fetchedBy": ["@prisma/engines", "@prisma/client"],
+      "fetchedBy": [
+        "@prisma/engines",
+        "@prisma/client"
+      ],
       "evidence": "measured",
       "observed": "Named in Prisma's own firewall-allowlist documentation, and since MEASURED under the jail (macOS arm64, 2026-07-31). `@prisma/client` is on this list because the download does not only happen under `@prisma/engines`' identity: @prisma/client's postinstall re-execs the `prisma` CLI, whose bundled `@prisma/fetch-engine` downloads the engines itself whenever they are not already on disk — the ordinary cold-store case, because aube runs the two postinstalls CONCURRENTLY (measured: both START within 3ms) and the client's routinely reaches the check first. Traced with DEBUG=prisma:* inside the confined spawn: `prisma:fetch-engine:download https://binaries.prisma.sh/all_commits/<sha>/darwin-arm64/libquery_engine.dylib.node.gz will be downloaded to <store>/@prisma+engines@6.19.3/...`; without the grant the same request returns `getaddrinfo ENOTFOUND binaries.prisma.sh`. npm on the identical fixture, with a cold npm cache AND a cold HOME, performs the same download from the same script — so this matches npm rather than widening past it.",
       "platform": "any"
@@ -19,7 +24,9 @@
     {
       "host": "download.cypress.io",
       "artifact": "The Cypress binary (302 redirect origin)",
-      "fetchedBy": ["cypress"],
+      "fetchedBy": [
+        "cypress"
+      ],
       "evidence": "measured",
       "observed": "Resolved by cypress's postinstall in the corpus harness-validation run. Paired with cdn.cypress.io because the 302 lands there; granting only one leaves the install broken.",
       "platform": "linux-arm64"
@@ -27,7 +34,9 @@
     {
       "host": "cdn.cypress.io",
       "artifact": "The Cypress binary (302 redirect target)",
-      "fetchedBy": ["cypress"],
+      "fetchedBy": [
+        "cypress"
+      ],
       "evidence": "measured",
       "observed": "Resolved by cypress's postinstall in the corpus harness-validation run, as the redirect target of download.cypress.io. cypress is the one corpus package that installs successfully under this four-host list.",
       "platform": "linux-arm64"
@@ -37,171 +46,21 @@
     "comment": "Per-package egress that names no host. Identical grant to being listed in a networkHosts entry's fetchedBy, but WITHOUT adding a hostname to $downloads — which is also the allowlist for nub's own out-of-jail prefetch. Every entry below fetches a github.com release asset; github.com stays refused in notGranted for the prefetcher's sake, and these packages reach it because the review that added them here ratified them, which is the control the jail actually relies on.",
     "full": [
       {
-        "package": "@railway/cli",
-        "evidence": "measured",
-        "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com` fetching https://github.com/railwayapp/cli/releases/download/v5.30.1/railway-v5.30.1-aarch64-apple-darwin.tar.gz, no artifact. Unconfined, same fixture: DID-WORK-AND-SUCCEEDED.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "@cubejs-backend/cubestore",
-        "evidence": "measured",
-        "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com` fetching https://github.com/cube-js/cube.js/releases/download/v1.4.4/cubestored-aarch64-apple-darwin.tar.gz, no artifact. Unconfined, same fixture: DID-WORK-AND-SUCCEEDED.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "hugo-bin",
-        "evidence": "measured",
-        "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: `Hugo binary installation failed! Error: getaddrinfo ENOTFOUND github.com`, postinstall exit 1. Unconfined, same fixture: `Hugo binary successfully installed!`, exit 0. The clearest control pair in the set — the package prints its own verdict either way.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "handbrake-js",
-        "evidence": "measured",
-        "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com` fetching https://github.com/HandBrake/HandBrake/releases/download/1.11.1/HandBrakeCLI-1.11.1.dmg, no artifact. Unconfined, same fixture: DID-WORK-AND-SUCCEEDED with a 106065024 B HandbrakeCLI. WITH THIS GRANT the download is restored (38059875 B mac.dmg on disk, verified by size against the unconfined arm) and the package STILL FAILS, at `hdiutil attach mac.dmg` -> `hdiutil: attach failed - Device not configured`. Attaching a disk image needs diskarbitrationd, which Seatbelt refuses and no catalog field can grant. The entry is earned on the measured egress denial; do not read the remaining failure as needing a wider grant, and do not count this package as fixed.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "@sematext/gc-stats",
-        "evidence": "measured",
-        "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: node-pre-gyp `getaddrinfo ENOTFOUND github.com` on https://github.com/adnanrahic/node-gcstats/archive/refs/tags/1.5.9.tar.gz. STATED PLAINLY: this grant does NOT on its own make the package install. Verified with the grant applied — the request now REACHES github and returns `404 Not Found` on that URL, so the grant does exactly its job, but the tag is gone upstream and node-pre-gyp falls back to a source compile that dies on `aube: node-gyp shim re-entered 4 times without reaching a real node-gyp`. Two separate reasons, neither a wider grant: a dead upstream artifact (this package fails on plain npm too) and a nub defect.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "@sitespeed.io/chromedriver",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `break1`/`default1`, 2026-07-31. Confined: `Downloading Chromedriver 149.0.7827.53 from https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.53/mac-arm64/chromedriver-mac-arm64.zip` then `could not be installed: fetch failed`, install script exit 1. Unconfined A0, same fixture: the same URL downloads to completion (8.4 MB, progress to 93.7%) and the install succeeds. storage.googleapis.com stays refused as a HOST in notGranted (multi-tenant); this entry grants the package, not the hostname.",
-        "platform": "macos-arm64"
-      },
-      {
         "package": "@appsignal/nodejs",
         "evidence": "measured",
         "observed": "corpus-v2 shard `d5a`, 2026-07-31. Confined: `Error downloading from mirror: DownloadError: Could not connect to CDN` for `downloadUrl: https://d135dj0rjqvssy.cloudfront.net/0.36.12/appsignal-aarch64-darwin-all-static.tar.gz`, then the same for the fastly mirror `https://appsignal-agent-releases.global.ssl.fastly.net/0.36.12/...`, ending `DownloadError: Could not download agent from any mirror`. Unconfined A0, same fixture: `Installing downloaded agent and extension.` Two mirror hostnames for one artifact is the shape packageNetwork exists for — a host list would have to carry both and neither is wanted in the prefetcher.",
         "platform": "macos-arm64"
       },
       {
-        "package": "@pact-foundation/pact-node",
+        "package": "@confluentinc/kafka-javascript",
         "evidence": "measured",
-        "observed": "corpus-v2 shard `d5a`, 2026-07-31. Confined: `Error downloading binary from https://github.com/pact-foundation/pact-ruby-standalone/releases/download/v2.4.1/pact-2.4.1-osx-arm64.tar.gz`, postinstall exit 1. Unconfined A0, same fixture: downloads, `Checksum passed for pact-2.4.1-osx-arm64.tar.gz`, `Extraction done.` EGRESS IS NOT SUFFICIENT ON ITS OWN for this package — the same confined run also raised `EPERM: operation not permitted, open <proj>/.npmrc` from inside its download path, which is why it additionally carries a packageGrants entry.",
-        "platform": "macos-arm64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 38412364 B / 2257 files. nub v0.6.0 a96f26529005.",
+        "platform": "darwin-arm64"
       },
       {
-        "package": "@shopify/ngrok",
+        "package": "@cubejs-backend/cubestore",
         "evidence": "measured",
-        "observed": "corpus-v2 shard `d5b`, 2026-07-31. Confined: `ngrok - error downloading from URL RequestError: getaddrinfo ENOTFOUND bin.equinox.io` for https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-arm64.zip. Unconfined A0, same fixture: the download completes.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "dugite",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `d5b`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND github.com` fetching the dugite-native release asset. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "@paloaltonetworks/postman-code-generators",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: its postinstall shells `npm install`, which dies `npm error code ENOTFOUND / npm error syscall getaddrinfo` reaching https://registry.npmjs.org/. Unconfined A0, same fixture: the nested install completes. registry.npmjs.org is deliberately NOT promoted to networkHosts — it serves an authenticated PUT publish route on the same hostname, the github.com shape, and a project .npmrc token is routinely present in CI.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "electron-chromedriver",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: `RequestError: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "free-email-domains",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND f.hubspotusercontent40.net`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "mbt",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "saucectl",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: `Installation failed: Error: failed to download: Error: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "@notarize/qlc-cli",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `Unhandled error: Error: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "azure-functions-core-tools",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND cdn.functions.azure.com` fetching https://cdn.functions.azure.com/public/4.0.286861/Azure.Functions.Cli.osx-arm64.4.12.1.zip. Unconfined A0, same fixture: the same URL downloads.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "ffmpeg-static",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "ibm_db",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `ENOTFOUND : https://public.dhe.ibm.com/ibmdl/export/pub/software/data/db2/drivers/odbc_cli/macarm64_odbc_cli.tar.gz` followed by the mirror `ENOTFOUND : https://github.com/ibmdb/db2drivers/raw/main/clidriver/macarm64_odbc_cli.tar.gz`. Unconfined A0, same fixture: the IBM URL resolves. Two hostnames for one artifact, one of them github.com — the case for a package grant rather than a host list.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "node-libcurl",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `[error] install request to https://github.com/JCMais/node-libcurl/releases/download/v5.1.2/node_libcurl-v5.1.2-node-v147-darwin-arm64-unknown.tar.gz failed, reason: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: the prebuilt resolves. ALSO CARRIES BUG-J: the denied prebuild sends it down the from-source node-gyp path, which is the failure the store-entry-root write grant (46661af07c) addresses; with egress restored it takes the prebuilt path and never reaches node-gyp.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "pngout-bin",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `RequestError: getaddrinfo ENOTFOUND raw.github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. raw.github.com is deliberately NOT promoted to networkHosts: it 301s to raw.githubusercontent.com, which serves arbitrary repository content rather than published release assets, and the prefetcher excludes that host on purpose (see GITHUB_PREFETCH_HOSTS in pm_engine/build_prefetch.rs).",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "redis-memory-server",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `Couldnt download /redis-stable.tar.gz! getaddrinfo ENOTFOUND download.redis.io`, then `failed to download/install Redis binaries`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "@go-task/cli",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `Error: Installation failed: Request failed: getaddrinfo ENOTFOUND github.com` for https://github.com/go-task/task/releases/download/v3.52.0/task_darwin_arm64.tar.gz. Unconfined A0, same fixture: the asset downloads via release-assets.githubusercontent.com.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "@typescript-tools/rust-implementation",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `AxiosError: getaddrinfo ENOTFOUND github.com` for https://github.com/typescript-tools/rust-implementation/releases/download/v7.0.8/typescript-tools-aarch64-apple-darwin.tar.gz. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "chromium",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `An error occurred while trying to setup Chromium ... RequestError: getaddrinfo ENOTFOUND www.googleapis.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. www.googleapis.com is a multi-tenant API front door and is not promoted to networkHosts for the same reason storage.googleapis.com is refused there.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "node-jq",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND github.com` fetching https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-macos-arm64. Unconfined A0, same fixture: the jq binary is downloaded and placed.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "protoc-gen-grpc-web",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com` fetching https://github.com/grpc/grpc-web/releases/download/1.5.0/protoc-gen-grpc-web-1.5.0-darwin-aarch64. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "tree-sitter-cli",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND github.com` fetching https://github.com/tree-sitter/tree-sitter/releases/download/v0.26.11/tree-sitter-macos-arm64.gz. Unconfined A0, same fixture: the gz is fetched and the binary written.",
+        "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com` fetching https://github.com/cube-js/cube.js/releases/download/v1.4.4/cubestored-aarch64-apple-darwin.tar.gz, no artifact. Unconfined, same fixture: DID-WORK-AND-SUCCEEDED.",
         "platform": "macos-arm64"
       },
       {
@@ -211,39 +70,93 @@
         "platform": "macos-arm64"
       },
       {
-        "package": "@sitespeed.io/edgedriver",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default4`, 2026-07-31. Confined: `Downloading Edgedriver 149.0.4022.52 from https://msedgedriver.microsoft.com/149.0.4022.52/edgedriver_mac64_m1.zip` then `could not be installed: fetch failed`, install script exit 1. Unconfined A0, same fixture: the same 9.7 MB zip downloads and the install succeeds.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "grpc-tools",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default4`, 2026-07-31. Confined: `[error] install request to https://node-precompiled-binaries.grpc.io/grpc-tools/v1.13.1/darwin-arm64.tar.gz failed, reason: getaddrinfo ENOTFOUND node-precompiled-binaries.grpc.io`. Unconfined A0, same fixture: the prebuilt resolves.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "cldr-data",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default6`, 2026-07-31. Confined: `AxiosError: getaddrinfo ENOTFOUND github.com` fetching https://github.com/unicode-cldr/cldr-core/archive/36.0.0.zip. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. Note this is an /archive/ URL, not /releases/download/ — a path-scoped github grant limited to release assets would not have covered it.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "purescript",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default6`, 2026-07-31. Confined: `FetchError: request to https://github.com/purescript/purescript/releases/download/v0.15.16/macos-arm64.tar.gz failed, reason: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "snyk",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default6`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND downloads.snyk.io` fetching https://downloads.snyk.io/cli/v1.1306.2/snyk-macos-arm64, plus denied static.snyk.io and o30291.ingest.sentry.io. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. STATED PLAINLY: egress here is a per-package BOOLEAN, so this grant also restores the sentry telemetry POST the same script makes. That endpoint would not be admissible as a networkHosts entry on its own — a telemetry sink whose POST body is the product is exactly the exfiltration shape the host criterion refuses — and it is admitted here only as part of ratifying a CLI the user installed deliberately.",
-        "platform": "macos-arm64"
-      },
-      {
         "package": "@eversdk/lib-node",
         "evidence": "measured",
         "observed": "corpus-v2 shard `default7`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND binaries.tonlabs.io` fetching https://binaries.tonlabs.io/eversdk_1_48_nodejs_addon_arm64-darwin.gz. Unconfined A0, same fixture: the addon downloads.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@go-task/cli",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `Error: Installation failed: Request failed: getaddrinfo ENOTFOUND github.com` for https://github.com/go-task/task/releases/download/v3.52.0/task_darwin_arm64.tar.gz. Unconfined A0, same fixture: the asset downloads via release-assets.githubusercontent.com.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@larksuite/cli",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 31591608 B / 1558 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "@notarize/qlc-cli",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `Unhandled error: Error: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@pact-foundation/pact-node",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `d5a`, 2026-07-31. Confined: `Error downloading binary from https://github.com/pact-foundation/pact-ruby-standalone/releases/download/v2.4.1/pact-2.4.1-osx-arm64.tar.gz`, postinstall exit 1. Unconfined A0, same fixture: downloads, `Checksum passed for pact-2.4.1-osx-arm64.tar.gz`, `Extraction done.` EGRESS IS NOT SUFFICIENT ON ITS OWN for this package — the same confined run also raised `EPERM: operation not permitted, open <proj>/.npmrc` from inside its download path, which is why it additionally carries a packageGrants entry.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@paloaltonetworks/postman-code-generators",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: its postinstall shells `npm install`, which dies `npm error code ENOTFOUND / npm error syscall getaddrinfo` reaching https://registry.npmjs.org/. Unconfined A0, same fixture: the nested install completes. registry.npmjs.org is deliberately NOT promoted to networkHosts — it serves an authenticated PUT publish route on the same hostname, the github.com shape, and a project .npmrc token is routinely present in CI.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@playwright/browser-chromium",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 691193515 B / 2154 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "@playwright/browser-firefox",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 232649668 B / 2488 files. nub v0.6.0 a96f26529005.",
+        "platform": "darwin-arm64"
+      },
+      {
+        "package": "@playwright/browser-webkit",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 327852531 B / 8746 files. nub v0.6.0 a96f26529005.",
+        "platform": "darwin-arm64"
+      },
+      {
+        "package": "@posthog/cli",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 47986568 B / 1563 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "@railway/cli",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com` fetching https://github.com/railwayapp/cli/releases/download/v5.30.1/railway-v5.30.1-aarch64-apple-darwin.tar.gz, no artifact. Unconfined, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@sematext/gc-stats",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: node-pre-gyp `getaddrinfo ENOTFOUND github.com` on https://github.com/adnanrahic/node-gcstats/archive/refs/tags/1.5.9.tar.gz. STATED PLAINLY: this grant does NOT on its own make the package install. Verified with the grant applied — the request now REACHES github and returns `404 Not Found` on that URL, so the grant does exactly its job, but the tag is gone upstream and node-pre-gyp falls back to a source compile that dies on `aube: node-gyp shim re-entered 4 times without reaching a real node-gyp`. Two separate reasons, neither a wider grant: a dead upstream artifact (this package fails on plain npm too) and a nub defect.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@shopify/ngrok",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `d5b`, 2026-07-31. Confined: `ngrok - error downloading from URL RequestError: getaddrinfo ENOTFOUND bin.equinox.io` for https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-arm64.zip. Unconfined A0, same fixture: the download completes.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@sitespeed.io/chromedriver",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `break1`/`default1`, 2026-07-31. Confined: `Downloading Chromedriver 149.0.7827.53 from https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.53/mac-arm64/chromedriver-mac-arm64.zip` then `could not be installed: fetch failed`, install script exit 1. Unconfined A0, same fixture: the same URL downloads to completion (8.4 MB, progress to 93.7%) and the install succeeds. storage.googleapis.com stays refused as a HOST in notGranted (multi-tenant); this entry grants the package, not the hostname.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@sitespeed.io/edgedriver",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default4`, 2026-07-31. Confined: `Downloading Edgedriver 149.0.4022.52 from https://msedgedriver.microsoft.com/149.0.4022.52/edgedriver_mac64_m1.zip` then `could not be installed: fetch failed`, install script exit 1. Unconfined A0, same fixture: the same 9.7 MB zip downloads and the install succeeds.",
         "platform": "macos-arm64"
       },
       {
@@ -253,34 +166,58 @@
         "platform": "macos-arm64"
       },
       {
-        "package": "chromedriver",
+        "package": "@typescript-tools/rust-implementation",
         "evidence": "measured",
-        "observed": "corpus-v2 shard `default7`, 2026-07-31. Confined: `ChromeDriver installation failed AxiosError: getaddrinfo ENOTFOUND googlechromelabs.github.io` fetching https://googlechromelabs.github.io/chrome-for-testing/151.0.7922.47.json, which is the manifest that names the storage.googleapis.com download. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `AxiosError: getaddrinfo ENOTFOUND github.com` for https://github.com/typescript-tools/rust-implementation/releases/download/v7.0.8/typescript-tools-aarch64-apple-darwin.tar.gz. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
         "platform": "macos-arm64"
       },
       {
-        "package": "ngrok",
+        "package": "@vscode/ripgrep",
         "evidence": "measured",
-        "observed": "corpus-v2 shard `default7`, 2026-07-31. Confined: `ngrok - error downloading from URL RequestError: getaddrinfo ENOTFOUND bin.equinox.io` for https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-arm64.zip. Unconfined A0, same fixture: the download completes.",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 55850539 B / 1558 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "azure-functions-core-tools",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND cdn.functions.azure.com` fetching https://cdn.functions.azure.com/public/4.0.286861/Azure.Functions.Cli.osx-arm64.4.12.1.zip. Unconfined A0, same fixture: the same URL downloads.",
         "platform": "macos-arm64"
       },
       {
-        "package": "nodejieba",
+        "package": "bootstrap-slider",
         "evidence": "measured",
-        "observed": "corpus-v2 shard `default7`, 2026-07-31. Confined: its node-pre-gyp path falls back to shelling npm, which dies `npm error code ENOTFOUND / npm error syscall getaddrinfo` on https://registry.npmjs.org/@mapbox%2fnode-pre-gyp. Unconfined A0, same fixture: the prebuilt is fetched from github.com and the install succeeds. Both hostnames are covered by this one package grant; neither is added to networkHosts.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "taiko",
-        "evidence": "measured",
-        "observed": "corpus-v2 shard `default7`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND storage.googleapis.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
-        "platform": "macos-arm64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 60986436 B / 4503 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
       },
       {
         "package": "canvas",
         "evidence": "measured",
         "observed": "Isolated single-package macOS arm `iso-canvas`, 2026-07-31. Confined: `prebuild-install warn install getaddrinfo ENOTFOUND github.com`, after which it falls through to a from-source node-gyp build. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. ALSO A BUG-J CARRIER: it only reaches node-gyp because the prebuilt was refused, so with egress restored it takes the prebuild-install path and the gyp write never happens.",
         "platform": "macos-arm64"
+      },
+      {
+        "package": "chromedriver",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default7`, 2026-07-31. Confined: `ChromeDriver installation failed AxiosError: getaddrinfo ENOTFOUND googlechromelabs.github.io` fetching https://googlechromelabs.github.io/chrome-for-testing/151.0.7922.47.json, which is the manifest that names the storage.googleapis.com download. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "chromium",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `An error occurred while trying to setup Chromium ... RequestError: getaddrinfo ENOTFOUND www.googleapis.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. www.googleapis.com is a multi-tenant API front door and is not promoted to networkHosts for the same reason storage.googleapis.com is refused there.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "cldr-data",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default6`, 2026-07-31. Confined: `AxiosError: getaddrinfo ENOTFOUND github.com` fetching https://github.com/unicode-cldr/cldr-core/archive/36.0.0.zip. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. Note this is an /archive/ URL, not /releases/download/ — a path-scoped github grant limited to release assets would not have covered it.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "cloudflared",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 64537053 B / 2398 files. nub v0.6.0 a96f26529005.",
+        "platform": "darwin-arm64"
       },
       {
         "package": "cmark-gfm",
@@ -295,27 +232,21 @@
         "platform": "macos-arm64"
       },
       {
-        "package": "gl",
+        "package": "dugite",
         "evidence": "measured",
-        "observed": "Isolated single-package macOS arm `iso-gl`, 2026-07-31. Confined: `prebuild-install warn install getaddrinfo ENOTFOUND github.com`. THE CONTROL IS BAD AND THE ENTRY SAYS SO: the unconfined A0 arm for this package exits rc=1 with `C++20 or later required.` and scored DID-WORK only because it had emitted 5,994 .o files before dying. So the egress DENIAL is measured and earns the entry, but there is no working unconfined arm to compare against and this package must NOT be counted as fixed by the grant — the same posture as handbrake-js above.",
+        "observed": "corpus-v2 shard `d5b`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND github.com` fetching the dugite-native release asset. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
         "platform": "macos-arm64"
       },
       {
-        "package": "mongodb-client-encryption",
+        "package": "electron",
         "evidence": "measured",
-        "observed": "Isolated single-package macOS arm `iso-mongodb-client-encryption`, 2026-07-31. Confined: `prebuild-install warn install getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
-        "platform": "macos-arm64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 130131869 B / 1390 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
       },
       {
-        "package": "node-zopfli",
+        "package": "electron-chromedriver",
         "evidence": "measured",
-        "observed": "Isolated single-package macOS arm `iso-node-zopfli`, 2026-07-31. Confined: `prebuild-install WARN install getaddrinfo ENOTFOUND github.com`, then a from-source build. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. Also a BUG-J carrier.",
-        "platform": "macos-arm64"
-      },
-      {
-        "package": "realm",
-        "evidence": "measured",
-        "observed": "Isolated single-package macOS arm `iso-realm`, 2026-07-31. Confined: `prebuild-install warn install getaddrinfo ENOTFOUND static.realm.io`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: `RequestError: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
         "platform": "macos-arm64"
       },
       {
@@ -325,20 +256,240 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "ffmpeg-static",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "free-email-domains",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND f.hubspotusercontent40.net`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "gl",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm `iso-gl`, 2026-07-31. Confined: `prebuild-install warn install getaddrinfo ENOTFOUND github.com`. THE CONTROL IS BAD AND THE ENTRY SAYS SO: the unconfined A0 arm for this package exits rc=1 with `C++20 or later required.` and scored DID-WORK only because it had emitted 5,994 .o files before dying. So the egress DENIAL is measured and earns the entry, but there is no working unconfined arm to compare against and this package must NOT be counted as fixed by the grant — the same posture as handbrake-js above.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "grpc-tools",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default4`, 2026-07-31. Confined: `[error] install request to https://node-precompiled-binaries.grpc.io/grpc-tools/v1.13.1/darwin-arm64.tar.gz failed, reason: getaddrinfo ENOTFOUND node-precompiled-binaries.grpc.io`. Unconfined A0, same fixture: the prebuilt resolves.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "handbrake-js",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com` fetching https://github.com/HandBrake/HandBrake/releases/download/1.11.1/HandBrakeCLI-1.11.1.dmg, no artifact. Unconfined, same fixture: DID-WORK-AND-SUCCEEDED with a 106065024 B HandbrakeCLI. WITH THIS GRANT the download is restored (38059875 B mac.dmg on disk, verified by size against the unconfined arm) and the package STILL FAILS, at `hdiutil attach mac.dmg` -> `hdiutil: attach failed - Device not configured`. Attaching a disk image needs diskarbitrationd, which Seatbelt refuses and no catalog field can grant. The entry is earned on the measured egress denial; do not read the remaining failure as needing a wider grant, and do not count this package as fixed.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "hugo-bin",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: `Hugo binary installation failed! Error: getaddrinfo ENOTFOUND github.com`, postinstall exit 1. Unconfined, same fixture: `Hugo binary successfully installed!`, exit 0. The clearest control pair in the set — the package prints its own verdict either way.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "ibm_db",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `ENOTFOUND : https://public.dhe.ibm.com/ibmdl/export/pub/software/data/db2/drivers/odbc_cli/macarm64_odbc_cli.tar.gz` followed by the mirror `ENOTFOUND : https://github.com/ibmdb/db2drivers/raw/main/clidriver/macarm64_odbc_cli.tar.gz`. Unconfined A0, same fixture: the IBM URL resolves. Two hostnames for one artifact, one of them github.com — the case for a package grant rather than a host list.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "inngest-cli",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 64824526 B / 1537 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "ip-num",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 16724736 B / 1557 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "mbt",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "mongodb-client-encryption",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm `iso-mongodb-client-encryption`, 2026-07-31. Confined: `prebuild-install warn install getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "n8n-nodes-evolution-api",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 16740577 B / 1568 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "ngrok",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default7`, 2026-07-31. Confined: `ngrok - error downloading from URL RequestError: getaddrinfo ENOTFOUND bin.equinox.io` for https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-arm64.zip. Unconfined A0, same fixture: the download completes.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "node-jq",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND github.com` fetching https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-macos-arm64. Unconfined A0, same fixture: the jq binary is downloaded and placed.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "node-libcurl",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `[error] install request to https://github.com/JCMais/node-libcurl/releases/download/v5.1.2/node_libcurl-v5.1.2-node-v147-darwin-arm64-unknown.tar.gz failed, reason: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: the prebuilt resolves. ALSO CARRIES BUG-J: the denied prebuild sends it down the from-source node-gyp path, which is the failure the store-entry-root write grant (46661af07c) addresses; with egress restored it takes the prebuilt path and never reaches node-gyp.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "node-zopfli",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm `iso-node-zopfli`, 2026-07-31. Confined: `prebuild-install WARN install getaddrinfo ENOTFOUND github.com`, then a from-source build. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. Also a BUG-J carrier.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "nodejieba",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default7`, 2026-07-31. Confined: its node-pre-gyp path falls back to shelling npm, which dies `npm error code ENOTFOUND / npm error syscall getaddrinfo` on https://registry.npmjs.org/@mapbox%2fnode-pre-gyp. Unconfined A0, same fixture: the prebuilt is fetched from github.com and the install succeeds. Both hostnames are covered by this one package grant; neither is added to networkHosts.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "odbc",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 18635686 B / 1444 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "pngout-bin",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `RequestError: getaddrinfo ENOTFOUND raw.github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. raw.github.com is deliberately NOT promoted to networkHosts: it 301s to raw.githubusercontent.com, which serves arbitrary repository content rather than published release assets, and the prefetcher excludes that host on purpose (see GITHUB_PREFETCH_HOSTS in pm_engine/build_prefetch.rs).",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "postman-code-generators",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 16851911 B / 1557 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "protoc-gen-grpc-web",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com` fetching https://github.com/grpc/grpc-web/releases/download/1.5.0/protoc-gen-grpc-web-1.5.0-darwin-aarch64. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "purescript",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default6`, 2026-07-31. Confined: `FetchError: request to https://github.com/purescript/purescript/releases/download/v0.15.16/macos-arm64.tar.gz failed, reason: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "realm",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm `iso-realm`, 2026-07-31. Confined: `prebuild-install warn install getaddrinfo ENOTFOUND static.realm.io`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "redis-memory-server",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `Couldnt download /redis-stable.tar.gz! getaddrinfo ENOTFOUND download.redis.io`, then `failed to download/install Redis binaries`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "saucectl",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: `Installation failed: Error: failed to download: Error: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "skia-canvas",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 47186585 B / 1558 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "snyk",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default6`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND downloads.snyk.io` fetching https://downloads.snyk.io/cli/v1.1306.2/snyk-macos-arm64, plus denied static.snyk.io and o30291.ingest.sentry.io. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. STATED PLAINLY: egress here is a per-package BOOLEAN, so this grant also restores the sentry telemetry POST the same script makes. That endpoint would not be admissible as a networkHosts entry on its own — a telemetry sink whose POST body is the product is exactly the exfiltration shape the host criterion refuses — and it is admitted here only as part of ratifying a CLI the user installed deliberately.",
+        "platform": "macos-arm64"
+      },
+      {
         "package": "sqlite3",
         "evidence": "measured",
         "observed": "Isolated single-package macOS arm `iso-sqlite3`, 2026-07-31. Confined: `prebuild-install warn install getaddrinfo ENOTFOUND github.com`, then a from-source build. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. Also a BUG-J carrier.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "squawk-cli",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 23342007 B / 1557 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "supabase",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 110276485 B / 1286 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "taiko",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default7`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND storage.googleapis.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "tree-sitter-cli",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND github.com` fetching https://github.com/tree-sitter/tree-sitter/releases/download/v0.26.11/tree-sitter-macos-arm64.gz. Unconfined A0, same fixture: the gz is fetched and the binary written.",
         "platform": "macos-arm64"
       }
     ]
   },
   "packageGrants": [
     {
+      "package": "@danmarshall/deckgl-typings",
+      "versions": "4.9.28",
+      "siblingDirs": [
+        "@types"
+      ],
+      "mechanism": "Its postinstall runs `indefinitely-typed`, which computes path.resolve(cwd, '../..'), asserts that directory is named node_modules, then mkdirs @types there and copySyncs each --folder argument into it. The write target is <own node_modules>/@types — the same enclosing-node_modules sibling shape as Prisma, under a different name.",
+      "evidence": "measured",
+      "observed": "EPERM mkdir <own node_modules>/@types. With the grant, 20 copied type folders present; without it, absent.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "@pact-foundation/pact-node",
+      "versions": "10.18.0",
+      "projectReads": [
+        ".npmrc"
+      ],
+      "mechanism": "standalone/install.js downloads the Pact Ruby standalone release, and before opening the socket it reads the CONSUMER's project `.npmrc` for proxy settings (`https-proxy` / `proxy`). That read is inside the download path, so it throws even though the failure surfaces as a download error. The egress half is granted separately under packageNetwork.full; this entry is only the manifest-adjacent read, and it is deliberately the single file rather than the project tree.",
+      "evidence": "measured",
+      "observed": "corpus-v2 shard `d5a`, 2026-07-31. Confined: `Error: Error while installing binary: Postinstalled Failed Unexpectedly: Error downloading binary from https://github.com/pact-foundation/pact-ruby-standalone/releases/download/v2.4.1/pact-2.4.1-osx-arm64.tar.gz: Error: Error while installing binary: Error: EPERM: operation not permitted, open '<proj>/.npmrc'` — the ONLY `.npmrc` EPERM in all 60 run directories. Unconfined A0, same fixture: `Checksum passed for 'pact-2.4.1-osx-arm64.tar.gz'. Extraction done.` STATED PLAINLY: a project `.npmrc` routinely carries a registry auth token, so this grant lets a lifecycle script read one. It is admitted because the script already runs as the user and reads that file on npm/pnpm/yarn today — the jail is loosening back toward the baseline it started from, not past it — and because the alternative is the package failing outright.",
+      "platform": "macos-arm64"
+    },
+    {
       "package": "@prisma/client",
       "versions": "6.x (7.0.0 dropped the postinstall entirely)",
-      "siblingDirs": [".prisma"],
-      "dependencyDirs": [["prisma"], ["prisma", "@prisma/engines"]],
-      "projectReads": ["prisma"],
+      "siblingDirs": [
+        ".prisma"
+      ],
+      "dependencyDirs": [
+        [
+          "prisma"
+        ],
+        [
+          "prisma",
+          "@prisma/engines"
+        ]
+      ],
+      "projectReads": [
+        "prisma"
+      ],
       "projectCwd": true,
       "mechanism": "scripts/postinstall.js does four things, and each masks the next: it calls process.chdir(INIT_CWD); createDefaultGeneratedThrowFiles unconditionally mkdirs path.join(__dirname, '../../../.prisma'), a sibling of @prisma in the package's own enclosing node_modules; it looks for the prisma CLI; then it re-execs that CLI as `prisma generate`, which reads the consumer's prisma/ schema directory. The CLI lookup is why the dependencyDirs are here and not the schema: `require.resolve('prisma')` ALWAYS throws on 6.19.3 (its exports map points `.` at ./build/types.js, which the published tarball does not contain — reproduced on plain node with no sandbox), so the script always falls through to `exec('prisma -v')`, and the CLI it then runs writes the query engine into `@prisma/engines`' package directory and copies it into its own. Those two directories belong to OTHER packages, so package_dir does not cover them. The generated client itself lands inside package_dir and needs no grant.",
       "evidence": "measured",
@@ -346,18 +497,53 @@
       "platform": "macos-arm64"
     },
     {
-      "package": "@danmarshall/deckgl-typings",
-      "versions": "4.9.28",
-      "siblingDirs": ["@types"],
-      "mechanism": "Its postinstall runs `indefinitely-typed`, which computes path.resolve(cwd, '../..'), asserts that directory is named node_modules, then mkdirs @types there and copySyncs each --folder argument into it. The write target is <own node_modules>/@types — the same enclosing-node_modules sibling shape as Prisma, under a different name.",
+      "package": "ghooks",
+      "versions": "2.0.4",
+      "projectWrites": {
+        "literal": [
+          ".git/hooks"
+        ]
+      },
+      "mechanism": "lib/install.js finds the repository with `findup.sync(process.cwd(), '.git')`, resolves a `.git` FILE's `gitdir:` pointer, then writes ALL SEVENTEEN git hook names into `<git>/hooks` — applypatch-msg through post-rewrite — renaming any hook it did not generate to `<name>.bkp` and chmodding each 0755. Seventeen names is why the grant is the hooks DIRECTORY rather than an enumeration: the list would have to be kept in sync with git's. Its cwd is its own store cell, which the jail already grants, so the `process.cwd()` call needs no project-root grant — verified, not assumed.",
       "evidence": "measured",
-      "observed": "EPERM mkdir <own node_modules>/@types. With the grant, 20 copied type folders present; without it, absent.",
+      "observed": "Isolated macOS arm on nub 321e731f (HEAD 4eca7e7af4 plus this change), 2026-07-31, both arms jail-ON with the catalog as the only variable. Confined WITHOUT the grant: ZERO non-sample files in `<proj>/.git/hooks`. Confined WITH it: all 17 hooks written, byte-identical to the jail-off arm apart from the run directory each script bakes in. THIS PACKAGE PRINTS NO EPERM — `bin/module-install` wraps the installer in a bare try/catch and reports a misleading `npm@2.15` message instead — so unlike the other four in this cohort its entry rests on the artifact differential rather than on a denial message, and its exit code is 0 in both arms.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "git-commit-msg-linter",
+      "versions": "5.0.8",
+      "projectWrites": {
+        "literal": [
+          ".git/hooks"
+        ]
+      },
+      "mechanism": "install.js guesses the project root from a list (`process.cwd()`, its own `../../..` chain), resolves `<git>/hooks`, copies any existing `commit-msg` to `commit-msg.old`, writes its own, and chmods 0777. It writes `commit-msg` rather than `pre-commit`, which is why the grant names the hooks DIRECTORY and not a hook file — the five installers in this table between them write at least three different hook names, and ghooks writes seventeen.",
+      "evidence": "measured",
+      "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `[git-commit-msg-linter]: Failed to create the hook file in your .git/hooks folder because: EPERM: operation not permitted, open '<proj>/.git/hooks/commit-msg'`, then `The hook was not installed.` — and then, misleadingly, `Installed successfully.`, so this package's EXIT CODE is not a usable signal and the artifact must be checked instead. Unconfined A0, same fixture: `Install starting...` straight to `Installed successfully.` with the hook file present.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "git-validate",
+      "versions": "2.2.4",
+      "projectWrites": {
+        "literal": [
+          ".git/hooks"
+        ]
+      },
+      "mechanism": "`bin/install.js` calls `lib/utils.js installHooks(['pre-commit','pre-push'])`, which for each name renames any existing `<hookRoot>/<hook>` to `<hook>.backup`, unlinks a broken symlink at that path, and `Fs.writeFileSync(dest, ..., { mode: 511 })`. Its `configureHook` helper also rewrites the consumer's root package.json, but that path is not reached by the postinstall this entry covers and is NOT granted.",
+      "evidence": "measured",
+      "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: an uncaught `Error: EPERM: operation not permitted, open '<proj>/.git/hooks/pre-commit'` with `syscall: 'open'` thrown from `lib/utils.js:259` inside `exports.installHooks`, aborting the install script. Unconfined A0, same fixture: both hooks are written.",
       "platform": "macos-arm64"
     },
     {
       "package": "msw",
       "versions": "2.15.0",
-      "projectWrites": { "manifestField": ["msw", "workerDirectory"] },
+      "projectWrites": {
+        "manifestField": [
+          "msw",
+          "workerDirectory"
+        ]
+      },
       "projectCwd": true,
       "mechanism": "config/scripts/postinstall.js reads the CONSUMER's package.json for msw.workerDirectory, returns silently if absent, and otherwise re-execs its own CLI with cwd set to INIT_CWD to copy mockServiceWorker.js into each listed directory. The directories come from the field rather than a literal because msw imposes no convention — the consumer picks them.",
       "evidence": "measured",
@@ -367,7 +553,11 @@
     {
       "package": "pre-commit",
       "versions": "2.0.0",
-      "projectWrites": { "literal": [".git/hooks"] },
+      "projectWrites": {
+        "literal": [
+          ".git/hooks"
+        ]
+      },
       "mechanism": "install.js walks up from its own __dirname testing `path.resolve(<dir>, '.git')` at each level, resolves a `.git` FILE's `gitdir:` pointer if it finds one, then writes `<git>/hooks/pre-commit` and chmods it 0755, first copying any existing hook to `pre-commit.old`. The write target is git's path, not one the consumer configures, which is why this is a `literal` rather than a `manifestField`. It also does `if (!exists(hooks)) fs.mkdirSync(hooks)` — that mkdir is NOT granted (it would need write on `.git` itself), so a repository with no `hooks/` directory still fails; `git init` always creates one.",
       "evidence": "measured",
       "observed": "corpus-v2 shards `break1` and `default6`, 2026-07-31. Confined: `pre-commit: Found .git in <proj>/.git` — so `.git` is READABLE under the jail and only the write is refused — then `pre-commit: Failed to create the hook file in your .git/hooks folder because: EPERM: operation not permitted, open '<proj>/.git/hooks/pre-commit'`, `The hook was not installed.`, followed by a consequential `ENOENT ... chmod` on the file that was never created. Unconfined A0, same fixture: the hook file is written. The class control is clean in every shard — `.git/hooks` non-`.sample` files appear in every A0 arm and in zero PROD arms.",
@@ -376,56 +566,31 @@
     {
       "package": "pre-push",
       "versions": "0.1.4",
-      "projectWrites": { "literal": [".git/hooks"] },
+      "projectWrites": {
+        "literal": [
+          ".git/hooks"
+        ]
+      },
       "mechanism": "The same installer shape as `pre-commit`, by the same author: walk up for `.git`, resolve a gitdir pointer, write `<git>/hooks/pre-push`, chmod 0775, back up an existing hook to `pre-push.old`. Bounded to the hooks directory for the same reason — the `fs.mkdirSync(hooks)` fallback is deliberately not granted.",
       "evidence": "measured",
       "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `pre-push: Found .git folder in <proj>/.git`, then `pre-push: Failed to create the hook file in your .git/hooks folder because: EPERM: operation not permitted, open '<proj>/.git/hooks/pre-push'`. Unconfined A0, same fixture: the hook is written.",
       "platform": "macos-arm64"
     },
     {
-      "package": "git-validate",
-      "versions": "2.2.4",
-      "projectWrites": { "literal": [".git/hooks"] },
-      "mechanism": "`bin/install.js` calls `lib/utils.js installHooks(['pre-commit','pre-push'])`, which for each name renames any existing `<hookRoot>/<hook>` to `<hook>.backup`, unlinks a broken symlink at that path, and `Fs.writeFileSync(dest, ..., { mode: 511 })`. Its `configureHook` helper also rewrites the consumer's root package.json, but that path is not reached by the postinstall this entry covers and is NOT granted.",
-      "evidence": "measured",
-      "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: an uncaught `Error: EPERM: operation not permitted, open '<proj>/.git/hooks/pre-commit'` with `syscall: 'open'` thrown from `lib/utils.js:259` inside `exports.installHooks`, aborting the install script. Unconfined A0, same fixture: both hooks are written.",
-      "platform": "macos-arm64"
-    },
-    {
-      "package": "git-commit-msg-linter",
-      "versions": "5.0.8",
-      "projectWrites": { "literal": [".git/hooks"] },
-      "mechanism": "install.js guesses the project root from a list (`process.cwd()`, its own `../../..` chain), resolves `<git>/hooks`, copies any existing `commit-msg` to `commit-msg.old`, writes its own, and chmods 0777. It writes `commit-msg` rather than `pre-commit`, which is why the grant names the hooks DIRECTORY and not a hook file — the five installers in this table between them write at least three different hook names, and ghooks writes seventeen.",
-      "evidence": "measured",
-      "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `[git-commit-msg-linter]: Failed to create the hook file in your .git/hooks folder because: EPERM: operation not permitted, open '<proj>/.git/hooks/commit-msg'`, then `The hook was not installed.` — and then, misleadingly, `Installed successfully.`, so this package's EXIT CODE is not a usable signal and the artifact must be checked instead. Unconfined A0, same fixture: `Install starting...` straight to `Installed successfully.` with the hook file present.",
-      "platform": "macos-arm64"
-    },
-    {
-      "package": "ghooks",
-      "versions": "2.0.4",
-      "projectWrites": { "literal": [".git/hooks"] },
-      "mechanism": "lib/install.js finds the repository with `findup.sync(process.cwd(), '.git')`, resolves a `.git` FILE's `gitdir:` pointer, then writes ALL SEVENTEEN git hook names into `<git>/hooks` — applypatch-msg through post-rewrite — renaming any hook it did not generate to `<name>.bkp` and chmodding each 0755. Seventeen names is why the grant is the hooks DIRECTORY rather than an enumeration: the list would have to be kept in sync with git's. Its cwd is its own store cell, which the jail already grants, so the `process.cwd()` call needs no project-root grant — verified, not assumed.",
-      "evidence": "measured",
-      "observed": "Isolated macOS arm on nub 321e731f (HEAD 4eca7e7af4 plus this change), 2026-07-31, both arms jail-ON with the catalog as the only variable. Confined WITHOUT the grant: ZERO non-sample files in `<proj>/.git/hooks`. Confined WITH it: all 17 hooks written, byte-identical to the jail-off arm apart from the run directory each script bakes in. THIS PACKAGE PRINTS NO EPERM — `bin/module-install` wraps the installer in a bare try/catch and reports a misleading `npm@2.15` message instead — so unlike the other four in this cohort its entry rests on the artifact differential rather than on a denial message, and its exit code is 0 in both arms.",
-      "platform": "macos-arm64"
-    },
-    {
       "package": "shared-git-hooks",
       "versions": "1.2.1",
-      "projectReads": [".git/HEAD", ".git/config"],
-      "projectWrites": { "literal": [".git/hooks"] },
+      "projectReads": [
+        ".git/HEAD",
+        ".git/config"
+      ],
+      "projectWrites": {
+        "literal": [
+          ".git/hooks"
+        ]
+      },
       "mechanism": "Its postinstall runs `git rev-parse --show-toplevel --git-path hooks` to locate the repository, then SYMLINKS all seventeen git hook names in that directory at its own `hook.sh`. Two distinct needs, and they are staged: git's repository detection reads `.git/HEAD` and then `.git/config`, and only after both does it reach the hooks directory to create the links. The reads are the two FILES rather than the `.git` subtree deliberately — a subtree read would pull in `objects/`, the consumer's entire source history, and the ladder below shows it buys nothing.",
       "evidence": "measured",
       "observed": "Isolated macOS arm on nub 1731fc6e (`e12e1d2ca8`, which includes the project-root cwd grant from `65c51530cb`), 2026-07-31. THREE ARMS, all jail-ON, catalog the only variable. (a) HEAD's catalog: `fatal: not a git repository (or any of the parent directories): .git`, ZERO hooks. (b) This catalog WITHOUT this entry — i.e. the cwd grant alone: identical `fatal: not a git repository`, ZERO hooks, which is what shows the cwd fix does not close this row on its own. (c) With this entry: all 17 hooks present as symlinks at `<store cell>/shared-git-hooks/hook.sh`, matching the jail-off arm's 17 name-for-name. The corpus triage had filed this row under BUG-CWD; the cwd grant is necessary and is NOT sufficient. Granting the whole `.git` subtree instead of the two files was measured separately and reached the same rc 0, so the narrower grant is not a guess.",
-      "platform": "macos-arm64"
-    },
-    {
-      "package": "@pact-foundation/pact-node",
-      "versions": "10.18.0",
-      "projectReads": [".npmrc"],
-      "mechanism": "standalone/install.js downloads the Pact Ruby standalone release, and before opening the socket it reads the CONSUMER's project `.npmrc` for proxy settings (`https-proxy` / `proxy`). That read is inside the download path, so it throws even though the failure surfaces as a download error. The egress half is granted separately under packageNetwork.full; this entry is only the manifest-adjacent read, and it is deliberately the single file rather than the project tree.",
-      "evidence": "measured",
-      "observed": "corpus-v2 shard `d5a`, 2026-07-31. Confined: `Error: Error while installing binary: Postinstalled Failed Unexpectedly: Error downloading binary from https://github.com/pact-foundation/pact-ruby-standalone/releases/download/v2.4.1/pact-2.4.1-osx-arm64.tar.gz: Error: Error while installing binary: Error: EPERM: operation not permitted, open '<proj>/.npmrc'` — the ONLY `.npmrc` EPERM in all 60 run directories. Unconfined A0, same fixture: `Checksum passed for 'pact-2.4.1-osx-arm64.tar.gz'. Extraction done.` STATED PLAINLY: a project `.npmrc` routinely carries a registry auth token, so this grant lets a lifecycle script read one. It is admitted because the script already runs as the user and reads that file on npm/pnpm/yarn today — the jail is loosening back toward the baseline it started from, not past it — and because the alternative is the package failing outright.",
       "platform": "macos-arm64"
     }
   ],
