@@ -107,7 +107,17 @@ function paths(root, prefix = '') {
   try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return out; }
   for (const e of entries) {
     const rel = prefix ? `${prefix}/${e.name}` : e.name;
-    if (!prefix && e.name === '.git') { out.push(...paths(path.join(root, e.name, 'hooks'), '.git/hooks')); continue; }
+    // GIT'S OWN BOOKKEEPING IS NOT A SIDE EFFECT, but `.git/hooks` underneath it very much is.
+    //
+    // This test was INERT until now: it read `!prefix`, i.e. only at the top level of the scan —
+    // but the scan root is the FIXTURE root holding `proj/` and `home/`, so `.git` was always
+    // reached with prefix `proj` and the whole tree was walked. It went unnoticed while the
+    // repo was empty; giving the fixture a real initial commit made git objects appear, and a
+    // commit object embeds a timestamp, so they differ per fixture and read as side effects.
+    if (e.name === '.git' && e.isDirectory()) {
+      out.push(...paths(path.join(root, e.name, 'hooks'), `${rel}/hooks`));
+      continue;
+    }
     if (e.isDirectory()) out.push(...paths(path.join(root, e.name), rel));
     else out.push(rel);
   }
@@ -127,6 +137,11 @@ function makeFixture(dir, pkg, version, { jailOff }) {
   const manifest = {
     name: 'searchfix',
     version: '1.0.0',
+    private: true,
+    type: 'module',
+    main: 'src/index.ts',
+    engines: { node: '>=18' },
+    scripts: { build: 'echo build', test: 'echo test' },
     dependencies: { [pkg]: version },
     'simple-git-hooks': { 'pre-commit': 'echo nub-fixture' },
     husky: { hooks: { 'pre-commit': 'echo nub-fixture' } },
@@ -136,7 +151,27 @@ function makeFixture(dir, pkg, version, { jailOff }) {
   // side-effects-cache=false is load-bearing: a warm cache replays a prior build
   // and the lifecycle script NEVER SPAWNS, which reads exactly like a jail denial.
   fs.writeFileSync(path.join(proj, '.npmrc'), 'side-effects-cache=false\n');
-  execFileSync('git', ['init', '-q', '.'], { cwd: proj });   // hook installers no-op without one
+  // A REAL repository, not a bare `git init`. An empty repo has no HEAD, no identity and no
+  // remote, and tools check all three: `git rev-parse HEAD` fails before the first commit, a
+  // hook that commits fails without user.email, and anything deriving a repo name reads
+  // `remote.origin.url`. Each of those is another silent bail.
+  const git = (...a) => execFileSync('git', a, { cwd: proj, stdio: 'ignore' });
+  git('init', '-q', '.');
+  git('config', 'user.email', 'fixture@nub.invalid');
+  git('config', 'user.name', 'nub fixture');
+  git('config', 'commit.gpgsign', 'false');
+  git('remote', 'add', 'origin', 'https://github.com/nub-fixture/fixture.git');
+  fs.writeFileSync(path.join(proj, '.gitignore'), 'node_modules\n');
+  fs.writeFileSync(path.join(proj, 'README.md'), '# fixture\n');
+  git('add', '-A');
+  // Pinned dates: a commit object embeds author/committer time, so an unpinned commit differs
+  // in every fixture and injects varying paths into the oracle.
+  execFileSync('git', ['commit', '-q', '-m', 'initial'], {
+    cwd: proj,
+    stdio: 'ignore',
+    env: { ...process.env,
+      GIT_AUTHOR_DATE: '2020-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2020-01-01T00:00:00Z' },
+  });
 
   // A REALISTIC PROJECT, not an empty directory.
   //
@@ -184,7 +219,20 @@ function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg }
   // Environment a real project would carry. `DATABASE_URL` is the prisma family's precondition —
   // without it `prisma generate` bails and measures as "needs nothing". Kept generic and
   // non-secret for the same reason as the fixture files above.
+  // ⛔ SCRUB CI DETECTION. A large family of postinstalls — husky, cypress, puppeteer,
+  // telemetry installers — deliberately SKIP their work when they believe they are on CI. The
+  // harness spreads `process.env`, so a sweep run on a CI runner would measure those packages as
+  // needing nothing and ship grants derived from scripts that never executed. The catalog is
+  // meant to be regenerated on Linux and Windows machines, which is exactly where CI is set.
+  //
+  // Scrubbed rather than forced to a value: we want the DEVELOPER-MACHINE path, which is the one
+  // that runs more code, and a wider measured grant is the safe direction.
   const env = { ...process.env, HOME: home, DATABASE_URL: 'postgresql://user:pass@localhost:5432/db' };
+  for (const k of ['CI', 'CONTINUOUS_INTEGRATION', 'BUILD_NUMBER', 'RUN_ID', 'GITHUB_ACTIONS',
+                   'GITLAB_CI', 'CIRCLECI', 'TRAVIS', 'JENKINS_URL', 'TEAMCITY_VERSION',
+                   'BUILDKITE', 'DRONE', 'APPVEYOR', 'CODEBUILD_BUILD_ID', 'TF_BUILD']) {
+    delete env[k];
+  }
   if (catalogFile) env[OVERRIDE_ENV] = catalogFile;
   let log = '';
   let rc = 0;
