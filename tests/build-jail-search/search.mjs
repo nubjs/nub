@@ -121,13 +121,42 @@ function makeFixture(dir, pkg, version, { jailOff }) {
   const proj = path.join(dir, 'proj');
   fs.mkdirSync(proj, { recursive: true });
   fs.mkdirSync(path.join(dir, 'home'), { recursive: true });
-  const manifest = { name: 'searchfix', version: '1.0.0', dependencies: { [pkg]: version } };
+  // Config keys a real consumer would carry. Same reason as the fixture files below: a script
+  // that bails for a missing key measures as "needs nothing", which is the verdict that ships a
+  // broken grant. `simple-git-hooks` reads its own key and exits silently without one.
+  const manifest = {
+    name: 'searchfix',
+    version: '1.0.0',
+    dependencies: { [pkg]: version },
+    'simple-git-hooks': { 'pre-commit': 'echo nub-fixture' },
+    husky: { hooks: { 'pre-commit': 'echo nub-fixture' } },
+  };
   if (jailOff) manifest.dependenciesMeta = { [pkg]: { sandbox: false } };
   fs.writeFileSync(path.join(proj, 'package.json'), JSON.stringify(manifest, null, 2));
   // side-effects-cache=false is load-bearing: a warm cache replays a prior build
   // and the lifecycle script NEVER SPAWNS, which reads exactly like a jail denial.
   fs.writeFileSync(path.join(proj, '.npmrc'), 'side-effects-cache=false\n');
   execFileSync('git', ['init', '-q', '.'], { cwd: proj });   // hook installers no-op without one
+
+  // A REALISTIC PROJECT, not an empty directory.
+  //
+  // A script that BAILS for a missing precondition is UNTESTED, not passing — and it looks
+  // exactly like a package that needs nothing, which is the verdict that ships a broken grant.
+  // `simple-git-hooks` bails without its config key; hook installers bail without a `.git`.
+  // Every precondition added here converts a silent no-op into a real measurement.
+  //
+  // Keep these GENERIC. This is scaffolding a real project would plausibly have, not a
+  // per-package fixture — the moment it becomes "what does package X need", it is the curated
+  // list this whole effort exists to delete.
+  fs.mkdirSync(path.join(proj, 'prisma'), { recursive: true });
+  fs.writeFileSync(path.join(proj, 'prisma', 'schema.prisma'),
+    'generator client {\n  provider = "prisma-client-js"\n}\n\n' +
+    'datasource db {\n  provider = "postgresql"\n  url = env("DATABASE_URL")\n}\n');
+  fs.mkdirSync(path.join(proj, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(proj, 'src', 'index.ts'), 'export const x = 1;\n');
+  fs.writeFileSync(path.join(proj, 'tsconfig.json'),
+    JSON.stringify({ compilerOptions: { target: 'ES2022', module: 'ESNext', strict: true } }, null, 2));
+
   return { proj, home: path.join(dir, 'home') };
 }
 
@@ -152,7 +181,10 @@ function isMaterialized(proj, pkgSpec) {
 }
 
 function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg }) {
-  const env = { ...process.env, HOME: home };
+  // Environment a real project would carry. `DATABASE_URL` is the prisma family's precondition —
+  // without it `prisma generate` bails and measures as "needs nothing". Kept generic and
+  // non-secret for the same reason as the fixture files above.
+  const env = { ...process.env, HOME: home, DATABASE_URL: 'postgresql://user:pass@localhost:5432/db' };
   if (catalogFile) env[OVERRIDE_ENV] = catalogFile;
   let log = '';
   let rc = 0;
