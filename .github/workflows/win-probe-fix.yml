@@ -1,0 +1,84 @@
+name: Windows stack fix validation
+
+# Branch-scoped ad-hoc probe: tree = PR head + the /STACK build-script fix, with
+# NO instrumentation. Proves (a) the PE reserve actually changed under MSVC and
+# (b) the real failing test passes.
+on:
+  push:
+    branches: [win-probe-fix]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fix:
+    name: Topology test with the stack fix
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch]
+        with:
+          toolchain: stable
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - name: Build the launcher template and the test binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --manifest-path crates/nub-launcher/Cargo.toml
+          cargo test -p nub-cli --features compile --test integration --no-run
+      # Read SizeOfStackReserve straight out of the PE optional header, so the
+      # claim "the link arg took effect on MSVC" rests on the built artifact
+      # rather than on the build script having printed something.
+      - name: PE stack reserve of the built nub.exe
+        shell: pwsh
+        run: |
+          function Get-StackReserve([string]$path) {
+            $b = [System.IO.File]::ReadAllBytes($path)
+            $peOff = [BitConverter]::ToInt32($b, 0x3C)
+            $magic = [BitConverter]::ToUInt16($b, $peOff + 4 + 20)
+            if ($magic -ne 0x20B) { throw "not PE32+ (magic 0x$($magic.ToString('X')))" }
+            [BitConverter]::ToUInt64($b, $peOff + 4 + 20 + 72)
+          }
+          foreach ($exe in @("target\debug\nub.exe", "crates\nub-launcher\target\debug\nub-launcher.exe")) {
+            if (Test-Path $exe) {
+              $r = Get-StackReserve $exe
+              Write-Host ("{0}: SizeOfStackReserve = {1} bytes ({2} MiB)" -f $exe, $r, ($r / 1MB))
+            }
+          }
+          $reserve = Get-StackReserve "target\debug\nub.exe"
+          if ($reserve -ne 8388608) { throw "nub.exe stack reserve is $reserve, expected 8388608" }
+      # The startup discriminator that failed before the fix.
+      - name: nub.exe survives its own argv
+        shell: bash
+        run: |
+          for args in "--version" "run --help" "install --help" "compile --help"; do
+            echo "##### nub $args #####"
+            target/debug/nub.exe $args > /dev/null 2>&1
+            echo "EXIT=$?"
+          done
+      # The real thing: the exact CI invocation that fails on PR #536.
+      - name: Compile artifact process topology (the failing test)
+        shell: bash
+        run: |
+          set -euo pipefail
+          launcher="$GITHUB_WORKSPACE/crates/nub-launcher/target/debug/nub-launcher.exe"
+          test -f "$launcher"
+          export __NUB_LAUNCHER_TEMPLATE="$launcher"
+          cargo test -p nub-cli --features compile --test integration \
+            compile_artifact_process_bootstrap_topology -- --exact
