@@ -181,16 +181,27 @@ fn run_compiled_artifact_with_timeout(artifact: &Path, cwd: &Path) -> std::proce
     run_compiled_artifact_command_with_timeout(cmd, std::time::Duration::from_secs(10))
 }
 
+/// Two contracts for a bundled CommonJS module that `require()`s an ES module,
+/// which Node has allowed since it unflagged `require(esm)`.
+///
+/// The deferred half is not a stylistic variant of the immediate one. Rolldown's
+/// scanner decides whether a `require()` result is used by walking to the nearest
+/// enclosing `ExpressionStatement` — and oxc represents a CONCISE arrow body as a
+/// `FunctionBody` holding exactly that node, so `() => require(esm)` was read as a
+/// discarded call and compiled to a bare `init_xxx()`, dropping the
+/// `__toCommonJS(namespace)` operand. The call then returned `undefined` with no
+/// error. A block body or any surrounding expression escapes the misread, so this
+/// fixture must keep the concise form to discriminate.
 #[cfg(feature = "compile")]
 #[test]
-fn compile_executes_mixed_commonjs_esm_cycles() {
+fn compile_resolves_commonjs_requires_of_esm() {
     let runtime = compile_test_runtime();
     let work = unique_test_cache();
     let cache = work.join("cache");
     let immediate_entry = work.join("immediate.mjs");
     let immediate_artifact = work.join(format!("immediate{}", std::env::consts::EXE_SUFFIX));
-    let lazy_entry = work.join("lazy.mjs");
-    let lazy_artifact = work.join(format!("lazy{}", std::env::consts::EXE_SUFFIX));
+    let deferred_entry = work.join("deferred.mjs");
+    let deferred_artifact = work.join(format!("deferred{}", std::env::consts::EXE_SUFFIX));
     std::fs::create_dir_all(&work).unwrap();
     std::fs::write(
         &immediate_entry,
@@ -222,26 +233,32 @@ fn compile_executes_mixed_commonjs_esm_cycles() {
     let immediate_run = run_compiled_artifact_with_timeout(&immediate_artifact, &work);
 
     std::fs::write(
-        &lazy_entry,
-        "import getMain from './lazy.cjs';\nexport const token = 'lazy-token';\nconsole.log('LAZY_CYCLE:' + getMain().token);\n",
+        &deferred_entry,
+        "import holder from './deferred.cjs';\nconsole.log('DEFERRED_REQUIRE:' + JSON.stringify(holder.load()?.token ?? null));\n",
     )
     .unwrap();
     std::fs::write(
-        work.join("lazy.cjs"),
-        "module.exports = () => require('./lazy.mjs');\n",
+        work.join("deferred.cjs"),
+        "module.exports = { load: () => require('./deferred-dep.mjs') };\n",
     )
     .unwrap();
-    let lazy_compile = compile_smol_artifact(&runtime, &work, &cache, &lazy_entry, &lazy_artifact);
+    std::fs::write(
+        work.join("deferred-dep.mjs"),
+        "export const token = 'deferred-token';\n",
+    )
+    .unwrap();
+    let deferred_compile =
+        compile_smol_artifact(&runtime, &work, &cache, &deferred_entry, &deferred_artifact);
     assert!(
-        lazy_compile.status.success(),
-        "lazy mixed cycle did not compile: {}",
-        String::from_utf8_lossy(&lazy_compile.stderr)
+        deferred_compile.status.success(),
+        "deferred require did not compile: {}",
+        String::from_utf8_lossy(&deferred_compile.stderr)
     );
     assert!(
-        lazy_artifact.is_file(),
-        "lazy mixed cycle did not write its artifact"
+        deferred_artifact.is_file(),
+        "deferred require did not write its artifact"
     );
-    let lazy_run = run_compiled_artifact_with_timeout(&lazy_artifact, &work);
+    let deferred_run = run_compiled_artifact_with_timeout(&deferred_artifact, &work);
     let _ = std::fs::remove_dir_all(&work);
 
     assert!(
@@ -256,14 +273,15 @@ fn compile_executes_mixed_commonjs_esm_cycles() {
         String::from_utf8_lossy(&immediate_run.stdout)
     );
     assert!(
-        lazy_run.status.success(),
-        "lazy mixed-cycle artifact failed: {}",
-        String::from_utf8_lossy(&lazy_run.stderr)
+        deferred_run.status.success(),
+        "deferred-require artifact failed: {}",
+        String::from_utf8_lossy(&deferred_run.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&lazy_run.stdout).contains("LAZY_CYCLE:lazy-token"),
-        "unexpected lazy mixed-cycle output: {}",
-        String::from_utf8_lossy(&lazy_run.stdout)
+        String::from_utf8_lossy(&deferred_run.stdout)
+            .contains("DEFERRED_REQUIRE:\"deferred-token\""),
+        "a deferred require of an ES module must resolve to its namespace, not undefined: {}",
+        String::from_utf8_lossy(&deferred_run.stdout)
     );
 }
 

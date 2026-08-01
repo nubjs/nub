@@ -753,12 +753,14 @@ impl Plugin for CjsPathGlobals {
             args.module_type,
             ModuleType::Js | ModuleType::Jsx | ModuleType::Ts | ModuleType::Tsx
         );
-        let edit = scannable
-            .then(|| cjs_path_globals_edit(clean_url(args.id), args.code))
-            .flatten();
-        let source = edit.as_ref().map(|_| args.code.to_string());
+        let inserts = if scannable {
+            commonjs_source_inserts(clean_url(args.id), args.code)
+        } else {
+            Vec::new()
+        };
+        let source = (!inserts.is_empty()).then(|| args.code.to_string());
         async move {
-            let (Some((at, decls)), Some(source)) = (edit, source) else {
+            let Some(source) = source else {
                 return Ok(None);
             };
             Ok(Some(HookTransformOutput {
@@ -767,13 +769,118 @@ impl Plugin for CjsPathGlobals {
                 // line positions — the same bargain [`rewrite_new_urls`] makes, and
                 // for the same reason: `Omitted` would make Rolldown drop the
                 // module's mapping entirely and warn on every build. Only the
-                // columns after the splice, on its one line, shift.
-                code: Some(format!("{}{decls}{}", &source[..at], &source[at..])),
+                // columns after a splice, on its own line, shift.
+                code: Some(apply_source_inserts(&source, inserts)),
                 map: HookTransformOutputMap::Null,
                 ..Default::default()
             }))
         }
     }
+}
+
+/// Every correction a module needs before Rolldown scans it, as `(byte offset,
+/// text)` pairs. Both are pure insertions and neither reads the other's output, so
+/// they are independent and order-free.
+fn commonjs_source_inserts(path: &str, source: &str) -> Vec<(usize, String)> {
+    let mut inserts = concise_arrow_require_inserts(path, source);
+    if let Some((at, decls)) = cjs_path_globals_edit(path, source) {
+        inserts.push((at, decls));
+    }
+    inserts
+}
+
+/// Applying from the highest offset down keeps every lower offset valid, so no
+/// insertion has to be rebased against the ones before it.
+fn apply_source_inserts(source: &str, mut inserts: Vec<(usize, String)>) -> String {
+    inserts.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    let mut out = source.to_string();
+    for (at, text) in inserts {
+        out.insert_str(at, &text);
+    }
+    out
+}
+
+/// Give a `require()` written as the entire concise body of an arrow function an
+/// explicit block body, so its VALUE survives bundling.
+///
+/// This works around a Rolldown scanner misread rather than a nub defect.
+/// `process_global_require_call` decides a require's result is discarded by walking
+/// outward to the nearest `ExpressionStatement` — and oxc represents a concise
+/// arrow body as a `FunctionBody` holding exactly that node. So `() => require(x)`
+/// is flagged `IsRequireUnused`, and the finalizer emits a bare `init_xxx()` in
+/// place of `(init_xxx(), __toCommonJS(xxx_exports))`. Where the required module is
+/// ESM that call evaluates to `undefined` — silently, with no error, no warning and
+/// a successful compile. A CommonJS importee is unaffected because its wrapper
+/// returns `module.exports` either way, and any surrounding expression (`() =>
+/// require(x).y`) escapes the misread by ending the walk early. Verified against
+/// rolldown 1.2.0 and still present on upstream `main`.
+///
+/// `() => e` and `() => { return e; }` are the same program for every arrow, async
+/// included, so the rewrite needs no CommonJS gating: on a module Rolldown
+/// classifies as ESM it is inert rather than wrong.
+fn concise_arrow_require_inserts(path: &str, source: &str) -> Vec<(usize, String)> {
+    use oxc_allocator::Allocator;
+    use oxc_ast_visit::Visit;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    // Cheap reject first: this runs on every module in the graph.
+    if !source.contains("require") || !source.contains("=>") {
+        return Vec::new();
+    }
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::mjs());
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    if parsed.panicked {
+        return Vec::new();
+    }
+    let mut scan = ConciseArrowRequireScan::default();
+    scan.visit_program(&parsed.program);
+    scan.bodies
+        .into_iter()
+        .flat_map(|(start, end)| [(start, "{return ".to_owned()), (end, ";}".to_owned())])
+        .collect()
+}
+
+/// The span of every concise arrow body that is exactly a build-time `require`.
+#[derive(Default)]
+struct ConciseArrowRequireScan {
+    bodies: Vec<(usize, usize)>,
+}
+
+impl<'a> oxc_ast_visit::Visit<'a> for ConciseArrowRequireScan {
+    fn visit_arrow_function_expression(&mut self, it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
+        if it.expression {
+            if let Some(oxc_ast::ast::Statement::ExpressionStatement(stmt)) =
+                it.body.statements.first()
+            {
+                if is_static_require_call(stmt.expression.get_inner_expression()) {
+                    let span = oxc_span::GetSpan::span(&stmt.expression);
+                    self.bodies.push((span.start as usize, span.end as usize));
+                }
+            }
+        }
+        oxc_ast_visit::walk::walk_arrow_function_expression(self, it);
+    }
+}
+
+/// A `require("literal")` Rolldown resolves at build time — the only shape its
+/// scanner records, and so the only one this correction may touch.
+fn is_static_require_call(expr: &Expression<'_>) -> bool {
+    let Expression::CallExpression(call) = expr else {
+        return false;
+    };
+    let Expression::Identifier(callee) = call.callee.get_inner_expression() else {
+        return false;
+    };
+    callee.name == "require"
+        && matches!(
+            call.arguments.first(),
+            Some(
+                oxc_ast::ast::Argument::StringLiteral(_)
+                    | oxc_ast::ast::Argument::TemplateLiteral(_)
+            )
+        )
 }
 
 /// Where to splice the declarations a CJS-origin module needs, and what they are —
