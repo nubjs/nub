@@ -301,10 +301,48 @@ function homeWritePaths(paths) {
 
 // ── the walk ──────────────────────────────────────────────────────────────────
 
+/** Which capability scope a tokenised path falls in — the vocabulary a GRANT is written in.
+ *  A grant is a capability over a scope, not a set of names, so this is what decides whether
+ *  one grant covers a set of paths whose names vary between runs. */
+function scopeOf(p, pkg) {
+  if (p.startsWith('$proj/')) return 'project';
+  if (p.startsWith('$home/')) return 'userHome';
+  if (p.startsWith('$store/')) {
+    const entry = p.slice('$store/'.length).split('/')[0];
+    return entry.startsWith(`${pkg.replace('/', '+')}@`) ? null : 'deps';   // own entry is baseline
+  }
+  return 'disk';
+}
+
+/** Widen a grant to cover scopes the oracle could NOT reliably measure.
+ *
+ *  When two identical control runs disagree, the paths they disagree about cannot be required
+ *  of a cell (the control itself does not always produce them) and cannot be ignored (a cell
+ *  that skipped them may genuinely lack a capability). The only safe reading is that those
+ *  scopes are UNMEASURED — so grant them. Escalating on uncertainty costs breadth; not
+ *  escalating costs a broken package, and this project's stated failure mode is packages
+ *  breaking. Only the scopes the varying paths actually touch are added, so a package with
+ *  one unstable log does not get `disk`. */
+function escalate(grant, scopes) {
+  if (!scopes.length) return grant;
+  const g = grant ? { ...grant } : {};
+  if (scopes.includes('disk') || g.write === 'disk') { g.write = 'disk'; return g; }
+  const w = typeof g.write === 'object' && g.write ? { ...g.write } : {};
+  for (const s of scopes) w[s] = true;
+  g.write = w;
+  // `read` may now be dominated by the widened `write`; the parser rejects that, so drop it.
+  if (g.read && typeof g.read === 'object') {
+    const r = { ...g.read };
+    for (const s of Object.keys(w)) delete r[s];
+    if (Object.keys(r).length) g.read = r; else delete g.read;
+  }
+  return g;
+}
+
 /** Paths that exist after the UNJAILED run but not after the no-grant run — what the script
  *  produced that confinement prevented. Store and jail-home hashes are already normalised by
  *  `runCell`, so these compare directly. */
-function controlOnly(control, floor) {
+function controlOnly(controlU, floor) {
   const had = new Set(floor.seen);
   return control.seen.filter((p) => !had.has(p));
 }
@@ -361,16 +399,43 @@ function search(nub, pkg, version, root, keep) {
   // control and the top-of-ladder check, and the two can no longer disagree about the regime
   // they run under. A failure here means the package is broken for reasons no grant fixes.
   const control = cell('control', { catalogFile: write(STATES[STATES.length - 1]), label: 'control (tested pkg: everything)' });
+  // RUN THE CONTROL TWICE. A single control cannot tell "this cell lacks a capability" from
+  // "this package does not write the same paths twice". `unrs-resolver@1.12.2` failed all 55
+  // states on three consecutive runs for the second reason — one npm debug log whose FILENAME
+  // carries a timestamp — and read as a package no grant could fix.
+  //
+  // The two runs are combined by UNION, never intersection. Intersecting compares on fewer
+  // paths, so a cell that failed to write an unstable path still passes and the search records
+  // too NARROW a minimum: the exact failure this effort exists to avoid. The union is what
+  // `writePaths` is derived from, so a directory seen in only one run is still promoted.
+  const controlB = cell('controlB', { catalogFile: write(STATES[STATES.length - 1]), label: 'control (repeat)' });
+  const inB = new Set(controlB.seen);
+  const stableSeen = control.seen.filter((x) => inB.has(x));
+  const unionSeen = [...new Set([...control.seen, ...controlB.seen])];
+  const stableSet = new Set(stableSeen);
+  const varyingSeen = unionSeen.filter((x) => !stableSet.has(x));
+  const unmeasuredScopes = [...new Set(varyingSeen.map((x) => scopeOf(x, pkg)).filter(Boolean))];
+  // Downstream derivations read the UNION, so nothing is lost by appearing in only one run.
+  const controlU = { ...control, seen: unionSeen, files: unionSeen.length };
   cells.push({ index: null, state: 'CONTROL (tested pkg: everything; all others: everything)', cost: null, pass: control.rc === 0,
                rc: control.rc, digest: control.digest, files: control.files,
                overrideEngaged: null, materialized: control.materialized });
   // One check, because the control IS the most permissive state. Failing here means no
   // grant can help — the package is broken for reasons confinement does not cause.
-  if (control.rc !== 0 || !control.overrideOk) {
+  if (control.rc !== 0 || !control.overrideOk || controlB.rc !== 0 || !controlB.overrideOk) {
     return { pkg, version, verdict: 'BROKEN-EVEN-WITH-EVERYTHING', cells, control: baseCase(control) };
   }
   const sideEffectful = hasScript;
-  const matches = (r) => r.rc === control.rc && (!sideEffectful || r.digest === control.digest);
+  // A cell passes iff it reproduces every path BOTH control runs produced. Paths only one
+  // control produced are not required — the control itself is not reliable about them — and
+  // the scopes they sit in are handled by escalating the recorded grant instead.
+  const matches = (r) => {
+    if (r.rc !== control.rc) return false;
+    if (!sideEffectful) return true;
+    const has = new Set(r.seen);
+    for (const p of stableSet) if (!has.has(p)) return false;
+    return true;
+  };
 
   // 3. Ascending walk. The first pass IS the minimum.
   //    WHAT THE GRANT BUYS is recorded, not just that it was needed. State 0 is the
@@ -395,7 +460,7 @@ function search(nub, pkg, version, root, keep) {
         verdict: 'MINIMUM',
         cells,
         // THE CATALOG FRAGMENT, machine-readable. `state` beside it is for humans.
-        grant: (() => { const g = grantFor(STATES[i]); if (g) delete g.notes; return g; })(),
+        grant: (() => { let g = grantFor(STATES[i]); if (g) delete g.notes; return escalate(g, unmeasuredScopes); })(),
         state: STATES[i].label,
         cost: STATES[i].cost,
         declaresInstallScript: hasScript,
@@ -415,7 +480,7 @@ function search(nub, pkg, version, root, keep) {
         // The paths the winning grant restores: present unjailed, absent at the no-grant
         // floor. Capped, with the true count kept, so one pathological package cannot make
         // the results file unreadable — a silent truncation would be worse than a number.
-        pathsBlockedWithoutGrantCount: floor ? controlOnly(control, floor).length : null,
+        pathsBlockedWithoutGrantCount: floor ? controlOnly(controlU, floor).length : null,
         // HOW MANY blocked paths land in the THROWAWAY home — a count, not a verdict.
         //
         // The jail redirects `$HOME` to a per-package directory that is discarded, so a
@@ -429,16 +494,21 @@ function search(nub, pkg, version, root, keep) {
         // a few bookkeeping paths sit elsewhere. A count cannot be quietly inert — 0 means
         // nothing landed there, and any other number is the promotion list's raw material.
         // The derived `writePaths` entry: the minimal directories that must survive.
-        writePaths: floor ? homeWritePaths(controlOnly(control, floor)) : null,
+        writePaths: floor ? homeWritePaths(controlOnly(controlU, floor)) : null,
         pathsLandingInThrowawayHome: floor
-          ? controlOnly(control, floor).filter((p) => p.startsWith('$home/')).length
+          ? controlOnly(controlU, floor).filter((p) => p.startsWith('$home/')).length
           : null,
-        pathsBlockedWithoutGrant: floor ? controlOnly(control, floor).slice(0, 40) : null,
-        control: baseCase(control),
+        pathsBlockedWithoutGrant: floor ? controlOnly(controlU, floor).slice(0, 40) : null,
+        control: baseCase(controlU),
+        // Two identical control runs, reconciled. `unstablePathCount` 0 means the package is
+        // deterministic and the verdict rests on a clean comparison; non-zero means these
+        // scopes were escalated into the grant because they could not be measured.
+        unstablePathCount: varyingSeen.length,
+        unmeasuredScopesGranted: unmeasuredScopes,
       };
     }
   }
-  return { pkg, version, verdict: 'NO-STATE-PASSED', cells, control: baseCase(control) };
+  return { pkg, version, verdict: 'NO-STATE-PASSED', cells, control: baseCase(controlU), unstablePathCount: varyingSeen.length };
 }
 
 // ── cli ───────────────────────────────────────────────────────────────────────
@@ -466,6 +536,27 @@ if (argv.includes('--selftest')) {
       if (!has(a)) { console.log(`  LOST "${a}" from state "${s.label}" ->`, JSON.stringify(g)); bad++; }
     }
   }
+  // ESCALATION MUST BE ABLE TO FIRE. The recurring defect in this harness has not been a wrong
+  // answer but a check that could never fire — a clamp that dropped every path, a flag whose
+  // second condition was never true. Assert the widening directly rather than trusting that a
+  // real package will exercise it.
+  const esc = [
+    ['no unmeasured scopes leaves the grant untouched', { write: { deps: true } }, [], { write: { deps: true } }],
+    ['an unmeasured scope is added to write', { write: { deps: true } }, ['userHome'], { write: { deps: true, userHome: true } }],
+    ['escalating from nothing produces a write', null, ['project'], { write: { project: true } }],
+    ['disk subsumes every narrow scope', { write: { deps: true } }, ['disk'], { write: 'disk' }],
+    // The parser REJECTS a read the write already covers, so widening must drop it or the
+    // catalog it emits will not load — an escalation that produces an invalid grant is worse
+    // than none, because it fails at the next cell instead of here.
+    ['a read the widened write now covers is dropped', { read: { userHome: true }, write: { deps: true } }, ['userHome'], { write: { deps: true, userHome: true } }],
+  ];
+  for (const [name, grant, scopes, want] of esc) {
+    const got = escalate(grant, scopes);
+    if (JSON.stringify(got) !== JSON.stringify(want)) {
+      console.log(`  ESCALATE "${name}": got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`); bad++;
+    }
+  }
+  console.log(`escalate: ${esc.length} cases`);
   console.log(`states: ${STATES.length}, all representable in v2 (v1 could express 14)`);
   console.log(`atoms lost in emission: ${bad}`);
   console.log('digest order-independent:', digestOf(['b', 'a']) === digestOf(['a', 'b']) ? 'yes' : 'NO — BUG');
