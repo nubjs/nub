@@ -868,9 +868,14 @@ jobs:
         run: "cargo test -p nub-cli --features compile --bin nub compile::"
       # The compiled process topology is OS-sensitive: in particular, Node SEA's
       # cluster argv shape differs on Windows. Build the actual launcher and run
-      # the topology test on every current-Node OS leg. The older mixed-cycle
-      # regression remains Linux-only and reuses the same built launcher/test
-      # target rather than multiplying that coverage across the OS matrix.
+      # the topology test on every current-Node OS leg.
+      #
+      # Linux additionally runs the WHOLE integration target rather than a list of
+      # named tests. Naming them left ~220 compile tests carried by two: a silent
+      # `require(esm)`-from-CJS defect (a deferred require resolved to `undefined`)
+      # sat in that gap, and the one test that would have caught it was masked
+      # anyway, because `set -e` aborts this step at the first failure and topology
+      # runs first. One Linux leg is the cost; running the whole target is the point.
       - name: Compile artifact process topology
         if: matrix.node == '24'
         shell: bash
@@ -883,7 +888,7 @@ jobs:
           export __NUB_LAUNCHER_TEMPLATE="$launcher"
           cargo test -p nub-cli --features compile --test integration compile_artifact_process_bootstrap_topology -- --exact
           if [[ "$RUNNER_OS" == "Linux" ]]; then
-            cargo test -p nub-cli --features compile --test integration compile_executes_mixed_commonjs_esm_cycles -- --exact
+            cargo test -p nub-cli --features compile --test integration
           fi
       # The default compile shape builds from the runtime extracted out of the
       # feature-on nub binary, so it cannot resolve these package imports from the
