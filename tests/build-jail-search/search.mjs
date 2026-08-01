@@ -24,7 +24,7 @@
 // — prisma with its grant stripped still writes 5 client files and exits 0 while
 // the 19.3 MB query engine is missing, and `ghooks` wrote 0 of 17 hooks.
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -40,6 +40,11 @@ const BANNER_BAD = 'was REJECTED';
  *  Every one of the 54 states is expressible — that is the point of v2 and the
  *  reason the earlier v1 translation was thrown away: it could express 14. */
 function catalogFor(pkg, state) {
+  // State 0 is the BASE PROFILE, and the catalog spells that as NO ENTRY. Emitting an
+  // entry with no capabilities is a different thing — the parser rejects it, correctly,
+  // because a grant that widens nothing is an authoring mistake everywhere except here.
+  if (state.atoms.size === 0) return { packages: {} };
+
   const grant = { notes: `grant-search cell probing "${state.label}"` };
 
   if (state.atoms.has('write.disk')) {
@@ -103,24 +108,31 @@ function makeFixture(dir, pkg, version, { jailOff }) {
   return { proj, home: path.join(dir, 'home') };
 }
 
-function runCell(nub, { proj, home }, { catalogFile, label }) {
+function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts }) {
   const env = { ...process.env, HOME: home };
   if (catalogFile) env[OVERRIDE_ENV] = catalogFile;
   let log = '';
   let rc = 0;
-  for (const args of [['install'], ['approve-builds', '--all']]) {
-    try {
-      log += execFileSync(nub, args, { cwd: proj, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-    } catch (e) {
-      log += (e.stdout || '') + (e.stderr || '');
-      rc = e.status ?? 1;
-      break;
-    }
+  const steps = ignoreScripts ? [['install', '--ignore-scripts']] : [['install'], ['approve-builds', '--all']];
+  for (const args of steps) {
+    // spawnSync, not execFileSync: the override banner is a `warning:` on STDERR, and
+    // execFileSync returns stdout ONLY. Losing stderr on the success path made every cell
+    // read as "the override did not engage".
+    const r = spawnSync(nub, args, { cwd: proj, env, encoding: 'utf8' });
+    log += (r.stdout || '') + (r.stderr || '');
+    if (r.status !== 0) { rc = r.status ?? 1; break; }
   }
   const store = path.join(home, '.cache', 'nub', 'pm', 'store');
-  const seen = [...paths(proj).map((p) => `proj/${p}`), ...paths(store).map((p) => `store/${p}`)];
+  // Store entries are `<pkg>@<version>-<hash>`, and the hash moves between arms, so raw
+  // store paths compare as ALL-NEW and swamp the real signal — 845 phantom "script effects"
+  // for a package whose script wrote 3 files. Strip the hash so the two arms are comparable.
+  const unhash = (p) => p.replace(/^([^/]+@[^/-]+(?:\.[^/-]+)*)-[0-9a-f]{8,}\//, '$1/');
+  const seen = [
+    ...paths(proj).map((p) => `proj/${p}`),
+    ...paths(store).map((p) => `store/${unhash(p)}`),
+  ];
   return {
-    label, rc, log,
+    label, rc, log, seen,
     digest: digestOf(seen),
     files: seen.length,
     overrideOk: !catalogFile || (log.includes(BANNER_OK) && !log.includes(BANNER_BAD)),
@@ -134,7 +146,7 @@ function runCell(nub, { proj, home }, { catalogFile, label }) {
 
 // ── the walk ──────────────────────────────────────────────────────────────────
 
-const brief = (r) => ({ rc: r.rc, files: r.files, digest: r.digest, materialized: r.materialized });
+const brief = (r) => ({ rc: r.rc, files: r.files, materialized: r.materialized });
 
 function search(nub, pkg, version, root, keep) {
   const cell = (name, opts) => {
@@ -150,10 +162,26 @@ function search(nub, pkg, version, root, keep) {
     return f;
   };
 
-  // 1. CONTROL. Everything downstream is defined relative to it.
+  // DOES THIS PACKAGE RUN A SCRIPT AT ALL? Read from its manifest, not measured against an
+  // `--ignore-scripts` arm. That arm was tried and is WRONG: `approve-builds` pulls in the
+  // build toolchain (node-gyp, the tar family), so the scripts-on arm installs strictly more
+  // packages and the diff reported ~845 phantom "side effects" for a script that wrote three
+  // files. The two shapes are not comparable; a manifest field is a fact.
+  const hasScript = (() => {
+    try {
+      const out = execFileSync('npm', ['view', `${pkg}@${version}`, 'scripts', '--json'], { encoding: 'utf8' });
+      const s = JSON.parse(out || '{}') || {};
+      return ['preinstall', 'install', 'postinstall'].some((k) => k in s);
+    } catch {
+      return true;   // unknown: assume it does, so the oracle stays strict
+    }
+  })();
+
+  // CONTROL — scripts on, jail off. EVERY cell runs the identical two steps, so full path
+  // sets are directly comparable and no baseline subtraction is needed.
   const control = cell('control', { jailOff: true, label: 'control' });
   if (control.rc !== 0) return { pkg, version, verdict: 'CONTROL-FAILED', control: brief(control) };
-  const sideEffectful = control.files > 0;
+  const sideEffectful = hasScript;
   const matches = (r) => r.rc === control.rc && (!sideEffectful || r.digest === control.digest);
 
   // 2. TOP first — if the widest grant cannot make it pass, no state can, so skip
@@ -194,7 +222,9 @@ const argv = process.argv.slice(2);
 if (argv.includes('--selftest')) {
   let bad = 0;
   for (const s of STATES) {
-    const g = catalogFor('x', s).packages.x[0];
+    const emitted = catalogFor('x', s).packages.x;
+    if (!emitted) continue;   // state 0 is 'no entry', correctly
+    const g = emitted[0];
     const has = (k) => {
       if (k === 'network') return !!g.network;
       if (k.startsWith('write.')) {
@@ -215,7 +245,8 @@ if (argv.includes('--selftest')) {
   console.log('digest order-independent:', digestOf(['b', 'a']) === digestOf(['a', 'b']) ? 'yes' : 'NO — BUG');
   console.log('\nsample emissions:');
   for (const i of [0, 1, 5, 13, 16, 51, 53]) {
-    console.log(' ', String(i).padStart(2), STATES[i].label, '->', JSON.stringify(catalogFor('p', STATES[i]).packages.p[0]));
+    const e = catalogFor('p', STATES[i]).packages.p;
+    console.log(' ', String(i).padStart(2), STATES[i].label, '->', e ? JSON.stringify(e[0]) : '(no entry — the base profile)');
   }
   process.exit(bad ? 1 : 0);
 }
