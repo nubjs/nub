@@ -1,0 +1,77 @@
+name: Windows compile-cache gate validation
+
+# Branch-scoped ad-hoc probe: runs the REWRITTEN tests/windows/compile-cache-release.ps1
+# exactly as ci.yml invokes it, on a real release build. This is the gate that
+# failed at 85be09531f.
+on:
+  push:
+    branches: [win-probe-rt]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gate:
+    name: compile-cache-release gate
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch]
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: ci-win-embed-roundtrip
+          save-if: false
+          workspaces: |
+            .
+            crates/nub-native
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "24"
+      - name: Install and stage runtime dependencies for embedded compile
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          rm -rf runtime/node_modules
+          mkdir -p \
+            runtime/node_modules/@js-temporal \
+            runtime/node_modules/@oxc-project \
+            runtime/node_modules/@petamoriken
+          cp -R node_modules/@js-temporal/polyfill runtime/node_modules/@js-temporal/
+          cp -R node_modules/@oxc-project/runtime runtime/node_modules/@oxc-project/
+          cp -R node_modules/@petamoriken/float16 runtime/node_modules/@petamoriken/
+          cp -R node_modules/jsbi node_modules/urlpattern-polyfill runtime/node_modules/
+      - name: Build + stage release nub-native addon
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd crates/nub-native && cargo build --release)
+          mkdir -p runtime/addons
+          cp target/release/nub_native.dll runtime/addons/nub-native.node
+      - name: Build release nub.exe and launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p nub-cli --release --features embed-runtime,compile
+          (cd crates/nub-launcher && cargo build --release)
+      - name: Gate -- release compiled-runtime cache repair and Windows cache safety
+        shell: pwsh
+        run: |
+          & tests/windows/compile-cache-release.ps1 `
+            -Nub (Join-Path $PWD 'target\release\nub.exe') `
+            -Launcher (Join-Path $PWD 'crates\nub-launcher\target\release\nub-launcher.exe')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
