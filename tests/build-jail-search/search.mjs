@@ -162,24 +162,27 @@ function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg }
     log += (r.stdout || '') + (r.stderr || '');
     if (r.status !== 0) { rc = r.status ?? 1; break; }
   }
-  const store = path.join(home, '.cache', 'nub', 'pm', 'store');
-  // Store entries are `<pkg>@<version>-<hash>`, and the hash moves between arms, so raw
-  // store paths compare as ALL-NEW and swamp the real signal — 845 phantom "script effects"
-  // for a package whose script wrote 3 files. Strip the hash so the two arms are comparable.
-  const unhash = (p) => p.replace(/^([^/]+@[^/-]+(?:\.[^/-]+)*)-[0-9a-f]{8,}\//, '$1/');
-  // THE JAIL'S PRIVATE HOME. `os.homedir()` inside the jail resolves here, not to the real
-  // home, so a package writing `~/.cache/<vendor>` succeeds, needs no grant, and its artifact
-  // is DISCARDED. That is not a false verdict — it genuinely needs nothing — but it is a
-  // package whose output vanishes, which a user would call broken. Measured directly: a probe
-  // writing `~/.cache/vendorX/artifact.bin` landed under `<fixture home>/.cache/nub/jail-home/`.
-  // Scanning it makes that visible instead of silently absent. Per-package hash stripped for
-  // the same reason as the store's.
-  const jailHome = path.join(home, '.cache', 'nub', 'jail-home');
-  const seen = [
-    ...paths(proj).map((p) => `proj/${p}`),
-    ...paths(store).map((p) => `store/${unhash(p)}`),
-    ...paths(jailHome).map((p) => `jailhome/${p.replace(/^([^/]+)-[0-9a-f]{8,}\//, '$1/')}`),
-  ];
+  // SCAN THE WHOLE FIXTURE ROOT, not a list of subpaths I expect to matter.
+  //
+  // The install runs with HOME pointed at this fixture, so everything it touches lands
+  // under here — that is why a package caching to `~/.cache/<vendor>` is visible at all.
+  // It is containment by construction, NOT disk-wide detection, and the boundary is
+  // verified: after a day of runs the real `~/.cache/puppeteer`, `~/.cache/node-gyp` and
+  // `~/.npm` had zero modifications.
+  //
+  // Enumerating three roots was UNSOUND once the control started running at `write: disk`.
+  // A control that wrote somewhere unscanned, and a narrow cell that did not, would produce
+  // matching digests — both missing it identically — and the search would record too NARROW
+  // a minimum. Scanning the root removes that whole class.
+  //
+  // Still missed: a write outside the fixture entirely (`/usr/local`, the real home). Those
+  // are denied for every cell below `write: disk`, proven with EPERM, but a `disk` cell is
+  // not bounded by that. That residual is stated rather than papered over.
+  const root = path.dirname(proj);
+  const unhash = (p) => p
+    .replace(/(store\/)([^/]+@[^/-]+(?:\.[^/-]+)*)-[0-9a-f]{8,}\//, '$1$2/')
+    .replace(/(jail-home\/)([^/]+)-[0-9a-f]{8,}\//, '$1$2/');
+  const seen = paths(root).map(unhash);
   return {
     label, rc, log, seen,
     digest: digestOf(seen),
