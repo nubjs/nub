@@ -118,14 +118,45 @@ const STUDY_PATH_DEFAULT = WINDOWS
 // this. WINDOWS ONLY, deliberately: the POSIX floor already contains a `node` and 643
 // packages have been measured against it across Linux and macOS, so prepending there would
 // change which interpreter those runs used and break comparability with them for no gain.
+//
+// ★ AND THE WINDOWS FLOOR WAS MISSING PYTHON AND GIT ENTIRELY, WHICH BIASED EVERY NATIVE
+// BUILD ROW ON THE PLATFORM (measured 2026-08-01, by `--toolchain-proof` on a windows-latest
+// runner). The POSIX floor gets both for free: `/usr/bin` holds `python3` AND `git`, so
+// every one of the 643 Linux and macOS rows was measured with an interpreter and a git on
+// the cell's PATH. Windows has no equivalent aggregate directory, so the transplanted floor
+// silently gave the cell NEITHER — `python` and `python3` did not resolve at all, and `git`
+// did not resolve at all, while every package in the full-disk set asks for a git fixture.
+// That is not a clean room, it is a machine no developer has: the Python installer's own
+// default puts `python.exe` on PATH, which is why `python_toolchain_grant` resolves it out
+// of jail on a real box and node-gyp never walks PATH. Under this floor node-gyp was forced
+// down its last route — the `py` launcher in `C:\Windows` — and five packages recorded
+// `Could not find any Python installation to use` and walked the ladder to a WHOLE-DISK
+// grant. Prepending the interpreter's and git's real directories restores PARITY with the
+// POSIX floor rather than widening anything.
 const STUDY_PATH = (() => {
   const base = process.env.STUDY_PATH || STUDY_PATH_DEFAULT;
   if (!WINDOWS) return base;
-  const nodeDir = path.dirname(process.execPath);
-  const present = base
-    .split(path.delimiter)
-    .some((d) => d && path.resolve(d).toLowerCase() === nodeDir.toLowerCase());
-  return present ? base : [nodeDir, base].join(path.delimiter);
+  const dirs = [path.dirname(process.execPath)];
+  // Resolved from the PARENT's PATH, which is the host's own view — the question is where
+  // the tool actually lives on this machine, and the cell is precisely the environment that
+  // cannot answer it.
+  for (const cmd of ['python', 'python3', 'git']) {
+    const exts = (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean);
+    outer: for (const d of (process.env.PATH || '').split(path.delimiter)) {
+      if (!d) continue;
+      for (const ext of exts) {
+        try { if (fs.statSync(path.join(d, cmd + ext)).isFile()) { dirs.push(d); break outer; } } catch { /* next */ }
+      }
+    }
+  }
+  const seen = new Set(base.split(path.delimiter).filter(Boolean).map((d) => path.resolve(d).toLowerCase()));
+  const add = [];
+  for (const d of dirs) {
+    const k = path.resolve(d).toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k); add.push(d);
+  }
+  return add.length ? [...add, base].join(path.delimiter) : base;
 })();
 const ROOT = arg('--out', path.join(os.homedir(), '.cache/nub/grant-matrix'));
 const JOBS = Number(arg('--jobs', '3'));
@@ -403,7 +434,14 @@ function toolchainProof() {
     let real = null, runs = null, out = null;
     if (resolved) {
       try { real = fs.realpathSync.native(resolved); } catch { real = null; }
-      const r = spawnSync(resolved, [flag], { env, encoding: 'utf8', timeout: 60_000 });
+      // A BATCH FILE IS NOT A BINARY. Node has refused to spawn `.cmd`/`.bat` without a
+      // shell since the CVE-2024-27980 fix, so probing `npm.CMD` directly reported FAILS on
+      // a perfectly healthy runner — a probe artifact that reads exactly like a broken host,
+      // which is the one thing this proof must never manufacture.
+      const batch = /\.(cmd|bat)$/i.test(resolved);
+      const r = batch
+        ? spawnSync(`"${resolved}" ${flag}`, { env, encoding: 'utf8', timeout: 60_000, shell: true })
+        : spawnSync(resolved, [flag], { env, encoding: 'utf8', timeout: 60_000 });
       runs = r.status === 0;
       out = ((r.stdout || '') + (r.stderr || '')).trim().split('\n')[0] || null;
     }
@@ -434,6 +472,10 @@ function toolchainProof() {
   if (!tools.node?.runs) failures.push('node does not resolve and run in the cell environment');
   if (!tools.npm?.runs) failures.push('npm does not resolve and run in the cell environment');
   if (!pythonOk) failures.push('no python interpreter resolves and runs in the cell environment');
+  // Required because the POSIX floor has always supplied it from `/usr/bin`, so a Windows
+  // run without it is not measuring the same environment as the 643 rows it is compared to
+  // — and every package in the full-disk set is provisioned with a git repository.
+  if (!tools.git?.runs) failures.push('git does not resolve and run in the cell environment');
   if (WINDOWS && !msvc.ok) failures.push('vswhere reports no Visual Studio install carrying the VC x86/x64 tools');
 
   // INDIRECTION IS WARNED, NOT FAILED, and the distinction is the whole design. A symlinked
