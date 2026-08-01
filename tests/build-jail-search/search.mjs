@@ -85,6 +85,13 @@ function paths(root, prefix = '') {
   for (const e of entries) {
     const rel = prefix ? `${prefix}/${e.name}` : e.name;
     if (!prefix && e.name === '.git') { out.push(...paths(path.join(root, e.name, 'hooks'), '.git/hooks')); continue; }
+    // PYTHON BYTECODE IS NOT A SIDE EFFECT. node-gyp ships `gyp/pylib`, and CPython writes
+    // `__pycache__/*.pyc` beside any module it imports. Unjailed it can; jailed it cannot —
+    // and the build SUCCEEDS either way, because .pyc is a pure cache. Counting them made
+    // nine native packages (keccak, lz4, ssh2, …) demand `write.userHome`, the second-widest
+    // grant we have, when the only difference between arms was bytecode. Verified by diffing
+    // the two path sets: __pycache__ entries were the ENTIRE delta.
+    if (e.name === '__pycache__' || e.name.endsWith('.pyc')) continue;
     if (e.isDirectory()) out.push(...paths(path.join(root, e.name), rel));
     else out.push(rel);
   }
