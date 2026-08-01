@@ -1,0 +1,83 @@
+{
+  "packages": {
+    "bcrypt": [
+      {
+        "network": true,
+        "versions": "5.1.1",
+        "notes": "measured: 5.1.1 -> network"
+      }
+    ],
+    "better-sqlite3": [
+      {
+        "network": true,
+        "writePaths": [
+          ".npm/_prebuilds"
+        ],
+        "versions": "12.6.0",
+        "notes": "measured: 12.6.0 -> network"
+      }
+    ],
+    "canvas": [
+      {
+        "write": "disk",
+        "notes": "measured: 2.11.2 -> write.disk"
+      }
+    ],
+    "cypress": [
+      {
+        "network": true,
+        "writePaths": [
+          "Library/Caches/Cypress"
+        ],
+        "notes": "measured: 12.17.4, 15.19.0 -> network"
+      }
+    ],
+    "esbuild": [
+      {
+        "network": true,
+        "writePaths": [
+          ".npm/_cacache",
+          ".npm/_logs",
+          "Library/Caches/esbuild"
+        ],
+        "versions": "0.12.29",
+        "notes": "measured: 0.12.29 -> network"
+      }
+    ],
+    "lefthook": [
+      {
+        "write": {
+          "project": true
+        },
+        "notes": "measured: 2.1.10 -> write.project"
+      }
+    ],
+    "puppeteer": [
+      {
+        "network": true,
+        "writePaths": [
+          ".cache/puppeteer"
+        ],
+        "notes": "measured: 19.11.1, 25.4.0 -> network"
+      }
+    ],
+    "sharp": [
+      {
+        "write": "disk",
+        "network": true,
+        "writePaths": [
+          "Library/Caches/Homebrew"
+        ],
+        "notes": "measured: 0.32.6, 0.34.4 -> write.disk + network"
+      }
+    ]
+  },
+  "baseline": [],
+  "env": [
+    {
+      "name": "PYTHONDONTWRITEBYTECODE",
+      "value": "1",
+      "notes": "node-gyp ships gyp/pylib and CPython writes __pycache__/*.pyc beside any module it imports. The jail refuses correctly and the build succeeds either way, because bytecode is a pure cache — but the refused writes were counted as side effects and made nine native packages (keccak, lz4, ssh2, ...) demand write.userHome, the second-widest grant, when bytecode was the ENTIRE delta between arms. Setting this stops the write happening at all, which is the general fix; the harness previously filtered .pyc after the fact, which is the same fix re-derived per tool."
+    }
+  ]
+}
