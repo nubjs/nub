@@ -1,0 +1,35 @@
+# RE-MEASUREMENT OF THE ELEVEN UNCORROBORATED win32-x64 FULL-DISK ROWS.
+#
+# `fullDisk` is the widest grant the catalog has, and on Windows it is wider still than on
+# the other two platforms: it launches the script WITHOUT the LowBox token, and egress is an
+# AppContainer capability, so declining the token concedes the network with it. Eleven live
+# entries reached that rung without clearing the corroboration guard in apply-matrix.mjs,
+# and five of them failed on `Could not find any Python installation to use` — a
+# toolchain-shaped string, which is the exact class that already produced two false
+# NEEDS-FULL-DISK rows on a linux-x64 host whose node was symlinked out of the granted
+# prefix. Re-measure them on a host that has PROVED it carries the toolchain.
+#
+# THE FIRST THREE ROWS ARE THE POSITIVE CONTROL AND THEY ARE PINNED.
+# Each is a bare node-gyp compile committed as NEEDS-NOTHING on win32-x64, so each already
+# demonstrates that node-gyp can find Python and MSVC from INSIDE the jail with no grants at
+# all — the one question `--toolchain-proof` cannot answer, since it necessarily probes from
+# outside. If any of them fails its `no_grants` cell, the host is wrong and NO verdict from
+# the run may be published. They lead the file so that with three slots each slot takes one
+# first, and a slot that dies part-way still carries its own control.
+#
+# Versions are pinned for the controls, because a control whose meaning drifts with a new
+# release is not a control. The eleven stay at `latest`, which is what they were measured at.
+dtrace-provider	0.8.8
+bigint-buffer	1.1.5
+websocket	1.0.31	git-repo
+registry-js	latest	git-repo
+msnodesqlv8	latest	git-repo
+interruptor	latest	git-repo
+gcstats.js	latest	git-repo
+nodejieba	latest	git-repo
+git-win	latest	git-repo
+electron-chromedriver	latest	git-repo
+bs-platform	latest	git-repo
+zopflipng-bin	latest	git-repo
+jpeg-recompress-bin	latest	git-repo
+gif2webp-bin	latest	git-repo

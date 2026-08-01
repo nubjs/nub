@@ -34,9 +34,22 @@
 // mode the jail cares most about. So `--apply` adds; removals print as a proposal and
 // need `--remove-redundant` said out loud on top.
 //
+// SUPERSEDING A FULL-DISK GRANT IS ITS OWN FLAG, AND THE SCRIPT COULD NOT DO IT AT ALL.
+// A re-measurement that resolves a `fullDisk` package to something NARROWER used to leave
+// the whole-disk grant standing: a NEEDS-EGRESS record carries no `packageGrant`, so the
+// existing entry was never looked at and the package ended up holding the whole disk AND a
+// new egress entry. A NEEDS-PROJECT record was worse — it reached the entry through
+// `Object.assign`, which merges, so `fullDisk: true` survived alongside the narrow keys and
+// the run reported `refreshed` as though it had narrowed something. Both are silent wrong
+// answers in the widening direction, which is the one direction this file exists to police.
+// `--supersede-fulldisk` withdraws a MACHINE-AUTHORED whole-disk grant when a real
+// measurement of the same package lands on any other verdict. It is off by default because
+// withdrawing a grant is the direction that breaks packages.
+//
 //   node apply-matrix.mjs <records.ndjson> [more.ndjson ...]        # dry run, the default
 //   node apply-matrix.mjs <records.ndjson> --apply
 //   node apply-matrix.mjs <records.ndjson> --apply --remove-redundant
+//   node apply-matrix.mjs <records.ndjson> --apply --supersede-fulldisk
 //   node apply-matrix.mjs ... --catalog <path>
 import fs from 'node:fs';
 import path from 'node:path';
@@ -45,9 +58,14 @@ const argv = process.argv.slice(2);
 const arg = (n, d) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : d; };
 const APPLY = argv.includes('--apply');
 const REMOVE = argv.includes('--remove-redundant');
+const SUPERSEDE = argv.includes('--supersede-fulldisk');
 const HARNESS = path.dirname(new URL(import.meta.url).pathname);
 const CATALOG = arg('--catalog', path.join(HARNESS, '../../crates/nub-sandbox/data/build-jail-catalog.json'));
-const files = argv.filter((a) => !a.startsWith('--') && a !== CATALOG && /\.(ndjson|json)$/.test(a));
+// Every flag that takes a PATH must be excluded here, not just the catalog: the filter
+// picks positional files by extension, so `--host-proof x.json` would otherwise be read as
+// a records file too — five "skipped unparseable line" warnings and a silent second input.
+const flagValues = new Set([CATALOG, arg('--host-proof', null)].filter(Boolean));
+const files = argv.filter((a) => !a.startsWith('--') && !flagValues.has(a) && /\.(ndjson|json)$/.test(a));
 if (!files.length) { console.error('usage: apply-matrix.mjs <records.ndjson>... [--apply] [--remove-redundant] [--catalog PATH]'); process.exit(2); }
 
 // The marker that tells a later run — and a later reader — that this entry was written
@@ -109,8 +127,8 @@ for (const f of files) {
 // committed records across every platform. A failure signature never seen in the corpus,
 // appearing on a new host, is the host. So a full-disk record must clear one of two bars:
 //
-//   (a) its failing signature is already KNOWN to the committed corpus, from a different
-//       host — someone else's machine hit this too, so it is not local; or
+//   (a) its failing signature is already KNOWN to the committed corpus from a different
+//       PLATFORM — a whole different OS hit this too, so it is not environmental; or
 //   (b) the same package is CROSS-PLATFORM CORROBORATED — a committed record from another
 //       platform also failed the `both` cell. Both survivors have this: `wordpos` and
 //       `unrs-resolver`, each a sibling-store write seen on two platforms.
@@ -118,6 +136,38 @@ for (const f of files) {
 // (b) is separate from (a) because the errno spelling is per-OS: Linux reports the
 // `unrs-resolver` sibling-store write as `EACCES ... mkdir`, macOS the same write as
 // `EPERM ... mkdir`, so signature matching alone would reject a genuinely corroborated row.
+//
+// ★ (a) SAYS PLATFORM, AND IT SAID `host` UNTIL 2026-08-01. THAT WAS THE HOLE.
+// `host` is the machine name, and every CI runner gets a fresh one — so two `windows-latest`
+// jobs read as two independent hosts while being the SAME IMAGE with the same tool layout
+// and the same tools missing or present. A correlated environment could therefore corroborate
+// itself, which is precisely the case the guard exists to exclude, and it is how four
+// `Could not find any Python installation to use` rows cleared the bar on the strength of a
+// same-image sibling. Measured consequence: under the tightened rule those four go back to
+// UNCORROBORATED, joining the seven that never cleared it. That is the correct outcome, and
+// they are NOT grandfathered.
+//
+// A genuinely different same-platform host — a developer's Windows box against a runner —
+// SHOULD be able to corroborate, and cannot today, because no record carries a description
+// of its toolchain layout to tell the two cases apart. `grant-matrix.mjs --toolchain-proof`
+// now produces exactly that description; wiring its fingerprint into the record is what
+// would let (a) relax from "a different platform" to "a demonstrably different environment".
+// Until a record carries one, platform is the only honest proxy.
+//
+//   (c) THE RUN CARRIES A HOST PROOF. `--host-proof <toolchain-proof.json>` admits a record
+//       whose platform, host and binary the proof names, when the proof passed AND the same
+//       run contains a POSITIVE CONTROL: a package that compiled a native addon from source
+//       INSIDE the jail with no grants at all, on that same host and binary.
+//
+// (c) is not a weakening, it is the thing (a) and (b) were only ever proxying for. They ask
+// "did some other environment agree?" because nothing recorded whether THIS environment was
+// sound. A passing toolchain proof plus a native build that succeeded ungranted is direct
+// evidence that it was, and direct evidence beats a proxy. It is also strictly harder to
+// satisfy by accident than (a) ever was: the proof must name the same binary sha the record
+// carries, so it cannot be borrowed from another run, and the control must have COMPILED —
+// the failure mode being excluded is precisely a host that cannot compile.
+//
+// It is opt-in and fails closed: no `--host-proof`, no route (c).
 //
 // A record clearing neither is reported as NEEDS-FULL-DISK:UNCORROBORATED and NOT written.
 // It is not silently dropped either — the whole point is that a human looks at it, because
@@ -154,13 +204,13 @@ function signature(line) {
     .replace(/\s+/g, ' ').trim().toLowerCase() || null;
 }
 
-const knownSignatures = new Map(); // signature -> Set of hosts that produced it
+const knownSignatures = new Map(); // signature -> Set of PLATFORMS that produced it
 const failedBothElsewhere = new Map(); // package -> Set of platforms where `both` failed
 for (const r of corpus) {
   const s = signature(r.evidence?.failing_line);
   if (s) {
     if (!knownSignatures.has(s)) knownSignatures.set(s, new Set());
-    knownSignatures.get(s).add(r.host);
+    knownSignatures.get(s).add(r.platform);
   }
   if (r.cells?.both === 1) {
     if (!failedBothElsewhere.has(r.package)) failedBothElsewhere.set(r.package, new Set());
@@ -168,15 +218,45 @@ for (const r of corpus) {
   }
 }
 
+// A node-gyp source build unpacks the Node headers into the fixture home — roughly 2,800
+// files on top of the ~1,500-file install floor — so an unconfined artifact above this mark
+// is a package that actually COMPILED rather than one that downloaded a prebuild or no-opped.
+// It is the mechanical way to tell a real positive control from a nag script that exits 0.
+const NATIVE_BUILD_FLOOR = 3800;
+
+const hostProof = (() => {
+  const p = arg('--host-proof', null);
+  if (!p) return null;
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { console.error(`--host-proof: ${e.message}`); process.exit(2); }
+})();
+
+// The control must come from the RECORDS BEING INGESTED, never from the committed corpus:
+// the question is whether THIS run's host could compile, and a control from another run
+// answers a different question.
+function positiveControlFor(r) {
+  return records.find((x) => x.verdict === 'NEEDS-NOTHING'
+    && x.cells?.no_grants === 0
+    && x.host === r.host && x.binary_sha256 === r.binary_sha256 && x.platform === r.platform
+    && (x.evidence?.control_artifact?.files || 0) >= NATIVE_BUILD_FLOOR);
+}
+
+function hostProven(r) {
+  if (!hostProof || hostProof.ok !== true) return null;
+  if (hostProof.platform !== r.platform || hostProof.host !== r.host || hostProof.binary_sha256 !== r.binary_sha256) return null;
+  const ctrl = positiveControlFor(r);
+  return ctrl ? `${ctrl.package}@${ctrl.version}` : null;
+}
+
 // Returns null when the record may be written, or the reason it may not.
 function fullDiskObjection(r) {
+  if (hostProven(r)) return null;                                             // (c)
   const platforms = failedBothElsewhere.get(r.package);
   if (platforms && [...platforms].some((p) => p !== r.platform)) return null; // (b)
   const s = signature(r.evidence?.failing_line);
-  const hosts = s ? knownSignatures.get(s) : null;
-  if (hosts && [...hosts].some((h) => h !== r.host)) return null;             // (a)
+  const seenOn = s ? knownSignatures.get(s) : null;
+  if (seenOn && [...seenOn].some((p) => p !== r.platform)) return null;       // (a)
   return s
-    ? `failure signature "${s}" is novel to ${r.host} and no other platform failed the both cell for this package`
+    ? `failure signature "${s}" has been seen on no platform but ${r.platform}, and no other platform failed the both cell for this package`
     : `no failing line recorded, and no other platform failed the both cell for this package`;
 }
 
@@ -200,6 +280,11 @@ if (argv.includes('--selftest')) {
     ['a host-local denial is refused', { ...base, package: 'eth-gas-reporter', evidence: { failing_line: 'sh: 1: npm: Permission denied' } }, false],
     ['a cross-platform failure is admitted', { ...base, package: 'unrs-resolver', evidence: { failing_line: 'Error: EACCES: permission denied, mkdir \'/x\'' } }, true],
     ['no failing line is refused', { ...base, package: 'never-measured-anywhere', evidence: {} }, false],
+    // The hole rule (a) carried until 2026-08-01: this signature exists in the committed
+    // corpus on win32-x64 ONLY, produced by several runners with different `host` names.
+    // Under the old spelling a different name was enough and the row was admitted.
+    ['a same-platform sibling does not corroborate',
+      { ...base, package: 'registry-js', platform: 'win32-x64', host: 'runnervm-new', evidence: { failing_line: 'gyp ERR! stack Error: Could not find any Python installation to use' } }, false],
   ];
   let bad = 0;
   for (const [name, rec, wantAdmit] of cases) {
@@ -207,10 +292,36 @@ if (argv.includes('--selftest')) {
     if (admitted !== wantAdmit) { console.error(`FAIL ${name}: admitted=${admitted}, want ${wantAdmit}`); bad++; }
     else console.log(`ok  ${name}`);
   }
+
+  // Route (c) FAILS CLOSED. A corroboration route that silently defaulted on would undo the
+  // whole guard, and the flag is the only thing standing between "measured on a proven host"
+  // and "measured anywhere at all".
+  const anyFullDisk = records.find((x) => x.verdict === 'NEEDS-FULL-DISK') || { platform: 'p', host: 'h', binary_sha256: 'b' };
+  if (!argv.includes('--host-proof') && hostProven(anyFullDisk) !== null) {
+    console.error('FAIL route (c) is armed without --host-proof'); bad++;
+  } else console.log('ok  route (c) is off unless --host-proof is passed');
+
+  // The merge-vs-replace bug had no test and was invisible in the report, which called the
+  // widening a refresh. Pin the property directly: a narrow entry replacing a whole-disk one
+  // must not carry `fullDisk` forward.
+  const wide = { package: 'q', fullDisk: true, evidence: 'measured', observed: `${MARK} old` };
+  const narrow = { package: 'q', projectCwd: true, evidence: 'measured', observed: `${MARK} new` };
+  const merged = Object.assign({ ...wide }, narrow);
+  if (merged.fullDisk !== true) { console.error('FAIL merge-vs-replace: the fixture no longer reproduces the merge'); bad++; }
+  else if (narrow.fullDisk !== undefined) { console.error('FAIL merge-vs-replace: replacement still carries fullDisk'); bad++; }
+  else console.log('ok  a narrow entry replacing a whole-disk one drops fullDisk');
+
   process.exit(bad ? 1 : 0);
 }
 
-const added = [], skipped = [], rejected = [], proposedRemovals = [], uncorroborated = [];
+// A REAL MEASUREMENT, as opposed to a row that says the run could not measure anything.
+// `CONTROL-FAILED` means the package failed UNJAILED, `UNMEASURABLE`/`ERROR` that the
+// harness gave up — none of them is evidence about what the package needs, so none may
+// withdraw a grant. Getting this set wrong would strip grants on a bad run, which is the
+// exact damage `--supersede-fulldisk` is otherwise designed to avoid.
+const MEASURED = new Set(['NEEDS-NOTHING', 'NEEDS-EGRESS', 'NEEDS-PROJECT', 'NEEDS-BOTH', 'FAILS-AT-BOTH', 'FAILS-AT-FULL-DISK']);
+
+const added = [], skipped = [], rejected = [], proposedRemovals = [], uncorroborated = [], superseded = [];
 
 for (const r of records) {
   const where = `${r.package}@${r.version}`;
@@ -224,6 +335,44 @@ for (const r of records) {
         rejected.push(`${where}: verdict ${r.verdict} but cells derive ${d ?? 'nothing'} (${JSON.stringify(r.cells)})`);
       }
       continue;
+    }
+  }
+
+  // WITHDRAW A SUPERSEDED WHOLE-DISK GRANT. Placed after the entailment guard so only a
+  // record whose cells support its verdict can withdraw anything, and before the
+  // `no catalog entry` skip below, because the commonest narrowing — NEEDS-NOTHING —
+  // carries no grant at all and would otherwise never reach the existing entry.
+  // Detected unconditionally and WITHDRAWN only under the flag, so a dry run names every
+  // grant the measurement supersedes without touching the file.
+  if (MEASURED.has(r.verdict)) {
+    const i = (catalog.packageGrants || []).findIndex((e) => e.package === r.package && e.fullDisk === true);
+    if (i >= 0) {
+      if (!String(catalog.packageGrants[i].observed || '').includes(MARK)) {
+        skipped.push(`${where}: holds a human-authored fullDisk grant, left alone`);
+      } else {
+        superseded.push(`- fullDisk ${r.package} — re-measured as ${r.verdict} on ${r.platform} (${r.host})`);
+        if (SUPERSEDE) { catalog.packageGrants.splice(i, 1); granted.project.delete(r.package); }
+
+        // BOTH HALVES, OR NEITHER. A NEEDS-FULL-DISK record writes an EGRESS entry as well
+        // as the filesystem grant, because the terminal cell carries egress and a grant that
+        // applied only half of what was measured would be a configuration nobody ran. So
+        // retracting the record has to retract the egress half too, or the package silently
+        // keeps network access on the strength of a measurement that has been withdrawn —
+        // which on Windows is the more permissive half, since a full-disk launch drops the
+        // LowBox token and egress is an AppContainer capability.
+        //
+        // Matched on the entry's OWN provenance, never on the package name: an entry whose
+        // `observed` records a NEEDS-EGRESS measurement was earned independently and stays.
+        // If this record's new verdict is NEEDS-EGRESS, the grant application below re-adds
+        // it from the current evidence, which is the entry we actually want.
+        const j = (catalog.packageNetwork.full || []).findIndex((e) => e.package === r.package
+          && String(e.observed || '').includes(MARK)
+          && String(e.observed || '').includes('NEEDS-FULL-DISK'));
+        if (j >= 0) {
+          superseded.push(`- egress ${r.package} — written by the same retracted full-disk record`);
+          if (SUPERSEDE) { catalog.packageNetwork.full.splice(j, 1); granted.net.delete(r.package); }
+        }
+      }
     }
   }
 
@@ -250,7 +399,13 @@ for (const r of records) {
     + ('full_disk' in r.cells ? ` full_disk=${r.cells.full_disk}` : '') + ` (0=pass). `
     + (r.evidence?.failing_line ? `Ungranted failure: ${r.evidence.failing_line}. ` : '')
     + (r.evidence?.control_artifact ? `Unconfined artifact ${r.evidence.control_artifact.bytes} B / ${r.evidence.control_artifact.files} files. ` : '')
-    + `nub ${r.nub_version} ${String(r.binary_sha256).slice(0, 12)}.`;
+    + `nub ${r.nub_version} ${String(r.binary_sha256).slice(0, 12)}.`
+    // WHY A WHOLE-DISK GRANT CLEARED THE GUARD BELONGS IN THE ENTRY. It is the widest tier
+    // the catalog has, so a reader deciding whether to narrow it needs to know what the
+    // corroboration actually rested on — here, a host that proved it could compile.
+    + (r.verdict === 'NEEDS-FULL-DISK' && hostProven(r)
+      ? ` Host toolchain proved on ${r.host}; positive control ${hostProven(r)} compiled a native addon ungranted inside the jail on the same binary.`
+      : '');
 
   if (r.grant.packageNetwork === 'full') {
     const existing = (catalog.packageNetwork.full || []).find((e) => e.package === r.package);
@@ -290,7 +445,15 @@ for (const r of records) {
     if (existing) {
       if (!String(existing.observed || '').includes(MARK)) { skipped.push(`${where}: packageGrant is human-authored, left alone`); }
       else if (JSON.stringify(existing) === JSON.stringify(entry)) { skipped.push(`${where}: packageGrant already current`); }
-      else { Object.assign(existing, entry); added.push(`~ packageGrants ${r.package} (refreshed)`); }
+      else {
+        // REPLACED WHOLESALE, NOT MERGED. `Object.assign` kept every capability key the new
+        // entry does not mention, so refreshing a `fullDisk` package with a narrow verdict
+        // left the whole disk in place and still printed `refreshed` — a widening the report
+        // called a narrowing. An entry must describe ONE measurement, so a key the current
+        // measurement does not imply has no business surviving it.
+        catalog.packageGrants[catalog.packageGrants.indexOf(existing)] = entry;
+        added.push(`~ packageGrants ${r.package} (replaced)`);
+      }
     } else {
       catalog.packageGrants.push(entry);
       added.push(`+ packageGrants ${r.package}`);
@@ -301,6 +464,7 @@ for (const r of records) {
 // ── report ────────────────────────────────────────────────────────────────────
 const say = (title, xs) => { if (xs.length) { console.log(`\n${title} (${xs.length})`); for (const x of xs) console.log(`  ${x}`); } };
 say('CHANGES', added);
+say(`SUPERSEDED FULL-DISK GRANTS — ${SUPERSEDE ? 'withdrawn' : 'NOT withdrawn; pass --supersede-fulldisk'}`, superseded);
 say('REJECTED — not applied', rejected);
 say('NEEDS-FULL-DISK:UNCORROBORATED — not applied, needs a human look', uncorroborated);
 say(`PROPOSED REMOVALS — ${REMOVE ? 'applying' : 'NOT applied; pass --remove-redundant'}`, proposedRemovals.map((r) => `- ${r.package}@${r.version}: passes ungranted (${r.evidence?.detail || ''})`));
@@ -316,6 +480,10 @@ if (REMOVE) {
   }
 }
 
+// A withdrawal counts as a change on its own: the commonest narrowing is NEEDS-NOTHING,
+// which adds nothing at all, so keying the write on `added` alone would splice the grant
+// out of the in-memory catalog and then decline to save it.
+if (SUPERSEDE) added.push(...superseded);
 const changed = added.length > 0;
 if (!APPLY) { console.log(`\nDRY RUN — ${changed ? `${added.length} change(s) would be written` : 'nothing to change'}. Pass --apply to write ${CATALOG}`); process.exit(0); }
 if (!changed) { console.log('\nnothing to write — catalog already current (idempotent)'); process.exit(0); }
