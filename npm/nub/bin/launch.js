@@ -134,7 +134,16 @@ function leadsToUs(entry, st, ourReal) {
       try { return fs.realpathSync(entry) === ourReal; } catch { return false; }
     }
     if (st.isFile()) {
+      // A PATH `nub` that is a regular file is usually a PM shim — but it can also be a
+      // REAL 45 MB nub binary (curl-install at ~/.nub/bin alongside an npm install). Reading
+      // that as utf8 and regexing it costs ~1.1s: measured 379ms to read, 41,781 quoted
+      // matches, 17,355 realpath syscalls, vs 0ms on an actual shim. Under a PM whose heal
+      // never lands, that is paid on EVERY call. Every shim shape we handle is ~0.5-2 KB and
+      // starts with `#!`, so a size cap plus a shebang probe rejects the binary for two
+      // syscalls. Cap is deliberately far above any real shim rather than tight.
+      if (st.size > 64 * 1024) return false;
       const body = fs.readFileSync(entry, "utf8");
+      if (!body.startsWith("#!")) return false;
       const basedir = path.dirname(entry);
       // pnpm >=11 emits an explicit `# cmd-shim-target=` trailer. Prefer it: it is the
       // shim's own declaration of what it dispatches to, so it cannot drift with
