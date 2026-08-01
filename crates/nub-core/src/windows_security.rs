@@ -81,6 +81,7 @@ unsafe extern "system" {
     fn GetAce(acl: *const Acl, index: u32, ace: *mut *mut c_void) -> i32;
     fn EqualSid(first: Sid, second: Sid) -> i32;
     fn IsWellKnownSid(sid: Sid, kind: i32) -> i32;
+    fn CreateWellKnownSid(kind: i32, domain: Sid, sid: *mut c_void, size: *mut u32) -> i32;
     fn OpenProcessToken(process: Handle, access: u32, token: *mut Handle) -> i32;
     fn GetTokenInformation(
         token: Handle,
@@ -464,6 +465,48 @@ mod tests {
     /// Pins the ancestor/leaf asymmetry. Reading an inherit-only ACE as if it
     /// granted access on its own object rejected every chain at `C:\`; ignoring it
     /// at the LEAF too would let the cache contents inherit a foreign grant.
+    /// `WinWorldSid`, i.e. Everyone. Not in the trusted set, and the only
+    /// well-known SID that makes the refusal branch reachable without a second
+    /// account or elevation.
+    const WIN_WORLD_SID: i32 = 1;
+
+    /// The refusal half of `harden_private_directory`.
+    ///
+    /// Hardening a directory we do NOT own would adopt an attacker-planted tree and
+    /// paper over it — the DACL would end up correct while the CONTENTS stayed
+    /// suspect. That branch had no coverage, because nothing in the tree creates a
+    /// directory owned by another principal, so the decision is tested where it is
+    /// actually made: the predicate, not the filesystem.
+    #[test]
+    fn a_directory_owned_by_another_principal_is_not_trusted() {
+        let current = current_user_sid().expect("this process has a token");
+
+        // Positive control: our own SID must pass, or a `false` below would prove
+        // nothing about foreign owners.
+        assert!(
+            trusted_sid(current.sid, current.sid),
+            "our own SID must be trusted, else this test cannot discriminate"
+        );
+
+        let mut everyone = vec![0u8; 68];
+        let mut size = everyone.len() as u32;
+        let made = unsafe {
+            CreateWellKnownSid(
+                WIN_WORLD_SID,
+                ptr::null_mut(),
+                everyone.as_mut_ptr().cast(),
+                &mut size,
+            )
+        };
+        assert!(made != 0, "CreateWellKnownSid(WinWorldSid) failed");
+
+        let everyone: Sid = everyone.as_mut_ptr().cast();
+        assert!(
+            !trusted_sid(everyone, current.sid),
+            "Everyone must not be a trusted owner — hardening such a directory would adopt it"
+        );
+    }
+
     #[test]
     fn an_inherit_only_grant_is_an_ancestor_template_but_a_leaf_hazard() {
         let dir = std::env::temp_dir().join(format!("nub-ws-io-{}", std::process::id()));
