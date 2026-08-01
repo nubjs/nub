@@ -781,7 +781,13 @@ pub fn compile_build_jail(
     // the package silently keeps whatever grant it shipped with. Measured with the per-package
     // gate: `wordpos` wrote into a sibling store entry from a supposedly grant-free cell,
     // because v1 was still granting it, and every cell of the search then passed at state 0.
+    // `mut` only when the override feature is on — without it nothing ever assigns, and
+    // clippy's `unused_mut` fires on the DEFAULT feature set, which is what a developer builds
+    // locally and what `--all-features` in CI therefore never sees.
+    #[cfg(feature = "build-jail-catalog-override")]
     let mut applied_v2 = false;
+    #[cfg(not(feature = "build-jail-catalog-override"))]
+    let applied_v2 = false;
     #[cfg(feature = "build-jail-catalog-override")]
     if crate::catalog_override::v2_in_force() {
         applied_v2 = true;

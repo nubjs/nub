@@ -102,13 +102,38 @@ pub(super) fn set_native_config_seed(seed: Vec<String>) {
 /// (disk-materialize project-local, via the SAME importer-closure + expand hook the
 /// phantom seeds use) restores a real project above `cwd`.
 ///
-/// DELIBERATELY curated, NOT "all script-havers": self-contained builds (node-gyp
-/// native compiles, prebuilt-binary downloaders like esbuild) read only their own
-/// dir, produce identical output anywhere, and share it cross-project via the
-/// side-effects cache — ejecting them would erode the symlink-in-store sharing win
-/// for zero correctness gain, so they STAY in GVS (built once, shared). Every name
-/// here is verified category-C (build reads/mutates the host project); absent names
-/// cost nothing (the seed union is presence-gated against the resolved graph).
+/// ⚠ THIS LIST IS SLATED FOR DELETION, and the argument below for curating it does
+/// not survive contact with what other package managers actually shipped.
+///
+/// It reads: "DELIBERATELY curated, NOT all script-havers — self-contained builds
+/// read only their own dir, produce identical output anywhere, and share it
+/// cross-project, so ejecting them would erode the symlink-in-store sharing win for
+/// zero correctness gain." Three things measured since:
+///
+/// - **bun ships the rejected rule.** A package that will run a lifecycle script is
+///   excluded from its global store and materialized project-local, and the
+///   ineligibility PROPAGATES to every dependent. Their source comment:
+///   "packages with lifecycle scripts mutate their install directory, so a shared
+///   global copy would either diverge from the patch or be mutated underneath other
+///   projects." yarn PnP unplugs build-script packages for the same reason; pnpm
+///   defaults builds OFF under its global virtual store. No PM uses a name list.
+/// - **The sharing win is smaller than assumed.** Under default-deny-scripts
+///   (pnpm 10+, npm 12, bun's trustedDependencies) the set that actually RUNS a
+///   script is single digits per project, so the loss is bounded by what the user
+///   explicitly approved.
+/// - **"Zero correctness gain" is wrong.** A shared slot is mutable state two
+///   projects share: reproduced on pnpm 11's global virtual store, project B's
+///   install re-ran a build script inside a directory project A was symlinked to,
+///   and a marker written by B appeared in A with no reinstall in A.
+///
+/// The replacement needs no new machinery. `aube-lockfile`'s
+/// `transitively_requires_build` already does the upward propagation ("mirrors
+/// pnpm's transitivelyRequiresBuild"), seeded on `allow_build(pkg)` — allowed to run
+/// its scripts, graph-derived, no names. Only PLACEMENT still consults this list.
+///
+/// Absent names cost nothing (the seed union is presence-gated against the resolved
+/// graph) — which is precisely the problem: a package that needs the project and is
+/// not listed breaks SILENTLY.
 ///
 /// Gate: this rides the same [`enabled`] seam as phantom eject, so disabling the
 /// internal eject seam also disables curated eject (reintroducing #457) — an
