@@ -1729,7 +1729,7 @@ mod tests {
         /// install while the project-local test stayed green. Emitting a rule and enforcing one
         /// are different claims, and only this fixture can tell them apart here.
         #[test]
-        fn write_deps_reaches_a_dependency_in_the_GLOBAL_store() {
+        fn write_deps_reaches_a_dependency_in_the_global_store() {
             let tmp = std::env::temp_dir().join(format!("nub-v2-gvs-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&tmp);
             let store = tmp.join("home/.cache/nub/pm/store");
