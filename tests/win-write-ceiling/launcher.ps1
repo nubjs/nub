@@ -413,6 +413,84 @@ public static class Wc
         return "OK";
     }
 
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool CreateProcessAsUserW(IntPtr token, string app, StringBuilder cmdline,
+        IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string cwd,
+        ref STARTUPINFOEXW si, out PROCESS_INFORMATION pi);
+
+    /// Launch WITHOUT an AppContainer token but WITH a de-elevated restricted one — the honest
+    /// baseline for "what does declining the LowBox token actually give a package".
+    ///
+    /// The `plain` arm on CI runs as an ELEVATED runner, so it writes `C:\Program Files` and
+    /// `C:\Windows` and overstates the no-token tier by exactly the amount CI differs from a
+    /// developer. This arm is the same launch under a token holding no admin authority.
+    /// `CreateProcessAsUserW` needs no privilege for a self-derived restricted token — the
+    /// documented `CreateRestrictedToken` exemption from `SE_ASSIGNPRIMARYTOKEN`, measured in
+    /// MECHANISM-FACTS §5e.
+    public static string LaunchDeelevated(string exe, string cmdline, string cwd,
+        string logPath, uint timeoutMs)
+    {
+        IntPtr self = IntPtr.Zero, restricted = IntPtr.Zero, adminSid = IntPtr.Zero, disable = IntPtr.Zero;
+        IntPtr hOut = new IntPtr(-1), hIn = new IntPtr(-1);
+        try
+        {
+            if (!OpenProcessToken(GetCurrentProcess(),
+                    TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY | TOKEN_IMPERSONATE, out self))
+                return "launch-error OpenProcessToken err=" + Marshal.GetLastWin32Error();
+            byte[] ntAuth = new byte[] { 0, 0, 0, 0, 0, 5 };
+            if (!AllocateAndInitializeSid(ntAuth, 2, 32, 544, 0, 0, 0, 0, 0, 0, out adminSid))
+                return "launch-error AllocateAndInitializeSid err=" + Marshal.GetLastWin32Error();
+            disable = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(SID_AND_ATTRIBUTES)));
+            SID_AND_ATTRIBUTES sd = new SID_AND_ATTRIBUTES();
+            sd.Sid = adminSid; sd.Attributes = 0;
+            Marshal.StructureToPtr(sd, disable, false);
+            if (!CreateRestrictedToken(self, DISABLE_MAX_PRIVILEGE, 1, disable, 0, IntPtr.Zero,
+                    0, IntPtr.Zero, out restricted))
+                return "launch-error CreateRestrictedToken err=" + Marshal.GetLastWin32Error();
+
+            SECURITY_ATTRIBUTES sa = new SECURITY_ATTRIBUTES();
+            sa.nLength = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES));
+            sa.bInheritHandle = 1;
+            hOut = CreateFileW(logPath, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                ref sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, IntPtr.Zero);
+            if (hOut == new IntPtr(-1)) return "launch-error CreateFileW(log) err=" + Marshal.GetLastWin32Error();
+            hIn = CreateFileW("NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                ref sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, IntPtr.Zero);
+            if (hIn == new IntPtr(-1)) return "launch-error CreateFileW(NUL) err=" + Marshal.GetLastWin32Error();
+
+            STARTUPINFOEXW si = new STARTUPINFOEXW();
+            si.StartupInfo.cb = (uint)Marshal.SizeOf(typeof(STARTUPINFOW));
+            si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            si.StartupInfo.hStdInput = hIn;
+            si.StartupInfo.hStdOutput = hOut;
+            si.StartupInfo.hStdError = hOut;
+
+            PROCESS_INFORMATION pi;
+            StringBuilder cl = new StringBuilder(cmdline, cmdline.Length + 64);
+            if (!CreateProcessAsUserW(restricted, exe, cl, IntPtr.Zero, IntPtr.Zero, true, 0,
+                    IntPtr.Zero, cwd, ref si, out pi))
+                return "launch-error CreateProcessAsUserW err=" + Marshal.GetLastWin32Error();
+
+            uint wr = WaitForSingleObject(pi.hProcess, timeoutMs);
+            uint code = 0xFFFFFFFF;
+            string extra = "";
+            if (wr == WAIT_TIMEOUT) { TerminateProcess(pi.hProcess, 0xDEAD); extra = " TIMED-OUT"; }
+            else { GetExitCodeProcess(pi.hProcess, out code); }
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            return "rc=" + code + " (0x" + code.ToString("x8") + ")" + extra;
+        }
+        finally
+        {
+            if (hOut != new IntPtr(-1)) CloseHandle(hOut);
+            if (hIn != new IntPtr(-1)) CloseHandle(hIn);
+            if (disable != IntPtr.Zero) Marshal.FreeHGlobal(disable);
+            if (adminSid != IntPtr.Zero) FreeSid(adminSid);
+            if (restricted != IntPtr.Zero) CloseHandle(restricted);
+            if (self != IntPtr.Zero) CloseHandle(self);
+        }
+    }
+
     public static string EndDeelevated()
     {
         if (!RevertToSelf()) return "ERR revert=" + Marshal.GetLastWin32Error();

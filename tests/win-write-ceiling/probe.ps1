@@ -38,9 +38,18 @@ function Check($name, $cond, $detail) {
 }
 
 # Generic rights, as production writes them (`windows.rs` leaf grants).
-$GR = 0x80000000; $GW = 0x40000000; $GE = 0x20000000; $DEL = 0x00010000
-$READ_MASK  = $GR -bor $GE
-$WRITE_MASK = $GR -bor $GW -bor $GE -bor $DEL
+#
+# `[Convert]::ToUInt32` rather than a `0x…` literal: PowerShell parses `0x80000000` as a SIGNED
+# int, so `$GR -bor $GE` came out -1610612736 and every `SetAce` call died on the uint32 marshal.
+# That produced a table of blanks which the "de-elevated refused on C:\" control then read as a
+# PASS — a control confirming the hypothesis because the call never ran. Hence the engagement
+# assertion below: a row must carry a real answer, not merely a non-OK one.
+$GR = [Convert]::ToUInt32('80000000', 16)
+$GW = [Convert]::ToUInt32('40000000', 16)
+$GE = [Convert]::ToUInt32('20000000', 16)
+$DEL = [Convert]::ToUInt32('00010000', 16)
+$READ_MASK = [uint32]($GR -bor $GE)
+$WRITE_MASK = [uint32]($GR -bor $GW -bor $GE -bor $DEL)
 $GRANT = 1; $REVOKE = 4
 # The well-known `internetClient` capability. Present in one arm ONLY, as the control proving the
 # egress denial in the others is the withheld capability rather than an artefact of confinement.
@@ -49,6 +58,11 @@ $INTERNET_CLIENT = 'S-1-15-3-1'
 $tag = 'wc' + (Get-Random -Maximum 999999)
 $proj = Join-Path $env:USERPROFILE "wcproj-$tag"
 $profPre = Join-Path $env:USERPROFILE "wcpre-$tag"
+# The harness's own staging dir: `child.js` and the per-arm op lists. It lives here, not in the
+# checkout, because the checkout (`D:\a\nub\nub`) carries no ACE for a per-run AppContainer sid —
+# the first revision launched from there and every confined arm died `MODULE_NOT_FOUND` on its own
+# entry point, which looks exactly like a filesystem denial and is really an unstaged harness.
+$stage = Join-Path $proj 'stage'
 
 Write-Host '=============================== PROVENANCE ==============================='
 Write-Host "os=$([System.Environment]::OSVersion.VersionString) arch=$env:PROCESSOR_ARCHITECTURE"
@@ -64,6 +78,9 @@ Write-Host "node=$nodeExe $(& $nodeExe -v)"
 # Everything a confined child touches is created BEFORE any ACE is written, so the "existing file"
 # cells are genuinely pre-existing — which is the distinction the whole cost argument rests on.
 
+New-Item -ItemType Directory -Force -Path $stage | Out-Null
+Copy-Item -Path (Join-Path $here 'child.js') -Destination $stage -Force
+$childJs = Join-Path $stage 'child.js'
 New-Item -ItemType Directory -Force -Path (Join-Path $proj 'granted\deep') | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $proj 'ungranted') | Out-Null
 Set-Content -Path (Join-Path $proj 'granted\deep\f.txt') -Value 'granted-preexisting'
@@ -103,6 +120,7 @@ Write-Host "probe-sid=$probeSid"
 Check 'probe-profile-created' ($probeSid -notlike 'ERR*') $probeSid
 
 $daclReach = @{}
+$elevReach = @{}
 foreach ($k in $roots.Keys) {
   $p = $roots[$k]
   $elev = [Wc]::SetAce($p, $probeSid, $READ_MASK, $GRANT, $false)
@@ -117,14 +135,28 @@ foreach ($k in $roots.Keys) {
   [void][Wc]::EndDeelevated()
 
   $daclReach[$k] = $deelev
+  $elevReach[$k] = $elev
   Write-Host ("{0,-38} | {1,-8} | {2}" -f $k, $elev, $deelev)
 }
 
-# The two controls that make this table mean anything. Elevated-on-`C:\` succeeding proves the
-# runner really holds admin authority, so a de-elevated refusal is privilege and not a bad path;
-# de-elevated-on-the-project succeeding proves impersonation did not simply break every call.
+# The controls that make this table mean anything.
+#  - ENGAGEMENT: every cell must carry a real answer. A blank means the call never reached the OS,
+#    and "not OK" would then be indistinguishable from "denied" — the exact false PASS the first
+#    revision of this probe produced.
+#  - Elevated-on-`C:\` succeeding proves the runner really holds admin authority, so the
+#    de-elevated refusal is attributable to privilege rather than to a bad path.
+#  - De-elevated-on-the-project succeeding proves impersonation did not simply break every call.
+$blank = @($daclReach.Keys | Where-Object { -not $daclReach[$_] -or -not $elevReach[$_] })
+Check 'dacl-rows-all-answered' ($blank.Count -eq 0) "blank=$($blank -join ',')"
+Check 'runner-really-is-elevated' ($elevReach['C:\'] -eq 'OK') "elevated-on-C:\ = $($elevReach['C:\'])"
 Check 'deelev-can-ace-own-project' ($daclReach['project'] -eq 'OK') "= $($daclReach['project'])"
-Check 'deelev-refused-on-C-root' ($daclReach['C:\'] -ne 'OK') "= $($daclReach['C:\'])"
+# REPORTED, not asserted: whichever way this falls it is the finding, and asserting a direction
+# would turn the answer into a harness failure.
+Write-Host "PROPERTY deelev-dacl-write-on-C-root = $($daclReach['C:\'])"
+Write-Host "PROPERTY deelev-dacl-write-on-C-Users = $($daclReach['C:\Users'])"
+Write-Host "PROPERTY deelev-dacl-write-on-ProgramData = $($daclReach['C:\ProgramData'])"
+Write-Host "PROPERTY deelev-dacl-write-on-ProgramFiles = $($daclReach['C:\Program Files'])"
+Write-Host "PROPERTY deelev-dacl-write-on-profile = $($daclReach['%USERPROFILE%'])"
 
 # ═══════════════════ SECTION 2 — PROPAGATION: what does a broad grant COST? ═══════════════════
 # The claim under test is `windows.rs`'s: "Windows inheritance is STATIC, copied into a child's
@@ -135,14 +167,16 @@ Check 'deelev-refused-on-C-root' ($daclReach['C:\'] -ne 'OK') "= $($daclReach['C
 Write-Host ''
 Write-Host '========== SECTION 2 — PROPAGATION AND COST =========='
 
+# .NET calls rather than `New-Item`/`Set-Content`: the largest tree here is tens of thousands of
+# entries, and the cmdlet pipeline costs more to BUILD the fixture than the measurement it feeds.
 function New-Tree($root, $dirs, $filesPerDir) {
-  New-Item -ItemType Directory -Force -Path $root | Out-Null
+  [void][IO.Directory]::CreateDirectory($root)
   for ($i = 0; $i -lt $dirs; $i++) {
     $d = Join-Path $root "d$i"
-    New-Item -ItemType Directory -Force -Path $d | Out-Null
-    for ($j = 0; $j -lt $filesPerDir; $j++) { Set-Content -Path (Join-Path $d "f$j.txt") -Value 'x' }
+    [void][IO.Directory]::CreateDirectory($d)
+    for ($j = 0; $j -lt $filesPerDir; $j++) { [IO.File]::WriteAllText((Join-Path $d "f$j.txt"), 'x') }
   }
-  return (Get-ChildItem -Path $root -Recurse -Force | Measure-Object).Count
+  return $dirs + ($dirs * $filesPerDir)
 }
 
 # (a) NON-propagating: an inheritable ACE at the root written this-object-only. If the deep file
@@ -173,21 +207,33 @@ Write-Host "propagating:    entries=$nB set=$rB grant-ms=$($swB.ElapsedMilliseco
 Check 'static-inheritance-holds' (($afterA -eq '0x00000000') -and ($afterB -ne '0x00000000')) `
   "nonprop=$afterA prop=$afterB"
 
-# (c) Scaling, so the per-launch cost of a real profile can be stated rather than guessed.
-$treeC = Join-Path $proj "treeC"
-$nC = New-Tree $treeC 100 40
-$swC = [Diagnostics.Stopwatch]::StartNew()
-[void][Wc]::SetAce($treeC, $probeSid, $WRITE_MASK, $GRANT, $true)
-$swC.Stop()
-$swCr = [Diagnostics.Stopwatch]::StartNew()
-[void][Wc]::SetAce($treeC, $probeSid, 0, $REVOKE, $true)
-$swCr.Stop()
-$perEntry = if ($nC) { [math]::Round($swC.ElapsedMilliseconds / $nC, 4) } else { 0 }
-Write-Host "scaling:        entries=$nC grant-ms=$($swC.ElapsedMilliseconds) revoke-ms=$($swCr.ElapsedMilliseconds) ms-per-entry=$perEntry"
+# (c) Scaling across THREE sizes. One size gives a number; three give a slope, which is what says
+#     whether the cost is per-entry (a tree walk) or fixed (a descriptor write). A CI runner's
+#     profile is small, so the slope — not the runner's own total — is what projects to a
+#     developer's machine.
+$perEntry = 0
+foreach ($sz in @(@(20, 10), @(100, 40), @(300, 100))) {
+  $t = Join-Path $proj "treeC$($sz[0])"
+  $n = New-Tree $t $sz[0] $sz[1]
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  $r = [Wc]::SetAce($t, $probeSid, $WRITE_MASK, $GRANT, $true)
+  $sw.Stop()
+  $swr = [Diagnostics.Stopwatch]::StartNew()
+  [void][Wc]::SetAce($t, $probeSid, 0, $REVOKE, $true)
+  $swr.Stop()
+  $pe = if ($n) { [math]::Round($sw.ElapsedMilliseconds / $n, 4) } else { 0 }
+  $perEntry = $pe
+  Write-Host "scaling: entries=$n set=$r grant-ms=$($sw.ElapsedMilliseconds) revoke-ms=$($swr.ElapsedMilliseconds) ms-per-entry=$pe"
+  Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue
+}
 
-# (d) The real thing: how big is a profile, and what would granting it actually cost?
+# (d) The real thing: how big is a profile, and what would granting it actually cost? The runner's
+#     own profile is the floor, not the typical case — a developer's carries node_modules trees.
 $profCount = (Get-ChildItem -Path $env:USERPROFILE -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count
 Write-Host "profile-entries=$profCount projected-grant-ms=$([math]::Round($profCount * $perEntry))"
+foreach ($hyp in @(100000, 500000, 1000000)) {
+  Write-Host "projection: entries=$hyp grant-ms=$([math]::Round($hyp * $perEntry)) round-trip-ms=$([math]::Round($hyp * $perEntry * 2))"
+}
 $sysCount = (Get-ChildItem -Path 'C:\Windows\System32' -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count
 Write-Host "system32-entries=$sysCount (a whole-volume grant is this plus everything else)"
 
@@ -217,12 +263,14 @@ function Build-Ops($arm) {
 # Each arm names the paths it ACEs. `$null` means "take no token" — the `plain` control, which is
 # also exactly what the shipping full-disk tier does on Windows today.
 $arms = @(
-  @{ name = 'plain';      token = $false; aces = @();                        caps = @() }
-  @{ name = 'ac-bare';    token = $true;  aces = @();                        caps = @() }
-  @{ name = 'ac-leaf';    token = $true;  aces = @('granted');               caps = @() }
-  @{ name = 'ac-max';     token = $true;  aces = @('granted', 'maxgrant');   caps = @() }
-  @{ name = 'ac-max-net'; token = $true;  aces = @('granted', 'maxgrant');   caps = @($INTERNET_CLIENT) }
+  @{ name = 'plain';        token = $false; deelev = $false; aces = @();                      caps = @() }
+  @{ name = 'plain-deelev'; token = $false; deelev = $true;  aces = @();                      caps = @() }
+  @{ name = 'ac-bare';      token = $true;  deelev = $false; aces = @();                      caps = @() }
+  @{ name = 'ac-leaf';      token = $true;  deelev = $false; aces = @('granted');             caps = @() }
+  @{ name = 'ac-max';       token = $true;  deelev = $false; aces = @('granted', 'maxgrant'); caps = @() }
+  @{ name = 'ac-max-net';   token = $true;  deelev = $false; aces = @('granted', 'maxgrant'); caps = @($INTERNET_CLIENT) }
 )
+$nodeDir = Split-Path -Parent $nodeExe
 
 $results = @{}
 foreach ($arm in $arms) {
@@ -243,6 +291,19 @@ foreach ($arm in $arms) {
   # rather than from a guess, so the arm is "the most a user could grant", by construction.
   $granted = @()
   if ($arm.token) {
+    # SCAFFOLDING, not a measured grant, and CONSTANT across every confined arm — so it can never
+    # explain a difference between them. A confined child must be able to read its interpreter and
+    # its entry point or it dies before user code, which presents as a filesystem denial. Node's
+    # install lives under `hostedtoolcache`, which carries no `ALL APPLICATION PACKAGES` ace (the
+    # one toolchain layout on these images that does not), so it needs a real grant.
+    $swS = [Diagnostics.Stopwatch]::StartNew()
+    $rNode = [Wc]::SetAce($nodeDir, $sid, $READ_MASK, $GRANT, $true)
+    $swS.Stop()
+    $rStage = [Wc]::SetAce($stage, $sid, $READ_MASK, $GRANT, $true)
+    Write-Host "$name scaffold node=$rNode ($($swS.ElapsedMilliseconds) ms) stage=$rStage"
+    if ($rNode -eq 'OK') { $granted += $nodeDir }
+    if ($rStage -eq 'OK') { $granted += $stage }
+
     if ($arm.aces -contains 'granted') {
       $g = Join-Path $proj 'granted'
       Write-Host "$name ace granted -> $([Wc]::SetAce($g, $sid, $WRITE_MASK, $GRANT, $true))"
@@ -266,7 +327,7 @@ foreach ($arm in $arms) {
     Write-Host "$name readback profile-deep = $([Wc]::ReadAceMask((Join-Path $profPre 'deep\f.txt'), $sid))"
   }
 
-  $opsFile = Join-Path $proj "ops-$name.json"
+  $opsFile = Join-Path $stage "ops-$name.json"
   Build-Ops $name | ConvertTo-Json -Depth 4 | Set-Content -Path $opsFile -Encoding UTF8
   $env:WC_OPS = $opsFile
   $log = Join-Path $proj "log-$name.txt"
@@ -274,8 +335,9 @@ foreach ($arm in $arms) {
   # `--preserve-symlinks-main` ONLY: it repairs the entry point's realpath, and it is measured
   # clean on the wrong-version axis for a non-symlinked entry (§5h). The tree-wide flag is not
   # used and is not needed — `child.js` requires only `node:` builtins.
-  $cmd = "`"$nodeExe`" --preserve-symlinks-main `"$here\child.js`""
-  $rc = [Wc]::Launch($sid, $nodeExe, $cmd, $proj, $log, 90000, $arm.caps)
+  $cmd = "`"$nodeExe`" --preserve-symlinks-main `"$childJs`""
+  if ($arm.deelev) { $rc = [Wc]::LaunchDeelevated($nodeExe, $cmd, $proj, $log, 90000) }
+  else { $rc = [Wc]::Launch($sid, $nodeExe, $cmd, $proj, $log, 90000, $arm.caps) }
   Write-Host "$name launch $rc"
 
   $lines = if (Test-Path $log) { Get-Content $log } else { @() }
@@ -330,6 +392,10 @@ Check 'plain-reads-the-secret' ($results['plain']['op:home-secret-read'] -like '
   "= $($results['plain']['op:home-secret-read'])"
 Check 'plain-has-network' ($results['plain']['net:connect-1.1.1.1'] -eq 'OK') `
   "= $($results['plain']['net:connect-1.1.1.1'])"
+# The de-elevated no-token arm is the HONEST baseline for the shipping full-disk tier: a real user
+# is not a CI admin. It must still write its own profile (or it is broken rather than confined).
+Check 'plain-deelev-writes-its-own-profile' ($results['plain-deelev']['op:profile-pre-write'] -like 'OK*') `
+  "= $($results['plain-deelev']['op:profile-pre-write'])"
 # Every confined arm must be genuinely confined, or its passes are meaningless.
 foreach ($a in $arms | Where-Object { $_.token }) {
   Check "$($a.name)-gate-is-live" ($results[$a.name]['op:sysroot-list'] -notlike 'OK*') `
