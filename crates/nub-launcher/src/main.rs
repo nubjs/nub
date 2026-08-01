@@ -201,10 +201,15 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
     // Hand the terminal back BEFORE anything the app might print — the box lives
     // on the alternate screen, so this restores the user's scrollback intact.
     notice.finish();
-    let entry = app_dir.join(&view.manifest.entry);
-    // `cache::resolve` canonicalizes `app_dir`'s root, so this is an absolute
-    // path to a file already covered by the exact payload-cache verification.
-    let bootstrap = app_dir.join(compile::COMPILE_BOOTSTRAP_NAME);
+    // `cache::resolve` canonicalizes `app_dir`'s root, so these are absolute paths
+    // to files already covered by the exact payload-cache verification. They are
+    // the only two cache paths that leave Rust and become Node arguments, so the
+    // verbatim spelling stops here (see `node_argument`).
+    let entry = node_argument(&app_dir.join(&view.manifest.entry), cfg!(windows));
+    let bootstrap = node_argument(
+        &app_dir.join(compile::COMPILE_BOOTSTRAP_NAME),
+        cfg!(windows),
+    );
 
     let user_args: Vec<String> = std::env::args().skip(1).collect();
     let node_options = std::env::var("NODE_OPTIONS").ok();
@@ -295,6 +300,27 @@ fn node_spawn_error(node_path: &Path, base: &Path, error: std::io::Error) -> any
         return anyhow!(cache::noexec_remedy(base));
     }
     anyhow::Error::new(error).context("spawning Node")
+}
+
+/// Re-spell a cache path as something Node can load.
+///
+/// Rust's `fs::canonicalize` — which `cache::resolve` uses to prove the cache
+/// namespace cannot be renamed underneath us — returns Windows' verbatim `\\?\`
+/// form, and Node cannot resolve a module through one: CJS resolution ends in
+/// `fs.realpathSync`, which lstats the path's root and dies
+/// `EISDIR: … lstat 'C:'` (mechanism in `spawn::strip_verbatim`). It failed on
+/// the launcher's own `--require` preload, so no compiled artifact ran at all on
+/// Windows.
+///
+/// The strip happens HERE, at the argument boundary, rather than inside
+/// `cache::resolve`: the canonical spelling is what the cache's ownership/DACL
+/// checks and `starts_with` containment tests are written against, and nothing
+/// on the Rust side is helped by changing it. Nothing is lost past MAX_PATH
+/// either — libuv re-applies the namespace prefix itself for every path it opens.
+///
+/// Pure over `windows` so both branches test on any host.
+fn node_argument(path: &Path, windows: bool) -> PathBuf {
+    spawn::strip_verbatim_path(path, windows)
 }
 
 /// Build the absolute CommonJS preload argument for the cache-verified compile
@@ -2322,6 +2348,36 @@ mod tests {
                 std::ffi::OsString::from("--import=runtime/preload.mjs"),
                 entry.into_os_string(),
             ]
+        );
+    }
+
+    /// `cache::resolve` canonicalizes, so on Windows every cache path arrives in
+    /// the verbatim `\\?\` spelling — and Node cannot resolve a module through
+    /// one: its CJS loader's `fs.realpathSync` dies `EISDIR: … lstat 'C:'`. That
+    /// killed the launcher's own `--require` preload, so no compiled artifact ran
+    /// on Windows at all. Neither Node argument may carry the prefix.
+    #[test]
+    fn a_verbatim_cache_path_never_reaches_node() {
+        let app_dir = r"\\?\C:\Users\r\AppData\Local\nub\compile-app\key";
+        let plain = &app_dir[r"\\?\".len()..];
+
+        let entry = node_argument(Path::new(&format!(r"{app_dir}\app.mjs")), true);
+        assert_eq!(entry, PathBuf::from(format!(r"{plain}\app.mjs")));
+
+        let bootstrap = node_argument(Path::new(&format!(r"{app_dir}\boot.cjs")), true);
+        let mut expected = std::ffi::OsString::from("--require=");
+        expected.push(format!(r"{plain}\boot.cjs"));
+        assert_eq!(compiled_bootstrap_require_arg(&bootstrap), expected);
+
+        // A network cache root keeps its UNC spelling rather than losing two
+        // leading separators, and off Windows nothing is a prefix at all.
+        assert_eq!(
+            node_argument(Path::new(r"\\?\UNC\srv\share\app.mjs"), true),
+            PathBuf::from(r"\\srv\share\app.mjs")
+        );
+        assert_eq!(
+            node_argument(Path::new(r"\\?\C:\a\app.mjs"), false),
+            PathBuf::from(r"\\?\C:\a\app.mjs")
         );
     }
 
