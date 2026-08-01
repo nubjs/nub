@@ -419,6 +419,12 @@
         "platform": "all"
       },
       {
+        "package": "applicationinsights-native-metrics",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 31578237 B / 1512 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
+      },
+      {
         "package": "argon2",
         "evidence": "policy",
         "observed": "POLICY grant, not measured. 1,808,121 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
@@ -466,6 +472,12 @@
         "evidence": "policy",
         "observed": "POLICY grant, not measured. 2,558,374 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
         "platform": "all"
+      },
+      {
+        "package": "bs-platform",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Unconfined artifact 16785433 B / 1593 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
       },
       {
         "package": "bufferutil",
@@ -564,6 +576,12 @@
         "platform": "all"
       },
       {
+        "package": "dotnet-2.0.0",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: code: 'EPERM',. Unconfined artifact 173895874 B / 2039 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
+      },
+      {
         "package": "drivelist",
         "evidence": "measured",
         "observed": "Isolated single-package macOS arm `iso-drivelist`, 2026-07-31. Confined: `prebuild-install warn install getaddrinfo ENOTFOUND github.com`, then a from-source build. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. Also a BUG-J carrier.",
@@ -608,8 +626,8 @@
       {
         "package": "electron-prebuilt",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 129086576 B / 1553 files. nub v0.6.0 e45722851e34.",
-        "platform": "linux-x64"
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: [Error: EPERM: operation not permitted, mkdir 'D:\\a\\_temp\\gm\\fx\\electron-prebuilt-both-Nms9p68y9a0og\\home\\AppData\\Local\\Packages'] {. Unconfined artifact 208877041 B / 1685 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
       },
       {
         "package": "electron-winstaller",
@@ -651,14 +669,14 @@
       {
         "package": "fast-folder-size",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 24282106 B / 2157 files. nub v0.6.0 e90b24e7d432.",
-        "platform": "darwin-arm64"
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: ENOENT: no such file or directory, open 'D:\\a\\_temp\\gm\\fx\\fast-folder-size-both-Nms9ow99sclcq\\home\\AppData\\Local\\Packages\\nub_sbx_2836_18c78a0941ad1a10_0\\AC\\Temp\\du.zip'. Unconfined artifact 18136069 B / 1586 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
       },
       {
         "package": "faunadb",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 23262871 B / 2325 files. nub v0.6.0 e90b24e7d432.",
-        "platform": "darwin-arm64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 16781099 B / 1593 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
       },
       {
         "package": "ffmpeg-static",
@@ -679,16 +697,40 @@
         "platform": "all"
       },
       {
+        "package": "gcstats.js",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: gyp ERR! stack Error: Could not find any Python installation to use. Unconfined artifact 87514374 B / 4365 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
+      },
+      {
         "package": "geckodriver",
         "evidence": "policy",
         "observed": "POLICY grant, not measured. 2,726,270 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
         "platform": "all"
       },
       {
+        "package": "gif2webp-bin",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Unconfined artifact 17340339 B / 1596 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
+      },
+      {
         "package": "gifsicle",
         "evidence": "measured",
         "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 23543464 B / 2308 files. nub v0.6.0 e90b24e7d432.",
         "platform": "darwin-arm64"
+      },
+      {
+        "package": "git-validate",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: EPERM: operation not permitted, open 'D:\\a\\_temp\\gm\\fx\\git-validate-both-Nms9p3axh2p53\\proj\\.git\\hooks\\pre-commit'. Unconfined artifact 16803593 B / 1596 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
+      },
+      {
+        "package": "git-win",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: non-zero exit code 23. Unconfined artifact 16750548 B / 1590 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
       },
       {
         "package": "gl",
@@ -721,6 +763,12 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "hummus",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 12524251 B / 904 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
+      },
+      {
         "package": "ibm_db",
         "evidence": "measured",
         "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `ENOTFOUND : https://public.dhe.ibm.com/ibmdl/export/pub/software/data/db2/drivers/odbc_cli/macarm64_odbc_cli.tar.gz` followed by the mirror `ENOTFOUND : https://github.com/ibmdb/db2drivers/raw/main/clidriver/macarm64_odbc_cli.tar.gz`. Unconfined A0, same fixture: the IBM URL resolves. Two hostnames for one artifact, one of them github.com — the case for a package grant rather than a host list.",
@@ -735,14 +783,20 @@
       {
         "package": "iedriver",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 27588574 B / 2331 files. nub v0.6.0 e90b24e7d432.",
-        "platform": "darwin-arm64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 21117599 B / 1619 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
       },
       {
         "package": "inngest-cli",
         "evidence": "measured",
         "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 64824526 B / 1537 files. nub v0.6.0 2421ab9a700c.",
         "platform": "linux-x64"
+      },
+      {
+        "package": "interruptor",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: gyp ERR! stack Error: Could not find any Python installation to use. Unconfined artifact 87729345 B / 4369 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
       },
       {
         "package": "iobroker.js-controller",
@@ -765,8 +819,8 @@
       {
         "package": "jpeg-recompress-bin",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 22987738 B / 2335 files. nub v0.6.0 e90b24e7d432.",
-        "platform": "darwin-arm64"
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Unconfined artifact 17227064 B / 1596 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
       },
       {
         "package": "jpegtran-bin",
@@ -847,10 +901,22 @@
         "platform": "all"
       },
       {
+        "package": "msnodesqlv8",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: gyp ERR! stack Error: Could not find any Python installation to use. Unconfined artifact 18553242 B / 1496 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
+      },
+      {
         "package": "msw",
         "evidence": "policy",
         "observed": "POLICY grant, not measured. 19,534,017 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
         "platform": "all"
+      },
+      {
+        "package": "muhammara",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 18847241 B / 1405 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
       },
       {
         "package": "n8n-nodes-evolution-api",
@@ -957,8 +1023,8 @@
       {
         "package": "phantomjs",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 68298650 B / 2361 files. nub v0.6.0 e90b24e7d432.",
-        "platform": "darwin-arm64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 35424273 B / 1652 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
       },
       {
         "package": "phantomjs-prebuilt",
@@ -969,8 +1035,8 @@
       {
         "package": "playwright-firefox",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 318812748 B / 2418 files. nub v0.6.0 e90b24e7d432.",
-        "platform": "darwin-arm64"
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: EPERM: operation not permitted, mkdir 'D:\\a\\_temp\\gm\\fx\\playwright-firefox-both-Nms9p48mpa5sl\\home\\AppData\\Local\\Packages'. Unconfined artifact 369949196 B / 1663 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
       },
       {
         "package": "playwright-webkit",
@@ -1055,6 +1121,12 @@
         "evidence": "measured",
         "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `Couldnt download /redis-stable.tar.gz! getaddrinfo ENOTFOUND download.redis.io`, then `failed to download/install Redis binaries`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
         "platform": "macos-arm64"
+      },
+      {
+        "package": "registry-js",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: gyp ERR! stack Error: Could not find any Python installation to use. Unconfined artifact 17623509 B / 1603 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
       },
       {
         "package": "saucectl",
@@ -1216,8 +1288,8 @@
       {
         "package": "wordpos",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-FULL-DISK on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: EPERM: operation not permitted, open '<run>/fx/wordpos-both-Nms9nl4khl6w6/home/.cache/nub/pm/store/wordnet-db@3.1.14-f249a5f12212c55c/node_modules/wordnet-db/dict/fast-index.adv.json'. Unconfined artifact 23471704 B / 2331 files. nub v0.6.0 633dccc87821.",
-        "platform": "darwin-arm64"
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: EPERM: operation not permitted, open 'D:\\a\\_temp\\gm\\fx\\wordpos-both-Nms9p08om6ikq\\home\\AppData\\Local\\nub\\pm\\store\\wordnet-db@3.1.14-f249a5f12212c55c\\node_modules\\wordnet-db\\dict\\fast-index.adv.json'. Unconfined artifact 16985912 B / 1599 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
       },
       {
         "package": "workerd",
@@ -1236,6 +1308,12 @@
         "evidence": "policy",
         "observed": "POLICY grant, not measured. 9,865,491 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
         "platform": "all"
+      },
+      {
+        "package": "zopflipng-bin",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Unconfined artifact 16973522 B / 1596 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
       }
     ]
   },
@@ -1356,6 +1434,14 @@
       "platform": "macos-arm64"
     },
     {
+      "package": "bs-platform",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Unconfined artifact 16785433 B / 1593 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
+    },
+    {
       "package": "cypress",
       "versionsObserved": "13.x, measured on 13.14.2. The CYPRESS_CACHE_FOLDER override and the cachedir() default both predate 13 and are unchanged on 14/15.",
       "homePaths": [
@@ -1371,6 +1457,54 @@
       "platform": "macos-arm64"
     },
     {
+      "package": "dotnet-2.0.0",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: code: 'EPERM',. Unconfined artifact 173895874 B / 2039 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "dugite",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: ENOENT: no such file or directory, mkdir 'D:\\a\\_temp\\gm\\fx\\dugite-both-Nms9p19nb1tn\\home\\AppData\\Local\\Packages\\nub_sbx_2948_18c78a3f9b9668fc_0\\AC\\Temp'. Unconfined artifact 138556493 B / 1979 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "electron-chromedriver",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: [Error: ENOENT: no such file or directory, mkdtemp 'D:\\a\\_temp\\gm\\fx\\electron-chromedriver-both-Nms9p2v4zc1bn\\home\\AppData\\Local\\Packages\\nub_sbx_6832_18c78a4fdb37fda8_0\\AC\\Temp\\electron-download-XXXXXX'] {. Unconfined artifact 89280974 B / 1468 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "electron-prebuilt",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: [Error: EPERM: operation not permitted, mkdir 'D:\\a\\_temp\\gm\\fx\\electron-prebuilt-both-Nms9p68y9a0og\\home\\AppData\\Local\\Packages'] {. Unconfined artifact 208877041 B / 1685 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "fast-folder-size",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: ENOENT: no such file or directory, open 'D:\\a\\_temp\\gm\\fx\\fast-folder-size-both-Nms9ow99sclcq\\home\\AppData\\Local\\Packages\\nub_sbx_2836_18c78a0941ad1a10_0\\AC\\Temp\\du.zip'. Unconfined artifact 18136069 B / 1586 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "gcstats.js",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: gyp ERR! stack Error: Could not find any Python installation to use. Unconfined artifact 87514374 B / 4365 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
+    },
+    {
       "package": "ghooks",
       "versionsObserved": "2.0.4",
       "projectWrites": {
@@ -1382,6 +1516,14 @@
       "evidence": "measured",
       "observed": "Isolated macOS arm on nub 321e731f (HEAD 4eca7e7af4 plus this change), 2026-07-31, both arms jail-ON with the catalog as the only variable. Confined WITHOUT the grant: ZERO non-sample files in `<proj>/.git/hooks`. Confined WITH it: all 17 hooks written, byte-identical to the jail-off arm apart from the run directory each script bakes in. THIS PACKAGE PRINTS NO EPERM — `bin/module-install` wraps the installer in a bare try/catch and reports a misleading `npm@2.15` message instead — so unlike the other four in this cohort its entry rests on the artifact differential rather than on a denial message, and its exit code is 0 in both arms.",
       "platform": "macos-arm64"
+    },
+    {
+      "package": "gif2webp-bin",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Unconfined artifact 17340339 B / 1596 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
     },
     {
       "package": "git-commit-msg-linter",
@@ -1408,6 +1550,30 @@
       "evidence": "measured",
       "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: an uncaught `Error: EPERM: operation not permitted, open '<proj>/.git/hooks/pre-commit'` with `syscall: 'open'` thrown from `lib/utils.js:259` inside `exports.installHooks`, aborting the install script. Unconfined A0, same fixture: both hooks are written.",
       "platform": "macos-arm64"
+    },
+    {
+      "package": "git-win",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: non-zero exit code 23. Unconfined artifact 16750548 B / 1590 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "interruptor",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: gyp ERR! stack Error: Could not find any Python installation to use. Unconfined artifact 87729345 B / 4369 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "jpeg-recompress-bin",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Unconfined artifact 17227064 B / 1596 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
     },
     {
       "package": "lefthook",
@@ -1445,6 +1611,14 @@
       "platform": "macos-arm64"
     },
     {
+      "package": "msnodesqlv8",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: gyp ERR! stack Error: Could not find any Python installation to use. Unconfined artifact 18553242 B / 1496 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
+    },
+    {
       "package": "msw",
       "versionsObserved": "2.15.0",
       "projectWrites": {
@@ -1458,6 +1632,14 @@
       "evidence": "measured",
       "observed": "EPERM uv_cwd. The cwd need bites first: without projectCwd the child dies in uv_cwd before it reads the field at all. With the grants, msw's worker script is present; without them, absent.",
       "platform": "macos-arm64"
+    },
+    {
+      "package": "nodejieba",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: npm error code EPERM. Unconfined artifact 47859778 B / 2142 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
     },
     {
       "package": "nx",
@@ -1476,6 +1658,14 @@
       "evidence": "measured",
       "observed": "MEASURED on macOS arm64, 2026-07-31, every version on ONE binary (sha256 89633e8db646). THE FIRST OLD-VERSION BREAK FOUND THAT THE SHIPPED CATALOG DID NOT ALREADY COVER, and it was invisible for a structural reason: nx needs nothing at latest, so every measurement taken at latest said so. Ladder cells: 13.10.6 passes confined-and-ungranted; 14.8.9, 15.9.7, 16.10.0, 17.3.2 and 18.3.5 each fail ungranted and pass with project access alone; 19.8.4, 21.6.11, 22.7.5 and 23.1.0 pass confined-and-ungranted again. So the requirement is a WINDOW, not a `<X` cutoff, and both edges are measured on adjacent majors. Ungranted, 15.9.7 dies `EPERM: operation not permitted, open <project>/nx.json` from `Workspaces.readNxJson` in the daemon client; 18.3.5 gets past that and dies `EPERM ... mkdir <project>/.nx/cache`, which is why the shape names both. INVERTED-RANGE CONTROL at all five in-window versions, one binary and catalogs differing only in this entry: the scoped range gives rc 0, `<14.0.0` gives rc 1, and the entry removed gives rc 1. Per-version weekly downloads inside the window are about 430,000 (15.9.7 alone is 257,980). Found only because the ladder's project cell was fixed the same day: it granted `projectReads: [\".\"]`, which `contained()` drops because the joined path equals the project root, so every past run scored this row FAILS-AT-BOTH - 'something the catalog cannot express' - when the catalog expresses it in two named paths.",
       "platform": "macos-arm64"
+    },
+    {
+      "package": "playwright-firefox",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: EPERM: operation not permitted, mkdir 'D:\\a\\_temp\\gm\\fx\\playwright-firefox-both-Nms9p48mpa5sl\\home\\AppData\\Local\\Packages'. Unconfined artifact 369949196 B / 1663 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
     },
     {
       "package": "pre-commit",
@@ -1520,6 +1710,14 @@
       "platform": "macos-arm64"
     },
     {
+      "package": "registry-js",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: gyp ERR! stack Error: Could not find any Python installation to use. Unconfined artifact 17623509 B / 1603 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
+    },
+    {
       "package": "shared-git-hooks",
       "versionsObserved": "1.2.1",
       "projectReads": [
@@ -1541,8 +1739,16 @@
       "fullDisk": true,
       "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
       "evidence": "measured",
-      "observed": "[grant-matrix] NEEDS-FULL-DISK on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: EPERM: operation not permitted, open '<run>/fx/wordpos-both-Nms9nl4khl6w6/home/.cache/nub/pm/store/wordnet-db@3.1.14-f249a5f12212c55c/node_modules/wordnet-db/dict/fast-index.adv.json'. Unconfined artifact 23471704 B / 2331 files. nub v0.6.0 633dccc87821.",
-      "platform": "darwin-arm64"
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: EPERM: operation not permitted, open 'D:\\a\\_temp\\gm\\fx\\wordpos-both-Nms9p08om6ikq\\home\\AppData\\Local\\nub\\pm\\store\\wordnet-db@3.1.14-f249a5f12212c55c\\node_modules\\wordnet-db\\dict\\fast-index.adv.json'. Unconfined artifact 16985912 B / 1599 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "zopflipng-bin",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Unconfined artifact 16973522 B / 1596 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
     }
   ],
   "notGranted": {
