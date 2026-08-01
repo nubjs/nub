@@ -890,6 +890,16 @@ jobs:
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             cargo test -p nub-cli --features compile --test integration
           fi
+      # nub-launcher's cache-directory probe chain is the most platform-specific
+      # code in the repo — owner and DACL checks, exec bits, junction rejection —
+      # and until now it ran on ubuntu only, from the clippy job. That is precisely
+      # where the inherit-only-ACE defect lived: it made every Windows cache base
+      # unusable, and no CI leg could see it. The launcher is already built above,
+      # so covering the OS legs it actually targets costs one `cargo test`.
+      - name: nub-launcher cache chain (per-OS)
+        if: matrix.node == '24' && runner.os != 'Linux'
+        shell: bash
+        run: cd crates/nub-launcher && cargo test
       # The default compile shape builds from the runtime extracted out of the
       # feature-on nub binary, so it cannot resolve these package imports from the
       # checkout's root node_modules. Copy the same locked pure-JS set release.yml
