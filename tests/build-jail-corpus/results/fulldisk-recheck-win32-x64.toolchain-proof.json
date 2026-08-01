@@ -1,0 +1,65 @@
+{
+  "binary_sha256": "f156e3cf57d62e53330a4a90f64571ec243dce259d3c292e59babc9120481f74",
+  "nub_version": "v0.6.0",
+  "platform": "win32-x64",
+  "node": "v22.23.1",
+  "host": "runnervmr7g38",
+  "harness": "grant-matrix.mjs",
+  "measured_at": "2026-08-01T03:33:18.895Z",
+  "study_path": "C:\\hostedtoolcache\\windows\\node\\22.23.1\\x64;C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64;C:\\Program Files\\Git\\mingw64\\bin;C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem",
+  "tools": {
+    "node": {
+      "resolved": "C:\\hostedtoolcache\\windows\\node\\22.23.1\\x64\\node.EXE",
+      "real": "C:\\hostedtoolcache\\windows\\node\\22.23.1\\x64\\node.exe",
+      "indirect": false,
+      "runs": true,
+      "first_line": "v22.23.1"
+    },
+    "npm": {
+      "resolved": "C:\\hostedtoolcache\\windows\\node\\22.23.1\\x64\\npm.CMD",
+      "real": "C:\\hostedtoolcache\\windows\\node\\22.23.1\\x64\\npm.cmd",
+      "indirect": false,
+      "runs": true,
+      "first_line": "10.9.8"
+    },
+    "python": {
+      "resolved": "C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\python.EXE",
+      "real": "C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\python.exe",
+      "indirect": false,
+      "runs": true,
+      "first_line": "Python 3.12.10"
+    },
+    "python3": {
+      "resolved": "C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\python3.EXE",
+      "real": "C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\python.exe",
+      "indirect": true,
+      "runs": true,
+      "first_line": "Python 3.12.10"
+    },
+    "py": {
+      "resolved": "C:\\Windows\\py.EXE",
+      "real": "C:\\Windows\\py.exe",
+      "indirect": false,
+      "runs": true,
+      "first_line": "Python 3.14.6"
+    },
+    "git": {
+      "resolved": "C:\\Program Files\\Git\\mingw64\\bin\\git.EXE",
+      "real": "C:\\Program Files\\Git\\mingw64\\bin\\git.exe",
+      "indirect": false,
+      "runs": true,
+      "first_line": "git version 2.55.0.windows.2"
+    }
+  },
+  "msvc": {
+    "vswhere": "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe",
+    "vswhere_present": true,
+    "install_path": "C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise",
+    "ok": true
+  },
+  "ok": true,
+  "failures": [],
+  "warnings": [
+    "python3 resolves to C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\python3.EXE but its real path is C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\python.exe — the jail must grant the REAL path"
+  ]
+}

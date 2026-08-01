@@ -61,7 +61,11 @@ const REMOVE = argv.includes('--remove-redundant');
 const SUPERSEDE = argv.includes('--supersede-fulldisk');
 const HARNESS = path.dirname(new URL(import.meta.url).pathname);
 const CATALOG = arg('--catalog', path.join(HARNESS, '../../crates/nub-sandbox/data/build-jail-catalog.json'));
-const files = argv.filter((a) => !a.startsWith('--') && a !== CATALOG && /\.(ndjson|json)$/.test(a));
+// Every flag that takes a PATH must be excluded here, not just the catalog: the filter
+// picks positional files by extension, so `--host-proof x.json` would otherwise be read as
+// a records file too — five "skipped unparseable line" warnings and a silent second input.
+const flagValues = new Set([CATALOG, arg('--host-proof', null)].filter(Boolean));
+const files = argv.filter((a) => !a.startsWith('--') && !flagValues.has(a) && /\.(ndjson|json)$/.test(a));
 if (!files.length) { console.error('usage: apply-matrix.mjs <records.ndjson>... [--apply] [--remove-redundant] [--catalog PATH]'); process.exit(2); }
 
 // The marker that tells a later run — and a later reader — that this entry was written
@@ -150,6 +154,21 @@ for (const f of files) {
 // would let (a) relax from "a different platform" to "a demonstrably different environment".
 // Until a record carries one, platform is the only honest proxy.
 //
+//   (c) THE RUN CARRIES A HOST PROOF. `--host-proof <toolchain-proof.json>` admits a record
+//       whose platform, host and binary the proof names, when the proof passed AND the same
+//       run contains a POSITIVE CONTROL: a package that compiled a native addon from source
+//       INSIDE the jail with no grants at all, on that same host and binary.
+//
+// (c) is not a weakening, it is the thing (a) and (b) were only ever proxying for. They ask
+// "did some other environment agree?" because nothing recorded whether THIS environment was
+// sound. A passing toolchain proof plus a native build that succeeded ungranted is direct
+// evidence that it was, and direct evidence beats a proxy. It is also strictly harder to
+// satisfy by accident than (a) ever was: the proof must name the same binary sha the record
+// carries, so it cannot be borrowed from another run, and the control must have COMPILED —
+// the failure mode being excluded is precisely a host that cannot compile.
+//
+// It is opt-in and fails closed: no `--host-proof`, no route (c).
+//
 // A record clearing neither is reported as NEEDS-FULL-DISK:UNCORROBORATED and NOT written.
 // It is not silently dropped either — the whole point is that a human looks at it, because
 // the honest reading is "we cannot yet tell a real need from this host", not "no".
@@ -199,8 +218,38 @@ for (const r of corpus) {
   }
 }
 
+// A node-gyp source build unpacks the Node headers into the fixture home — roughly 2,800
+// files on top of the ~1,500-file install floor — so an unconfined artifact above this mark
+// is a package that actually COMPILED rather than one that downloaded a prebuild or no-opped.
+// It is the mechanical way to tell a real positive control from a nag script that exits 0.
+const NATIVE_BUILD_FLOOR = 3800;
+
+const hostProof = (() => {
+  const p = arg('--host-proof', null);
+  if (!p) return null;
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { console.error(`--host-proof: ${e.message}`); process.exit(2); }
+})();
+
+// The control must come from the RECORDS BEING INGESTED, never from the committed corpus:
+// the question is whether THIS run's host could compile, and a control from another run
+// answers a different question.
+function positiveControlFor(r) {
+  return records.find((x) => x.verdict === 'NEEDS-NOTHING'
+    && x.cells?.no_grants === 0
+    && x.host === r.host && x.binary_sha256 === r.binary_sha256 && x.platform === r.platform
+    && (x.evidence?.control_artifact?.files || 0) >= NATIVE_BUILD_FLOOR);
+}
+
+function hostProven(r) {
+  if (!hostProof || hostProof.ok !== true) return null;
+  if (hostProof.platform !== r.platform || hostProof.host !== r.host || hostProof.binary_sha256 !== r.binary_sha256) return null;
+  const ctrl = positiveControlFor(r);
+  return ctrl ? `${ctrl.package}@${ctrl.version}` : null;
+}
+
 // Returns null when the record may be written, or the reason it may not.
 function fullDiskObjection(r) {
+  if (hostProven(r)) return null;                                             // (c)
   const platforms = failedBothElsewhere.get(r.package);
   if (platforms && [...platforms].some((p) => p !== r.platform)) return null; // (b)
   const s = signature(r.evidence?.failing_line);
@@ -243,6 +292,14 @@ if (argv.includes('--selftest')) {
     if (admitted !== wantAdmit) { console.error(`FAIL ${name}: admitted=${admitted}, want ${wantAdmit}`); bad++; }
     else console.log(`ok  ${name}`);
   }
+
+  // Route (c) FAILS CLOSED. A corroboration route that silently defaulted on would undo the
+  // whole guard, and the flag is the only thing standing between "measured on a proven host"
+  // and "measured anywhere at all".
+  const anyFullDisk = records.find((x) => x.verdict === 'NEEDS-FULL-DISK') || { platform: 'p', host: 'h', binary_sha256: 'b' };
+  if (!argv.includes('--host-proof') && hostProven(anyFullDisk) !== null) {
+    console.error('FAIL route (c) is armed without --host-proof'); bad++;
+  } else console.log('ok  route (c) is off unless --host-proof is passed');
 
   // The merge-vs-replace bug had no test and was invisible in the report, which called the
   // widening a refresh. Pin the property directly: a narrow entry replacing a whole-disk one
@@ -295,6 +352,26 @@ for (const r of records) {
       } else {
         superseded.push(`- fullDisk ${r.package} — re-measured as ${r.verdict} on ${r.platform} (${r.host})`);
         if (SUPERSEDE) { catalog.packageGrants.splice(i, 1); granted.project.delete(r.package); }
+
+        // BOTH HALVES, OR NEITHER. A NEEDS-FULL-DISK record writes an EGRESS entry as well
+        // as the filesystem grant, because the terminal cell carries egress and a grant that
+        // applied only half of what was measured would be a configuration nobody ran. So
+        // retracting the record has to retract the egress half too, or the package silently
+        // keeps network access on the strength of a measurement that has been withdrawn —
+        // which on Windows is the more permissive half, since a full-disk launch drops the
+        // LowBox token and egress is an AppContainer capability.
+        //
+        // Matched on the entry's OWN provenance, never on the package name: an entry whose
+        // `observed` records a NEEDS-EGRESS measurement was earned independently and stays.
+        // If this record's new verdict is NEEDS-EGRESS, the grant application below re-adds
+        // it from the current evidence, which is the entry we actually want.
+        const j = (catalog.packageNetwork.full || []).findIndex((e) => e.package === r.package
+          && String(e.observed || '').includes(MARK)
+          && String(e.observed || '').includes('NEEDS-FULL-DISK'));
+        if (j >= 0) {
+          superseded.push(`- egress ${r.package} — written by the same retracted full-disk record`);
+          if (SUPERSEDE) { catalog.packageNetwork.full.splice(j, 1); granted.net.delete(r.package); }
+        }
       }
     }
   }
@@ -322,7 +399,13 @@ for (const r of records) {
     + ('full_disk' in r.cells ? ` full_disk=${r.cells.full_disk}` : '') + ` (0=pass). `
     + (r.evidence?.failing_line ? `Ungranted failure: ${r.evidence.failing_line}. ` : '')
     + (r.evidence?.control_artifact ? `Unconfined artifact ${r.evidence.control_artifact.bytes} B / ${r.evidence.control_artifact.files} files. ` : '')
-    + `nub ${r.nub_version} ${String(r.binary_sha256).slice(0, 12)}.`;
+    + `nub ${r.nub_version} ${String(r.binary_sha256).slice(0, 12)}.`
+    // WHY A WHOLE-DISK GRANT CLEARED THE GUARD BELONGS IN THE ENTRY. It is the widest tier
+    // the catalog has, so a reader deciding whether to narrow it needs to know what the
+    // corroboration actually rested on — here, a host that proved it could compile.
+    + (r.verdict === 'NEEDS-FULL-DISK' && hostProven(r)
+      ? ` Host toolchain proved on ${r.host}; positive control ${hostProven(r)} compiled a native addon ungranted inside the jail on the same binary.`
+      : '');
 
   if (r.grant.packageNetwork === 'full') {
     const existing = (catalog.packageNetwork.full || []).find((e) => e.package === r.package);
