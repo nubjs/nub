@@ -1,0 +1,212 @@
+{
+  "pkg": "ghooks",
+  "version": "2.0.4",
+  "verdict": "MINIMUM",
+  "cells": [
+    {
+      "index": null,
+      "state": "CONTROL (tested pkg: everything; all others: everything)",
+      "cost": null,
+      "pass": true,
+      "rc": 0,
+      "digest": "cff995eef588fe58",
+      "files": 1040,
+      "overrideEngaged": null,
+      "materialized": true
+    },
+    {
+      "index": 0,
+      "state": "(nothing)",
+      "cost": 0,
+      "pass": false,
+      "rc": 0,
+      "digest": "a8fc551c4c8b5181",
+      "files": 1023,
+      "overrideEngaged": true,
+      "materialized": true
+    },
+    {
+      "index": 1,
+      "state": "read.project",
+      "cost": 1,
+      "pass": false,
+      "rc": 0,
+      "digest": "a8fc551c4c8b5181",
+      "files": 1023,
+      "overrideEngaged": true,
+      "materialized": true
+    },
+    {
+      "index": 2,
+      "state": "read.userHome",
+      "cost": 1,
+      "pass": false,
+      "rc": 0,
+      "digest": "a8fc551c4c8b5181",
+      "files": 1023,
+      "overrideEngaged": true,
+      "materialized": true
+    },
+    {
+      "index": 3,
+      "state": "read.project + read.userHome",
+      "cost": 2,
+      "pass": false,
+      "rc": 0,
+      "digest": "a8fc551c4c8b5181",
+      "files": 1023,
+      "overrideEngaged": true,
+      "materialized": true
+    },
+    {
+      "index": 4,
+      "state": "network",
+      "cost": 3,
+      "pass": false,
+      "rc": 0,
+      "digest": "a8fc551c4c8b5181",
+      "files": 1023,
+      "overrideEngaged": true,
+      "materialized": true
+    },
+    {
+      "index": 5,
+      "state": "write.deps",
+      "cost": 3,
+      "pass": false,
+      "rc": 0,
+      "digest": "a8fc551c4c8b5181",
+      "files": 1023,
+      "overrideEngaged": true,
+      "materialized": true
+    },
+    {
+      "index": 6,
+      "state": "read.disk",
+      "cost": 4,
+      "pass": false,
+      "rc": 0,
+      "digest": "a8fc551c4c8b5181",
+      "files": 1023,
+      "overrideEngaged": true,
+      "materialized": true
+    },
+    {
+      "index": 7,
+      "state": "read.project + network",
+      "cost": 4,
+      "pass": false,
+      "rc": 0,
+      "digest": "a8fc551c4c8b5181",
+      "files": 1023,
+      "overrideEngaged": true,
+      "materialized": true
+    },
+    {
+      "index": 8,
+      "state": "read.userHome + network",
+      "cost": 4,
+      "pass": false,
+      "rc": 0,
+      "digest": "a8fc551c4c8b5181",
+      "files": 1023,
+      "overrideEngaged": true,
+      "materialized": true
+    },
+    {
+      "index": 9,
+      "state": "write.deps + read.project",
+      "cost": 4,
+      "pass": false,
+      "rc": 0,
+      "digest": "a8fc551c4c8b5181",
+      "files": 1023,
+      "overrideEngaged": true,
+      "materialized": true
+    },
+    {
+      "index": 10,
+      "state": "write.deps + read.userHome",
+      "cost": 4,
+      "pass": false,
+      "rc": 0,
+      "digest": "a8fc551c4c8b5181",
+      "files": 1023,
+      "overrideEngaged": true,
+      "materialized": true
+    },
+    {
+      "index": 11,
+      "state": "read.project + read.userHome + network",
+      "cost": 5,
+      "pass": false,
+      "rc": 0,
+      "digest": "a8fc551c4c8b5181",
+      "files": 1023,
+      "overrideEngaged": true,
+      "materialized": true
+    },
+    {
+      "index": 12,
+      "state": "write.deps + read.project + read.userHome",
+      "cost": 5,
+      "pass": false,
+      "rc": 0,
+      "digest": "a8fc551c4c8b5181",
+      "files": 1023,
+      "overrideEngaged": true,
+      "materialized": true
+    },
+    {
+      "index": 13,
+      "state": "write.project",
+      "cost": 5,
+      "pass": true,
+      "rc": 0,
+      "digest": "cff995eef588fe58",
+      "files": 1040,
+      "overrideEngaged": true,
+      "materialized": true
+    }
+  ],
+  "state": "write.project",
+  "cost": 5,
+  "stateIndex": 13,
+  "sideEffectful": true,
+  "materialized": true,
+  "projectAxisConclusive": true,
+  "boughtCount": 17,
+  "bought": [
+    "proj/.git/hooks/applypatch-msg",
+    "proj/.git/hooks/commit-msg",
+    "proj/.git/hooks/post-applypatch",
+    "proj/.git/hooks/post-checkout",
+    "proj/.git/hooks/post-commit",
+    "proj/.git/hooks/post-merge",
+    "proj/.git/hooks/post-receive",
+    "proj/.git/hooks/post-rewrite",
+    "proj/.git/hooks/post-update",
+    "proj/.git/hooks/pre-applypatch",
+    "proj/.git/hooks/pre-auto-gc",
+    "proj/.git/hooks/pre-commit",
+    "proj/.git/hooks/pre-push",
+    "proj/.git/hooks/pre-rebase",
+    "proj/.git/hooks/pre-receive",
+    "proj/.git/hooks/prepare-commit-msg",
+    "proj/.git/hooks/update"
+  ],
+  "control": {
+    "rc": 0,
+    "files": 1040,
+    "materialized": true
+  },
+  "provenance": {
+    "nubPath": "/Users/colinmcd94/.cache/nub/worktrees/integ/target/fast/nub",
+    "nubSha256": "066b73bfb9aeca06737e0cc52f69266acd871ef7b25b3bd882398ed4897d0935",
+    "nubVersion": "v0.6.0",
+    "harnessSha256": "15809d1ba650f2d2",
+    "platform": "darwin-arm64",
+    "node": "v26.5.0",
+    "at": "2026-08-01T15:23:40.162Z"
+  }
+}

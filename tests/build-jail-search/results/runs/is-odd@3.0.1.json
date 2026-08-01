@@ -1,0 +1,51 @@
+{
+  "pkg": "is-odd",
+  "version": "3.0.1",
+  "verdict": "MINIMUM",
+  "cells": [
+    {
+      "index": null,
+      "state": "CONTROL (tested pkg: everything; all others: everything)",
+      "cost": null,
+      "pass": true,
+      "rc": 0,
+      "digest": "9e34042bebd6169a",
+      "files": 32,
+      "overrideEngaged": null,
+      "materialized": false
+    },
+    {
+      "index": 0,
+      "state": "(nothing)",
+      "cost": 0,
+      "pass": true,
+      "rc": 0,
+      "digest": "9e34042bebd6169a",
+      "files": 32,
+      "overrideEngaged": true,
+      "materialized": false
+    }
+  ],
+  "state": "(nothing)",
+  "cost": 0,
+  "stateIndex": 0,
+  "sideEffectful": false,
+  "materialized": false,
+  "projectAxisConclusive": false,
+  "boughtCount": 0,
+  "bought": [],
+  "control": {
+    "rc": 0,
+    "files": 32,
+    "materialized": false
+  },
+  "provenance": {
+    "nubPath": "/Users/colinmcd94/.cache/nub/worktrees/integ/target/fast/nub",
+    "nubSha256": "066b73bfb9aeca06737e0cc52f69266acd871ef7b25b3bd882398ed4897d0935",
+    "nubVersion": "v0.6.0",
+    "harnessSha256": "15809d1ba650f2d2",
+    "platform": "darwin-arm64",
+    "node": "v26.5.0",
+    "at": "2026-08-01T15:20:46.385Z"
+  }
+}

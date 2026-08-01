@@ -1,0 +1,114 @@
+{
+  "pkg": "wordpos",
+  "version": "2.1.0",
+  "verdict": "MINIMUM",
+  "cells": [
+    {
+      "index": null,
+      "state": "CONTROL (tested pkg: everything; all others: everything)",
+      "cost": null,
+      "pass": true,
+      "rc": 0,
+      "digest": "b2ae6796a5e328f4",
+      "files": 1417,
+      "overrideEngaged": null,
+      "materialized": false
+    },
+    {
+      "index": 0,
+      "state": "(nothing)",
+      "cost": 0,
+      "pass": false,
+      "rc": 1,
+      "digest": "a8a9864082cff32d",
+      "files": 1411,
+      "overrideEngaged": true,
+      "materialized": false
+    },
+    {
+      "index": 1,
+      "state": "read.project",
+      "cost": 1,
+      "pass": false,
+      "rc": 1,
+      "digest": "a8a9864082cff32d",
+      "files": 1411,
+      "overrideEngaged": true,
+      "materialized": false
+    },
+    {
+      "index": 2,
+      "state": "read.userHome",
+      "cost": 1,
+      "pass": false,
+      "rc": 1,
+      "digest": "a8a9864082cff32d",
+      "files": 1411,
+      "overrideEngaged": true,
+      "materialized": false
+    },
+    {
+      "index": 3,
+      "state": "read.project + read.userHome",
+      "cost": 2,
+      "pass": false,
+      "rc": 1,
+      "digest": "a8a9864082cff32d",
+      "files": 1411,
+      "overrideEngaged": true,
+      "materialized": false
+    },
+    {
+      "index": 4,
+      "state": "network",
+      "cost": 3,
+      "pass": false,
+      "rc": 1,
+      "digest": "a8a9864082cff32d",
+      "files": 1411,
+      "overrideEngaged": true,
+      "materialized": false
+    },
+    {
+      "index": 5,
+      "state": "write.deps",
+      "cost": 3,
+      "pass": true,
+      "rc": 0,
+      "digest": "b2ae6796a5e328f4",
+      "files": 1417,
+      "overrideEngaged": true,
+      "materialized": false
+    }
+  ],
+  "state": "write.deps",
+  "cost": 3,
+  "stateIndex": 5,
+  "sideEffectful": true,
+  "materialized": false,
+  "projectAxisConclusive": false,
+  "boughtCount": 7,
+  "bought": [
+    "proj/node_modules/.nub-engine",
+    "proj/node_modules/.store/.nub-state/fresh.json",
+    "proj/node_modules/.store/.nub-state/state.json",
+    "store/wordnet-db@3.1.14/node_modules/wordnet-db/dict/fast-index.adj.json",
+    "store/wordnet-db@3.1.14/node_modules/wordnet-db/dict/fast-index.adv.json",
+    "store/wordnet-db@3.1.14/node_modules/wordnet-db/dict/fast-index.noun.json",
+    "store/wordnet-db@3.1.14/node_modules/wordnet-db/dict/fast-index.verb.json"
+  ],
+  "control": {
+    "rc": 0,
+    "files": 1417,
+    "materialized": false
+  },
+  "provenance": {
+    "nubPath": "/Users/colinmcd94/.cache/nub/worktrees/integ/target/fast/nub",
+    "nubSha256": "066b73bfb9aeca06737e0cc52f69266acd871ef7b25b3bd882398ed4897d0935",
+    "nubVersion": "v0.6.0",
+    "harnessSha256": "15809d1ba650f2d2",
+    "platform": "darwin-arm64",
+    "node": "v26.5.0",
+    "at": "2026-08-01T15:22:20.672Z"
+  }
+}

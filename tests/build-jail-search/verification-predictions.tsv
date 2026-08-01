@@ -1,0 +1,10 @@
+is-odd@3.0.1	(nothing)	no install script at all
+esbuild@0.28.1	(nothing)	prebuilts ship via optionalDependencies
+core-js@3.49.0	(nothing)	postinstall is a funding nag
+keccak@3.0.4	(nothing)	native build; only .pyc differed, and that is filtered
+prisma@7.9.1	(nothing)	own script only prints; the engine is a dependency's job
+wordpos@2.1.0	write.deps	writes fast-index into wordnet-db, a declared dep
+unrs-resolver@1.12.2	write.deps + network	mkdirs into napi-postinstall AND fetches
+ghooks@2.0.4	write.project	writes 17 files into .git/hooks
+puppeteer@25.4.0	network	downloads a browser
+cypress@15.19.0	network	downloads the binary

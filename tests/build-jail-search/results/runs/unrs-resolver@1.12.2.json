@@ -1,0 +1,207 @@
+{
+  "pkg": "unrs-resolver",
+  "version": "1.12.2",
+  "verdict": "MINIMUM",
+  "cells": [
+    {
+      "index": null,
+      "state": "CONTROL (tested pkg: everything; all others: everything)",
+      "cost": null,
+      "pass": true,
+      "rc": 0,
+      "digest": "940897fba8469444",
+      "files": 890,
+      "overrideEngaged": null,
+      "materialized": false
+    },
+    {
+      "index": 0,
+      "state": "(nothing)",
+      "cost": 0,
+      "pass": false,
+      "rc": 1,
+      "digest": "f5433b980e589e84",
+      "files": 889,
+      "overrideEngaged": true,
+      "materialized": false
+    },
+    {
+      "index": 1,
+      "state": "read.project",
+      "cost": 1,
+      "pass": false,
+      "rc": 1,
+      "digest": "f5433b980e589e84",
+      "files": 889,
+      "overrideEngaged": true,
+      "materialized": false
+    },
+    {
+      "index": 2,
+      "state": "read.userHome",
+      "cost": 1,
+      "pass": false,
+      "rc": 1,
+      "digest": "f5433b980e589e84",
+      "files": 889,
+      "overrideEngaged": true,
+      "materialized": false
+    },
+    {
+      "index": 3,
+      "state": "read.project + read.userHome",
+      "cost": 2,
+      "pass": false,
+      "rc": 1,
+      "digest": "f5433b980e589e84",
+      "files": 889,
+      "overrideEngaged": true,
+      "materialized": false
+    },
+    {
+      "index": 4,
+      "state": "network",
+      "cost": 3,
+      "pass": false,
+      "rc": 1,
+      "digest": "f5433b980e589e84",
+      "files": 889,
+      "overrideEngaged": true,
+      "materialized": false
+    },
+    {
+      "index": 5,
+      "state": "write.deps",
+      "cost": 3,
+      "pass": false,
+      "rc": 1,
+      "digest": "f5433b980e589e84",
+      "files": 889,
+      "overrideEngaged": true,
+      "materialized": false
+    },
+    {
+      "index": 6,
+      "state": "read.disk",
+      "cost": 4,
+      "pass": false,
+      "rc": 1,
+      "digest": "f5433b980e589e84",
+      "files": 889,
+      "overrideEngaged": true,
+      "materialized": false
+    },
+    {
+      "index": 7,
+      "state": "read.project + network",
+      "cost": 4,
+      "pass": false,
+      "rc": 1,
+      "digest": "f5433b980e589e84",
+      "files": 889,
+      "overrideEngaged": true,
+      "materialized": false
+    },
+    {
+      "index": 8,
+      "state": "read.userHome + network",
+      "cost": 4,
+      "pass": false,
+      "rc": 1,
+      "digest": "f5433b980e589e84",
+      "files": 889,
+      "overrideEngaged": true,
+      "materialized": false
+    },
+    {
+      "index": 9,
+      "state": "write.deps + read.project",
+      "cost": 4,
+      "pass": false,
+      "rc": 1,
+      "digest": "f5433b980e589e84",
+      "files": 889,
+      "overrideEngaged": true,
+      "materialized": false
+    },
+    {
+      "index": 10,
+      "state": "write.deps + read.userHome",
+      "cost": 4,
+      "pass": false,
+      "rc": 1,
+      "digest": "f5433b980e589e84",
+      "files": 889,
+      "overrideEngaged": true,
+      "materialized": false
+    },
+    {
+      "index": 11,
+      "state": "read.project + read.userHome + network",
+      "cost": 5,
+      "pass": false,
+      "rc": 1,
+      "digest": "f5433b980e589e84",
+      "files": 889,
+      "overrideEngaged": true,
+      "materialized": false
+    },
+    {
+      "index": 12,
+      "state": "write.deps + read.project + read.userHome",
+      "cost": 5,
+      "pass": false,
+      "rc": 1,
+      "digest": "f5433b980e589e84",
+      "files": 889,
+      "overrideEngaged": true,
+      "materialized": false
+    },
+    {
+      "index": 13,
+      "state": "write.project",
+      "cost": 5,
+      "pass": false,
+      "rc": 1,
+      "digest": "f5433b980e589e84",
+      "files": 889,
+      "overrideEngaged": true,
+      "materialized": false
+    },
+    {
+      "index": 14,
+      "state": "write.deps + network",
+      "cost": 6,
+      "pass": true,
+      "rc": 0,
+      "digest": "940897fba8469444",
+      "files": 890,
+      "overrideEngaged": true,
+      "materialized": false
+    }
+  ],
+  "state": "write.deps + network",
+  "cost": 6,
+  "stateIndex": 14,
+  "sideEffectful": true,
+  "materialized": false,
+  "projectAxisConclusive": false,
+  "boughtCount": 1,
+  "bought": [
+    "store/napi-postinstall@0.3.4/node_modules/unrs-resolver/resolver.darwin-arm64.node"
+  ],
+  "control": {
+    "rc": 0,
+    "files": 890,
+    "materialized": false
+  },
+  "provenance": {
+    "nubPath": "/Users/colinmcd94/.cache/nub/worktrees/integ/target/fast/nub",
+    "nubSha256": "066b73bfb9aeca06737e0cc52f69266acd871ef7b25b3bd882398ed4897d0935",
+    "nubVersion": "v0.6.0",
+    "harnessSha256": "15809d1ba650f2d2",
+    "platform": "darwin-arm64",
+    "node": "v26.5.0",
+    "at": "2026-08-01T15:23:00.549Z"
+  }
+}
