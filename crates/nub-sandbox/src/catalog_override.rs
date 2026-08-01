@@ -118,6 +118,11 @@ mod loader {
     /// build that never opts in, and of one whose override was rejected.
     static LOADED: OnceLock<Option<&'static Catalog>> = OnceLock::new();
 
+    /// The v2 latch. Separate from [`LOADED`] rather than an enum because the two schemas
+    /// have different consumers and exactly one of them is ever set — a document is v1 or v2,
+    /// never both.
+    static LOADED_V2: OnceLock<Option<&'static crate::catalog_v2::Catalog>> = OnceLock::new();
+
     pub(crate) fn load(path: &str) -> Decision {
         // AT MOST ONCE per process. Startup calls this exactly once; a second call must not
         // report a fresh parse as the catalog in force, because the FIRST latch is what every
@@ -130,11 +135,49 @@ mod loader {
             };
         }
 
-        let outcome = std::fs::read_to_string(path)
-            .map_err(|e| format!("cannot read: {e}"))
-            .and_then(|text| crate::catalog::parse(&text));
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = LOADED.set(None);
+                return Decision::FellBack {
+                    path: path.to_string(),
+                    reason: format!("cannot read: {e}"),
+                };
+            }
+        };
 
-        match outcome {
+        // WHICH SCHEMA? Detected from the document, never guessed: a v2 catalog is keyed by
+        // `packages`, a v1 one by `packageGrants`. Guessing would report a v1 parse error for
+        // a v2 file with a typo, which sends the author looking at the wrong grammar.
+        let is_v2 = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .is_some_and(|v| v.get("packages").is_some());
+
+        if is_v2 {
+            return match crate::catalog_v2::parse(&text) {
+                Ok(catalog) => {
+                    let grants: usize = catalog.packages.values().map(Vec::len).sum();
+                    let summary =
+                        format!("v2: {} packages, {} grants", catalog.packages.len(), grants);
+                    let _ = LOADED.set(None);
+                    let _ = LOADED_V2.set(Some(Box::leak(Box::new(catalog))));
+                    Decision::Loaded {
+                        path: path.to_string(),
+                        summary,
+                    }
+                }
+                Err(reason) => {
+                    let _ = LOADED.set(None);
+                    let _ = LOADED_V2.set(None);
+                    Decision::FellBack {
+                        path: path.to_string(),
+                        reason,
+                    }
+                }
+            };
+        }
+
+        match crate::catalog::parse(&text) {
             Ok(catalog) => {
                 let summary = format!(
                     "{} hosts, {} package grants, {} egress entries",
@@ -165,10 +208,22 @@ mod loader {
     pub(crate) fn active() -> Option<&'static Catalog> {
         *LOADED.get().unwrap_or(&None)
     }
+
+    pub(crate) fn active_v2() -> Option<&'static crate::catalog_v2::Catalog> {
+        *LOADED_V2.get().unwrap_or(&None)
+    }
 }
 
 #[cfg(feature = "build-jail-catalog-override")]
-use loader::{active, load};
+use loader::{active, active_v2, load};
+
+/// The v2 grants for one package, in written order, or `None` when no v2 override is in
+/// force. The CALLER picks the first whose matchers apply — first match wins, and the
+/// version predicate lives with the compiler because that is where the semver parser is.
+#[cfg(feature = "build-jail-catalog-override")]
+pub(crate) fn v2_grants_for(package: &str) -> Option<&'static [crate::catalog_v2::Grant]> {
+    Some(active_v2()?.packages.get(package)?.as_slice())
+}
 
 /// Without the feature there is no loader, no parser, and no path that could produce one —
 /// [`decide`] refuses any set variable before reaching here.

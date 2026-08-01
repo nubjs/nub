@@ -762,6 +762,128 @@ fn grant_from_table(
     }
 }
 
+/// Lower a v2 grant's capabilities onto the policy's fs axis.
+///
+/// EVERY CAPABILITY MUST DO SOMETHING, and that is not rhetoric — the likeliest defect in
+/// this file is a grant that compiles to no rule at all, which is invisible without a
+/// differential test. `projectReads: ["."]` compiled to NOTHING for an entire measurement
+/// campaign because [`contained`] requires `joined != root`, and every result taken through
+/// it was worthless. The per-capability tests below exist for exactly that reason.
+///
+/// `Disk` is not lowered here. It is the absence of confinement rather than a rule, so it
+/// rides out on [`CuratedOutcome`] and the caller relaxes the axis once, after every other
+/// grant has compiled — the same shape v1's `full_disk` uses.
+#[cfg(feature = "build-jail-catalog-override")]
+pub fn apply_v2_grant(
+    policy: &mut SandboxPolicy,
+    homes: &Homes,
+    package_dir: &Path,
+    grant: &crate::catalog_v2::Grant,
+) -> V2Outcome {
+    use crate::catalog_v2::{Reach, Scope};
+
+    let mut rules = Vec::new();
+    let project_root = homes.project.as_path();
+
+    // WRITE first: it implies read at its own scope, so a later read pass must not
+    // downgrade what a write already granted.
+    if let Reach::Scopes(scopes) = &grant.write {
+        for scope in scopes {
+            match scope {
+                // DECLARED DEPENDENCIES ONLY — deliberately NOT the enclosing `node_modules`.
+                //
+                // The spec's earlier wording folded "the node_modules I am installed into"
+                // into this scope, to carry `@prisma/client` writing `.prisma` beside itself.
+                // Granting that directory wholesale would hand over every sibling package's
+                // code AND `.bin`, which is executables; the invariant is asserted by
+                // `a_sibling_grant_names_one_entry_of_the_enclosing_node_modules`.
+                //
+                // It is also unnecessary. Measured: under the isolated linker `.prisma` lands
+                // inside what `preset::store_entry_write_root` already grants, and under the
+                // hoisted linker it is a `project` write. So the clause bought nothing and
+                // cost a deliberate bound.
+                Scope::Deps => {
+                    for dep in declared_dependencies(package_dir) {
+                        // One-element chains only: each name is LOOKED UP the way Node would,
+                        // never joined onto a directory, so the reachable set is exactly what
+                        // the package can already `require`. That bound is the security
+                        // argument for `deps` being narrower than "the store".
+                        if let Some(path) =
+                            resolve_dependency_dir(project_root, package_dir, &[&dep])
+                        {
+                            push_rw(&mut rules, &path);
+                        }
+                    }
+                }
+                Scope::Project => push_rw(&mut rules, project_root),
+                Scope::UserHome => push_rw(&mut rules, &homes.home),
+            }
+        }
+    }
+
+    if let Reach::Scopes(scopes) = &grant.read {
+        for scope in scopes {
+            let path = match scope {
+                Scope::Project => project_root,
+                Scope::UserHome => homes.home.as_path(),
+                // Unreachable: the parser rejects `read.deps`, because reading declared
+                // dependencies is the base profile.
+                Scope::Deps => continue,
+            };
+            for glob in defaults::subtree_globs(&path.to_string_lossy()) {
+                rules.push(rule(&glob, FsAccess::Read));
+            }
+        }
+    }
+
+    policy.fs.rules.entries.extend(rules);
+    V2Outcome {
+        read_disk: matches!(grant.read, Reach::Disk),
+        write_disk: matches!(grant.write, Reach::Disk),
+        network: grant.network,
+    }
+}
+
+/// What a v2 grant asks of the caller that is not a filesystem RULE.
+#[cfg(feature = "build-jail-catalog-override")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct V2Outcome {
+    /// Read the whole filesystem. Distinct from `write_disk` because it is a far weaker
+    /// grant and, on Windows, a far cheaper one.
+    pub read_disk: bool,
+    /// The fs axis does not confine at all.
+    pub write_disk: bool,
+    pub network: bool,
+}
+
+/// The names in the package's own `dependencies`. Reading the manifest is what makes `deps`
+/// mean "what I declared" rather than "what happens to sit beside me" — the latter is the
+/// `siblingDirs` shape that v2 retires, and it could name a neighbour the package cannot
+/// even `require`.
+///
+/// `optionalDependencies` are included: a prebuilt-binary package routinely declares its
+/// platform builds there, and a grant that missed them would break exactly the native
+/// packages this capability exists for. `devDependencies` are NOT — they are absent from a
+/// consumer's install by definition.
+#[cfg(feature = "build-jail-catalog-override")]
+fn declared_dependencies(package_dir: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(package_dir.join("package.json")) else {
+        return Vec::new();
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for field in ["dependencies", "optionalDependencies"] {
+        if let Some(obj) = manifest.get(field).and_then(|v| v.as_object()) {
+            names.extend(obj.keys().cloned());
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// Expand one [`HomePath`] pattern and keep it only if it lands strictly under its anchor.
 ///
 /// The clamp re-checks at run time what `catalog::require_home_anchored` already rejected at
@@ -1397,6 +1519,198 @@ mod tests {
     #[cfg(unix)]
     fn symlink_dir(target: &Path, link: &Path) {
         std::os::unix::fs::symlink(target, link).expect("symlink");
+    }
+
+    // ── v2: every capability must DO something ────────────────────────────────
+    //
+    // These are the proof the model is workable, not a formality. The likeliest defect in
+    // this file is a capability that compiles to no rule — `projectReads: ["."]` did exactly
+    // that for a whole measurement campaign, and nothing failed, so every number taken
+    // through it was worthless. Each test below asserts a rule APPEARS with the capability
+    // and is ABSENT without it, varying exactly that one capability.
+
+    #[cfg(feature = "build-jail-catalog-override")]
+    mod v2 {
+        use super::*;
+
+        /// The (glob, access) pairs a grant compiles to. Access matters: a `read` capability
+        /// that silently emitted `ReadWrite` would pass any glob-only assertion.
+        fn compiled(json: &str, package_dir: &Path) -> (Vec<(String, FsAccess)>, V2Outcome) {
+            let catalog = crate::catalog_v2::parse(&format!(
+                r#"{{"packages":{{"p":[{{{json},"notes":"per-capability differential test"}}]}}}}"#
+            ))
+            .expect("test grant must parse");
+            let mut policy = SandboxPolicy::default();
+            let outcome = apply_v2_grant(
+                &mut policy,
+                &homes_for(&project()),
+                package_dir,
+                &catalog.packages["p"][0],
+            );
+            let rules = policy
+                .fs
+                .rules
+                .entries
+                .iter()
+                .map(|r| (r.matcher.as_str().to_string(), r.access))
+                .collect();
+            (rules, outcome)
+        }
+
+        fn touches(rules: &[(String, FsAccess)], root: &Path, access: FsAccess) -> bool {
+            let root = root.to_string_lossy().to_string();
+            rules
+                .iter()
+                .any(|(g, a)| *a == access && g.starts_with(&root))
+        }
+
+        #[test]
+        fn read_project_grants_read_and_only_read() {
+            let dir = cell("p");
+            let (with, _) = compiled(r#""read":{"project":true}"#, &dir);
+            assert!(
+                touches(&with, &project(), FsAccess::Read),
+                "read.project compiled to no readable rule under {}: {with:?}",
+                project().display()
+            );
+            assert!(
+                !touches(&with, &project(), FsAccess::ReadWrite),
+                "read.project must not grant write: {with:?}"
+            );
+            // The control: the same package with no capability gets nothing at all, so the
+            // assertion above is this capability firing rather than something ambient.
+            let (without, _) = compiled(r#""network":true"#, &dir);
+            assert!(
+                !touches(&without, &project(), FsAccess::Read),
+                "a grant with no fs capability must compile to no fs rule: {without:?}"
+            );
+        }
+
+        #[test]
+        fn write_project_grants_write_where_read_project_did_not() {
+            let dir = cell("p");
+            let (w, _) = compiled(r#""write":{"project":true}"#, &dir);
+            let (r, _) = compiled(r#""read":{"project":true}"#, &dir);
+            assert!(
+                touches(&w, &project(), FsAccess::ReadWrite),
+                "write.project compiled to no writable rule: {w:?}"
+            );
+            assert!(
+                !touches(&r, &project(), FsAccess::ReadWrite),
+                "the read-only arm must differ from the write arm, or neither is proven"
+            );
+        }
+
+        #[test]
+        fn user_home_is_the_real_home_not_the_jails_private_one() {
+            let dir = cell("p");
+            let home = homes_for(&project()).home;
+            let (rd, _) = compiled(r#""read":{"userHome":true}"#, &dir);
+            let (wr, _) = compiled(r#""write":{"userHome":true}"#, &dir);
+            assert!(
+                touches(&rd, &home, FsAccess::Read),
+                "read.userHome compiled to no rule under {}: {rd:?}",
+                home.display()
+            );
+            assert!(
+                touches(&wr, &home, FsAccess::ReadWrite),
+                "write.userHome compiled to no writable rule: {wr:?}"
+            );
+            assert!(
+                !touches(&rd, &home, FsAccess::ReadWrite),
+                "read.userHome must not grant write: {rd:?}"
+            );
+        }
+
+        /// `deps` needs a REAL tree: it reads the package's own manifest and resolves each
+        /// declared name the way Node would, so a synthetic path grants nothing by design.
+        #[test]
+        fn write_deps_reaches_a_declared_dependency_and_nothing_else() {
+            let tmp = std::env::temp_dir().join(format!("nub-v2-deps-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            let nm = tmp.join("node_modules");
+            let me = nm.join("me");
+            let declared = nm.join("declared");
+            let stranger = nm.join("stranger");
+            for d in [&me, &declared, &stranger] {
+                std::fs::create_dir_all(d).expect("fixture");
+            }
+            std::fs::write(
+                me.join("package.json"),
+                br#"{"name":"me","dependencies":{"declared":"1.0.0"}}"#,
+            )
+            .expect("fixture");
+
+            let catalog = crate::catalog_v2::parse(
+                r#"{"packages":{"p":[{"write":{"deps":true},"notes":"deps differential test"}]}}"#,
+            )
+            .expect("parses");
+            let mut policy = SandboxPolicy::default();
+            let homes = Homes {
+                project: tmp.clone(),
+                ..homes_for(&tmp)
+            };
+            apply_v2_grant(&mut policy, &homes, &me, &catalog.packages["p"][0]);
+            let rules: Vec<String> = policy
+                .fs
+                .rules
+                .entries
+                .iter()
+                .map(|r| r.matcher.as_str().to_string())
+                .collect();
+
+            let reaches = |p: &Path| {
+                let s = crate::matcher::path::canonicalize_including_nonexistent(p)
+                    .to_string_lossy()
+                    .to_string();
+                rules.iter().any(|g| g.starts_with(&s))
+            };
+            assert!(
+                reaches(&declared),
+                "a DECLARED dependency must be reachable: {rules:?}"
+            );
+            assert!(
+                !reaches(&stranger),
+                "an undeclared neighbour must NOT be reachable — that bound is the whole \
+                 security argument for `deps`: {rules:?}"
+            );
+            assert!(
+                !rules.iter().any(|g| {
+                    let n = crate::matcher::path::canonicalize_including_nonexistent(&nm);
+                    g == &n.to_string_lossy()
+                }),
+                "the enclosing node_modules itself must never be granted (it is `.bin` and \
+                 the virtual store): {rules:?}"
+            );
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        /// `disk` is the ABSENCE of confinement, so it is correct for it to emit no rule —
+        /// but then the only thing that can prove it fired is the outcome, which is exactly
+        /// why the outcome is asserted rather than the rule set.
+        #[test]
+        fn disk_and_network_ride_on_the_outcome_not_the_rules() {
+            let dir = cell("p");
+            let (rules, out) = compiled(r#""write":"disk""#, &dir);
+            assert!(out.write_disk, "write:disk must reach the caller");
+            assert!(rules.is_empty(), "disk must not also emit rules: {rules:?}");
+
+            let (_, read_only) = compiled(r#""read":"disk""#, &dir);
+            assert!(read_only.read_disk, "read:disk must reach the caller");
+            assert!(
+                !read_only.write_disk,
+                "read:disk must NOT relax the write axis — that is the whole point of \
+                 splitting them, and on Windows it is the difference between free and costly"
+            );
+
+            let (_, net) = compiled(r#""network":true"#, &dir);
+            assert!(net.network);
+            let (_, no_net) = compiled(r#""read":{"project":true}"#, &dir);
+            assert!(
+                !no_net.network,
+                "egress must not come along with an fs grant"
+            );
+        }
     }
 
     /// The sibling grant lands one level ABOVE `package_dir`, which is the whole point —

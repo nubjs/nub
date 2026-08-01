@@ -731,15 +731,43 @@ pub fn compile_build_jail(
     // LAST of the grants, so a curated rw wins under last-match-wins over the
     // front-inserted dependency-tree READ it nests inside. `ctx.homes.project` is the
     // consumer's project root, which aube guarantees whenever it hands over a name.
-    let curated = super::curated::grant_curated_package(
-        &mut policy,
-        &ctx.homes,
-        package_dir,
-        package_name,
-        package_version,
-    );
-    if curated.full_disk {
-        relax_fs_to_full_disk(&mut policy);
+    // A v2 override REPLACES the curated path rather than layering onto it: both express the
+    // same axis, so applying both would union two answers and leave the search that generates
+    // v2 unable to observe its own cell.
+    let mut applied_v2 = false;
+    #[cfg(feature = "build-jail-catalog-override")]
+    if let Some(grants) = package_name.and_then(crate::catalog_override::v2_grants_for) {
+        applied_v2 = true;
+        let here = crate::catalog_v2::Platform::current();
+        // FIRST MATCH WINS, on platform AND version. No match is a REAL state — a macOS-only
+        // grant evaluated on Linux — and it means the base profile, never a fall-through to
+        // v1, which would silently apply a different answer.
+        if let Some(grant) = grants.iter().find(|g| {
+            g.matches_platform(here)
+                && super::version_scope::applies(g.versions.as_deref(), package_version)
+        }) {
+            let out = super::curated::apply_v2_grant(&mut policy, &ctx.homes, package_dir, grant);
+            if out.write_disk {
+                relax_fs_to_full_disk(&mut policy);
+            }
+        }
+    }
+
+    // v2 has no `homePaths` equivalent, so it contributes no env — the cache-variable
+    // redirect was v1's second job and v2 deliberately does not carry it.
+    let mut curated_env: Vec<(String, String)> = Vec::new();
+    if !applied_v2 {
+        let curated = super::curated::grant_curated_package(
+            &mut policy,
+            &ctx.homes,
+            package_dir,
+            package_name,
+            package_version,
+        );
+        if curated.full_disk {
+            relax_fs_to_full_disk(&mut policy);
+        }
+        curated_env = curated.env;
     }
     enforce_pure_allowlist("build-jail", &mut policy);
     policy.env = defaults::lifecycle_scrubbed_env(&ambient_env);
@@ -823,7 +851,7 @@ pub fn compile_build_jail(
     // deliberate and argued at `curated::CuratedGrant::home_paths`: the rule was compiled
     // against nub's path, so a respected ambient value would aim the download at a directory
     // the policy denies.
-    for (key, value) in curated.env {
+    for (key, value) in curated_env {
         defaults::insert_env(&mut policy.env.constructed, key, value);
     }
     Ok(policy)
