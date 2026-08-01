@@ -627,6 +627,15 @@ function search(nub, pkg, version, root, keep) {
         // nothing landed there, and any other number is the promotion list's raw material.
         // The derived `writePaths` entry: the minimal directories that must survive.
         writePaths: wp,
+        // IS AN ENTRY VERSION-PINNED? An entry containing the measured version — `.cache/foo-1.2.3`
+        // — names a directory that MOVES on the next release, so shipping it matcher-less would
+        // silently stop matching. Walking UP is not the fix: the next level is a shared root, and
+        // widening to that is the over-granting the collapse floor exists to prevent. So it is
+        // recorded, and the collator pins the grant's `versions` matcher instead.
+        //
+        // Exact substring of the measured version, NOT a "looks like a version" regex — a regex
+        // would fire on legitimate names and miss unusual schemes, and both failures are silent.
+        writePathsVersionPinned: (wp ?? []).filter((e) => e.includes(version)),
         // DID THE PROMOTION ACTUALLY HAPPEN? Counts, not a boolean — a number cannot go
         // quietly inert, and this is the field that says whether the catalog's `writePaths`
         // is worth anything. `promotedIntoRealHome` 0 with a non-empty `writePaths` is a

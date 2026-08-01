@@ -200,8 +200,16 @@ for (const [pkg, rsRaw] of [...byPackage.entries()].sort()) {
     // version-specific rule and is noise. Compare the version sets across bands: pin only when
     // this band's versions are not the whole set.
     const bandVersions = [...new Set(group.map((r) => r.version))].sort();
-    if (bandVersions.length < allVersions.size) {
+    // A writePaths entry embedding the measured version names a directory that moves on the next
+    // release, so the grant MUST carry a versions matcher even when nothing else distinguishes
+    // this band — otherwise it ships matcher-less and silently stops matching.
+    const pinned = [...new Set(group.flatMap((r) => r.writePathsVersionPinned ?? []))];
+    if (bandVersions.length < allVersions.size || pinned.length) {
       g.versions = bandVersions.join(' || ');
+    }
+    if (pinned.length) {
+      g.notes = `${g.notes ?? ''}; version-pinned writePaths (${pinned.join(', ')}) — re-measure on a new release`;
+      notes.push(`${pkg}: writePaths pinned to ${bandVersions.join(', ')} by ${pinned.join(', ')}`);
     }
     // PER-PLATFORM MATCHERS, ONLY WHEN THE PLATFORMS DISAGREE.
     //
