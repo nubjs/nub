@@ -1381,12 +1381,22 @@ mod tests {
             ))
             .output()
             .unwrap();
-        if !junction.status.success() {
-            eprintln!(
-                "skipping Windows final-reparse test: directory junction creation unavailable"
-            );
-            fs::remove_dir_all(&base).unwrap();
-            return;
+        // `mklink` rejects the `\\?\` verbatim spelling `tmp_base` produces, so on
+        // CI this always failed and the skip swallowed the whole test. A directory
+        // symlink carries the same FILE_ATTRIBUTE_REPARSE_POINT the check under
+        // test reads, so fall back to it and skip only when the runner genuinely
+        // withholds the privilege — matching the sibling base-reparse test.
+        if !junction.status.success()
+            && let Err(error) = std::os::windows::fs::symlink_dir(&actual, &target)
+        {
+            if error.raw_os_error() == Some(1314) {
+                eprintln!(
+                    "skipping Windows final-reparse test: junction and symlink creation unavailable"
+                );
+                fs::remove_dir_all(&base).unwrap();
+                return;
+            }
+            panic!("creating Windows final-reparse point: {error}");
         }
         assert!(
             verify_runtime_tree(&target),
