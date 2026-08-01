@@ -30,7 +30,7 @@ struct Acl {
 #[repr(C)]
 struct AceHeader {
     ace_type: u8,
-    _ace_flags: u8,
+    ace_flags: u8,
     ace_size: u16,
 }
 
@@ -100,6 +100,7 @@ const ACCESS_ALLOWED_CALLBACK_ACE_TYPE: u8 = 9;
 const ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE: u8 = 11;
 const ACE_OBJECT_TYPE_PRESENT: u32 = 0x1;
 const ACE_INHERITED_OBJECT_TYPE_PRESENT: u32 = 0x2;
+const INHERIT_ONLY_ACE: u8 = 0x08;
 
 const WIN_CREATOR_OWNER_SID: i32 = 3;
 const WIN_LOCAL_SYSTEM_SID: i32 = 22;
@@ -232,6 +233,20 @@ pub fn directory_is_stable(path: &Path, leaf: bool, volume_root: bool) -> io::Re
         if !standard_allow && !object_allow && header.ace_type != ACCESS_ALLOWED_COMPOUND_ACE_TYPE {
             continue;
         }
+        // An INHERIT_ONLY ACE is a template, never consulted when checking access
+        // to the object carrying it — only when composing a child's DACL. On an
+        // ANCESTOR that makes it irrelevant here: the walk visits every component,
+        // so wherever the ACE actually propagates it is examined as an effective
+        // ACE there, and a component that blocks inheritance stops it outright.
+        // Counting it is what refused `C:\` on stock Windows, whose volume root
+        // always carries `Authenticated Users:(OI)(CI)(IO)(M)` — that rejected the
+        // first component of every chain, so no runtime-cache or compiled-artifact
+        // base was usable on any Windows machine. The LEAF still counts them: its
+        // children are the cache CONTENTS, which no later component validates, so
+        // an inherit-only grant there does reach the files we are protecting.
+        if !leaf && header.ace_flags & INHERIT_ONLY_ACE != 0 {
+            continue;
+        }
         if usize::from(header.ace_size) < 8 {
             return Ok(false);
         }
@@ -322,4 +337,39 @@ fn wide_path(path: &Path) -> Vec<u16> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Owner-only, except one INHERIT_ONLY grant of full control to Everyone —
+    /// the shape stock Windows ships on `C:\` (`Authenticated Users:(OI)(CI)(IO)(M)`).
+    fn create_inherit_only_shared_directory(path: &Path) -> io::Result<()> {
+        create_directory_with_sddl(
+            path,
+            "D:P(A;OICIIO;FA;;;WD)(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)",
+        )
+    }
+
+    /// Pins the ancestor/leaf asymmetry. Reading an inherit-only ACE as if it
+    /// granted access on its own object rejected every chain at `C:\`; ignoring it
+    /// at the LEAF too would let the cache contents inherit a foreign grant.
+    #[test]
+    fn an_inherit_only_grant_is_an_ancestor_template_but_a_leaf_hazard() {
+        let dir = std::env::temp_dir().join(format!("nub-ws-io-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        create_inherit_only_shared_directory(&dir).unwrap();
+
+        assert!(
+            directory_is_stable(&dir, false, false).unwrap(),
+            "an inherit-only ACE grants nothing on the ancestor carrying it"
+        );
+        assert!(
+            !directory_is_stable(&dir, true, false).unwrap(),
+            "the leaf's children are the cache contents, which do receive it"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

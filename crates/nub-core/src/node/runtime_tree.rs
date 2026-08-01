@@ -172,7 +172,11 @@ mod tests {
         for (name, bytes) in files {
             let path = root.join(name);
             std::fs::write(&path, bytes).unwrap();
-            let file = std::fs::File::open(&path).unwrap();
+            // Windows `SetFileTime` needs FILE_WRITE_ATTRIBUTES, which the
+            // GENERIC_READ handle from `File::open` does not carry; Unix
+            // `futimens` accepts a read-only fd, which is why this only ever
+            // failed on Windows.
+            let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
             file.set_times(std::fs::FileTimes::new().set_modified(
                 SystemTime::UNIX_EPOCH + Duration::from_secs(if reverse { 123 } else { 456 }),
             ))
