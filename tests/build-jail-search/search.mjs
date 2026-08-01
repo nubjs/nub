@@ -286,7 +286,27 @@ function grantFor(state) {
  *  would pin a version (`chrome/mac_arm-151.0.7922.47`) that changes on the next release and
  *  turn a stable entry into a churning one. Going shallower would hand over all of `.cache`.
  */
-function homeWritePaths(paths) {
+function homeWritePaths(paths, pkg = '') {
+  // ONLY THE PACKAGE'S OWN DIRECTORY IS PROMOTED — measured necessity, not a style rule.
+  //
+  // `ip-num@1.6.1` runs `npx only-allow` and writes 21 paths under the jail's throwaway home,
+  // deriving `.npm/_cacache` and `.npm/_npx`. Those are NPM'S state, not ip-num's: `_cacache`
+  // is the content-addressed cache including its `index-v5` key-to-content map, and `_npx`
+  // holds cached executables (`.bin/only-allow` among them). Moving either into the user's
+  // REAL `~/.npm` would hand a dependency's install script a write into npm's cache index and
+  // a way to plant binaries a later `npx` invocation runs — a supply-chain channel of exactly
+  // the kind the jail exists to close, created by the promotion mechanism itself.
+  //
+  // What distinguishes the legitimate case is OWNERSHIP: `.cache/puppeteer` is puppeteer's own
+  // vendor directory. So the prefix must name the package. That is a mechanical test, not a
+  // judgement about which directories are dangerous, and it fails CLOSED — a package whose
+  // cache directory is named after something else keeps working and merely re-downloads,
+  // which is a performance cost rather than a break.
+  // A SCOPED PACKAGE MATCHES ON EITHER HALF. `@puppeteer/browsers` owns `.cache/puppeteer`,
+  // which the bare name `browsers` does not appear in — dropping it would discard a real
+  // artefact rather than a hazard.
+  const owner = [pkg.replace(/^@([^/]+)\/.*/, '$1'), pkg.replace(/^@[^/]+\//, '')]
+    .map((x) => x.toLowerCase()).filter(Boolean);
   const dirs = new Set();
   for (const p of paths) {
     if (!p.startsWith('$home/')) continue;
@@ -303,7 +323,9 @@ function homeWritePaths(paths) {
     // `.npmrc` — the config root whose capture the private home exists to prevent — can never
     // reach this list.
     if (segs.length < 3) continue;
-    dirs.add(segs.slice(0, 2).join('/'));
+    const prefix = segs.slice(0, 2).join('/');
+    if (owner.length && !owner.some((o) => prefix.toLowerCase().includes(o))) continue;
+    dirs.add(prefix);
   }
   // Drop any entry already covered by a shallower one, so the set is minimal by construction.
   const out = [...dirs].sort();
@@ -505,7 +527,7 @@ function search(nub, pkg, version, root, keep) {
         // a few bookkeeping paths sit elsewhere. A count cannot be quietly inert — 0 means
         // nothing landed there, and any other number is the promotion list's raw material.
         // The derived `writePaths` entry: the minimal directories that must survive.
-        writePaths: floor ? homeWritePaths(controlOnly(controlU, floor)) : null,
+        writePaths: floor ? homeWritePaths(controlOnly(controlU, floor), pkg) : null,
         pathsLandingInThrowawayHome: floor
           ? controlOnly(controlU, floor).filter((p) => p.startsWith('$home/')).length
           : null,
