@@ -174,8 +174,8 @@
       {
         "package": "@larksuite/cli",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 31591608 B / 1558 files. nub v0.6.0 2421ab9a700c.",
-        "platform": "linux-x64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 38066091 B / 2328 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
       },
       {
         "package": "@modelcontextprotocol/ext-apps",
@@ -188,6 +188,12 @@
         "evidence": "policy",
         "observed": "POLICY grant, not measured. 12,894,852 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
         "platform": "all"
+      },
+      {
+        "package": "@netlify/esbuild",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 39477707 B / 2328 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
       },
       {
         "package": "@newrelic/native-metrics",
@@ -446,8 +452,8 @@
       {
         "package": "bootstrap-slider",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 60986436 B / 4503 files. nub v0.6.0 2421ab9a700c.",
-        "platform": "linux-x64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 67493191 B / 5267 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
       },
       {
         "package": "braintrust",
@@ -631,10 +637,28 @@
         "platform": "macos-arm64"
       },
       {
+        "package": "eth-gas-reporter",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 134594576 B / 10662 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
+      },
+      {
+        "package": "exiftool-vendored",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 97357653 B / 10724 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
+      },
+      {
+        "package": "fast-folder-size",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 24282106 B / 2157 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
+      },
+      {
         "package": "faunadb",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 both=0. Postinstall is `node ./tools/printReleaseNotes`, which GETs api.github.com/repos/.../releases/tags/<v> solely to print a release-notes box — egress for a cosmetic nag, the same shape as `ip-num`. Granted anyway, for the reason ip-num was: refusing costs a per-package mechanism and a maintainer round-trip, while the grant is one line and the residual is bounded (env scrubbed, no secret paths). Consistency with the ip-num precedent is the argument, not need.",
-        "platform": "linux-x64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 23262871 B / 2325 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
       },
       {
         "package": "ffmpeg-static",
@@ -661,6 +685,12 @@
         "platform": "all"
       },
       {
+        "package": "gifsicle",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 23543464 B / 2308 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
+      },
+      {
         "package": "gl",
         "evidence": "measured",
         "observed": "Isolated single-package macOS arm `iso-gl`, 2026-07-31. Confined: `prebuild-install warn install getaddrinfo ENOTFOUND github.com`. THE CONTROL IS BAD AND THE ENTRY SAYS SO: the unconfined A0 arm for this package exits rc=1 with `C++20 or later required.` and scored DID-WORK only because it had emitted 5,994 .o files before dying. So the egress DENIAL is measured and earns the entry, but there is no working unconfined arm to compare against and this package must NOT be counted as fixed by the grant — the same posture as handbrake-js above.",
@@ -677,6 +707,12 @@
         "evidence": "measured",
         "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com` fetching https://github.com/HandBrake/HandBrake/releases/download/1.11.1/HandBrakeCLI-1.11.1.dmg, no artifact. Unconfined, same fixture: DID-WORK-AND-SUCCEEDED with a 106065024 B HandbrakeCLI. WITH THIS GRANT the download is restored (38059875 B mac.dmg on disk, verified by size against the unconfined arm) and the package STILL FAILS, at `hdiutil attach mac.dmg` -> `hdiutil: attach failed - Device not configured`. Attaching a disk image needs diskarbitrationd, which Seatbelt refuses and no catalog field can grant. The entry is earned on the measured egress denial; do not read the remaining failure as needing a wider grant, and do not count this package as fixed.",
         "platform": "macos-arm64"
+      },
+      {
+        "package": "hasura-cli",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 102361780 B / 2327 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
       },
       {
         "package": "hugo-bin",
@@ -699,8 +735,8 @@
       {
         "package": "iedriver",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 16590636 B / 1559 files. nub v0.6.0 e45722851e34.",
-        "platform": "linux-x64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 27588574 B / 2331 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
       },
       {
         "package": "inngest-cli",
@@ -711,8 +747,8 @@
       {
         "package": "iobroker.js-controller",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 9511352 B / 881 files. nub v0.6.0 e45722851e34.",
-        "platform": "linux-x64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 12939329 B / 1289 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
       },
       {
         "package": "ip-num",
@@ -729,8 +765,14 @@
       {
         "package": "jpeg-recompress-bin",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 17087032 B / 1543 files. nub v0.6.0 e45722851e34.",
-        "platform": "linux-x64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 22987738 B / 2335 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
+      },
+      {
+        "package": "jpegtran-bin",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 23385866 B / 2311 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
       },
       {
         "package": "jss",
@@ -791,6 +833,12 @@
         "evidence": "policy",
         "observed": "POLICY grant, not measured. 1,948,906 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
         "platform": "all"
+      },
+      {
+        "package": "mozjpeg",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 23797397 B / 2307 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
       },
       {
         "package": "msgpackr-extract",
@@ -909,20 +957,38 @@
       {
         "package": "phantomjs",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 84704161 B / 1597 files. nub v0.6.0 e45722851e34.",
-        "platform": "linux-x64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 68298650 B / 2361 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
+      },
+      {
+        "package": "phantomjs-prebuilt",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 68259838 B / 2359 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
       },
       {
         "package": "playwright-firefox",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 332363399 B / 1608 files. nub v0.6.0 e45722851e34.",
-        "platform": "linux-x64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 318812748 B / 2418 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
+      },
+      {
+        "package": "playwright-webkit",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 293651728 B / 9001 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
       },
       {
         "package": "pngout-bin",
         "evidence": "measured",
         "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `RequestError: getaddrinfo ENOTFOUND raw.github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. raw.github.com is deliberately NOT promoted to networkHosts: it 301s to raw.githubusercontent.com, which serves arbitrary repository content rather than published release assets, and the prefetcher excludes that host on purpose (see GITHUB_PREFETCH_HOSTS in pm_engine/build_prefetch.rs).",
         "platform": "macos-arm64"
+      },
+      {
+        "package": "pngquant-bin",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 24230119 B / 2306 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
       },
       {
         "package": "postinstall-postinstall",
@@ -933,8 +999,8 @@
       {
         "package": "postman-code-generators",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 16851911 B / 1557 files. nub v0.6.0 2421ab9a700c.",
-        "platform": "linux-x64"
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 23390352 B / 2327 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
       },
       {
         "package": "prisma",
@@ -1062,6 +1128,12 @@
         "evidence": "measured",
         "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 110276485 B / 1286 files. nub v0.6.0 2421ab9a700c.",
         "platform": "linux-x64"
+      },
+      {
+        "package": "svf-lib",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 2230546892 B / 5674 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
       },
       {
         "package": "taiko",
