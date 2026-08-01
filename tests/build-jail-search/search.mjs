@@ -167,9 +167,18 @@ function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg }
   // store paths compare as ALL-NEW and swamp the real signal — 845 phantom "script effects"
   // for a package whose script wrote 3 files. Strip the hash so the two arms are comparable.
   const unhash = (p) => p.replace(/^([^/]+@[^/-]+(?:\.[^/-]+)*)-[0-9a-f]{8,}\//, '$1/');
+  // THE JAIL'S PRIVATE HOME. `os.homedir()` inside the jail resolves here, not to the real
+  // home, so a package writing `~/.cache/<vendor>` succeeds, needs no grant, and its artifact
+  // is DISCARDED. That is not a false verdict — it genuinely needs nothing — but it is a
+  // package whose output vanishes, which a user would call broken. Measured directly: a probe
+  // writing `~/.cache/vendorX/artifact.bin` landed under `<fixture home>/.cache/nub/jail-home/`.
+  // Scanning it makes that visible instead of silently absent. Per-package hash stripped for
+  // the same reason as the store's.
+  const jailHome = path.join(home, '.cache', 'nub', 'jail-home');
   const seen = [
     ...paths(proj).map((p) => `proj/${p}`),
     ...paths(store).map((p) => `store/${unhash(p)}`),
+    ...paths(jailHome).map((p) => `jailhome/${p.replace(/^([^/]+)-[0-9a-f]{8,}\//, '$1/')}`),
   ];
   return {
     label, rc, log, seen,
@@ -340,6 +349,19 @@ function search(nub, pkg, version, root, keep) {
         // floor. Capped, with the true count kept, so one pathological package cannot make
         // the results file unreadable — a silent truncation would be worse than a number.
         boughtCount: floor ? controlOnly(control, floor).length : null,
+        // ⚠ DID THE ARTEFACT LAND SOMEWHERE THAT SURVIVES? The jail redirects `$HOME` to a
+        // throwaway per-package directory, so a package caching under `~/.cache/<vendor>`
+        // writes into `jail-home/` — the install PASSES and the artefact is DISCARDED. At run
+        // time `HOME` is the real home and the package finds nothing. MEASURED: puppeteer's
+        // browser landed in `jail-home/puppeteer-<hash>/.cache/` with ZERO entries under the
+        // real `~/.cache/puppeteer`. The oracle cannot catch this — the install reproduced the
+        // control exactly — so it is flagged from WHERE the bought paths landed instead.
+        ephemeralArtifacts: floor
+          ? (() => {
+              const b = controlOnly(control, floor).filter((p) => !p.startsWith('proj/node_modules/.nub'));
+              return b.length > 0 && b.every((p) => p.startsWith('jailhome/'));
+            })()
+          : null,
         bought: floor ? controlOnly(control, floor).slice(0, 40) : null,
         control: brief(control),
       };
