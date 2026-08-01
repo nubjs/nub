@@ -20,6 +20,12 @@ on:
   push:
     branches: [probe/gm-win-t2]
   workflow_dispatch:
+    inputs:
+      shards:
+        # A re-measurement of a handful of rows should not re-run the other 160. The
+        # push path always takes the default; only an explicit dispatch narrows it.
+        description: 'JSON array of shard ids to run'
+        default: '["01","02","03","04","05","06","07","08","09","10"]'
 
 permissions:
   contents: read
@@ -64,7 +70,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10']
+        shard: ${{ fromJSON(inputs.shards || '["01","02","03","04","05","06","07","08","09","10"]') }}
     steps:
       - uses: actions/checkout@v4
         with:

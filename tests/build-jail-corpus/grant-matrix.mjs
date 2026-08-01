@@ -87,6 +87,15 @@ if (!NUB || !fs.existsSync(NUB)) { console.error('set NUB_BIN to a nub built wit
 // resolves to a directory that does not exist — so `BASE_CATALOG` silently pointed at
 // nothing and the run died on the first cell.
 const HARNESS = path.dirname(fileURLToPath(import.meta.url));
+// TEARDOWN, NOT MEASUREMENT — but it discarded three completed measurements before this
+// existed. Windows deletes a directory only once the last handle to it closes, so a child
+// that has just exited can leave `rmSync` seeing ENOTEMPTY on a tree it is already
+// unlinking; `maxRetries` is exactly the knob Node documents for that class (Windows
+// EBUSY/EMFILE/ENFILE/ENOTEMPTY/EPERM), and it defaults to 0. Three fulldisk cells died
+// this way in the tier-2 Windows sweep, each AFTER its cell had run, so a real result was
+// thrown away by a fixture that would not delete. Nothing here can change a verdict: the
+// only calls are the pre-create wipe and the post-run prune.
+const RM = { recursive: true, force: true, maxRetries: 20, retryDelay: 200 };
 const BASE_CATALOG = process.env.BASE_CATALOG || path.join(HARNESS, '../../crates/nub-sandbox/data/build-jail-catalog.json');
 // The default is the system tool floor a lifecycle script may reach, plus the node that
 // runs it — appended below. Windows has no `/usr/bin`, and a PATH of POSIX directories
@@ -336,7 +345,7 @@ function runCell(pkg, version, cell, nonce, need) {
   const jailOff = cell === 'off';
   const dir = path.join(ROOT, 'fx', `${slug(pkg)}-${cell}-${nonce}`);
   const proj = path.join(dir, 'proj'), home = path.join(dir, 'home'), tmp = path.join(dir, 'tmp');
-  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(dir, RM);
   for (const d of [proj, home, tmp]) fs.mkdirSync(d, { recursive: true });
 
   // FRESHLY GENERATED, never copied: `approve-builds` writes the approval INTO
@@ -382,7 +391,7 @@ function runCell(pkg, version, cell, nonce, need) {
 // Bounded by disk, not by politeness: the host runs at 96% and a single cell's tree can
 // be hundreds of MB. Fixtures are dropped as soon as their verdict is recorded; only
 // logs survive, which is all a re-read needs.
-const prune = (r) => { if (r?.dir) fs.rmSync(r.dir, { recursive: true, force: true }); };
+const prune = (r) => { if (r?.dir) fs.rmSync(r.dir, RM); };
 
 // ── the ladder ────────────────────────────────────────────────────────────────
 // Exit code first. The artifact delta decides ONLY the two cases an exit code cannot:
