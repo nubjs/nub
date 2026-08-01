@@ -1,0 +1,93 @@
+name: Windows island resolution probe
+
+# Branch-scoped ad-hoc probe. No PR: pushing to this branch runs it.
+on:
+  push:
+    branches: [win-island-probe]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  geometry:
+    name: Resolution geometry (no build)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: '24'
+      - name: Probe module-resolution geometry
+        shell: bash
+        run: node tests/win-island-probe/geometry.mjs
+
+  repro:
+    name: Traced native-island repro
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch]
+        with:
+          toolchain: stable
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install compiler bootstrap dependencies
+        shell: bash
+        run: npm ci
+      - name: Build fresh native candidate and matching launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf runtime/node_modules runtime/addons
+          mkdir -p runtime/node_modules/@js-temporal runtime/node_modules/@oxc-project runtime/node_modules/@petamoriken runtime/addons
+          cp -R node_modules/@js-temporal/polyfill runtime/node_modules/@js-temporal/
+          cp -R node_modules/@oxc-project/runtime runtime/node_modules/@oxc-project/
+          cp -R node_modules/@petamoriken/float16 runtime/node_modules/@petamoriken/
+          cp -R node_modules/jsbi node_modules/urlpattern-polyfill runtime/node_modules/
+          (cd crates/nub-native && cargo build --release)
+          cp target/release/nub_native.dll runtime/addons/nub-native.node
+          cargo build -p nub-cli --release --features embed-runtime,compile
+          (cd crates/nub-launcher && cargo build --release)
+      - name: Compile and run prebuilt native island with a resolution tracer
+        shell: bash
+        run: |
+          set -euo pipefail
+          export COMPILE_NATIVE_LOG_DIR="$RUNNER_TEMP/compile-native-islands-logs"
+          export NUB_ISLAND_TRACE="$GITHUB_WORKSPACE/tests/win-island-probe/trace.cjs"
+          mkdir -p "$COMPILE_NATIVE_LOG_DIR"
+          target="$(node --version)"
+          target="${target#v}"
+          tests/compile-native-islands/run.sh \
+            --nub "$GITHUB_WORKSPACE/target/release/nub.exe" \
+            --launcher "$GITHUB_WORKSPACE/crates/nub-launcher/target/release/nub-launcher.exe" \
+            --target "$target" \
+            --platform win32-x64 \
+            --mode prebuilt \
+            --verify-companion-dll-rename
+      - name: Upload probe logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: win-island-probe-logs
+          path: ${{ runner.temp }}/compile-native-islands-logs
+          if-no-files-found: ignore
+          retention-days: 7
