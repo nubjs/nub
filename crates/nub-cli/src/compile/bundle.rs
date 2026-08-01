@@ -34,33 +34,36 @@
 //! successfully" mean the output is at least loadable.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail};
-use oxc_ast::ast::{Expression, NewExpression, Program};
+use oxc_ast::ast::{BinaryExpression, BinaryOperator, Expression, NewExpression, Program};
 use rolldown::plugin::__inner::SharedPluginable;
 use rolldown::plugin::{
-    HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput,
-    HookResolveIdReturn, HookTransformArgs, HookTransformOutput, HookTransformOutputMap,
-    HookTransformReturn, HookUsage, Plugin, PluginContext, SharedLoadPluginContext,
-    SharedTransformPluginContext,
+    HookAddonArgs, HookInjectionOutputReturn, HookLoadArgs, HookLoadOutput, HookLoadReturn,
+    HookResolveIdArgs, HookResolveIdOutput, HookResolveIdReturn, HookTransformArgs,
+    HookTransformOutput, HookTransformOutputMap, HookTransformReturn, HookUsage, Plugin,
+    PluginContext, SharedLoadPluginContext, SharedTransformPluginContext,
 };
 use rolldown::{BundlerBuilder, BundlerOptions, InputItem};
 use rolldown_common::bundler_options::{BundlerTransformOptions, Either, JsxOptions};
 use rolldown_common::{
-    EmittedChunk, InnerOptions, IsExternal, ModuleType, Output, OutputFormat, Platform,
-    RawMinifyOptions, ResolveOptions, SourceMapType, StrOrBytes, TreeshakeOptions, TsConfig,
+    CodeSplittingMode, EmittedChunk, InnerOptions, IsExternal, ManualCodeSplittingOptions,
+    MatchGroup, MatchGroupName, ModuleType, Output, OutputFormat, Platform, RawMinifyOptions,
+    ResolveOptions, ResolvedExternal, SourceMapType, StrOrBytes, TreeshakeOptions, TsConfig,
 };
 use rolldown_error::{BuildDiagnostic, DiagnosticOptions, EventKind};
 use rolldown_utils::indexmap::FxIndexMap;
 use rolldown_utils::url::clean_url;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
+use string_wizard::{Hires, MagicString, SourceMapOptions};
 
-use super::{loaders, native};
+use super::{loaders, native, native_layout};
 
 /// Where the source map goes. `Linked` and `External` both emit a real `.map`;
 /// they differ only in whether the bundle references it — which for a compiled
@@ -129,6 +132,7 @@ pub struct BundleOptions {
 }
 
 /// One emitted file: a chunk, or a source map that travels with it.
+#[derive(Debug)]
 pub struct BundledFile {
     pub name: String,
     pub bytes: Vec<u8>,
@@ -146,6 +150,18 @@ pub struct BundleResult {
     /// are re-parsed as JavaScript by [`reject_invalid_chunks`], which a `.wasm`
     /// would rightly fail.
     pub assets: Vec<BundledFile>,
+    /// Reached native-addon package islands. These are nested regular files and
+    /// deliberately do not share the generic flat asset collector — nor
+    /// [`BundledFile`], because an island is a verbatim copy of a package
+    /// directory and so is the only bundler output that can be executable.
+    pub native_files: Vec<native_layout::IslandFile>,
+    /// Compile-runtime helpers which must remain real files beside the emitted
+    /// chunks because runtime `createRequire(import.meta.url)` loads them by
+    /// relative path.
+    pub support_files: Vec<BundledFile>,
+    /// Compile bootstrap which must be extracted at the payload root before any
+    /// generated chunk can read the private builtin registry it installs.
+    pub root_support_files: Vec<BundledFile>,
     /// Computed `import()` sites `--allow-dynamic-import` let through. Zero
     /// unless the flag is set; the build would otherwise have failed. This is
     /// what decides whether the artifact needs a runtime resolve hook at all.
@@ -154,19 +170,66 @@ pub struct BundleResult {
     /// empties still counts. The over-approximation can only ship a hook nothing
     /// uses; it can never omit one something needs.
     pub dynamic_import_sites: usize,
-    /// File names of the `.node` addons embedded, for the compile summary.
+    /// Owning package identities plus `.node` names, for the compile summary.
     pub native_addons: Vec<String>,
+    /// Static `--external` imports with the authored importer retained for a
+    /// compiled artifact's runtime hook. Empty for the generic build path.
+    pub external_imports: Vec<ExternalImport>,
+    /// The public worker entry named from application code and its private
+    /// bundled implementation chunk.  Compile writes a tiny public wrapper for
+    /// each pair after it knows whether a runtime resolve hook is needed.
+    pub worker_roots: Vec<WorkerRoot>,
 }
 
+/// One statically traceable worker. `entry` is the URL rewritten into the
+/// program; `chunk` is the prelude-bearing Rolldown output it must import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerRoot {
+    pub entry: String,
+    pub chunk: String,
+}
+
+/// One external import Rolldown must keep distinct in generated output. The
+/// synthetic id is an internal compiler identity, while `specifier` is what
+/// Node must resolve at runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExternalImport {
+    pub id: String,
+    pub specifier: String,
+    pub package: String,
+    /// Importer filename relative to the directory in which the binary will be
+    /// started. `None` is a virtual/non-file importer and preserves cwd lookup.
+    pub importer: Option<String>,
+}
+
+#[cfg(test)]
 pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
+    bundle_inner(entry_abs, opts, None)
+}
+
+/// Compile's artifact hook needs the original importer, whereas `nub build`
+/// deliberately leaves ordinary external specifiers in its output.
+pub fn bundle_for_compile(
+    entry_abs: &Path,
+    opts: &BundleOptions,
+    launch_root: &Path,
+) -> Result<BundleResult> {
+    bundle_inner(entry_abs, opts, Some(launch_root))
+}
+
+fn bundle_inner(
+    entry_abs: &Path,
+    opts: &BundleOptions,
+    launch_root: Option<&Path>,
+) -> Result<BundleResult> {
     let cwd = entry_abs
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let import = format!(
-        "./{}",
-        entry_abs.file_name().unwrap_or_default().to_string_lossy()
-    );
+    // Rolldown resolves files through the real filesystem. On macOS `/tmp` is
+    // commonly a `/private/tmp` symlink; keep its output cwd in that same
+    // spelling or relative region/map ids fall back to the build-machine path.
+    let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
     let stem = entry_abs
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -177,7 +240,13 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
     let options = BundlerOptions {
         input: Some(vec![InputItem {
             name: Some(stem),
-            import,
+            // A virtual root statically imports the compile prelude before the
+            // program.  Putting the import into the authored file would turn a
+            // CommonJS entry into an ESM-classified module before Rolldown has
+            // wrapped it, which changes `module.exports` semantics.  The wrapper
+            // keeps the source's format intact while still making both imports
+            // part of the module graph (and therefore its source map).
+            import: COMPILE_ROOT_ID.into(),
         }]),
         module_types: (!loader_plan.module_types.is_empty()).then(|| {
             loader_plan
@@ -186,7 +255,7 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
                 .map(|(ext, ty)| (ext.clone(), ty.clone()))
                 .collect()
         }),
-        cwd: Some(cwd),
+        cwd: Some(cwd.clone()),
         // THESE TWO ARE A PRECONDITION, NOT A DEFAULT. Two things below assume
         // `Esm` + `Node` and would go quietly wrong if `nub build` makes either a
         // knob. [`reject_invalid_chunks`] parses every emitted chunk as `mjs`, so a
@@ -197,6 +266,24 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
         // redundant there and should simply be skipped.
         format: Some(OutputFormat::Esm),
         platform: Some(Platform::Node),
+        // An authored ESM module has no `require` binding. Rolldown's Node ESM
+        // default installs `createRequire(import.meta.url)` for every unbound
+        // `require` reference, which changes `require.main` from a ReferenceError
+        // into an ordinary runtime value. Compiled artifacts preserve Node's ESM
+        // semantics here. CommonJS inputs are forced into their own chunk below,
+        // where [`CompilePreamble::intro`] supplies the loader their remaining
+        // external/dynamic require calls need without exposing it to ESM chunks.
+        polyfill_require: Some(false),
+        code_splitting: Some(compile_code_splitting()),
+        // The manual CommonJS boundary deliberately creates CJS↔ESM cross-chunk
+        // edges. Rolldown's default fast ordering does not promise cycle/order
+        // fidelity for that shape; its supported correctness mode does.
+        strict_execution_order: Some(true),
+        // Compiled chunks always execute as ESM, regardless of the source
+        // package's `type` field. Keeping that fact in their extension lets Node
+        // load extracted artifacts without a synthetic package boundary.
+        entry_filenames: Some("[name].mjs".to_string().into()),
+        chunk_filenames: Some("[name]-[hash].mjs".to_string().into()),
         minify: Some(RawMinifyOptions::Bool(opts.minify)),
         // The ONLY keep-names switch we touch. Rolldown threads this single flag
         // into both the finalizer's `__name` helper and the minifier's
@@ -208,7 +295,15 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
         define: Some(defines(opts)?),
         sourcemap: sourcemap_type(opts.sourcemap),
         sourcemap_exclude_sources: (!opts.sources_content).then_some(true),
-        external: external_matcher(&opts.external)?,
+        // Rolldown evaluates `external` before plugins. Compile needs a plugin
+        // to replace each raw request with an importer-specific synthetic id,
+        // while build keeps the ordinary matcher/output behavior.
+        external: if launch_root.is_some() {
+            validate_external_packages(&opts.external)?;
+            None
+        } else {
+            external_matcher(&opts.external)?
+        },
         resolve: Some(ResolveOptions {
             alias: alias_entries(&opts.alias)?,
             condition_names: (!opts.conditions.is_empty()).then(|| opts.conditions.clone()),
@@ -242,33 +337,49 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
         &loader_plan,
         Arc::clone(&collected),
     ));
+    let prelude = Arc::new(CompilePreamble::new(entry_abs)?);
     let new_urls = Arc::new(NewUrlAssets {
         collected: Arc::clone(&collected),
         files: Arc::clone(&files_plugin),
-        workers: Mutex::new(BTreeSet::new()),
+        prelude: Arc::clone(&prelude),
+        project_root: cwd.clone(),
+        workers: Mutex::new(BTreeMap::new()),
         modules: Mutex::new(BTreeMap::new()),
+        worker_refusals: Mutex::new(Vec::new()),
     });
-    // Sharing `collected` is what makes an addon reached twice ship once, and
-    // gives `.node` the same content-hashed flat naming as every other asset.
     let native_plugin = opts.native_target.map(|target| {
         Arc::new(native::NativeAddons::new(
             target,
-            Arc::clone(&collected),
             loader_plan.claims_extension("node"),
         ))
     });
+    let external_plugin = launch_root
+        .filter(|_| !opts.external.is_empty())
+        .map(|root| {
+            Arc::new(ExternalImports::new(
+                &opts.external,
+                root,
+                prelude.private_importers(),
+            ))
+        });
     // `CjsPathGlobals` runs LAST among the transforms that rewrite user source, so the
     // scanners ahead of it see the module as its author wrote it. `NativeAddons` is
     // pushed after it but cannot disturb that: its transform is gated on the source
     // containing `createRequire`, which `CjsPathGlobals` never emits (it splices
     // `__dirname`/`__filename` from the virtual `\0nub-path-globals` module), and its
     // rewrite blanks bytes in place without moving any position.
-    let mut plugins: Vec<SharedPluginable> = vec![
+    let mut plugins: Vec<SharedPluginable> = Vec::new();
+    if let Some(plugin) = &external_plugin {
+        // Claim raw package requests before aliases and resolver plugins.
+        plugins.push(Arc::clone(plugin) as SharedPluginable);
+    }
+    plugins.extend([
         Arc::clone(&scan) as SharedPluginable,
         Arc::clone(&files_plugin) as SharedPluginable,
         Arc::clone(&new_urls) as SharedPluginable,
+        Arc::clone(&prelude) as SharedPluginable,
         Arc::new(CjsPathGlobals) as SharedPluginable,
-    ];
+    ]);
     if let Some(plugin) = &native_plugin {
         plugins.push(Arc::clone(plugin) as SharedPluginable);
     }
@@ -308,6 +419,12 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
             anyhow!("{e}\n\n{}", hints.join("\n"))
         }
     })?;
+
+    // A plugin transform error loses its useful text when Rolldown renders the
+    // diagnostic.  Collect the syntactically provable unsupported worker forms
+    // while scanning, then refuse here so the author sees the source and the
+    // precise v1 boundary rather than merely a plugin name.
+    new_urls.reject_unsupported_workers()?;
 
     let sites = scan.take();
     reject_unresolved(&sites, &output.warnings, opts.allow_dynamic_import)?;
@@ -387,6 +504,19 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
     if files.is_empty() {
         bail!("the bundler produced no chunks");
     }
+    // The load hook only collected cheap `.node` seeds. Package traversal and
+    // copying starts here, after tree-shaking: a foreign optional variant whose
+    // wrapper disappeared cannot affect this target's payload or fail the build.
+    let planned_native = if let Some(plugin) = &native_plugin {
+        plugin.plan_survivors(&mut files)?
+    } else {
+        native::PlannedNative {
+            files: Vec::new(),
+            summaries: Vec::new(),
+        }
+    };
+    let native_files = planned_native.files;
+    let native_addons = planned_native.summaries;
     // `files` is still chunks-only here — maps are merged in below.
     reject_invalid_chunks(&files)?;
     // Also while it is chunks-only, because reachability is a property of CODE
@@ -409,24 +539,25 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
 
     reject_nested_chunks(&files, &assets)?;
 
-    // Read AFTER `retain_referenced`, so both reports name what the payload
-    // actually carries rather than everything the hooks happened to see. Scoped
-    // so the set's borrow of `assets` ends before `assets` is moved out below.
-    let native_addons = {
+    // Read AFTER `retain_referenced`, so the report names what the payload
+    // actually carries rather than everything the hooks happened to see.
+    {
         let kept: BTreeSet<&str> = assets.iter().map(|a| a.name.as_str()).collect();
         warn_module_data_assets(&new_urls.module_assets(&kept));
-        native_plugin
-            .map(|n| n.survivors(&kept))
-            .unwrap_or_default()
-    };
+    }
 
     Ok(BundleResult {
         entry,
         files,
         detached_maps,
         assets,
+        native_files,
+        support_files: prelude.support_files().collect(),
+        root_support_files: prelude.root_support_files().collect(),
         dynamic_import_sites,
         native_addons,
+        external_imports: external_plugin.map_or_else(Vec::new, |p| p.take()),
+        worker_roots: new_urls.worker_roots(),
     })
 }
 
@@ -448,7 +579,7 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
 /// `.js` entry does. The payload should not depend on which one you wrote.)
 ///
 /// Reachability is decided by a substring scan for the asset's name, which is
-/// exact here rather than approximate: the name carries an 8-hex content hash,
+/// exact here rather than approximate: the name carries a full SHA-256 content hash,
 /// and the only way user code can reach the file is through the path string the
 /// loader emitted — a name absent from every chunk is unreachable by
 /// construction. Minification preserves it, since it lives in a string literal.
@@ -574,8 +705,8 @@ const PATH_GLOBALS_ID: &str = "\0nub-path-globals";
 /// point. It carries neither `__dirname` nor `__filename` as text, so the transform
 /// hook's own cheap reject skips it.
 const PATH_GLOBALS_SOURCE: &str = concat!(
-    "import { fileURLToPath as __nubToPath } from \"node:url\";\n",
-    "import { dirname as __nubDirname } from \"node:path\";\n",
+    "const { fileURLToPath: __nubToPath } = process[Symbol.for(\"nub.compile.bootstrap\")].getBuiltin(\"node:url\");\n",
+    "const { dirname: __nubDirname } = process[Symbol.for(\"nub.compile.bootstrap\")].getBuiltin(\"node:path\");\n",
     "export const file = __nubToPath(import.meta.url);\n",
     "export const dir = __nubDirname(file);\n",
 );
@@ -797,6 +928,796 @@ impl<'a> oxc_ast_visit::Visit<'a> for PathGlobalScan {
 
 // ---- `new URL(…, import.meta.url)` asset embedding -----------------------------
 
+// ---- Compile prelude roots ------------------------------------------------------
+
+/// Virtual module ids owned by [`CompilePreamble`].  The leading NUL puts them in
+/// Rollup's plugin-only namespace, so neither a package nor a user file can
+/// collide with the compiler's roots.
+const COMPILE_ROOT_ID: &str = "\0nub:compile-root";
+const COMPILE_PREAMBLE_ID: &str = "\0nub:compile-preamble";
+const COMPILE_COMMONJS_CHUNK: &str = "_nub_commonjs";
+const COMPILE_COMMONJS_REQUIRE_MARKER: &str = "const require = process[Symbol.for(\"nub.compile.bootstrap\")].createRequire(import.meta.url);";
+
+/// Keep CommonJS inputs in a lexical scope application ESM can never share.
+///
+/// `polyfill_require: false` is bundle-global, while the desired semantics are
+/// not: authored ESM must keep `require` unbound, but bundled CommonJS needs a
+/// real Node loader for builtins, externals, and unanalyzable calls Rolldown
+/// intentionally leaves in the output. Rolldown exposes its final per-module
+/// classification to manual chunk naming, after parsing and package-boundary
+/// resolution have settled ambiguities which a source transform cannot settle.
+/// Grouping exactly those inputs creates a reliable lexical boundary; dependency
+/// recursion is deliberately off so an authored ESM dependency can never be
+/// pulled in. The one explicit ESM member is Nub's own path-globals bridge: it
+/// must evaluate `import.meta.url` in the chunk whose `__filename` it supplies.
+/// Placement does not make CommonJS eager: Rolldown retains each input's
+/// `__commonJS` wrapper and cross-chunk links invoke that cached wrapper at the
+/// original import/require site. `strict_execution_order` above enables its
+/// cycle/order-preserving linker path, while each wrapper's early module cache
+/// preserves partial exports through CommonJS cycles. The shared chunk evaluates
+/// only wrapper declarations.
+fn compile_code_splitting() -> CodeSplittingMode {
+    CodeSplittingMode::Advanced(ManualCodeSplittingOptions {
+        groups: Some(vec![MatchGroup {
+            name: MatchGroupName::Dynamic(Arc::new(|id, ctx| {
+                let commonjs_scope = id == PATH_GLOBALS_ID
+                    || ctx
+                        .get_module_info(id)
+                        .is_some_and(|module| is_node_commonjs_module(&module));
+                Box::pin(
+                    async move { Ok(commonjs_scope.then(|| COMPILE_COMMONJS_CHUNK.to_string())) },
+                )
+            })),
+            include_dependencies_recursively: Some(false),
+            ..Default::default()
+        }]),
+        ..Default::default()
+    })
+}
+
+/// Apply the chunk boundary only when Node and Rolldown agree on CommonJS.
+///
+/// Rolldown's scanner lets CommonJS `module`/`exports` markers outweigh even an
+/// `.mjs` suffix; Node does not. Trusting `input_format` alone would therefore
+/// move authored ESM into the loader-bearing chunk and silently make code run
+/// where plain Node throws. The scanner result is still the first gate because
+/// only a module Rolldown will wrap can safely consume the chunk's lexical
+/// `require`.
+fn is_node_commonjs_module(module: &rolldown_common::ModuleInfo) -> bool {
+    if !module.input_format.is_commonjs() {
+        return false;
+    }
+    let id = clean_url(module.id.as_str());
+    match Path::new(id).extension().and_then(|ext| ext.to_str()) {
+        Some("cjs" | "cts") => true,
+        Some("mjs" | "mts") => false,
+        // Rolldown has settled whether it will emit a CommonJS wrapper. Node's
+        // explicit extension/package classification is the remaining gate.
+        _ => node_package_defaults_to_commonjs(id),
+    }
+}
+
+/// A synchronous loader intro for CommonJS chunks. Its lexical `require` is
+/// isolated by the manual chunk boundary, and the payload-root bootstrap has
+/// already installed the private builtin registry before any chunk evaluates.
+fn compile_commonjs_require_intro() -> String {
+    format!("{COMPILE_COMMONJS_REQUIRE_MARKER}\n")
+}
+
+/// Supplies the program and worker root wrappers plus the prelude source itself.
+///
+/// A wrapper, rather than a textual import prepended to every authored root, is
+/// intentional.  A static ESM import in a `.cjs` root changes Rolldown's module
+/// classification before its CommonJS pass sees `module.exports`; importing that
+/// source FROM an ESM wrapper preserves CommonJS semantics and still emits ESM.
+/// The wrapper's two static imports give the prelude unconditional side effects
+/// before any program or worker code can run.
+#[derive(Debug)]
+struct CompilePreamble {
+    /// Virtual root id → the user-authored source it imports.  `BTreeMap` keeps
+    /// the generated wrapper ids and test output deterministic.
+    roots: Mutex<BTreeMap<String, PathBuf>>,
+    /// The public runtime directory found from the running Nub binary. In a
+    /// release this is the embedded-runtime extraction cache, never Cargo's
+    /// source checkout; in development it is the live `runtime/` directory.
+    runtime_dir: PathBuf,
+    /// Loaded before Rolldown starts, so a missing runtime gives a normal compile
+    /// error rather than an opaque plugin failure.
+    source: String,
+    /// Physical modules reached from the private prelude. Externalization runs
+    /// before this plugin, so both plugins share the set to keep `--external`
+    /// from intercepting any transitive prelude dependency.
+    private_importers: Arc<Mutex<BTreeSet<String>>>,
+    /// Runtime helpers intentionally loaded through `createRequire(import.meta.url)`
+    /// rather than an ESM import. They must remain real sibling files after the
+    /// prelude is bundled; otherwise the emitted chunk resolves them from the
+    /// extraction directory and fails before application code runs.
+    support_files: Vec<(String, Vec<u8>)>,
+    /// Runtime bootstrap extracted at the payload root rather than beside the
+    /// content-addressed bundle layout. The launcher loads it before the entry.
+    root_support_files: Vec<(String, Vec<u8>)>,
+}
+
+impl CompilePreamble {
+    fn new(entry: &Path) -> Result<Self> {
+        let runtime_dir = compile_runtime_dir()?;
+        let prelude = runtime_dir.join("compile-preamble.mjs");
+        let source = std::fs::read_to_string(&prelude)
+            .with_context(|| format!("reading the compile prelude at {}", prelude.display()))?;
+        let worker_blob = runtime_dir.join("worker-blob-url.cjs");
+        let worker_blob_bytes = std::fs::read(&worker_blob).with_context(|| {
+            format!(
+                "reading compile runtime support at {}",
+                worker_blob.display()
+            )
+        })?;
+        // Two distinct names, deliberately: the runtime tree ships this as its own
+        // source filename, while the payload publishes it under the `__nub_`-prefixed
+        // fixed root name so it cannot collide with an application file. Reading by
+        // the payload name finds nothing and fails every compile.
+        let bootstrap = runtime_dir.join("compile-bootstrap.cjs");
+        let bootstrap_bytes = std::fs::read(&bootstrap).with_context(|| {
+            format!(
+                "reading compile runtime root support at {}",
+                bootstrap.display()
+            )
+        })?;
+        let mut prelude = Self::from_source(entry, runtime_dir, source);
+        prelude
+            .support_files
+            .push(("worker-blob-url.cjs".to_string(), worker_blob_bytes));
+        prelude.root_support_files.push((
+            nub_core::compile::COMPILE_BOOTSTRAP_NAME.to_string(),
+            bootstrap_bytes,
+        ));
+        Ok(prelude)
+    }
+
+    fn from_source(entry: &Path, runtime_dir: PathBuf, source: String) -> Self {
+        let entry = std::fs::canonicalize(entry).unwrap_or_else(|_| entry.into());
+        Self {
+            roots: Mutex::new(BTreeMap::from([(COMPILE_ROOT_ID.to_string(), entry)])),
+            runtime_dir,
+            source,
+            private_importers: Arc::new(Mutex::new(BTreeSet::from([
+                COMPILE_PREAMBLE_ID.to_string()
+            ]))),
+            support_files: Vec::new(),
+            root_support_files: Vec::new(),
+        }
+    }
+
+    fn private_importers(&self) -> Arc<Mutex<BTreeSet<String>>> {
+        Arc::clone(&self.private_importers)
+    }
+
+    fn support_files(&self) -> impl Iterator<Item = BundledFile> + '_ {
+        self.support_files.iter().map(|(name, bytes)| BundledFile {
+            name: name.clone(),
+            bytes: bytes.clone(),
+        })
+    }
+
+    fn root_support_files(&self) -> impl Iterator<Item = BundledFile> + '_ {
+        self.root_support_files
+            .iter()
+            .map(|(name, bytes)| BundledFile {
+                name: name.clone(),
+                bytes: bytes.clone(),
+            })
+    }
+
+    /// Register `source` as a static worker root and return the virtual entry id
+    /// that [`NewUrlAssets::emit_worker`] must give Rolldown.  Its hash is solely
+    /// an internal module identity; the existing emitted filename remains keyed
+    /// on the source path and retains its current layout.
+    fn worker_root(&self, source: &Path) -> Result<String> {
+        let source = std::fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
+        let hash = format!("{:x}", Sha256::digest(source.to_string_lossy().as_bytes()));
+        let id = format!("\0nub:compile-worker-{hash}");
+        let mut roots = self
+            .roots
+            .lock()
+            .map_err(|_| anyhow!("the compile-prelude roots were poisoned by an earlier panic"))?;
+        match roots.entry(id.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(source);
+            }
+            Entry::Occupied(entry) if entry.get() == &source => {}
+            Entry::Occupied(_) => {
+                bail!("generated worker root id {id:?} identifies different source paths")
+            }
+        }
+        Ok(id)
+    }
+
+    fn root_source(&self, id: &str) -> Option<String> {
+        let source = self.roots.lock().ok()?.get(id)?.clone();
+        Some(compile_root_source(&source))
+    }
+
+    fn has_root(&self, id: &str) -> bool {
+        self.roots.lock().is_ok_and(|roots| roots.contains_key(id))
+    }
+
+    fn is_root_source(&self, id: &str) -> bool {
+        let id_path = Path::new(clean_url(id));
+        self.roots
+            .lock()
+            .is_ok_and(|roots| roots.values().any(|source| source == id_path))
+    }
+}
+
+/// The only code generated for a root.  Both imports are static and
+/// side-effectful: prelude first, program second.  JSON quoting keeps Windows
+/// separators and every filename character out of JavaScript grammar concerns;
+/// Rolldown resolves the absolute id only while building and never emits it.
+fn compile_root_source(source: &Path) -> String {
+    let prelude = serde_json::to_string(COMPILE_PREAMBLE_ID).expect("a virtual id serializes");
+    let source =
+        serde_json::to_string(&source.to_string_lossy()).expect("a source path serializes");
+    format!("import {prelude};\nimport {source};\n")
+}
+
+/// Locate exactly the public runtime whose dependencies compiled artifacts need.
+/// `find_public_preload` is the one runtime-extraction seam used by normal nub
+/// launch: it resolves the live source tree in development and materializes the
+/// embedded runtime cache in a released single binary. Deriving the sibling
+/// directory from that public `preload.mjs` keeps compile from ever reaching back
+/// to a non-existent Cargo checkout after distribution.
+fn compile_runtime_dir() -> Result<PathBuf> {
+    let binary = nub_core::node::spawn::current_nub_binary()
+        .context("locating the running nub binary for the compile prelude")?;
+    let preload = nub_core::node::spawn::find_public_preload(&binary)
+        .context("the nub runtime is unavailable, so compile cannot bundle its required prelude")?;
+    let runtime_dir = Path::new(&preload)
+        .parent()
+        .map(Path::to_path_buf)
+        .context("the public nub preload has no runtime directory")?;
+    #[cfg(feature = "embed-runtime")]
+    if !nub_core::node::verify_or_heal_embedded_runtime_tree(&runtime_dir) {
+        bail!("the embedded nub runtime failed integrity verification; refusing to compile")
+    }
+    Ok(runtime_dir)
+}
+
+impl Plugin for CompilePreamble {
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("nub:compile-preamble")
+    }
+
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::ResolveId | HookUsage::Load | HookUsage::Transform | HookUsage::Intro
+    }
+
+    fn intro(
+        &self,
+        ctx: &PluginContext,
+        args: &HookAddonArgs,
+    ) -> impl Future<Output = HookInjectionOutputReturn> + Send {
+        let module_ids = args
+            .chunk
+            .module_ids
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect::<Vec<_>>();
+        let commonjs = module_ids.iter().any(|id| {
+            ctx.get_module_info(id.as_str())
+                .is_some_and(|module| is_node_commonjs_module(&module))
+        });
+        let intro = commonjs.then(compile_commonjs_require_intro);
+        async move { Ok(intro) }
+    }
+
+    fn resolve_id(
+        &self,
+        ctx: &PluginContext,
+        args: &HookResolveIdArgs<'_>,
+    ) -> impl std::future::Future<Output = HookResolveIdReturn> + Send {
+        let root = self.has_root(args.specifier);
+        let specifier = args.specifier.to_string();
+        let prelude_path = self.runtime_dir.join("compile-preamble.mjs");
+        let private_importers = Arc::clone(&self.private_importers);
+        let private_import = args.importer.is_some_and(|importer| {
+            private_importers
+                .lock()
+                .map_or(true, |ids| ids.contains(importer))
+        });
+        let importer = (private_import && args.importer == Some(COMPILE_PREAMBLE_ID))
+            .then(|| prelude_path.to_string_lossy().into_owned())
+            .or_else(|| args.importer.map(str::to_string));
+        async move {
+            if root || specifier == COMPILE_PREAMBLE_ID {
+                return Ok(Some(HookResolveIdOutput::from_id(specifier)));
+            }
+            if !private_import {
+                return Ok(None);
+            }
+            // The prelude has a virtual graph id so no build-machine path can
+            // escape into emitted code, but its imports must resolve from the
+            // PUBLIC runtime directory (which carries runtime/node_modules in a
+            // release), not from the application's cwd. Re-entering Rolldown's
+            // resolver with the physical prelude only as its importer preserves
+            // package `exports`/conditions and normal relative-import behavior.
+            let importer = importer.expect("a private import has an importer");
+            private_importers
+                .lock()
+                .map_err(|_| anyhow!("the compile-prelude graph was poisoned by an earlier panic"))?
+                .insert(importer.clone());
+            let resolved = ctx
+                .resolve(&specifier, Some(&importer), None)
+                .await
+                .context("resolving a compile-prelude dependency")?
+                .map_err(|err| {
+                    anyhow!("resolving compile-prelude dependency {specifier:?}: {err}")
+                })?;
+            private_importers
+                .lock()
+                .map_err(|_| anyhow!("the compile-prelude graph was poisoned by an earlier panic"))?
+                .insert(resolved.id.to_string());
+            Ok(Some(HookResolveIdOutput::from_resolved_id(resolved)))
+        }
+    }
+
+    fn load(
+        &self,
+        _ctx: SharedLoadPluginContext,
+        args: &HookLoadArgs<'_>,
+    ) -> impl std::future::Future<Output = HookLoadReturn> + Send {
+        let prelude = (args.id == COMPILE_PREAMBLE_ID).then(|| self.source.clone());
+        let wrapper = (!args.id.eq(COMPILE_PREAMBLE_ID))
+            .then(|| self.root_source(args.id))
+            .flatten();
+        let root = self
+            .is_root_source(args.id)
+            .then(|| PathBuf::from(clean_url(args.id)));
+        async move {
+            if let Some(code) = prelude {
+                return Ok(Some(HookLoadOutput {
+                    code: code.into(),
+                    module_type: Some(ModuleType::Js),
+                    ..Default::default()
+                }));
+            }
+            if let Some(code) = wrapper {
+                return Ok(Some(HookLoadOutput {
+                    code: code.into(),
+                    module_type: Some(ModuleType::Js),
+                    ..Default::default()
+                }));
+            }
+            if let Some(path) = root {
+                let source = std::fs::read_to_string(&path).with_context(|| {
+                    format!("reading compile root source at {}", path.display())
+                })?;
+                if let Some(code) =
+                    preserve_entry_esm_classification(&path.to_string_lossy(), &source)
+                {
+                    // Rolldown chooses the module format before transform hooks.
+                    // Returning the marker here makes an authored `.mjs` root
+                    // unambiguously ESM without changing its physical id, which
+                    // is still needed by tsconfig, asset, and worker handling.
+                    return Ok(Some(HookLoadOutput {
+                        code: code.into(),
+                        // Let Rolldown infer the real source type from this
+                        // physical id; forcing `Js` would skip `.ts`/`.tsx`.
+                        ..Default::default()
+                    }));
+                }
+            }
+            Ok(None)
+        }
+    }
+
+    fn transform(
+        &self,
+        _ctx: SharedTransformPluginContext,
+        args: &HookTransformArgs<'_>,
+    ) -> impl Future<Output = HookTransformReturn> + Send {
+        let root = self.is_root_source(args.id);
+        let rewritten = if root {
+            let cjs = rewrite_entry_main_checks(clean_url(args.id), args.code);
+            let source = cjs.as_deref().unwrap_or(args.code);
+            rewrite_import_meta_main(clean_url(args.id), source, "true")
+                .map(|magic| import_meta_transform_output(args.id, magic))
+                .or_else(|| cjs.map(|code| (code, HookTransformOutputMap::Null)))
+                .or_else(|| {
+                    preserve_entry_esm_classification(clean_url(args.id), args.code)
+                        .map(|code| (code, HookTransformOutputMap::Null))
+                })
+        } else {
+            // Rolldown can flatten a static dependency into the executable's
+            // entry chunk, where a raw `import.meta.main` would accidentally
+            // observe the chunk's main-ness. Preserve Node/Deno's per-module
+            // rule before chunking: only the executable root may see `true`.
+            rewrite_non_root_import_meta_main(clean_url(args.id), args.code)
+                .map(|magic| import_meta_transform_output(args.id, magic))
+        };
+        async move {
+            Ok(rewritten.map(|(code, map)| HookTransformOutput {
+                code: Some(code),
+                map,
+                ..Default::default()
+            }))
+        }
+    }
+}
+
+/// A bundled static dependency is not the process entry merely because Rolldown
+/// places it in the entry chunk. Give each dependency its own non-main metadata
+/// object before finalization. Every dynamic chunk is non-main too.
+fn rewrite_non_root_import_meta_main(path: &str, source: &str) -> Option<MagicString<'static>> {
+    rewrite_import_meta_main(path, source, "false")
+}
+
+/// Snapshot a module's `import.meta` before Rolldown can flatten it into a chunk.
+///
+/// Replacing only `import.meta.main` with a boolean is not semantics-preserving:
+/// the property is writable and configurable, so assignment, update, and delete
+/// targets must remain references. Instead every authored `import.meta` becomes
+/// one module-local object. Object-literal spread gives each copied property —
+/// including the explicit `main` override — the ordinary writable, enumerable,
+/// configurable data descriptor, while `__proto__: null` prevents inherited
+/// properties from appearing on the snapshot. Roots need `true` because worker
+/// resolver bootstraps dynamically import their prelude-bearing chunk;
+/// dependencies and code-split chunks need `false` even when Rolldown flattens
+/// them into main.
+///
+/// Main-ness is the only thing chunking can leak, so a module whose every
+/// `import.meta` is read through a static non-`main` property is left alone: it
+/// never holds the metadata object, so there is nothing to correct. That keeps
+/// `import.meta.url` — the overwhelmingly common use, and the base every
+/// embedded asset resolves against — intact in the emitted chunk instead of
+/// paying for a snapshot object in each such module of every compiled binary.
+fn rewrite_import_meta_main(
+    path: &str,
+    source: &str,
+    literal: &str,
+) -> Option<MagicString<'static>> {
+    use oxc_allocator::Allocator;
+    use oxc_ast_visit::{Visit, walk};
+    use oxc_parser::Parser;
+    use oxc_span::{GetSpan, SourceType, Span};
+
+    // Whitespace and comments are legal between the `import`, `.`, and `meta`
+    // tokens (`import /* ... */ . meta`), so a contiguous `import.meta` search
+    // would skip valid metadata expressions before the AST gets to recognize
+    // them. `import` itself cannot be escaped when it is the keyword here; it
+    // is only a cheap parser-avoidance sentinel for sources that cannot contain
+    // an `import.meta` MetaProperty at all.
+    if !source.contains("import") {
+        return None;
+    }
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::mjs());
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    if parsed.panicked {
+        return None;
+    }
+
+    struct Scan {
+        edits: Vec<Span>,
+        /// Start offsets of the `import.meta` occurrences that are read through a
+        /// static, non-`main` property and so can never reach `main`.
+        main_free: BTreeSet<u32>,
+        identifiers: BTreeSet<String>,
+    }
+    impl<'a> Visit<'a> for Scan {
+        fn visit_meta_property(&mut self, meta: &oxc_ast::ast::MetaProperty<'a>) {
+            if meta.meta.name == "import" && meta.property.name == "meta" {
+                self.edits.push(meta.span());
+            }
+        }
+
+        // A computed key stays out of this set: `import.meta["ma" + "in"]` is a
+        // main access spelled dynamically, and only the static form is decidable.
+        fn visit_static_member_expression(
+            &mut self,
+            member: &oxc_ast::ast::StaticMemberExpression<'a>,
+        ) {
+            if member.property.name != "main"
+                && let oxc_ast::ast::Expression::MetaProperty(meta) = &member.object
+                && meta.meta.name == "import"
+                && meta.property.name == "meta"
+            {
+                self.main_free.insert(meta.span().start);
+            }
+            walk::walk_static_member_expression(self, member);
+        }
+
+        fn visit_identifier_reference(
+            &mut self,
+            identifier: &oxc_ast::ast::IdentifierReference<'a>,
+        ) {
+            self.identifiers.insert(identifier.name.to_string());
+        }
+
+        fn visit_binding_identifier(&mut self, identifier: &oxc_ast::ast::BindingIdentifier<'a>) {
+            self.identifiers.insert(identifier.name.to_string());
+        }
+    }
+
+    let mut scan = Scan {
+        edits: Vec::new(),
+        main_free: BTreeSet::new(),
+        identifiers: BTreeSet::new(),
+    };
+    scan.visit_program(&parsed.program);
+    if scan.edits.is_empty()
+        || scan
+            .edits
+            .iter()
+            .all(|span| scan.main_free.contains(&span.start))
+    {
+        return None;
+    }
+
+    // Check both raw text and normalized identifier names. The latter catches a
+    // nested binding or an unbound reference written with Unicode escapes: the
+    // injection would otherwise shadow it despite the alias text itself being
+    // absent from the file. Rolldown may independently rename equal aliases from
+    // different modules when it flattens them into one chunk.
+    let alias = import_meta_alias(source, &scan.identifiers);
+    let injection =
+        format!("const {alias} = {{ __proto__: null, ...import.meta, main: {literal} }};\n");
+    let mut magic = MagicString::new(source.to_owned());
+    for span in scan.edits {
+        // Spans are disjoint MetaProperty leaves, so updates cannot overlap.
+        magic
+            .update(span.start, span.end, alias.clone())
+            .expect("parsed import.meta spans must be valid MagicString ranges");
+    }
+
+    // A hashbang must remain the first bytes in the file, and directives must
+    // remain a prologue. Insert immediately after both when present; otherwise
+    // a real prepend gives the common case the simplest generated shape.
+    let insertion = parsed
+        .program
+        .directives
+        .last()
+        .map(|directive| directive.span())
+        .or_else(|| {
+            parsed
+                .program
+                .hashbang
+                .as_ref()
+                .map(|hashbang| hashbang.span())
+        })
+        .map_or(0, |span| span.end);
+    if insertion == 0 {
+        magic.prepend(injection);
+    } else {
+        magic.prepend_right(insertion, format!("\n{injection}"));
+    }
+    Some(magic)
+}
+
+fn import_meta_alias(source: &str, identifiers: &BTreeSet<String>) -> String {
+    const STEM: &str = "__nub_import_meta";
+    let available =
+        |candidate: &str| !source.contains(candidate) && !identifiers.contains(candidate);
+    if available(STEM) {
+        return STEM.to_string();
+    }
+    (1u32..)
+        .map(|suffix| format!("{STEM}_{suffix}"))
+        .find(|candidate| available(candidate))
+        .expect("an authored source cannot contain every numeric alias")
+}
+
+fn import_meta_transform_output(
+    path: &str,
+    magic: MagicString<'static>,
+) -> (String, HookTransformOutputMap) {
+    let code = magic.to_string();
+    let map = magic.source_map(SourceMapOptions {
+        hires: Hires::Boundary,
+        include_content: true,
+        source: path.to_string().into(),
+    });
+    (code, HookTransformOutputMap::from(map))
+}
+
+/// Restore the Node main-module check for a CommonJS source used as one of
+/// compile's executable roots.
+///
+/// Compile enters the app and each static worker through an ESM prelude wrapper.
+/// That preserves the authored source's CommonJS classification, but it also
+/// means Rolldown wraps the source as an imported dependency. Consequently,
+/// `require.main === module` is false even though Node would make it true when
+/// the same file is launched directly (including as a worker entry). This is a
+/// common CLI guard, and leaving it false produces a successful executable that
+/// silently does nothing.
+///
+/// Rewriting only roots is load-bearing. A bundled dependency can carry the
+/// identical guard around its own CLI, and plain Node correctly answers false
+/// there. A bundle-wide define would execute those dependency CLIs as collateral
+/// damage. The comparison itself is replaced rather than either operand, keeping
+/// every other `require.main` use on today's conservative semantics.
+fn rewrite_entry_main_checks(path: &str, source: &str) -> Option<String> {
+    use oxc_allocator::Allocator;
+    use oxc_ast_visit::{Visit, walk};
+    use oxc_parser::Parser;
+    use oxc_span::{GetSpan, SourceType, Span};
+
+    if !source.contains("require") || !source.contains("main") || !source.contains("module") {
+        return None;
+    }
+
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::mjs());
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    if parsed.panicked || !node_classifies_as_commonjs(path, &parsed.program) {
+        return None;
+    }
+    let semantic = oxc_semantic::SemanticBuilder::new()
+        .with_build_nodes(true)
+        .build(&parsed.program)
+        .semantic;
+
+    #[derive(Clone, Copy)]
+    struct Edit {
+        span: Span,
+        value: bool,
+    }
+
+    struct Scan<'a> {
+        edits: Vec<Edit>,
+        semantic: &'a oxc_semantic::Semantic<'a>,
+    }
+
+    impl<'a> Visit<'a> for Scan<'a> {
+        fn visit_binary_expression(&mut self, it: &BinaryExpression<'a>) {
+            let Some(value) = (match it.operator {
+                BinaryOperator::Equality | BinaryOperator::StrictEquality => Some(true),
+                BinaryOperator::Inequality | BinaryOperator::StrictInequality => Some(false),
+                _ => None,
+            }) else {
+                walk::walk_binary_expression(self, it);
+                return;
+            };
+            if (is_require_main(&it.left, self.semantic)
+                && is_global_identifier(&it.right, "module", self.semantic))
+                || (is_global_identifier(&it.left, "module", self.semantic)
+                    && is_require_main(&it.right, self.semantic))
+            {
+                self.edits.push(Edit {
+                    span: it.span(),
+                    value,
+                });
+                return;
+            }
+            walk::walk_binary_expression(self, it);
+        }
+    }
+
+    fn unparenthesized<'a>(mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
+        while let Expression::ParenthesizedExpression(parenthesized) = expr {
+            expr = &parenthesized.expression;
+        }
+        expr
+    }
+
+    fn is_global_identifier(
+        expr: &Expression<'_>,
+        name: &str,
+        semantic: &oxc_semantic::Semantic<'_>,
+    ) -> bool {
+        matches!(
+            unparenthesized(expr),
+            Expression::Identifier(identifier)
+                if identifier.name == name && is_unbound_global(identifier, semantic)
+        )
+    }
+
+    fn is_require_main(expr: &Expression<'_>, semantic: &oxc_semantic::Semantic<'_>) -> bool {
+        match unparenthesized(expr) {
+            Expression::StaticMemberExpression(member) => {
+                member.property.name == "main"
+                    && is_global_identifier(&member.object, "require", semantic)
+            }
+            Expression::ComputedMemberExpression(member) => {
+                matches!(
+                    member.expression.get_inner_expression(),
+                    Expression::StringLiteral(property) if property.value == "main"
+                ) && is_global_identifier(&member.object, "require", semantic)
+            }
+            _ => false,
+        }
+    }
+
+    let mut scan = Scan {
+        edits: Vec::new(),
+        semantic: &semantic,
+    };
+    scan.visit_program(&parsed.program);
+    if scan.edits.is_empty() {
+        return None;
+    }
+    scan.edits.sort_by_key(|edit| edit.span.start);
+
+    let mut output = source.as_bytes().to_vec();
+    for edit in scan.edits {
+        let start = edit.span.start as usize;
+        let end = edit.span.end as usize;
+        let literal = if edit.value {
+            b"true".as_slice()
+        } else {
+            b"false".as_slice()
+        };
+        debug_assert!(end - start >= literal.len());
+        output[start..start + literal.len()].copy_from_slice(literal);
+        for byte in &mut output[start + literal.len()..end] {
+            if !matches!(*byte, b'\r' | b'\n') {
+                *byte = b' ';
+            }
+        }
+    }
+    String::from_utf8(output).ok()
+}
+
+/// Rolldown's CommonJS scan treats an unbound `require`/`module` reference as
+/// stronger evidence than an `.mjs` id. An ESM root that merely *mentions* one
+/// of those names would therefore be wrapped as CommonJS and gain a fabricated
+/// `require` at runtime. An empty export is the smallest standard ESM marker:
+/// it changes no bindings or evaluation order, but makes the module format
+/// unambiguous before that scan runs.
+///
+/// This is root-only. A dependency with no ESM syntax still follows its own
+/// package/module rules; marking it here would change its exports semantics.
+fn preserve_entry_esm_classification(path: &str, source: &str) -> Option<String> {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::mjs());
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    if parsed.panicked
+        || has_esm_syntax(&parsed.program)
+        || node_classifies_as_commonjs(path, &parsed.program)
+    {
+        return None;
+    }
+    Some(format!("{source}\nexport {{}};\n"))
+}
+
+fn is_unbound_global(
+    identifier: &oxc_ast::ast::IdentifierReference<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+) -> bool {
+    identifier
+        .reference_id
+        .get()
+        .is_some_and(|id| semantic.scoping().get_reference(id).symbol_id().is_none())
+}
+
+/// Node's module kind for a compiler root. `.js`/`.ts` inherit the nearest
+/// package boundary; syntax alone cannot distinguish a type-module script with
+/// no import or export from CommonJS.
+fn node_classifies_as_commonjs(path: &str, program: &Program<'_>) -> bool {
+    match Path::new(path).extension().and_then(|ext| ext.to_str()) {
+        Some("cjs" | "cts") => true,
+        Some("mjs" | "mts") => false,
+        _ if has_esm_syntax(program) => false,
+        _ => node_package_defaults_to_commonjs(path),
+    }
+}
+
+fn node_package_defaults_to_commonjs(path: &str) -> bool {
+    let mut dir = Path::new(clean_url(path)).parent();
+    while let Some(current) = dir {
+        let manifest = current.join("package.json");
+        if let Ok(text) = std::fs::read_to_string(&manifest)
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
+        {
+            return json.get("type").and_then(serde_json::Value::as_str) != Some("module");
+        }
+        dir = current.parent();
+    }
+    true
+}
+
 /// Embeds the file a `new URL("./x", import.meta.url)` names, and repoints the
 /// URL at the embedded copy.
 ///
@@ -845,14 +1766,33 @@ struct NewUrlAssets {
     /// one would re-resolve an already-hashed asset name against the original
     /// file's directory.
     files: Arc<loaders::FilePlugin>,
+    /// Owns the virtual ESM wrapper each statically emitted worker enters
+    /// through, so it receives the same prelude as the primary program without
+    /// changing a CommonJS worker's classification.
+    prelude: Arc<CompilePreamble>,
+    /// Logical root used to name workers independently of checkout location.
+    project_root: PathBuf,
     /// Filenames of the worker chunks this build emitted. Read back after the
     /// bundle to keep them out of entry detection — Rolldown marks an emitted
     /// chunk `is_entry`, so without this a worker would be mistaken for the
     /// program's own entry and the launcher would boot the wrong module.
-    workers: Mutex<BTreeSet<String>>,
+    /// Public worker-entry name → its source and prelude-bearing worker chunk.
+    /// The public file is written after bundling, when compile knows whether it
+    /// must first install the external/dynamic resolve hook.
+    workers: Mutex<BTreeMap<String, WorkerOutput>>,
     /// Payload name → source path, for each embedded asset that is itself a
     /// JavaScript or TypeScript module. See [`warn_module_data_assets`].
     modules: Mutex<BTreeMap<String, PathBuf>>,
+    /// Unsupported executable worker sources found while transforming the
+    /// module graph.  Kept for [`Self::reject_unsupported_workers`], after
+    /// Rolldown has finished rendering its own diagnostics.
+    worker_refusals: Mutex<Vec<WorkerRefusal>>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkerOutput {
+    source: PathBuf,
+    chunk: String,
 }
 
 /// One `new URL(<literal>, import.meta.url)` this build can act on.
@@ -868,6 +1808,22 @@ struct NewUrlEdit {
     worker: bool,
 }
 
+/// A worker source compile can prove has no file-backed module root into which it
+/// can install the ESM prelude.  We retain the module path rather than a byte
+/// span because Rolldown's normal diagnostic renderer owns source snippets, and
+/// it discards text returned from a transform-plugin error.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct WorkerRefusal {
+    source: PathBuf,
+    reason: String,
+}
+
+#[derive(Debug, Default)]
+struct NewUrlScan {
+    edits: Vec<NewUrlEdit>,
+    worker_refusals: Vec<WorkerRefusal>,
+}
+
 impl NewUrlAssets {
     /// Bundle `source` as its own entry chunk and return the filename to point
     /// the `new URL(…)` at.
@@ -875,10 +1831,8 @@ impl NewUrlAssets {
     /// The name is pinned rather than left to Rolldown's hash so it is known HERE,
     /// while the referencing module is still being transformed — `get_file_name`
     /// can only answer once chunks exist, which is after every rewrite has already
-    /// had to happen. Hashing the absolute path keeps two same-named workers from
-    /// different directories apart, and makes repeat compiles of identical input
-    /// name the chunk identically, which `app_sha256` needs to key the extraction
-    /// dir stably.
+    /// had to happen. Hashing the project-relative path keeps same-named workers
+    /// in separate directories distinct without baking in the checkout location.
     fn emit_worker(&self, ctx: &PluginContext, source: &Path) -> Result<String> {
         let stem: String = source
             .file_stem()
@@ -898,31 +1852,147 @@ impl NewUrlAssets {
         } else {
             stem
         };
-        let hash = format!("{:x}", Sha256::digest(source.to_string_lossy().as_bytes()));
-        let name = format!("{stem}-{}.js", &hash[..8]);
-        // Idempotent by name: one worker referenced from two modules must emit
-        // once, or Rolldown sees two chunks claiming the same filename.
-        let fresh = self
-            .workers
-            .lock()
-            .map_err(|_| anyhow!("the worker collector was poisoned by an earlier panic"))?
-            .insert(name.clone());
+        let entry = worker_output_name(&self.project_root, source, &stem);
+        let chunk = worker_chunk_output_name(&entry);
+        // Idempotent for the same source: one worker referenced from two modules
+        // must emit once, while a generated-name collision must never alias it.
+        let source = std::fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
+        // Scoped so the guard is released before `worker_root` below, which takes
+        // its own locks.
+        let fresh = {
+            let mut workers = self
+                .workers
+                .lock()
+                .map_err(|_| anyhow!("the worker collector was poisoned by an earlier panic"))?;
+            record_worker(&mut workers, entry.clone(), chunk.clone(), &source)?
+        };
         if fresh {
+            let root = self.prelude.worker_root(&source)?;
             ctx.emit_chunk(EmittedChunk {
                 name: None,
-                file_name: Some(name.as_str().into()),
-                id: source.to_string_lossy().into_owned(),
+                file_name: Some(chunk.as_str().into()),
+                id: root,
                 importer: None,
                 preserve_entry_signatures: None,
             })
             .map_err(|e| anyhow!("bundling the worker entry {}: {e}", source.display()))?;
         }
-        Ok(name)
+        Ok(entry)
     }
 
+    fn note_worker_refusals(&self, refusals: Vec<WorkerRefusal>) {
+        if refusals.is_empty() {
+            return;
+        }
+        if let Ok(mut found) = self.worker_refusals.lock() {
+            found.extend(refusals);
+        }
+    }
+
+    /// Render direct diagnostics for worker construction forms that cannot run
+    /// a static ESM prelude in v1.  This happens after the bundle result is
+    /// available because Rolldown otherwise reduces plugin errors to an opaque
+    /// `plugin threw an error` diagnostic.
+    fn reject_unsupported_workers(&self) -> Result<()> {
+        let mut refusals = self
+            .worker_refusals
+            .lock()
+            .map_err(|_| anyhow!("the worker refusal collector was poisoned by an earlier panic"))?
+            .clone();
+        reject_unsupported_workers(&mut refusals)
+    }
+}
+
+fn worker_output_name(project_root: &Path, source: &Path, stem: &str) -> String {
+    let logical = pathdiff::diff_paths(source, project_root)
+        .unwrap_or_else(|| source.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/");
+    let hash = format!("{:x}", Sha256::digest(logical.as_bytes()));
+    worker_output_name_with_hash(stem, &hash)
+}
+
+fn worker_output_name_with_hash(stem: &str, hash: &str) -> String {
+    format!("{stem}-{hash}.mjs")
+}
+
+fn record_worker(
+    workers: &mut BTreeMap<String, WorkerOutput>,
+    entry: String,
+    chunk: String,
+    source: &Path,
+) -> Result<bool> {
+    match workers.entry(entry.clone()) {
+        Entry::Vacant(slot) => {
+            slot.insert(WorkerOutput {
+                source: source.to_path_buf(),
+                chunk,
+            });
+            Ok(true)
+        }
+        Entry::Occupied(slot) if slot.get().source == source => Ok(false),
+        Entry::Occupied(_) => {
+            bail!("generated worker entry {entry:?} identifies different source paths")
+        }
+    }
+}
+
+/// Keep the app-visible worker name stable while reserving a distinct bundled
+/// module that a generated wrapper can import only after installing a resolver
+/// hook. A suffix before `.mjs` avoids a second hash/name scheme and remains a
+/// legal flat payload name on every target.
+fn worker_chunk_output_name(entry: &str) -> String {
+    entry
+        .strip_suffix(".mjs")
+        .map(|stem| format!("{stem}-code.mjs"))
+        .unwrap_or_else(|| format!("{entry}-code.mjs"))
+}
+
+fn reject_unsupported_workers(refusals: &mut Vec<WorkerRefusal>) -> Result<()> {
+    if refusals.is_empty() {
+        return Ok(());
+    }
+    refusals.sort_by(|a, b| a.source.cmp(&b.source).then(a.reason.cmp(&b.reason)));
+    refusals.dedup();
+    let lines = refusals
+        .iter()
+        .map(|refusal| format!("  {}: {}", refusal.source.display(), refusal.reason))
+        .collect::<Vec<_>>();
+    bail!(
+        "nub compile cannot augment these worker sources in v1:\n{}\n\n\
+         \x20\x20Compile can inject its ESM prelude into file-backed workers written as\n\
+         \x20\x20new Worker(new URL(\"./worker.js\", import.meta.url)). `data:`, `blob:`,\n\
+         \x20\x20and `{{ eval: true }}` workers execute code without a module root, so there is\n\
+         \x20\x20no safe place to install the prelude. Move the worker body into a file-backed\n\
+         \x20\x20module. A constructor compile cannot tie to Node's Worker is refused rather\n\
+         \x20\x20than shipped as data: reach it through the global Worker, globalThis.Worker,\n\
+         \x20\x20or an import from node:worker_threads, and bind it with a plain const.\n\
+         \x20\x20Dynamic or unresolved file worker specifiers keep their existing behavior.",
+        lines.join("\n")
+    );
+}
+
+impl NewUrlAssets {
     /// The worker chunk filenames this build emitted.
     fn worker_names(&self) -> BTreeSet<String> {
-        self.workers.lock().map(|g| g.clone()).unwrap_or_default()
+        self.workers
+            .lock()
+            .map(|g| g.values().map(|worker| worker.chunk.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    fn worker_roots(&self) -> Vec<WorkerRoot> {
+        self.workers
+            .lock()
+            .map(|g| {
+                g.iter()
+                    .map(|(entry, worker)| WorkerRoot {
+                        entry: entry.clone(),
+                        chunk: worker.chunk.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Record a data asset that is itself a module, for the post-bundle report.
@@ -983,10 +2053,13 @@ fn is_module_extension(path: &Path) -> bool {
 /// refusal there is no flag that means "I meant it", so a refusal would be a wall
 /// with nothing on the other side of it, and the only way past would be to stop
 /// using `new URL` — which is the idiomatic spelling this compiler went out of
-/// its way to support. The executed case that IS decidable, `new Worker(new
-/// URL(…))`, is already emitted as a real chunk, so what reaches here skews to
-/// inert data. The defect is the ABSENCE of a build-time signal; a note is the
-/// whole of that.
+/// its way to support.
+///
+/// What makes a WARNING sufficient here is that the executed case never reaches
+/// this function. Every worker spelling [`classify_worker_callee`] can prove is
+/// emitted as a real chunk, and every one it cannot is REFUSED at build time
+/// rather than falling through — so what arrives here is data, and the defect it
+/// addresses is the absence of a build-time signal about that.
 fn warn_module_data_assets(sources: &[PathBuf]) {
     for source in sources {
         eprintln!(
@@ -1021,11 +2094,13 @@ impl Plugin for NewUrlAssets {
             args.module_type,
             ModuleType::Js | ModuleType::Jsx | ModuleType::Ts | ModuleType::Tsx
         ) && !self.files.claims(clean_url(args.id));
-        let edits = if scannable {
+        let scan = if scannable {
             scan_new_urls(args.id, args.code)
         } else {
-            Vec::new()
+            NewUrlScan::default()
         };
+        self.note_worker_refusals(scan.worker_refusals);
+        let edits = scan.edits;
         // Cloned only when there is an edit to make — this hook runs on every
         // module in the graph, and almost none of them have one.
         let source = (!edits.is_empty()).then(|| args.code.to_string());
@@ -1090,25 +2165,39 @@ fn rewrite_new_urls(source: &str, edits: &[(NewUrlEdit, String)]) -> String {
 /// order — [`rewrite_new_urls`] splices in one forward pass. A parse failure
 /// yields nothing: the bundler's own parse error is the better diagnostic, and
 /// this pass must never be the thing that fails a build.
-fn scan_new_urls(id: &str, source: &str) -> Vec<NewUrlEdit> {
+fn scan_new_urls(id: &str, source: &str) -> NewUrlScan {
     use oxc_allocator::Allocator;
     use oxc_ast_visit::{Visit, walk};
     use oxc_parser::Parser;
     use oxc_span::{GetSpan, SourceType};
 
     let Some(dir) = Path::new(clean_url(id)).parent().map(Path::to_path_buf) else {
-        return Vec::new();
+        return NewUrlScan::default();
     };
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(id).unwrap_or_else(|_| SourceType::mjs());
+    let source_type = SourceType::from_path(clean_url(id)).unwrap_or_else(|_| SourceType::mjs());
     let parsed = Parser::new(&allocator, source, source_type).parse();
-    if parsed.panicked || binds_url(&parsed.program) {
-        return Vec::new();
+    if parsed.panicked {
+        return NewUrlScan::default();
     }
+    let semantic = oxc_semantic::SemanticBuilder::new()
+        .with_build_nodes(true)
+        .build(&parsed.program)
+        .semantic;
+    let node_builtins = node_builtin_import_bindings(&parsed.program);
+    let cjs_worker_bindings = cjs_worker_thread_bindings(&parsed.program, &semantic);
+    let worker_aliases = worker_alias_bindings(&parsed.program, &semantic, &node_builtins);
 
-    struct Visitor {
+    struct Visitor<'a, 's> {
         dir: PathBuf,
+        module: PathBuf,
+        code: &'s str,
+        semantic: &'a oxc_semantic::Semantic<'a>,
+        node_builtins: &'a BTreeMap<oxc_semantic::SymbolId, &'static str>,
+        cjs_worker_bindings: &'a BTreeSet<oxc_semantic::SymbolId>,
+        worker_aliases: &'a BTreeMap<oxc_semantic::SymbolId, WorkerCallee>,
         found: Vec<NewUrlEdit>,
+        worker_refusals: Vec<WorkerRefusal>,
         /// Starts of the `new URL(…)` spans an enclosing `new Worker(…)` already
         /// took. The walk reaches the outer expression first, so claiming there is
         /// what stops the inner one from ALSO being recorded as a data asset — and
@@ -1117,13 +2206,65 @@ fn scan_new_urls(id: &str, source: &str) -> Vec<NewUrlEdit> {
         claimed: std::collections::HashSet<u32>,
     }
 
-    impl<'a> Visit<'a> for Visitor {
+    impl<'a, 's> Visit<'a> for Visitor<'a, 's> {
         fn visit_new_expression(&mut self, it: &NewExpression<'a>) {
-            if let Some(url) = worker_url_argument(it) {
+            let callee = classify_worker_callee(
+                &it.callee,
+                self.semantic,
+                self.node_builtins,
+                self.worker_aliases,
+            );
+            if callee == WorkerCallee::Proven
+                && let Some(reason) =
+                    unsupported_worker_reason(it, self.semantic, self.node_builtins)
+            {
+                self.worker_refusals.push(WorkerRefusal {
+                    source: self.module.clone(),
+                    reason,
+                });
+            }
+            if callee == WorkerCallee::Proven
+                && let Some(url) = new_url_argument(it)
+            {
                 if let Some(edit) = self.embeddable(url, true) {
                     self.claimed.insert(url.span().start);
                     self.found.push(edit);
                 }
+            } else if is_cjs_worker_constructor(it, self.semantic, self.cjs_worker_bindings)
+                && let Some(url) = new_url_argument(it)
+            {
+                // This is a direct `{ Worker: Local } = require(...)` binding,
+                // not a text match. Do not silently turn its executable source
+                // into a raw data asset: the compiled artifact would then fail
+                // only after the source tree has gone away.
+                self.worker_refusals.push(WorkerRefusal {
+                    source: self.module.clone(),
+                    reason: "CommonJS `require(\"node:worker_threads\")` worker bindings are not supported by `nub compile` yet; use `import { Worker } from \"node:worker_threads\"` (aliases are supported) or the global Worker".into(),
+                });
+                self.claimed.insert(url.span().start);
+            } else if callee == WorkerCallee::Unprovable
+                && let Some(url) = new_url_argument(it)
+                && self.embeddable(url, false).is_some()
+            {
+                // Same hazard as the CommonJS binding above, reached from the
+                // other side: the receiver is unprovable, so this MIGHT be a
+                // Worker, and the data-asset fallback is only safe when it is
+                // not. Refusing costs a build error on a spelling nobody has to
+                // write; falling through costs a worker that runs on bare Node,
+                // untranspiled, with no preamble, on the user's machine.
+                let spelling = callee_spelling(self.code, it.callee.span());
+                self.worker_refusals.push(WorkerRefusal {
+                    source: self.module.clone(),
+                    reason: format!(
+                        "`new {spelling}(new URL(…))` cannot be proven to construct Node's Worker, so its entry would ship as data rather than as code"
+                    ),
+                });
+                self.claimed.insert(url.span().start);
+            } else if let Some(url) = spelled_worker_url_argument(it) {
+                // A same-named local/custom Worker owns the whole expression;
+                // its URL is not a data asset merely because its spelling is
+                // otherwise embeddable.
+                self.claimed.insert(url.span().start);
             } else if !self.claimed.contains(&it.span().start)
                 && let Some(edit) = self.embeddable(it, false)
             {
@@ -1133,12 +2274,12 @@ fn scan_new_urls(id: &str, source: &str) -> Vec<NewUrlEdit> {
         }
     }
 
-    impl Visitor {
+    impl Visitor<'_, '_> {
         fn embeddable(&self, expr: &NewExpression<'_>, worker: bool) -> Option<NewUrlEdit> {
             let Expression::Identifier(callee) = &expr.callee else {
                 return None;
             };
-            if callee.name != "URL" {
+            if !is_compiler_builtin(callee, "URL", self.semantic, self.node_builtins) {
                 return None;
             }
             if !is_import_meta_url(expr.arguments.get(1)?.as_expression()?) {
@@ -1181,34 +2322,492 @@ fn scan_new_urls(id: &str, source: &str) -> Vec<NewUrlEdit> {
     }
 
     let mut visitor = Visitor {
+        module: PathBuf::from(clean_url(id)),
         dir,
+        code: source,
+        semantic: &semantic,
+        node_builtins: &node_builtins,
+        cjs_worker_bindings: &cjs_worker_bindings,
+        worker_aliases: &worker_aliases,
         found: Vec::new(),
+        worker_refusals: Vec::new(),
         claimed: std::collections::HashSet::new(),
     };
     visitor.visit_program(&parsed.program);
     visitor.found.sort_by_key(|e| e.start);
-    visitor.found
+    NewUrlScan {
+        edits: visitor.found,
+        worker_refusals: visitor.worker_refusals,
+    }
 }
 
-/// The `new URL(…)` a `new Worker(…)` is constructed from, if that is the shape.
-///
-/// Only the INLINE form is recognized — `new Worker(new URL("./w.ts",
-/// import.meta.url))`. A worker whose URL was computed into a variable first is
-/// left alone, on the same reasoning the rest of this scan follows: nub rewrites
-/// what it can prove, and proving a variable's value needs data flow this pass
-/// deliberately does not do. That is the shape every bundler with worker support
-/// requires too, and it is what opencode, Vite's docs, and MDN all write.
-fn worker_url_argument<'a>(expr: &'a NewExpression<'a>) -> Option<&'a NewExpression<'a>> {
-    let Expression::Identifier(callee) = &expr.callee else {
-        return None;
+/// Symbol identities for direct Node CommonJS worker destructuring bindings.
+/// This is intentionally narrower than a general CommonJS data-flow analysis:
+/// only an unshadowed `require("node:worker_threads")` and a direct `Worker`
+/// property prove that a local constructor is Node's Worker. That both avoids
+/// comments/string-literal false positives and leaves custom constructors alone.
+fn cjs_worker_thread_bindings(
+    program: &Program<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+) -> BTreeSet<oxc_semantic::SymbolId> {
+    use oxc_ast::ast::{BindingPattern, Expression, VariableDeclarator};
+    use oxc_ast_visit::{Visit, walk};
+
+    fn is_worker_threads_require(
+        expression: &Expression<'_>,
+        semantic: &oxc_semantic::Semantic<'_>,
+    ) -> bool {
+        let Expression::CallExpression(call) = expression else {
+            return false;
+        };
+        matches!(
+            &call.callee,
+            Expression::Identifier(callee)
+                if callee.name == "require"
+                    && is_unbound_global(callee, semantic)
+        ) && call.arguments.len() == 1
+            && matches!(
+                call.arguments[0].as_expression(),
+                Some(Expression::StringLiteral(specifier))
+                    if matches!(specifier.value.as_str(), "worker_threads" | "node:worker_threads")
+            )
+    }
+
+    struct Visitor<'a> {
+        semantic: &'a oxc_semantic::Semantic<'a>,
+        bindings: BTreeSet<oxc_semantic::SymbolId>,
+    }
+
+    impl<'a> Visit<'a> for Visitor<'a> {
+        fn visit_variable_declarator(&mut self, declarator: &VariableDeclarator<'a>) {
+            if declarator
+                .init
+                .as_ref()
+                .is_some_and(|init| is_worker_threads_require(init, self.semantic))
+                && let BindingPattern::ObjectPattern(pattern) = &declarator.id
+            {
+                for property in &pattern.properties {
+                    if !property.computed
+                        && property.key.is_specific_static_name("Worker")
+                        && let BindingPattern::BindingIdentifier(binding) = &property.value
+                        && let Some(symbol) = binding.symbol_id.get()
+                    {
+                        self.bindings.insert(symbol);
+                    }
+                }
+            }
+            walk::walk_variable_declarator(self, declarator);
+        }
+    }
+
+    let mut visitor = Visitor {
+        semantic,
+        bindings: BTreeSet::new(),
     };
-    if callee.name != "Worker" {
+    visitor.visit_program(program);
+    visitor.bindings
+}
+
+fn spelled_worker_url_argument<'a>(expr: &'a NewExpression<'a>) -> Option<&'a NewExpression<'a>> {
+    if !matches!(&expr.callee, Expression::Identifier(callee) if callee.name == "Worker") {
         return None;
     }
     match expr.arguments.first()?.as_expression()? {
-        Expression::NewExpression(inner) => Some(inner),
+        Expression::NewExpression(url) => Some(url),
         _ => None,
     }
+}
+
+/// The syntactic URL shape shared by native/global workers and the explicit
+/// CommonJS rejection above. This intentionally does not decide WHAT the
+/// constructor is; that remains semantic for supported worker roots.
+fn new_url_argument<'a>(expr: &'a NewExpression<'a>) -> Option<&'a NewExpression<'a>> {
+    match expr.arguments.first()?.as_expression()? {
+        Expression::NewExpression(url) => Some(url),
+        _ => None,
+    }
+}
+
+/// A local binding destructured directly from Node's `worker_threads` require.
+/// Unlike ESM named imports this is not compiled as a worker root yet, but the
+/// shape is explicit enough to reject instead of corrupting it into a data asset.
+fn is_cjs_worker_constructor(
+    expr: &NewExpression<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+    bindings: &BTreeSet<oxc_semantic::SymbolId>,
+) -> bool {
+    let Expression::Identifier(callee) = &expr.callee else {
+        return false;
+    };
+    callee
+        .reference_id
+        .get()
+        .and_then(|id| semantic.scoping().get_reference(id).symbol_id())
+        .is_some_and(|symbol| bindings.contains(&symbol))
+}
+
+/// How strongly a `new` expression's callee can be tied to Node's `Worker`.
+///
+/// Three-valued rather than a predicate because both ends are wrong for a
+/// spelling like `new registry.Worker(new URL("./w.js", import.meta.url))`.
+/// Bundling it would emit a chunk for what may be the user's own constructor;
+/// ignoring it hands the URL to the data-asset path, which ships an executable
+/// module VERBATIM — untranspiled, with its bare imports still naming packages
+/// the extracted app dir has no `node_modules` for — so the worker fails only on
+/// the deploy machine, long after the source tree is gone. The middle rung is
+/// what lets an unprovable spelling be refused at build time instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum WorkerCallee {
+    No,
+    /// Spelled as a `Worker`, on a receiver or binding this pass cannot resolve.
+    Unprovable,
+    Proven,
+}
+
+/// The `new URL(…)` a `new Worker(…)` is constructed from is only recognized in
+/// the INLINE form — `new Worker(new URL("./w.ts", import.meta.url))`. A worker
+/// whose URL was computed into a variable first is left alone, on the same
+/// reasoning the rest of this scan follows: nub rewrites what it can prove, and
+/// proving a variable's value needs data flow this pass deliberately does not
+/// do. That is the shape every bundler with worker support requires too, and it
+/// is what opencode, Vite's docs, and MDN all write.
+///
+/// The CONSTRUCTOR, unlike the URL, does get followed through bindings — see
+/// [`worker_alias_bindings`] for why that asymmetry is not an inconsistency.
+fn classify_worker_callee(
+    callee: &Expression<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+    node_builtins: &BTreeMap<oxc_semantic::SymbolId, &'static str>,
+    aliases: &BTreeMap<oxc_semantic::SymbolId, WorkerCallee>,
+) -> WorkerCallee {
+    if let Some(access) = worker_property_access(callee, semantic) {
+        return access;
+    }
+    let Expression::Identifier(identifier) = callee.get_inner_expression() else {
+        return WorkerCallee::No;
+    };
+    if is_compiler_builtin(identifier, "Worker", semantic, node_builtins) {
+        return WorkerCallee::Proven;
+    }
+    resolved_symbol(identifier, semantic)
+        .and_then(|symbol| aliases.get(&symbol).copied())
+        .unwrap_or(WorkerCallee::No)
+}
+
+/// `<receiver>.Worker` or `<receiver>["Worker"]`, classified by whether the
+/// receiver is provably the platform's global object rather than a user's.
+fn worker_property_access(
+    expr: &Expression<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+) -> Option<WorkerCallee> {
+    let (object, property) = match expr.get_inner_expression() {
+        Expression::StaticMemberExpression(member) => {
+            (&member.object, member.property.name.to_string())
+        }
+        Expression::ComputedMemberExpression(member) => {
+            (&member.object, static_specifier(&member.expression)?)
+        }
+        _ => return None,
+    };
+    (property == "Worker").then(|| {
+        if is_global_object(object, semantic) {
+            WorkerCallee::Proven
+        } else {
+            WorkerCallee::Unprovable
+        }
+    })
+}
+
+/// Receivers whose `Worker` property is the platform's, not a user object's.
+/// `global` is Node's own spelling; `self` and `window` are what isomorphic code
+/// reaches for and both are unbound in a compiled artifact, so a hit here means
+/// the author wrote the global they expected nub to supply.
+fn is_global_object(expr: &Expression<'_>, semantic: &oxc_semantic::Semantic<'_>) -> bool {
+    matches!(
+        expr.get_inner_expression(),
+        Expression::Identifier(object)
+            if matches!(object.name.as_str(), "globalThis" | "global" | "self" | "window")
+                && is_unbound_global(object, semantic)
+    )
+}
+
+fn resolved_symbol(
+    identifier: &oxc_ast::ast::IdentifierReference<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+) -> Option<oxc_semantic::SymbolId> {
+    identifier
+        .reference_id
+        .get()
+        .and_then(|id| semantic.scoping().get_reference(id).symbol_id())
+}
+
+/// A binding initializer reduced to only what decides its Worker identity. Kept
+/// as data rather than as an AST borrow so the fixpoint below can iterate
+/// without re-walking the program once per round.
+enum AliasSource {
+    Known(WorkerCallee),
+    Binding(oxc_semantic::SymbolId),
+    /// `a ?? b`, `a || b`, `a && b`, `c ? a : b` — the value is one of the arms,
+    /// so the binding is only proven when EVERY arm is.
+    OneOf(Vec<AliasSource>),
+}
+
+/// Local bindings that carry Node's `Worker`, and the ones that only look like
+/// they might.
+///
+/// This exists because a spelling this analysis misses is not merely skipped.
+/// It falls through to the data-asset path, and the worker's entry then ships
+/// verbatim inside a binary that runs it anyway — with bare Node's
+/// `process.execPath` and no compiled preamble. So every shape real code puts
+/// between the global and the `new` has to resolve here: `const A = Worker`,
+/// `const { Worker: W } = globalThis`, and above all the isomorphic
+/// `globalThis.Worker ?? NodeWorker`, which is the guard the ecosystem actually
+/// writes.
+///
+/// A binding that is assigned again is capped at `Unprovable` rather than
+/// dropped. Its value at the construction site is not this pass's to claim, but
+/// dropping it would return that site to the silent data-asset fallback, which
+/// is the failure this whole analysis exists to close.
+fn worker_alias_bindings(
+    program: &Program<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+    node_builtins: &BTreeMap<oxc_semantic::SymbolId, &'static str>,
+) -> BTreeMap<oxc_semantic::SymbolId, WorkerCallee> {
+    use oxc_ast::ast::{BindingPattern, VariableDeclarator};
+    use oxc_ast_visit::{Visit, walk};
+
+    struct Visitor<'a> {
+        semantic: &'a oxc_semantic::Semantic<'a>,
+        node_builtins: &'a BTreeMap<oxc_semantic::SymbolId, &'static str>,
+        candidates: Vec<(oxc_semantic::SymbolId, AliasSource)>,
+    }
+
+    impl Visitor<'_> {
+        /// A redeclared binding keeps BOTH initializers, so a second `var W =
+        /// other` cannot leave the first one's proof standing.
+        fn record(&mut self, symbol: oxc_semantic::SymbolId, source: AliasSource) {
+            match self
+                .candidates
+                .iter_mut()
+                .find(|(existing, _)| *existing == symbol)
+            {
+                Some((_, existing)) => {
+                    let first = std::mem::replace(existing, AliasSource::Known(WorkerCallee::No));
+                    *existing = AliasSource::OneOf(vec![first, source]);
+                }
+                None => self.candidates.push((symbol, source)),
+            }
+        }
+    }
+
+    impl<'a> Visit<'a> for Visitor<'a> {
+        fn visit_variable_declarator(&mut self, declarator: &VariableDeclarator<'a>) {
+            if let Some(init) = &declarator.init {
+                match &declarator.id {
+                    BindingPattern::BindingIdentifier(binding) => {
+                        if let Some(symbol) = binding.symbol_id.get() {
+                            let source = alias_source(init, self.semantic, self.node_builtins);
+                            self.record(symbol, source);
+                        }
+                    }
+                    BindingPattern::ObjectPattern(pattern) => {
+                        let receiver = if is_global_object(init, self.semantic) {
+                            WorkerCallee::Proven
+                        } else {
+                            WorkerCallee::Unprovable
+                        };
+                        for property in &pattern.properties {
+                            if !property.computed
+                                && property.key.is_specific_static_name("Worker")
+                                && let BindingPattern::BindingIdentifier(binding) = &property.value
+                                && let Some(symbol) = binding.symbol_id.get()
+                            {
+                                self.record(symbol, AliasSource::Known(receiver));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            walk::walk_variable_declarator(self, declarator);
+        }
+    }
+
+    let mut visitor = Visitor {
+        semantic,
+        node_builtins,
+        candidates: Vec::new(),
+    };
+    visitor.visit_program(program);
+
+    // Least fixpoint over `No < Unprovable < Proven`, which terminates because
+    // `resolve_alias` is monotone and an entry only ever moves up a lattice of
+    // height two. Chained aliases therefore resolve regardless of source order.
+    let mut resolved = BTreeMap::new();
+    let mut changed = !visitor.candidates.is_empty();
+    while changed {
+        changed = false;
+        for (symbol, source) in &visitor.candidates {
+            let mut value = resolve_alias(source, &resolved);
+            if semantic.scoping().symbol_is_mutated(*symbol) {
+                value = value.min(WorkerCallee::Unprovable);
+            }
+            if value > resolved.get(symbol).copied().unwrap_or(WorkerCallee::No) {
+                resolved.insert(*symbol, value);
+                changed = true;
+            }
+        }
+    }
+    resolved
+}
+
+fn alias_source(
+    expr: &Expression<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+    node_builtins: &BTreeMap<oxc_semantic::SymbolId, &'static str>,
+) -> AliasSource {
+    if let Some(access) = worker_property_access(expr, semantic) {
+        return AliasSource::Known(access);
+    }
+    match expr.get_inner_expression() {
+        Expression::Identifier(identifier) => {
+            if is_compiler_builtin(identifier, "Worker", semantic, node_builtins) {
+                AliasSource::Known(WorkerCallee::Proven)
+            } else if let Some(symbol) = resolved_symbol(identifier, semantic) {
+                AliasSource::Binding(symbol)
+            } else {
+                AliasSource::Known(WorkerCallee::No)
+            }
+        }
+        Expression::LogicalExpression(logical) => AliasSource::OneOf(vec![
+            alias_source(&logical.left, semantic, node_builtins),
+            alias_source(&logical.right, semantic, node_builtins),
+        ]),
+        Expression::ConditionalExpression(conditional) => AliasSource::OneOf(vec![
+            alias_source(&conditional.consequent, semantic, node_builtins),
+            alias_source(&conditional.alternate, semantic, node_builtins),
+        ]),
+        _ => AliasSource::Known(WorkerCallee::No),
+    }
+}
+
+fn resolve_alias(
+    source: &AliasSource,
+    resolved: &BTreeMap<oxc_semantic::SymbolId, WorkerCallee>,
+) -> WorkerCallee {
+    match source {
+        AliasSource::Known(callee) => *callee,
+        AliasSource::Binding(symbol) => resolved.get(symbol).copied().unwrap_or(WorkerCallee::No),
+        AliasSource::OneOf(arms) => {
+            let arms: Vec<_> = arms
+                .iter()
+                .map(|arm| resolve_alias(arm, resolved))
+                .collect();
+            if arms.iter().all(|arm| *arm == WorkerCallee::Proven) {
+                WorkerCallee::Proven
+            } else if arms.iter().any(|arm| *arm != WorkerCallee::No) {
+                WorkerCallee::Unprovable
+            } else {
+                WorkerCallee::No
+            }
+        }
+    }
+}
+
+/// The callee as the author wrote it, for the refusal that names their spelling.
+/// Bounded because the span is arbitrary source: an `await import(…)` receiver
+/// can run to several lines, and a diagnostic is not a code listing.
+fn callee_spelling(code: &str, span: oxc_span::Span) -> String {
+    let text = code
+        .get(span.start as usize..span.end as usize)
+        .unwrap_or("<constructor>");
+    let flattened = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flattened.chars().count() <= 48 {
+        return flattened;
+    }
+    flattened.chars().take(47).chain(['…']).collect()
+}
+
+/// A recognized constructor must be either an unresolved Node global or a
+/// binding imported from Node's corresponding builtin. The imported identity,
+/// rather than its local spelling, is what survives `import { Worker as W }`.
+/// Semantic references make nested parameters and locals fail this test at their
+/// individual use sites rather than disabling every URL in the file.
+fn is_compiler_builtin(
+    identifier: &oxc_ast::ast::IdentifierReference<'_>,
+    name: &str,
+    semantic: &oxc_semantic::Semantic<'_>,
+    node_builtins: &BTreeMap<oxc_semantic::SymbolId, &'static str>,
+) -> bool {
+    (identifier.name == name && is_unbound_global(identifier, semantic))
+        || identifier
+            .reference_id
+            .get()
+            .and_then(|id| semantic.scoping().get_reference(id).symbol_id())
+            .is_some_and(|symbol| {
+                node_builtins
+                    .get(&symbol)
+                    .is_some_and(|imported| *imported == name)
+            })
+}
+
+/// Name the executable worker forms that have no module root to wrap.  This is
+/// deliberately a positive, syntactic check: a computed path or an ordinary
+/// unresolved worker without `{ eval: true }` stays on the compiler's existing
+/// policy instead of being rejected merely because this pass cannot prove it.
+fn unsupported_worker_reason(
+    expr: &NewExpression<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+    node_builtins: &BTreeMap<oxc_semantic::SymbolId, &'static str>,
+) -> Option<String> {
+    if worker_options_enable_eval(expr) {
+        return Some("`new Worker(..., { eval: true })` executes arbitrary source text".into());
+    }
+    let first = expr.arguments.first()?.as_expression()?;
+    let specifier = match first.get_inner_expression() {
+        Expression::NewExpression(url) if is_url_constructor(url, semantic, node_builtins) => {
+            static_specifier(url.arguments.first()?.as_expression()?)?
+        }
+        other => static_specifier(other)?,
+    };
+    inline_worker_scheme(&specifier)
+        .then(|| format!("`new Worker({specifier:?})` has no file-backed module root"))
+}
+
+fn is_url_constructor(
+    expr: &NewExpression<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+    node_builtins: &BTreeMap<oxc_semantic::SymbolId, &'static str>,
+) -> bool {
+    matches!(&expr.callee, Expression::Identifier(callee) if is_compiler_builtin(callee, "URL", semantic, node_builtins))
+}
+
+fn inline_worker_scheme(specifier: &str) -> bool {
+    specifier
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+        || specifier
+            .get(..5)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("blob:"))
+}
+
+fn worker_options_enable_eval(expr: &NewExpression<'_>) -> bool {
+    use oxc_ast::ast::{ObjectPropertyKind, PropertyKind};
+
+    let Some(Expression::ObjectExpression(options)) =
+        expr.arguments.get(1).and_then(|arg| arg.as_expression())
+    else {
+        return false;
+    };
+    options.properties.iter().any(|property| {
+        let ObjectPropertyKind::ObjectProperty(property) = property else {
+            return false;
+        };
+        property.kind == PropertyKind::Init
+            && !property.computed
+            && (property.key.is_specific_id("eval") || property.key.is_specific_string_literal("eval"))
+            && matches!(property.value.get_inner_expression(), Expression::BooleanLiteral(value) if value.value)
+    })
 }
 
 /// `import.meta.url`, exactly — the only base whose resolution nub can predict.
@@ -1221,49 +2820,39 @@ fn is_import_meta_url(expr: &Expression<'_>) -> bool {
             if meta.meta.name == "import" && meta.property.name == "meta")
 }
 
-/// Does this module declare its own top-level `URL`?
-///
-/// A module that does is not talking about the global constructor, so rewriting
-/// its argument could change what the program means. Two deliberate boundaries:
-///
-/// - **Value declarations only.** An `import { URL } from "node:url"` binds the
-///   SAME constructor, so treating it as a shadow would silently exclude a
-///   perfectly ordinary way to write this.
-/// - **Top level only.** A `URL` bound in an inner scope — a function parameter,
-///   a block-scoped class — is NOT seen, and such a module IS rewritten. Catching
-///   it needs real scope analysis, which does not earn an `oxc_semantic`
-///   dependency for a name nothing legitimately rebinds.
-///
-/// The `export` wrappers are unwrapped rather than skipped: without that the
-/// guard turned on whether the shadow happened to be exported, honoring
-/// `class URL {}` while rewriting `export class URL {}` three characters later.
-fn binds_url(program: &Program<'_>) -> bool {
-    use oxc_ast::ast::{BindingPattern, Declaration, ExportDefaultDeclarationKind, Statement};
+/// Binding symbol ids mapped to their imported Node builtin identity.
+/// Every other binding is handled as authored code by semantic reference
+/// resolution.  Retaining the imported name makes aliased imports first-class
+/// without mistaking an arbitrary local `Worker`/`URL` for a compiler builtin.
+fn node_builtin_import_bindings(
+    program: &Program<'_>,
+) -> BTreeMap<oxc_semantic::SymbolId, &'static str> {
+    use oxc_ast::ast::{ImportDeclarationSpecifier, ModuleExportName, Statement};
 
-    fn declares_url(decl: &Declaration<'_>) -> bool {
-        match decl {
-            Declaration::VariableDeclaration(d) => d.declarations.iter().any(
-                |d| matches!(&d.id, BindingPattern::BindingIdentifier(id) if id.name == "URL"),
-            ),
-            Declaration::ClassDeclaration(c) => c.id.as_ref().is_some_and(|id| id.name == "URL"),
-            Declaration::FunctionDeclaration(f) => f.id.as_ref().is_some_and(|id| id.name == "URL"),
-            _ => false,
-        }
-    }
-
-    program.body.iter().any(|stmt| match stmt {
-        Statement::ExportNamedDeclaration(e) => e.declaration.as_ref().is_some_and(declares_url),
-        Statement::ExportDefaultDeclaration(e) => match &e.declaration {
-            ExportDefaultDeclarationKind::ClassDeclaration(c) => {
-                c.id.as_ref().is_some_and(|id| id.name == "URL")
-            }
-            ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
-                f.id.as_ref().is_some_and(|id| id.name == "URL")
-            }
-            _ => false,
-        },
-        other => other.as_declaration().is_some_and(declares_url),
-    })
+    program
+        .body
+        .iter()
+        .filter_map(|statement| {
+            let Statement::ImportDeclaration(import) = statement else {
+                return None;
+            };
+            Some(import)
+        })
+        .flat_map(|import| import.specifiers.iter().flatten().filter_map(move |specifier| {
+            let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
+                return None;
+            };
+            let imported_url = matches!(&specifier.imported, ModuleExportName::IdentifierName(name) if name.name == "URL");
+            let identity = (import.source.value == "node:url" && imported_url)
+                .then_some("URL")
+                .or_else(|| {
+                    let imported_worker = matches!(&specifier.imported, ModuleExportName::IdentifierName(name) if name.name == "Worker");
+                    (import.source.value == "node:worker_threads" && imported_worker)
+                        .then_some("Worker")
+                })?;
+            specifier.local.symbol_id.get().map(|symbol| (symbol, identity))
+        }))
+        .collect()
 }
 
 /// Resolve a URL specifier's `%XX` escapes into the path bytes the RUNTIME will
@@ -1476,6 +3065,23 @@ fn external_matcher(packages: &[String]) -> Result<Option<IsExternal>> {
     if packages.is_empty() {
         return Ok(None);
     }
+    validate_external_packages(packages)?;
+    let packages = packages.to_vec();
+    // The return type is spelled out because `IsExternal::Fn` holds a `dyn Fn`
+    // whose return is itself a boxed trait object: without it, inference gives
+    // the closure a concrete future type and the unsizing coercion fails.
+    type Answer = Pin<Box<dyn Future<Output = Result<bool>> + Send + 'static>>;
+    Ok(Some(IsExternal::Fn(Some(Arc::new(
+        move |specifier: &str, _importer: Option<&str>, _is_resolved: bool| -> Answer {
+            let matched = packages
+                .iter()
+                .any(|pkg| is_package_specifier(specifier, pkg));
+            Box::pin(async move { Ok(matched) })
+        },
+    )))))
+}
+
+fn validate_external_packages(packages: &[String]) -> Result<()> {
     // Only a BARE specifier can be honored. A path-shaped value bakes the build
     // host's own path into the chunk as an import specifier (Rolldown's
     // resolved-id external call matches it) or normalizes to something the
@@ -1494,25 +3100,146 @@ fn external_matcher(packages: &[String]) -> Result<Option<IsExternal>> {
             );
         }
     }
-    let packages = packages.to_vec();
-    // The return type is spelled out because `IsExternal::Fn` holds a `dyn Fn`
-    // whose return is itself a boxed trait object: without it, inference gives
-    // the closure a concrete future type and the unsizing coercion fails.
-    type Answer = Pin<Box<dyn Future<Output = Result<bool>> + Send + 'static>>;
-    Ok(Some(IsExternal::Fn(Some(Arc::new(
-        move |specifier: &str, _importer: Option<&str>, _is_resolved: bool| -> Answer {
-            let matched = packages
-                .iter()
-                .any(|pkg| is_package_specifier(specifier, pkg));
-            Box::pin(async move { Ok(matched) })
-        },
-    )))))
+    Ok(())
 }
 
 /// Does `specifier` name `pkg` or one of its subpaths?
 fn is_package_specifier(specifier: &str, pkg: &str) -> bool {
     specifier == pkg
         || (specifier.starts_with(pkg) && specifier.as_bytes().get(pkg.len()) == Some(&b'/'))
+}
+
+/// Compile-only externalization. Rolldown's `external` callback runs before
+/// plugins, so it cannot carry an importer into emitted code; this plugin
+/// substitutes a unique external module id which the generated hook decodes.
+#[derive(Debug)]
+struct ExternalImports {
+    packages: Vec<String>,
+    launch_root: PathBuf,
+    private_importers: Arc<Mutex<BTreeSet<String>>>,
+    records: Mutex<BTreeMap<String, ExternalImport>>,
+}
+
+impl ExternalImports {
+    fn new(
+        packages: &[String],
+        launch_root: &Path,
+        private_importers: Arc<Mutex<BTreeSet<String>>>,
+    ) -> Self {
+        Self {
+            packages: packages.to_vec(),
+            // Rolldown canonicalizes module ids. Match that spelling before
+            // deriving portable importer paths (`/tmp` is `/private/tmp` on
+            // macOS), or provenance can accidentally encode the build root.
+            launch_root: std::fs::canonicalize(launch_root)
+                .unwrap_or_else(|_| launch_root.to_path_buf()),
+            private_importers,
+            records: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn take(&self) -> Vec<ExternalImport> {
+        self.records
+            .lock()
+            .map(|mut records| std::mem::take(&mut *records).into_values().collect())
+            .unwrap_or_default()
+    }
+
+    fn record(&self, specifier: &str, importer: Option<&str>) -> Option<ExternalImport> {
+        // `ExternalImports` runs before `CompilePreamble`, so a matching
+        // `--external` must not steal an import made by the private runtime
+        // prelude. Those dependencies are bundled from nub's runtime directory,
+        // not resolved from the user's launch directory.
+        if importer.is_some_and(|importer| {
+            is_compile_private_importer(importer)
+                || self
+                    .private_importers
+                    .lock()
+                    .map_or(true, |ids| ids.contains(importer))
+        }) {
+            return None;
+        }
+        let package = self
+            .packages
+            .iter()
+            .find(|pkg| is_package_specifier(specifier, pkg))?
+            .clone();
+        let importer = importer.and_then(|id| portable_importer(id, &self.launch_root));
+        let mut hash = Sha256::new();
+        for part in [
+            specifier,
+            package.as_str(),
+            importer.as_deref().unwrap_or(""),
+        ] {
+            hash.update((part.len() as u64).to_le_bytes());
+            hash.update(part.as_bytes());
+        }
+        let id = format!("\0nub:compile-external:{:x}", hash.finalize());
+        Some(ExternalImport {
+            id,
+            specifier: specifier.to_string(),
+            package,
+            importer,
+        })
+    }
+}
+
+/// Private compiler modules have their own runtime resolution contract and are
+/// never subject to a user's `--external` package list.
+fn is_compile_private_importer(id: &str) -> bool {
+    id.starts_with("\0nub:compile-")
+}
+
+impl Plugin for ExternalImports {
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("nub:compile-externals")
+    }
+
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::ResolveId
+    }
+
+    fn resolve_id(
+        &self,
+        _ctx: &PluginContext,
+        args: &HookResolveIdArgs<'_>,
+    ) -> impl std::future::Future<Output = HookResolveIdReturn> + Send {
+        let record = self.record(args.specifier, args.importer);
+        if let Some(record) = &record {
+            if let Ok(mut records) = self.records.lock() {
+                records
+                    .entry(record.id.clone())
+                    .or_insert_with(|| record.clone());
+            }
+        }
+        async move {
+            Ok(record.map(|record| HookResolveIdOutput {
+                id: record.id.into(),
+                external: Some(ResolvedExternal::Bool(true)),
+                ..Default::default()
+            }))
+        }
+    }
+}
+
+/// Convert only a genuine file importer to a path portable from the launch cwd.
+/// Opaque virtual/data ids intentionally keep the old cwd resolution behavior.
+fn portable_importer(id: &str, launch_root: &Path) -> Option<String> {
+    let mut path = if let Some(url) = id.strip_prefix("file:") {
+        url::Url::parse(&format!("file:{url}"))
+            .ok()?
+            .to_file_path()
+            .ok()?
+    } else if id.starts_with('\0') || id.contains("://") {
+        return None;
+    } else {
+        PathBuf::from(id)
+    };
+    if path.is_relative() {
+        path = launch_root.join(path);
+    }
+    pathdiff::diff_paths(path, launch_root)
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
 }
 
 /// Split at the FIRST `=`: a define value (`K='a=b'`) and an alias target may
@@ -1592,14 +3319,28 @@ impl Plugin for DynamicImportScan {
         _ctx: SharedTransformPluginContext,
         args: &HookTransformArgs<'_>,
     ) -> impl std::future::Future<Output = HookTransformReturn> + Send {
-        let found = scan_unresolvable(args.id, args.code);
+        let scan = scan_unresolvable_with_rewrites(args.id, args.code);
+        let rewritten = (!scan.dynamic_import_ignores.is_empty()).then(|| {
+            let magic = dynamic_import_magic_string(args.code, &scan.dynamic_import_ignores);
+            let code = magic.to_string();
+            let map = magic.source_map(SourceMapOptions {
+                hires: Hires::Boundary,
+                include_content: true,
+                source: args.id.to_string().into(),
+            });
+            (code, HookTransformOutputMap::from(map))
+        });
         async move {
-            if !found.is_empty() {
+            if !scan.sites.is_empty() {
                 if let Ok(mut sites) = self.sites.lock() {
-                    sites.extend(found);
+                    sites.extend(scan.sites);
                 }
             }
-            Ok(None)
+            Ok(rewritten.map(|(code, map)| HookTransformOutput {
+                code: Some(code),
+                map,
+                ..Default::default()
+            }))
         }
     }
 
@@ -1612,15 +3353,29 @@ impl Plugin for DynamicImportScan {
 /// resolving once the artifact runs. A parse failure yields nothing: the
 /// bundler's own parse error is the better diagnostic, and this pass must never
 /// be the thing that fails a build.
+#[cfg(test)]
 fn scan_unresolvable(id: &str, source: &str) -> Vec<DynamicSite> {
+    scan_unresolvable_with_rewrites(id, source).sites
+}
+
+/// The unresolved sites plus the dynamic `import()` arguments Rolldown must not
+/// reinterpret as static after this scan has classified them as runtime work.
+#[derive(Debug, Default)]
+struct UnresolvableScan {
+    sites: Vec<DynamicSite>,
+    dynamic_import_ignores: Vec<usize>,
+}
+
+fn scan_unresolvable_with_rewrites(id: &str, source: &str) -> UnresolvableScan {
     use oxc_allocator::Allocator;
     use oxc_ast::AstKind;
     use oxc_ast::ast::{BindingPattern, CallExpression, Expression, FormalParameters, Statement};
     use oxc_ast_visit::{Visit, walk};
     use oxc_parser::Parser;
-    use oxc_span::{SourceType, Span};
+    use oxc_span::{GetSpan, SourceType, Span};
 
-    struct Visitor {
+    struct Visitor<'source> {
+        source: &'source str,
         /// One entry per enclosing function; `true` when that function's own
         /// parameters bind `require`.
         fn_stack: Vec<bool>,
@@ -1631,9 +3386,16 @@ fn scan_unresolvable(id: &str, source: &str) -> Vec<DynamicSite> {
         /// [`literal_consts`].
         consts: BTreeMap<String, Vec<String>>,
         found: Vec<(SiteKind, Span, Vec<String>)>,
+        /// Byte offsets at the start of every non-literal import argument.
+        /// Rolldown's `/* @vite-ignore */` marker deliberately keeps the
+        /// operation in the emitted JavaScript instead of making it a module
+        /// graph edge. This is needed even for a constant binding: later
+        /// optimization may fold the binding, but the opted-in runtime hook is
+        /// the contract for every expression-shaped `import()`.
+        dynamic_import_ignores: Vec<usize>,
     }
 
-    impl Visitor {
+    impl Visitor<'_> {
         fn require_is_local(&self) -> bool {
             self.module_binds_require || self.fn_stack.iter().any(|shadows| *shadows)
         }
@@ -1684,7 +3446,7 @@ fn scan_unresolvable(id: &str, source: &str) -> Vec<DynamicSite> {
         }
     }
 
-    impl<'a> Visit<'a> for Visitor {
+    impl<'a> Visit<'a> for Visitor<'_> {
         fn enter_node(&mut self, kind: AstKind<'a>) {
             match kind {
                 AstKind::Function(f) => self.fn_stack.push(binds_require(&f.params)),
@@ -1708,6 +3470,14 @@ fn scan_unresolvable(id: &str, source: &str) -> Vec<DynamicSite> {
             {
                 let (kind, resolves_to) = self.classify_import(&imp.source);
                 self.found.push((kind, imp.span, resolves_to));
+                let argument_start = imp.source.span().start as usize;
+                let import_start = imp.span.start as usize;
+                // Do not duplicate an author-supplied marker. Rolldown has
+                // already been told to preserve this import at runtime, while
+                // the site must still reach Nub's opt-in diagnostic/policy.
+                if !self.source[import_start..argument_start].contains("@vite-ignore") {
+                    self.dynamic_import_ignores.push(argument_start);
+                }
             }
             walk::walk_expression(self, expr);
         }
@@ -1736,9 +3506,10 @@ fn scan_unresolvable(id: &str, source: &str) -> Vec<DynamicSite> {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, source_type).parse();
     if parsed.panicked {
-        return Vec::new();
+        return UnresolvableScan::default();
     }
     let mut visitor = Visitor {
+        source,
         fn_stack: Vec::new(),
         module_binds_require: parsed.program.body.iter().any(|stmt| {
             matches!(stmt, Statement::VariableDeclaration(d)
@@ -1755,10 +3526,11 @@ fn scan_unresolvable(id: &str, source: &str) -> Vec<DynamicSite> {
             BTreeMap::new()
         },
         found: Vec::new(),
+        dynamic_import_ignores: Vec::new(),
     };
     visitor.visit_program(&parsed.program);
 
-    visitor
+    let sites = visitor
         .found
         .into_iter()
         .map(|(kind, span, resolves_to)| {
@@ -1772,7 +3544,44 @@ fn scan_unresolvable(id: &str, source: &str) -> Vec<DynamicSite> {
                 resolves_to,
             }
         })
-        .collect()
+        .collect();
+    UnresolvableScan {
+        sites,
+        dynamic_import_ignores: visitor.dynamic_import_ignores,
+    }
+}
+
+/// Keep every expression-shaped dynamic import out of Rolldown's static graph.
+///
+/// `/* @vite-ignore */` is Rolldown's documented scanner escape hatch. Its
+/// scanner checks this marker before it accepts a static request, so it also
+/// protects the constant variable form against later constant folding. The
+/// inserted text does not change JavaScript's runtime value or control flow.
+#[cfg(test)]
+fn ignore_dynamic_imports(source: &str, offsets: &[usize]) -> String {
+    dynamic_import_magic_string(source, offsets).to_string()
+}
+
+/// Make the scanner escape rewrite together with a source map that accounts
+/// for every inserted marker. `prepend_right` fixes each insertion at the
+/// original source offset, so no reverse-order string mutation can shift a
+/// later insertion's location.
+fn dynamic_import_magic_string(source: &str, offsets: &[usize]) -> MagicString<'static> {
+    const MARKER: &str = "/* @vite-ignore */ ";
+    let mut offsets = offsets.to_vec();
+    offsets.sort_unstable();
+    offsets.dedup();
+
+    let mut magic = MagicString::new(source.to_owned());
+    for offset in offsets {
+        // Every offset originates from an oxc span into `source`, so it is a
+        // UTF-8 boundary. Re-check to keep this helper total if a future caller
+        // supplies a malformed offset.
+        if source.is_char_boundary(offset) {
+            magic.prepend_right(offset as u32, MARKER);
+        }
+    }
+    magic
 }
 
 /// Module-scope `const` bindings whose specifier value this pass can read.
@@ -1986,9 +3795,10 @@ fn reject_unresolved(
     // one — the specifier is already static; what is wrong is the module format
     // the resolver picked — so the hint is only shown when it applies.
     let indirect_hint = if any_indirect {
-        "\n\x20\x20A require() whose `require` is a local binding (a UMD factory parameter) is\n\
-         \x20\x20an ordinary call the bundler cannot rewrite. Depend on the package's ESM\n\
-         \x20\x20build, or alias the specifier to it with --alias."
+        "\n\x20\x20A require() whose `require` is a local binding (a UMD factory parameter or a\n\
+         \x20\x20createRequire result) is an ordinary call the bundler cannot rewrite. Replace a\n\
+         \x20\x20relative createRequire call with a static import. For a UMD dependency, depend on\n\
+         \x20\x20the package's ESM build or alias the specifier to it with --alias."
     } else {
         ""
     };
@@ -2086,7 +3896,7 @@ fn reject_invalid_chunks(chunks: &[BundledFile]) -> Result<()> {
             continue;
         };
         let allocator = Allocator::default();
-        // ESM with JSX OFF, which is exactly what Node accepts for the `.js`
+        // ESM with JSX OFF, which is exactly what Node accepts for the `.mjs`
         // files this emits: `format` is always `esm` above, and no Node parses
         // JSX. Anything this rejects, the shipped runtime rejects too.
         let parsed = Parser::new(&allocator, code, SourceType::mjs()).parse();
@@ -2142,6 +3952,24 @@ mod tests {
             loaders: Vec::new(),
             native_target: None,
         }
+    }
+
+    fn emitted_entry_code(result: &BundleResult) -> String {
+        let entry = result
+            .files
+            .iter()
+            .find(|file| file.name == result.entry)
+            .expect("the reported entry chunk must be emitted");
+        String::from_utf8(entry.bytes.clone()).expect("the emitted entry must be UTF-8")
+    }
+
+    fn emitted_chunk_code(result: &BundleResult) -> String {
+        result
+            .files
+            .iter()
+            .filter(|file| !file.name.ends_with(".map"))
+            .map(|file| String::from_utf8_lossy(&file.bytes).into_owned())
+            .collect()
     }
 
     #[test]
@@ -2275,8 +4103,9 @@ mod tests {
     }
 
     /// A dependency in `node_modules` whose entry file is `body`, imported by a TS
-    /// entry. Returns the emitted entry chunk. `main` carries the EXTENSION, which
-    /// is what decides the source type Rolldown parses the dependency with.
+    /// entry. Returns all emitted chunk code because CommonJS dependencies now
+    /// occupy their own loader scope. `main` carries the EXTENSION, which is what
+    /// decides the source type Rolldown parses the dependency with.
     fn bundle_with_dep(tag: &str, main: &str, pkg_json: &str, body: &str) -> String {
         let dir = std::env::temp_dir().join(format!("nub-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2295,7 +4124,7 @@ mod tests {
         // rather than on names minify does not promise to keep.
         o.minify = false;
         let res = bundle(&dir.join("entry.ts"), &o).expect("the fixture bundles");
-        let code = String::from_utf8(res.files[0].bytes.clone()).unwrap();
+        let code = emitted_chunk_code(&res);
         let _ = std::fs::remove_dir_all(&dir);
         code
     }
@@ -2428,8 +4257,14 @@ mod tests {
             ),
         ];
         for (tag, pkg_json, body, why) in cases {
-            let code = bundle_with_dep(tag, "index.js", pkg_json, body);
-            assert!(!code.contains("fileURLToPath"), "{why}, got:\n{code}");
+            assert!(
+                cjs_path_globals_edit("node_modules/dep/index.js", body).is_none(),
+                "{why}"
+            );
+            // The real bundle is the second half of the assertion: a duplicate
+            // declaration or a shim call bound to the module's own `require`
+            // would fail Rolldown or the emitted-chunk parse gate.
+            let _ = bundle_with_dep(tag, "index.js", pkg_json, body);
         }
     }
 
@@ -2465,7 +4300,7 @@ mod tests {
             "an asset must be a flat sibling of the chunks: {:?}",
             res.assets.iter().map(|a| &a.name).collect::<Vec<_>>()
         );
-        let code = String::from_utf8(res.files[0].bytes.clone()).unwrap();
+        let code = emitted_entry_code(&res);
         assert!(
             code.contains("import.meta.url"),
             "the path must be resolved against the module, got:\n{code}"
@@ -2636,7 +4471,7 @@ mod tests {
             o.minify = false;
             let res = bundle(&dir.join("entry.ts"), &o)
                 .unwrap_or_else(|e| panic!("{spec} must compile, got: {e:#}"));
-            let code = String::from_utf8(res.files[0].bytes.clone()).unwrap();
+            let code = emitted_entry_code(&res);
             assert!(
                 code.contains("# Title"),
                 "{spec} must inline the file's text, got:\n{code}"
@@ -2658,6 +4493,1145 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn bundle_module_graph(tag: &str, entry: &str, files: &[(&str, &str)]) -> Result<BundleResult> {
+        let dir = fixture_dir(tag);
+        for (name, source) in files {
+            let path = dir.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, source).unwrap();
+        }
+        let mut o = opts();
+        o.minify = false;
+        let result = bundle(&dir.join(entry), &o);
+        let _ = std::fs::remove_dir_all(dir);
+        result
+    }
+
+    // Rolldown lowers mixed CommonJS/ESM cycles through lazy init wrappers.
+    // Compilation preserves supported lazy cycles rather than applying a
+    // whole-graph refusal. The fixture covers a direct edge, a longer CJS
+    // bridge, and a syntax-detected ESM `.js` target.
+    #[test]
+    fn mixed_commonjs_esm_cycles_bundle() {
+        for (tag, files) in [
+            (
+                "require-esm-direct-cycle",
+                vec![
+                    (
+                        "main.mjs",
+                        "import './nested/a.cjs';\nexport const token = 'esm';\n",
+                    ),
+                    ("nested/a.cjs", "module.exports = require('../main.mjs');\n"),
+                ],
+            ),
+            (
+                "require-esm-long-cycle",
+                vec![
+                    ("main.mjs", "import './bridge.cjs';\n"),
+                    ("bridge.cjs", "require('./a.cjs');\n"),
+                    ("a.cjs", "require('./main.mjs');\n"),
+                ],
+            ),
+            (
+                "require-syntax-esm-cycle",
+                vec![
+                    ("main.mjs", "import './a.cjs';\n"),
+                    ("a.cjs", "require('./target.js');\n"),
+                    ("target.js", "import './a.cjs';\nexport const value = 1;\n"),
+                ],
+            ),
+        ] {
+            bundle_module_graph(tag, "main.mjs", &files)
+                .unwrap_or_else(|err| panic!("{tag} must compile, got: {err:#}"));
+        }
+    }
+
+    // The CommonJS module itself is retained for its top-level assignment, but
+    // its back-edge is not called.  This is the control against a future static
+    // graph refusal reappearing merely because an unused lazy closure is present.
+    #[test]
+    fn retained_unused_lazy_mixed_cycle_bundles() {
+        bundle_module_graph(
+            "require-esm-retained-lazy-cycle",
+            "main.mjs",
+            &[
+                (
+                    "main.mjs",
+                    "import './a.cjs';\nexport const token = 'esm-token';\n",
+                ),
+                ("a.cjs", "module.exports = () => require('./main.mjs');\n"),
+            ],
+        )
+        .expect("a retained but unused lazy CJS back-edge must compile");
+    }
+
+    // Invoking the CJS back-edge after the ESM has evaluated keeps the call site
+    // inside the CJS wrapper. Rolldown lowers its ESM target through cached
+    // init/namespace helpers.
+    #[test]
+    fn invoked_lazy_mixed_cycle_bundles() {
+        bundle_module_graph(
+            "require-esm-invoked-lazy-cycle",
+            "main.mjs",
+            &[
+                (
+                    "main.mjs",
+                    "import getMain from './a.cjs';\nexport const token = 'esm-token';\nsetImmediate(() => getMain().token);\n",
+                ),
+                ("a.cjs", "module.exports = () => require('./main.mjs');\n"),
+            ],
+        )
+        .expect("a delayed CJS back-edge must compile");
+    }
+
+    #[test]
+    fn compile_root_statically_imports_the_prelude_before_the_program() {
+        let source = Path::new("/tmp/compile prelude/main.cjs");
+        let wrapper = compile_root_source(source);
+        let prelude = serde_json::to_string(COMPILE_PREAMBLE_ID).unwrap();
+        let program = serde_json::to_string(&source.to_string_lossy()).unwrap();
+        assert_eq!(wrapper, format!("import {prelude};\nimport {program};\n"));
+        assert!(
+            wrapper.find(&prelude).unwrap() < wrapper.find(&program).unwrap(),
+            "the side-effect prelude must be evaluated before authored code: {wrapper}"
+        );
+    }
+
+    #[test]
+    fn generated_loader_sources_get_builtins_from_the_compile_bootstrap() {
+        assert!(
+            !PATH_GLOBALS_SOURCE.contains("import "),
+            "the path globals module must not rely on static builtin imports: {PATH_GLOBALS_SOURCE}"
+        );
+        for builtin in ["node:url", "node:path"] {
+            assert!(
+                PATH_GLOBALS_SOURCE.contains(&format!("getBuiltin(\"{builtin}\")")),
+                "the path globals module must fetch {builtin} from the bootstrap registry: {PATH_GLOBALS_SOURCE}"
+            );
+        }
+        let intro = compile_commonjs_require_intro();
+        assert_eq!(intro, format!("{COMPILE_COMMONJS_REQUIRE_MARKER}\n"));
+        assert!(
+            !intro.contains("node:module") && !intro.contains("__nubCompileCommonjs"),
+            "the CommonJS loader must be a fixed bootstrap-backed binding: {intro}"
+        );
+    }
+
+    #[test]
+    fn executable_root_main_checks_are_true_without_touching_offsets() {
+        let source = "if (require.main === module) main();\n\
+                      if (module == require.main) reverse();\n\
+                      if (require.main !== module) notMain();\n";
+        let rewritten = rewrite_entry_main_checks("/tmp/entry.cjs", source)
+            .expect("the CommonJS entry guards must be rewritten");
+        assert_eq!(rewritten.len(), source.len());
+        assert_eq!(
+            rewritten.matches('\n').count(),
+            source.matches('\n').count()
+        );
+        assert!(rewritten.contains("if (true"));
+        assert_eq!(
+            rewritten.matches("true").count(),
+            2,
+            "both equality spellings describe the executable root: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("if (false"),
+            "inequality must take the non-main branch out: {rewritten}"
+        );
+        assert!(
+            !rewritten.contains("require.main"),
+            "the whole recognized predicates must be replaced: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn computed_commonjs_main_checks_keep_global_and_fixed_width_semantics() {
+        let source = "if (require[\"main\"] === module) main();\n\
+                      if (module !== require['main']) notMain();\n";
+        let rewritten = rewrite_entry_main_checks("/tmp/entry.cjs", source)
+            .expect("computed CommonJS root guards must be rewritten");
+        assert_eq!(rewritten.len(), source.len());
+        assert_eq!(
+            rewritten.matches('\n').count(),
+            source.matches('\n').count()
+        );
+        assert!(rewritten.contains("if (true"), "{rewritten}");
+        assert!(rewritten.contains("if (false"), "{rewritten}");
+        assert!(
+            !rewritten.contains("require["),
+            "the whole computed predicate must be replaced: {rewritten}"
+        );
+        for shadowed in [
+            "function check(require) { return require[\"main\"] === module; }",
+            "function check(module) { return require['main'] === module; }",
+        ] {
+            assert!(
+                rewrite_entry_main_checks("/tmp/entry.cjs", shadowed).is_none(),
+                "a shadowed computed guard must retain its authored semantics: {shadowed}"
+            );
+        }
+    }
+
+    #[test]
+    fn shadowed_commonjs_names_are_never_treated_as_node_entry_globals() {
+        for source in [
+            "function check(require) { return require.main === module; }\n",
+            "function check(module) { return require.main === module; }\n",
+            "const require = makeRequire(); require.main === module;\n",
+        ] {
+            assert!(
+                rewrite_entry_main_checks("/tmp/entry.cjs", source).is_none(),
+                "a user binding owns the comparison and must stay untouched: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn esm_main_guards_keep_their_authored_reference_error_semantics() {
+        for (path, source) in [
+            ("/tmp/entry.mjs", "require.main === module;"),
+            ("/tmp/entry.js", "export {}; require.main === module;"),
+        ] {
+            assert!(
+                rewrite_entry_main_checks(path, source).is_none(),
+                "{path} must remain ESM: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn esm_roots_without_module_syntax_get_only_an_empty_export_marker() {
+        let source = "require.main === module;\n";
+        let marked = preserve_entry_esm_classification("/tmp/entry.mjs", source).expect(
+            "an .mjs root with only CommonJS-looking globals still needs ESM classification",
+        );
+        assert!(marked.starts_with(source));
+        assert!(marked.ends_with("export {};\n"));
+        assert!(
+            preserve_entry_esm_classification("/tmp/entry.cjs", source).is_none(),
+            "a CJS root must retain its CommonJS module format"
+        );
+        assert!(
+            preserve_entry_esm_classification("/tmp/entry.mjs", "export {};\n").is_none(),
+            "existing ESM syntax already classifies the module"
+        );
+    }
+
+    #[test]
+    fn esm_root_guard_stays_an_esm_reference_in_the_emitted_chunk() {
+        let dir = fixture_dir("esm-main-guard-output");
+        let entry = dir.join("entry.mjs");
+        std::fs::write(
+            &entry,
+            "try { console.log(require.main === module); } catch (e) { console.log('ESM_REFERENCE:' + e.name); }\n",
+        )
+        .unwrap();
+        let mut o = opts();
+        o.minify = false;
+        let res = bundle(&entry, &o).expect("an ESM root must compile");
+        let entry_code = res
+            .files
+            .iter()
+            .find(|file| file.name == res.entry)
+            .map(|file| String::from_utf8_lossy(&file.bytes))
+            .expect("the named entry chunk must be emitted");
+        assert!(entry_code.contains("ESM_REFERENCE:"));
+        assert!(
+            !entry_code.contains(COMPILE_COMMONJS_REQUIRE_MARKER),
+            "the CommonJS loader must never become a lexical binding in authored ESM:\n{entry_code}"
+        );
+        let code = res
+            .files
+            .iter()
+            .filter(|file| !file.name.ends_with(".map"))
+            .map(|file| String::from_utf8_lossy(&file.bytes).into_owned())
+            .collect::<String>();
+        assert!(code.contains("ESM_REFERENCE:"));
+        let manufactured_require = code
+            .find("__require.main")
+            .map(|offset| {
+                let start = offset.saturating_sub(96);
+                let end = (offset + 160).min(code.len());
+                &code[start..end]
+            })
+            .unwrap_or("no manufactured require");
+        assert!(
+            !code.contains("__require.main"),
+            "compiled ESM must not manufacture a require binding or polyfill near:\n{manufactured_require}"
+        );
+        let commonjs_chunks = res
+            .files
+            .iter()
+            .filter(|file| {
+                String::from_utf8_lossy(&file.bytes).contains(COMPILE_COMMONJS_REQUIRE_MARKER)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            commonjs_chunks.len(),
+            1,
+            "the bundled runtime's CommonJS modules need one isolated loader scope"
+        );
+        let runtime_commonjs = String::from_utf8_lossy(&commonjs_chunks[0].bytes);
+        assert!(
+            runtime_commonjs.contains("installSyncPolyfills"),
+            "the private prelude's CommonJS runtime must use the isolated loader chunk"
+        );
+        assert!(
+            runtime_commonjs.contains("require(\"node:fs\")"),
+            "the private polyfill runtime must retain the builtin require this loader fixes"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn commonjs_builtin_require_is_isolated_from_the_esm_entry_chunk() {
+        let dir = fixture_dir("commonjs-require-output");
+        let entry = dir.join("entry.cjs");
+        std::fs::write(
+            &entry,
+            "console.log('CJS_BUILTIN_REQUIRE:' + require('node:path').sep);\n",
+        )
+        .unwrap();
+        let mut o = opts();
+        o.minify = false;
+        let res = bundle(&entry, &o).expect("a CommonJS root with a builtin require must compile");
+        let commonjs = res
+            .files
+            .iter()
+            .find(|file| String::from_utf8_lossy(&file.bytes).contains("CJS_BUILTIN_REQUIRE:"))
+            .expect("the authored CommonJS module must be emitted");
+        let commonjs_code = String::from_utf8_lossy(&commonjs.bytes);
+        assert!(
+            commonjs_code.contains(COMPILE_COMMONJS_REQUIRE_MARKER),
+            "a raw Node builtin require needs createRequire in its CommonJS chunk:\n{commonjs_code}"
+        );
+        assert!(
+            commonjs_code.contains("require(\"node:path\")"),
+            "the fixture must retain the raw builtin call that needs the lexical loader:\n{commonjs_code}"
+        );
+        assert!(
+            commonjs.name.starts_with(COMPILE_COMMONJS_CHUNK),
+            "Rolldown must keep CommonJS behind the named manual boundary: {}",
+            commonjs.name
+        );
+        assert_ne!(
+            commonjs.name, res.entry,
+            "the CommonJS module must not share the ESM facade's lexical scope"
+        );
+        let entry_code = res
+            .files
+            .iter()
+            .find(|file| file.name == res.entry)
+            .map(|file| String::from_utf8_lossy(&file.bytes))
+            .expect("the named entry chunk must be emitted");
+        assert!(
+            !entry_code.contains(COMPILE_COMMONJS_REQUIRE_MARKER),
+            "the ESM facade must keep require unbound:\n{entry_code}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn commonjs_dependency_keeps_global_and_shadowed_require_scopes_distinct() {
+        let dir = fixture_dir("commonjs-dependency-require-output");
+        let entry = dir.join("entry.mjs");
+        std::fs::write(
+            &entry,
+            "import value from './dependency.cjs'; console.log(value);\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("dependency.cjs"),
+            "const local = (require) => require();\nconst leaf = require('./leaf.mjs').default;\nmodule.exports = 'CJS_DEPENDENCY_REQUIRE:' + require('node:path').sep + local(() => 'local') + leaf;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("leaf.mjs"),
+            "globalThis.CJS_TO_ESM_LEAF = 'leaf';\nexport default globalThis.CJS_TO_ESM_LEAF;\n",
+        )
+        .unwrap();
+        let mut o = opts();
+        o.minify = false;
+        let res = bundle(&entry, &o).expect("a CommonJS dependency must compile");
+        let commonjs = res
+            .files
+            .iter()
+            .find(|file| String::from_utf8_lossy(&file.bytes).contains("CJS_DEPENDENCY_REQUIRE:"))
+            .expect("the CommonJS dependency must be emitted");
+        let commonjs_code = String::from_utf8_lossy(&commonjs.bytes);
+        assert!(
+            commonjs_code.contains(COMPILE_COMMONJS_REQUIRE_MARKER),
+            "the dependency's global require needs the CommonJS loader scope:\n{commonjs_code}"
+        );
+        assert!(
+            commonjs_code.contains("require(\"node:path\")"),
+            "the builtin require must remain bound by the chunk intro:\n{commonjs_code}"
+        );
+        assert!(
+            commonjs_code.contains("local"),
+            "the fixture's shadowed require path must survive bundling:\n{commonjs_code}"
+        );
+        assert!(
+            !commonjs_code.contains("CJS_TO_ESM_LEAF"),
+            "non-recursive grouping must keep a required ESM leaf outside the loader scope:\n{commonjs_code}"
+        );
+        assert!(
+            res.files
+                .iter()
+                .any(|file| { String::from_utf8_lossy(&file.bytes).contains("CJS_TO_ESM_LEAF") }),
+            "the required ESM leaf must still be emitted"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mjs_dependency_never_enters_the_commonjs_loader_scope() {
+        let dir = fixture_dir("mjs-require-output");
+        let entry = dir.join("entry.mjs");
+        std::fs::write(&entry, "import './dependency.mjs';\n").unwrap();
+        std::fs::write(
+            dir.join("dependency.mjs"),
+            "try { module.exports = require('node:path'); } catch (e) { console.log('MJS_REFERENCE:' + e.name); }\n",
+        )
+        .unwrap();
+        let mut o = opts();
+        o.minify = false;
+        let res =
+            bundle(&entry, &o).expect("an .mjs dependency with an unbound require must compile");
+        let dependency = res
+            .files
+            .iter()
+            .find(|file| String::from_utf8_lossy(&file.bytes).contains("MJS_REFERENCE:"))
+            .expect("the authored ESM dependency must be emitted");
+        let dependency_code = String::from_utf8_lossy(&dependency.bytes);
+        assert!(
+            !dependency_code.contains(COMPILE_COMMONJS_REQUIRE_MARKER),
+            "an .mjs dependency must retain Node's unbound-require semantics:\n{dependency_code}"
+        );
+        assert!(
+            dependency_code.contains("require(\"node:path\")"),
+            "the authored .mjs require must remain an unbound reference:\n{dependency_code}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn package_type_classifies_ambiguous_root_extensions() {
+        let dir = fixture_dir("main-guard-package-type");
+        let entry = dir.join("entry.js");
+        std::fs::write(&entry, "require.main === module;").unwrap();
+        std::fs::write(dir.join("package.json"), r#"{"type":"module"}"#).unwrap();
+        assert!(
+            rewrite_entry_main_checks(&entry.to_string_lossy(), "require.main === module;")
+                .is_none()
+        );
+
+        std::fs::write(dir.join("package.json"), r#"{"type":"commonjs"}"#).unwrap();
+        assert!(
+            rewrite_entry_main_checks(&entry.to_string_lossy(), "require.main === module;")
+                .is_some(),
+            "a nearest type:commonjs boundary must restore the executable-root guard"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn main_guard_rewrite_resolves_each_identifier_reference_by_scope() {
+        let source = "if (require.main === module) top();\n\
+                      function customRequire(require) { return require.main === module; }\n\
+                      function customModule(module) { return require.main === module; }\n";
+        let rewritten = rewrite_entry_main_checks("/tmp/entry.cjs", source).unwrap();
+        assert!(
+            rewritten.contains("if (true"),
+            "the real top-level guard must run: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("return require.main === module"),
+            "shadowed guards must retain their authored references: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn worker_names_are_stable_across_checkout_relocation() {
+        let first = worker_output_name(
+            Path::new("/tmp/one/project"),
+            Path::new("/tmp/one/project/src/worker.ts"),
+            "worker",
+        );
+        let second = worker_output_name(
+            Path::new("/var/folders/project"),
+            Path::new("/var/folders/project/src/worker.ts"),
+            "worker",
+        );
+        let sibling = worker_output_name(
+            Path::new("/var/folders/project"),
+            Path::new("/var/folders/project/other/worker.ts"),
+            "worker",
+        );
+        assert_eq!(first, second);
+        assert_ne!(
+            first, sibling,
+            "logical paths must remain collision-resistant"
+        );
+    }
+
+    #[test]
+    fn worker_names_retain_digest_suffixes_past_a_shared_prefix() {
+        let a = worker_output_name_with_hash(
+            "worker",
+            "deadbeef00000000000000000000000000000000000000000000000000000001",
+        );
+        let b = worker_output_name_with_hash(
+            "worker",
+            "deadbeef00000000000000000000000000000000000000000000000000000002",
+        );
+        assert_ne!(a, b, "a shared digest prefix must not alias worker entries");
+    }
+
+    #[test]
+    fn worker_entries_dedupe_the_same_source_and_reject_an_alias() {
+        let mut workers = BTreeMap::new();
+        let entry = "worker-deadbeef.mjs".to_string();
+        let chunk = "worker-deadbeef-code.mjs".to_string();
+        assert!(
+            record_worker(
+                &mut workers,
+                entry.clone(),
+                chunk.clone(),
+                Path::new("/p/one/worker.ts"),
+            )
+            .unwrap()
+        );
+        assert!(
+            !record_worker(
+                &mut workers,
+                entry.clone(),
+                chunk,
+                Path::new("/p/one/worker.ts"),
+            )
+            .unwrap()
+        );
+        assert!(
+            record_worker(
+                &mut workers,
+                entry,
+                "worker-deadbeef-code.mjs".to_string(),
+                Path::new("/p/two/worker.ts"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn only_registered_program_and_worker_sources_are_executable_roots() {
+        let program = Path::new("/tmp/nub-prelude/program.cjs");
+        let worker = Path::new("/tmp/nub-prelude/worker.cjs");
+        let dependency = "/tmp/nub-prelude/node_modules/tool/cli.cjs";
+        let roots = CompilePreamble::from_source(program, PathBuf::new(), String::new());
+        roots.worker_root(worker).unwrap();
+        assert!(roots.is_root_source(program.to_str().unwrap()));
+        assert!(roots.is_root_source(worker.to_str().unwrap()));
+        assert!(
+            !roots.is_root_source(dependency),
+            "a dependency's identical require.main guard must remain false"
+        );
+    }
+
+    #[test]
+    fn compile_bootstrap_stays_separate_from_layout_relative_support_files() {
+        let mut prelude = CompilePreamble::from_source(
+            Path::new("/tmp/program.mjs"),
+            PathBuf::new(),
+            String::new(),
+        );
+        prelude
+            .support_files
+            .push(("worker-blob-url.cjs".into(), Vec::new()));
+        prelude
+            .root_support_files
+            .push((nub_core::compile::COMPILE_BOOTSTRAP_NAME.into(), Vec::new()));
+
+        assert_eq!(
+            prelude
+                .support_files()
+                .map(|file| file.name)
+                .collect::<Vec<_>>(),
+            vec!["worker-blob-url.cjs".to_string()]
+        );
+        assert_eq!(
+            prelude
+                .root_support_files()
+                .map(|file| file.name)
+                .collect::<Vec<_>>(),
+            vec![nub_core::compile::COMPILE_BOOTSTRAP_NAME.to_string()]
+        );
+    }
+
+    #[test]
+    fn each_static_worker_gets_its_own_prelude_root_without_touching_the_program_root() {
+        let program = Path::new("/tmp/nub-prelude/program.ts");
+        let worker = Path::new("/tmp/nub-prelude/worker.ts");
+        let roots = CompilePreamble::from_source(program, PathBuf::new(), String::new());
+        let worker_id = roots.worker_root(worker).unwrap();
+        assert_ne!(worker_id, COMPILE_ROOT_ID);
+        let program_wrapper = compile_root_source(program);
+        assert_eq!(
+            roots.root_source(COMPILE_ROOT_ID).as_deref(),
+            Some(program_wrapper.as_str())
+        );
+        let worker_wrapper = compile_root_source(worker);
+        assert_eq!(
+            roots.root_source(&worker_id).as_deref(),
+            Some(worker_wrapper.as_str())
+        );
+    }
+
+    #[test]
+    fn import_meta_snapshot_preserves_mutable_property_operations() {
+        let source = r#"const read = import.meta.main;
+import.meta.main = false;
+import.meta.main ??= true;
+import.meta.main++;
+const removed = delete import.meta.main;
+const computed = import.meta["main"];
+const url = import.meta.url;
+const metadata = import.meta;
+"#;
+        let rewritten = rewrite_import_meta_main("/tmp/entry.mjs", source, "true")
+            .expect("an executable root needs module-local import metadata")
+            .to_string();
+
+        assert!(
+            rewritten.starts_with(
+                "const __nub_import_meta = { __proto__: null, ...import.meta, main: true };\n"
+            ),
+            "the snapshot must be null-prototype with an explicit writable data property: {rewritten}"
+        );
+        for operation in [
+            "const read = __nub_import_meta.main",
+            "__nub_import_meta.main = false",
+            "__nub_import_meta.main ??= true",
+            "__nub_import_meta.main++",
+            "delete __nub_import_meta.main",
+            "__nub_import_meta[\"main\"]",
+            "__nub_import_meta.url",
+            "const metadata = __nub_import_meta",
+        ] {
+            assert!(
+                rewritten.contains(operation),
+                "the authored reference operation must survive: {operation}\n{rewritten}"
+            );
+        }
+        assert_eq!(
+            rewritten.matches("import.meta").count(),
+            1,
+            "only the snapshot's read of the chunk metadata may remain: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn computed_import_meta_main_has_distinct_root_and_dependency_values() {
+        let source = "if (import.meta[\"main\"]) sideEffect();\n";
+        let root = rewrite_import_meta_main("/tmp/entry.mjs", source, "true")
+            .expect("the executable root's computed main marker must be restored")
+            .to_string();
+        let dependency = rewrite_non_root_import_meta_main("/tmp/dependency.mjs", source)
+            .expect("a dependency's computed main marker must be false")
+            .to_string();
+        assert!(root.contains("main: true"), "{root}");
+        assert!(dependency.contains("main: false"), "{dependency}");
+        assert!(
+            root.contains("if (__nub_import_meta[\"main\"])")
+                && dependency.contains("if (__nub_import_meta[\"main\"])")
+                && !root.contains("import.meta[")
+                && !dependency.contains("import.meta["),
+            "computed access must remain access against each module's snapshot"
+        );
+    }
+
+    #[test]
+    fn spaced_and_commented_import_meta_is_snapshotted_for_roots_and_dependencies() {
+        let root_source = "const root = import . meta . main;\n";
+        let dependency_source =
+            "const dependency = import /* module metadata */ . meta[\"main\"];\n";
+        let root = rewrite_import_meta_main("/tmp/entry.mjs", root_source, "true")
+            .expect("a spaced root import.meta must be recognized")
+            .to_string();
+        let dependency =
+            rewrite_non_root_import_meta_main("/tmp/dependency.mjs", dependency_source)
+                .expect("a commented dependency import.meta must be recognized")
+                .to_string();
+
+        assert!(
+            root.starts_with(
+                "const __nub_import_meta = { __proto__: null, ...import.meta, main: true };\n"
+            ),
+            "{root}"
+        );
+        assert!(
+            dependency.starts_with(
+                "const __nub_import_meta = { __proto__: null, ...import.meta, main: false };\n"
+            ),
+            "{dependency}"
+        );
+        assert!(
+            root.contains("const root = __nub_import_meta . main;"),
+            "{root}"
+        );
+        assert!(
+            dependency.contains("const dependency = __nub_import_meta[\"main\"];"),
+            "{dependency}"
+        );
+        assert!(!root.contains("import . meta"), "{root}");
+        assert!(
+            !dependency.contains("import /* module metadata */ . meta"),
+            "{dependency}"
+        );
+        assert_eq!(
+            root.matches("import.meta").count(),
+            1,
+            "only the root snapshot may retain a contiguous import.meta: {root}"
+        );
+        assert_eq!(
+            dependency.matches("import.meta").count(),
+            1,
+            "only the dependency snapshot may retain a contiguous import.meta: {dependency}"
+        );
+    }
+
+    #[test]
+    fn import_meta_alias_is_absent_from_the_authored_source() {
+        let source = r#"const __nub_import_meta = "occupied";
+const __nub_import_meta_1 = "also occupied";
+function read(\u005f_nub_import_meta_2) { return import.meta.main; }
+globalThis.value = read();
+"#;
+        let rewritten = rewrite_import_meta_main("/tmp/entry.mjs", source, "true")
+            .expect("import.meta must be rewritten")
+            .to_string();
+        assert!(
+            rewritten.starts_with(
+                "const __nub_import_meta_3 = { __proto__: null, ...import.meta, main: true };\n"
+            ),
+            "the injected binding must not collide with raw or escaped authored bindings: {rewritten}"
+        );
+        assert!(rewritten.contains("return __nub_import_meta_3.main"));
+    }
+
+    #[test]
+    fn import_meta_snapshot_sourcemap_tracks_insertions_and_updates() {
+        let source = "const before = 1;\nconst value = import.meta.main; const after = 2;\n";
+        let magic = rewrite_import_meta_main("/tmp/entry.mjs", source, "true")
+            .expect("import.meta must be rewritten");
+        let rewritten = magic.to_string();
+        let map = magic.source_map(SourceMapOptions {
+            hires: Hires::Boundary,
+            include_content: true,
+            source: "/tmp/entry.mjs".into(),
+        });
+        let authored_after = source.lines().nth(1).unwrap().find("const after").unwrap();
+        let generated_line = rewritten.lines().nth(2).unwrap();
+        let generated_after = generated_line.find("const after").unwrap();
+
+        assert_eq!(
+            map.get_sources().collect::<Vec<_>>(),
+            vec!["/tmp/entry.mjs"]
+        );
+        assert_eq!(
+            map.get_source_contents().collect::<Vec<_>>(),
+            vec![Some(source)],
+            "the map must retain the exact authored source"
+        );
+        assert!(
+            map.get_tokens().any(|token| {
+                token.get_dst_line() == 1
+                    && token.get_dst_col() == 0
+                    && token.get_src_line() == 0
+                    && token.get_src_col() == 0
+            }),
+            "the prepended snapshot must shift the first authored line: {}",
+            map.to_json_string()
+        );
+        assert!(
+            map.get_tokens().any(|token| {
+                token.get_dst_line() == 2
+                    && token.get_dst_col() == generated_after as u32
+                    && token.get_src_line() == 1
+                    && token.get_src_col() == authored_after as u32
+            }),
+            "authored code after the longer alias update must retain its original column: {}",
+            map.to_json_string()
+        );
+    }
+
+    #[test]
+    fn bundled_dependencies_do_not_inherit_the_entry_import_meta_main_value() {
+        let dir = fixture_dir("import-meta-main-dependency");
+        let entry = dir.join("entry.mjs");
+        std::fs::write(
+            &entry,
+            "import './dependency.mjs';\nglobalThis.entryMain = import.meta.main;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("dependency.mjs"),
+            "globalThis.dependencyMain = import.meta.main;\n",
+        )
+        .unwrap();
+
+        let mut o = opts();
+        o.minify = false;
+        let res = bundle(&entry, &o).expect("an ESM root and dependency must compile");
+        let code = res
+            .files
+            .iter()
+            .filter(|file| !file.name.ends_with(".map"))
+            .map(|file| String::from_utf8_lossy(&file.bytes).into_owned())
+            .collect::<String>();
+        assert!(
+            !code.contains("import.meta.main"),
+            "every authored main predicate must use module-local state before chunking: {code}"
+        );
+        assert!(
+            code.contains("main: true"),
+            "the executable root snapshot must start as main: {code}"
+        );
+        assert!(
+            code.contains("main: false"),
+            "a static dependency placed in the entry chunk must get a non-main snapshot: {code}"
+        );
+        assert_eq!(
+            code.matches("...import.meta").count(),
+            2,
+            "flattening must retain one independent metadata snapshot per authored module: {code}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A wrapper is a separate, two-line virtual source rather than a prefix
+    // spliced into the authored module.  That keeps all author-source lines and
+    // columns owned by Rolldown's existing maps: linked/external maps still
+    // describe the original module, and inline maps merely gain this virtual
+    // root.  It also keeps the absolute source path out of generated chunks.
+    #[test]
+    fn compile_root_wrapper_keeps_source_maps_and_output_paths_separate() {
+        let dir = fixture_dir("compile-prelude-maps");
+        let entry = dir.join("entry.cjs");
+        std::fs::write(&entry, "module.exports = globalThis['compileResult'];\n").unwrap();
+
+        for mode in [
+            SourcemapMode::Linked,
+            SourcemapMode::Inline,
+            SourcemapMode::External,
+        ] {
+            let mut o = opts();
+            o.minify = false;
+            o.sourcemap = mode;
+            let res = bundle(&entry, &o).unwrap_or_else(|err| {
+                panic!("a CJS root with {mode:?} source maps must compile: {err:#}")
+            });
+            let chunks = res
+                .files
+                .iter()
+                .filter(|file| !file.name.ends_with(".map"))
+                .map(|file| String::from_utf8_lossy(&file.bytes).into_owned())
+                .collect::<Vec<_>>();
+            assert!(
+                chunks
+                    .iter()
+                    .all(|chunk| !chunk.contains(dir.to_string_lossy().as_ref())),
+                "the build-machine fixture path must stay in the module graph, not emitted code"
+            );
+            match mode {
+                SourcemapMode::Linked => {
+                    assert!(res.files.iter().any(|file| file.name.ends_with(".map")));
+                    assert!(
+                        chunks
+                            .iter()
+                            .any(|chunk| chunk.contains("sourceMappingURL="))
+                    );
+                }
+                SourcemapMode::Inline => {
+                    assert!(res.files.iter().all(|file| !file.name.ends_with(".map")));
+                    assert!(
+                        chunks
+                            .iter()
+                            .any(|chunk| chunk.contains("sourceMappingURL=data:"))
+                    );
+                }
+                SourcemapMode::External => {
+                    assert!(!res.detached_maps.is_empty());
+                    assert!(
+                        chunks
+                            .iter()
+                            .all(|chunk| !chunk.contains("sourceMappingURL="))
+                    );
+                }
+                SourcemapMode::None => unreachable!(),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_static_worker_is_a_second_esm_root_with_no_source_path_in_its_chunk() {
+        let dir = fixture_dir("compile-prelude-worker");
+        let entry = dir.join("entry.ts");
+        let worker = dir.join("worker.cts");
+        std::fs::write(
+            &entry,
+            "new Worker(new URL('./worker.cts', import.meta.url));\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &worker,
+            "console.log('CJS_WORKER_REQUIRE:' + require('node:path').sep);\nexport = globalThis['workerResult'];\n",
+        )
+        .unwrap();
+
+        let mut o = opts();
+        o.minify = false;
+        let res = bundle(&entry, &o).expect("a static CJS-authored worker must compile");
+        let chunks = res
+            .files
+            .iter()
+            .filter(|file| !file.name.ends_with(".map"))
+            .map(|file| String::from_utf8_lossy(&file.bytes).into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            chunks.len() >= 2,
+            "the primary program and worker must each emit a root chunk: {chunks:#?}"
+        );
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| !chunk.contains(dir.to_string_lossy().as_ref())),
+            "neither root may emit the build-machine source path"
+        );
+        let commonjs = chunks
+            .iter()
+            .find(|chunk| chunk.contains("CJS_WORKER_REQUIRE:"))
+            .expect("the CommonJS worker implementation must be emitted");
+        assert!(
+            commonjs.contains(COMPILE_COMMONJS_REQUIRE_MARKER),
+            "the worker's raw builtin require needs the shared CommonJS loader scope:\n{commonjs}"
+        );
+        assert!(
+            commonjs.contains("require(\"node:path\")"),
+            "the worker fixture must retain the raw builtin call this loader fixes:\n{commonjs}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn emitted_esm_chunks_use_mjs_with_coherent_worker_dynamic_import_and_maps() {
+        let dir = fixture_dir("compile-mjs-chunks");
+        let entry = dir.join("entry.ts");
+        std::fs::write(
+            &entry,
+            "new Worker(new URL('./worker.ts', import.meta.url));\n\
+             import('./dynamic.ts').then(({ value }) => (globalThis.OUT = value));\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("worker.ts"), "postMessage('ready');\n").unwrap();
+        std::fs::write(dir.join("dynamic.ts"), "export const value = 'dynamic';\n").unwrap();
+
+        let mut o = opts();
+        o.minify = false;
+        o.sourcemap = SourcemapMode::Linked;
+        let res = bundle(&entry, &o).expect("static worker and dynamic import must compile");
+        let chunks = res
+            .files
+            .iter()
+            .filter(|file| !file.name.ends_with(".map"))
+            .collect::<Vec<_>>();
+        assert!(res.entry.ends_with(".mjs"), "entry was {}", res.entry);
+        assert!(
+            chunks.len() >= 3,
+            "main, dynamic, and static-worker chunks must all emit: {chunks:#?}"
+        );
+        assert!(
+            chunks.iter().all(|chunk| chunk.name.ends_with(".mjs")),
+            "every compiler-produced ESM chunk must have an unambiguous extension: {chunks:#?}"
+        );
+
+        let worker = chunks
+            .iter()
+            .find(|chunk| chunk.name.starts_with("worker-") && chunk.name.ends_with("-code.mjs"))
+            .expect("the explicit static-worker filename must be emitted");
+        let dynamic = chunks
+            .iter()
+            .find(|chunk| chunk.name.starts_with("dynamic-"))
+            .expect("the dynamic import must be split into its own chunk");
+        let main = chunks
+            .iter()
+            .find(|chunk| chunk.name == res.entry)
+            .expect("the reported entry must be one emitted chunk");
+        let main_code = String::from_utf8_lossy(&main.bytes);
+        let public_worker = worker
+            .name
+            .strip_suffix("-code.mjs")
+            .map(|stem| format!("{stem}.mjs"))
+            .expect("worker chunks use the private -code.mjs suffix");
+        assert!(
+            main_code.contains(&public_worker),
+            "the rewritten worker URL must name the public worker wrapper: {main_code}"
+        );
+        assert!(
+            main_code.contains(&dynamic.name),
+            "the dynamic import must name the emitted .mjs chunk: {main_code}"
+        );
+        for chunk in chunks {
+            let map_name = format!("{}.map", chunk.name);
+            if chunk.name.starts_with("rolldown-runtime-") {
+                // Strict execution order adds a synthetic helper-only runtime
+                // chunk. It has no authored source to map, and Rolldown
+                // deliberately emits neither an empty map nor a reference.
+                assert!(
+                    !res.files.iter().any(|file| file.name == map_name)
+                        && !String::from_utf8_lossy(&chunk.bytes).contains("sourceMappingURL="),
+                    "the synthetic runtime must not pretend to map authored source"
+                );
+                continue;
+            }
+            assert!(
+                res.files.iter().any(|file| file.name == map_name),
+                "the authored .mjs chunk {} must keep its linked source map",
+                chunk.name
+            );
+            assert!(
+                String::from_utf8_lossy(&chunk.bytes)
+                    .contains(&format!("sourceMappingURL={map_name}")),
+                "the .mjs chunk {} must reference its own map",
+                chunk.name
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn worker_runtime_imports_keep_worker_provenance_after_its_source_is_removed() {
+        let dir = fixture_dir("worker-runtime-imports");
+        let entry = dir.join("entry.ts");
+        let worker = dir.join("worker.ts");
+        std::fs::write(
+            &entry,
+            "new Worker(new URL('./worker.ts', import.meta.url));\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &worker,
+            "import 'peer';\nconst selected = 'peer'; await import(selected);\n",
+        )
+        .unwrap();
+
+        let mut o = opts();
+        o.minify = false;
+        o.external = vec!["peer".into()];
+        o.allow_dynamic_import = true;
+        let res = bundle_for_compile(&entry, &o, &dir)
+            .expect("worker external and computed imports must stay runtime-resolvable");
+
+        let root = res
+            .worker_roots
+            .iter()
+            .find(|root| root.entry.starts_with("worker-") && root.chunk.ends_with("-code.mjs"))
+            .expect("the worker remains a separately wrapped executable root");
+        assert!(
+            res.files.iter().any(|file| file.name == root.chunk),
+            "the private worker chunk must be in the payload before its source disappears"
+        );
+        assert!(
+            res.external_imports.iter().any(|external| {
+                external.specifier == "peer" && external.importer.as_deref() == Some("worker.ts")
+            }),
+            "the resolver must retain the worker's launch-cwd-relative importer: {:#?}",
+            res.external_imports
+        );
+        assert_eq!(res.dynamic_import_sites, 1);
+        assert!(
+            res.files.iter().all(|file| {
+                !String::from_utf8_lossy(&file.bytes).contains(dir.to_string_lossy().as_ref())
+            }),
+            "the payload cannot depend on the build-tree path after extraction"
+        );
+
+        std::fs::remove_file(&worker).unwrap();
+        assert!(
+            !worker.exists(),
+            "the artifact metadata above must be sufficient after the authored worker has gone away"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dynamic_global_access_still_has_an_unconditional_prelude_import() {
+        let source = Path::new("/tmp/nub-prelude/dynamic-global.ts");
+        let wrapper = compile_root_source(source);
+        assert!(
+            wrapper.starts_with("import "),
+            "the wrapper must not depend on a statically named global that the prelude creates: {wrapper}"
+        );
+        assert!(wrapper.contains("\"\\u0000nub:compile-preamble\""));
+    }
+
+    #[test]
+    fn inline_worker_forms_are_refused_but_dynamic_file_workers_remain_unresolved() {
+        let forbidden = [
+            ("data", "new Worker('data:text/javascript,postMessage(1)')"),
+            (
+                "blob",
+                "new Worker(new URL('blob:opaque', import.meta.url))",
+            ),
+            ("eval", "new Worker(source, { eval: true })"),
+        ];
+        let mut refusals = Vec::new();
+        for (tag, source) in forbidden {
+            let scan = scan_new_urls(&format!("/tmp/{tag}.ts"), source);
+            assert_eq!(scan.worker_refusals.len(), 1, "{tag}: {scan:?}");
+            refusals.extend(scan.worker_refusals);
+        }
+        let err = reject_unsupported_workers(&mut refusals)
+            .expect_err("inline worker forms must fail compilation with an actionable diagnostic");
+        let message = format!("{err:#}");
+        assert!(message.contains("data:") && message.contains("blob:") && message.contains("eval"));
+        assert!(message.contains("file-backed module"), "{message}");
+        let dynamic = scan_new_urls("/tmp/dynamic.ts", "new Worker(workerPath)");
+        assert!(dynamic.worker_refusals.is_empty());
+        assert!(dynamic.edits.is_empty());
+
+        let cjs = scan_new_urls(
+            "/tmp/cjs-worker.cjs",
+            "const { Worker: NodeWorker } = require('node:worker_threads'); new NodeWorker(new URL('./worker.ts', import.meta.url));",
+        );
+        assert_eq!(cjs.worker_refusals.len(), 1, "{cjs:?}");
+        assert!(cjs.worker_refusals[0].reason.contains("CommonJS"));
+
+        for source in [
+            concat!(
+                "// require('node:worker_threads')\n",
+                "new Custom(new URL('./worker.ts', import.meta.url));",
+            ),
+            concat!(
+                "const example = \"require('node:worker_threads')\"; ",
+                "new Custom(new URL('./worker.ts', import.meta.url));",
+            ),
+            concat!(
+                "const { Worker: NodeWorker } = require('node:worker_threads'); ",
+                "new Custom(new URL('./worker.ts', import.meta.url));",
+            ),
+        ] {
+            let scan = scan_new_urls("/tmp/cjs-worker-false-positive.cjs", source);
+            assert!(
+                scan.worker_refusals.is_empty(),
+                "only a constructor resolved to the destructured Node binding may be rejected: {source}"
+            );
+        }
     }
 
     // The whole contract of the `new URL` rewrite, against a REAL bundle: the
@@ -2687,7 +5661,7 @@ mod tests {
             "the asset must be a flat sibling of the chunks: {}",
             res.assets[0].name
         );
-        let code = String::from_utf8(res.files[0].bytes.clone()).unwrap();
+        let code = emitted_entry_code(&res);
         assert!(
             code.contains(&res.assets[0].name),
             "the chunk must name the embedded copy, got:\n{code}"
@@ -2921,6 +5895,169 @@ await import(`./${name}.js`);
         );
     }
 
+    // Rolldown has a scanner escape hatch for a dynamic import that must remain
+    // runtime work. This is deliberately an AST-driven rewrite, not a special
+    // case for a constant: an optimizer may learn that ANY expression is
+    // constant after this plugin has scanned it. Literal strings and templates
+    // without substitutions stay graph edges and are still bundled.
+    #[test]
+    fn nonliteral_dynamic_imports_are_marked_runtime_before_rolldown_scans_them() {
+        let src = r#"
+await import("./literal.mjs");
+await import(`./template.mjs`);
+const name = "foreign-dynamic";
+await import(name);
+await import(process.env.NUB_DYNAMIC);
+await import(`./${process.env.NUB_SUFFIX}.mjs`);
+await import("./" + process.env.NUB_SUFFIX + ".mjs");
+await import(optionName, { with: { type: "json" } });
+await import(/* @vite-ignore */ alreadyMarked);
+"#;
+        let scan = scan_unresolvable_with_rewrites("/p/app.mjs", src);
+        assert_eq!(
+            scan.sites.len(),
+            6,
+            "only expression imports defer: {scan:#?}"
+        );
+        assert_eq!(scan.sites[0].kind, SiteKind::Variable, "{scan:#?}");
+        assert!(
+            scan.sites[1..]
+                .iter()
+                .all(|site| site.kind == SiteKind::Dynamic),
+            "only the constant variable has a readable diagnostic value: {scan:#?}"
+        );
+
+        let rewritten = ignore_dynamic_imports(src, &scan.dynamic_import_ignores);
+        assert_eq!(
+            rewritten.matches("/* @vite-ignore */").count(),
+            6,
+            "every expression-shaped import needs the Rolldown scanner escape: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("import(\"./literal.mjs\")")
+                && rewritten.contains("import(`./template.mjs`)"),
+            "literal and interpolation-free template imports must remain static: {rewritten}"
+        );
+        for expression in [
+            "name)",
+            "process.env.NUB_DYNAMIC)",
+            "`./${process.env.NUB_SUFFIX}.mjs`)",
+            "\"./\" + process.env.NUB_SUFFIX + \".mjs\")",
+            "optionName, { with: { type: \"json\" } })",
+            "alreadyMarked)",
+        ] {
+            assert!(
+                rewritten.contains(&format!("/* @vite-ignore */ {expression}")),
+                "runtime expression was not protected: {rewritten}"
+            );
+        }
+    }
+
+    #[test]
+    fn dynamic_import_marker_sourcemap_tracks_inserted_columns() {
+        const MARKER: &str = "/* @vite-ignore */ ";
+        let source = "const loaded = import(name);\nconst after = 1;\n";
+        let argument_start = source.find("name").expect("the import argument exists");
+        let magic = dynamic_import_magic_string(source, &[argument_start]);
+        let rewritten = magic.to_string();
+        let map = magic.source_map(SourceMapOptions {
+            hires: Hires::Boundary,
+            include_content: true,
+            source: "entry.mjs".into(),
+        });
+
+        assert_eq!(
+            rewritten,
+            "const loaded = import(/* @vite-ignore */ name);\nconst after = 1;\n"
+        );
+        assert_eq!(map.get_sources().collect::<Vec<_>>(), vec!["entry.mjs"]);
+        assert_eq!(
+            map.get_source_contents().collect::<Vec<_>>(),
+            vec![Some(source)],
+            "the transform map must preserve the authored source for linked and inline maps"
+        );
+        assert!(
+            map.get_tokens().any(|token| {
+                token.get_dst_line() == 0
+                    && token.get_dst_col() == (argument_start + MARKER.len()) as u32
+                    && token.get_src_line() == 0
+                    && token.get_src_col() == argument_start as u32
+            }),
+            "the argument after an insertion must map from its shifted generated column: {}",
+            map.to_json_string()
+        );
+        assert!(
+            map.get_tokens().any(|token| {
+                token.get_dst_line() == 1
+                    && token.get_dst_col() == 0
+                    && token.get_src_line() == 1
+                    && token.get_src_col() == 0
+            }),
+            "the next line must retain its original source position: {}",
+            map.to_json_string()
+        );
+    }
+
+    #[test]
+    fn dynamic_import_expression_forms_compile_only_with_the_opt_in() {
+        let dir = fixture_dir("dynamic-import-expression-forms");
+        let entry = dir.join("entry.mjs");
+        std::fs::write(
+            dir.join("literal.mjs"),
+            "console.log('literal-static-import');\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("template.mjs"),
+            "console.log('template-static-import');\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &entry,
+            r#"
+await import("./literal.mjs");
+await import(`./template.mjs`);
+const name = "foreign-dynamic";
+await import(name);
+await import(process.env.NUB_DYNAMIC);
+await import(`./${process.env.NUB_SUFFIX}.mjs`);
+await import("./" + process.env.NUB_SUFFIX + ".mjs");
+"#,
+        )
+        .unwrap();
+
+        let mut allowed = opts();
+        allowed.minify = false;
+        allowed.sourcemap = SourcemapMode::None;
+        allowed.allow_dynamic_import = true;
+        let result = bundle(&entry, &allowed)
+            .expect("the opt-in must preserve every nonliteral dynamic import for runtime");
+        assert_eq!(
+            result.dynamic_import_sites, 4,
+            "constant, runtime, interpolated, and concatenated imports need the runtime hook"
+        );
+        assert!(
+            emitted_chunk_code(&result).contains("literal-static-import")
+                && emitted_chunk_code(&result).contains("template-static-import"),
+            "literal and no-substitution template imports must still be bundled"
+        );
+
+        let err = match bundle(&entry, &opts()) {
+            Ok(_) => panic!("the default must fail closed"),
+            Err(err) => err,
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("--allow-dynamic-import") && message.contains("import(name)"),
+            "the default refusal must retain the public dynamic-import diagnostic: {message}"
+        );
+        assert!(
+            !message.contains("Could not resolve 'am'"),
+            "a nonliteral import must never leak Rolldown's malformed resolution: {message}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // A cast is erased before the bundler resolves, so reading the specifier as
     // WRITTEN reported a literal as computed — and then told the author to make it
     // a static string they had already written. The last two lines are the control
@@ -3095,6 +6232,9 @@ const pkg = require("./package.json");
             "the permitted dynamic site must be gone from the list: {msg}"
         );
         assert!(msg.contains("1 import could not"), "got: {msg}");
+        assert!(msg.contains("UMD factory parameter"), "got: {msg}");
+        assert!(msg.contains("createRequire result"), "got: {msg}");
+        assert!(msg.contains("static import"), "got: {msg}");
         assert!(
             !msg.contains("--allow-dynamic-import"),
             "a flag that cannot help this site must not be offered: {msg}"
@@ -3116,7 +6256,8 @@ const pkg = require("./package.json");
             snippet: "import(pkg)".into(),
             resolves_to: vec!["@x/core-darwin".into(), "@x/core-linux".into()],
         };
-        let err = reject_unresolved(&[site.clone()], &[], false).expect_err("must fail");
+        let err =
+            reject_unresolved(std::slice::from_ref(&site), &[], false).expect_err("must fail");
         let msg = err.to_string();
         assert!(msg.contains("/p/src/platform.ts:7:22"), "got: {msg}");
         assert!(msg.contains("import(pkg)"), "got: {msg}");
@@ -3192,7 +6333,7 @@ const pkg = require("./package.json");
         let mut o = opts();
         o.minify = false;
         let res = bundle(&entry, &o).expect("a preserve tsconfig must still compile");
-        let code = String::from_utf8(res.files[0].bytes.clone()).unwrap();
+        let code = emitted_entry_code(&res);
         assert!(
             !code.contains("<div"),
             "JSX must not survive into the bundle, got:\n{code}"
@@ -3240,7 +6381,7 @@ const pkg = require("./package.json");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("entry.ts"), source).unwrap();
         let res = bundle(&dir.join("entry.ts"), o).expect("bundle succeeds");
-        let code = String::from_utf8(res.files[0].bytes.clone()).expect("utf8 bundle");
+        let code = emitted_entry_code(&res);
         let _ = std::fs::remove_dir_all(&dir);
         code
     }
@@ -3270,5 +6411,314 @@ const pkg = require("./package.json");
             "control: keep_names=false must let minify rename the class (else the \
              positive case proves nothing), got:\n{code}"
         );
+    }
+
+    #[test]
+    fn compile_external_ids_keep_competing_importer_provenance_distinct() {
+        let root = Path::new("/workspace/app");
+        let externals = ExternalImports::new(
+            &["peer".into()],
+            root,
+            Arc::new(Mutex::new(BTreeSet::new())),
+        );
+        let root_peer = externals
+            .record("peer", Some("/workspace/app/entry.mjs"))
+            .expect("configured package");
+        let nested_peer = externals
+            .record("peer", Some("/workspace/app/node_modules/host/index.mjs"))
+            .expect("configured package");
+        let nested_again = externals
+            .record("peer", Some("/workspace/app/node_modules/host/index.mjs"))
+            .expect("configured package");
+
+        assert_ne!(root_peer.id, nested_peer.id);
+        assert_eq!(nested_peer.id, nested_again.id);
+        assert_eq!(root_peer.importer.as_deref(), Some("entry.mjs"));
+        assert_eq!(
+            nested_peer.importer.as_deref(),
+            Some("node_modules/host/index.mjs")
+        );
+
+        let sibling_peer = externals
+            .record("peer", Some("/workspace/sibling/index.mjs"))
+            .expect("configured package");
+        assert_eq!(
+            sibling_peer.importer.as_deref(),
+            Some("../sibling/index.mjs"),
+            "a source outside the launch cwd must retain relocatable provenance"
+        );
+    }
+
+    #[test]
+    fn the_transitive_compile_prelude_graph_cannot_be_externalized() {
+        let dir = fixture_dir("private-prelude-external");
+        let entry = dir.join("entry.mjs");
+        std::fs::write(&entry, "console.log('ok');\n").unwrap();
+        let mut o = opts();
+        o.external = vec!["urlpattern-polyfill".into()];
+        let res = bundle_for_compile(&entry, &o, &dir)
+            .expect("a user external must not intercept the private runtime graph");
+        assert!(
+            res.external_imports.is_empty(),
+            "no authored module imported the configured external: {:#?}",
+            res.external_imports
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn compile_prelude_imports_are_not_user_externals() {
+        let root = Path::new("/workspace/app");
+        let externals = ExternalImports::new(
+            &["urlpattern-polyfill".into()],
+            root,
+            Arc::new(Mutex::new(BTreeSet::new())),
+        );
+        assert!(
+            externals
+                .record("urlpattern-polyfill", Some(COMPILE_PREAMBLE_ID))
+                .is_none(),
+            "the private prelude resolves from nub's runtime, never the launch cwd"
+        );
+        assert!(
+            externals
+                .record("urlpattern-polyfill", Some("/workspace/app/entry.mjs"))
+                .is_some(),
+            "the user's direct import remains controlled by --external"
+        );
+    }
+
+    #[test]
+    fn query_suffixed_typescript_worker_source_is_scanned_as_typescript() {
+        let dir = fixture_dir("query-worker");
+        std::fs::write(dir.join("worker.js"), "postMessage('ok')").unwrap();
+        let id = format!("{}?worker", dir.join("entry.ts").display());
+        let scan = scan_new_urls(
+            &id,
+            "const typed: string = './worker.js'; new Worker(new URL('./worker.js', import.meta.url));",
+        );
+        assert!(
+            !scan.edits.is_empty(),
+            "the TypeScript syntax must parse rather than silently skipping this worker scan: {scan:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn local_or_custom_worker_and_url_bindings_are_not_compiler_syntax() {
+        let dir = fixture_dir("shadowed-worker-url");
+        std::fs::write(dir.join("worker.ts"), "postMessage('ok')").unwrap();
+        for source in [
+            "const Worker = makeWorker; new Worker(new URL('./worker.ts', import.meta.url));",
+            "const URL = makeUrl; new Worker(new URL('./worker.ts', import.meta.url));",
+            "import { Worker } from 'custom-workers'; new Worker(new URL('./worker.ts', import.meta.url));",
+            "import { URL } from 'custom-url'; new Worker(new URL('./worker.ts', import.meta.url));",
+        ] {
+            let scan = scan_new_urls(&dir.join("entry.ts").to_string_lossy(), source);
+            assert!(
+                scan.edits.is_empty(),
+                "authored binding was rewritten: {source}"
+            );
+            assert!(
+                scan.worker_refusals.is_empty(),
+                "authored Worker was treated as the Node builtin: {source}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn named_node_url_and_worker_import_aliases_remain_compiler_syntax() {
+        let dir = fixture_dir("node-worker-url-imports");
+        std::fs::write(dir.join("worker.ts"), "postMessage('ok')").unwrap();
+        for source in [
+            "import { URL } from 'node:url'; new Worker(new URL('./worker.ts', import.meta.url));",
+            "import { Worker } from 'node:worker_threads'; new Worker(new URL('./worker.ts', import.meta.url));",
+            "import { URL as NodeUrl } from 'node:url'; new Worker(new NodeUrl('./worker.ts', import.meta.url));",
+            "import { Worker as NodeWorker } from 'node:worker_threads'; new NodeWorker(new URL('./worker.ts', import.meta.url));",
+            concat!(
+                "import { URL as NodeUrl } from 'node:url'; ",
+                "import { Worker as NodeWorker } from 'node:worker_threads'; ",
+                "new NodeWorker(new NodeUrl('./worker.ts', import.meta.url));",
+            ),
+        ] {
+            let scan = scan_new_urls(&dir.join("entry.ts").to_string_lossy(), source);
+            assert_eq!(
+                scan.edits.len(),
+                1,
+                "Node builtin was not recognized: {source}"
+            );
+            assert!(
+                scan.edits[0].worker,
+                "worker entry was treated as data: {source}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Every spelling that statically reaches Node's `Worker` — through a global
+    /// receiver, a binding, a destructure, or the isomorphic `??` guard — must
+    /// bundle a worker chunk exactly as the bare global does. A miss here is not
+    /// a missed optimization: the entry falls through to the data-asset path and
+    /// the compiled binary runs it verbatim on bare Node, with nothing failing
+    /// at build time.
+    #[test]
+    fn indirectly_spelled_workers_bundle_a_chunk_like_the_bare_global() {
+        let dir = fixture_dir("indirect-worker-spellings");
+        std::fs::write(dir.join("worker.ts"), "postMessage('ok')").unwrap();
+        const NODE_WORKER: &str = "import { Worker as NodeWorker } from 'node:worker_threads'; ";
+        const CONSTRUCT: &str = "new URL('./worker.ts', import.meta.url));";
+        for source in [
+            format!("new globalThis.Worker({CONSTRUCT}"),
+            format!("new self.Worker({CONSTRUCT}"),
+            format!("new window.Worker({CONSTRUCT}"),
+            format!("new global.Worker({CONSTRUCT}"),
+            format!("new globalThis['Worker']({CONSTRUCT}"),
+            format!("const A = Worker; new A({CONSTRUCT}"),
+            format!("const A = Worker; const B = A; new B({CONSTRUCT}"),
+            format!("const W = globalThis.Worker; new W({CONSTRUCT}"),
+            format!("const {{ Worker: W }} = globalThis; new W({CONSTRUCT}"),
+            format!("{NODE_WORKER}const N = NodeWorker; new N({CONSTRUCT}"),
+            format!("{NODE_WORKER}const W = globalThis.Worker ?? NodeWorker; new W({CONSTRUCT}"),
+        ] {
+            let scan = scan_new_urls(&dir.join("entry.ts").to_string_lossy(), &source);
+            assert_eq!(
+                scan.edits.len(),
+                1,
+                "no worker chunk for: {source} ({scan:?})"
+            );
+            assert!(
+                scan.edits[0].worker,
+                "worker entry shipped as data: {source}"
+            );
+            assert!(
+                scan.worker_refusals.is_empty(),
+                "{source}: {:?}",
+                scan.worker_refusals
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A `Worker`-shaped constructor this pass cannot resolve fails the build.
+    /// The alternative is not "leave it alone": an unclaimed URL is embedded as
+    /// a data asset, so the real choice is between a build error on a spelling
+    /// nobody has to write and a worker that breaks on the user's machine.
+    #[test]
+    fn unprovable_worker_spellings_are_refused_rather_than_embedded_as_data() {
+        let dir = fixture_dir("unprovable-worker-spellings");
+        std::fs::write(dir.join("worker.ts"), "postMessage('ok')").unwrap();
+        const CONSTRUCT: &str = "new URL('./worker.ts', import.meta.url));";
+        for (spelling, source) in [
+            (
+                "registry.Worker",
+                format!("new registry.Worker({CONSTRUCT}"),
+            ),
+            ("W", format!("const W = registry.Worker; new W({CONSTRUCT}")),
+            (
+                "W",
+                format!("const W = globalThis.Worker ?? makePolyfill(); new W({CONSTRUCT}"),
+            ),
+            ("W", format!("let W = Worker; W = Other; new W({CONSTRUCT}")),
+            (
+                "W",
+                format!(
+                    "const {{ Worker: W }} = await import('node:worker_threads'); new W({CONSTRUCT}"
+                ),
+            ),
+        ] {
+            let scan = scan_new_urls(&dir.join("entry.ts").to_string_lossy(), &source);
+            assert!(
+                scan.edits.is_empty(),
+                "an unprovable worker entry was embedded as data: {source} ({scan:?})"
+            );
+            assert_eq!(
+                scan.worker_refusals.len(),
+                1,
+                "not refused: {source} ({scan:?})"
+            );
+            assert!(
+                scan.worker_refusals[0]
+                    .reason
+                    .contains(&format!("new {spelling}(")),
+                "the refusal must name the spelling as authored: {source} -> {}",
+                scan.worker_refusals[0].reason
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The isomorphic guard through a real bundle. A scan-level edit is not
+    /// sufficient evidence for this one: what broke was that the spelling never
+    /// became a worker ROOT, so the thread started with no preamble — reporting
+    /// bare Node's `process.execPath` and no global `Worker` — while the build
+    /// stayed green.
+    #[test]
+    fn an_isomorphic_worker_guard_emits_a_prelude_bearing_worker_root() {
+        let dir = fixture_dir("isomorphic-worker-guard");
+        let entry = dir.join("entry.ts");
+        std::fs::write(
+            &entry,
+            "import { Worker as NodeWorker } from 'node:worker_threads';\n\
+             const W = globalThis.Worker ?? NodeWorker;\n\
+             new W(new URL('./worker.ts', import.meta.url));\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("worker.ts"), "postMessage('ISOMORPHIC_WORKER');\n").unwrap();
+
+        let mut o = opts();
+        o.minify = false;
+        let res = bundle(&entry, &o).expect("an isomorphic Worker guard must compile");
+        assert_eq!(
+            res.worker_roots.len(),
+            1,
+            "the guarded constructor must register a worker root: {:?}",
+            res.worker_roots
+        );
+        let root = &res.worker_roots[0];
+        let worker = res
+            .files
+            .iter()
+            .find(|file| file.name == root.chunk)
+            .unwrap_or_else(|| {
+                panic!("the chunk named by the worker root must be emitted: {root:?}")
+            });
+        let code = String::from_utf8_lossy(&worker.bytes);
+        assert!(
+            code.contains("ISOMORPHIC_WORKER"),
+            "the worker body must be bundled as code, not copied as data:\n{code}"
+        );
+        let program = res
+            .files
+            .iter()
+            .find(|file| file.name == res.entry)
+            .expect("the program chunk must be emitted");
+        let program = String::from_utf8_lossy(&program.bytes);
+        assert!(
+            program.contains(&root.entry),
+            "the program must construct the worker from the emitted entry {}:\n{program}",
+            root.entry
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nested_url_and_worker_parameters_do_not_disable_unshadowed_call_sites() {
+        let dir = fixture_dir("nested-shadowed-worker-url");
+        std::fs::write(dir.join("worker.ts"), "postMessage('ok')").unwrap();
+        let id = dir.join("entry.ts").to_string_lossy().into_owned();
+        for source in [
+            "new Worker(new URL('./worker.ts', import.meta.url)); function custom(URL) { new Worker(new URL('./worker.ts', import.meta.url)); }",
+            "new Worker(new URL('./worker.ts', import.meta.url)); function custom(Worker) { new Worker(new URL('./worker.ts', import.meta.url)); }",
+        ] {
+            let scan = scan_new_urls(&id, source);
+            assert_eq!(
+                scan.edits.len(),
+                1,
+                "only the unshadowed constructor pair may be compiler syntax: {source}"
+            );
+            assert!(scan.edits[0].worker);
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
