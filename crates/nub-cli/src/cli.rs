@@ -3067,24 +3067,14 @@ pub(crate) fn runtime_node_options(
         if preload.is_empty() || preload.contains('\0') {
             bail!("nub.jsonc `preload` entries must be non-empty paths or module specifiers");
         }
-        let path = Path::new(preload);
-        let is_cjs = path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("cjs"));
-        let value = if path.is_absolute() && !is_cjs {
-            nub_core::node::spawn::path_to_file_url(preload)
-        } else {
-            preload.clone()
-        };
-        options.push(
-            nub_core::node::spawn::PreloadInjection {
-                flag: if is_cjs { "--require" } else { "--import" },
-                value,
-            }
-            .node_options_token(),
-        );
     }
+    // The whole list at once: whether a `.cjs` entry can keep `--require` depends on
+    // whether any SIBLING entry drags in the ESM loader. See user_preload_injections.
+    options.extend(
+        nub_core::node::spawn::user_preload_injections(&runtime.preload, &node.version)
+            .iter()
+            .map(|injection| injection.node_options_token()),
+    );
 
     if let Some(tsconfig) = runtime.tsconfig.as_deref()
         && !Path::new(tsconfig).is_file()
