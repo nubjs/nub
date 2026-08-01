@@ -357,12 +357,9 @@ fn default_network_concurrency() -> usize {
 }
 
 fn network_concurrency_for_workers(workers: usize) -> usize {
-    // 128 ceiling chosen empirically. The npm registry advertises
-    // ~100 concurrent HTTP/2 streams per connection; with prior
-    // knowledge of h2 multiplexing a single TCP connection absorbs
-    // most of this and we never spawn 128 sockets. The old 64 cap
-    // queued the second wave on cold installs >500 packages.
-    workers.saturating_mul(3).clamp(16, 128)
+    // Match pnpm's automatic maximum: three requests per worker,
+    // bounded so a high-core runner cannot overwhelm a private registry.
+    workers.saturating_mul(3).clamp(16, 64)
 }
 
 /// Resolve `verifyStoreIntegrity` from cli / env / `.npmrc` /
@@ -1326,9 +1323,9 @@ mod network_concurrency_tests {
     fn dynamic_default_matches_pnpm_worker_clamp() {
         assert_eq!(network_concurrency_for_workers(1), 16);
         assert_eq!(network_concurrency_for_workers(8), 24);
-        assert_eq!(network_concurrency_for_workers(24), 72);
-        assert_eq!(network_concurrency_for_workers(64), 128);
-        assert_eq!(network_concurrency_for_workers(usize::MAX), 128);
+        assert_eq!(network_concurrency_for_workers(24), 64);
+        assert_eq!(network_concurrency_for_workers(64), 64);
+        assert_eq!(network_concurrency_for_workers(usize::MAX), 64);
     }
 }
 

@@ -786,26 +786,21 @@ where
             Some(c) => c,
             None => (client_builder.take().unwrap())(),
         };
-        /*
-         * Adaptive concurrency on the lockfile driven fetch path
-         * (frozen / fetch / ci / matched lockfile). Same gradient
-         * controller as the streaming resolver fetch path.
-         * `networkConcurrency` setting acts as the seed when set.
-         * Cross run persisted under `tarball:default` so this path
-         * shares its converged operating point with the streaming
-         * tarball path.
-         */
+        // `networkConcurrency` is a hard ceiling. The adaptive limiter may
+        // lower the initial value after backpressure and recover it later,
+        // but it must never exceed a caller's configured limit.
         let sem_seed = network_concurrency.unwrap_or_else(default_lockfile_network_concurrency);
+        let sem_min = if network_concurrency.is_some() { 1 } else { 4 };
         let lockfile_persistent = aube_util::adaptive::global_persistent_state();
         let semaphore = match lockfile_persistent.as_ref() {
             Some(state) => aube_util::adaptive::AdaptiveLimit::from_persistent(
                 state,
                 "tarball:default",
-                sem_seed.clamp(64, 128),
-                4,
-                256,
+                sem_seed,
+                sem_min,
+                sem_seed,
             ),
-            None => aube_util::adaptive::AdaptiveLimit::new(sem_seed.clamp(64, 128), 4, 256),
+            None => aube_util::adaptive::AdaptiveLimit::new(sem_seed, sem_min, sem_seed),
         };
         if let Some(state) = lockfile_persistent.clone() {
             lockfile_persist_handle = Some((state, std::sync::Arc::clone(&semaphore)));

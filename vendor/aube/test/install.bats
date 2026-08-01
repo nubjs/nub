@@ -6,7 +6,144 @@ setup() {
 }
 
 teardown() {
+	_stop_concurrency_registry
 	_common_teardown
+}
+
+_stop_concurrency_registry() {
+	if [ -n "${CONCURRENCY_REGISTRY_PID:-}" ]; then
+		kill "$CONCURRENCY_REGISTRY_PID" 2>/dev/null || true
+		wait "$CONCURRENCY_REGISTRY_PID" 2>/dev/null || true
+		unset CONCURRENCY_REGISTRY_PID
+	fi
+}
+
+_start_concurrency_registry() {
+	local count=16
+	local i name
+	for i in $(seq 1 "$count"); do
+		name="concurrency-pkg-$i"
+		mkdir -p "$name/package"
+		printf '{"name":"%s","version":"1.0.0"}\n' "$name" >"$name/package/package.json"
+		tar -czf "$name-1.0.0.tgz" -C "$name" package
+	done
+
+	cat >concurrency-registry.mjs <<'NODE'
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import http from 'node:http';
+
+const count = Number(process.env.CONCURRENCY_PKG_COUNT);
+const names = Array.from({ length: count }, (_, i) => `concurrency-pkg-${i + 1}`);
+const packages = new Map(names.map((name) => {
+  const tarball = fs.readFileSync(`${name}-1.0.0.tgz`);
+  const integrity = `sha512-${crypto.createHash('sha512').update(tarball).digest('base64')}`;
+  return [name, { tarball, integrity }];
+}));
+let active = 0;
+let peak = 0;
+let completed = 0;
+
+const server = http.createServer((req, res) => {
+  const path = new URL(req.url, 'http://registry.invalid').pathname;
+  if (req.method === 'POST' && path === '/metrics/reset') {
+    active = 0;
+    peak = 0;
+    completed = 0;
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
+  if (req.method === 'GET' && path === '/metrics') {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ active, peak, completed }));
+    return;
+  }
+  const packageName = path.slice(1);
+  if (req.method === 'GET' && packages.has(packageName)) {
+    const pkg = packages.get(packageName);
+    const base = `http://${req.headers.host}`;
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({
+      name: packageName,
+      'dist-tags': { latest: '1.0.0' },
+      versions: {
+        '1.0.0': {
+          name: packageName,
+          version: '1.0.0',
+          dist: {
+            tarball: `${base}/${packageName}/-/${packageName}-1.0.0.tgz`,
+            integrity: pkg.integrity,
+          },
+        },
+      },
+      time: { '1.0.0': '2024-01-01T00:00:00.000Z' },
+    }));
+    return;
+  }
+  const match = /^\/(concurrency-pkg-\d+)\/-\/\1-1\.0\.0\.tgz$/.exec(path);
+  if (req.method === 'GET' && match && packages.has(match[1])) {
+    const pkg = packages.get(match[1]);
+    active += 1;
+    peak = Math.max(peak, active);
+    let settled = false;
+    const settle = () => {
+      if (!settled) {
+        settled = true;
+        active -= 1;
+      }
+    };
+    res.once('finish', () => {
+      completed += 1;
+      settle();
+    });
+    res.once('close', settle);
+    setTimeout(() => {
+      if (!res.destroyed) {
+        res.setHeader('content-type', 'application/octet-stream');
+        res.setHeader('content-length', pkg.tarball.length);
+        res.end(pkg.tarball);
+      }
+    }, 200);
+    return;
+  }
+  res.statusCode = 404;
+  res.end('{}');
+});
+server.listen(0, '127.0.0.1', () => {
+  fs.writeFileSync('concurrency-registry-port', String(server.address().port));
+});
+NODE
+	CONCURRENCY_PKG_COUNT="$count" node concurrency-registry.mjs &
+	CONCURRENCY_REGISTRY_PID=$!
+	for _ in $(seq 1 20); do
+		[ -f concurrency-registry-port ] && break
+		sleep 0.1
+	done
+	assert_file_exists concurrency-registry-port
+	CONCURRENCY_REGISTRY="http://127.0.0.1:$(cat concurrency-registry-port)"
+}
+
+_write_concurrency_fixture() {
+	CONCURRENCY_PKG_COUNT=16 node - <<'NODE' >package.json
+const count = Number(process.env.CONCURRENCY_PKG_COUNT);
+const dependencies = Object.fromEntries(
+  Array.from({ length: count }, (_, i) => [`concurrency-pkg-${i + 1}`, '1.0.0']),
+);
+process.stdout.write(`${JSON.stringify({ name: 'concurrency-cap-test', version: '1.0.0', dependencies }, null, 2)}\n`);
+NODE
+}
+
+_assert_concurrency_metrics() {
+	local expected_peak="$1"
+	local metrics actual
+	metrics="$(curl --fail --silent "$CONCURRENCY_REGISTRY/metrics")"
+	actual="$(node -e 'const m = JSON.parse(process.argv[1]); console.log(`${m.active} ${m.peak} ${m.completed}`)' "$metrics")"
+	assert_equal "$actual" "0 $expected_peak 16"
+}
+
+_reset_concurrency_metrics() {
+	curl --fail --silent --request POST "$CONCURRENCY_REGISTRY/metrics/reset"
 }
 
 _write_conflicted_basic_lockfile() {
@@ -1114,6 +1251,33 @@ JSON
 	assert_success
 	assert_dir_exists node_modules
 	assert_file_exists node_modules/is-odd/package.json
+}
+
+@test "aube install keeps network-concurrency as a tarball transfer ceiling" {
+	_start_concurrency_registry
+	_write_concurrency_fixture
+	cat >.npmrc <<-EOF
+		registry=$CONCURRENCY_REGISTRY
+		network-concurrency=4
+	EOF
+
+	# A fresh resolution streams packages into the download coordinator.
+	# The old adaptive ceiling expanded this configured four-request limit.
+	run aube install --no-frozen-lockfile
+	assert_success
+	_assert_concurrency_metrics 4
+
+	# A matched frozen lockfile uses a distinct batch fetch scheduler.
+	# It previously forced every explicit setting into a 64--128 range.
+	rm -rf node_modules "$XDG_DATA_HOME/aube/store" "$XDG_CACHE_HOME/aube/packuments-v1" "$XDG_CACHE_HOME/aube/virtual-store"
+	_reset_concurrency_metrics
+	cat >.npmrc <<-EOF
+		registry=$CONCURRENCY_REGISTRY
+		network-concurrency=1
+	EOF
+	run aube install --frozen-lockfile
+	assert_success
+	_assert_concurrency_metrics 1
 }
 
 @test "aube install honors verify-store-integrity=false from .npmrc" {

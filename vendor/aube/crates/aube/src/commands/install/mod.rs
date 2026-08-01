@@ -1723,15 +1723,19 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // Resolver options are applied via `configure_resolver` so the
             // `--lockfile-only` short-circuit produces an identical lockfile.
             // `AUBE_CONCURRENCY` is an emergency override for users on slow
-            // private registries (Artifactory, Nexus) where the default
-            // 128 in-flight tarballs trigger 429/503 throttling. Honored
-            // ahead of `network_concurrency_setting` so the env var wins
-            // over npmrc + workspace yaml.
-            let env_concurrency =
-                aube_util::concurrency::parse_concurrency_env().map(|n| n as usize);
-            let fetch_network_concurrency = env_concurrency
-                .or(network_concurrency_setting)
+            // private registries (Artifactory, Nexus). An explicit setting
+            // is a ceiling; only the automatic default retains a four-request
+            // recovery floor after backpressure.
+            let configured_network_concurrency = aube_util::concurrency::parse_concurrency_env()
+                .map(|n| n as usize)
+                .or(network_concurrency_setting);
+            let fetch_network_concurrency = configured_network_concurrency
                 .unwrap_or_else(default_streaming_network_concurrency);
+            let tarball_min = if configured_network_concurrency.is_some() {
+                1
+            } else {
+                4
+            };
             // Channel capacity is decoupled from fetch concurrency: the
             // mpsc just buffers ResolvedPackage handoffs so the BFS
             // never blocks on send() while the fetch coordinator is
@@ -1854,33 +1858,24 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // `filter_graph` prunes the post-resolve graph.
             let fetch_deprecations_tx = deprecations.clone();
             let fetch = Box::pin(async move {
-                /*
-                 * Adaptive tarball concurrency. Loaded from the
-                 * cross run persistent store when available so the
-                 * limiter starts where a previous run converged
-                 * instead of cold ramping from the ceiling. Falls
-                 * back to seed 256 (h2 stream cap) on first ever
-                 * run. Floor 4 keeps progress under continuous
-                 * 429 / 503. Persisted back at end of fetch phase
-                 * so the next invocation benefits.
-                 */
-                // Honor user-configured `networkConcurrency` (or
-                // `AUBE_NETWORK_CONCURRENCY` env override) as the
-                // seed. Adaptive grow/shrink still operate around
-                // it. Floor 4 keeps progress under continuous
-                // throttling regardless of seed.
-                let tarball_seed = fetch_network_concurrency.max(4);
-                let tarball_max = tarball_seed.max(256);
+                // An adaptive limiter preserves the selected concurrency as
+                // its ceiling. Persisted observations may start a later run
+                // lower after backpressure but are clamped to this bound.
+                let tarball_max = fetch_network_concurrency;
                 let persistent = aube_util::adaptive::global_persistent_state();
                 let semaphore = match persistent.as_ref() {
                     Some(state) => aube_util::adaptive::AdaptiveLimit::from_persistent(
                         state,
                         "tarball:default",
-                        tarball_seed,
-                        4,
+                        tarball_max,
+                        tarball_min,
                         tarball_max,
                     ),
-                    None => aube_util::adaptive::AdaptiveLimit::new(tarball_seed, 4, tarball_max),
+                    None => aube_util::adaptive::AdaptiveLimit::new(
+                        tarball_max,
+                        tarball_min,
+                        tarball_max,
+                    ),
                 };
                 let semaphore_for_persist = std::sync::Arc::clone(&semaphore);
                 let persistent_for_save = persistent.clone();
