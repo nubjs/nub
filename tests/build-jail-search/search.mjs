@@ -105,14 +105,6 @@ function paths(root, prefix = '') {
     // grant we have, when the only difference between arms was bytecode. Verified by diffing
     // the two path sets: __pycache__ entries were the ENTIRE delta.
     if (e.name === '__pycache__' || e.name.endsWith('.pyc')) continue;
-    // NPM'S DEBUG LOG IS NOT A SIDE EFFECT — its FILENAME carries the wall-clock time
-    // (`.npm/_logs/2026-08-01T16_39_35_911Z-debug-0.log`), so two identical runs never agree.
-    // Measured on `unrs-resolver@1.12.2`: 3 runs at full grant produced 2731 identical paths
-    // plus exactly one uniquely-named log each — and that alone mismatched all 55 cells and
-    // reported "no state passed" for a package that installs fine. It also would have entered
-    // the `writePaths` derivation as `.npm/_logs`, a directory to promote into the user's real
-    // npm home for no reason. Costs nothing on the grant axis: `$home` is baseline-writable.
-    if (rel.startsWith('.npm/_logs/') || /\/\.npm\/_logs\//.test(rel)) continue;
     if (e.isDirectory()) out.push(...paths(path.join(root, e.name), rel));
     else out.push(rel);
   }
@@ -438,7 +430,14 @@ function search(nub, pkg, version, root, keep) {
   const unionSeen = [...new Set([...control.seen, ...controlB.seen])];
   const stableSet = new Set(stableSeen);
   const varyingSeen = unionSeen.filter((x) => !stableSet.has(x));
-  const unmeasuredScopes = [...new Set(varyingSeen.map((x) => scopeOf(x, pkg)).filter(Boolean))];
+  // ESCALATE ONLY FOR A SCOPE THE STABLE SET DOES NOT ALREADY COVER. A path whose only
+  // variation is its NAME sits in a scope the stable paths already prove — a timestamped log
+  // inside an otherwise-measured directory is the canonical case — so widening there buys
+  // nothing and costs breadth on every package that writes one. Escalation is for a scope the
+  // run genuinely could not measure.
+  const stableScopes = new Set(stableSeen.map((x) => scopeOf(x, pkg)).filter(Boolean));
+  const unmeasuredScopes = [...new Set(varyingSeen.map((x) => scopeOf(x, pkg)).filter(Boolean))]
+    .filter((sc) => !stableScopes.has(sc));
   // Downstream derivations read the UNION, so nothing is lost by appearing in only one run.
   const controlU = { ...control, seen: unionSeen, files: unionSeen.length };
   cells.push({ index: null, state: 'CONTROL (tested pkg: everything; all others: everything)', cost: null, pass: control.rc === 0,
