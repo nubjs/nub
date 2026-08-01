@@ -26,6 +26,7 @@ An index of the rules a doing-agent must not miss. Each links to its authoritati
 - Brand boundary: no public `globalThis.nub`, no `nub:*` import namespace, no `@nub/*` scope, no `"nub"` user-authored config field, no documented `NUB_*` user knob. Internals are exempt. ([The brand boundary](#the-brand-boundary--public-surfaces-only-internals-are-exempt))
 - `vendor/aube` fork-discipline no longer applies (2026-07-29) — edit the vendored engine freely, defaults included. The separate rule against upstreaming is untouched. ([The aube vendoring + upstreaming](#the-aube-vendoring--upstreaming))
 - No agent co-author trailers in commits; the commit-msg hook strips them.
+- **Never cut a release without the maintainer's explicit, in-the-moment instruction.** Publishing to npm is irreversible, and the tag push is what triggers it. Same shape as the never-upstream rule. ([Releasing](#releasing) — and invoke the `release` skill, which carries the runbook and this gate.)
 
 ## Core design positions
 
@@ -194,7 +195,7 @@ Keep containers ephemeral (`docker run --rm`), mount the repo read-only where yo
 When a `nub install` or PM operation is mysteriously slow, do not hand-trace Rust — the `pm-perf-tracing` skill is the canonical method. The essentials:
 
 - `RUST_LOG=debug nub install` emits `phase:<name> <elapsed>` lines (the coarse resolve/fetch/link split) and works under nub today.
-- The per-file/per-strategy linker diagnostic (`aube_util::diag` → `AUBE_DIAG_FILE`; the `link_clonedir`/`link_macos_small_copy`/… tally) exists in aube but is gated off under nub (`env_prefix: None` in `pm_engine/identity.rs`) — flip it to `Some("NUB")` in a throwaway build to activate it.
+- The per-file/per-strategy linker diagnostic (`aube_util::diag`; the `link_clonedir`/`link_macos_small_copy`/… tally) is LIVE under nub as `NUB_DIAG_FILE` — no source edit, no rebuild. `identity.rs` sets `diag_env_prefix: Some("NUB")`, carved out from `env_prefix: None` for exactly this. (`AUBE_DIAG_*` is not read under nub, and a former version of this bullet told you to patch `env_prefix` and rebuild for nothing.)
 - Judge by the **strategy tally plus an A/B ratio** (the default `NodeLinker::Isolated` — see `vendor/aube/crates/aube-linker/src/lib.rs` — vs `--node-linker hoisted`), never a contended-host absolute. Always run a verified-clean warm `--offline` loop with rc=0.
 
 ## Verify the artifact, not something adjacent to it (HIGH PRIORITY)
@@ -275,11 +276,10 @@ Feature-specific harnesses live under `tests/<feature>/` — e.g. `tests/pnp/` b
 - **Verify locally before pushing — don't outsource verification to CI.** This protects shared CI capacity: every push fires ~5 workflows × the 8-platform matrix (~30–40 min each), and several PRs pushing fix-after-fix saturate the runner pool so head-commit jobs queue for hours. Get it green locally, push once. The loop, in your worktree:
   1. **Incremental build** through `scripts/rust-build.sh` — `scripts/rust-build.sh build -p nub-cli --profile fast` for the touched crates. **Never `export CARGO_TARGET_DIR` yourself:** the wrapper picks the target dir AND CoW-seeds a fresh private one from a warm shared bucket (~14s); an explicit variable silently opts out and costs a ~40-min cold build. This applies to a dispatch prompt as much as your own shell.
   2. **Run exactly what CI runs** for the cheap gates: `cargo clippy --all-targets --all-features --profile fast -- -D warnings` (a scoped `-p` without `--all-targets` misses test-code lints), `cargo fmt --check`, and the scoped `cargo test` for what changed. Match the invocations in `.github/workflows/ci.yml`. `--profile fast` on the lint gates is load-bearing, not a shortcut: it is what CI's check and clippy jobs run, and it keeps the gates in the same artifact universe as the dev loop instead of driving a second full dependency build under `dev`. `fast` inherits `dev`, so debug-assertions, overflow checks, and opt-level are identical — only debuginfo differs, which no lint reads. `cargo test` stays on the DEFAULT profile, matching CI's test jobs.
-  2a. **The root workspace is not the whole repo.** `crates/nub-launcher` and `crates/nub-native` are excluded from the root `[workspace]`, so `-p nub-launcher` from the root fails with `package ID specification 'nub-launcher' did not match any packages` — that is the workspace boundary, not a typo. Run their gates from inside the crate, as CI does:
-      - `cd crates/nub-launcher && cargo clippy --all-targets -- -D warnings && cargo build && cargo test`
+  2a. **The root workspace is not the whole repo.** `crates/nub-native` is its OWN workspace — a cdylib loaded into the user's Node process needs `panic = "abort"`, which cannot coexist with the root's strategy — so `-p nub-native` from the root fails with `package ID specification … did not match any packages`. That is the workspace boundary, not a typo. Run its gates from inside the crate, as CI does, and note `cargo fmt --check` is per-workspace too:
       - `cd crates/nub-native && cargo clippy --all-features --profile fast -- -D warnings`
 
-      `cargo fmt --check` is also per-workspace — run it in `crates/nub-launcher` too. Build the addon with `cd crates/nub-native && cargo build --release`, **never** `--manifest-path`: Cargo reads `.cargo/config.toml` from the CWD, so the manifest-path form silently writes to `crates/nub-native/target/` instead of the repo-root `target/` the copy paths expect.
+      Build the addon with `cd crates/nub-native && cargo build --release`, **never** `--manifest-path`: Cargo reads `.cargo/config.toml` from the CWD, so the manifest-path form can write somewhere other than the repo-root `target/` the copy paths expect. (The root `Cargo.toml` comment describes the `--manifest-path` form as how it is built; the two disagree and it has not been settled by running it — prefer the `cd` form until someone does.)
   3. **Prefer running the heavy gates remotely.** `cargo clippy --all-targets --all-features` and a full `cargo test` are what saturate the dev host when many worktrees build at once. Run them on an ephemeral GCE spot VM: `nub scripts/remote-build.ts --job clippy` and `--job test` (the `remote-build` skill). Byte-identical CI invocation, a few cents each. The `--profile fast` inner loop stays local.
   4. **End-to-end test the specific functionality with a tmp fixture** — build the binary and exercise the actual feature against a throwaway fixture in `/tmp`, diffing against the reference tool where parity is claimed. "Tests pass" is not "the feature works."
   5. **Use Docker for behavior touching the global cache / config / a clean machine** — global `~/.npmrc`, config homes, the CAS store, first-run install, a Node floor — in an ephemeral `docker run --rm` container so host state can't mask or pollute the result. Linux only; Windows rides CI.
@@ -343,6 +343,10 @@ Before loading a large markdown file in full, run `node scripts/md-toc/index.mjs
 ## Releasing
 
 Nub publishes to npm as `@nubjs/nub` plus 8 platform-specific binary packages, fully automated via GitHub Actions.
+
+**The `v*` tag push IS the publish — it is irreversible and requires the maintainer's explicit, in-the-moment
+say-so. Invoke the `release` skill rather than running the recipe below from memory**; it carries that gate,
+the version-pick rules, and the mandatory post-release issue/PR comments.
 
 ```bash
 make version V=0.0.6          # sets version in all 9 npm packages + Cargo.toml
