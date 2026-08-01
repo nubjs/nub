@@ -318,8 +318,18 @@ fn assert_compile_path_eq(actual: &str, expected: &str, context: &str) {
             .replace('/', "\\")
             .to_ascii_lowercase()
     };
+    // macOS serves the temp dir as `/var/...` while a process reports its own path
+    // as `/private/var/...` — the same file under two spellings, so a textual
+    // compare fails there for every developer. Normalize the prefix rather than
+    // canonicalize: the artifact is already gone by the time this runs, so a
+    // symlink resolve would fall back to the raw value and keep the mismatch.
     #[cfg(not(windows))]
-    let normalize = |value: &str| value.to_owned();
+    let normalize = |value: &str| {
+        value
+            .strip_prefix("/private/var/")
+            .map(|rest| format!("/var/{rest}"))
+            .unwrap_or_else(|| value.to_owned())
+    };
     assert_eq!(
         normalize(actual),
         normalize(expected),
