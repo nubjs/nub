@@ -167,6 +167,44 @@ function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg }
   };
 }
 
+
+// ── run records ───────────────────────────────────────────────────────────────
+
+/** Where one package@version's measurement lives. One file per pair, so re-running a
+ *  single package rewrites exactly its own record and a batch is resumable — the catalog
+ *  is COLLATED from these later, never edited in place by a run. */
+function runPath(dir, pkg, version) {
+  return path.join(dir, `${pkg.replace('/', '+')}@${version}.json`);
+}
+
+/** What produced this record. Without it a results directory is a pile of numbers with no
+ *  way to tell which binary or host they came from — and this effort has already been
+ *  burned by results whose provenance had to be reconstructed after the fact. */
+function provenance(nub) {
+  let sha = null;
+  try { sha = createHash('sha256').update(fs.readFileSync(nub)).digest('hex'); } catch {}
+  let nubVersion = null;
+  try { nubVersion = spawnSync(nub, ['--version'], { encoding: 'utf8' }).stdout?.trim() || null; } catch {}
+  // THE HARNESS'S OWN HASH, because the harness decides the ANSWER as much as the binary
+  // does. A filter change (Python bytecode stopped counting as a side effect) moved nine
+  // packages from `write.userHome` to `(nothing)` without the binary changing at all, and a
+  // long batch picked up the edit MID-RUN. Without this a results directory silently mixes
+  // two methodologies and nothing in the file says so.
+  let harnessSha = null;
+  try {
+    const here = new URL('.', import.meta.url).pathname;
+    const h = createHash('sha256');
+    for (const f of ['search.mjs', 'states.mjs']) h.update(fs.readFileSync(path.join(here, f)));
+    harnessSha = h.digest('hex').slice(0, 16);
+  } catch {}
+  return {
+    nubPath: nub, nubSha256: sha, nubVersion, harnessSha256: harnessSha,
+    platform: `${process.platform}-${process.arch}`,
+    node: process.version,
+    at: new Date().toISOString(),
+  };
+}
+
 // ── the walk ──────────────────────────────────────────────────────────────────
 
 /** Paths the CONTROL produced that the no-grant floor did not — i.e. what a grant must
@@ -209,8 +247,12 @@ function search(nub, pkg, version, root, keep) {
 
   // CONTROL — scripts on, jail off. EVERY cell runs the identical two steps, so full path
   // sets are directly comparable and no baseline subtraction is needed.
+  const cells = [];
   const control = cell('control', { jailOff: true, label: 'control' });
-  if (control.rc !== 0) return { pkg, version, verdict: 'CONTROL-FAILED', control: brief(control) };
+  cells.push({ index: null, state: 'CONTROL (jail off)', cost: null, pass: control.rc === 0,
+               rc: control.rc, digest: control.digest, files: control.files,
+               overrideEngaged: null, materialized: control.materialized });
+  if (control.rc !== 0) return { pkg, version, verdict: 'CONTROL-FAILED', cells, control: brief(control) };
   const sideEffectful = hasScript;
   const matches = (r) => r.rc === control.rc && (!sideEffectful || r.digest === control.digest);
 
@@ -218,8 +260,12 @@ function search(nub, pkg, version, root, keep) {
   //    the other 52. The one step that assumes monotonicity; dropping it changes
   //    no answer, only the cost.
   const top = cell('top', { catalogFile: write(STATES[STATES.length - 1]), label: 'top' });
-  if (!top.overrideOk) return { pkg, version, verdict: 'HARNESS-ERROR', why: 'override did not engage at top', log: top.log.slice(-400) };
-  if (!matches(top)) return { pkg, version, verdict: 'FAILS-AT-TOP', control: brief(control), top: brief(top) };
+  cells.push({ index: STATES.length - 1, state: `TOP (${STATES[STATES.length - 1].label})`,
+               cost: STATES[STATES.length - 1].cost, pass: matches(top), rc: top.rc,
+               digest: top.digest, files: top.files, overrideEngaged: top.overrideOk,
+               materialized: top.materialized });
+  if (!top.overrideOk) return { pkg, version, cells, verdict: 'HARNESS-ERROR', why: 'override did not engage at top', log: top.log.slice(-400) };
+  if (!matches(top)) return { pkg, version, verdict: 'FAILS-AT-TOP', cells, control: brief(control), top: brief(top) };
 
   // 3. Ascending walk. The first pass IS the minimum.
   //    WHAT THE GRANT BUYS is recorded, not just that it was needed. State 0 is the
@@ -232,11 +278,17 @@ function search(nub, pkg, version, root, keep) {
   for (let i = 0; i < STATES.length; i++) {
     const r = cell(`s${i}`, { catalogFile: write(STATES[i]), label: STATES[i].label });
     if (i === 0) floor = r;
-    if (!r.overrideOk) return { pkg, version, verdict: 'HARNESS-ERROR', why: `override did not engage at state ${i}`, log: r.log.slice(-400) };
+    cells.push({
+      index: i, state: STATES[i].label, cost: STATES[i].cost,
+      pass: matches(r), rc: r.rc, digest: r.digest, files: r.files,
+      overrideEngaged: r.overrideOk, materialized: r.materialized,
+    });
+    if (!r.overrideOk) return { pkg, version, cells, verdict: 'HARNESS-ERROR', why: `override did not engage at state ${i}`, log: r.log.slice(-400) };
     if (matches(r)) {
       return {
         pkg, version,
         verdict: 'MINIMUM',
+        cells,
         state: STATES[i].label,
         cost: STATES[i].cost,
         stateIndex: i,
@@ -263,7 +315,7 @@ function search(nub, pkg, version, root, keep) {
       };
     }
   }
-  return { pkg, version, verdict: 'NO-STATE-PASSED', control: brief(control) };
+  return { pkg, version, verdict: 'NO-STATE-PASSED', cells, control: brief(control) };
 }
 
 // ── cli ───────────────────────────────────────────────────────────────────────
@@ -316,7 +368,23 @@ const keep = argv.includes('--keep');
 // Never /tmp: a /tmp/package.json on this box is found by walking up.
 const root = fs.mkdtempSync(path.join(os.homedir(), '.cache', 'nub-search-'));
 try {
-  console.log(JSON.stringify(search(nub, pkg, version, root, keep)));
+  const runDir = argv.includes('--runs')
+    ? argv[argv.indexOf('--runs') + 1]
+    : path.join(path.dirname(new URL(import.meta.url).pathname), 'results', 'runs');
+  const out = runPath(runDir, pkg, version);
+
+  // RESUMABLE BY DEFAULT. A batch re-run should cost only what it has not already measured;
+  // `--force` re-measures one package after a harness or jail change.
+  if (!argv.includes('--force') && fs.existsSync(out)) {
+    const prior = JSON.parse(fs.readFileSync(out, 'utf8'));
+    console.log(JSON.stringify({ ...prior, skipped: 'already measured; pass --force to redo' }));
+  } else {
+    const record = search(nub, pkg, version, root, keep);
+    record.provenance = provenance(nub);
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(out, JSON.stringify(record, null, 2));
+    console.log(JSON.stringify(record));
+  }
 } finally {
   if (!keep) fs.rmSync(root, { recursive: true, force: true });
 }

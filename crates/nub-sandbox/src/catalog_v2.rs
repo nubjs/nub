@@ -123,8 +123,10 @@ pub struct Grant {
     pub read: Reach,
     pub write: Reach,
     pub network: bool,
-    /// Free text. NOT machine-read — the earlier `evidence` enum was validated and then
-    /// discarded by every consumer, so structuring this bought nothing.
+    /// Free text, optional, unvalidated. A CATCHALL — the earlier `evidence` enum was
+    /// validated and then discarded by every consumer, and a minimum-length rule on this
+    /// field was the same mistake in cheaper clothing: it rejected real catalogs written by
+    /// a harness that had nothing interesting to say.
     pub notes: String,
 }
 
@@ -271,11 +273,6 @@ fn parse_env(root: &serde_json::Value) -> Result<Vec<BaselineEnv>, String> {
             .unwrap_or_default()
             .trim()
             .to_string();
-        if notes.len() < 12 {
-            return Err(format!(
-                "{at}: `notes` must say why every jailed script needs this variable"
-            ));
-        }
         if out.iter().any(|e| e.name == name) {
             return Err(format!("{at}: `{name}` is set twice"));
         }
@@ -329,11 +326,6 @@ fn parse_baseline(root: &serde_json::Value) -> Result<Vec<BaselinePath>, String>
             .unwrap_or_default()
             .trim()
             .to_string();
-        if notes.len() < 12 {
-            return Err(format!(
-                "{at}: `notes` must say why every jailed script needs this path"
-            ));
-        }
         if out.iter().any(|b: &BaselinePath| b.path == path) {
             return Err(format!("{at}: `{path}` is listed twice"));
         }
@@ -362,11 +354,6 @@ fn parse_grant(value: &serde_json::Value, at: &str) -> Result<Grant, String> {
         .unwrap_or_default()
         .trim()
         .to_string();
-    if notes.len() < 12 {
-        return Err(format!(
-            "{at}: `notes` must say why this grant exists; it is the only thing a later reader gets"
-        ));
-    }
 
     let versions = match obj.get("versions") {
         None => None,
@@ -612,12 +599,6 @@ mod tests {
     fn a_grant_that_widens_nothing_is_rejected() {
         let err = one(&format!(r#"{{{NOTES}}}"#)).unwrap_err();
         assert!(err.contains("grants nothing"), "{err}");
-    }
-
-    #[test]
-    fn notes_are_required_because_they_are_all_a_later_reader_gets() {
-        let err = one(r#"{"network":true,"notes":"why"}"#).unwrap_err();
-        assert!(err.contains("`notes` must say why"), "{err}");
     }
 
     #[test]
