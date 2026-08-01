@@ -320,6 +320,42 @@ function runPath(dir, pkg, version) {
   return path.join(runDirFor(dir, pkg, version), 'results.json');
 }
 
+/** The BUILD TOOLCHAIN this run had available.
+ *
+ *  ⛔ THE SINGLE MOST EXPENSIVE OMISSION IN THIS EFFORT. One `canvas@2.11.2` failure was
+ *  diagnosed FIVE different wrong ways — Node 26, then Python 3.14, then gyp incompatibility,
+ *  then a missing prebuilt, then a missing toolchain — and the actual cause was `PATH`: one
+ *  fixture reached `/opt/homebrew/bin` and found `pkg-config`, another did not and got exit
+ *  127. Same machine, same package, opposite verdicts, and NOTHING in either record said so.
+ *
+ *  Every one of those five wrong answers dies instantly against a record that states
+ *  `pkg-config: /opt/homebrew/bin/pkg-config` versus `pkg-config: null`. A native build is
+ *  decided by ambient state, so the ambient state is part of the measurement. */
+function toolchain() {
+  // `which`, not `command -v` through a shell: passing args with `shell: true` is deprecated
+  // (DEP0190, args are concatenated rather than escaped) and would print a warning on every run.
+  const which = (c) => {
+    const r = spawnSync('which', [c], { encoding: 'utf8' });
+    return r.status === 0 ? (r.stdout || '').trim() || null : null;
+  };
+  const ver = (c, a) => {
+    const r = spawnSync(c, a, { encoding: 'utf8' });
+    return r.status === 0 ? ((r.stdout || r.stderr || '').split('\n')[0] || '').trim() : null;
+  };
+  return {
+    node: process.version,
+    pkgConfig: which('pkg-config'),
+    pkgConfigVersion: ver('pkg-config', ['--version']),
+    python: which('python3'),
+    pythonVersion: ver('python3', ['--version']),
+    make: which('make'),
+    cc: ver('cc', ['--version']),
+    // The PREFIX matters, not the whole variable: whether Homebrew's bin is reachable is the
+    // thing that decided the canvas verdict, and the full PATH is noise around that fact.
+    pathPrefix: (process.env.PATH || '').split(':').slice(0, 4).join(':'),
+  };
+}
+
 /** What produced this record. Without it a results directory is a pile of numbers with no
  *  way to tell which binary or host they came from — and this effort has already been
  *  burned by results whose provenance had to be reconstructed after the fact. */
@@ -344,6 +380,7 @@ function provenance(nub) {
     nubPath: nub, nubSha256: sha, nubVersion, harnessSha256: harnessSha,
     platform: `${process.platform}-${process.arch}`,
     node: process.version,
+    toolchain: toolchain(),
     at: new Date().toISOString(),
   };
 }
