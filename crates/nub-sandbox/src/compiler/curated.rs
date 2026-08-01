@@ -1096,18 +1096,33 @@ mod tests {
     /// cannot reach a policy. It failed exactly that way once the ingester's first sort
     /// landed. Name UNIQUENESS is asserted first, because a set comparison over duplicate
     /// keys would let a doubled entry hide one that is missing.
+    /// CONTAINMENT, NOT EQUALITY — and the constant's own name is the reason.
+    /// `GOLDEN_PRE_CATALOG_GRANTS` is the set as it stood BEFORE the JSON migration, and the
+    /// property being defended is that moving them did not alter or drop any. The catalog is
+    /// now MACHINE-INGESTED by `apply-matrix.mjs`, so it legitimately GROWS — a measured sweep
+    /// adds entries this mirror was never meant to predict. Equality therefore turned every
+    /// ingest into a failure while proving nothing extra: the migration guarantee is about the
+    /// golden entries, not the table's size. A NEW grant is reviewed at its own commit and by
+    /// the catalog validator, which is where that review belongs.
     #[test]
-    fn the_catalog_matches_the_hand_written_mirror() {
+    fn the_catalog_preserves_every_pre_catalog_grant() {
         fn by_name<'a>(table: &'a [(&'a str, CuratedGrant)]) -> BTreeMap<&'a str, CuratedGrant> {
             let map: BTreeMap<&'a str, CuratedGrant> = table.iter().copied().collect();
             assert_eq!(map.len(), table.len(), "a package is listed twice");
             map
         }
-        assert_eq!(
-            by_name(CURATED_GRANTS),
-            by_name(GOLDEN_PRE_CATALOG_GRANTS),
-            "the generated table diverged from the hand-written mirror"
-        );
+        let generated = by_name(CURATED_GRANTS);
+        for (name, golden) in by_name(GOLDEN_PRE_CATALOG_GRANTS) {
+            match generated.get(name) {
+                None => {
+                    panic!("`{name}` was in the pre-catalog set and the generated table lost it")
+                }
+                Some(got) => assert_eq!(
+                    got, &golden,
+                    "`{name}` survived the migration carrying a DIFFERENT grant than it had"
+                ),
+            }
+        }
     }
 
     /// A version the grant's range admits, so a scoped row is probed inside its own window
