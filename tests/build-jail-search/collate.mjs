@@ -97,6 +97,18 @@ function grantKey(r) {
   return JSON.stringify({ g: norm(g), w: (r.writePaths ?? []).slice().sort() });
 }
 
+/** The catalog names platforms `macos | linux | windows`; provenance records them as
+ *  `darwin-arm64`, `linux-x64`, `win32-x64`. Map once, here, so nothing downstream has to
+ *  know both vocabularies. Architecture is deliberately dropped: the grant model has no
+ *  per-arch axis, and a run on arm64 speaks for the OS. */
+function osOf(r) {
+  const p = r.provenance?.platform ?? '';
+  if (p.startsWith('darwin')) return 'macos';
+  if (p.startsWith('linux')) return 'linux';
+  if (p.startsWith('win')) return 'windows';
+  return null;
+}
+
 // ── build ─────────────────────────────────────────────────────────────────────
 
 const packages = {};
@@ -155,6 +167,8 @@ for (const [pkg, rsRaw] of [...byPackage.entries()].sort()) {
   for (const r of rs) {
     if (r._mergedFrom) notes.push(`${pkg}@${r.version}: reconciled ${r._mergedFrom} runs by union`);
   }
+  const allPlatforms = new Set(rs.map((r) => osOf(r)).filter(Boolean));
+  const allVersions = new Set(rs.map((r) => r.version));
   const bands = new Map();
   for (const r of rs) {
     const k = grantKey(r);
@@ -181,10 +195,26 @@ for (const [pkg, rsRaw] of [...byPackage.entries()].sort()) {
     // other version the grant it was never measured at -- and install scripts concentrate in OLD
     // pins. Where bands genuinely differ the versions are named, and the widest band is placed
     // last so it acts as the fallback under first-match-wins.
-    if (meaningful.length > 1) {
-      g.versions = group.map((r) => r.version).sort().join(' || ');
+    // VERSIONS ARE PINNED ONLY WHEN THE VERSIONS ARE WHAT DIFFER. Two bands that differ by
+    // PLATFORM, at the same version, must not both carry a `versions` matcher — that reads as a
+    // version-specific rule and is noise. Compare the version sets across bands: pin only when
+    // this band's versions are not the whole set.
+    const bandVersions = [...new Set(group.map((r) => r.version))].sort();
+    if (bandVersions.length < allVersions.size) {
+      g.versions = bandVersions.join(' || ');
     }
-    if (PLATFORM) g.platforms = [PLATFORM];
+    // PER-PLATFORM MATCHERS, ONLY WHEN THE PLATFORMS DISAGREE.
+    //
+    // Where every measured platform reached the same grant — the common case — the entry is
+    // matcher-less and one line covers all three. A `platforms` key is emitted only when this
+    // band genuinely does not span every platform that measured the package, so the catalog
+    // does not fill with redundant per-OS duplicates of an identical grant.
+    const bandPlatforms = [...new Set(group.map((r) => osOf(r)).filter(Boolean))];
+    if (bandPlatforms.length && bandPlatforms.length < allPlatforms.size) {
+      g.platforms = bandPlatforms.sort();
+    } else if (PLATFORM) {
+      g.platforms = [PLATFORM];
+    }
     g.notes = `measured: ${group.map((r) => `${r.version}`).sort().join(', ')} -> ${group[0].state}`;
 
     const unmeasured = group.flatMap((r) => r.unmeasuredScopesGranted ?? []);
