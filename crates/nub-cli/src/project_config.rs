@@ -1926,9 +1926,22 @@ mod tests {
             values.iter().map(|value| (*value).to_string()).collect()
         }
 
-        let schema: Value =
-            serde_json::from_str(include_str!("../../../site/public/schema/latest.json"))
-                .expect("the published nub.json schema must be valid JSON");
+        // Read at RUNTIME, not via include_str!. The schema is a PUBLISHED site
+        // artifact, and the site withdraws it whenever the config reference is
+        // hidden pending ship (3539b65db1) — a compile-time include turns that
+        // ordinary content decision into a build failure for the whole crate's test
+        // target. Absent schema means there is nothing published to be out of step
+        // with, so skip; the assertions return with the file.
+        let published = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../site/public/schema/latest.json"
+        );
+        let Ok(source) = std::fs::read_to_string(published) else {
+            eprintln!("skipping: {published} is not published right now");
+            return;
+        };
+        let schema: Value = serde_json::from_str(&source)
+            .expect("the published nub.json schema must be valid JSON");
         assert_eq!(keys(&schema, "/properties"), expected(ROOT_KEYS));
         assert_eq!(
             keys(&schema, "/properties/install/properties"),
