@@ -1398,9 +1398,14 @@ mod tests {
             }
             panic!("creating Windows final-reparse point: {error}");
         }
+        // Hash the real directory, not the link — `runtime_tree` refuses a
+        // reparse-point ROOT rather than following it (`is_symlink` covers both a
+        // symlink and a junction on Windows), so the link spelling cannot be used
+        // to establish that the tree behind it is clean. Same reasoning, and the
+        // same shape, as the unix sibling above.
         assert!(
-            verify_runtime_tree(&target),
-            "control: following the final junction is clean"
+            verify_runtime_tree(&actual),
+            "control: the tree behind the final reparse point is clean"
         );
         assert!(
             !verify_or_heal_embedded_runtime_tree(&target),
