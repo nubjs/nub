@@ -3295,14 +3295,15 @@ mod tests {
     }
 
     #[test]
-    fn install_sandbox_remains_inert() {
-        // Every policy shape (not just `false`) must lower identically to the
-        // no-sandbox baseline until the sandbox execution slice lands.
+    fn build_jail_setting_does_not_reach_install_lowering() {
+        // `install.buildJail` decides whether a lifecycle script is CONFINED, not how the
+        // install is configured, so neither value may move a single lowered setting. This
+        // replaces an equivalent assertion about the removed `install.sandbox`.
         let baseline = lower_native_install_settings(&InstallConfig::default(), &[]).unwrap();
-        for (raw, shape) in crate::project_config::sandbox_shapes::four_shapes() {
+        for on in [true, false] {
             let configured = lower_native_install_settings(
                 &InstallConfig {
-                    sandbox: Some(shape),
+                    build_jail: Some(on),
                     ..InstallConfig::default()
                 },
                 &[],
@@ -3310,7 +3311,7 @@ mod tests {
             .unwrap();
             assert_eq!(
                 configured, baseline,
-                "install lowering must not react to sandbox shape {raw}"
+                "install lowering must not react to buildJail={on}"
             );
         }
     }

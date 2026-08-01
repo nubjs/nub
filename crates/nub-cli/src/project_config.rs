@@ -52,7 +52,7 @@ const INSTALL_KEYS: &[&str] = &[
     "minimumReleaseAge",
     "minimumReleaseAgeExclude",
     "nodeOptions",
-    "sandbox",
+    "buildJail",
 ];
 const DLX_KEYS: &[&str] = &["consent", "sandbox", "env"];
 
@@ -187,7 +187,20 @@ pub struct InstallConfig {
     pub minimum_release_age: Option<Duration>,
     pub minimum_release_age_exclude: Option<Vec<String>>,
     pub node_options: Option<Vec<String>>,
-    pub sandbox: Option<SandboxSetting>,
+    /// `install.buildJail` — the build jail is GLOBALLY on or off, nothing finer.
+    ///
+    /// Confinement of dependency lifecycle scripts is a single switch on purpose. A
+    /// per-package form was considered and dropped: it is not worth shipping, and its
+    /// absence deletes the whole question of whether a DEPENDENCY could switch off its
+    /// own confinement — a package that could would be strictly worse than no jail,
+    /// because it advertises a protection that silently is not there.
+    ///
+    /// Orthogonal to `approveBuilds`/`allowBuilds`, which decide WHETHER a script runs;
+    /// this decides whether a script that runs is CONFINED. Distinct from `nub sandbox`
+    /// (the top-level and `dlx` scopes), which is a different mechanism entirely.
+    ///
+    /// `None` means on — the jail is the default and the opt-out must be explicit.
+    pub build_jail: Option<bool>,
 }
 
 /// The flat layout enum (collapsed 2026-07-08). `symlink` (nub's default global
@@ -282,7 +295,7 @@ pub enum ConfigKey {
     InstallMinimumReleaseAge,
     InstallMinimumReleaseAgeExclude,
     InstallNodeOptions,
-    InstallSandbox,
+    InstallBuildJail,
     DlxConsent,
     DlxSandbox,
     DlxEnv,
@@ -879,8 +892,8 @@ fn merge_layer(
         sources,
         layer.install,
         source,
-        sandbox,
-        ConfigKey::InstallSandbox
+        build_jail,
+        ConfigKey::InstallBuildJail
     );
     merge_field!(
         values.dlx,
@@ -1156,8 +1169,8 @@ fn validate_install(v: &Value, path: &str) -> Result<InstallConfig> {
     if let Some(v) = obj.get("nodeOptions") {
         install.node_options = Some(as_string_array(v, &child(path, "nodeOptions"))?);
     }
-    if let Some(v) = obj.get("sandbox") {
-        install.sandbox = Some(validate_sandbox(v, &child(path, "sandbox"))?);
+    if let Some(v) = obj.get("buildJail") {
+        install.build_jail = Some(as_bool(v, &child(path, "buildJail"))?);
     }
     Ok(install)
 }
@@ -1687,10 +1700,6 @@ mod tests {
         // file so its reuse pointers cannot reach arbitrary nub.jsonc siblings.
         for (text, path) in [
             (r#"{ "sandbox": { "fs": false } }"#, "sandbox"),
-            (
-                r#"{ "install": { "sandbox": { "net": false } } }"#,
-                "install.sandbox",
-            ),
             (r#"{ "dlx": { "sandbox": { "vars": [] } } }"#, "dlx.sandbox"),
         ] {
             match parse_project_config(text).unwrap_err() {
@@ -2149,7 +2158,7 @@ mod tests {
             "minimumReleaseAge": "1d",
             "minimumReleaseAgeExclude": [],
             "nodeOptions": [],
-            "sandbox": false
+            "buildJail": false
           },
           "dlx": { "consent": "prompt", "sandbox": false, "env": false }
         }"#;

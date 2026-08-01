@@ -47,8 +47,6 @@ pub(crate) enum SandboxSource {
 pub(crate) enum SandboxScope {
     /// Top-level `sandbox` — root-authored.
     ProjectDefault,
-    /// `install.sandbox` — root-authored.
-    Install,
     /// `dlx.sandbox` — root-authored.
     Dlx,
     // DEFERRED (not parsed yet — §7c): `ScriptsMeta` (root-authored → approved),
@@ -62,7 +60,7 @@ pub(crate) enum SandboxScope {
 #[allow(dead_code)] // built-not-activated in P6; exercised by unit tests only.
 pub(crate) fn caps_for_scope(scope: SandboxScope) -> nub_sandbox::ScopeCapabilities {
     match scope {
-        SandboxScope::ProjectDefault | SandboxScope::Install | SandboxScope::Dlx => {
+        SandboxScope::ProjectDefault | SandboxScope::Dlx => {
             nub_sandbox::ScopeCapabilities::approved()
         }
     }
@@ -246,11 +244,7 @@ mod tests {
 
     #[test]
     fn every_root_scope_is_approved() {
-        for scope in [
-            SandboxScope::ProjectDefault,
-            SandboxScope::Install,
-            SandboxScope::Dlx,
-        ] {
+        for scope in [SandboxScope::ProjectDefault, SandboxScope::Dlx] {
             let caps = caps_for_scope(scope);
             assert!(caps.env_substitution);
             assert!(caps.credential_broker);

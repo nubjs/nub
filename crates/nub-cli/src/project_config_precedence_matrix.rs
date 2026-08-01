@@ -215,12 +215,14 @@ fn specs() -> Vec<KeySpec> {
             is_empty: Some(|c| c.install.node_options == Some(Vec::new())),
         },
         KeySpec {
-            key: ConfigKey::InstallSandbox,
-            name: "install.sandbox",
-            set: |c, t| c.install.sandbox = Some(preset(t)),
-            matches: |c, t| c.install.sandbox == Some(preset(t)),
-            set_empty: Some(|c| c.install.sandbox = Some(SandboxSetting::Disabled)),
-            is_empty: Some(|c| c.install.sandbox == Some(SandboxSetting::Disabled)),
+            key: ConfigKey::InstallBuildJail,
+            name: "install.buildJail",
+            // Boolean key — same shape as `nodeCompat`: the layer token is encoded in the
+            // value's parity, since a bool cannot carry a distinguishing name.
+            set: |c, t| c.install.build_jail = Some(t.is_multiple_of(2)),
+            matches: |c, t| c.install.build_jail == Some(t.is_multiple_of(2)),
+            set_empty: Some(|c| c.install.build_jail = Some(false)),
+            is_empty: Some(|c| c.install.build_jail == Some(false)),
         },
         KeySpec {
             key: ConfigKey::DlxConsent,
@@ -273,7 +275,7 @@ fn ordinal(key: ConfigKey) -> usize {
         ConfigKey::InstallMinimumReleaseAge => 14,
         ConfigKey::InstallMinimumReleaseAgeExclude => 15,
         ConfigKey::InstallNodeOptions => 16,
-        ConfigKey::InstallSandbox => 17,
+        ConfigKey::InstallBuildJail => 17,
         ConfigKey::DlxConsent => 18,
         ConfigKey::DlxSandbox => 19,
         ConfigKey::DlxEnv => 20,

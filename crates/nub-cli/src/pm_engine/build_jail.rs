@@ -35,8 +35,8 @@
 //! the importer directory, so anchoring reads there would let the fetched tree grant
 //! itself a read on a sibling of its scratch.
 //!
-//! The one per-package opt-out is [`opted_out`] — `dependenciesMeta.<name>.sandbox:
-//! false` in the CONSUMER's root manifest, read nowhere else.
+//! The jail is GLOBAL: on by default, off only via `nub.jsonc` `install.buildJail: false`
+//! ([`build_jail_enabled`]). There is no per-package opt-out.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -325,7 +325,7 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         ));
 
         let homes = sandbox_homes(&spawn.project_root);
-        // The name is aube's `registry_name()` — the SAME identity `opted_out` keys the
+        // The name is aube's `registry_name()` — the identity the catalog keys the
         // per-package opt-out on, and for the same reason: a dependency cannot rename
         // itself into it, and aube withholds it entirely once its root is a checkout it
         // fetched. It selects a curated exception only; it can never widen the baseline.
@@ -557,26 +557,15 @@ fn evidence(detail: &str) -> String {
 
 /// The first line, which has to be TRUE about where the requirement came from.
 ///
-/// A reader whose install just refused needs to know whether their own repository asked for
-/// this or whether nub decided it — those lead to completely different next actions (talk to
-/// the team vs. file a bug). So the project is named only when `nub.jsonc` actually carries the
-/// opt-in; otherwise the line says nothing about a project that did not ask.
+/// The refusal headline.
 ///
-/// The config is READ here, not consumed: `install.sandbox` remains inert as a policy input,
-/// and this is attribution for a message, not a gate. When the opt-in becomes the thing that
-/// arms the jail, this function is already asking the right question.
+/// This used to branch on whether the project had opted IN via `install.sandbox`, so a reader
+/// could tell "my team asked for this" from "nub decided it". That distinction is gone with the
+/// setting: the jail is ON BY DEFAULT and `install.buildJail: false` is the only opt-out, so a
+/// project that did nothing is in the same position as everyone else and there is nothing to
+/// attribute.
 fn headline() -> String {
-    let opted_in = crate::project_config::effective_config()
-        .and_then(|config| config.values.install.sandbox.as_ref())
-        .is_some();
-    if opted_in {
-        return String::from(
-            "nub install: this project requires the build sandbox (nub.jsonc → install.sandbox)\n\n",
-        );
-    }
-    String::from(
-        "nub install: the build sandbox could not confine a dependency's install script\n\n",
-    )
+    String::from("nub install: the build jail could not confine a dependency's install script\n\n")
 }
 
 /// The per-cause remedy block. Each cause gets the command that actually fixes IT — a package
@@ -689,13 +678,11 @@ fn bubblewrap_install_hint(distro: Distro) -> String {
     }
 }
 
-/// Whether this script stays confined. The whole decision, split out from the hook so
-/// the two gates that make the opt-out safe are testable without an install: aube must
-/// have handed over a package identity at all (`None` = its root is a checkout it
-/// fetched, not the consumer's project), and `project_root` must independently look like
-/// the user's own project.
-fn should_confine(package_name: Option<&str>, project_root: &Path) -> bool {
-    should_confine_from(package_name, project_root, std::env::current_dir().ok())
+/// Whether this script stays confined. `package_name` is `None` when aube's root is a
+/// checkout it fetched rather than the consumer's project; that case stays confined too, so
+/// the parameters remain only to keep the call site's intent legible.
+fn should_confine(_package_name: Option<&str>, _project_root: &Path) -> bool {
+    build_jail_enabled()
 }
 
 /// [`should_confine`] with the process cwd injected, so both gates are testable without
@@ -709,58 +696,21 @@ fn should_confine(package_name: Option<&str>, project_root: &Path) -> bool {
 /// dir). Exact rather than heuristic: nub's cwd is where the user invoked the install,
 /// aube's project root is at or above it, and the nested git-prepare install runs in this
 /// same process without chdir — so a clone dir under nub's store never contains the cwd.
-fn should_confine_from(
-    package_name: Option<&str>,
-    project_root: &Path,
-    cwd: Option<PathBuf>,
-) -> bool {
-    let Some(name) = package_name else {
-        return true;
-    };
-    let users_own = cwd.is_some_and(|cwd| canonical(&cwd).starts_with(canonical(project_root)));
-    !users_own || !opted_out(project_root, name)
-}
-
-/// Whether the CONSUMER opted `name` out of the build jail — `dependenciesMeta.<name>.
-/// sandbox: false` in `project_root`'s own `package.json`.
+/// Is the build jail on? It is GLOBAL — `nub.jsonc` `install.buildJail: false` is the only way
+/// off, and absence means on.
 ///
-/// SECURITY INVARIANT, the reason this reads exactly one file: a DEPENDENCY-authored
-/// `dependenciesMeta` is IGNORED, by every route — not the building package's own
-/// manifest, not a workspace member's, not a `file:`/injected dep's, and not a fetched
-/// git checkout's, which aube keeps out by withholding `package_name` entirely once its
-/// root is one (`SandboxScope::package_name`). A package that could switch off its own
-/// confinement would be strictly worse than no jail at all, because it advertises a
-/// protection that silently is not there. `name` is the installer-resolved identity for
-/// the same reason, so a dependency cannot rename itself into an opt-out the consumer
-/// wrote for some other package.
+/// A per-package opt-out (`dependenciesMeta.<name>.sandbox: false`) was removed. It carried a
+/// real invariant — a DEPENDENCY-authored `dependenciesMeta` had to be ignored by every route,
+/// because a package that could switch off its own confinement is strictly worse than no jail,
+/// advertising a protection that silently is not there. A single global switch deletes that
+/// whole question rather than defending it.
 ///
-/// PRECEDENCE: this is the LAST word — a repo-wide opt-in to confinement does not seal
-/// the jail shut, because the narrower per-package statement has the same author.
-///
-/// Only an explicit `false` opts out, and every read/parse failure confines.
-///
-/// `name` is aube's `registry_name()` (`alias_of` before `name`), which is what
-/// `dependenciesMeta.<name>.built` in the SAME object already matches on — so the two
-/// directives in one `dependenciesMeta` entry cannot mean different packages. Two
-/// consequences follow, both inherited rather than introduced: an `npm:` alias does not
-/// borrow an opt-out written for the aliased-as spelling (it fails closed, the direction
-/// `default_trust` chose for the same reason), and an opt-out covers that registry name
-/// wherever it appears in the tree, not just as a direct dependency. It does NOT carry
-/// `jail_for`'s source/git keys, so it cannot distinguish a registry `esbuild` from a
-/// `file:`- or git-backed package resolving under that name.
-fn opted_out(project_root: &Path, name: &str) -> bool {
-    let Ok(text) = std::fs::read_to_string(project_root.join("package.json")) else {
-        return false;
-    };
-    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return false;
-    };
-    manifest
-        .get("dependenciesMeta")
-        .and_then(|meta| meta.get(name))
-        .and_then(|entry| entry.get("sandbox"))
-        .and_then(serde_json::Value::as_bool)
-        == Some(false)
+/// Orthogonal to `approveBuilds`/`allowBuilds`, which decide WHETHER a script runs; this
+/// decides whether a script that runs is CONFINED.
+fn build_jail_enabled() -> bool {
+    crate::project_config::effective_config()
+        .and_then(|config| config.values.install.build_jail)
+        .unwrap_or(true)
 }
 
 /// The effective child env: the current (aube) process env with the command's explicit
@@ -1681,119 +1631,6 @@ mod tests {
         env.unset("path");
         env.unset("SOMEVAR");
         assert!(env.into_map().is_empty());
-    }
-
-    /// Only an explicit `false` unjails. The `true` and absent cases are not symmetry
-    /// for its own sake: they are what keeps the field a narrowing switch, so no manifest
-    /// can pre-emptively force confinement OFF-by-default back ON, or vice versa.
-    #[test]
-    fn opted_out_only_on_an_explicit_false() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path();
-        let write = |json: &str| std::fs::write(root.join("package.json"), json).expect("manifest");
-
-        write(r#"{"dependenciesMeta":{"esbuild":{"sandbox":false}}}"#);
-        assert!(opted_out(root, "esbuild"));
-        assert!(
-            !opted_out(root, "sharp"),
-            "an unnamed package stays confined"
-        );
-
-        for confining in [
-            r#"{"dependenciesMeta":{"esbuild":{"sandbox":true}}}"#,
-            r#"{"dependenciesMeta":{"esbuild":{"built":false}}}"#,
-            r#"{"dependenciesMeta":{"esbuild":{}}}"#,
-            r#"{"dependenciesMeta":{}}"#,
-            // A non-bool must not be coerced — `"false"` is not `false`.
-            r#"{"dependenciesMeta":{"esbuild":{"sandbox":"false"}}}"#,
-            r#"{"name":"app"}"#,
-            "{ not json",
-        ] {
-            write(confining);
-            assert!(!opted_out(root, "esbuild"), "must confine: {confining}");
-        }
-
-        std::fs::remove_file(root.join("package.json")).expect("remove");
-        assert!(
-            !opted_out(root, "esbuild"),
-            "a missing root manifest confines"
-        );
-    }
-
-    /// The invariant the whole feature rests on: the opt-out is read from the CONSUMER's
-    /// root manifest and nowhere else, so a dependency writing the identical field into
-    /// its OWN `package.json` — the manifest sitting right beside the script about to run
-    /// — buys nothing. A package that could unjail itself is worse than no jail.
-    #[test]
-    fn a_dependency_authored_opt_out_is_ignored() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path();
-        std::fs::write(root.join("package.json"), r#"{"name":"app"}"#).expect("root manifest");
-        let dep = root.join("node_modules/evil");
-        std::fs::create_dir_all(&dep).expect("dep dir");
-        std::fs::write(
-            dep.join("package.json"),
-            r#"{"name":"evil","dependenciesMeta":{"evil":{"sandbox":false}}}"#,
-        )
-        .expect("dep manifest");
-
-        assert!(
-            !opted_out(root, "evil"),
-            "a dependency's own dependenciesMeta must never disable its confinement"
-        );
-        // Stated the other way: the dep's manifest DOES carry the field, so this is a
-        // scope test, not a parse test.
-        assert!(dep.as_path() != root && opted_out(&dep, "evil"));
-    }
-
-    /// The GIT-DEP ESCALATION, which the first cut of this feature shipped and which the
-    /// `opted_out` scope test above does NOT catch — there the hole was never in which
-    /// file is read, but in which `project_root` the caller supplies.
-    ///
-    /// `run_git_dep_prepare` roots a nested install at the fetched clone dir, so a git
-    /// dependency's own manifest becomes that install's "project root" and every package
-    /// IT builds would consult attacker-authored `dependenciesMeta`. Both gates are
-    /// pinned independently, because either one alone closes it and the point of having
-    /// two is that neither is load-bearing on its own.
-    #[test]
-    fn a_fetched_checkout_cannot_unjail_the_packages_its_nested_install_builds() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let checkout = tmp.path();
-        std::fs::write(
-            checkout.join("package.json"),
-            r#"{"name":"x","dependenciesMeta":{"payload":{"sandbox":false}}}"#,
-        )
-        .expect("checkout manifest");
-
-        // The user's real project, somewhere else entirely — the cwd every arm below runs
-        // under.
-        let elsewhere = tempfile::tempdir().expect("tempdir");
-        let cwd = Some(elsewhere.path().to_path_buf());
-
-        // Gate 1 — aube withholds the identity under a fetched root, so there is nothing
-        // to look up however tempting the manifest beside it looks.
-        assert!(should_confine_from(None, checkout, cwd.clone()));
-        // Gate 2 — even handed a name, the root must contain nub's cwd to be the user's.
-        // A clone dir under nub's store never does. This is the gate that survives a
-        // future aube caller re-pointing `project_dir`.
-        assert!(
-            should_confine_from(Some("payload"), checkout, cwd),
-            "a fetched checkout's dependenciesMeta must not unjail its nested install's builds"
-        );
-
-        // Non-vacuousness: the SAME manifest unjails once the cwd is inside it, so the
-        // two assertions above are the provenance gates firing — not a parse failure, a
-        // missing field, or a jail that never opts out at all. The cwd must EXIST:
-        // `canonical` returns its input unchanged for a path that does not, and on macOS
-        // the real root canonicalizes `/var` to `/private/var`, so a made-up subpath
-        // would fail containment for a reason that has nothing to do with provenance.
-        let inside = checkout.join("sub");
-        std::fs::create_dir(&inside).expect("cwd inside the root");
-        assert!(!should_confine_from(
-            Some("payload"),
-            checkout,
-            Some(inside)
-        ));
     }
 
     #[test]

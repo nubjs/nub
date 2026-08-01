@@ -16,7 +16,7 @@ fn golden_full_surface_config_parses_with_all_three_sandbox_positions() {
           "sandbox": true,
           "install": {
             "nodeLinker": "isolated",
-            "sandbox": "./install-policy.json"
+            "buildJail": false
           },
           "dlx": {
             "consent": "never",
@@ -28,10 +28,7 @@ fn golden_full_surface_config_parses_with_all_three_sandbox_positions() {
     .expect("the full-surface golden shape is valid");
     assert_eq!(cfg.node_compat, Some(false));
     assert_eq!(cfg.sandbox, Some(SandboxSetting::Enabled));
-    assert_eq!(
-        cfg.install.sandbox,
-        Some(SandboxSetting::FileRef("./install-policy.json".into()))
-    );
+    assert_eq!(cfg.install.build_jail, Some(false));
     assert_eq!(
         cfg.dlx.sandbox,
         Some(SandboxSetting::Preset("publish-jail".into()))
@@ -100,9 +97,9 @@ fn wrong_wrapper_types_report_the_nested_path() {
     for (text, path, expected) in [
         (r#"{ "dlx": [] }"#, "dlx", "an object"),
         (
-            r#"{ "install": { "sandbox": 5 } }"#,
-            "install.sandbox",
-            "a boolean or string (preset or \"./file.json\")",
+            r#"{ "install": { "buildJail": 5 } }"#,
+            "install.buildJail",
+            "a boolean",
         ),
         (
             r#"{ "dlx": { "sandbox": 5 } }"#,

@@ -124,6 +124,11 @@
         "nodeOptions": {
           "$ref": "#/$defs/stringArray",
           "description": "Node options applied to dependency lifecycle scripts."
+        },
+        "buildJail": {
+          "type": "boolean",
+          "default": true,
+          "description": "Confine dependency lifecycle scripts (preinstall/install/postinstall) with the OS build jail. On by default; set false to disable it entirely. This is a global switch \u2014 there is no per-package form. Independent of whether a script is allowed to run at all."
         }
       }
     },

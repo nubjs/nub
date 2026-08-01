@@ -1,6 +1,6 @@
 //! P6 — sandbox config values are LOSSLESS through parse and INERT in every
 //! Phase-0 consumer projection. One four-shape table (the wrapper's full value
-//! space: `false | true | preset | file-ref`) is shared across the top-level, `install.sandbox`, and
+//! space: `false | true | preset | file-ref`) is shared across the top-level and
 //! `dlx.sandbox` positions, and reused by pm_engine's install-lowering test.
 //! Top-level parse + snapshot retention is covered by the sibling
 //! `sandbox_four_shapes_are_lossless_and_inert_in_the_snapshot`; this module
@@ -37,17 +37,14 @@ fn project_layer(values: ProjectConfig) -> Option<LoadedConfig> {
 #[test]
 fn four_shapes_round_trip_losslessly_at_the_nested_positions() {
     for (raw, expected) in four_shapes() {
-        let install = parse_project_config(&format!(r#"{{ "install": {{ "sandbox": {raw} }} }}"#))
-            .expect("install.sandbox shape parses");
-        assert_eq!(
-            install.install.sandbox,
-            Some(expected.clone()),
-            "install.sandbox: {raw}"
-        );
-
         let dlx = parse_project_config(&format!(r#"{{ "dlx": {{ "sandbox": {raw} }} }}"#))
             .expect("dlx.sandbox shape parses");
-        assert_eq!(dlx.dlx.sandbox, Some(expected), "dlx.sandbox: {raw}");
+        assert_eq!(
+            dlx.dlx.sandbox,
+            Some(expected.clone()),
+            "dlx.sandbox: {raw}"
+        );
+        let _ = expected;
     }
 }
 
@@ -71,7 +68,6 @@ fn runtime_projection_with_any_sandbox_shape_equals_the_no_sandbox_baseline() {
     for (raw, shape) in four_shapes() {
         let mut values = base_values.clone();
         values.sandbox = Some(shape.clone());
-        values.install.sandbox = Some(shape.clone());
         values.dlx.sandbox = Some(shape);
         let projected = resolve_effective_config(
             Path::new("/cwd"),
