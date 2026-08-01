@@ -378,6 +378,25 @@ static GOLDEN_PRE_CATALOG_GRANTS: &[(&str, CuratedGrant)] = &[
             ..CuratedGrant::NONE
         },
     ),
+    // nx's postinstall starts the daemon client, which reads the consumer's `nx.json`
+    // eagerly and — from 18 on — creates `<project>/.nx/cache`. Both are the consumer's own
+    // project files, which nx was installed to operate on.
+    //
+    // A WINDOW, not a cutoff, and both edges sit on adjacent majors that were measured:
+    // 13.10.6 needs nothing, 14 through 18 need this, 19 onward needs nothing again. It is
+    // the only grant in this table that a measurement taken at LATEST could not have
+    // produced — every version from 19 up passes confined and ungranted, so the requirement
+    // is invisible unless old pins are measured on purpose.
+    (
+        "nx",
+        CuratedGrant {
+            versions: Some(">=14.0.0, <19.0.0"),
+            project_reads: &["nx.json"],
+            project_writes: ProjectWrites::Literal(&["nx.json", ".nx"]),
+            project_cwd: true,
+            ..CuratedGrant::NONE
+        },
+    ),
     // THE HOOK-INSTALLER COHORT — nine packages, and the reason it is NINE ENTRIES rather
     // than one class rule. A `.git/hooks` write is persistent arbitrary code execution: the
     // file runs, UNCONFINED, on the developer's next `git commit`, long after the install
@@ -1091,6 +1110,22 @@ mod tests {
         );
     }
 
+    /// A version the grant's range admits, so a scoped row is probed inside its own window
+    /// instead of at a fixed version that may fall outside it. Scanning rather than parsing
+    /// the range: the scan can only ever return a version the SHIPPED predicate accepts,
+    /// whereas a second range parser could disagree with the first and hide the divergence
+    /// it was written to find. An empty result is itself a finding — a range no ordinary
+    /// version satisfies is a grant that silently applies to nobody.
+    fn probe_version(range: Option<&str>) -> String {
+        let Some(range) = range else {
+            return "1.0.0".to_string();
+        };
+        (0..=200)
+            .flat_map(|n| [format!("{n}.0.0"), format!("0.{n}.0")])
+            .find(|v| crate::compiler::version_scope::applies(Some(range), Some(v.as_str())))
+            .unwrap_or_else(|| panic!("no version satisfies the range `{range}`"))
+    }
+
     /// Equal tables are the input; equal POLICIES are the thing that actually has to hold.
     /// Both arms run the production rule-builder — only the table differs — so this closes
     /// the gap the table comparison leaves: a field the generator populates correctly but
@@ -1109,6 +1144,10 @@ mod tests {
 
         for (name, grant) in GOLDEN_PRE_CATALOG_GRANTS {
             let dir = project.join(format!("node_modules/.store/{name}@1/node_modules/{name}"));
+            // A version the grant's OWN range admits, not a fixed one. `nx` is scoped to
+            // `>=14.0.0, <19.0.0`, so probing every row at "1.0.0" compiled it to nothing and
+            // tripped the vacuity guard below — the guard working, but on a correct table.
+            let probe = probe_version(grant.versions);
             let compile = |table| {
                 let mut p = SandboxPolicy::default();
                 // The env pairs ride into the comparison too: a `home_paths` entry the
@@ -1119,7 +1158,7 @@ mod tests {
                     &homes_for(project),
                     &dir,
                     Some(name),
-                    Some("1.0.0"),
+                    Some(&probe),
                 );
                 p.fs.rules
                     .entries

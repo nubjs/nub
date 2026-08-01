@@ -70,7 +70,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const WINDOWS = process.platform === 'win32';
 
 // ── args ──────────────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
@@ -79,9 +83,35 @@ const has = (n) => argv.includes(n);
 
 const NUB = process.env.NUB_BIN;
 if (!NUB || !fs.existsSync(NUB)) { console.error('set NUB_BIN to a nub built with --features build-jail-catalog-override'); process.exit(2); }
-const HARNESS = path.dirname(new URL(import.meta.url).pathname);
+// `new URL(...).pathname` yields `/C:/…` on Windows, which every `path.join` below then
+// resolves to a directory that does not exist — so `BASE_CATALOG` silently pointed at
+// nothing and the run died on the first cell.
+const HARNESS = path.dirname(fileURLToPath(import.meta.url));
 const BASE_CATALOG = process.env.BASE_CATALOG || path.join(HARNESS, '../../crates/nub-sandbox/data/build-jail-catalog.json');
-const STUDY_PATH = process.env.STUDY_PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
+// The default is the system tool floor a lifecycle script may reach, plus the node that
+// runs it — appended below. Windows has no `/usr/bin`, and a PATH of POSIX directories
+// there resolves nothing at all.
+const STUDY_PATH_DEFAULT = WINDOWS
+  ? [
+      `${process.env.SystemRoot || 'C:\\Windows'}\\system32`,
+      process.env.SystemRoot || 'C:\\Windows',
+      `${process.env.SystemRoot || 'C:\\Windows'}\\System32\\Wbem`,
+    ].join(path.delimiter)
+  : '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
+// A lifecycle script's `node` must be reachable or every cell fails for a reason that has
+// nothing to do with the jail. `run-shard.sh` prepends the caller's node dir for exactly
+// this. WINDOWS ONLY, deliberately: the POSIX floor already contains a `node` and 643
+// packages have been measured against it across Linux and macOS, so prepending there would
+// change which interpreter those runs used and break comparability with them for no gain.
+const STUDY_PATH = (() => {
+  const base = process.env.STUDY_PATH || STUDY_PATH_DEFAULT;
+  if (!WINDOWS) return base;
+  const nodeDir = path.dirname(process.execPath);
+  const present = base
+    .split(path.delimiter)
+    .some((d) => d && path.resolve(d).toLowerCase() === nodeDir.toLowerCase());
+  return present ? base : [nodeDir, base].join(path.delimiter);
+})();
 const ROOT = arg('--out', path.join(os.homedir(), '.cache/nub/grant-matrix'));
 const JOBS = Number(arg('--jobs', '3'));
 const LIMIT = Number(arg('--limit', '0'));
@@ -107,7 +137,7 @@ const RESULTS = path.join(ROOT, MINIMALITY ? 'minimality.ndjson' : 'matrix.ndjso
 // answer, so both are cleared and the result is asserted below.
 const baseCatalog = JSON.parse(fs.readFileSync(BASE_CATALOG, 'utf8'));
 
-function cellCatalog(pkg, cell) {
+function cellCatalog(pkg, cell, version) {
   const c = JSON.parse(JSON.stringify(baseCatalog));
   c.packageNetwork.full = (c.packageNetwork.full || []).filter((e) => e.package !== pkg);
   for (const h of c.networkHosts || []) if (Array.isArray(h.fetchedBy)) h.fetchedBy = h.fetchedBy.filter((n) => n !== pkg);
@@ -132,8 +162,21 @@ function cellCatalog(pkg, cell) {
     // cell's question is "does this script need the project at all", and a scoped probe
     // that missed the real path would answer no for the wrong reason. Scoping is a
     // follow-up decision, made once a package is known to need project access.
+    //
+    // `**`, NOT `.` — and this cell spelled it `.` until 2026-07-31, which made it INERT.
+    // `contained()` (compiler/curated.rs) returns None when the joined path EQUALS the
+    // project root: `(joined != root && joined.starts_with(&root))`. The catalog VALIDATOR
+    // accepts `.`, so nothing errored; the compiler just dropped it, leaving `projectCwd`
+    // (by its own comment "the NODE alone") as the whole grant. Measured by intervention,
+    // one variable, four arms on nx@15.9.7 with banners engaged in all of them: no grant
+    // rc=1 EPERM on `<proj>/nx.json`; `.` rc=1, the SAME EPERM; `nx.json` rc=0; `*` rc=0;
+    // `**` rc=0. So every `project`/`both` cell before this measured cwd and nothing else,
+    // and the corrupted verdict is FAILS-AT-BOTH specifically — a package needing project
+    // access failed the `both` cell and was recorded as "something the catalog cannot
+    // express" when the catalog expresses it fine. NEEDS-NOTHING and NEEDS-EGRESS rows are
+    // unaffected, since neither depends on this grant compiling.
     c.packageGrants.push({
-      package: pkg, projectReads: ['.'], projectWrites: { literal: ['.'] }, projectCwd: true,
+      package: pkg, projectReads: ['**'], projectWrites: { literal: ['**'] }, projectCwd: true,
       mechanism: 'Matrix probe arm: unscoped project read/write/cwd, to determine empirically whether this install script needs project access at all.',
       evidence: 'measured', observed, platform: 'macos-arm64',
     });
@@ -154,7 +197,10 @@ function cellCatalog(pkg, cell) {
     throw new Error(`cell ${cell}/${pkg}: fullDisk mismatch`);
   }
 
-  const file = path.join(ROOT, 'catalogs', `${slug(pkg)}-${cell}.json`);
+  // The VERSION is in the filename only to keep two slots running the same package at
+  // different versions off one path: `writeFileSync` truncates, so a concurrent read of a
+  // half-written catalog would trip the banner check and waste an otherwise good row.
+  const file = path.join(ROOT, 'catalogs', `${slug(pkg)}-${slug(version)}-${cell}.json`);
   fs.writeFileSync(file, JSON.stringify(c, null, 2));
   // The exact substring the binary's banner must contain. Deriving it here and matching
   // it there is what makes "the edit took effect" a measurement rather than an assumption.
@@ -243,6 +289,49 @@ function provision(proj, need, nonce) {
   }
 }
 
+// WINDOWS ENV FLOOR — transplanted verbatim from `run-shard.sh`'s, deliberately, so the
+// matrix and the corpus measure the SAME environment and their Windows numbers stay
+// comparable. A near-empty env is the whole point of this harness on POSIX, but on Windows
+// it is not a clean room, it is a broken one: a native process resolves system DLLs and
+// the winsock provider catalogue relative to `%SystemRoot%`, so a child without it fails
+// to START. Every cell would then score `INSTALL-FAILED` and every package would read as
+// fails-at-every-cell — a whole sweep of false findings that look exactly like the
+// interesting category.
+//
+// Every path-shaped member points into the cell's own private tree, so isolation survives.
+// `LOCALAPPDATA` is the exception and is NOT like the others: `CreateAppContainerProfile`
+// takes a name and no path, so Windows creates the profile under the CALLING user's real
+// `%LOCALAPPDATA%\Packages` while the confined child resolves its redirected temp from
+// whatever it was handed — point that at a synthetic tree and the two compose different
+// paths. `WIN_HOST_LOCALAPPDATA=1` hands the child the host's value instead; off by
+// default so this matches the corpus rather than silently diverging from it.
+function winEnvFloor(home, tmp) {
+  if (!WINDOWS) return {};
+  const sysRoot = process.env.SystemRoot || process.env.SYSTEMROOT || 'C:\\Windows';
+  fs.mkdirSync(path.join(home, 'AppData', 'Roaming'), { recursive: true });
+  fs.mkdirSync(path.join(home, 'AppData', 'Local'), { recursive: true });
+  const localAppData = process.env.WIN_HOST_LOCALAPPDATA
+    ? process.env.LOCALAPPDATA || process.env.LocalAppData || path.join(home, 'AppData', 'Local')
+    : path.join(home, 'AppData', 'Local');
+  return {
+    SystemRoot: sysRoot,
+    windir: process.env.windir || process.env.WINDIR || sysRoot,
+    COMSPEC: process.env.COMSPEC || process.env.ComSpec || `${sysRoot}\\system32\\cmd.exe`,
+    PATHEXT: process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD',
+    OS: process.env.OS || 'Windows_NT',
+    NUMBER_OF_PROCESSORS: process.env.NUMBER_OF_PROCESSORS || '2',
+    PROCESSOR_ARCHITECTURE: process.env.PROCESSOR_ARCHITECTURE || 'AMD64',
+    SystemDrive: process.env.SystemDrive || process.env.SYSTEMDRIVE || 'C:',
+    ProgramData: process.env.ProgramData || process.env.PROGRAMDATA || 'C:\\ProgramData',
+    ProgramFiles: process.env.ProgramFiles || process.env.PROGRAMFILES || 'C:\\Program Files',
+    USERPROFILE: home,
+    APPDATA: path.join(home, 'AppData', 'Roaming'),
+    LOCALAPPDATA: localAppData,
+    TEMP: tmp,
+    TMP: tmp,
+  };
+}
+
 function runCell(pkg, version, cell, nonce, need) {
   const jailOff = cell === 'off';
   const dir = path.join(ROOT, 'fx', `${slug(pkg)}-${cell}-${nonce}`);
@@ -264,8 +353,9 @@ function runCell(pkg, version, cell, nonce, need) {
 
   // The catalog is forwarded even into the jail-off control, so a binary silently lacking
   // the override feature fails on the FIRST cell rather than part-way through a sweep.
-  const { file: catalog, banner } = cellCatalog(pkg, jailOff ? 'none' : cell);
+  const { file: catalog, banner } = cellCatalog(pkg, jailOff ? 'none' : cell, version);
   const env = {
+    ...winEnvFloor(home, tmp),
     PATH: STUDY_PATH, HOME: home, TMPDIR: tmp,
     NUB_CACHE_DIR: STORE, NUB_BUILD_JAIL_CATALOG: catalog,
   };
@@ -409,7 +499,10 @@ function worklist() {
 //     against one binary is not a fact about every platform forever, and a later reader
 //     needs to be able to tell whether it still holds.
 const PROVENANCE = {
-  binary_sha256: (() => { try { return spawnSync('shasum', ['-a', '256', NUB], { encoding: 'utf8' }).stdout?.trim().split(/\s+/)[0] ?? null; } catch { return null; } })(),
+  // Hashed in-process rather than by shelling out: `shasum` is not on a Windows PATH, and
+  // the provenance silently degrading to `null` is exactly the kind of quiet gap that makes
+  // a later reader unable to tell which binary produced a grant.
+  binary_sha256: (() => { try { return crypto.createHash('sha256').update(fs.readFileSync(NUB)).digest('hex'); } catch { return null; } })(),
   nub_version: (() => { const r = spawnSync(NUB, ['--version'], { encoding: 'utf8' }); return (r.stdout || '').trim().split('\n')[0] || null; })(),
   platform: `${process.platform}-${process.arch}`,
   node: process.version,
@@ -456,8 +549,13 @@ function shapeRecord(raw, meta) {
   // human rather than something to apply.
   const grant =
     raw.requirement === 'NEEDS-EGRESS' ? { packageNetwork: 'full' }
-      : raw.requirement === 'NEEDS-PROJECT' ? { packageGrant: { projectReads: ['.'], projectWrites: { literal: ['.'] }, projectCwd: true } }
-        : raw.requirement === 'NEEDS-BOTH' ? { packageNetwork: 'full', packageGrant: { projectReads: ['.'], projectWrites: { literal: ['.'] }, projectCwd: true } }
+      // `**` for the same reason the probe cell uses it: a `.` here would have had
+      // `apply-matrix.mjs` write a grant into the shipped catalog that the compiler
+      // silently drops — a catalog entry that looks like a capability and is not. No
+      // record ever reached this branch (with `.` inert, the ladder produced FAILS-AT-BOTH
+      // instead of NEEDS-PROJECT), so nothing shipped; the bug was latent, not live.
+      : raw.requirement === 'NEEDS-PROJECT' ? { packageGrant: { projectReads: ['**'], projectWrites: { literal: ['**'] }, projectCwd: true } }
+        : raw.requirement === 'NEEDS-BOTH' ? { packageNetwork: 'full', packageGrant: { projectReads: ['**'], projectWrites: { literal: ['**'] }, projectCwd: true } }
           // The full-disk cell carries egress, so the grant it implies does too. Recording
           // only the filesystem half would apply a configuration that was never measured.
           : raw.requirement === 'NEEDS-FULL-DISK' ? { packageNetwork: 'full', packageGrant: { fullDisk: true } }
@@ -500,12 +598,18 @@ const weeklyOf = (() => {
   return (n) => m.get(n) ?? null;
 })();
 
+// Resume and log keys are name@VERSION, not name. A worklist may legitimately carry the
+// same package at several versions — that is the whole shape of the old-pinned-version
+// study, where the comparison IS latest-vs-older of one package. Keyed on the name alone,
+// a resume would silently drop every band but the first, and the second band's log would
+// overwrite the first's; both failures are invisible in the output.
+const key = (name, version) => `${name}@${version}`;
 const work = worklist().slice(0, LIMIT || undefined);
 const done = new Set();
 if (fs.existsSync(RESULTS)) {
-  for (const l of fs.readFileSync(RESULTS, 'utf8').split('\n')) { if (!l.trim()) continue; try { done.add(JSON.parse(l).package); } catch { /* partial line */ } }
+  for (const l of fs.readFileSync(RESULTS, 'utf8').split('\n')) { if (!l.trim()) continue; try { const o = JSON.parse(l); done.add(key(o.package, o.version)); } catch { /* partial line */ } }
 }
-const pending = work.filter((w) => !done.has(w.name));
+const pending = work.filter((w) => !done.has(key(w.name, w.version)));
 console.log(`${MINIMALITY ? 'minimality' : 'ladder'}: ${pending.length} to run (${done.size} already recorded) -> ${RESULTS}`);
 
 // A worker per job slot, each pulling the next name. Written as processes rather than
@@ -521,7 +625,7 @@ if (slot >= 0) {
     const secs = Math.round((Date.now() - t) / 1000);
     const rec = shapeRecord(raw, { weekly: weeklyOf(name), need, secs });
     fs.appendFileSync(RESULTS, JSON.stringify(rec) + '\n');
-    if (raw.log) fs.writeFileSync(path.join(ROOT, 'logs', `${slug(name)}.log`), raw.log);
+    if (raw.log) fs.writeFileSync(path.join(ROOT, 'logs', `${slug(name)}-${slug(version)}.log`), raw.log);
     console.log(`[${slot}] ${name}@${version}\t${rec.verdict}\t${secs}s\t${rec.evidence.detail || ''}`);
   }
   process.exit(0);
