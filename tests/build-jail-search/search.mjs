@@ -291,7 +291,18 @@ function homeWritePaths(paths) {
   for (const p of paths) {
     if (!p.startsWith('$home/')) continue;
     const segs = p.slice('$home/'.length).split('/');
-    if (segs.length < 2) continue;           // a bare file in $HOME is not a directory grant
+    // A DIRECTORY GRANT NEEDS A DIRECTORY. Two segments with nothing beneath them is a FILE,
+    // and promoting it moves another tool's bookkeeping into the user's real home for nothing:
+    // `unrs-resolver` derived `.npm/_update-notifier-last-checked`, npm's update-notifier
+    // timestamp, which is not the package's artefact at all. Requiring something below the
+    // prefix is a structural test, not a judgement about which files are worth keeping —
+    // `.cache/puppeteer` has paths beneath it and survives. Audited over every record: one
+    // junk entry, one legitimate entry, and this separates them.
+    //
+    // A bare file directly in $HOME (`segs.length < 2`) was already excluded, which is why
+    // `.npmrc` — the config root whose capture the private home exists to prevent — can never
+    // reach this list.
+    if (segs.length < 3) continue;
     dirs.add(segs.slice(0, 2).join('/'));
   }
   // Drop any entry already covered by a shallower one, so the set is minimal by construction.
