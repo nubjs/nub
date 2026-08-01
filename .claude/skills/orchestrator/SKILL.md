@@ -9,6 +9,8 @@ You hold the goal set, own the durable record, and dispatch sub-agents to execut
 
 **Not fray.** fray juggles many independent efforts. Here the pieces belong to one goal. It reuses fray's machinery (dispatch profiles, `SendMessage` steering, worktrees, the merge queue).
 
+**Only a top-level session orchestrates.** If you are yourself a dispatched sub-agent, you are one of the pieces, not the holder of the goal set — the repo-wide depth cap in `AGENTS.local.md` applies and you do not dispatch. Execute your scoped task inline and return; if it turns out to be a whole campaign, say so in your return and let your dispatcher run it.
+
 ## The record you own
 
 One living doc **is** the effort — goals, architecture, resolved ambiguities with rationale, the to-do, status. Keep it behavior-level; a symbol-pinned to-do rots. Sub-agents get scoped tasks and **do not edit it**; you reflect each landed piece yourself. (They still merge scoped progress into fray's thread scratchpad — that is the standing exception.)

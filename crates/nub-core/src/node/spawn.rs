@@ -2663,6 +2663,32 @@ pub fn strip_verbatim_path(path: &Path, windows: bool) -> PathBuf {
     }
 }
 
+/// Whether a preload spec names an absolute path rather than a bare module
+/// specifier, deciding whether it needs the `file://` spelling.
+///
+/// Pure over `windows`, for the same reason [`to_file_url`] is: `Path::is_absolute`
+/// answers for the HOST, so a fixture like `/proj/pre.cjs` reads absolute on Unix
+/// and NOT absolute on Windows (there it is rooted but not drive-qualified). Mixing
+/// that into an otherwise-`windows`-parameterized function makes the pair disagree
+/// on a Windows host and silently emit a bare `--import=/proj/pre.cjs`. Matches
+/// `Path::is_absolute` on each platform for the paths that actually reach here.
+fn is_absolute_path(spec: &str, windows: bool) -> bool {
+    if !windows {
+        return spec.starts_with('/');
+    }
+    // UNC (`\\server\share`, `//server/share`) and the verbatim `\\?\C:\…` form
+    // both lead with a doubled separator; everything else must be drive-qualified
+    // (`C:\a`, `C:/a`). A lone leading slash is rooted-but-relative on Windows.
+    if spec.starts_with(r"\\") || spec.starts_with("//") {
+        return true;
+    }
+    let bytes = spec.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
 /// Convert a filesystem path to a `file://` URL Node's loader accepts on every
 /// platform. On Windows a path is `C:\a\b` (or a canonicalized `\\?\C:\a\b`); a
 /// naive `format!("file://{path}")` yields `file://C:\a\b`, which Node's
@@ -2683,11 +2709,6 @@ fn to_file_url(path: &str, windows: bool) -> String {
         // Drive: C:/a/b -> file:///C:/a/b
         format!("file:///{forward}")
     }
-}
-
-/// Convert an absolute native path to the file URL spelling Node expects.
-pub fn path_to_file_url(path: &str) -> String {
-    to_file_url(path, cfg!(windows))
 }
 
 /// How nub injects its preload, chosen BY TIER. The fast tier (Node 22.15+) loads a
@@ -2786,6 +2807,104 @@ pub fn preload_injection(
     version: &super::version::NodeVersion,
 ) -> PreloadInjection {
     preload_injection_for(preload_mjs, version, cfg!(windows))
+}
+
+/// How a USER preload (`nub.jsonc` `preload`) reaches Node — chosen by tier so it
+/// always lands AFTER nub's own preload and runs exactly once.
+///
+/// Two upstream Node facts drive this, both measured against plain `node` with no
+/// nub in the picture (18.19.0 through 26.5.0):
+///
+/// 1. Node runs EVERY `--require` preload before ANY `--import` preload, whatever
+///    order the tokens appear in on argv or in NODE_OPTIONS.
+/// 2. Every `module.register()` loader worker RE-RUNS the `--require` preloads in
+///    its own realm. The worker reads the immutable per-process option store, so
+///    scrubbing `process.env.NODE_OPTIONS` or `process.execArgv` before the
+///    `register()` call does NOT suppress it — there is no JS-side workaround.
+///    `--import` preloads are skipped in loader workers, which is why nub's own
+///    compat preload does not recurse.
+///
+/// On the COMPAT tier nub is itself an `--import` ([`preload_injection_for`]) and
+/// always registers a loader worker (`runtime/preload.mjs`), so a `.cjs` user
+/// preload injected as `--require` would run BEFORE nub's hooks are installed and
+/// run TWICE. Injecting it as `--import` fixes both at once.
+///
+/// So a `.cjs` preload may keep `--require` only when NOTHING in this invocation
+/// pulls in the ESM loader: nub's own preload is a `--require` (fast tier) AND no
+/// sibling entry in the list rides `--import`. A sibling `--import` is enough on its
+/// own, because it makes the runtime auto-select the async loader-worker tier
+/// (`shouldAutoAsyncTierAtPreload`) — measured: `["./b.mjs", "./a.cjs"]` on Node
+/// 22.15 ran `a.cjs` twice, ahead of `b.mjs`. Rerouting the `.cjs` in that case
+/// costs nothing, since the sibling has already forced eager ESM-loader init.
+///
+/// Where no sibling forces it, `--require` is retained deliberately: routing a CJS
+/// preload through `--import` would itself force that eager init and break the
+/// synchronous `Module.runMain` semantics of the user's ENTRY (the R1 cluster
+/// documented on [`PreloadInjection`]).
+///
+/// Takes the whole list because the decision is a property of the list, not of one
+/// entry. Order is preserved, which is the user-visible contract.
+pub fn user_preload_injections(
+    specs: &[String],
+    version: &super::version::NodeVersion,
+) -> Vec<PreloadInjection> {
+    user_preload_injections_for(specs, version, cfg!(windows))
+}
+
+fn user_preload_injections_for(
+    specs: &[String],
+    version: &super::version::NodeVersion,
+    windows: bool,
+) -> Vec<PreloadInjection> {
+    // Nub's own preload is `--import` below 22.15; above it, any non-CJS entry in
+    // the user's own list drags the ESM loader in just the same.
+    let esm_loader_forced =
+        !version.supports_augmentation() || specs.iter().any(|spec| !is_cjs_preload(spec));
+    specs
+        .iter()
+        .map(|spec| user_preload_injection_for(spec, esm_loader_forced, windows))
+        .collect()
+}
+
+fn is_cjs_preload(spec: &str) -> bool {
+    Path::new(spec)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("cjs"))
+}
+
+fn user_preload_injection_for(
+    spec: &str,
+    esm_loader_forced: bool,
+    windows: bool,
+) -> PreloadInjection {
+    let path = Path::new(spec);
+    // Only the exact lowercase `.cjs` can be rerouted. Node's ESM loader maps
+    // extensions case-SENSITIVELY and aborts on one it does not know
+    // (ERR_UNKNOWN_FILE_EXTENSION), while `require` falls back to loading an
+    // unrecognized extension as JS — so an oddly-cased `.CJS` stays on `--require`
+    // everywhere, keeping exactly the behavior it already had rather than trading a
+    // preload-ordering bug for a hard startup crash.
+    let reroutable = path.extension().and_then(|e| e.to_str()) == Some("cjs");
+    if is_cjs_preload(spec) && !(esm_loader_forced && reroutable) {
+        // `--require` does NOT accept a file:// URL, so the raw path goes through.
+        return PreloadInjection {
+            flag: "--require",
+            value: spec.to_string(),
+        };
+    }
+    PreloadInjection {
+        flag: "--import",
+        // A bare specifier (`my-preload`, `@scope/pkg`) stays bare — Node resolves it
+        // as an import from the cwd. Only a real path needs the file:// spelling,
+        // which is what stops a Windows `C:\…` from parsing its drive as the URL
+        // authority (ERR_INVALID_FILE_URL_PATH).
+        value: if is_absolute_path(spec, windows) {
+            to_file_url(spec, windows)
+        } else {
+            spec.to_string()
+        },
+    }
 }
 
 /// NODE_PATH value that makes nub's vendored runtime deps resolvable to a
@@ -5041,6 +5160,130 @@ mod tests {
         // The 22.14.x boundary stays on the compat (import) channel.
         let boundary = preload_injection_for(mjs, &NodeVersion::new(22, 14, 99), false);
         assert_eq!(boundary.flag, "--import");
+    }
+
+    fn tokens(specs: &[&str], version: &NodeVersion) -> Vec<String> {
+        let owned: Vec<String> = specs.iter().map(|s| (*s).to_string()).collect();
+        user_preload_injections_for(&owned, version, false)
+            .iter()
+            .map(|injection| injection.node_options_token())
+            .collect()
+    }
+
+    /// A lone `.cjs` USER preload rides `--require` only where nothing else pulls in
+    /// the ESM loader. On the compat tier nub's own preload is an `--import`, so the
+    /// user's must be one too: Node runs every `--require` before any `--import`
+    /// regardless of token order (a `--require` would beat nub's hooks into the
+    /// process), and re-runs `--require` preloads inside the `module.register()`
+    /// loader worker the compat tier always spawns (so it would also run twice).
+    #[test]
+    fn lone_cjs_preload_rides_import_on_compat_tier_require_on_fast_tier() {
+        assert_eq!(
+            tokens(&["/proj/pre.cjs"], &NodeVersion::new(22, 15, 0)),
+            ["--require=/proj/pre.cjs"]
+        );
+
+        for version in [
+            NodeVersion::new(22, 14, 99),
+            NodeVersion::new(20, 11, 0),
+            NodeVersion::new(18, 19, 0),
+        ] {
+            assert_eq!(
+                tokens(&["/proj/pre.cjs"], &version),
+                ["--import=file:///proj/pre.cjs"],
+                "Node {version}: a .cjs user preload must not ride --require on the compat tier"
+            );
+        }
+    }
+
+    /// A sibling `--import` entry forces the runtime onto its async loader-worker
+    /// tier even on the fast tier, so a `.cjs` alongside one has the same
+    /// runs-early-and-twice problem and is rerouted too. Rerouting is free here: the
+    /// sibling has already forced eager ESM-loader init, so the R1 entry semantics
+    /// that `--require` protects are gone either way. Declared order is preserved.
+    #[test]
+    fn cjs_preload_is_rerouted_when_a_sibling_entry_forces_the_esm_loader() {
+        assert_eq!(
+            tokens(
+                &["/proj/b.mjs", "/proj/a.cjs"],
+                &NodeVersion::new(22, 15, 0)
+            ),
+            ["--import=file:///proj/b.mjs", "--import=file:///proj/a.cjs"]
+        );
+        // No sibling `--import`: every entry keeps the sync `--require` channel.
+        assert_eq!(
+            tokens(
+                &["/proj/a.cjs", "/proj/c.cjs"],
+                &NodeVersion::new(22, 15, 0)
+            ),
+            ["--require=/proj/a.cjs", "--require=/proj/c.cjs"]
+        );
+    }
+
+    /// An oddly-cased `.CJS` keeps `--require` even where the ESM loader is forced.
+    /// Node's ESM loader would abort the process with ERR_UNKNOWN_FILE_EXTENSION on
+    /// it, whereas `require` loads an unrecognized extension as JS — so rerouting
+    /// would trade a preload-ordering bug for a hard startup crash.
+    #[test]
+    fn oddly_cased_cjs_preload_is_not_rerouted_onto_import() {
+        for version in [NodeVersion::new(20, 11, 0), NodeVersion::new(24, 0, 0)] {
+            assert_eq!(
+                tokens(&["/proj/pre.CJS"], &version),
+                ["--require=/proj/pre.CJS"],
+                "Node {version}: .CJS must stay on --require (the ESM loader has no \
+                 case-insensitive or unknown-extension fallback)"
+            );
+        }
+    }
+
+    /// Non-`.cjs` preloads are `--import` on BOTH tiers, and only a real path gets
+    /// the file:// spelling — a bare specifier stays bare so Node resolves it as an
+    /// ordinary import from the cwd.
+    #[test]
+    fn user_preload_import_form_is_tier_independent_and_spares_bare_specifiers() {
+        for version in [NodeVersion::new(24, 0, 0), NodeVersion::new(20, 11, 0)] {
+            assert_eq!(
+                tokens(&["/proj/pre.mjs"], &version),
+                ["--import=file:///proj/pre.mjs"]
+            );
+            assert_eq!(
+                tokens(&["telemetry-pkg"], &version),
+                ["--import=telemetry-pkg"],
+                "Node {version}: a bare specifier must not be mangled into a file:// URL"
+            );
+        }
+    }
+
+    /// Whether a spec needs the file:// spelling is decided from the `windows`
+    /// parameter, never the host — so both spellings are exercised wherever the
+    /// suite runs. Deciding it with `Path::is_absolute` instead passed everywhere
+    /// locally and failed all three POSIX-fixture cases above on the Windows CI leg,
+    /// where `/proj/pre.cjs` is rooted but not drive-qualified: the injection fell
+    /// through to the bare-specifier branch and emitted `--import=/proj/pre.cjs`.
+    #[test]
+    fn file_url_worthiness_is_decided_by_the_windows_flag_not_the_host() {
+        assert!(is_absolute_path("/proj/pre.cjs", false));
+        assert!(!is_absolute_path("telemetry-pkg", false));
+
+        // Rooted but not drive-qualified — Windows agrees this is not absolute.
+        assert!(!is_absolute_path("/proj/pre.cjs", true));
+        assert!(is_absolute_path(r"C:\proj\pre.cjs", true));
+        assert!(is_absolute_path("C:/proj/pre.cjs", true));
+        assert!(is_absolute_path(r"\\server\share\pre.cjs", true));
+        assert!(is_absolute_path(r"\\?\C:\proj\pre.cjs", true));
+        assert!(!is_absolute_path("telemetry-pkg", true));
+        assert!(!is_absolute_path("C:", true));
+
+        // End to end: a Windows drive path reaches Node as a drive-qualified URL,
+        // not as `file://C:\…` (whose drive would parse as the URL authority).
+        let specs = vec![r"C:\proj\pre.mjs".to_string()];
+        let win = user_preload_injections_for(&specs, &NodeVersion::new(20, 11, 0), true);
+        assert_eq!(
+            win.iter()
+                .map(|injection| injection.node_options_token())
+                .collect::<Vec<_>>(),
+            ["--import=file:///C:/proj/pre.mjs"]
+        );
     }
 
     #[test]

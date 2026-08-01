@@ -18,8 +18,10 @@ members = ["crates/nub-cache-key", "crates/nub-cli", "crates/nub-core", "crates/
 # `panic = "abort"` to drop the unwind metadata and shrink the binary. The two
 # strategies can't coexist in one workspace's release profile, so nub-native
 # lives in its own workspace (crates/nub-native/Cargo.toml) with its own
-# `[profile.release] panic = "unwind"`, and is excluded here. It is built
-# directly (`--manifest-path crates/nub-native/Cargo.toml`); its `.cargo/config.toml`
+# `[profile.release] panic = "unwind"`, and is excluded here. It is built with
+# cwd inside the crate (`cd crates/nub-native && cargo build --release`), NOT via
+# `--manifest-path`: cargo discovers `.cargo/config.toml` by walking up from the
+# CWD, so only that form picks up the crate's config and its `target-dir`, which
 # routes output to this same root `target/` so the addon-copy paths are unchanged.
 # nub-native depends on `crates/nub-cache-key` and `crates/nub-json-guard` (both
 # stay members here) via path deps that cross the workspace boundary — their

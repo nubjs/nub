@@ -30,6 +30,8 @@ Use the full shape when the change crosses module boundaries, touches a default 
 
 ## The shape — ONE owning L1, L2s underneath
 
+> **If you are yourself a dispatched sub-agent, this skill's fan-out does not apply to you.** Take its phase methodology and run the phases INLINE — you are the L1 it describes, and an L1 does not spawn a fleet of its own. The repo-wide depth cap in `AGENTS.local.md` ("fan-out is ONE level deep") outranks the diagram below. Only a top-level session dispatches.
+
 A **single L1 sub-agent** dispatched by L0 carries the work through every phase and **spawns its own L2 sub-agents** for sub-steps that benefit from a fresh context or parallelism. The L1 holds continuity; L0 stays lean.
 
 ```

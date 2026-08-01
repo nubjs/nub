@@ -25,6 +25,8 @@ Enumerate the full surface (coverage) → harvest candidate gaps → cross-check
 
 Run it as a fray thread with individually-dispatched agents — not a blind parallel Workflow fan-out that buries the gates.
 
+**Only a top-level session dispatches those agents.** If you are yourself a dispatched sub-agent, the repo-wide depth cap in `AGENTS.local.md` applies: run the gates INLINE and return. Gate 4's "fresh context" is then a fresh PASS, not a fresh agent — re-pin, re-run the fixture, and re-check the decision record yourself, defaulting to refuted when uncertain. An audit prong that cannot be refuted inline returns saying so rather than spawning a refuter.
+
 **When a finding is ACTIONED.** An audit is investigation-scope: it surfaces gaps, it does not land fixes. The moment a finding becomes a code change, verify it the standard way — an ad-hoc fixture sweep against a built binary, re-running the audit's own differential against the pinned reference, then an in-thread read of the diff. A parity fix touching a shared verb/flag dispatch path routinely ripples to sibling commands, which is one of the cases that earns escalating to a fresh-context `impact-analysis` pass — but that never substitutes for running the sibling commands and diffing them against the reference. Gate 4 asks whether a FINDING is real; impact analysis asks whether a FIX is safe.
 
 ## Dispatch template (every audit sub-agent prompt must be self-contained)

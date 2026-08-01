@@ -707,3 +707,53 @@ fn module_enabler_flags_make_ffi_vfs_stream_iter_importable() {
         "all three enabler modules must load once nub injects their flags: stdout={stdout:?}"
     );
 }
+
+/// A `.cjs` entry in `nub.jsonc` `preload` must behave identically on both tiers:
+/// it runs exactly ONCE, and only after nub's hooks are live.
+///
+/// It regressed on the compat tier because a `.cjs` preload was injected as
+/// `--require`, and Node (a) runs every `--require` preload before any `--import`
+/// preload whatever the token order — and `--import` is how nub's own compat
+/// preload arrives — and (b) re-runs `--require` preloads inside the
+/// `module.register()` loader worker the compat tier always spawns. So the user's
+/// preload beat nub's hooks into the process AND ran a second time in the worker
+/// realm. See `user_preload_injection` in nub-core's spawn module.
+///
+/// The fixture's preload `require()`s a TypeScript sibling, so "hooks not yet
+/// installed" surfaces as a hard SyntaxError instead of a silent difference.
+#[test]
+fn cjs_preload_runs_once_after_hooks_on_both_tiers() {
+    // 22.13.0 is the compat-tier representative (the regression), 22.15.0 the
+    // first fast-tier version (the control that was always correct).
+    for want in [(22, 13, 0), (22, 15, 0)] {
+        let (maj, min, pat) = want;
+        let Some((stdout, stderr, code)) = run_nub_against_node(want, "cjs-preload", "main.js")
+        else {
+            eprintln!(
+                "skipping: Node {maj}.{min}.{pat} not installed \
+                 (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+            );
+            continue;
+        };
+
+        assert_eq!(
+            code, 0,
+            "Node {maj}.{min}.{pat}: a .cjs preload must run without aborting: stderr={stderr}"
+        );
+        assert_eq!(
+            stdout.matches("preload:").count(),
+            1,
+            "Node {maj}.{min}.{pat}: a .cjs preload must run exactly once \
+             (a second line means the loader worker re-ran it): stdout={stdout:?}"
+        );
+        assert!(
+            stdout.contains("preload:hooked:marked"),
+            "Node {maj}.{min}.{pat}: the preload must see nub's hooks and version marker \
+             already installed: stdout={stdout:?}"
+        );
+        assert!(
+            stdout.find("preload:") < stdout.find("main:done"),
+            "Node {maj}.{min}.{pat}: the preload must run before the entry: stdout={stdout:?}"
+        );
+    }
+}

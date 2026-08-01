@@ -156,6 +156,18 @@ fn ref_unpacked_size(v: &Value) -> Option<u64> {
     v.as_u64()
 }
 
+/// `modified` keeps a string and drops every other shape.
+fn ref_modified(v: &Value) -> Option<String> {
+    v.as_str().map(str::to_owned)
+}
+
+/// `hasInstallScript` and `peerDependenciesMeta.<x>.optional` keep a
+/// real boolean and read as `false` for every other shape — the same
+/// reading a missing key already gets.
+fn ref_tolerant_bool(v: &Value) -> bool {
+    v.as_bool().unwrap_or(false)
+}
+
 // === Plumbing: wrap an arbitrary value into a minimal Packument /
 // VersionMetadata JSON and parse it through the production path. ===
 
@@ -181,6 +193,14 @@ fn parse_dist_with(field: &str, value: &Value) -> VersionMetadata {
     dist.insert("tarball".into(), Value::String("https://x/t.tgz".into()));
     dist.insert(field.into(), value.clone());
     parse_version_with("dist", &Value::Object(dist))
+}
+
+/// `peerDependenciesMeta` nests a level down, and both levels can be
+/// off-spec: the entry itself, or its `optional` field.
+fn parse_peer_meta_entry(entry: &Value) -> VersionMetadata {
+    let mut meta = serde_json::Map::new();
+    meta.insert("react".into(), entry.clone());
+    parse_version_with("peerDependenciesMeta", &Value::Object(meta))
 }
 
 // === Properties ===
@@ -256,6 +276,36 @@ proptest! {
         let parsed = parse_dist_with("unpackedSize", &v);
         let actual = parsed.dist.as_ref().and_then(|d| d.unpacked_size);
         prop_assert_eq!(actual, ref_unpacked_size(&v));
+    }
+
+    #[test]
+    fn modified_matches_reference(v in arb_json()) {
+        let parsed = parse_packument_with("modified", &v);
+        prop_assert_eq!(parsed.modified, ref_modified(&v));
+    }
+
+    #[test]
+    fn has_install_script_matches_reference(v in arb_json()) {
+        let parsed = parse_version_with("hasInstallScript", &v);
+        prop_assert_eq!(parsed.has_install_script, ref_tolerant_bool(&v));
+    }
+
+    /// An off-spec `optional` degrades to `false` — the stricter
+    /// reading (peer required), never a silently relaxed requirement.
+    #[test]
+    fn peer_dep_meta_optional_matches_reference(v in arb_json()) {
+        let parsed = parse_peer_meta_entry(&serde_json::json!({ "optional": v.clone() }));
+        let actual = parsed.peer_dependencies_meta.get("react").map(|m| m.optional);
+        prop_assert_eq!(actual, Some(ref_tolerant_bool(&v)));
+    }
+
+    /// The whole entry being off-spec is the other shape a mirror
+    /// produces; it must not abort the packument either.
+    #[test]
+    fn peer_dep_meta_tolerates_a_non_object_entry(v in arb_json()) {
+        let parsed = parse_peer_meta_entry(&v);
+        let expected = v.get("optional").is_some_and(ref_tolerant_bool);
+        prop_assert_eq!(parsed.peer_dependencies_meta["react"].optional, expected);
     }
 
     #[test]

@@ -1901,9 +1901,21 @@ fn resolve_identity_walk_up(
 /// `nub pm use` is the one-command fix for both states). Exit code is the
 /// generic 1 (the session-build path has no per-code exit channel); the
 /// stable code string in the output is the contract scripts can branch on.
+///
+/// The two states get DIFFERENT remedies because "set the declaration" is a
+/// dead end for one of them. A declaration naming nub is a self-name: the
+/// engine reads it as "preserve whatever format this project already uses"
+/// (`aube-lockfile`'s `is_self_name` carve-out), which resolves nothing when
+/// two candidate lockfiles are present. Since `nub install` WRITES that
+/// declaration itself, telling an ambiguous project to declare its manager
+/// sends the common case in a circle — the state a hosted builder manufactures
+/// when it runs its own install beside nub's lockfile.
 fn identity_error(err: aube_lockfile::Error) -> anyhow::Error {
     use aube_lockfile::Error as E;
-    const REMEDY: &str = "set the declaration: nub pm use <pm> — or remove the stale lockfile";
+    const MISMATCH_REMEDY: &str =
+        "set the declaration: nub pm use <pm> — or remove the stale lockfile";
+    const AMBIGUITY_REMEDY: &str =
+        "remove the stale lockfile, or run nub pm use <pm> naming a specific manager";
     let report = match &err {
         E::DeclarationMismatch {
             declared,
@@ -1912,13 +1924,13 @@ fn identity_error(err: aube_lockfile::Error) -> anyhow::Error {
             found,
         } => miette::miette!(
             code = aube_codes::errors::ERR_AUBE_LOCKFILE_DECLARATION_MISMATCH,
-            help = REMEDY,
+            help = MISMATCH_REMEDY,
             "package.json declares `{declared}` (via `{field}`), but {expected} is missing — \
              found {found} instead"
         ),
         E::AmbiguousLockfiles { found } => miette::miette!(
             code = aube_codes::errors::ERR_AUBE_LOCKFILE_AMBIGUOUS,
-            help = REMEDY,
+            help = AMBIGUITY_REMEDY,
             "multiple lockfiles found: {found} — cannot tell which package manager owns this \
              project"
         ),
