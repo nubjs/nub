@@ -169,6 +169,13 @@ function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg }
 
 // ── the walk ──────────────────────────────────────────────────────────────────
 
+/** Paths the CONTROL produced that the no-grant floor did not — i.e. what a grant must
+ *  restore. Store hashes are already normalised by `runCell`, so these compare directly. */
+function controlOnly(control, floor) {
+  const had = new Set(floor.seen);
+  return control.seen.filter((p) => !had.has(p));
+}
+
 const brief = (r) => ({ rc: r.rc, files: r.files, materialized: r.materialized });
 
 function search(nub, pkg, version, root, keep) {
@@ -215,8 +222,16 @@ function search(nub, pkg, version, root, keep) {
   if (!matches(top)) return { pkg, version, verdict: 'FAILS-AT-TOP', control: brief(control), top: brief(top) };
 
   // 3. Ascending walk. The first pass IS the minimum.
+  //    WHAT THE GRANT BUYS is recorded, not just that it was needed. State 0 is the
+  //    no-grant floor, so the paths present in the control and missing from it are exactly
+  //    the side effects a grant has to restore. Persisting them turns "why does this package
+  //    need userHome?" into a field lookup instead of a manual two-arm rebuild-and-diff — the
+  //    detour that found the __pycache__ artefact, which the harness already had in memory
+  //    and discarded.
+  let floor = null;
   for (let i = 0; i < STATES.length; i++) {
     const r = cell(`s${i}`, { catalogFile: write(STATES[i]), label: STATES[i].label });
+    if (i === 0) floor = r;
     if (!r.overrideOk) return { pkg, version, verdict: 'HARNESS-ERROR', why: `override did not engage at state ${i}`, log: r.log.slice(-400) };
     if (matches(r)) {
       return {
@@ -239,6 +254,11 @@ function search(nub, pkg, version, root, keep) {
         // is about. Measured: 12 of 12 top-download packages came back `materialized=false`
         // and every one was reported trustworthy.
         projectAxisConclusive: r.materialized,
+        // The paths the winning grant restores: present unjailed, absent at the no-grant
+        // floor. Capped, with the true count kept, so one pathological package cannot make
+        // the results file unreadable — a silent truncation would be worse than a number.
+        boughtCount: floor ? controlOnly(control, floor).length : null,
+        bought: floor ? controlOnly(control, floor).slice(0, 40) : null,
         control: brief(control),
       };
     }
