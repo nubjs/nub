@@ -105,6 +105,14 @@ function paths(root, prefix = '') {
     // grant we have, when the only difference between arms was bytecode. Verified by diffing
     // the two path sets: __pycache__ entries were the ENTIRE delta.
     if (e.name === '__pycache__' || e.name.endsWith('.pyc')) continue;
+    // NPM'S DEBUG LOG IS NOT A SIDE EFFECT — its FILENAME carries the wall-clock time
+    // (`.npm/_logs/2026-08-01T16_39_35_911Z-debug-0.log`), so two identical runs never agree.
+    // Measured on `unrs-resolver@1.12.2`: 3 runs at full grant produced 2731 identical paths
+    // plus exactly one uniquely-named log each — and that alone mismatched all 55 cells and
+    // reported "no state passed" for a package that installs fine. It also would have entered
+    // the `writePaths` derivation as `.npm/_logs`, a directory to promote into the user's real
+    // npm home for no reason. Costs nothing on the grant axis: `$home` is baseline-writable.
+    if (rel.startsWith('.npm/_logs/') || /\/\.npm\/_logs\//.test(rel)) continue;
     if (e.isDirectory()) out.push(...paths(path.join(root, e.name), rel));
     else out.push(rel);
   }
