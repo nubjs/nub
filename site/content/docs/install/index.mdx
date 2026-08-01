@@ -15,7 +15,7 @@ Run Nub in a repo that already uses npm, pnpm, Yarn, or Bun and it behaves *as t
 - **`devEngines.packageManager`** — object or array form
 - **lockfile on disk**
 
-In a workspace, the chain runs from any member: Nub walks up to the root, which carries the declaration and lockfile. Two lockfiles for different managers, with no declaration, is a hard error.
+In a workspace, the chain runs from any member: Nub walks up to the root, which carries the declaration and lockfile. Two lockfiles for different managers is a hard error unless a declaration names one of them. Declaring Nub itself does not settle it: Nub preserves whatever format the project already uses, so with two candidates there is nothing to choose between.
 
 | Incumbent | Lockfile | Round-trip |
 |---|---|---|
@@ -212,16 +212,19 @@ nub: pnpm-workspace.yaml is not read under nub identity — migrate it
 ```
 
 <Callout title="Contradictions are loud">
-When signals disagree, Nub stops rather than guess. Two lockfiles, no declaration:
+When signals disagree, Nub stops rather than guess. Two lockfiles it cannot choose between:
 
 ```console
 $ nub install
 Error: ERR_NUB_LOCKFILE_AMBIGUOUS
 
-  × multiple lockfiles found: pnpm-lock.yaml, package-lock.json —
-  │ cannot tell which package manager owns this project
-  help: nub pm use <pm> to declare it, or remove the stale lockfile
+  × multiple lockfiles found: pnpm-lock.yaml, package-lock.json — cannot tell
+  │ which package manager owns this project
+  help: remove the stale lockfile, or run nub pm use <pm> naming a specific
+        manager
 ```
+
+A hosted builder is the common way to reach this state: it runs its own install beside the lockfile you committed, leaving two. See [Cloudflare](/docs/deployment/cloudflare) for the build-level fix.
 
 A declaration whose lockfile is missing:
 

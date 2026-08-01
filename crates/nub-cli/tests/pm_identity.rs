@@ -226,9 +226,50 @@ fn undeclared_multi_lockfile_projects_error_as_ambiguous() {
         stderr.contains("package-lock.json") && stderr.contains("yarn.lock"),
         "the error must name the conflicting files: {stderr}"
     );
+    // Asserted as fragments, not the whole sentence: miette wraps the help line
+    // at terminal width, so a full-sentence `contains` breaks on the wrap point
+    // rather than on a real regression.
     assert!(
-        stderr.contains("set the declaration: nub pm use <pm> — or remove the stale lockfile"),
+        stderr.contains("remove the stale lockfile") && stderr.contains("nub pm use <pm>"),
         "the remedy must be nub's: {stderr}"
+    );
+    assert!(
+        !stderr.contains("set the declaration"),
+        "the ambiguity remedy must not advise setting a declaration: {stderr}"
+    );
+}
+
+/// The ambiguity remedy must not send a nub-DECLARED project in a circle.
+/// `nub install` writes `devEngines.packageManager: nub` itself, and a
+/// self-name declaration accepts every format — so it cannot pick between two
+/// candidates. Advising "set the declaration" there names something already
+/// set. Regression for the state a hosted builder manufactures when it runs
+/// its own install (bun/npm) beside a committed `nub.lock`.
+#[test]
+fn a_nub_declared_ambiguous_project_is_not_told_to_set_a_declaration() {
+    let dir = project(
+        "ambiguous-nub-declared",
+        r#"{"name":"app","version":"1.0.0","devEngines":{"packageManager":{"name":"nub","version":"^0.6.0","onFail":"warn"}}}"#,
+    );
+    std::fs::write(
+        dir.join("package-lock.json"),
+        r#"{"name":"app","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{}}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
+    let (_, stderr, code) = run(&dir, &["install"]);
+    assert_ne!(code, 0, "an ambiguous project must refuse to install");
+    assert!(
+        stderr.contains("ERR_NUB_LOCKFILE_AMBIGUOUS"),
+        "the stable code must be present: {stderr}"
+    );
+    assert!(
+        !stderr.contains("set the declaration"),
+        "the declaration already names nub — advising it again is a dead end: {stderr}"
+    );
+    assert!(
+        stderr.contains("remove the stale lockfile"),
+        "the remedy must name an action that actually resolves it: {stderr}"
     );
 }
 
