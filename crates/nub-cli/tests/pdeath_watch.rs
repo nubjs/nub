@@ -102,7 +102,8 @@ fn sigkill_on_nub_group_terminates_the_script_child() {
 }
 
 /// Normal completion must not leak a watcher: the guard disarms and reaps it
-/// before nub exits, so no `__pdeath-watch <child-pid>` process may remain.
+/// before nub exits. The private environment selects the watcher, leaving only
+/// its ordinary `<child-pid> <fd>` payload visible in `ps`.
 #[test]
 fn normal_exit_leaves_no_watcher_process() {
     let dir = std::env::temp_dir().join(format!("nub-pdw-clean-{}", std::process::id()));
@@ -112,13 +113,13 @@ fn normal_exit_leaves_no_watcher_process() {
     assert!(status.success(), "nub run must succeed");
 
     let child_pid = read_pid(&dir.join("child.pid"));
-    // The watcher's argv is exactly `__pdeath-watch <child-pid> <fd>`, so this
-    // match can't collide with concurrent nub instances on the host.
+    // The child PID is unique to this fixture, so the private mode's visible
+    // `<child-pid> <fd>` payload identifies only this watcher's command line.
     let ps = std::process::Command::new("ps")
         .args(["-ax", "-o", "command"])
         .output()
         .expect("ps");
-    let needle = format!("__pdeath-watch {child_pid} ");
+    let needle = format!(" {child_pid} 3");
     assert!(
         !String::from_utf8_lossy(&ps.stdout).contains(&needle),
         "a watcher for exited child {child_pid} is still running"
@@ -128,13 +129,14 @@ fn normal_exit_leaves_no_watcher_process() {
 
 /// The watcher is re-invoked through `current_exe()`, which carries whatever
 /// NAME nub is running under — `node` for anything spawned through nub's own
-/// PATH shim, not `nub`. So the hidden verb must be honored under EVERY argv0
-/// identity nub answers to. When it hung off the `nub`-only argv0 arm, a
-/// shim-named re-invocation ran `__pdeath-watch` as a script, spawning a
-/// workload (and thus another watcher) per level until the process table was
-/// exhausted (regression from #504).
+/// PATH shim, not `nub`. Its private environment mode keeps the PID/read-fd
+/// payload ordinary application arguments; the legacy hidden-token protocol
+/// remains accepted for old callers. Both forms must be honored under EVERY
+/// argv0 identity nub answers to. If the dispatcher coupled either form to
+/// `nub` argv0, a shim-named re-invocation would run a watcher payload as a
+/// workload and recursively spawn more watchers (regression from #504).
 #[test]
-fn pdeath_watch_verb_is_honored_under_every_argv0() {
+fn pdeath_watch_protocols_are_honored_under_every_argv0() {
     // Alongside the binary, so the aliases can be HARDLINKS — same-filesystem,
     // no 78MB copy per name, and the same shape as nub's real PATH shims.
     let nub = nub_binary();
@@ -147,29 +149,44 @@ fn pdeath_watch_verb_is_honored_under_every_argv0() {
 
     // `getpgrp() + 1` can never equal the child's own group (children inherit
     // ours), so the watcher deterministically takes its membership self-check
-    // exit. That keeps the assertion on "the verb was RECOGNIZED" alone — no
-    // pipe timing, and it never reaches the group kill.
+    // exit. That keeps the assertion on "the protocol was RECOGNIZED" alone —
+    // no pipe timing, and it never reaches the group kill.
     let foreign_pgid = (unsafe { libc::getpgrp() } + 1).to_string();
     for name in ["nub", "node", "nubx", "npm"] {
         let aliased = dir.join(name);
         std::fs::hard_link(&nub, &aliased).unwrap();
-        let out = std::process::Command::new(&aliased)
-            .args(["__pdeath-watch", &foreign_pgid, "3"])
-            .output()
-            .expect("spawn aliased nub");
-        assert_eq!(
-            out.status.code(),
-            Some(0),
-            "nub invoked as `{name}` did not honor __pdeath-watch (stderr: {})",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(
-            out.stdout.is_empty() && out.stderr.is_empty(),
-            "nub invoked as `{name}` ran __pdeath-watch as a workload instead of \
-             the watcher loop (stdout: {}, stderr: {})",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
+        for (protocol, env_mode, args) in [
+            (
+                "private environment mode",
+                Some("pdeath-watch"),
+                vec![foreign_pgid.as_str(), "3"],
+            ),
+            (
+                "legacy hidden token",
+                None,
+                vec!["__pdeath-watch", foreign_pgid.as_str(), "3"],
+            ),
+        ] {
+            let mut cmd = std::process::Command::new(&aliased);
+            cmd.args(args);
+            if let Some(env_mode) = env_mode {
+                cmd.env("__NUB_COMPILED_LAUNCHER_MODE", env_mode);
+            }
+            let out = cmd.output().expect("spawn aliased nub");
+            assert_eq!(
+                out.status.code(),
+                Some(0),
+                "nub invoked as `{name}` did not honor {protocol} (stderr: {})",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                out.stdout.is_empty() && out.stderr.is_empty(),
+                "nub invoked as `{name}` ran {protocol} as a workload instead of \
+                 the watcher loop (stdout: {}, stderr: {})",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

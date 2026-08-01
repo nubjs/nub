@@ -60,6 +60,1022 @@ fn run_nub_with_env(fixture: &str, file: &str, env: &[(&str, &str)]) -> (String,
     (stdout, stderr, code)
 }
 
+#[cfg(feature = "compile")]
+struct CompileTestRuntime {
+    launcher: PathBuf,
+    node_target: String,
+    node_exec_path: String,
+}
+
+#[cfg(feature = "compile")]
+fn compile_test_runtime() -> CompileTestRuntime {
+    let launcher = std::env::var_os("__NUB_LAUNCHER_TEMPLATE")
+        .map(PathBuf::from)
+        .expect("compile test requires __NUB_LAUNCHER_TEMPLATE to name a nub-launcher binary");
+    assert!(
+        launcher.is_file(),
+        "compile test launcher template is missing: {}",
+        launcher.display()
+    );
+    let node_version = Command::new("node")
+        .arg("--version")
+        .output()
+        .expect("compile test requires `node` on PATH so the smol artifact can run");
+    assert!(
+        node_version.status.success(),
+        "compile test requires `node --version` to succeed; stderr: {}",
+        String::from_utf8_lossy(&node_version.stderr)
+    );
+    let node_target = String::from_utf8(node_version.stdout)
+        .expect("`node --version` must write UTF-8")
+        .trim()
+        .strip_prefix('v')
+        .filter(|version| !version.is_empty())
+        .unwrap_or_else(|| panic!("`node --version` did not return a v-prefixed version"))
+        .to_owned();
+    let node_exec_path = Command::new("node")
+        .args(["-p", "process.execPath"])
+        .output()
+        .expect("compile test requires `node -p process.execPath` to succeed");
+    assert!(
+        node_exec_path.status.success(),
+        "compile test requires Node to report process.execPath; stderr: {}",
+        String::from_utf8_lossy(&node_exec_path.stderr)
+    );
+    let node_exec_path = String::from_utf8(node_exec_path.stdout)
+        .expect("Node process.execPath must be UTF-8")
+        .trim()
+        .to_owned();
+    assert!(
+        !node_exec_path.is_empty(),
+        "Node process.execPath must not be empty"
+    );
+    CompileTestRuntime {
+        launcher,
+        node_target,
+        node_exec_path,
+    }
+}
+
+#[cfg(feature = "compile")]
+fn compile_smol_artifact(
+    runtime: &CompileTestRuntime,
+    work: &Path,
+    cache: &Path,
+    entry: &Path,
+    artifact: &Path,
+) -> std::process::Output {
+    Command::new(nub_binary())
+        .args([
+            "compile",
+            "--smol",
+            "--target",
+            &runtime.node_target,
+            "--out",
+        ])
+        .arg(artifact)
+        .arg(entry)
+        .current_dir(work)
+        .env("XDG_CACHE_HOME", cache)
+        .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+        .output()
+        .expect("spawn nub compile")
+}
+
+#[cfg(feature = "compile")]
+fn run_compiled_artifact_command_with_timeout(
+    mut cmd: Command,
+    timeout: std::time::Duration,
+) -> std::process::Output {
+    let mut child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn compiled artifact");
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if child.try_wait().expect("poll compiled artifact").is_some() {
+            return child
+                .wait_with_output()
+                .expect("collect compiled artifact output");
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let output = child
+                .wait_with_output()
+                .expect("collect timed-out compiled artifact output");
+            panic!(
+                "compiled artifact did not exit within {timeout:?}; stdout: {}; stderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[cfg(feature = "compile")]
+fn run_compiled_artifact_with_timeout(artifact: &Path, cwd: &Path) -> std::process::Output {
+    let mut cmd = Command::new(artifact);
+    cmd.current_dir(cwd);
+    run_compiled_artifact_command_with_timeout(cmd, std::time::Duration::from_secs(10))
+}
+
+#[cfg(feature = "compile")]
+#[test]
+fn compile_executes_mixed_commonjs_esm_cycles() {
+    let runtime = compile_test_runtime();
+    let work = unique_test_cache();
+    let cache = work.join("cache");
+    let immediate_entry = work.join("immediate.mjs");
+    let immediate_artifact = work.join(format!("immediate{}", std::env::consts::EXE_SUFFIX));
+    let lazy_entry = work.join("lazy.mjs");
+    let lazy_artifact = work.join(format!("lazy{}", std::env::consts::EXE_SUFFIX));
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(
+        &immediate_entry,
+        "import './immediate.cjs';\nexport const token = 'esm-token';\nconsole.log('IMMEDIATE_MAIN:' + token);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        work.join("immediate.cjs"),
+        "const namespace = require('./immediate.mjs');\nconsole.log('IMMEDIATE_BACKEDGE:' + typeof namespace);\n",
+    )
+    .unwrap();
+
+    let immediate_compile = compile_smol_artifact(
+        &runtime,
+        &work,
+        &cache,
+        &immediate_entry,
+        &immediate_artifact,
+    );
+    assert!(
+        immediate_compile.status.success(),
+        "immediate mixed cycle did not compile: {}",
+        String::from_utf8_lossy(&immediate_compile.stderr)
+    );
+    assert!(
+        immediate_artifact.is_file(),
+        "immediate mixed cycle did not write its artifact"
+    );
+    let immediate_run = run_compiled_artifact_with_timeout(&immediate_artifact, &work);
+
+    std::fs::write(
+        &lazy_entry,
+        "import getMain from './lazy.cjs';\nexport const token = 'lazy-token';\nconsole.log('LAZY_CYCLE:' + getMain().token);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        work.join("lazy.cjs"),
+        "module.exports = () => require('./lazy.mjs');\n",
+    )
+    .unwrap();
+    let lazy_compile = compile_smol_artifact(&runtime, &work, &cache, &lazy_entry, &lazy_artifact);
+    assert!(
+        lazy_compile.status.success(),
+        "lazy mixed cycle did not compile: {}",
+        String::from_utf8_lossy(&lazy_compile.stderr)
+    );
+    assert!(
+        lazy_artifact.is_file(),
+        "lazy mixed cycle did not write its artifact"
+    );
+    let lazy_run = run_compiled_artifact_with_timeout(&lazy_artifact, &work);
+    let _ = std::fs::remove_dir_all(&work);
+
+    assert!(
+        immediate_run.status.success(),
+        "immediate mixed-cycle artifact failed: {}",
+        String::from_utf8_lossy(&immediate_run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&immediate_run.stdout).contains("IMMEDIATE_BACKEDGE:object")
+            && String::from_utf8_lossy(&immediate_run.stdout).contains("IMMEDIATE_MAIN:esm-token"),
+        "unexpected immediate mixed-cycle output: {}",
+        String::from_utf8_lossy(&immediate_run.stdout)
+    );
+    assert!(
+        lazy_run.status.success(),
+        "lazy mixed-cycle artifact failed: {}",
+        String::from_utf8_lossy(&lazy_run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&lazy_run.stdout).contains("LAZY_CYCLE:lazy-token"),
+        "unexpected lazy mixed-cycle output: {}",
+        String::from_utf8_lossy(&lazy_run.stdout)
+    );
+}
+
+#[cfg(feature = "compile")]
+fn compiled_json_string_array(value: &serde_json::Value) -> Vec<String> {
+    value
+        .as_array()
+        .expect("compiled topology result field must be an array")
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .expect("compiled topology argv item must be a string")
+                .to_owned()
+        })
+        .collect()
+}
+
+#[cfg(feature = "compile")]
+fn assert_compiled_bootstrap_first_once(args: &[String], bootstrap: &str, context: &str) {
+    assert_eq!(
+        args.first().map(String::as_str),
+        Some(bootstrap),
+        "{context} must expose the fixed-root bootstrap first: {args:?}"
+    );
+    assert_eq!(
+        args.iter().filter(|arg| arg.as_str() == bootstrap).count(),
+        1,
+        "{context} must expose the fixed-root bootstrap exactly once: {args:?}"
+    );
+}
+
+#[cfg(feature = "compile")]
+fn assert_native_node_identity(value: &str, context: &str) {
+    let basename = value
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(value)
+        .to_ascii_lowercase();
+    assert!(
+        basename == "node" || basename == "node.exe",
+        "{context} must retain native Node identity, got {value:?}"
+    );
+}
+
+#[cfg(feature = "compile")]
+fn assert_compile_path_eq(actual: &str, expected: &str, context: &str) {
+    #[cfg(windows)]
+    let normalize = |value: &str| {
+        value
+            .strip_prefix(r"\\?\")
+            .unwrap_or(value)
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+    };
+    #[cfg(not(windows))]
+    let normalize = |value: &str| value.to_owned();
+    assert_eq!(
+        normalize(actual),
+        normalize(expected),
+        "{context}: actual={actual:?} expected={expected:?}"
+    );
+}
+
+#[cfg(feature = "compile")]
+fn make_compile_test_node_alias(source: &Path, destination: &Path) {
+    if std::fs::hard_link(source, destination).is_ok() {
+        return;
+    }
+    std::fs::copy(source, destination).unwrap_or_else(|error| {
+        panic!(
+            "copying explicit fork Node {} to {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    });
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(source)
+            .expect("read explicit fork Node permissions")
+            .permissions()
+            .mode();
+        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(mode))
+            .expect("preserve explicit fork Node executable permissions");
+    }
+}
+
+#[cfg(feature = "compile")]
+#[test]
+fn compile_artifact_process_bootstrap_topology() {
+    let runtime = compile_test_runtime();
+    let work = unique_test_cache();
+    let cache = work.join("compile-cache");
+    let artifact_cache = work.join("artifact-cache");
+    let entry = work.join("topology-main.mjs");
+    let artifact = work.join(format!("topology-app{}", std::env::consts::EXE_SUFFIX));
+    let fork_child = work.join("fork-child.mjs");
+    let explicit_node = work.join(format!("explicit-node{}", std::env::consts::EXE_SUFFIX));
+    std::fs::create_dir_all(&work).unwrap();
+    make_compile_test_node_alias(Path::new(&runtime.node_exec_path), &explicit_node);
+
+    // An ordinary Node child: fork() must select the captured real Node rather
+    // than the public outer executable, retain IPC, and normalize only its Node
+    // argv. This source intentionally needs no compile preamble of its own.
+    std::fs::write(
+        &fork_child,
+        r#"const record = process[Symbol.for("nub.compile.bootstrap")];
+const bootstrap = record?.requireArg ?? null;
+const result = {
+  tag: process.argv[2] ?? process.env.FORK_TAG ?? "no-args",
+  execPath: process.execPath,
+  execArgv: process.execArgv,
+  bootstrap,
+  bootstrapCount: bootstrap === null ? 0 : process.execArgv.filter((arg) => arg === bootstrap).length,
+  customValue: process.env.CUSTOM_VALUE ?? null,
+  nestedFork: process.env.NESTED_FORK ?? null,
+  compiledEnv: process.env.__NUB_COMPILED_EXEC_PATH ?? null,
+};
+process.send(result, () => process.disconnect());
+"#,
+    )
+    .unwrap();
+
+    // Both files execute from NODE_OPTIONS. The first proves the launcher's
+    // absolute CJS bootstrap ran before inherited user ESM imports, then installs
+    // a hook which would break any later loader-visible node:module dependency in
+    // Nub's generated runtime.
+    std::fs::write(
+        work.join("loader-preload.mjs"),
+        r#"import { register } from "node:module";
+const record = process[Symbol.for("nub.compile.bootstrap")];
+process.env.COMPILE_LOADER_SAW_BOOTSTRAP = String(
+  typeof record?.createRequire === "function" &&
+  typeof record?.getBuiltin === "function" &&
+  typeof record?.requireArg === "string" &&
+  Object.isFrozen(record)
+);
+register(new URL("./hostile-loader-hooks.mjs", import.meta.url));
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        work.join("hostile-loader-hooks.mjs"),
+        r#"export async function resolve(specifier, context, nextResolve) {
+  if (specifier === "node:module") {
+    return {
+      shortCircuit: true,
+      url: "data:text/javascript,export%20const%20redirected%20%3D%20true%3B",
+    };
+  }
+  return nextResolve(specifier, context);
+}
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        work.join("nested-worker.mjs"),
+        r#"import { parentPort } from "node:worker_threads";
+const record = process[Symbol.for("nub.compile.bootstrap")];
+parentPort.postMessage({
+  execPath: process.execPath,
+  execArgv: process.execArgv,
+  bootstrap: record?.requireArg ?? null,
+  customValue: process.env.NESTED_CUSTOM ?? null,
+});
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        work.join("native-worker.mjs"),
+        r#"import { fork } from "node:child_process";
+import { Worker, parentPort, workerData } from "node:worker_threads";
+
+const record = process[Symbol.for("nub.compile.bootstrap")];
+const own = {
+  execPath: process.execPath,
+  execArgv: process.execArgv,
+  bootstrap: record?.requireArg ?? null,
+  customValue: process.env.NATIVE_CUSTOM ?? null,
+};
+
+function nestedWorker() {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL("./nested-worker.mjs", import.meta.url), {
+      execArgv: [],
+      env: { NESTED_CUSTOM: "nested-env-kept" },
+    });
+    const timer = setTimeout(() => {
+      worker.terminate();
+      reject(new Error("nested native Worker timed out"));
+    }, 5000);
+    worker.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    worker.once("message", (message) => {
+      clearTimeout(timer);
+      Promise.resolve(worker.terminate()).then(() => resolve(message), reject);
+    });
+  });
+}
+
+function nestedFork() {
+  return new Promise((resolve, reject) => {
+    const child = fork(workerData.forkChildPath, ["worker-nested"], {
+      execArgv: [],
+      env: { NESTED_FORK: "nested-fork-kept" },
+    });
+    let message;
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error("nested fork timed out"));
+    }, 5000);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("message", (value) => { message = value; });
+    child.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      if (code !== 0 || message === undefined) {
+        reject(new Error(`nested fork failed: code=${code} signal=${signal}`));
+      } else {
+        resolve(message);
+      }
+    });
+  });
+}
+
+if (workerData?.nested === true) {
+  own.nestedWorker = await nestedWorker();
+  own.nestedFork = await nestedFork();
+}
+parentPort.postMessage(own);
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        work.join("browser-worker.mjs"),
+        r#"const record = process[Symbol.for("nub.compile.bootstrap")];
+self.postMessage({
+  execPath: process.execPath,
+  execArgv: process.execArgv,
+  bootstrap: record?.requireArg ?? null,
+});
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        &entry,
+        r#"import cluster from "node:cluster";
+import { fork, spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { Worker as NativeWorker } from "node:worker_threads";
+
+const record = process[Symbol.for("nub.compile.bootstrap")];
+const bootstrap = record.requireArg;
+const forkChildPath = process.env.COMPILE_FORK_CHILD_PATH;
+const explicitNodeExecPath = process.env.COMPILE_EXPLICIT_NODE_EXEC_PATH;
+
+function identity() {
+  return {
+    execPath: process.execPath,
+    argv: process.argv,
+    argv0: process.argv[0],
+    argv1: process.argv[1],
+    argv1Absolute: /^([A-Za-z]:[\\/]|[/\\]{2}|\/)/.test(process.argv[1]),
+    argv1Exists: existsSync(process.argv[1]),
+    argvOriginal: process.argv0,
+    title: process.title,
+    execArgv: process.execArgv,
+    bootstrap,
+    bootstrapCount: process.execArgv.filter((arg) => arg === bootstrap).length,
+  };
+}
+
+function forkProbe(start, label) {
+  return new Promise((resolve, reject) => {
+    const child = start();
+    let message;
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`${label} fork timed out`));
+    }, 5000);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("message", (value) => { message = value; });
+    child.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      if (code !== 0 || message === undefined) {
+        reject(new Error(`${label} fork failed: code=${code} signal=${signal}`));
+      } else {
+        resolve(message);
+      }
+    });
+  });
+}
+
+function nativeWorkerProbe(options, label) {
+  return new Promise((resolve, reject) => {
+    const worker = new NativeWorker(new URL("./native-worker.mjs", import.meta.url), options);
+    const timer = setTimeout(() => {
+      worker.terminate();
+      reject(new Error(`${label} native Worker timed out`));
+    }, 5000);
+    worker.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    worker.once("message", (message) => {
+      clearTimeout(timer);
+      Promise.resolve(worker.terminate()).then(() => resolve(message), reject);
+    });
+  });
+}
+
+function browserWorkerProbe(options) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL("./browser-worker.mjs", import.meta.url), options);
+    const timer = setTimeout(() => {
+      worker.terminate();
+      reject(new Error("global Worker timed out"));
+    }, 5000);
+    worker.addEventListener("error", (event) => {
+      clearTimeout(timer);
+      reject(event.error ?? new Error(event.message));
+    }, { once: true });
+    worker.addEventListener("message", (event) => {
+      clearTimeout(timer);
+      Promise.resolve(worker.terminate()).then(() => resolve(event.data), reject);
+    }, { once: true });
+  });
+}
+
+function clusterProbe(label, execArgv) {
+  return new Promise((resolve, reject) => {
+    const settings = { exec: process.argv[1] };
+    if (execArgv !== undefined) settings.execArgv = execArgv;
+    cluster.setupPrimary(settings);
+    const worker = cluster.fork({ ...process.env, COMPILE_CLUSTER_CHILD: label });
+    let message;
+    const timer = setTimeout(() => {
+      worker.kill();
+      reject(new Error(`${label} cluster worker timed out`));
+    }, 5000);
+    worker.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    worker.once("message", (value) => { message = value; });
+    worker.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      if (code !== 0 || message === undefined) {
+        reject(new Error(`${label} cluster worker failed: code=${code} signal=${signal}`));
+      } else {
+        resolve(message);
+      }
+    });
+  });
+}
+
+async function main() {
+  const root = identity();
+  const redirectedModule = await import("node:module");
+  const self = spawnSync(process.execPath, [], {
+    cwd: process.cwd(),
+    env: { ...process.env, COMPILE_SELF_CHILD: "1" },
+    encoding: "utf8",
+    timeout: 10000,
+  });
+  if (self.status !== 0) {
+    throw new Error(`self-spawn failed: status=${self.status} stderr=${self.stderr}`);
+  }
+  const selfLine = self.stdout.split(/\r?\n/).find((line) => line.startsWith("SELF:"));
+  if (selfLine === undefined) throw new Error(`self-spawn emitted no identity: ${self.stdout}`);
+
+  const noArgs = await forkProbe(() => fork(forkChildPath), "no-args");
+  const argsInput = ["args-shape"];
+  const argsSnapshot = JSON.stringify(argsInput);
+  const args = await forkProbe(() => fork(forkChildPath, argsInput), "args");
+
+  const falsyOptions = {
+    execPath: "",
+    execArgv: "",
+    env: { FORK_TAG: "options-shape", CUSTOM_VALUE: "custom-env-kept" },
+  };
+  const falsySnapshot = JSON.stringify(falsyOptions);
+  const options = await forkProbe(() => fork(forkChildPath, falsyOptions), "options");
+
+  const emptyArgs = ["explicit-empty"];
+  const emptyExecArgv = [];
+  const emptyOptions = { execArgv: emptyExecArgv };
+  const emptySnapshot = JSON.stringify({ emptyArgs, emptyExecArgv, emptyOptions });
+  const explicitEmpty = await forkProbe(
+    () => fork(forkChildPath, emptyArgs, emptyOptions),
+    "explicit-empty",
+  );
+
+  const flagArgs = ["explicit-flags"];
+  const authoredFlags = ["--trace-deprecation", bootstrap, "--no-warnings", bootstrap];
+  const authoredEnv = { FORK_TAG: "explicit-flags", CUSTOM_VALUE: "explicit-env-kept" };
+  const flagOptions = {
+    execPath: explicitNodeExecPath,
+    execArgv: authoredFlags,
+    env: authoredEnv,
+  };
+  const flagsSnapshot = JSON.stringify({ flagArgs, authoredFlags, authoredEnv, flagOptions });
+  const explicitFlags = await forkProbe(
+    () => fork(forkChildPath, flagArgs, flagOptions),
+    "explicit-flags",
+  );
+
+  const nativeDefault = await nativeWorkerProbe(undefined, "default");
+  const nativeCustom = await nativeWorkerProbe({
+    execArgv: [],
+    env: { NATIVE_CUSTOM: "native-env-kept" },
+    workerData: { nested: true, forkChildPath },
+  }, "custom-env");
+  const globalAuthored = ["--trace-deprecation", bootstrap, "--no-warnings"];
+  const browser = await browserWorkerProbe({ execArgv: globalAuthored });
+
+  const clusterDefault = await clusterProbe("default", undefined);
+  const clusterExplicit = await clusterProbe("explicit-empty", []);
+
+  console.log("RESULT:" + JSON.stringify({
+    root,
+    loader: {
+      sawBootstrap: process.env.COMPILE_LOADER_SAW_BOOTSTRAP,
+      nodeOptions: process.env.NODE_OPTIONS,
+      redirectedBuiltin: redirectedModule.redirected === true,
+    },
+    self: JSON.parse(selfLine.slice("SELF:".length)),
+    forks: {
+      noArgs,
+      args,
+      options,
+      explicitEmpty,
+      explicitFlags,
+      immutable: {
+        args: JSON.stringify(argsInput) === argsSnapshot,
+        falsyOptions: JSON.stringify(falsyOptions) === falsySnapshot,
+        empty: JSON.stringify({ emptyArgs, emptyExecArgv, emptyOptions }) === emptySnapshot,
+        flags: JSON.stringify({ flagArgs, authoredFlags, authoredEnv, flagOptions }) === flagsSnapshot,
+      },
+    },
+    workers: { nativeDefault, nativeCustom, browser, globalAuthored },
+    clusters: { default: clusterDefault, explicit: clusterExplicit },
+  }));
+}
+
+if (process.env.COMPILE_SELF_CHILD === "1") {
+  console.log("SELF:" + JSON.stringify(identity()));
+} else if (!cluster.isPrimary && process.env.COMPILE_CLUSTER_CHILD !== undefined) {
+  process.send({ ...identity(), clusterLabel: process.env.COMPILE_CLUSTER_CHILD }, () => {
+    process.disconnect();
+  });
+} else {
+  await main();
+}
+"#,
+    )
+    .unwrap();
+
+    let compile = compile_smol_artifact(&runtime, &work, &cache, &entry, &artifact);
+    assert!(
+        compile.status.success(),
+        "topology artifact did not compile: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    assert!(
+        artifact.is_file(),
+        "topology compile did not write its artifact"
+    );
+    let expected_artifact_path = std::fs::canonicalize(&artifact)
+        .expect("canonicalize topology artifact")
+        .to_string_lossy()
+        .into_owned();
+    let expected_explicit_node_path = std::fs::canonicalize(&explicit_node)
+        .expect("canonicalize explicit fork Node")
+        .to_string_lossy()
+        .into_owned();
+
+    let fork_child_env = fork_child.to_string_lossy().into_owned();
+    let explicit_node_env = explicit_node.to_string_lossy().into_owned();
+    let artifact_cache_env = artifact_cache.to_string_lossy().into_owned();
+    let mut command = Command::new(&artifact);
+    command
+        .current_dir(&work)
+        .env("__NUB_COMPILE_CACHE_DIR", &artifact_cache_env)
+        .env("COMPILE_FORK_CHILD_PATH", &fork_child_env)
+        .env("COMPILE_EXPLICIT_NODE_EXEC_PATH", &explicit_node_env)
+        // Relative to the explicit cwd, so a space in the host temp path never
+        // enters NODE_OPTIONS tokenization.
+        .env(
+            "NODE_OPTIONS",
+            "--import=./loader-preload.mjs --no-warnings",
+        );
+    let run =
+        run_compiled_artifact_command_with_timeout(command, std::time::Duration::from_secs(45));
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&run.stderr).into_owned();
+    let result_line = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("RESULT:"))
+        .map(str::to_owned);
+    let _ = std::fs::remove_dir_all(&work);
+
+    assert!(
+        run.status.success(),
+        "topology artifact failed: status={} stdout={stdout} stderr={stderr}",
+        run.status
+    );
+    let result: serde_json::Value = serde_json::from_str(
+        result_line
+            .as_deref()
+            .unwrap_or_else(|| panic!("topology artifact emitted no RESULT record: {stdout}")),
+    )
+    .unwrap_or_else(|error| panic!("topology RESULT was not JSON: {error}; stdout={stdout}"));
+
+    let bootstrap = result["root"]["bootstrap"]
+        .as_str()
+        .expect("root bootstrap must be a string");
+    assert!(
+        bootstrap.starts_with("--require=") && bootstrap.ends_with("__nub_compile_bootstrap.cjs"),
+        "root bootstrap must be the canonical fixed-root require: {bootstrap:?}"
+    );
+    let root_args = compiled_json_string_array(&result["root"]["execArgv"]);
+    assert_compiled_bootstrap_first_once(&root_args, bootstrap, "compiled root");
+    assert!(
+        !root_args
+            .iter()
+            .any(|arg| arg.starts_with("--import") || arg == "--no-warnings"),
+        "inherited NODE_OPTIONS flags must remain outside process.execArgv: {root_args:?}"
+    );
+    assert_eq!(
+        result["loader"]["sawBootstrap"].as_str(),
+        Some("true"),
+        "the fixed CJS bootstrap must run before the inherited ESM loader"
+    );
+    assert!(
+        result["loader"]["nodeOptions"]
+            .as_str()
+            .is_some_and(|value| value.contains("loader-preload.mjs")),
+        "the hostile loader must remain present through NODE_OPTIONS"
+    );
+    assert_eq!(
+        result["loader"]["redirectedBuiltin"].as_bool(),
+        Some(true),
+        "the NODE_OPTIONS loader hook must be active for authored builtin imports"
+    );
+
+    for (context, identity) in [
+        ("compiled root", &result["root"]),
+        ("self-spawn", &result["self"]),
+    ] {
+        assert_compile_path_eq(
+            identity["execPath"]
+                .as_str()
+                .expect("compiled process.execPath must be a string"),
+            &expected_artifact_path,
+            &format!("{context} process.execPath must be the outer artifact"),
+        );
+        assert_compile_path_eq(
+            identity["argv0"]
+                .as_str()
+                .expect("compiled process.argv[0] must be a string"),
+            &expected_artifact_path,
+            &format!("{context} process.argv[0] must be the outer artifact"),
+        );
+        assert_eq!(identity["argv1Absolute"].as_bool(), Some(true));
+        assert_eq!(identity["argv1Exists"].as_bool(), Some(true));
+        assert_ne!(
+            identity["argv1"].as_str(),
+            Some(expected_artifact_path.as_str())
+        );
+        assert_native_node_identity(
+            identity["argvOriginal"]
+                .as_str()
+                .expect("process.argv0 must be a string"),
+            &format!("{context} process.argv0"),
+        );
+        assert_native_node_identity(
+            identity["title"]
+                .as_str()
+                .expect("process.title must be a string"),
+            &format!("{context} process.title"),
+        );
+        let args = compiled_json_string_array(&identity["execArgv"]);
+        assert_eq!(args, root_args, "{context} must retain honest Node flags");
+    }
+
+    let forks = &result["forks"];
+    for name in [
+        "noArgs",
+        "args",
+        "options",
+        "explicitEmpty",
+        "explicitFlags",
+    ] {
+        let expected_exec_path = if name == "explicitFlags" {
+            expected_explicit_node_path.as_str()
+        } else {
+            runtime.node_exec_path.as_str()
+        };
+        assert_compile_path_eq(
+            forks[name]["execPath"]
+                .as_str()
+                .expect("fork process.execPath must be a string"),
+            expected_exec_path,
+            &format!("{name} fork must use the selected Node executable"),
+        );
+        assert_compile_path_eq(
+            forks[name]["compiledEnv"]
+                .as_str()
+                .expect("fork compiled identity must be a string"),
+            &expected_artifact_path,
+            &format!("{name} fork must retain compiled identity for nested runtime work"),
+        );
+        let args = compiled_json_string_array(&forks[name]["execArgv"]);
+        assert_compiled_bootstrap_first_once(&args, bootstrap, &format!("{name} fork"));
+    }
+    assert_eq!(forks["noArgs"]["tag"].as_str(), Some("no-args"));
+    assert_eq!(forks["args"]["tag"].as_str(), Some("args-shape"));
+    assert_eq!(forks["options"]["tag"].as_str(), Some("options-shape"));
+    assert_eq!(
+        forks["options"]["customValue"].as_str(),
+        Some("custom-env-kept")
+    );
+    assert_eq!(
+        compiled_json_string_array(&forks["noArgs"]["execArgv"]),
+        root_args
+    );
+    assert_eq!(
+        compiled_json_string_array(&forks["args"]["execArgv"]),
+        root_args
+    );
+    assert_eq!(
+        compiled_json_string_array(&forks["options"]["execArgv"]),
+        root_args,
+        "falsy fork execArgv must normalize from the parent flags"
+    );
+    assert_eq!(
+        compiled_json_string_array(&forks["explicitEmpty"]["execArgv"]),
+        vec![bootstrap.to_owned()],
+        "explicit empty fork execArgv must receive only the bootstrap"
+    );
+    assert_eq!(
+        compiled_json_string_array(&forks["explicitFlags"]["execArgv"]),
+        vec![
+            bootstrap.to_owned(),
+            "--trace-deprecation".to_owned(),
+            "--no-warnings".to_owned(),
+        ],
+        "explicit fork flags must retain authored order after bootstrap normalization"
+    );
+    assert_eq!(
+        forks["explicitFlags"]["customValue"].as_str(),
+        Some("explicit-env-kept")
+    );
+    for field in ["args", "falsyOptions", "empty", "flags"] {
+        assert_eq!(
+            forks["immutable"][field].as_bool(),
+            Some(true),
+            "fork wrapper must not mutate the caller's {field} value"
+        );
+    }
+
+    let workers = &result["workers"];
+    let native_default_args = compiled_json_string_array(&workers["nativeDefault"]["execArgv"]);
+    assert_eq!(
+        native_default_args, root_args,
+        "native Worker without execArgv must inherit honest Node flags"
+    );
+    assert_eq!(
+        workers["nativeDefault"]["bootstrap"].as_str(),
+        Some(bootstrap)
+    );
+    assert_compile_path_eq(
+        workers["nativeDefault"]["execPath"]
+            .as_str()
+            .expect("default native Worker execPath must be a string"),
+        &expected_artifact_path,
+        "default native Worker must retain compiled identity",
+    );
+    assert_compile_path_eq(
+        workers["nativeCustom"]["execPath"]
+            .as_str()
+            .expect("custom native Worker execPath must be a string"),
+        &expected_artifact_path,
+        "custom-env native Worker must recover compiled identity through environment data",
+    );
+    assert!(
+        compiled_json_string_array(&workers["nativeCustom"]["execArgv"]).is_empty(),
+        "native Worker explicit execArgv=[] must remain publicly empty"
+    );
+    assert_eq!(
+        workers["nativeCustom"]["bootstrap"].as_str(),
+        Some(bootstrap),
+        "the generated worker wrapper must establish bootstrap with explicit execArgv=[]"
+    );
+    assert_eq!(
+        workers["nativeCustom"]["customValue"].as_str(),
+        Some("native-env-kept")
+    );
+    let nested_worker = &workers["nativeCustom"]["nestedWorker"];
+    assert_compile_path_eq(
+        nested_worker["execPath"]
+            .as_str()
+            .expect("nested Worker execPath must be a string"),
+        &expected_artifact_path,
+        "nested Worker must retain compiled identity",
+    );
+    assert!(compiled_json_string_array(&nested_worker["execArgv"]).is_empty());
+    assert_eq!(nested_worker["bootstrap"].as_str(), Some(bootstrap));
+    assert_eq!(
+        nested_worker["customValue"].as_str(),
+        Some("nested-env-kept")
+    );
+    let nested_fork = &workers["nativeCustom"]["nestedFork"];
+    assert_compile_path_eq(
+        nested_fork["execPath"]
+            .as_str()
+            .expect("nested fork execPath must be a string"),
+        &runtime.node_exec_path,
+        "nested fork must use the captured real Node",
+    );
+    assert_eq!(
+        compiled_json_string_array(&nested_fork["execArgv"]),
+        vec![bootstrap.to_owned()]
+    );
+    assert_eq!(nested_fork["bootstrap"].as_str(), Some(bootstrap));
+    assert_eq!(nested_fork["nestedFork"].as_str(), Some("nested-fork-kept"));
+    assert_compile_path_eq(
+        nested_fork["compiledEnv"]
+            .as_str()
+            .expect("nested fork compiled identity must be a string"),
+        &expected_artifact_path,
+        "nested fork must retain compiled identity",
+    );
+
+    let mut expected_browser_args = root_args.clone();
+    expected_browser_args.extend(["--trace-deprecation".to_owned(), "--no-warnings".to_owned()]);
+    let browser_args = compiled_json_string_array(&workers["browser"]["execArgv"]);
+    assert_eq!(
+        browser_args, expected_browser_args,
+        "global Worker must merge inherited then authored flags while deduplicating bootstrap"
+    );
+    assert_compiled_bootstrap_first_once(&browser_args, bootstrap, "global Worker");
+    assert_eq!(workers["browser"]["bootstrap"].as_str(), Some(bootstrap));
+    assert_compile_path_eq(
+        workers["browser"]["execPath"]
+            .as_str()
+            .expect("global Worker execPath must be a string"),
+        &expected_artifact_path,
+        "global Worker must retain compiled identity",
+    );
+
+    let clusters = &result["clusters"];
+    let extracted_entry = result["root"]["argv1"]
+        .as_str()
+        .expect("root extracted entry must be a string");
+    for name in ["default", "explicit"] {
+        assert_compile_path_eq(
+            clusters[name]["execPath"]
+                .as_str()
+                .expect("cluster process.execPath must be a string"),
+            &expected_artifact_path,
+            &format!("{name} cluster worker must retain compiled identity"),
+        );
+        let argv = compiled_json_string_array(&clusters[name]["argv"]);
+        assert_eq!(
+            argv.len(),
+            2,
+            "{name} cluster worker must expose only the outer artifact and extracted entry, without a duplicated executable path: {argv:?}"
+        );
+        assert_compile_path_eq(
+            &argv[0],
+            &expected_artifact_path,
+            &format!("{name} cluster process.argv[0] must be the outer artifact"),
+        );
+        assert_compile_path_eq(
+            &argv[1],
+            extracted_entry,
+            &format!("{name} cluster process.argv[1] must be the honest extracted entry"),
+        );
+        let args = compiled_json_string_array(&clusters[name]["execArgv"]);
+        assert_compiled_bootstrap_first_once(&args, bootstrap, &format!("{name} cluster worker"));
+    }
+    assert_eq!(
+        compiled_json_string_array(&clusters["default"]["execArgv"]),
+        root_args,
+        "default cluster worker must inherit honest Node flags"
+    );
+    assert_eq!(
+        compiled_json_string_array(&clusters["explicit"]["execArgv"]),
+        vec![bootstrap.to_owned()],
+        "cluster explicit execArgv=[] must receive only the bootstrap"
+    );
+    assert_eq!(
+        clusters["default"]["clusterLabel"].as_str(),
+        Some("default")
+    );
+    assert_eq!(
+        clusters["explicit"]["clusterLabel"].as_str(),
+        Some("explicit-empty")
+    );
+}
+
 /// Flagship provisioning, end-to-end through the binary: a project pinned (via
 /// `.node-version`) to an EXACT version that is on neither PATH nor in nub's store
 /// nor nvm → `nub <file>` downloads + installs it from nodejs.org (uv-style
