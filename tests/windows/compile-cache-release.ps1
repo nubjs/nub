@@ -5,10 +5,14 @@
 
 .DESCRIPTION
     Exercises a real release nub.exe, nub-launcher.exe and staged nub-native DLL.
-    In particular, compile's full-tree repair must fail closed when a live Node
-    process has the extracted addon loaded, then repair exactly after that process
-    exits. The final two probes ensure unsafe cache candidates are rejected rather
-    than written through.
+    In particular, compile's full-tree repair must fail closed while a live nub
+    process is holding the runtime directory, then repair exactly after that
+    process exits. The final two probes ensure unsafe cache candidates are
+    rejected rather than written through.
+
+    "Holding" means a directory handle, not a loaded DLL: a mapped nub-native.node
+    was measured NOT to block the repair rename on Windows. See the holder comment
+    below for the measurement and what does block it.
 #>
 param(
     [Parameter(Mandatory = $true)]
@@ -174,8 +178,21 @@ setInterval(() => {}, 1000);
     if (-not (Test-Path -LiteralPath $addon -PathType Leaf)) { throw "missing extracted staged native addon: $addon" }
     Assert-NoRuntimeDebris $nubRoot
 
-    # Keep Node alive after it dlopen's nub-native.node. Windows must not move the
-    # canonical directory during repair while this handle exists.
+    # Keep a live nub process using this runtime tree while repair is attempted.
+    #
+    # Its WORKING DIRECTORY is the runtime dir, and that -- not the dlopen'd addon --
+    # is what makes the repair rename fail. Measured on windows-latest: a DLL
+    # confirmed mapped into a live process (verified through its module list) does
+    # NOT block renaming the DLL itself, nor its ancestor directory; both returned
+    # RENAME_OK. Windows blocks DELETING a mapped image, not renaming it. A process
+    # whose current directory is the target does hold a directory handle opened
+    # without FILE_SHARE_DELETE, and `std::fs::rename` -- the exact call
+    # `swap_extract` makes -- then fails with ERROR_SHARING_VIOLATION (os error 32),
+    # one of the two codes `classify_target_rename_failure` maps to `InUse`.
+    # 5/5 runs blocked with a holder and 5/5 succeeded once it exited.
+    #
+    # The holder still loads the addon, so the realistic shape is unchanged; the
+    # cwd is what makes the obstruction real rather than assumed.
     $holderOut = Join-Path $root 'holder.stdout'
     $holderErr = Join-Path $root 'holder.stderr'
     $oldCache = $env:XDG_CACHE_HOME
@@ -183,7 +200,7 @@ setInterval(() => {}, 1000);
     try {
         $env:XDG_CACHE_HOME = $cache
         $env:__NUB_LAUNCHER_TEMPLATE = $Launcher
-        $holder = Start-Process -FilePath $Nub -ArgumentList (ConvertTo-Arguments @($holderApp)) -WorkingDirectory $work -PassThru -RedirectStandardOutput $holderOut -RedirectStandardError $holderErr
+        $holder = Start-Process -FilePath $Nub -ArgumentList (ConvertTo-Arguments @($holderApp)) -WorkingDirectory $runtime -PassThru -RedirectStandardOutput $holderOut -RedirectStandardError $holderErr
     } finally {
         $env:XDG_CACHE_HOME = $oldCache
         $env:__NUB_LAUNCHER_TEMPLATE = $oldTemplate
