@@ -1926,9 +1926,14 @@ mod tests {
             values.iter().map(|value| (*value).to_string()).collect()
         }
 
-        let schema: Value =
-            serde_json::from_str(include_str!("../../../site/public/schema/latest.json"))
-                .expect("the published nub.json schema must be valid JSON");
+        // Read the crate's own copy, not the site's. This test used to `include_str!`
+        // `site/public/schema/latest.json`, so 3539b65db1 — which deliberately
+        // unpublished the schema until the config surface ships — broke the whole Rust
+        // build, and main has been red since. A unit test's oracle must not be a
+        // web-published asset that product decisions can withdraw. `set-version` still
+        // stamps the site copy when one exists; this file is the parser's contract.
+        let schema: Value = serde_json::from_str(include_str!("schema/nub-config-schema.json"))
+            .expect("the nub.json schema must be valid JSON");
         assert_eq!(keys(&schema, "/properties"), expected(ROOT_KEYS));
         assert_eq!(
             keys(&schema, "/properties/install/properties"),
