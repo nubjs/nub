@@ -172,6 +172,22 @@ Most such lists should be **derived rather than relocated**. Whether a package p
 
 This does not govern security policy whose value depends on *not* being overridable. A resolver trust-exemption list is correctly compiled in, because anything that can add a name to it bypasses the supply-chain check for that package. The test is whether dynamism makes the system more **honest** — a grant derived from measurement — or more **attackable** — an exemption an attacker can grant themselves.
 
+## Changing the catalog shape — everything that must move together
+
+The catalog shape is written in one place and read in four, and a change that misses one fails in a way that looks like something else. A shape change that reached the parser but not the harness produced a hundred-package sweep in which every package reported that the override had not engaged — which reads as a broken binary, not a shape mismatch.
+
+| # | What | Where |
+|---|---|---|
+| 1 | The Rust types, parser, validation, and resolution | `crates/nub-sandbox/src/catalog_v2.rs` |
+| 2 | The startup grant count and lookup used by the compiler | `crates/nub-sandbox/src/catalog_override.rs` |
+| 3 | The collator, which **writes** the catalog | `tests/build-jail-search/collate.mjs` |
+| 4 | The synthesized per-cell catalogs, which the search **writes on every run** | `catalogFor` in `tests/build-jail-search/search.mjs` |
+| 5 | Hand-written overrides, and the schema they are validated against | `tests/build-jail-search/overrides/` |
+
+Two of these are easy to forget because they are not the catalog anyone edits: the search synthesizes a fresh catalog for every cell it measures, and the selftest asserts against that synthesized shape.
+
+**The pre-flight check must take its probe catalog from the emitting function, never from a literal.** A hand-written probe drifts silently from what the harness actually emits. A catalog with an empty package map is the worst possible probe, because it parses under every shape there has ever been and therefore proves nothing at all.
+
 ## Overrides
 
 A hand-written override may replace a measured entry. Each one is a place the catalog stops being derived and starts being an assertion, and assertions rot silently while measurements re-run. Every override carries a mandatory rationale naming its investigator, evidence, and date; one that matches what measurement already produces is reported as dead weight.
