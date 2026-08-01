@@ -661,7 +661,31 @@ fn build_jail_surface(
 ///   means nothing here reads as a gate, and zero *authored* hosts keeps `mode` off the
 ///   proxy-starting path (`apply_inner`'s Landlock arm skips the proxy outright).
 fn build_jail_net(package_name: Option<&str>, package_version: Option<&str>) -> Value {
-    if !super::package_network::build_jail_net_allowed(package_name, package_version) {
+    let allowed = {
+        // A v2 catalog owns the net axis too, for the same reason it owns the fs axis: the two
+        // tables are alternative spellings of one policy, so consulting v1 while v2 is in force
+        // answers from the wrong one. Measured before this existed — `network: true` compiled to
+        // nothing, because `apply_v2_grant` reported it on its outcome and the surface, built
+        // EARLIER, had already asked v1 and been told no.
+        #[cfg(feature = "build-jail-catalog-override")]
+        if crate::catalog_override::v2_in_force() {
+            let here = crate::catalog_v2::Platform::current();
+            package_name
+                .and_then(crate::catalog_override::v2_grants_for)
+                .and_then(|grants| {
+                    grants.iter().find(|g| {
+                        g.matches_platform(here)
+                            && super::version_scope::applies(g.versions.as_deref(), package_version)
+                    })
+                })
+                .is_some_and(|g| g.network)
+        } else {
+            super::package_network::build_jail_net_allowed(package_name, package_version)
+        }
+        #[cfg(not(feature = "build-jail-catalog-override"))]
+        super::package_network::build_jail_net_allowed(package_name, package_version)
+    };
+    if !allowed {
         return json!(false);
     }
     if cfg!(target_os = "linux") {

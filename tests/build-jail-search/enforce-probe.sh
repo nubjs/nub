@@ -87,9 +87,49 @@ JSON
   done
 }
 
+# --- arm 3: network is granted by the catalog, and denied without it ----------------------
+# Added after `network: true` was found INERT: `apply_v2_grant` reported it on its outcome,
+# and the surface — built earlier — had already asked the v1 table and been told no. A
+# capability can be perfectly parsed, perfectly validated, and reach nothing.
+arm_network () {
+  local d arm expect got
+  for arm in grant nogrant; do
+    [ "$arm" = grant ] && expect=NET-OK || expect=NET-DENIED
+    # A FRESH fixture per arm, not just a fresh home: reusing the project makes the second
+    # install a no-op ("Already up to date") and the script never runs, which reads as a
+    # denial and is not one.
+    d="$ROOT/net-$arm"
+    mkdir -p "$d/proj/a" "$d/home"
+    cat > "$d/proj/a/package.json" <<'JSON'
+{"name":"pa","version":"1.0.0","scripts":{"postinstall":"node -e \"require('https').get('https://registry.npmjs.org/is-odd',r=>{console.log('NET-OK '+r.statusCode);r.destroy()}).on('error',e=>console.log('NET-DENIED '+e.code))\""}}
+JSON
+    printf '{"name":"f","version":"1.0.0","dependencies":{"pa":"file:./a"}}' > "$d/proj/package.json"
+    printf 'side-effects-cache=false\n' > "$d/proj/.npmrc"
+    if [ "$arm" = grant ]; then
+      printf '{"packages":{"pa":[{"network":true,"notes":"enforcement probe: egress reaches the registry"}]}}' > "$d/cat.json"
+    else
+      printf '{"packages":{}}' > "$d/cat.json"
+    fi
+    ( cd "$d/proj" && HOME="$d/home" NUB_BUILD_JAIL_CATALOG="$d/cat.json" "$NUB" install > i.log 2>&1
+      HOME="$d/home" NUB_BUILD_JAIL_CATALOG="$d/cat.json" "$NUB" approve-builds --all > a.log 2>&1 )
+    if ! banner_ok "$d/proj/i.log" "$d/proj/a.log"; then
+      echo "  HARNESS  the catalog override did not engage in the network '$arm' arm"
+      fails=$((fails + 1)); continue
+    fi
+    got=$(grep -hoE 'NET-(OK [0-9]+|DENIED [A-Z]+)' "$d/proj/i.log" "$d/proj/a.log" | head -1)
+    if [ "${got%% *}" = "$expect" ]; then
+      echo "  PASS  network '$arm' arm  ($got)"
+    else
+      echo "  FAIL  network '$arm' arm: wanted $expect, got ${got:-<no marker — did the script run?>}"
+      fails=$((fails + 1))
+    fi
+  done
+}
+
 echo "build-jail enforcement probe — $NUB"
 arm_outside
 arm_deps
+arm_network
 rm -rf "$ROOT"
 echo "failures: $fails"
 exit $((fails > 0))
