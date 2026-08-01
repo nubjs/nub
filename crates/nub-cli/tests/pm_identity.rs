@@ -239,37 +239,36 @@ fn undeclared_multi_lockfile_projects_error_as_ambiguous() {
     );
 }
 
-/// The ambiguity remedy must not send a nub-DECLARED project in a circle.
-/// `nub install` writes `devEngines.packageManager: nub` itself, and a
-/// self-name declaration accepts every format — so it cannot pick between two
-/// candidates. Advising "set the declaration" there names something already
-/// set. Regression for the state a hosted builder manufactures when it runs
-/// its own install (bun/npm) beside a committed `nub.lock`.
+/// A DECLARED project is never ambiguous: the declaration says who owns it,
+/// so a stray second lockfile no longer refuses the install. `nub install`
+/// writes `devEngines.packageManager: nub` itself, so leaving this ambiguous
+/// made the state inescapable — the remedy was already applied. Regression for
+/// the state a hosted builder manufactures when it runs its own install
+/// (bun/npm) beside a committed `nub.lock`.
 #[test]
-fn a_nub_declared_ambiguous_project_is_not_told_to_set_a_declaration() {
+fn a_nub_declared_project_resolves_past_a_stray_lockfile() {
     let dir = project(
-        "ambiguous-nub-declared",
+        "declared-stray",
         r#"{"name":"app","version":"1.0.0","devEngines":{"packageManager":{"name":"nub","version":"^0.6.0","onFail":"warn"}}}"#,
     );
+    std::fs::write(dir.join("nub.lock"), "lockfileVersion: '9.0'\n").unwrap();
+    // A REAL bun lockfile, not a `{}` placeholder: resolving past the stray
+    // means the stray still gets parsed, so an unparseable one fails the
+    // install on its own merits rather than on identity.
     std::fs::write(
-        dir.join("package-lock.json"),
-        r#"{"name":"app","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{}}"#,
+        dir.join("bun.lock"),
+        r#"{"lockfileVersion":1,"workspaces":{"":{"name":"app"}},"packages":{}}"#,
     )
     .unwrap();
-    std::fs::write(dir.join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
-    let (_, stderr, code) = run(&dir, &["install"]);
-    assert_ne!(code, 0, "an ambiguous project must refuse to install");
+    let (stdout, stderr, code) = run(&dir, &["install"]);
+    assert_eq!(code, 0, "a declared project must install: {stderr}{stdout}");
     assert!(
-        stderr.contains("ERR_NUB_LOCKFILE_AMBIGUOUS"),
-        "the stable code must be present: {stderr}"
+        !stderr.contains("ERR_NUB_LOCKFILE_AMBIGUOUS"),
+        "a declaration resolves ownership — no ambiguity: {stderr}"
     );
     assert!(
-        !stderr.contains("set the declaration"),
-        "the declaration already names nub — advising it again is a dead end: {stderr}"
-    );
-    assert!(
-        stderr.contains("remove the stale lockfile"),
-        "the remedy must name an action that actually resolves it: {stderr}"
+        dir.join("nub.lock").is_file(),
+        "the canonical lockfile stays the project's own"
     );
 }
 
