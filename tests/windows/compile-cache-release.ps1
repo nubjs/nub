@@ -149,9 +149,16 @@ try {
 const message: string = "compile-cache-release-ok";
 console.log(message);
 '@, [System.Text.UTF8Encoding]::new($false))
+    # `enum` is NON-ERASABLE, so running this file REQUIRES nub's transpiler and
+    # therefore dlopen's nub-native.node. Measured: the previous body was plain
+    # JavaScript under a .ts extension, so the holder never mapped the addon at all
+    # -- its module list came back empty -- and the gate's "while its addon was
+    # loaded" premise was vacuous a second way, independently of the rename
+    # semantics below.
     $holderApp = Join-Path $work 'holder.ts'
     [System.IO.File]::WriteAllText($holderApp, @'
-console.log("compile-cache-holder-ready");
+enum HolderState { Ready = 1 }
+console.log("compile-cache-holder-ready", HolderState.Ready);
 setInterval(() => {}, 1000);
 '@, [System.Text.UTF8Encoding]::new($false))
 
@@ -191,8 +198,9 @@ setInterval(() => {}, 1000);
     # one of the two codes `classify_target_rename_failure` maps to `InUse`.
     # 5/5 runs blocked with a holder and 5/5 succeeded once it exited.
     #
-    # The holder still loads the addon, so the realistic shape is unchanged; the
-    # cwd is what makes the obstruction real rather than assumed.
+    # The holder now genuinely loads the addon too (see its non-erasable fixture
+    # above), so the realistic shape is what the gate always claimed; the cwd is
+    # what makes the obstruction real rather than assumed.
     $holderOut = Join-Path $root 'holder.stdout'
     $holderErr = Join-Path $root 'holder.stderr'
     $oldCache = $env:XDG_CACHE_HOME
