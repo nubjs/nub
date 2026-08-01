@@ -38,6 +38,10 @@ function fixture({ latest = false } = {}) {
   for (const file of PACKAGE_FILES) write(root, file, JSON.stringify({ version: "0.0.0" }) + "\n");
   write(root, "Cargo.toml", '[workspace.package]\nversion = "0.0.0"\n');
   write(root, "crates/nub-native/Cargo.toml", '[package]\nversion = "0.0.0"\n');
+  // nub-core carries an inlined manifest version too, stamped alongside
+  // nub-native. Omitting it makes set-version exit on ENOENT before it reaches
+  // the schema snapshot this file is testing.
+  write(root, "crates/nub-core/Cargo.toml", '[package]\nversion = "0.0.0"\n');
   write(root, "runtime/version.mjs", 'export const NUB_VERSION = "0.0.0";\n');
   if (latest) {
     write(root, "site/public/schema/latest.json", JSON.stringify({ $id: "https://nubjs.com/schema/latest.json", title: "Nub config" }) + "\n");
