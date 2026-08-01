@@ -987,7 +987,43 @@ if (!spec) {
 const at = spec.lastIndexOf('@');
 const pkg = at > 0 ? spec.slice(0, at) : spec;
 const version = at > 0 ? spec.slice(at + 1) : 'latest';
-const nub = argv.includes('--nub') ? argv[argv.indexOf('--nub') + 1] : 'nub';
+/** Pin the binary into a CONTENT-ADDRESSED cache and measure against the copy.
+ *
+ *  ⛔ ANY cargo command on a profile rewrites that profile's binary with ITS OWN features. A
+ *  probe takes minutes to hours, so a `cargo test --profile fast` started meanwhile silently
+ *  swaps the binary mid-run. MEASURED: that happened during a batch and six packages recorded
+ *  `BROKEN-EVEN-WITH-EVERYTHING` while installing fine jailed, unjailed AND under npm — a build
+ *  accident written down as a fact about each package.
+ *
+ *  `run-batch.sh` already snapshots for batches, but every clobbering incident came from
+ *  invoking THIS script directly, where `--nub` was used live. So the pin belongs here, at the
+ *  bottom, where nothing can route around it.
+ *
+ *  Content-addressed rather than per-PID: the same binary reuses one copy across every run,
+ *  and the cache key IS the `nubSha256` already recorded in provenance — so a record names the
+ *  exact file it was measured against, and it is still on disk to re-check. Stale entries are
+ *  just files under `~/.cache/nub/probe-bin/`; delete the directory to reclaim it. */
+function pinBinary(p) {
+  try {
+    const bytes = fs.readFileSync(p);
+    const sha = createHash('sha256').update(bytes).digest('hex').slice(0, 16);
+    const dir = path.join(os.homedir(), '.cache', 'nub', 'probe-bin');
+    fs.mkdirSync(dir, { recursive: true });
+    const pinned = path.join(dir, sha);
+    if (!fs.existsSync(pinned)) {
+      // Write-then-rename so a concurrent probe never sees a half-copied binary.
+      const tmp = `${pinned}.partial-${process.pid}`;
+      fs.writeFileSync(tmp, bytes, { mode: 0o755 });
+      fs.renameSync(tmp, pinned);
+    }
+    return pinned;
+  } catch {
+    return p;   // unreadable or not a path (bare `nub` on PATH) — measure against it directly
+  }
+}
+
+const nubArg = argv.includes('--nub') ? argv[argv.indexOf('--nub') + 1] : 'nub';
+const nub = pinBinary(nubArg);
 const keep = argv.includes('--keep');
 
 // Never /tmp: a /tmp/package.json on this box is found by walking up.

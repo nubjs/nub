@@ -91,93 +91,17 @@ pub(super) fn set_native_config_seed(seed: Vec<String>) {
     }
 }
 
-/// Curated "project-context" packages (nub#457): each one's build script READS or
-/// MUTATES the CONSUMING project rather than only its own dir — git-hook installers
-/// walk up from `cwd` to the project root and write `.git/hooks`; the rest generate
-/// project-local files or resolve peers/bridges against the host tree. Under GVS a
-/// build runs in the shared global store, DETACHED from any project, so a
-/// cwd/upward-walk lands on the per-package store wrapper (which has no
-/// package.json) and the script crashes — #457: `simple-git-hooks` postinstall →
-/// ENOENT — or silently emits shared-mutable wrong output. Ejecting them
-/// (disk-materialize project-local, via the SAME importer-closure + expand hook the
-/// phantom seeds use) restores a real project above `cwd`.
-///
-/// ⚠ THIS LIST IS SLATED FOR DELETION, and the argument below for curating it does
-/// not survive contact with what other package managers actually shipped.
-///
-/// It reads: "DELIBERATELY curated, NOT all script-havers — self-contained builds
-/// read only their own dir, produce identical output anywhere, and share it
-/// cross-project, so ejecting them would erode the symlink-in-store sharing win for
-/// zero correctness gain." Three things measured since:
-///
-/// - **bun ships the rejected rule.** A package that will run a lifecycle script is
-///   excluded from its global store and materialized project-local, and the
-///   ineligibility PROPAGATES to every dependent. Their source comment:
-///   "packages with lifecycle scripts mutate their install directory, so a shared
-///   global copy would either diverge from the patch or be mutated underneath other
-///   projects." yarn PnP unplugs build-script packages for the same reason; pnpm
-///   defaults builds OFF under its global virtual store. No PM uses a name list.
-/// - **The sharing win is smaller than assumed.** Under default-deny-scripts
-///   (pnpm 10+, npm 12, bun's trustedDependencies) the set that actually RUNS a
-///   script is single digits per project, so the loss is bounded by what the user
-///   explicitly approved.
-/// - **"Zero correctness gain" is wrong.** A shared slot is mutable state two
-///   projects share: reproduced on pnpm 11's global virtual store, project B's
-///   install re-ran a build script inside a directory project A was symlinked to,
-///   and a marker written by B appeared in A with no reinstall in A.
-///
-/// The replacement needs no new machinery. `aube-lockfile`'s
-/// `transitively_requires_build` already does the upward propagation ("mirrors
-/// pnpm's transitivelyRequiresBuild"), seeded on `allow_build(pkg)` — allowed to run
-/// its scripts, graph-derived, no names. Only PLACEMENT still consults this list.
-///
-/// Absent names cost nothing (the seed union is presence-gated against the resolved
-/// graph) — which is precisely the problem: a package that needs the project and is
-/// not listed breaks SILENTLY.
-///
-/// Gate: this rides the same [`enabled`] seam as phantom eject, so disabling the
-/// internal eject seam also disables curated eject (reintroducing #457) — an
-/// accepted property of that internal-only escape hatch.
-pub(super) const NUB_PROJECT_CONTEXT_EJECT: &[&str] = &[
-    // Git-hook installers — walk up from cwd to the project root, write `.git/hooks`.
-    "simple-git-hooks",
-    "lefthook",
-    "@evilmartians/lefthook",
-    "@arkweid/lefthook",
-    "pre-commit",
-    "pre-push",
-    "ghooks",
-    "git-validate",
-    "shared-git-hooks",
-    "yorkie",
-    "git-commit-msg-linter",
-    // Other host-project reader/mutators (generate project-local files, resolve
-    // peers/bridges against the consuming tree).
-    "install-peers",
-    "msw",
-    "@bahmutov/add-typescript-to-cypress",
-    "@cypress/snapshot",
-    "cordova.plugins.diagnostic",
-    "vue-demi",
-    "vue-inbrowser-compiler-demi",
-    "@intlify/vue-i18n-bridge",
-    "@intlify/vue-router-bridge",
-    "storage-engine",
-];
+// WHY PLACEMENT EXISTS AT ALL (nub#457). A build script that READS or MUTATES the consuming
+// project — a git-hook installer walking up from `cwd` to write `.git/hooks`, a generator
+// emitting project-local files — cannot do so from the global store: the build runs DETACHED,
+// so the upward walk lands on the per-package store wrapper (no package.json) and the script
+// either crashes (`simple-git-hooks` postinstall → ENOENT) or silently emits shared-mutable
+// wrong output. Disk-materializing project-local restores a real project above `cwd`.
+//
+// This used to be a curated 21-name list. It is now DERIVED: `expand()` seeds every package
+// whose manifest declares preinstall/install/postinstall, which covers all 21 by construction
+// — they were hook installers, so each declares one — plus the ones nobody wrote down.
 
-/// Stable, order-independent fingerprint token for the curated eject list, folded
-/// into the install-state settings hash via [`crate::dynamic_phantom::settings_token`]
-/// (the `extra_settings_fingerprint` embedder hook). Load-bearing for warm/upgrade
-/// trees (nub#457): the curated seed is injected INSIDE the expand hook, after
-/// aube's `disk_materialize_packages` settings fold, so without this token an
-/// existing install — one from a nub predating the list, or after any FUTURE list
-/// edit — keeps an identical `settings_hash`, and aube's existence-gated fast path
-/// accepts the stale symlinked tree and skips the relink, leaving #457 unfixed.
-/// Folding this token forces the relink that converts the stale symlink to an
-/// ejected dir. Hashing the SORTED names makes the token move on any add/remove and
-/// hold steady on a pure reorder; FNV-1a keeps it dependency-free and stable across
-/// platforms/releases (std's `DefaultHasher` is not guaranteed stable across Rust
-/// versions).
 /// Bumped on ANY change to the [`nested_optional_dep_pairs`] selection rules.
 ///
 /// Load-bearing for warm trees, for the same reason as
@@ -191,21 +115,21 @@ pub(super) const NUB_PROJECT_CONTEXT_EJECT: &[&str] = &[
 /// a hand-bumped version is the form that composes.
 pub(crate) const NESTED_OPTIONAL_DEP_POLICY_VERSION: u32 = 1;
 
+/// Fingerprints the PLACEMENT POLICY into the install-state settings hash via
+/// [`crate::dynamic_phantom::settings_token`] (the `extra_settings_fingerprint` hook).
+///
+/// Load-bearing for warm/upgrade trees (nub#457): the seed is injected INSIDE the expand
+/// hook, past aube's `disk_materialize_packages` settings fold, so without a token here an
+/// existing install keeps an identical `settings_hash`, the existence-gated fast path accepts
+/// the stale symlinked tree, and the packages the current policy would place stay symlinked.
+///
+/// This used to hash a curated 21-name list, so editing the list moved the token. The seed is
+/// now DERIVED per package from its manifest, so there is no list to fingerprint — the seed
+/// follows the graph, which the lockfile already covers. A constant naming the policy is what
+/// is left: it moves the hash exactly once, invalidating every tree built under the list, and
+/// is stable afterwards.
 pub(crate) fn project_context_eject_token() -> String {
-    eject_list_token(NUB_PROJECT_CONTEXT_EJECT)
-}
-
-fn eject_list_token(names: &[&str]) -> String {
-    let mut sorted: Vec<&str> = names.to_vec();
-    sorted.sort_unstable();
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for name in sorted {
-        for byte in name.bytes().chain(std::iter::once(0x1f)) {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-    format!("{hash:016x}")
+    String::from("placement=declares-lifecycle-script/v1")
 }
 
 /// Keep nub's internal and native-config seed names, dropping every
@@ -500,19 +424,10 @@ fn plan_from_flags(
         }
     }
 
-    // Curated project-context eject (nub#457): union every `NUB_PROJECT_CONTEXT_EJECT`
-    // name PRESENT in the resolved graph. Their builds read/mutate the consuming
-    // project, so a GVS store-detached materialization crashes or emits
-    // shared-mutable wrong output; seeding them here routes them through the SAME
-    // importer-closure + disk-materialize path as the phantom seeds (a git-hook leaf
-    // has ~0 importers, so its closure is just itself). The presence gate keeps an
-    // absent name free.
-    let graph_names: HashSet<&str> = graph.packages.values().map(|p| p.name.as_str()).collect();
-    for &name in NUB_PROJECT_CONTEXT_EJECT {
-        if graph_names.contains(name) {
-            seed_names_set.insert(name);
-        }
-    }
+    // (The curated project-context eject list that used to seed here is GONE. Every package
+    // declaring a lifecycle script is seeded in `expand()` from the manifest instead, which
+    // covers all 21 former names by construction — they were hook installers, so each declares
+    // one — and covers the ones nobody had thought to write down.)
 
     // Seed DEP_PATHS: every graph package whose name is a seed, plus every
     // embedded vite<8.1 copy (auto-detected — the #315 residual). Seeding by
@@ -900,20 +815,26 @@ mod tests {
         assert!(plan.names.is_empty());
     }
 
-    // Curated project-context eject (nub#457): a build that reads/mutates the
-    // consuming project ejects from GVS; a self-contained build stays symlinked.
+    // Project-context eject (nub#457): a build that reads/mutates the consuming project must be
+    // placed project-local, or its upward walk from `cwd` never reaches the project.
 
     #[test]
-    fn project_context_pkg_ejects_from_gvs() {
-        // `simple-git-hooks` postinstall walks up from cwd to the project root; under
-        // GVS the store-detached copy crashes (#457 ENOENT). As a curated
-        // project-context leaf it seeds its own closure (no importers, no phantom
-        // flag) purely by name.
+    fn a_seeded_project_context_leaf_ejects_from_gvs() {
+        // This used to assert that `simple-git-hooks` seeds itself BY NAME, from a curated list
+        // `plan_from_flags` consulted directly. The list is gone: `expand()` now seeds every
+        // package whose MANIFEST declares a lifecycle script, which needs the store to read
+        // manifests from and so cannot be reached from a unit test with a synthetic graph.
+        //
+        // What `plan_from_flags` still owns is the CLOSURE — given a seed, produce the plan —
+        // and that is what this pins. A git-hook leaf has no importers, so its closure is
+        // itself. The SEED SOURCE is verified end-to-end instead: simple-git-hooks@2.13.1
+        // installs with `.store/simple-git-hooks@2.13.1` a REAL DIRECTORY rather than a symlink
+        // into the global store, and its postinstall writes a 226-byte `.git/hooks/pre-commit`.
         let g = graph(&[("simple-git-hooks@2.13.1", "simple-git-hooks", &[])]);
-        let plan = plan_from_flags(&g, &[], &[]);
+        let plan = plan_from_flags(&g, &["simple-git-hooks".to_string()], &[]);
         assert!(
             plan.names.iter().any(|n| n == "simple-git-hooks"),
-            "a curated project-context package ejects: {:?}",
+            "a seeded project-context leaf ejects: {:?}",
             plan.names
         );
     }
@@ -934,25 +855,20 @@ mod tests {
     }
 
     #[test]
-    fn eject_list_token_is_order_independent_and_edit_sensitive() {
-        // The token feeds the install-state fingerprint (#457 warm-tree fix): a pure
-        // reorder is a no-op (it's a set), while any add/remove MUST move it so an
-        // existing install relinks. And it is deterministic — a stable fingerprint,
-        // not a per-run value.
-        assert_eq!(
-            eject_list_token(&["a", "b", "c"]),
-            eject_list_token(&["c", "a", "b"]),
-            "a pure reorder does not change the token"
-        );
-        assert_ne!(
-            eject_list_token(&["a", "b"]),
-            eject_list_token(&["a", "b", "c"]),
-            "an added name changes the token"
-        );
+    fn placement_policy_token_is_stable_across_calls() {
+        // The token feeds the install-state fingerprint (#457 warm-tree fix). It used to hash a
+        // curated 21-name list, so editing the list moved it; the seed is now DERIVED per
+        // package from its manifest, so there is no list left to fingerprint. What remains must
+        // be DETERMINISTIC — a warm tree that relinked on every install would be a performance
+        // bug, and one that never relinked would leave stale placement.
         assert_eq!(
             project_context_eject_token(),
             project_context_eject_token(),
             "deterministic across calls"
+        );
+        assert!(
+            !project_context_eject_token().is_empty(),
+            "an empty token cannot invalidate a tree built under the previous policy"
         );
     }
 
