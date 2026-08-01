@@ -340,10 +340,9 @@ pub fn write(
         .filter(|p| p.as_str() != ".")
         .filter(|p| workspace_package_for_importer(graph, p).is_none())
         .map(|p| {
-            let m = aube_manifest::PackageJson::from_path(
-                &project_dir.join(p).join("package.json"),
-            )
-            .unwrap_or_default();
+            let m =
+                aube_manifest::PackageJson::from_path(&project_dir.join(p).join("package.json"))
+                    .unwrap_or_default();
             (p.as_str(), m)
         })
         .collect();

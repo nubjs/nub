@@ -28,6 +28,9 @@ const TS_PARENT_EXTS: [&str; 4] = [".ts", ".tsx", ".mts", ".cts"];
 /// The additive TS resolution. `Some(absolute path)` ⇒ nub short-circuits; `None`
 /// ⇒ fall through to Node (the compat boundary). `parent_path` is the importer's
 /// absolute filesystem path (empty for the entry).
+/// `tsconfig_path` is the project's configured tsconfig when one is set, so
+/// `paths` resolution reads the file the project names instead of rediscovering
+/// one by walking up from the importer.
 /// `preserve_symlinks` mirrors Node's flag of the same name. The caller passes it
 /// because the flag reaches a process two ways — argv and `NODE_OPTIONS` — and only
 /// the JS side sees both.
@@ -35,6 +38,7 @@ const TS_PARENT_EXTS: [&str; 4] = [".ts", ".tsx", ".mts", ".cts"];
 pub fn resolve_ts(
     specifier: String,
     parent_path: String,
+    tsconfig_path: Option<String>,
     preserve_symlinks: Option<bool>,
 ) -> Option<String> {
     let preserve_symlinks = preserve_symlinks.unwrap_or(false);
@@ -66,7 +70,7 @@ pub fn resolve_ts(
     // outside node_modules. (Not gated on a TS parent: a plain .js with a paths
     // alias resolves too.)
     if !is_relative && !is_absolute && !is_file_url && !is_node_modules(&parent_path) {
-        let candidates = tsconfig::match_paths(&parent_dir, &specifier);
+        let candidates = tsconfig::match_paths(&parent_dir, &specifier, tsconfig_path.as_deref());
         for candidate in candidates {
             if let Some(resolved) = try_resolve_file(&candidate, true, probe_order(&parent_ext)) {
                 return Some(resolved);

@@ -1,27 +1,37 @@
 ---
 title: Deployment
-description: Getting the Nub CLI into a deploy or build environment — the GitHub Action, the official Docker images, and the devDependency pattern for hosted builders that run the install for you.
+description: Deploy Nub projects through GitHub Actions, the official container image, or the installer and npm package used by managed builders.
 ---
 
-A Nub project needs the `nub` CLI present wherever it builds. How you get it there depends on whether the environment gives you a setup step:
+Choose the deployment path your platform exposes:
 
-- **You control a setup step** — a CI workflow or a Dockerfile. Install Nub explicitly: the [GitHub Action](/docs/deployment/github-action) on GitHub Actions, or the [Docker](/docs/deployment/docker) images in a container.
-- **A hosted builder runs the install for you** — Cloudflare Workers Builds, Netlify, some Vercel setups. There's no seam to add a setup step, so Nub rides in as a devDependency.
+1. **GitHub Actions** — use [`nubjs/setup-nub@v0`](/docs/deployment/github-action) to install Nub, provision the project's Node, and cache the store.
+2. **Containers** — use [`ghcr.io/nubjs/nub`](/docs/deployment/docker) as the base image. It contains Node and Nub for `linux/amd64` and `linux/arm64`.
+3. **Managed builders** — install Nub with the [installer](/docs/faq#is-there-a-curl-install-script) or add `@nubjs/nub` as a devDependency when the platform owns the install step.
 
-## Hosted builds
+| Platform | Deployment path | Where Nub runs |
+| --- | --- | --- |
+| [Vercel](/docs/deployment/vercel) | Installer or devDependency | Install and build; Vercel Functions still use Vercel's Node runtime |
+| [Cloudflare](/docs/deployment/cloudflare) | Preinstalled in Workers Builds; devDependency on Pages | Build only; Workers use Cloudflare's runtime |
+| [Railway](/docs/deployment/railway) | Dockerfile | Build and runtime |
+| [Render](/docs/deployment/render) | Dockerfile | Build and runtime |
+| [AWS Lambda](/docs/deployment/aws-lambda) | Dockerfile with Lambda Web Adapter | Build and runtime |
+| [Google Cloud Run](/docs/deployment/google-cloud-run) | Dockerfile | Build and runtime |
 
-Hosted build environments run the install themselves from your lockfile and provision Node from `.node-version` or `.tool-versions`. There's no step to add the GitHub Action, so a `package.json` script that shells out to `nub` fails before it starts:
+## Managed builders
+
+A hosted builder that runs the install from your lockfile cannot resolve Nub until the project supplies it:
 
 ```console
 sh: nub: not found
 ```
 
-Add `@nubjs/nub` as a devDependency and call it from your scripts:
+Add the CLI as a devDependency and call it from a package script:
 
-```json
+```json title="package.json"
 {
   "devDependencies": {
-    "@nubjs/nub": "^0.1.0"
+    "@nubjs/nub": "^{{NUB_VERSION}}"
   },
   "scripts": {
     "build": "nubx vite build"
@@ -29,23 +39,71 @@ Add `@nubjs/nub` as a devDependency and call it from your scripts:
 }
 ```
 
-The package declares `bin: { nub, nubx }`, so any installer — including the pnpm these builders run — links both onto `node_modules/.bin`, and your scripts resolve them no matter who ran the install. This holds even under pnpm's default blocking of dependency build scripts (pnpm 10+): bin-linking is independent of script approval, and Nub's launcher sets its own execute bit at runtime, so there's nothing to allowlist.
+The package exposes both `nub` and `nubx`. npm, pnpm, Yarn, Bun, and Nub all link those commands without running a dependency lifecycle script. Bin linking does not depend on pnpm's dependency build-script approval, and the Nub launcher sets its executable bit at runtime, so pnpm needs no allowlist entry.
 
-It coexists with the project's real package manager. Nub reads the existing lockfile, so `@nubjs/nub` sits in `devDependencies` alongside pnpm, npm, or bun without conflict.
+<Callout type="warn">
+  Keep development dependencies enabled for the build. Use the installer or a Dockerfile when the platform installs production dependencies only.
+</Callout>
 
-The builder still provisions Node from your version pin — set it so the build Node matches the version Nub resolves at runtime:
+## Container services
 
-- `package.json` → `devEngines.runtime`
-- `.node-version`
-- `.nvmrc`
-- `package.json` → `engines.node`
+The official image starts from Node, installs Nub, and runs as the non-root `node` user. A web service only needs a Dockerfile and an application that listens on `0.0.0.0` at the provider's `PORT`:
 
-## Which to use
+```dockerfile title="Dockerfile"
+FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
 
-- **GitHub Actions** — the [GitHub Action](/docs/deployment/github-action). It installs Nub, eagerly provisions the pinned Node, and fronts it on PATH.
-- **A Dockerfile you control** — the [Docker](/docs/deployment/docker) images, or one line to layer Nub onto your own `node` base.
-- **A hosted builder with no setup step** — the devDependency pattern above.
+COPY --chown=node:node package.json package-lock.json ./
+RUN nub ci
 
-## Version managers
+COPY --chown=node:node . .
+EXPOSE 8080
+CMD ["nub", "run", "start"]
+```
 
-Environments driven by `.tool-versions` can provision the CLI directly. [mise](https://mise.jdx.dev) ships a `nub` entry, so `mise use nub@latest` puts `nub` and `nubx` on PATH.
+Change `package-lock.json` to the lockfile the project already uses. Nub reads npm, pnpm, Bun, and Yarn lockfiles; the image needs no provider-specific package-manager setup.
+
+See [Docker](/docs/deployment/docker#web-services) for the server contract and image variants.
+
+## GitHub Actions and registries
+
+The setup action prepares the runner for tests and build scripts. Standard Docker actions can then build the application image from the Dockerfile above and publish it to GHCR:
+
+```yaml title=".github/workflows/image.yml"
+name: Image
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: nubjs/setup-nub@v0
+      - run: nub ci
+      - run: nub run test
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ github.sha }}
+```
+
+Railway and Render can pull an application image from GHCR directly. AWS Lambda requires ECR, while Google recommends Artifact Registry for Cloud Run; the provider pages show those registry-specific steps.
+
+## Node versions
+
+A managed builder selects Node, and Nub augments that version. Pin Node with the source the platform supports, normally `.node-version`, `.nvmrc`, or `package.json#engines.node`.
+
+A container carries its own Node version. Pin the Nub image tag and update it deliberately when you want a new Nub or Node release.
+
+Environments driven by `.tool-versions` can also provision the CLI through [mise](https://mise.jdx.dev): `mise use nub@latest` puts `nub` and `nubx` on `PATH`.

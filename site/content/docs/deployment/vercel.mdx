@@ -1,0 +1,135 @@
+---
+title: Vercel
+description: Vercel ships no preinstalled Nub, but the install command is yours to replace — so one line puts the CLI on PATH for the rest of the build. The devDependency pattern works too.
+---
+
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+
+[Vercel](https://vercel.com) doesn't ship Nub in its build image, but it lets you replace the install command — which is all it takes.
+
+<Steps>
+
+<Step>
+
+### Point the install command at Nub
+
+Add both commands to `vercel.json`. The installer fetches a static binary, then Nub installs the dependencies and runs the build:
+
+```json title="vercel.json"
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "curl -fsSL https://nubjs.com/install.sh | bash && export PATH=$HOME/.nub/bin:$PATH && nub ci",
+  "buildCommand": "export PATH=$HOME/.nub/bin:$PATH && nub run build"
+}
+```
+
+The clean install requires a committed lockfile that matches the manifest. It recreates `node_modules` on every deployment.
+
+<Callout type="warn" title="Export PATH — don't call the binary by path">
+  The installer writes to `$HOME/.nub/bin`, and calling `$HOME/.nub/bin/nub` directly looks equivalent but leaves Nub off PATH for everything it then starts. A script like `"build": "nub run i18n:compile && nubx vite build"` fails with `nub: command not found`. Because the install and build commands run as separate shells, the export belongs in both.
+</Callout>
+
+</Step>
+
+<Step>
+
+### Add an HTTP endpoint
+
+Files under `api/` become Vercel Functions. This endpoint makes the deployed service directly testable:
+
+```ts title="api/alive.ts"
+export default function handler(
+  _request: unknown,
+  response: {
+    status(code: number): { json(body: unknown): void };
+  },
+) {
+  response.status(200).json({
+    alive: true,
+    provider: "vercel",
+    runtime: "vercel-node",
+  });
+}
+```
+
+</Step>
+
+<Step>
+
+### Deploy
+
+Connect the repository from the Vercel dashboard, or push a deployment from the CLI:
+
+```bash
+nubx -y vercel deploy --prod
+```
+
+Request the Function after the production deployment:
+
+```bash
+curl --fail https://PROJECT.vercel.app/api/alive
+```
+
+```json
+{"alive":true,"provider":"vercel","runtime":"vercel-node"}
+```
+
+</Step>
+
+<Step>
+
+### Verify Nub ran the build
+
+The build log names the version it installed and the Node it picked up. This fixture's `"build"` script is `"nub build.ts"`, so `nub run build` expands to the `$ nub build.ts` line:
+
+```console
+Installed nub v{{NUB_VERSION}} (with nubx) to /vercel/.nub/bin/nub
+Removing existing node_modules...
+dependencies:
++ kleur@4.1.5
+$ nub build.ts
+Built with nub-on-node on v24.15.0
+Build Completed in /vercel/output [4s]
+```
+
+The fixture's build output records the Node version. Nub augments the Node the build machine already provisioned rather than downloading one.
+
+</Step>
+
+</Steps>
+
+## The devDependency alternative
+
+Overriding the install command isn't required. Adding the CLI as a devDependency also works and leaves `vercel.json` empty:
+
+```json
+{
+  "devDependencies": {
+    "@nubjs/nub": "^{{NUB_VERSION}}"
+  },
+  "scripts": {
+    "build": "nubx vite build"
+  }
+}
+```
+
+Vercel's auto-detected install links `nub` and `nubx` onto `node_modules/.bin`, and your scripts resolve them. Reach for it when you'd rather pin the version in the manifest than in build settings; see [Managed builders](/docs/deployment#managed-builders) for the full pattern.
+
+<Callout>
+  Excluding development dependencies from the install drops the CLI along with them. Override the install command instead when a project builds without devDependencies.
+</Callout>
+
+## Runtime boundary
+
+Nub runs the install and build. A deployed Vercel Function still runs on Vercel's Node runtime because Vercel owns the function entrypoint and does not run the project's Dockerfile.
+
+Use a [container provider](/docs/deployment#container-services) when request-time code needs Nub's runtime augmentation. Static output and frameworks that emit ordinary Node-compatible functions work normally on Vercel.
+
+## Node version
+
+Vercel selects the Node version and Nub adopts it, so pin it on Vercel's side:
+
+- Project Settings → Node.js Version
+- `package.json` → `engines.node`
+
+Nub reads `engines.node` too, so that spelling keeps both in agreement from one place.

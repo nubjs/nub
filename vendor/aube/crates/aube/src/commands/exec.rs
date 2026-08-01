@@ -317,6 +317,17 @@ pub(crate) async fn exec_bin(
     exec_bin_with_node_args(cwd, bin_path, bin, args, &[], shell_mode).await
 }
 
+pub(crate) async fn exec_bin_with_env(
+    cwd: &Path,
+    bin_path: &Path,
+    bin: &str,
+    args: &[String],
+    shell_mode: bool,
+    child_env: &std::collections::BTreeMap<String, String>,
+) -> miette::Result<Option<i32>> {
+    exec_bin_with_node_args_and_env(cwd, bin_path, bin, args, &[], shell_mode, child_env).await
+}
+
 /// Run a project-local binary. On a non-zero child exit, returns
 /// `Ok(Some(code))` so the caller can propagate the code up to the binary's
 /// single `std::process::exit` instead of terminating in place — keeping the
@@ -330,11 +341,33 @@ pub(crate) async fn exec_bin_with_node_args(
     node_args: &[String],
     shell_mode: bool,
 ) -> miette::Result<Option<i32>> {
+    exec_bin_with_node_args_and_env(
+        cwd,
+        bin_path,
+        bin,
+        args,
+        node_args,
+        shell_mode,
+        &Default::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn exec_bin_with_node_args_and_env(
+    cwd: &Path,
+    bin_path: &Path,
+    bin: &str,
+    args: &[String],
+    node_args: &[String],
+    shell_mode: bool,
+    child_env: &std::collections::BTreeMap<String, String>,
+) -> miette::Result<Option<i32>> {
     if !shell_mode && !bin_path.exists() {
         return Err(bin_not_found_error(bin));
     }
 
-    let command = build_bin_command(cwd, bin_path, bin, args, node_args, shell_mode);
+    let command = build_bin_command(cwd, bin_path, bin, args, node_args, shell_mode, child_env);
     let status = crate::process_guard::spawn_and_wait(command)
         .await
         .into_diagnostic()
@@ -365,13 +398,24 @@ pub(crate) async fn exec_bin_terminal(
     args: &[String],
     shell_mode: bool,
 ) -> miette::Result<Option<i32>> {
+    exec_bin_terminal_with_env(cwd, bin_path, bin, args, shell_mode, &Default::default()).await
+}
+
+pub(crate) async fn exec_bin_terminal_with_env(
+    cwd: &Path,
+    bin_path: &Path,
+    bin: &str,
+    args: &[String],
+    shell_mode: bool,
+    child_env: &std::collections::BTreeMap<String, String>,
+) -> miette::Result<Option<i32>> {
     #[cfg(unix)]
     if aube_util::embedder().name == aube_util::AUBE.name {
         use std::os::unix::process::CommandExt;
         if !shell_mode && !bin_path.exists() {
             return Err(bin_not_found_error(bin));
         }
-        let mut command = build_bin_command(cwd, bin_path, bin, args, &[], shell_mode);
+        let mut command = build_bin_command(cwd, bin_path, bin, args, &[], shell_mode, child_env);
         // `exec` only returns on failure; on success the tool has replaced us.
         let err = command.as_std_mut().exec();
         return Err(miette!(
@@ -381,7 +425,7 @@ pub(crate) async fn exec_bin_terminal(
     }
     // Embedded host or Windows: replacing the image is unsafe or unsupported,
     // so run the tool as a supervised child instead.
-    exec_bin(cwd, bin_path, bin, args, shell_mode).await
+    exec_bin_with_env(cwd, bin_path, bin, args, shell_mode, child_env).await
 }
 
 fn bin_not_found_error(bin: &str) -> miette::Report {
@@ -393,7 +437,9 @@ fn bin_not_found_error(bin: &str) -> miette::Report {
 
 /// Assemble the `tokio::process::Command` that runs `bin`, shared by the
 /// supervised (`spawn_and_wait`) and image-replacing (`exec_bin_terminal`)
-/// paths. Callers own the bin-exists check.
+/// paths. Callers own the bin-exists check. `child_env` carries the embedder's
+/// added environment; standalone callers pass an empty map.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_bin_command(
     cwd: &Path,
     bin_path: &Path,
@@ -401,6 +447,7 @@ pub(crate) fn build_bin_command(
     args: &[String],
     node_args: &[String],
     shell_mode: bool,
+    child_env: &std::collections::BTreeMap<String, String>,
 ) -> tokio::process::Command {
     let mut command =
         if !shell_mode && let Some(cmd) = resolved_bin_command(bin_path, args, node_args) {
@@ -431,6 +478,7 @@ pub(crate) fn build_bin_command(
         };
     crate::runtime::apply_child_env(&mut command);
     command
+        .envs(child_env)
         .current_dir(cwd)
         .stderr(aube_scripts::child_stderr());
     command
@@ -464,7 +512,15 @@ pub(crate) async fn exec_bin_status_with_node_args(
         ));
     }
 
-    let command = build_bin_command(cwd, bin_path, bin, args, node_args, shell_mode);
+    let command = build_bin_command(
+        cwd,
+        bin_path,
+        bin,
+        args,
+        node_args,
+        shell_mode,
+        &std::collections::BTreeMap::new(),
+    );
     super::run_output::run_command(command, output_mode).await
 }
 
@@ -959,6 +1015,7 @@ mod tests {
             ],
             &[],
             false,
+            &std::collections::BTreeMap::new(),
         );
         let output = command.output().await.unwrap();
         assert!(output.status.success());
@@ -997,6 +1054,7 @@ mod tests {
             &["launched-directly".to_string()],
             &[],
             false,
+            &std::collections::BTreeMap::new(),
         );
         let node_path = command
             .as_std()

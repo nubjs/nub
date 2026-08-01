@@ -166,7 +166,10 @@ version:
 	@cd crates/nub-native && cargo update -p nub-native --precise $(V)
 	@echo "✓ All packages, Cargo.toml, both Cargo.lock files, and runtime/version.mjs set to $(V)"
 
-# Verify version consistency across npm packages, Cargo.toml, and version.mjs.
+# Verify version consistency across npm packages, Cargo.toml, version.mjs, and
+# the version-pinned nub.jsonc schema snapshot under site/public/schema (which
+# must equal latest.json modulo the schema-id field, so a published vX.Y.json is
+# never stale relative to the schema the release actually ships).
 # Canonical source is npm/nub/package.json. Non-zero exit on any mismatch — the
 # pre-release gate (release.yml runs it before building/publishing). Guards the
 # transpile-cache invariant (A12): NUB_VERSION is the sole cache key, valid only
@@ -175,6 +178,7 @@ version:
 version-check: oxc-lockstep-check
 	@node -e " \
 		const fs = require('fs'); \
+		const { isDeepStrictEqual } = require('node:util'); \
 		const root = JSON.parse(fs.readFileSync('npm/nub/package.json', 'utf8')); \
 		const v = root.version; \
 		const errors = []; \
@@ -206,8 +210,19 @@ version-check: oxc-lockstep-check
 		const pm = version.match(/export const NUB_VERSION = \x22([^\x22]*)\x22/); \
 		if (!pm) errors.push('runtime/version.mjs: NUB_VERSION not found'); \
 		else if (pm[1] !== v) errors.push('runtime/version.mjs NUB_VERSION is ' + pm[1] + ', expected ' + v); \
+		const pinned = 'v' + v.split('.').slice(0, 2).join('.') + '.json'; \
+		try { \
+			const latest = JSON.parse(fs.readFileSync('site/public/schema/latest.json', 'utf8')); \
+			const snapshotPath = 'site/public/schema/' + pinned; \
+			const snapshot = JSON.parse(fs.readFileSync(snapshotPath, 'utf8')); \
+			const expectedId = 'https://nubjs.com/schema/' + pinned; \
+			if (snapshot.\$$id !== expectedId) errors.push(snapshotPath + ' has \$$id ' + JSON.stringify(snapshot.\$$id) + ', expected ' + JSON.stringify(expectedId)); \
+			delete latest.\$$id; \
+			delete snapshot.\$$id; \
+			if (!isDeepStrictEqual(snapshot, latest)) errors.push(snapshotPath + ' does not equal latest.json modulo \$$id'); \
+		} catch { errors.push('missing or unreadable schema snapshot for ' + pinned); } \
 		if (errors.length) { console.error('Version mismatch:\\n  ' + errors.join('\\n  ')); process.exit(1); } \
-		else { console.log('✓ All npm packages, Cargo.toml (incl. the inlined nub-core/nub-native manifests), runtime/version.mjs at v' + v); }"
+		else { console.log('✓ All npm packages, Cargo.toml (incl. the inlined nub-core/nub-native manifests), runtime/version.mjs, and the schema snapshot at v' + v); }"
 
 npm-build: build
 	./npm/build-local.sh

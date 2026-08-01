@@ -57,6 +57,26 @@ fn is_transient(err: &io::Error) -> bool {
 }
 
 pub fn atomic_write(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
+    atomic_write_with_permissions(final_path, bytes, None)
+}
+
+/// [`atomic_write`], applying `permissions` to the temp file BEFORE the rename.
+///
+/// The rename installs a NEW inode, so whatever the replaced file carried in
+/// its metadata is gone. A caller preserving a mode would have to re-apply it
+/// after the write, which leaves the committed file readable more widely than
+/// the one it replaced for as long as that takes — and leaves it that way
+/// permanently if the process dies in between. Setting the mode on the temp
+/// file folds it into the same atomic step as the content: either the rename
+/// happens and the file is wholly correct, or it never happens. No
+/// intermediate state to tear down, nothing to leak on a kill.
+///
+/// `None` keeps the platform default, which is what every other caller gets.
+pub fn atomic_write_with_permissions(
+    final_path: &Path,
+    bytes: &[u8],
+    permissions: Option<std::fs::Permissions>,
+) -> io::Result<()> {
     if let Some(parent) = final_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -65,6 +85,16 @@ pub fn atomic_write(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
         use std::io::Write;
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(bytes)?;
+        if let Some(mode) = permissions {
+            // Best effort, and deliberately not `?`: a filesystem that will not
+            // carry the mode must still get the content, which is what a caller
+            // re-applying it afterwards also ended up with. Failing the write
+            // here would turn a cosmetic loss into a broken `config set`.
+            //
+            // Through the handle rather than the path — the temp name is ours
+            // alone, but a by-path call is a second lookup on principle.
+            let _ = f.set_permissions(mode);
+        }
         // No fsync: every aube caller writes content that is either
         // regenerable from network/manifest (packument cache, install
         // state, version-check cache) or paired with explicit user

@@ -672,6 +672,14 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
     if !install_is_noop && should_print_human_install_summary() {
         print_direct_dependency_summary(graph_for_link, manifests, direct_dep_info);
     }
+    // The embedder's report slot. Placed here so a host's own end-of-install
+    // block lands above the success line rather than after it. Inert with no
+    // hook registered, which is every standalone aube run.
+    super::emit_pre_summary(
+        cwd,
+        planned_gvs && node_linker == aube_linker::NodeLinker::Isolated,
+        install_is_noop,
+    );
     if let Some(p) = prog_ref {
         p.print_install_summary(
             stats.packages_linked,

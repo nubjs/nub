@@ -329,6 +329,7 @@ pub async fn run(
             dangerously_allow_all_builds: false,
             network_mode,
             minimum_release_age_override: None,
+            revalidate_release_policy: false,
             strict_no_lockfile: false,
             force: false,
             cli_flags: vec![(

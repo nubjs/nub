@@ -1,0 +1,97 @@
+#!/bin/sh
+# pre-push hook: build site/ before a push that touches it.
+#
+# WHY THIS EXISTS: nothing else gates the marketing site before it deploys.
+# ci.yml triggers only on `push: main` and `pull_request: main`, but most work
+# here lands on long-lived feature branches pushed directly — so on those,
+# Vercel is the FIRST thing that ever type checks site/, and it reports by email
+# after the fact. That is how a type error in src/app/api/search/route.ts broke
+# ~34 consecutive preview deployments across three days (2026-07-28..31) with a
+# fix sitting unmerged on a branch the whole time.
+#
+# Runs the SAME `next build` Vercel runs, so this gate cannot drift from the
+# thing it is protecting. ~20s, and only when the pushed commits touch site/**;
+# a Rust-only push never pays for it. For the inner loop use the much faster
+# `pnpm run typecheck` (~2s) — it catches the type-error class but not build- or
+# render-time failures.
+#
+# NEVER BLOCKS ON INFRASTRUCTURE. Missing deps, absent pnpm, a failed install —
+# all warn and exit 0. Only a genuine build failure exits non-zero. A hook that
+# hard-fails on setup gets bypassed permanently, which protects nothing.
+#
+# It DOES auto-install site deps when absent (~4s against a warm pnpm store),
+# because worktrees start without them: .worktreeinclude cannot carry
+# node_modules (a copy is multi-GB, and Turbopack rejects a symlinked
+# node_modules outright — "points out of the filesystem root"). Without this the
+# hook would silently skip in exactly the worktrees where the work happens.
+#
+# CAVEAT: it builds the WORKING TREE, while the range it inspects is the commits
+# being pushed. Those agree in the normal commit-then-push flow, but not when you
+# push a branch other than the one checked out — there it can pass on a tree that
+# is not what ships. CI's Site build job checks the pushed commit itself.
+#
+# Bypass: NUB_SKIP_SITE_CHECK=1 git push   ·   git push --no-verify
+#
+# core.hooksPath is .githooks, so this is active in every worktree with no
+# per-clone setup step.
+
+[ "${NUB_SKIP_SITE_CHECK:-}" = "1" ] && exit 0
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+[ -d "$ROOT/site" ] || exit 0
+
+# Decide whether the pushed range touches site/**. FAIL SAFE, matching the
+# matrix-plan job's philosophy in ci.yml: a range we cannot resolve runs the
+# check rather than skipping it. Skipping costs a broken deployment; running
+# costs 20 seconds.
+site_touched=0
+undecidable=0
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  # An all-zero local sha is a branch deletion — nothing to build.
+  case "$local_sha" in *[!0]*) ;; *) continue ;; esac
+  case "$remote_sha" in
+    # Existing remote branch: diff exactly what this push adds.
+    *[!0]*) base="$remote_sha" ;;
+    # New remote branch: fall back to where it forked from trunk.
+    *) base=$(git merge-base "$local_sha" origin/main 2>/dev/null) ;;
+  esac
+  if [ -z "$base" ]; then
+    undecidable=1
+    continue
+  fi
+  changed=$(git diff --name-only "$base" "$local_sha" -- site/ 2>/dev/null) || undecidable=1
+  [ -n "$changed" ] && site_touched=1
+done
+
+[ "$site_touched" = 1 ] || [ "$undecidable" = 1 ] || exit 0
+
+if [ ! -x "$ROOT/site/node_modules/.bin/next" ]; then
+  if ! command -v pnpm >/dev/null 2>&1; then
+    echo "pre-push: site/ changed, but site deps are absent and pnpm is not on PATH — skipping." >&2
+    echo "          CI's 'Site build' job is the backstop for anything reaching main." >&2
+    exit 0
+  fi
+  echo "pre-push: site/ changed — installing site deps (first run in this worktree)…"
+  if ! (cd "$ROOT/site" && pnpm install --frozen-lockfile --config.strictDepBuilds=false) >/dev/null 2>&1; then
+    echo "pre-push: site dep install failed — skipping the build rather than blocking the push." >&2
+    echo "          Run it by hand to see why:  (cd site && pnpm install)" >&2
+    exit 0
+  fi
+fi
+
+echo "pre-push: site/ changed — running \`next build\` (the build Vercel runs)…"
+LOG=$(mktemp) || exit 0
+if (cd "$ROOT/site" && ./node_modules/.bin/next build) >"$LOG" 2>&1; then
+  rm -f "$LOG"
+  exit 0
+fi
+
+echo >&2
+tail -40 "$LOG" >&2
+rm -f "$LOG"
+cat >&2 <<'MSG'
+
+pre-push: SITE BUILD FAILED — pushing this would break the Vercel deployment.
+          Fix it, or bypass with:  git push --no-verify
+MSG
+exit 1

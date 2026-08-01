@@ -80,16 +80,19 @@ pub struct DlxArgs {
 ///   3. Exec `<tmp>/node_modules/.bin/<command>` from the user's original cwd.
 ///   4. tempfile removes the scratch dir on drop.
 pub async fn run(args: DlxArgs) -> miette::Result<Option<i32>> {
-    run_in(args, None).await
+    run_in(args, None, BTreeMap::new()).await
 }
 
 /// `dlx` rooted at an explicit `base_dir` instead of the process cwd for
 /// runtime resolution and the local-bin fast path — the in-process
 /// embedding entry. `None` reproduces the CLI behavior. The transient
-/// install still runs in its own scratch project regardless.
+/// install still runs in its own scratch project regardless. `child_env`
+/// adds environment values to the executed tool; the CLI path passes an
+/// empty map and is unchanged.
 pub async fn run_in(
     args: DlxArgs,
     base_dir: Option<std::path::PathBuf>,
+    child_env: BTreeMap<String, String>,
 ) -> miette::Result<Option<i32>> {
     args.network.install_overrides();
     args.lockfile.install_overrides();
@@ -182,12 +185,13 @@ pub async fn run_in(
             // Local-bin fast path: no scratch dir was created, so nothing
             // needs to run after the tool. Hand off via image replacement
             // on the standalone binary (embedded/Windows supervise).
-            return super::exec::exec_bin_terminal(
+            return super::exec::exec_bin_terminal_with_env(
                 &initial_cwd,
                 &bin_path,
                 &bin_name,
                 &bin_args,
                 false,
+                &child_env,
             )
             .await;
         }
@@ -269,6 +273,7 @@ pub async fn run_in(
         let mut cmd = aube_scripts::spawn_shell(&line);
         crate::runtime::apply_child_env(&mut cmd);
         cmd.env("PATH", &new_path)
+            .envs(&child_env)
             .current_dir(&prev_cwd)
             .stderr(aube_scripts::child_stderr());
         crate::process_guard::spawn_and_wait(cmd)
@@ -303,6 +308,7 @@ pub async fn run_in(
             &bin_args,
             &[],
             false,
+            &child_env,
         );
         crate::process_guard::spawn_and_wait(cmd)
             .await
@@ -672,6 +678,7 @@ mod tests {
             managed_aube_config: &[],
             project_aube_config: &[],
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: &empty_workspace,

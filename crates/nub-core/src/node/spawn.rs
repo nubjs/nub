@@ -3,6 +3,7 @@
 //! all of Nub's runtime augmentation into a single child-process spawn.
 
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::{
@@ -703,6 +704,13 @@ pub struct SpawnConfig<'a> {
     /// a node bin run via `nub exec -r` executes IN the member, seeing its own
     /// `.env` / Node pin / `.bin` chain rather than the workspace root's.
     pub cwd: &'a Path,
+    /// Resolved project/global Node options, already validated against this Node.
+    pub runtime_node_options: &'a [String],
+    /// Resolved project/global `v8Flags`. Delivered as ARGV, not `NODE_OPTIONS`:
+    /// Node refuses most V8-only flags (`--stack-size`, `--no-opt`, …) in
+    /// `NODE_OPTIONS` but accepts them on the command line, so this is the only
+    /// channel that can carry them.
+    pub runtime_v8_flags: &'a [String],
 }
 
 /// The result of spawning a Node process.
@@ -799,6 +807,15 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     let node_options = env::var("NODE_OPTIONS").ok();
     let is_reentrant = is_reentrant_in(node_options.as_deref(), reentrancy_key.as_deref());
 
+    // A compat re-entry may arrive through an augmented parent's PATH shim.
+    // Restore the environment captured before that parent installed Nub's
+    // NODE_OPTIONS/NODE_PATH/NODE/compile-cache values, and remove its exact
+    // shim component. This makes a nested `NODE_COMPAT=1 node ...` genuinely
+    // vanilla instead of merely skipping a second augmentation pass.
+    if config.compat_mode {
+        restore_compat_environment(&mut cmd);
+    }
+
     // Augment only when we can locate our own preload. If `find_preload` fails —
     // a broken install, or (Windows, A-WIN2) the PATH-shim `node.exe` running
     // from a temp dir where the relative walk to `runtime/` can't reach (a
@@ -809,6 +826,18 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // a half-setup (flags + a nested shim, no preload). See
     // wiki/runtime/hijack-by-default.md.
     if !config.compat_mode && !is_reentrant && preload.is_some() {
+        apply_augmentation_restore_markers(|key, value| {
+            cmd.env(key, value);
+        });
+        // Establish an expected value for every restoration-controlled variable,
+        // including those this spawn may leave inherited. Branches below
+        // overwrite the marker when they rewrite a value. Without the baseline,
+        // a later script replacement of an untouched variable would look like a
+        // parent-owned value and be overwritten at the fresh boundary.
+        for var in &RESTORABLE_VARS {
+            let inherited = env::var_os(var.name);
+            mark_augmented(&mut cmd, var.name, inherited.as_deref());
+        }
         // Flag injection — intersected with the binary's actual accepted-flag set
         // (probed + cached) so an open-ended `Unflag` band never injects a flag a
         // future Node has removed (which would abort startup with "bad option").
@@ -881,12 +910,13 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
 
         // PATH shim: prepend a temp dir with a `node` symlink → nub.
         if let Ok(shim_dir) = setup_path_shim(config.nub_binary) {
-            let mut new_path = std::ffi::OsString::from(shim_dir.as_str());
+            let mut new_path = OsString::from(shim_dir.as_str());
             if let Some(existing) = env::var_os("PATH") {
                 new_path.push(crate::PATH_LIST_SEPARATOR);
                 new_path.push(existing);
             }
-            cmd.env("PATH", new_path);
+            cmd.env("PATH", &new_path);
+            mark_augmented(&mut cmd, "PATH", Some(OsStr::new(shim_dir.as_str())));
         }
 
         // `process.versions.nub` source: hand the running binary's version to the
@@ -919,8 +949,8 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // routed single-channel. NODE_OPTIONS `--require` preserves the R1 sync-entry
         // semantics identically to argv (R1 is the `--require`-vs-`--import` tier
         // choice — see PreloadInjection — not the argv-vs-NODE_OPTIONS channel), and
-        // this matches the already-single-channel `compute_augmentation_env` script
-        // path. PnP's install-before-preload ordering is preserved by the
+        // this matches the already-single-channel `compute_augmentation_env`
+        // script path. PnP's install-before-preload ordering is preserved by the
         // NODE_OPTIONS token order (PnP token pushed before the preload token below).
 
         // Coverage-exclude nub's own runtime (R9). When the user runs the test
@@ -991,9 +1021,15 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             // default nub sets; their coverage numbers may be cache-affected, the
             // same tradeoff they'd have on plain node). Normal R8 strip+sentinel.
             cmd.env_remove("NODE_COMPILE_CACHE");
-            if write_compile_cache_sentinel(&dir).is_ok() {
+            let sentinel_written = write_compile_cache_sentinel(&dir).is_ok();
+            if sentinel_written {
                 _ccache_guard = Some(CompileCacheSentinelGuard);
             }
+            mark_augmented(
+                &mut cmd,
+                "NODE_COMPILE_CACHE",
+                sentinel_written.then(|| OsStr::new(&dir)),
+            );
         } else if coverage {
             // No user cache + coverage active: suppress nub's DEFAULT compile
             // cache (a warm V8 cache collapses/omits per-branch coverage ranges,
@@ -1003,6 +1039,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             // half (preload-common.cjs reenableUserCompileCache) for coverage
             // children nub's spawn path never sees.
             cmd.env_remove("NODE_COMPILE_CACHE");
+            mark_augmented(&mut cmd, "NODE_COMPILE_CACHE", None);
         } else if let Some(dir) = default_compile_cache_dir() {
             // Default-on compile cache (decided 2026-06-10, measured): when the
             // user hasn't set NODE_COMPILE_CACHE, point it at a nub-owned dir.
@@ -1030,11 +1067,16 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             // Escape hatches unchanged: NODE_COMPILE_CACHE yourself, or
             // NODE_DISABLE_COMPILE_CACHE=1 (honored by Node).
             cmd.env_remove("NODE_COMPILE_CACHE");
-            if let Some(dir) = dir.to_str()
-                && write_compile_cache_sentinel(dir).is_ok()
-            {
+            let dir = dir.to_str();
+            let sentinel_written = dir.is_some_and(|dir| write_compile_cache_sentinel(dir).is_ok());
+            if sentinel_written {
                 _ccache_guard = Some(CompileCacheSentinelGuard);
             }
+            mark_augmented(
+                &mut cmd,
+                "NODE_COMPILE_CACHE",
+                dir.filter(|_| sentinel_written).map(OsStr::new),
+            );
         }
 
         // Dual-channel injection: set NODE_OPTIONS so hardcoded-path `node`
@@ -1058,12 +1100,22 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         if let Some(pnp) = config.pnp {
             node_opts_parts.push(format!(
                 "--require={}",
-                node_options_quote(&pnp.display().to_string())
+                node_options_token(&pnp.display().to_string())
             ));
         }
         if let Some(ref inj) = injection {
             node_opts_parts.push(inj.node_options_token());
         }
+        // Project-config `nodeOptions` entries are quoted like every other value nub
+        // writes here. The CLI-side validator rejects whitespace and NUL but NOT a
+        // double quote, so an entry such as `--title=a"b` would otherwise reach
+        // Node's tokenizer with an unmatched quote and abort startup.
+        node_opts_parts.extend(
+            config
+                .runtime_node_options
+                .iter()
+                .map(|opt| node_options_token(opt)),
+        );
         // Coverage-exclude nub's own runtime (R9) — via NODE_OPTIONS, not just argv.
         // The CLI-arg form at the `cmd.arg(glob)` site above only reaches the DIRECT
         // child nub spawns. But the test-runner coverage fixtures spawn the actual
@@ -1092,7 +1144,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             // silently drop the exclude.
             node_opts_parts.push(format!(
                 "--test-coverage-exclude={}",
-                node_options_quote(&format!("{}/**", runtime_dir.display()))
+                node_options_token(&format!("{}/**", runtime_dir.display()))
             ));
         }
         // Web Storage (mirrors the argv site above): always inject
@@ -1121,7 +1173,9 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             }
         }
         if !node_opts_parts.is_empty() {
-            cmd.env("NODE_OPTIONS", node_opts_parts.join(" "));
+            let node_options = node_opts_parts.join(" ");
+            cmd.env("NODE_OPTIONS", &node_options);
+            mark_augmented(&mut cmd, "NODE_OPTIONS", Some(OsStr::new(&node_options)));
         }
 
         // NODE_PATH so the transpile's bare helper requires (e.g.
@@ -1132,13 +1186,35 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // NODE_PATH. No-op in dev (runtime/ has no node_modules → walk-up to the
         // repo's), active for an installed package (A30).
         if let Some(node_path) = vendored_node_path(preload.as_deref()) {
-            cmd.env("NODE_PATH", node_path);
+            cmd.env("NODE_PATH", &node_path);
+            mark_augmented(&mut cmd, "NODE_PATH", Some(&node_path));
         }
+    }
+
+    // `v8Flags` ride argv, and deliberately sit OUTSIDE the augment block above:
+    // that block is skipped on a re-entrant spawn (a `node` reaching us through
+    // the PATH shim from inside a script or a child process), yet that child is
+    // exactly the real Node process the flags must reach. Each V8 flag is applied
+    // to each Node process once — the ancestor that installed the shim spawned a
+    // SHELL, not a Node, so there is no double-application to guard against.
+    // Compat mode is the zero-augmentation contract, so it carries none.
+    if !config.compat_mode {
+        cmd.args(config.runtime_v8_flags);
     }
 
     // .env vars injected by the CLI layer.
     for (k, v) in config.env_vars {
         cmd.env(k, v);
+    }
+
+    // Compat is tree-wide, not only a choice made by this one launcher. The
+    // restored PATH deliberately preserves unrelated inherited entries, which
+    // may include a Nub shim from an outer logical invocation. Stamping the
+    // public opt-out makes any later bare `node` descendant stay vanilla even
+    // if it reaches that shim. Apply it after env-file values so `--node` or a
+    // resolved `nodeCompat` cannot be undone by forwarded project input.
+    if config.compat_mode {
+        cmd.env("NODE_COMPAT", "1");
     }
 
     // User args always pass through.
@@ -1756,6 +1832,7 @@ pub fn compute_augmentation_env(
     node_version: super::version::NodeVersion,
     compat_mode: bool,
     pnp: Option<&Path>,
+    runtime_node_options: &[String],
 ) -> Option<AugmentationEnv> {
     if compat_mode {
         return None;
@@ -1809,10 +1886,17 @@ pub fn compute_augmentation_env(
     if let Some(pnp) = pnp {
         node_opts_parts.push(format!(
             "--require={}",
-            node_options_quote(&pnp.display().to_string())
+            node_options_token(&pnp.display().to_string())
         ));
     }
     node_opts_parts.push(injection.node_options_token());
+    // Quoted for the same reason as the direct-spawn site: the CLI validator lets a
+    // double quote through, and an unmatched one aborts Node's NODE_OPTIONS parse.
+    node_opts_parts.extend(
+        runtime_node_options
+            .iter()
+            .map(|opt| node_options_token(opt)),
+    );
     // Web Storage (mirrors `spawn_node`): always inject
     // `--experimental-webstorage` on the flag-needed band (22.4–24.x) so a
     // script-run child shell's `node` has `sessionStorage` out of the box, with no
@@ -1880,7 +1964,7 @@ pub struct AugmentationEnv {
     pub shim_dir: Option<String>,
     /// NODE_PATH so CJS `require()` of the transpile's vendored helper deps
     /// resolves from an installed package (A30). `None` in dev / when absent.
-    pub node_path: Option<std::ffi::OsString>,
+    pub node_path: Option<OsString>,
     /// Whether to set the internal `__NUB_NEUTRALIZE_LOCALSTORAGE` env var on the
     /// child so nub's preload replaces the throwing `localStorage` getter with
     /// `undefined` (the flag-needed band, no user `--localstorage-file`). Consumers
@@ -1890,6 +1974,34 @@ pub struct AugmentationEnv {
 }
 
 impl AugmentationEnv {
+    /// Preserve the environment that a later compat-mode PATH-shim re-entry must
+    /// restore before it launches plain Node. A separate presence bitmask keeps
+    /// an explicitly empty value distinct from an absent variable.
+    pub fn apply_restore_markers(&self, mut set_env: impl FnMut(&str, &OsStr)) {
+        apply_augmentation_restore_markers(&mut set_env);
+        let ambient_node_options = env::var_os("NODE_OPTIONS");
+        let ambient_node_path = env::var_os("NODE_PATH");
+        let ambient_compile_cache = env::var_os("NODE_COMPILE_CACHE");
+        // NODE and PATH are the caller's to stamp: the script launchers compose
+        // them after this call, so only they know the final value.
+        for (name, expected) in [
+            (
+                "NODE_OPTIONS",
+                self.node_options
+                    .as_ref()
+                    .map(|value| value.as_ref())
+                    .or(ambient_node_options.as_deref()),
+            ),
+            (
+                "NODE_PATH",
+                self.node_path.as_deref().or(ambient_node_path.as_deref()),
+            ),
+            ("NODE_COMPILE_CACHE", ambient_compile_cache.as_deref()),
+        ] {
+            apply_expected_augmentation_marker(name, expected, &mut set_env);
+        }
+    }
+
     /// The PATH-shim's `node` entry (a symlink/hardlink → nub), suitable as the
     /// `$NODE` value that npm/pnpm set so userland `$NODE child.js` (and
     /// `spawn(process.env.NODE, …)`) invoke "the same Node this script runs under."
@@ -1912,7 +2024,7 @@ impl AugmentationEnv {
         }
     }
 
-    pub fn node_shim_exe(&self) -> Option<std::ffi::OsString> {
+    pub fn node_shim_exe(&self) -> Option<OsString> {
         self.shim_dir.as_deref().map(|dir| {
             #[cfg(windows)]
             let name = "node.exe";
@@ -1966,6 +2078,14 @@ fn is_permission_flag(arg: &str) -> bool {
 /// the same preload via NODE_OPTIONS) and they advertise the marker too.
 const VERSION_ENV: &str = "__NUB_VERSION";
 
+/// Carries the resolved `nub.jsonc` snapshot (`preload`, `loader`, `tsconfig`)
+/// to the runtime as JSON. Resolved ONCE by the Rust frontend after the final
+/// cwd is known and transported unchanged through nested shim launches, so every
+/// process in a run transpiles against the same config. Internal plumbing, not a
+/// user knob — and denylisted from `.env` sources, since a repo-supplied value
+/// would rewrite the code nub transpiles.
+pub const RUNTIME_CONFIG_ENV: &str = "__NUB_RUNTIME_CONFIG";
+
 /// Tells nub's fast-tier preload to register its module hooks via the ASYNC
 /// loader-worker path (`module.register`) instead of the sync
 /// `module.registerHooks`, even on a Node that supports the sync fast tier. Set
@@ -1976,6 +2096,407 @@ const VERSION_ENV: &str = "__NUB_VERSION";
 /// `__NUB_*` plumbing var, NOT a user knob — explicitly permitted by the brand
 /// boundary.
 const FORCE_ASYNC_TIER_ENV: &str = "__NUB_FORCE_ASYNC_TIER";
+
+/// The presence bitmask stamped alongside the `__NUB_COMPAT_*` capture, so a
+/// variable captured EMPTY stays distinguishable from one that was absent.
+const COMPAT_PRESENT_ENV: &str = "__NUB_COMPAT_PRESENT";
+
+/// An environment variable nub rewrites when it augments a child, together with
+/// the wire vars a descendant needs to undo that rewrite:
+///
+/// - `compat` — the value the variable held before the OUTERMOST augmentation.
+///   A compat re-entry or a fresh nested invocation restores it.
+/// - `augmented` / `augmented_present` — the exact value nub installed, so a
+///   later `.env` or script mutation stays distinguishable from an untouched
+///   parent-owned value and survives the boundary.
+/// - `bit` — this variable's slot in the [`COMPAT_PRESENT_ENV`] mask.
+struct RestorableVar {
+    name: &'static str,
+    compat: &'static str,
+    augmented: &'static str,
+    augmented_present: &'static str,
+    bit: u8,
+}
+
+impl RestorableVar {
+    fn lookup(name: &str) -> Option<&'static Self> {
+        RESTORABLE_VARS.iter().find(|var| var.name == name)
+    }
+
+    fn was_present(&self, presence_mask: u8) -> bool {
+        presence_mask & self.bit != 0
+    }
+}
+
+/// PATH is the odd one out: nub COMPOSES it (`shim:.bin:system`) rather than
+/// replacing it, so it gets its own restore rule ([`restored_path`]).
+static RESTORABLE_VARS: [RestorableVar; 5] = [
+    RestorableVar {
+        name: "NODE_OPTIONS",
+        compat: "__NUB_COMPAT_NODE_OPTIONS",
+        augmented: "__NUB_AUGMENTED_NODE_OPTIONS",
+        augmented_present: "__NUB_AUGMENTED_NODE_OPTIONS_PRESENT",
+        bit: 1 << 0,
+    },
+    RestorableVar {
+        name: "NODE_PATH",
+        compat: "__NUB_COMPAT_NODE_PATH",
+        augmented: "__NUB_AUGMENTED_NODE_PATH",
+        augmented_present: "__NUB_AUGMENTED_NODE_PATH_PRESENT",
+        bit: 1 << 1,
+    },
+    RestorableVar {
+        name: "NODE",
+        compat: "__NUB_COMPAT_NODE",
+        augmented: "__NUB_AUGMENTED_NODE",
+        augmented_present: "__NUB_AUGMENTED_NODE_PRESENT",
+        bit: 1 << 2,
+    },
+    RestorableVar {
+        name: "NODE_COMPILE_CACHE",
+        compat: "__NUB_COMPAT_NODE_COMPILE_CACHE",
+        augmented: "__NUB_AUGMENTED_NODE_COMPILE_CACHE",
+        augmented_present: "__NUB_AUGMENTED_NODE_COMPILE_CACHE_PRESENT",
+        bit: 1 << 3,
+    },
+    RestorableVar {
+        name: "PATH",
+        compat: "__NUB_COMPAT_PATH",
+        augmented: "__NUB_AUGMENTED_PATH",
+        augmented_present: "__NUB_AUGMENTED_PATH_PRESENT",
+        bit: 1 << 4,
+    },
+];
+
+/// Stamp the exact value a parent installed for one rewritten environment
+/// variable. A fresh child restores the captured ambient value only while the
+/// current value still matches this ownership marker; user replacements win.
+/// Names outside [`RESTORABLE_VARS`] carry no marker and are ignored.
+pub fn apply_expected_augmentation_marker(
+    name: &str,
+    value: Option<&OsStr>,
+    mut set_env: impl FnMut(&str, &OsStr),
+) {
+    let Some(var) = RestorableVar::lookup(name) else {
+        return;
+    };
+    set_env(var.augmented, value.unwrap_or_else(|| OsStr::new("")));
+    set_env(
+        var.augmented_present,
+        OsStr::new(if value.is_some() { "1" } else { "0" }),
+    );
+}
+
+/// [`apply_expected_augmentation_marker`] for the common case of stamping the
+/// marker onto a child `Command`.
+fn mark_augmented(cmd: &mut Command, name: &str, value: Option<&OsStr>) {
+    apply_expected_augmentation_marker(name, value, |key, value| {
+        cmd.env(key, value);
+    });
+}
+
+fn decode_expected_augmentation_value(
+    value: Option<OsString>,
+    present: Option<&str>,
+) -> Option<Option<OsString>> {
+    match present {
+        Some("1") => Some(Some(value.unwrap_or_default())),
+        Some("0") => Some(None),
+        _ => None,
+    }
+}
+
+fn expected_augmentation_value(var: &RestorableVar) -> Option<Option<OsString>> {
+    let present = env::var(var.augmented_present).ok();
+    decode_expected_augmentation_value(env::var_os(var.augmented), present.as_deref())
+}
+
+fn inherited_presence_mask() -> u8 {
+    env::var(COMPAT_PRESENT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or(0)
+}
+
+/// The pre-augmentation value to carry forward for `var`: an outer nub's capture
+/// if there is one, otherwise this process's current value.
+fn compat_restore_value(var: &RestorableVar, inherited_presence: u8) -> (OsString, bool) {
+    if let Some(captured) = env::var_os(var.compat) {
+        (captured, var.was_present(inherited_presence))
+    } else if let Some(current) = env::var_os(var.name) {
+        (current, true)
+    } else {
+        (OsString::new(), false)
+    }
+}
+
+/// Stamp the pre-augmentation environment onto a child. The snapshot serves two
+/// exits: `NODE_COMPAT` restores plain Node, while an explicitly nested
+/// `nub`/`nubx`/PM shim restores a fresh user invocation before discovering its
+/// own config.
+pub fn apply_augmentation_restore_markers(mut set_env: impl FnMut(&str, &OsStr)) {
+    let inherited_presence = inherited_presence_mask();
+    let mut presence = 0;
+    for var in &RESTORABLE_VARS {
+        let (value, present) = compat_restore_value(var, inherited_presence);
+        if present {
+            presence |= var.bit;
+        }
+        set_env(var.compat, &value);
+    }
+    set_env(COMPAT_PRESENT_ENV, OsStr::new(&presence.to_string()));
+}
+
+/// Decide whether and how to remove a parent's NODE_OPTIONS augmentation.
+///
+/// `None` means preserve the current user-replaced value. `Some(value)` applies
+/// the change, where the inner `None` removes the variable. The common mutation
+/// shape (`NODE_OPTIONS="$NODE_OPTIONS …"` or the prepend equivalent) retains
+/// the user's addition by replacing the exact parent-produced substring with the
+/// captured ambient value.
+fn restored_node_options(
+    current: Option<&OsStr>,
+    expected: Option<Option<&OsStr>>,
+    original: OsString,
+    original_present: bool,
+) -> Option<Option<OsString>> {
+    // No ownership marker at all: a legacy parent, whose value is not ours to touch.
+    let expected = expected?;
+    if current == expected {
+        return Some(original_present.then_some(original));
+    }
+    // The parent installed nothing, so there is no substring of ours to splice out.
+    let expected = expected?;
+    let (current, expected) = (current?.to_str()?, expected.to_str()?);
+    if expected.is_empty() || !current.contains(expected) {
+        return None;
+    }
+    let preserved = current.replacen(expected, original.to_str()?, 1);
+    let preserved = preserved.trim();
+    Some((!preserved.is_empty()).then(|| OsString::from(preserved)))
+}
+
+/// PATH's restore rule. An untouched marker means nub owned the whole value, so
+/// the capture goes back verbatim. Any other shape means a launcher composed
+/// `shim:.bin:system` or the user appended to it, so only nub's own shim
+/// component is dropped and every other entry survives.
+fn restored_path(
+    current: Option<OsString>,
+    expected: Option<Option<OsString>>,
+    original: OsString,
+    original_present: bool,
+) -> Option<Option<OsString>> {
+    if expected.is_some_and(|expected| current == expected) {
+        return Some(original_present.then_some(original));
+    }
+    let current = current?;
+    match remove_parent_shim_from_path(&current, &original)? {
+        Ok(path) => Some(Some(path)),
+        Err(e) => {
+            eprintln!(
+                "nub: could not remove the compat shim from PATH ({e}); \
+                 a bare `node` run from this process may re-enter nub"
+            );
+            None
+        }
+    }
+}
+
+/// One restoration's stable identity for the randomized parent PATH shim.
+/// Most PATH entries cannot be a Nub shim, so [`Self::matches`] rejects them by
+/// basename before opening or canonicalizing anything. Windows prepares the
+/// reference identity once so paths that cannot be canonicalized still compare
+/// without repeated I/O over unrelated or unreachable PATH entries.
+struct ShimPathMatcher {
+    component: OsString,
+    #[cfg(windows)]
+    identity: Option<FileHandle>,
+    #[cfg(windows)]
+    canonical: Option<PathBuf>,
+    #[cfg(windows)]
+    normalized: String,
+}
+
+impl ShimPathMatcher {
+    fn new(component: &OsStr) -> Self {
+        #[cfg(windows)]
+        let path = Path::new(component);
+        Self {
+            component: component.to_os_string(),
+            #[cfg(windows)]
+            identity: FileHandle::from_path(path).ok(),
+            #[cfg(windows)]
+            canonical: path.canonicalize().ok(),
+            #[cfg(windows)]
+            normalized: path.as_os_str().to_string_lossy().replace('/', "\\"),
+        }
+    }
+
+    fn matches(&self, entry: &Path) -> bool {
+        if entry.as_os_str() == self.component.as_os_str() {
+            return true;
+        }
+        if !is_path_shim_candidate(entry) {
+            return false;
+        }
+        #[cfg(windows)]
+        {
+            // Windows canonicalization can fail outright for real directories:
+            // an SMB component the user cannot list, a volume without a drive
+            // letter, or a mount outside the Mount Manager. Compare stable file
+            // identity first, then canonical paths, with a textual fallback.
+            if let (Some(component), Ok(entry)) = (&self.identity, FileHandle::from_path(entry))
+                && &entry == component
+            {
+                return true;
+            }
+            if let (Some(component), Ok(entry)) = (&self.canonical, entry.canonicalize())
+                && entry.as_path() == component.as_path()
+            {
+                return true;
+            }
+            entry
+                .as_os_str()
+                .to_string_lossy()
+                .replace('/', "\\")
+                .eq_ignore_ascii_case(&self.normalized)
+        }
+        #[cfg(not(windows))]
+        false
+    }
+}
+
+fn is_path_shim_candidate(path: &Path) -> bool {
+    let Some(file_name) = path.file_name() else {
+        return false;
+    };
+    let file_name = file_name.to_string_lossy();
+    #[cfg(windows)]
+    {
+        file_name
+            .get(..PATH_SHIM_PREFIX.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(PATH_SHIM_PREFIX))
+    }
+    #[cfg(not(windows))]
+    {
+        file_name.starts_with(PATH_SHIM_PREFIX)
+    }
+}
+
+/// `None` when the current PATH carries no parent-owned shim and needs no edit.
+fn remove_parent_shim_from_path(
+    current: &OsStr,
+    original: &OsStr,
+) -> Option<std::result::Result<OsString, env::JoinPathsError>> {
+    // The parent captures PATH before adding its randomized shim. Compare the
+    // current candidate shims to that snapshot instead of depending on a
+    // separately captured spelling of the added directory. Preparing only the
+    // original shim identities keeps pre-existing unrelated Nub shims while the
+    // new candidate is the parent-owned augmentation to remove.
+    let original_shims = env::split_paths(original)
+        .filter(|entry| is_path_shim_candidate(entry))
+        .map(|entry| ShimPathMatcher::new(entry.as_os_str()))
+        .collect::<Vec<_>>();
+    let mut removed = false;
+    let filtered = env::split_paths(current)
+        .filter(|entry| {
+            if !is_path_shim_candidate(entry) {
+                return true;
+            }
+            let inherited = original_shims.iter().any(|matcher| matcher.matches(entry));
+            removed |= !inherited;
+            inherited
+        })
+        .collect::<Vec<_>>();
+    removed.then(|| env::join_paths(filtered))
+}
+
+/// The env edits that shed a parent's augmentation, as `(name, value)` pairs
+/// where `None` removes the variable. Each restorable variable contributes its
+/// restored value (when the ownership markers say the parent still owns it) plus
+/// the removal of its own wire vars, so the boundary leaves nothing behind.
+fn augmentation_environment_restoration() -> Vec<(&'static str, Option<OsString>)> {
+    let presence_mask = inherited_presence_mask();
+    let mut changes = Vec::new();
+
+    for var in &RESTORABLE_VARS {
+        if let Some(original) = env::var_os(var.compat) {
+            let present = var.was_present(presence_mask);
+            let current = env::var_os(var.name);
+            let expected = expected_augmentation_value(var);
+            let restored = match var.name {
+                "NODE_OPTIONS" => restored_node_options(
+                    current.as_deref(),
+                    expected.as_ref().map(|expected| expected.as_deref()),
+                    original,
+                    present,
+                ),
+                "PATH" => restored_path(current, expected, original, present),
+                // Replaced outright, so the marker settles ownership on its own:
+                // restore only while the installed value is untouched. A later
+                // `.env` or script mutation is the user's and must survive.
+                _ => expected
+                    .is_none_or(|expected| current == expected)
+                    .then(|| present.then_some(original)),
+            };
+            if let Some(value) = restored {
+                changes.push((var.name, value));
+            }
+        }
+        changes.extend([
+            (var.compat, None),
+            (var.augmented, None),
+            (var.augmented_present, None),
+        ]);
+    }
+
+    for marker in [
+        COMPAT_PRESENT_ENV,
+        RUNTIME_CONFIG_ENV,
+        VERSION_ENV,
+        flags::NEUTRALIZE_LOCALSTORAGE_ENV,
+        FORCE_ASYNC_TIER_ENV,
+    ] {
+        changes.push((marker, None));
+    }
+    changes
+}
+
+fn restore_compat_environment(cmd: &mut Command) {
+    for (name, value) in augmentation_environment_restoration() {
+        match value {
+            Some(value) => {
+                cmd.env(name, value);
+            }
+            None => {
+                cmd.env_remove(name);
+            }
+        }
+    }
+}
+
+/// Restore the ambient environment captured before a parent Nub installed its
+/// augmentation. Call this for a fresh nested Nub-family user invocation, never
+/// for the `node` PATH shim (which continues the parent's logical invocation).
+///
+/// # Safety
+///
+/// Process-environment mutation is safe only before any other thread can read
+/// or write it. The Nub binary calls this as its first action in `main`.
+pub unsafe fn restore_fresh_invocation_environment() {
+    for (name, value) in augmentation_environment_restoration() {
+        match value {
+            Some(value) => {
+                // SAFETY: upheld by this function's caller.
+                unsafe { env::set_var(name, value) };
+            }
+            None => {
+                // SAFETY: upheld by this function's caller.
+                unsafe { env::remove_var(name) };
+            }
+        }
+    }
+}
 
 /// Node versions where the async `module.register` loader's `resolveSync`/
 /// `loadSync` are unimplemented stubs that throw `ERR_METHOD_NOT_IMPLEMENTED`.
@@ -2143,6 +2664,11 @@ fn to_file_url(path: &str, windows: bool) -> String {
     }
 }
 
+/// Convert an absolute native path to the file URL spelling Node expects.
+pub fn path_to_file_url(path: &str) -> String {
+    to_file_url(path, cfg!(windows))
+}
+
 /// How nub injects its preload, chosen BY TIER. The fast tier (Node 22.15+) loads a
 /// CommonJS preload via `--require`; the compat tier (18.19–22.14) loads the ESM
 /// preload via `--import`. The channel choice is load-bearing: an `--import` ESM
@@ -2166,14 +2692,14 @@ impl PreloadInjection {
     /// which doubles as the re-entrancy key: a child detects a parent-injected
     /// preload by finding this exact token in its inherited NODE_OPTIONS.
     ///
-    /// The VALUE half is quoted with [`node_options_quote`] so a preload path
+    /// The VALUE half is quoted with [`node_options_token`] so a preload path
     /// containing a space (e.g. a cache or temp dir under `C:\Users\John Doe\…`,
     /// or a macOS `~/Library/Application Support/…`) survives Node's NODE_OPTIONS
     /// tokenizer, which splits on unquoted spaces. The re-entrancy detector
     /// ([`is_reentrant_in`]) compares against this same quoted form, so the key
     /// still round-trips.
     pub fn node_options_token(&self) -> String {
-        format!("{}={}", self.flag, node_options_quote(&self.value))
+        format!("{}={}", self.flag, node_options_token(&self.value))
     }
 }
 
@@ -2187,13 +2713,15 @@ impl PreloadInjection {
 /// Single quotes do NOT work — Node has no single-quote handling, so they'd
 /// become literal characters in the path (`ERR_INVALID_STATE` on the store).
 ///
-/// Values WITHOUT a space are returned unchanged: they tokenize fine bare, and
-/// not quoting them keeps NODE_OPTIONS readable and matches plain-Node argv.
+/// A value that is empty or carries whitespace or a double quote is wrapped and
+/// escaped; anything else is returned bare, which tokenizes identically while
+/// keeping NODE_OPTIONS readable and argv-like.
+///
 /// Use this for EVERY value-bearing flag nub writes into NODE_OPTIONS
 /// (`--test-coverage-exclude=`, the preload `--require=`/`--import=` token,
 /// PnP `--require=`).
-fn node_options_quote(value: &str) -> String {
-    if value.contains(' ') {
+pub fn node_options_token(value: &str) -> String {
+    if value.is_empty() || value.chars().any(char::is_whitespace) || value.contains('"') {
         let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
         format!("\"{escaped}\"")
     } else {
@@ -2248,7 +2776,7 @@ pub fn preload_injection(
 /// to any existing NODE_PATH — but only when that dir exists (an installed
 /// package). In dev `runtime/` has no `node_modules`, so this is None and the
 /// requires resolve by walking up to the repo's `node_modules`, unchanged.
-fn vendored_node_path(preload: Option<&str>) -> Option<std::ffi::OsString> {
+fn vendored_node_path(preload: Option<&str>) -> Option<OsString> {
     let vendored = Path::new(preload?).parent()?.join("node_modules");
     if !vendored.is_dir() {
         return None;
@@ -2548,7 +3076,7 @@ fn pid_is_alive(pid: u32) -> bool {
 /// The nub-owned default compile-cache dir (`<cache>/nub/v8-compile-cache`),
 /// created best-effort. `None` when the cache root can't be resolved (no HOME) —
 /// the spawn simply proceeds uncached, never errors.
-pub fn default_compile_cache_dir() -> Option<std::ffi::OsString> {
+pub fn default_compile_cache_dir() -> Option<OsString> {
     let dir = crate::node::discovery::cache_dir()?.join("v8-compile-cache");
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir.into_os_string())
@@ -2560,29 +3088,59 @@ mod tests {
     use crate::node::version::NodeVersion;
 
     #[test]
-    fn node_options_quote_only_wraps_spacey_values() {
+    fn node_options_token_preserves_spaces_quotes_and_backslashes() {
         // No space → returned bare (tokenizes fine, stays readable / argv-like).
-        assert_eq!(node_options_quote("/tmp/store.sqlite"), "/tmp/store.sqlite");
+        assert_eq!(node_options_token("/tmp/store.sqlite"), "/tmp/store.sqlite");
         // Space → wrapped in double quotes (single quotes are literal to Node's
         // tokenizer and would corrupt the path → ERR_INVALID_STATE).
         assert_eq!(
-            node_options_quote("/tmp/nub cache/store.sqlite"),
+            node_options_token("/tmp/nub cache/store.sqlite"),
             "\"/tmp/nub cache/store.sqlite\""
         );
         // Windows: backslashes inside the quotes are escape chars to Node, so each
         // must be doubled or `\U`/`\J`/`\.` get eaten. Only quoted when spacey.
         assert_eq!(
-            node_options_quote(r"C:\Users\John Doe\.cache\store.sqlite"),
+            node_options_token(r"C:\Users\John Doe\.cache\store.sqlite"),
             r#""C:\\Users\\John Doe\\.cache\\store.sqlite""#
         );
         // A backslash path WITHOUT a space stays bare — Node only treats `\` as an
         // escape INSIDE a quoted string, so an unquoted backslash is literal.
         assert_eq!(
-            node_options_quote(r"C:\Users\John\.cache\store.sqlite"),
+            node_options_token(r"C:\Users\John\.cache\store.sqlite"),
             r"C:\Users\John\.cache\store.sqlite"
         );
         // An embedded double-quote in a spacey value is backslash-escaped.
-        assert_eq!(node_options_quote(r#"/tmp/a "b" c"#), r#""/tmp/a \"b\" c""#);
+        assert_eq!(node_options_token(r#"/tmp/a "b" c"#), r#""/tmp/a \"b\" c""#);
+        assert_eq!(
+            node_options_token(r#"--conditions=a"b"#),
+            r#""--conditions=a\"b""#
+        );
+        assert_eq!(node_options_token(""), r#""""#);
+    }
+
+    #[test]
+    fn node_options_token_round_trips_as_one_real_node_option() {
+        // The second case is the shape a project `nub.jsonc` can actually deliver:
+        // the CLI validator rejects whitespace and NUL but not a double quote, and
+        // `--title` is in Node's allowedNodeEnvironmentFlags — so an unquoted
+        // `--title=a"b` would reach the tokenizer with an unmatched quote.
+        for title in [r#"hello "quoted" C:\tmp"#, r#"a"b"#] {
+            let output = std::process::Command::new("node")
+                .arg("-e")
+                .arg("process.stdout.write(process.title)")
+                .env(
+                    "NODE_OPTIONS",
+                    node_options_token(&format!("--title={title}")),
+                )
+                .output()
+                .expect("host Node must run");
+            assert!(
+                output.status.success(),
+                "node rejected NODE_OPTIONS for title {title:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), title);
+        }
     }
 
     #[test]
@@ -4305,6 +4863,128 @@ mod tests {
             "no preload resolved"
         );
         assert!(!is_reentrant_in(Some(""), Some(ours)), "empty NODE_OPTIONS");
+    }
+
+    #[test]
+    fn compat_presence_marker_distinguishes_empty_from_absent() {
+        let node = RestorableVar::lookup("NODE").expect("NODE is restoration-controlled");
+        assert!(
+            node.was_present(node.bit),
+            "the presence bit keeps an explicitly empty value present"
+        );
+        assert!(
+            !node.was_present(0),
+            "a cleared bit means the variable was absent"
+        );
+    }
+
+    #[test]
+    fn expected_value_presence_marker_keeps_every_string_representable() {
+        assert_eq!(
+            decode_expected_augmentation_value(Some(OsString::from("any value")), None),
+            None,
+            "the companion marker is mandatory for this unreleased wire shape"
+        );
+        assert_eq!(
+            decode_expected_augmentation_value(Some(OsString::new()), Some("1")),
+            Some(Some(OsString::new())),
+            "an explicitly empty expected value is present"
+        );
+        assert_eq!(
+            decode_expected_augmentation_value(Some(OsString::from("ignored")), Some("0")),
+            Some(None),
+            "the companion marker, not the value payload, encodes absence"
+        );
+    }
+
+    #[test]
+    fn fresh_boundary_removes_only_parent_owned_node_options() {
+        let original = OsString::from("--ambient");
+        let expected = OsStr::new("--ambient --require=/nub/preload.cjs");
+        let restore = |current: Option<&OsStr>| {
+            restored_node_options(current, Some(Some(expected)), original.clone(), true)
+        };
+
+        assert_eq!(
+            restore(Some(expected)),
+            Some(Some(original.clone())),
+            "an unchanged parent value restores the pre-augmentation ambient value"
+        );
+        assert_eq!(
+            restore(Some(OsStr::new(
+                "--ambient --require=/nub/preload.cjs --trace-warnings"
+            ))),
+            Some(Some(OsString::from("--ambient --trace-warnings"))),
+            "an appended user value must survive"
+        );
+        assert_eq!(
+            restore(Some(OsStr::new(
+                "--trace-warnings --ambient --require=/nub/preload.cjs"
+            ))),
+            Some(Some(OsString::from("--trace-warnings --ambient"))),
+            "a prepended user value must survive"
+        );
+        assert_eq!(
+            restore(Some(OsStr::new("--max-old-space-size=8192"))),
+            None,
+            "a complete user replacement must survive untouched"
+        );
+    }
+
+    #[test]
+    fn fresh_boundary_tracks_an_expected_absent_value() {
+        assert_eq!(
+            restored_node_options(None, Some(None), OsString::from("--ambient"), true),
+            Some(Some(OsString::from("--ambient"))),
+            "an unchanged absent parent value restores the captured ambient value"
+        );
+        assert_eq!(
+            restored_node_options(
+                Some(OsStr::new("--trace-warnings")),
+                Some(None),
+                OsString::new(),
+                false,
+            ),
+            None,
+            "a value added after an absent parent value must survive"
+        );
+    }
+
+    #[test]
+    fn path_matcher_is_exact() {
+        let shim = std::path::Path::new("/tmp/nub-node-shim-42");
+        let matcher = ShimPathMatcher::new(shim.as_os_str());
+        assert!(matcher.matches(shim));
+        assert!(!matcher.matches(std::path::Path::new("/tmp/nub-node-shim-4")));
+        assert!(!matcher.matches(std::path::Path::new("/usr/bin")));
+    }
+
+    #[test]
+    fn fresh_path_restoration_removes_only_the_parent_shim() {
+        let shim = std::path::Path::new("/tmp/nub-node-shim-42");
+        let inherited_shim = std::path::Path::new("/tmp/nub-node-shim-7");
+        let bin = std::path::Path::new("/project/node_modules/.bin");
+        let addition = std::path::Path::new("/user/addition");
+        let original = env::join_paths([inherited_shim, std::path::Path::new("/usr/bin")]).unwrap();
+        let path = env::join_paths([shim, bin, inherited_shim, addition]).unwrap();
+        let restored = remove_parent_shim_from_path(&path, &original)
+            .expect("the parent shim must be found")
+            .expect("remaining PATH entries are representable");
+        assert_eq!(
+            env::split_paths(&restored).collect::<Vec<_>>(),
+            vec![
+                bin.to_path_buf(),
+                inherited_shim.to_path_buf(),
+                addition.to_path_buf()
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn path_matcher_handles_a_quoted_semicolon_entry() {
+        let matcher = ShimPathMatcher::new(OsStr::new(r"C:\nub-node-shim-42"));
+        assert!(matcher.matches(std::path::Path::new(r"C:/nub-node-shim-42")));
     }
 
     #[test]

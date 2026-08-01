@@ -291,6 +291,21 @@ pub fn check_needs_install_with_flags(
     check_needs_install_inner(project_dir, Some(cli_flags))
 }
 
+/// Whether the resolved install settings differ from the last successful
+/// install. This is a narrow post-warm-miss probe for embedders that must
+/// distinguish policy/config drift from unrelated work (manifest edits,
+/// missing modules, lockfile changes). Missing legacy state returns `false`.
+pub(crate) fn install_settings_changed_since_last_run(
+    project_dir: &Path,
+    cli_flags: &[(String, String)],
+) -> bool {
+    let (_, state_path) = resolve_paths(project_dir);
+    let Some(state) = read_or_migrate_fresh_state(&state_path) else {
+        return false;
+    };
+    hash_settings(project_dir, cli_flags) != state.settings_hash
+}
+
 fn check_needs_install_inner(
     project_dir: &Path,
     cli_flags: Option<&[(String, String)]>,
@@ -1446,6 +1461,11 @@ fn hash_settings(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
     hasher.update(b"\0");
     let lockfile_enabled = aube_settings::resolved::lockfile(&ctx);
     hasher.update(format!("lockfile={lockfile_enabled}\0").as_bytes());
+    // Resolution policy is part of warm-install freshness too. A project may
+    // keep the same manifest and lockfile while tightening its release-age
+    // policy; accepting the old warm tree would skip the policy-aware install
+    // path entirely.
+    hash_release_age_settings(&mut hasher, &ctx);
     // additional tree shape settings. cover enable_modules_dir flip
     // (pnpm equivalent of --lockfile-only persistent), virtual_store_only,
     // hoist_workspace_packages, dedupe_direct_deps, symlink,
@@ -1652,6 +1672,22 @@ fn hash_settings(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
     format!("blake3:{}", hasher.finalize().to_hex())
 }
 
+fn hash_release_age_settings(hasher: &mut blake3::Hasher, ctx: &aube_settings::ResolveCtx<'_>) {
+    let minimum_release_age = aube_settings::resolved::minimum_release_age(ctx);
+    hasher.update(format!("minimum_release_age={minimum_release_age}\0").as_bytes());
+    let minimum_release_age_exclude =
+        aube_settings::resolved::minimum_release_age_exclude(ctx).unwrap_or_default();
+    hasher.update(b"minimum_release_age_exclude=");
+    for pattern in &minimum_release_age_exclude {
+        hasher.update(pattern.as_bytes());
+        hasher.update(b"\x1f");
+    }
+    hasher.update(b"\0");
+    let minimum_release_age_strict = aube_settings::resolved::minimum_release_age_strict(ctx)
+        || aube_settings::resolved::paranoid(ctx);
+    hasher.update(format!("minimum_release_age_strict={minimum_release_age_strict}\0").as_bytes());
+}
+
 fn hash_file(path: &Path) -> String {
     // BLAKE3 is 3–5× faster than SHA-256 on the state-check hot path.
     // The `"blake3:"` prefix makes old `"sha256:"` state mismatch on
@@ -1682,8 +1718,8 @@ mod tests {
     use super::{
         InstallLayoutMode, InstallLayoutState, InstallState, InstalledPackageState,
         collect_package_json_hashes_from_manifests, empty_blake3_hash, fresh_state_file, hash_file,
-        hash_settings, install_state_file, member_lockfiles_stale, new_workspace_member,
-        read_or_migrate_fresh_state, relative_path_or_original, remove_state,
+        hash_release_age_settings, hash_settings, install_state_file, member_lockfiles_stale,
+        new_workspace_member, read_or_migrate_fresh_state, relative_path_or_original, remove_state,
         verify_install_layout,
     };
     use std::collections::BTreeMap;
@@ -2473,6 +2509,11 @@ mod tests {
         // tree, so adding / editing / removing it must change the
         // freshness verdict — otherwise the hook silently never re-applies
         // and the lockfile + node_modules go stale on the warm path.
+        //
+        // `hash_settings` reaches the cwd-default arm of `pnpmfile::detect`, so
+        // this shares the process-global gate seam with pnpmfile's own tests
+        // even though it lives in another module of the same test binary.
+        let _lock = crate::pnpmfile::default_gate_lock();
         let dir = temp_project_dir("settings-hash-pnpmfile");
         std::fs::write(dir.join("package.json"), r#"{"name":"x"}"#).unwrap();
 
@@ -2499,6 +2540,53 @@ mod tests {
             baseline,
             hash_settings(&dir, &[]),
             "removing the pnpmfile must restore the baseline hash"
+        );
+    }
+
+    #[test]
+    fn release_age_value_exclusions_and_strictness_change_freshness_hash() {
+        fn fingerprint(settings: &[(&str, &str)]) -> String {
+            let project: Vec<(String, String)> = settings
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect();
+            let empty_yaml = BTreeMap::new();
+            let ctx = aube_settings::ResolveCtx {
+                managed_aube_config: &[],
+                project_aube_config: &[],
+                project_npmrc: &[],
+                project_config: &project,
+                user_aube_config: &[],
+                user_npmrc: &[],
+                workspace_yaml: &empty_yaml,
+                global_config_yaml: &empty_yaml,
+                env: &[],
+                cli: &[],
+                embedder_defaults: &[],
+            };
+            let mut hasher = blake3::Hasher::new();
+            hash_release_age_settings(&mut hasher, &ctx);
+            hasher.finalize().to_hex().to_string()
+        }
+
+        let zero = fingerprint(&[("minimumReleaseAge", "0")]);
+        let weeks_999 = fingerprint(&[("minimumReleaseAge", "10069920")]);
+        assert_ne!(zero, weeks_999, "0 minutes -> 999 weeks must invalidate");
+        assert_ne!(
+            weeks_999,
+            fingerprint(&[
+                ("minimumReleaseAge", "10069920"),
+                ("minimumReleaseAgeExclude", "is-number")
+            ]),
+            "changing exclusions must invalidate"
+        );
+        assert_ne!(
+            weeks_999,
+            fingerprint(&[
+                ("minimumReleaseAge", "10069920"),
+                ("minimumReleaseAgeStrict", "true")
+            ]),
+            "changing strictness must invalidate"
         );
     }
 }

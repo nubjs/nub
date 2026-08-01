@@ -81,9 +81,9 @@ pub struct EngineContext {
     /// workspace yaml + the `pnpm` package.json namespace). The GLOBAL /
     /// user-scope pnpm-named files (`<configDir>/config.yaml` and
     /// `<configDir>/auth.ini`) are gated by the separate
-    /// [`read_pnpm_global_config`](Self::read_pnpm_global_config) posture —
-    /// they must NOT ride a project-derived (cwd-dependent) gate, since global
-    /// config has no project incumbent.
+    /// [`read_pnpm_global_config`](Self::read_pnpm_global_config) posture. The
+    /// two gates are separate because the files are loaded through different
+    /// paths; an embedder may still derive both from the active project identity.
     pub read_branded_pnpm_config: bool,
 
     /// Whether aube reads pnpm's GLOBAL / user-scope pnpm-named config files:
@@ -92,21 +92,32 @@ pub struct EngineContext {
     /// preserves upstream behavior — standalone aube IS a pnpm-compatible PM
     /// and reads pnpm's global config unconditionally.
     ///
-    /// This is DELIBERATELY SEPARATE from
+    /// This is deliberately separate from
     /// [`read_branded_pnpm_config`](Self::read_branded_pnpm_config). That
-    /// posture is derived from the project's incumbent PM (a cwd-scoped
-    /// concept) and correctly gates the PROJECT-scoped pnpm surfaces. Global
-    /// config, by contrast, has no project and no incumbent — gating it on the
-    /// cwd's incumbent would mean "read pnpm's global config only when you
-    /// happen to be standing in a pnpm project", which is incoherent. This
-    /// separate posture lets an embedder read the global pnpm-named files
-    /// UNGATED by the cwd. nub sets this `true` unconditionally: it honors
-    /// whatever global config the user already has from any tool (npm's
-    /// `~/.npmrc`, pnpm's global `config.yaml` / `auth.ini`), independent of
-    /// the cwd. (nub keeps global WRITES neutral — never writing back a
-    /// pnpm-branded global file — but that is the embedder's write-path
-    /// concern, not this read gate.)
+    /// posture gates the PROJECT-scoped pnpm surfaces, while this one gates
+    /// pnpm-named user files loaded by the global readers. An embedder can keep
+    /// the upstream unconditional behavior or set this from its own identity
+    /// policy. Nub enables it only for a provable pnpm-v11+ incumbent; its
+    /// global writes remain neutral and are a separate write-path concern.
     pub read_pnpm_global_config: bool,
+
+    /// Whether LAYOUT settings — the ones flagged `layout = true` in
+    /// `settings.toml`: `nodeLinker`, the hoisting family, `modulesDir`, and
+    /// the virtual-store directories — may resolve from the workspace-YAML
+    /// source family (the project workspace yaml and pnpm's global
+    /// `config.yaml`). `true` (default) preserves upstream aube behavior:
+    /// every declared source applies to every setting.
+    ///
+    /// DISTINCT from [`read_branded_pnpm_config`](Self::read_branded_pnpm_config),
+    /// which decides whether those pnpm-named FILES are read at all. This one
+    /// is per-AXIS rather than per-file: an embedder whose compatibility
+    /// guarantee covers version resolution, module resolution, and the
+    /// lockfile — but NOT how `node_modules` is physically arranged — sets
+    /// this `false` so a mirrored PM's YAML still supplies resolution config
+    /// while layout stays the embedder's own axis. Every other source
+    /// (`.npmrc`, env, CLI, embedder defaults, project config) is unaffected,
+    /// so the same keys keep working from the neutral surfaces.
+    pub read_layout_from_workspace_yaml: bool,
 
     /// Whether aube honors bare `pnpm_config_<registry-client-key>` /
     /// `PNPM_CONFIG_<REGISTRY_CLIENT_KEY>` environment variables on the
@@ -223,6 +234,13 @@ pub struct EngineContext {
     /// embedder. Empty by default. These are inserted below the real project
     /// `.npmrc`, preserving explicit project npm config precedence.
     pub synthetic_project_npmrc_entries: Vec<(String, String)>,
+
+    /// Project-scoped settings supplied directly by an embedder. Unlike
+    /// [`synthetic_project_npmrc_entries`](Self::synthetic_project_npmrc_entries),
+    /// these feed only the typed settings resolver, never the registry client.
+    /// They occupy the project-config tier below CLI/environment and above file
+    /// and global sources. Empty by default, preserving standalone behavior.
+    pub project_config_settings: Vec<(String, String)>,
 
     /// PATH entries prepended (in order, ahead of the existing PATH) to every
     /// lifecycle spawn. An embedder places a runtime shim dir first so a bare
@@ -369,6 +387,7 @@ impl Default for EngineContext {
             trusted_dependencies_honored: true,
             read_branded_pnpm_config: true,
             read_pnpm_global_config: true,
+            read_layout_from_workspace_yaml: true,
             read_pnpm_config_env_registry: false,
             npmrc_settings_allowlist: false,
             read_yarn_config: false,
@@ -378,6 +397,7 @@ impl Default for EngineContext {
             pnpmfile_default_enabled: true,
             synthetic_user_npmrc_entries: Vec::new(),
             synthetic_project_npmrc_entries: Vec::new(),
+            project_config_settings: Vec::new(),
             path_prepends: Vec::new(),
             env_overlay: Vec::new(),
             runtime_node_dir: None,
@@ -449,6 +469,7 @@ mod tests {
         assert!(ctx.pnpmfile_default_enabled);
         assert!(ctx.synthetic_user_npmrc_entries.is_empty());
         assert!(ctx.synthetic_project_npmrc_entries.is_empty());
+        assert!(ctx.project_config_settings.is_empty());
         assert!(ctx.path_prepends.is_empty());
         assert!(ctx.env_overlay.is_empty());
         assert_eq!(ctx.runtime_node_dir, None);

@@ -8,9 +8,10 @@ Nub augments the Node already in your image — it is not a separate runtime. Th
 ## Official images
 
 ```dockerfile
-FROM ghcr.io/nubjs/nub
+FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
+COPY --chown=node:node package.json package-lock.json ./
+RUN nub ci
 COPY --chown=node:node . .
-RUN nub install
 CMD ["nub", "run", "start"]
 ```
 
@@ -49,20 +50,60 @@ RUN apk add --no-cache libgcc libstdc++ && npm install -g @nubjs/nub
 
 To pin the floor Node version instead of the current line, use a `22` base (`node:22-slim` or `node:22-alpine`) — the lowest version Nub's fast tier supports.
 
+## Web services
+
+Container platforms route traffic to the port they provide through `PORT`. Bind the server to `0.0.0.0`, not `127.0.0.1`:
+
+```ts title="server.ts"
+import { createServer } from "node:http";
+
+const host = "0.0.0.0";
+const port = Number(process.env.PORT || 8080);
+
+createServer((request, response) => {
+  if (request.url !== "/alive") {
+    response.writeHead(404);
+    response.end();
+    return;
+  }
+
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(JSON.stringify({
+    alive: true,
+    runtime: "nub-on-node",
+  }));
+}).listen(port, host);
+```
+
+Copy manifests before source files so dependency installation stays cached. The image runs as `node`, so use `--chown=node:node` for files the install must write beside:
+
+```dockerfile title="Dockerfile"
+FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
+
+COPY --chown=node:node package.json package-lock.json ./
+RUN nub ci
+
+COPY --chown=node:node . .
+EXPOSE 8080
+CMD ["nub", "run", "start"]
+```
+
+Change `package-lock.json` to the project's existing lockfile. Exclude `node_modules`, `.git`, and local `.env` files with `.dockerignore`.
+
 ## Multi-stage builds
 
 Install with `nub ci` in the build stage. It writes a self-contained `node_modules` — real files, project-local links — that survives a `COPY --from` into the final stage. A plain `nub install` shares packages through a machine-global store the final stage doesn't have, so the copied tree would point at files that aren't there.
 
 ```dockerfile
-FROM node:26-slim AS build
-RUN npm install -g @nubjs/nub
-WORKDIR /app
-COPY . .
+FROM ghcr.io/nubjs/nub:{{NUB_VERSION}} AS build
+COPY --chown=node:node package.json package-lock.json ./
 RUN nub ci
+COPY --chown=node:node . .
+RUN nub run build
 
-FROM node:26-slim
-WORKDIR /app
-COPY --from=build /app/node_modules ./node_modules
-COPY . .
+FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
+COPY --from=build --chown=node:node /app/node_modules ./node_modules
+COPY --from=build --chown=node:node /app/dist ./dist
+COPY --from=build --chown=node:node /app/package.json ./package.json
 CMD ["nub", "run", "start"]
 ```

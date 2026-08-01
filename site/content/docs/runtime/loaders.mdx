@@ -29,6 +29,28 @@ Loaders are keyed on file extension:
 
 The `.json` extension is intentionally not in this set — it is Node-native (`resolveJsonModule`), so Nub leaves it to Node.
 
+## Custom extensions
+
+Map an extension of your own onto one of Nub's loaders from a [nub.jsonc](/docs/config#loader).
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "loader": {
+    ".config": "jsonc",  // JSON with comments
+    ".data": "yaml"
+  }
+}
+```
+
+The loader names are:
+
+```text
+text  jsonc  json5  toml  yaml  ts  tsx  jsx
+```
+
+Any other value stops the command with an error.
+
 ## Default export
 
 A data module exposes a single default export — the parsed value, exactly like Node's own JSON modules. There are no named exports; destructure the default to pull out top-level keys.

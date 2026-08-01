@@ -238,9 +238,7 @@ Out of scope for this research; flagged for future thinking.
 
 **Real-world signal.** node:test usage is growing but still overshadowed by Jest/Vitest. Coverage is the most-used of the three.
 
-**Recommendation.** **Don't inject by default — but reconsider when `nub test` lands.** Nub has not committed to using `node:test` as the underlying runner. If `nub test` (a future subcommand) shells out to `node:test`, then injecting these flags under-the-hood is the right call *for that subcommand*. For the generic `nub script.ts` path, leave them off — they have a slight startup cost (test-coverage in particular enables V8 coverage which is non-free) and they're noise.
-
-No plan doc for this research's purposes; the question reopens when `nub test` is on the roadmap.
+**Recommendation.** **Don't inject by default.** Nub ships no subcommand that shells out to `node:test`, so there is no dispatch point where injecting these flags under-the-hood would apply. For the generic `nub script.ts` path, leave them off — they have a slight startup cost (test-coverage in particular enables V8 coverage which is non-free) and they're noise.
 
 ### `--experimental-wasm-modules`
 

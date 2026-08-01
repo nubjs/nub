@@ -49,6 +49,12 @@ struct SettingDef {
     /// (`~/.config/aube/config.toml`).
     #[serde(default, rename = "npmShared")]
     npm_shared: bool,
+    /// Marks a setting that shapes how `node_modules` is physically arranged
+    /// rather than what resolves. Gates the workspace-YAML source family at
+    /// runtime via `read_layout_from_workspace_yaml`; see `settings.toml`'s
+    /// schema header and `values.rs`.
+    #[serde(default)]
+    layout: bool,
     /// Source precedence for the generated accessor, high-to-low.
     /// Valid entries: scope-qualified leaves `"projectAubeConfig"`,
     /// `"projectNpmrc"`, `"userAubeConfig"`, `"userNpmrc"`,
@@ -165,6 +171,7 @@ fn main() {
         )
         .unwrap();
         writeln!(out, "        npm_shared: {},", def.npm_shared).unwrap();
+        writeln!(out, "        layout: {},", def.layout).unwrap();
         writeln!(out, "        managed_policy: {},", lit(&def.managed_policy)).unwrap();
         writeln!(out, "    }},").unwrap();
     }
@@ -344,6 +351,7 @@ fn generate_resolved_accessors(settings: &BTreeMap<String, SettingDef>) -> Strin
             let (call, arg) = match src.as_str() {
                 "cli" => (cli_call, "ctx.cli"),
                 "env" => (env_call, "ctx.env"),
+                "projectConfig" => (npmrc_call, "ctx.project_config"),
                 "projectAubeConfig" => (npmrc_call, "ctx.project_aube_config"),
                 "projectNpmrc" => (npmrc_call, "ctx.project_npmrc"),
                 "userAubeConfig" => (npmrc_call, "ctx.user_aube_config"),
@@ -674,7 +682,8 @@ fn pascal_case(name: &str) -> String {
 /// didn't mention in the default order so every source is still
 /// consulted.
 fn resolve_precedence(declared: &[String]) -> Vec<String> {
-    // CLI and env are always highest-precedence, in that order. The
+    // CLI, env, and embedder project config are always highest-precedence, in
+    // that order. The
     // per-setting `precedence` override only reorders the file-based
     // sources. Anyone who declares `cli` or `env` in their precedence
     // list gets it silently dropped because it's already pinned on top.
@@ -711,14 +720,15 @@ fn resolve_precedence(declared: &[String]) -> Vec<String> {
         // applies instead.
         "embedderDefaults",
     ];
-    let mut files: Vec<String> = Vec::with_capacity(file_default.len());
+    let mut files: Vec<String> = Vec::with_capacity(file_default.len() + 1);
+    files.push("projectConfig".to_string());
     for src in declared {
         // Convenience aliases: bare `npmrc` / `aubeConfig` expand to
         // their project+user pair (project first). Older
         // `settings.toml` overrides that predate the scope split can
         // keep using the short names.
         let expansion: &[&str] = match src.as_str() {
-            "cli" | "env" => continue,
+            "cli" | "env" | "projectConfig" => continue,
             "npmrc" => &["projectNpmrc", "userNpmrc"],
             "aubeConfig" => &["projectAubeConfig", "userAubeConfig"],
             other => &[other],

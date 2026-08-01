@@ -92,6 +92,26 @@ nub ci                   # frozen-lockfile install
 
 It's optional: keep running your existing package manager and reach for Nub for everything else. See [install](/docs/install) for lockfile fidelity per incumbent, and [pm](/docs/pm) for provisioning the exact package-manager version a project pins.
 
+## Configuration
+
+Everything above works with no configuration. When you want to change a default, put a `nub.jsonc` at the project root:
+
+```jsonc title="nub.jsonc"
+{
+  "$schema": "https://nubjs.com/schema/latest.json",
+
+  "preload": ["./instrumentation.ts"],   // load a module before the entry file
+  "envFile": ".env.local",               // read one env file instead of the default set
+  "tsconfig": "./tsconfig.runtime.json", // the TypeScript config the runtime uses
+
+  "install": {
+    "minimumReleaseAge": "3d"            // refuse dependencies published in the last 3 days
+  }
+}
+```
+
+Unknown keys and invalid values stop the command with an error, so a typo never silently does nothing. See [nub.jsonc](/docs/config) for every field, and for the block that lives in the global file instead.
+
 ## Requirements
 
 - **Node 18.19+** (Node 18 LTS) for augmented modes.

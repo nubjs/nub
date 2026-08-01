@@ -41,7 +41,8 @@
 //! pre-productionization pure-symlink behavior. All policy lives here; aube owns
 //! only the neutral seam + the graph primitive.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::{LazyLock, PoisonError, RwLock};
 
 use aube_linker::DiskMaterializePlan;
 use aube_lockfile::{LockedPackage, LockfileGraph};
@@ -71,20 +72,30 @@ pub(crate) fn register() {
     aube_linker::set_disk_materialize_expand_hook(Box::new(expand));
 }
 
-/// nub's own embedder-default names that may seed the eject set. nub exposes NO
-/// user-facing `diskMaterializePackages` knob (maintainer 2026-07-07): the dynamic
-/// phantom detector is the sole eject mechanism, so a hand-listed package is
-/// redundant. The resolved seed still carries nub's INTERNAL vite #315 embedder
-/// default ([`super::mod::nub_setting_defaults`]) — kept so the phantom-eject
-/// opt-out (no-hook) path still ejects vite<8.1 — but every OTHER name arrived
-/// from a user source (`.npmrc`/env/`pnpm-workspace.yaml`) and is dropped by
-/// [`nub_internal_seed`]. Standalone aube installs no hook and honors the full
-/// seed verbatim, so its `diskMaterializePackages` knob is unaffected.
+/// nub's own embedder-default names that may seed the eject set. Native
+/// `install.linker.eject` entries are admitted separately; incumbent
+/// `.npmrc`/env/workspace values remain ignored. Standalone aube installs no
+/// hook and honors its full `diskMaterializePackages` knob unchanged.
 ///
 /// SHARED with [`super::nub_setting_defaults`], which seeds exactly this name as
 /// the embedder default — sourcing both from one const so a future internal
 /// default can't be added in one place and silently dropped by the other.
 pub(super) const NUB_INTERNAL_DISK_MATERIALIZE_SEED: &[&str] = &["vite"];
+
+/// `install.linker.eject` from the project's `nub.jsonc`, published by
+/// [`super::engine_session_inner`]. A process-global because the eject hook is a
+/// bare `fn` the engine installs once and calls with only the resolved graph —
+/// there is no seam to thread session state through. Poisoning is ignored
+/// throughout: the guarded value is a plain name list, so a panic mid-write
+/// cannot leave it inconsistent.
+static NATIVE_CONFIG_SEED: LazyLock<RwLock<Vec<String>>> =
+    LazyLock::new(|| RwLock::new(Vec::new()));
+
+pub(super) fn set_native_config_seed(seed: Vec<String>) {
+    *NATIVE_CONFIG_SEED
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = seed;
+}
 
 /// Curated "project-context" packages (nub#457): each one's build script READS or
 /// MUTATES the CONSUMING project rather than only its own dir — git-hook installers
@@ -165,13 +176,17 @@ fn eject_list_token(names: &[&str]) -> String {
     format!("{hash:016x}")
 }
 
-/// Keep only nub's own embedder-default seed names, dropping every user-source
-/// entry — the mechanism that retires the user-facing `diskMaterializePackages`
-/// knob under nub while leaving standalone aube's byte-for-byte.
+/// Keep nub's internal and native-config seed names, dropping every
+/// incumbent/user-source `diskMaterializePackages` entry.
 fn nub_internal_seed(resolved_seed: &[String]) -> Vec<String> {
+    let configured = NATIVE_CONFIG_SEED
+        .read()
+        .unwrap_or_else(PoisonError::into_inner);
     resolved_seed
         .iter()
-        .filter(|n| NUB_INTERNAL_DISK_MATERIALIZE_SEED.contains(&n.as_str()))
+        .filter(|n| {
+            NUB_INTERNAL_DISK_MATERIALIZE_SEED.contains(&n.as_str()) || configured.contains(n)
+        })
         .cloned()
         .collect()
 }
@@ -179,15 +194,97 @@ fn nub_internal_seed(resolved_seed: &[String]) -> Vec<String> {
 /// The hook entry: read the per-version scanner's sidecars (the store-IO half)
 /// then hand off to the pure planner. Split so [`plan_from_flags`] — all the
 /// closure/seed policy — is unit-tested with injected flags and never touches
-/// the host store. The resolved seed is first filtered to nub's internal names
-/// ([`nub_internal_seed`]) so a user's `diskMaterializePackages` value has no
-/// effect under nub.
+/// the host store. The resolved seed is filtered through [`nub_internal_seed`].
 fn expand(graph: &LockfileGraph, seed_names: &[String]) -> DiskMaterializePlan {
-    plan_from_flags(
-        graph,
-        &nub_internal_seed(seed_names),
-        &dynamic_phantom_flags(graph),
-    )
+    let seed = nub_internal_seed(seed_names);
+    let flags = dynamic_phantom_flags(graph);
+    let plan = plan_from_flags(graph, &seed, &flags);
+    // The install report's digest names what moved and why. Labelling runs as a
+    // second pass over the FINISHED plan rather than inside the planner, so the
+    // planner and its tests stay untouched and the reported SET can never
+    // disagree with the executed one — only a label could ever be off.
+    super::install_report::record_plan(label_plan(graph, &seed, &flags, &plan));
+    plan
+}
+
+/// Attach a reason to every package the plan materializes. Mirrors the planner's
+/// seed conditions in the same order, then falls back to the closure edge —
+/// a plan member nothing seeded directly is there because it imports one that
+/// was, which is the fact worth printing.
+fn label_plan(
+    graph: &LockfileGraph,
+    seed_names: &[String],
+    flags: &[FlaggedImporter],
+    plan: &DiskMaterializePlan,
+) -> Vec<super::install_report::Materialized> {
+    use super::install_report::{Materialized, Reason};
+
+    let planned: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
+    let root_provided: HashSet<&str> = graph
+        .importers
+        .values()
+        .flat_map(|deps| deps.iter().map(|d| d.name.as_str()))
+        .collect();
+    let is_top_level = |name: &str| root_provided.contains(name);
+    let seed_matcher = aube_linker::PackageNameMatcher::new(seed_names);
+
+    // One representative version per planned name — the digest is name-keyed
+    // (so is the linker's eject), so a duplicated name needs one printable spec.
+    let mut version_of: BTreeMap<&str, &str> = BTreeMap::new();
+    for pkg in graph.packages.values() {
+        if planned.contains(pkg.name.as_str()) {
+            version_of.entry(&pkg.name).or_insert(&pkg.version);
+        }
+    }
+
+    version_of
+        .iter()
+        .map(|(&name, &version)| {
+            let flag = flags.iter().find(|flag| flag.name == name);
+            let reason = if let Some(flag) = flag.filter(|flag| {
+                !flag.targets.is_empty()
+                    && should_seed(
+                        &flag.targets,
+                        &direct_dep_names(&flag.dep_path, graph),
+                        is_top_level,
+                    )
+            }) {
+                Reason::Undeclared(flag.targets.clone())
+            } else if flag.is_some_and(|flag| {
+                flag.type_peers
+                    .iter()
+                    .any(|peer| is_top_level(&types_package_name(peer)))
+            }) {
+                Reason::PeerTypes
+            } else if NUB_PROJECT_CONTEXT_EJECT.contains(&name) {
+                Reason::ProjectContext
+            } else if name == "vite" && super::vite_compat::vite_lt_8_1(version) {
+                Reason::LegacyVite
+            } else if seed_matcher.matches(name) {
+                Reason::Configured
+            } else {
+                // The closure edge: whichever declared dependency of this package
+                // is itself in the plan is why this one had to come along.
+                graph
+                    .packages
+                    .values()
+                    .filter(|pkg| pkg.name == name)
+                    .flat_map(|pkg| pkg.dependencies.keys())
+                    .filter(|dep| dep.as_str() != name)
+                    .find_map(|dep| {
+                        version_of
+                            .get(dep.as_str())
+                            .map(|dep_version| Reason::ImporterOf(format!("{dep}@{dep_version}")))
+                    })
+                    .unwrap_or(Reason::Closure)
+            };
+            Materialized {
+                name: name.to_string(),
+                version: version.to_string(),
+                reason,
+            }
+        })
+        .collect()
 }
 
 /// One dynamically-flagged importer the planner may seed. Two INDEPENDENT reasons
@@ -242,10 +339,10 @@ fn plan_from_flags(
         .collect();
     let is_top_level = |name: &str| root_provided.contains(name);
 
-    // Seed set by NAME: the caller's disk-materialize list ∪ every dynamically-
-    // flagged importer that SURVIVES the precision seed-selection filter. Embedded
-    // vite<8.1 is seeded by dep_path below.
-    let mut seed_names_set: HashSet<&str> = seed_names.iter().copied().collect();
+    // Seed set by NAME: every dynamically-flagged importer that SURVIVES the
+    // precision seed-selection filter. Embedded vite<8.1 and caller-supplied
+    // package-name patterns are seeded by dep_path below.
+    let mut seed_names_set: HashSet<&str> = HashSet::new();
 
     // Dynamic phantom source (the per-version scanner's sidecars) — the replacement
     // for the retired hand-curated map. Each SURVIVING flagged importer seeds the
@@ -300,8 +397,12 @@ fn plan_from_flags(
     // embedded vite<8.1 copy (auto-detected — the #315 residual). Seeding by
     // dep_path keeps the reverse walk anchored to the real copies present.
     let mut seed_dep_paths: HashSet<&str> = HashSet::new();
+    // Compiled once, not per comparison: this loop runs over every package in
+    // the graph, and matching inline re-parsed each pattern on every one.
+    let seed_matcher = aube_linker::PackageNameMatcher::new(&seed_names);
     for (dep_path, pkg) in &graph.packages {
         if seed_names_set.contains(pkg.name.as_str())
+            || seed_matcher.matches(&pkg.name)
             || (pkg.name == "vite" && super::vite_compat::vite_lt_8_1(&pkg.version))
         {
             seed_dep_paths.insert(dep_path.as_str());
@@ -329,10 +430,10 @@ fn plan_from_flags(
         );
     }
 
-    // Rung-1 names: every closure member's name ∪ the original seed names (the
-    // executor is name-keyed). Original seed names are kept even if absent from
-    // the graph — the executor simply never matches an absent name.
-    let mut names: HashSet<String> = seed_names.iter().map(|s| s.to_string()).collect();
+    // Rung-1 names: every closure member's name (the executor is name-keyed).
+    // Seeding is dep_path-anchored, so a seed name with no copy in the resolved
+    // graph contributes nothing — there is no package for the executor to eject.
+    let mut names: HashSet<String> = HashSet::new();
     for dep_path in &closure {
         if let Some(pkg) = graph.packages.get(dep_path) {
             names.insert(pkg.name.clone());
@@ -732,6 +833,28 @@ mod tests {
             project_context_eject_token(),
             "deterministic across calls"
         );
+    }
+
+    #[test]
+    fn configured_seed_patterns_match_wildcards_and_literals() {
+        let g = graph(&[
+            ("app@1.0.0", "app", &[("is-number", "7.0.0")]),
+            ("is-number@7.0.0", "is-number", &[]),
+            ("left-pad@1.3.0", "left-pad", &[]),
+        ]);
+        for pattern in ["is-*", "is-number"] {
+            let plan = plan_from_flags(&g, &[pattern.to_string()], &[]);
+            let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
+            assert!(
+                names.contains("is-number"),
+                "pattern {pattern} seeds the package"
+            );
+            assert!(
+                names.contains("app"),
+                "pattern {pattern} expands its importer closure"
+            );
+            assert!(!names.contains("left-pad"));
+        }
     }
 
     #[test]

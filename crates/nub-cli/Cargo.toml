@@ -51,6 +51,10 @@ compile = [
 
 [dependencies]
 nub-core = { path = "../nub-core" }
+# The raw-text nesting bound every externally-authored JSONC read goes through
+# (src/jsonc.rs). Shared with the nub-native addon, which parses the same
+# JSON-family formats in its own workspace, so the two cannot drift.
+nub-json-guard = { path = "../nub-json-guard" }
 # `nub compile` compile-time pipeline (behind the `compile` feature). The Rolldown
 # crates are pinned EXACT — they explicitly disclaim semver (rolldown.rs/apis/
 # rust-crates), so every bump is a reviewed change gated on a round-trip test.

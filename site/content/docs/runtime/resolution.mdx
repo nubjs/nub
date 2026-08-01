@@ -146,6 +146,30 @@ Nub resolves only the TypeScript-aware cases Node has no opinion on. Everything 
 - export conditions
 - every subpath into a dependency that declares `exports`
 
+## Adding export conditions
+
+Node does the condition matching, but you choose which conditions are active. Add your own in a [nub.jsonc](/docs/config#conditions) and every run in the project resolves against them.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "conditions": ["development"]  // matched ahead of "default"
+}
+```
+
+```json title="node_modules/example/package.json"
+{
+  "exports": {
+    ".": {
+      "development": "./development.js",
+      "default": "./production.js"
+    }
+  }
+}
+```
+
+Every resolution in the project matches against them, a bare-specifier [preload](/docs/config#preload) included.
+
 ## Yarn Plug'n'Play
 
 A project Yarn installed in PnP mode just runs — Nub enables Plug'n'Play automatically, with no flag and no setup. Walking up from the working directory, Nub detects a `.pnp.cjs` at the project root and injects it ahead of its own preload (`--require .pnp.cjs` on the fast tier, the `NODE_OPTIONS` equivalent on the compat tier), so PnP's resolver patches install first and Nub's TypeScript resolution layers on top.

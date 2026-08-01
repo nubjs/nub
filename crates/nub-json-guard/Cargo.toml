@@ -1,0 +1,27 @@
+# The JSON-family nesting-depth bound, factored out so BOTH workspaces share one
+# implementation and one test. `nub-native` is a `cdylib` N-API addon whose
+# `napi_*` symbols are resolved by the Node host at dlopen, so it carries
+# `test = false` (a `cargo test` harness cannot link them) — a copy of this
+# scanner living inside `nub-native` could never be unit tested. Same reasoning
+# that put the transpile cache-key derivation in `nub-cache-key`. Keep this crate
+# dependency-free.
+#
+# SELF-CONTAINED MANIFEST (no `*.workspace = true`): this crate is a member of the
+# ROOT workspace but is ALSO a cross-workspace path dependency of
+# `crates/nub-native` (its own panic=unwind workspace). The release `cross` build
+# runs `cd crates/nub-native && cross build`, where the repo-root manifest is
+# absent, so any inherited field would fail to resolve ("failed to find a
+# workspace root"). Inlining the values lets this manifest parse standalone in the
+# cross container — see `nub-cache-key`'s manifest for the same constraint.
+[package]
+name = "nub-json-guard"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/nubjs/nub"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"

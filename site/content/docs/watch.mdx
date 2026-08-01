@@ -17,6 +17,8 @@ nub watch src/server.ts
 
 TypeScript, JSX, `.env*` loading, `tsconfig.json` paths — everything `nub <file>` gives you is active here too, because `nub watch` runs the same augmented Node underneath.
 
+A project [`nub.jsonc`](/docs/config) applies the same way: its runtime settings — `preload`, `envFile`, `loader`, `conditions`, `tsconfig` — are in force on every restart.
+
 A `--watch` placed after a script name is forwarded *to the script* like any other argument — `nub run test --watch` runs your test tool's own watch mode, it does not invoke Nub's watcher. See [`nub run` → Forward arguments](/docs/runner/run#forward-arguments).
 
 ## `--watch`
@@ -68,7 +70,7 @@ Nub's watch mode is intentionally not byte-for-byte Node — it adds the banner,
 node --watch script.js
 ```
 
-Nub's PATH shim is per-invocation: it only affects descendants of an active `nub ...` call, so the `node` in your shell is always your real Node. For strict-Node watch behavior, this is the path.
+Nub's PATH shim is per-invocation: it only affects descendants of an active `nub ...` call, so the `node` in your shell is always your real Node.
 
 ## Related
 

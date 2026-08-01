@@ -55,7 +55,7 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
       href: '/docs/install/pnpm',
       items: [
         { code: 'pnpm-lock.yaml', ok: true, note: 'v6/v5.4 declined — re-lock under pnpm 9+.' },
-        { code: 'pnpm-workspace.yaml', ok: true },
+        { code: 'pnpm-workspace.yaml', ok: true, note: 'Pnpm 11+ layout and resolution settings.' },
         { code: '.pnpmfile.cjs', ok: true },
         { code: '.npmrc', ok: true },
         { code: 'package.json#pnpm', ok: true },
@@ -67,7 +67,6 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
         { code: 'workspace:', ok: true },
         { code: 'workspaces', ok: true },
         { code: 'dependenciesMeta.injected', ok: true },
-        { code: 'nodeLinker', ok: true, partial: true, note: 'No PnP — node-linker=pnp errors.' },
         { code: 'engines / os / cpu', ok: true },
         { code: 'pnpm_config_*', ok: true, note: 'Generic settings under any pnpm version; registry-client keys (registry, proxy, strict-ssl) under pnpm v11+.' },
         { code: 'npm_config_*', ok: true },
@@ -88,7 +87,7 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
           code: '.yarnrc.yml',
           ok: true,
           partial: true,
-          note: 'Not read: per-host proxies, PnP.',
+          note: 'Not read: per-host proxies, nodeLinker and the layout keys.',
         },
         {
           code: '.yarnrc',
@@ -100,7 +99,7 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
           code: 'YARN_*',
           ok: true,
           partial: true,
-          note: 'Reads the registry, auth token/ident, node-linker, CA file, proxy, and strict-SSL env values; map-shaped and scoped env config is not translated.',
+          note: 'Reads the registry, auth token/ident, CA file, proxy, and strict-SSL env values; map-shaped and scoped env config is not translated.',
         },
         { code: '.npmrc', ok: true },
         { code: 'resolutions', ok: true },
@@ -108,7 +107,7 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
         { code: 'workspaces', ok: true },
         { code: 'packageExtensions', ok: true },
         { code: 'dependenciesMeta.built', ok: true },
-        { code: 'nodeLinker', ok: true, partial: true, note: 'No PnP — warns and links node_modules instead.' },
+        { code: 'nodeLinker: pnp', ok: false, note: "Refused before any write — Berry's default and an explicit pnp both abort." },
         { code: 'engines / os / cpu', ok: true },
       ],
     },
@@ -122,7 +121,7 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
           code: 'bunfig.toml',
           ok: true,
           partial: true,
-          note: '[install] section only.',
+          note: '[install] section only, minus linker — use the neutral .npmrc key or CLI flag.',
         },
         { code: 'trustedDependencies', ok: true },
         { code: 'overrides', ok: true },
@@ -171,6 +170,26 @@ Under its own identity, Nub reads only neutral, cross-tool config — never anot
 <Callout title="You don't need to use Nub's package manager">
 The installer is optional. Keep running `npm`, `pnpm`, `yarn`, or `bun` exactly as you do today, and reach for Nub for everything else — running files, scripts, and binaries.
 </Callout>
+
+### Resolution versus layout
+
+The tables above cover resolution and the supported layout settings for each incumbent. A Nub-identity project reads its [`nub.jsonc`](/docs/config#installlinker) install block. A compat project keeps its incumbent settings instead; the neutral `node-linker` key in `.npmrc` remains available where that package-manager version reads it.
+
+Layout support differs by incumbent:
+
+| Incumbent | Setting | Under Nub |
+|---|---|---|
+| **npm** | `install-strategy` | No effect — except `nested`, which aborts rather than install a tree that resolves differently |
+| **npm** | `global-style` | No effect |
+| **npm** | `legacy-bundling` | No effect |
+| **pnpm 11+** | `nodeLinker` and the hoisting keys in `pnpm-workspace.yaml` | Honored |
+| **pnpm 10 and below** | `node-linker` and the hoisting keys in `.npmrc` | Honored |
+| **pnpm** | `symlink=false` | No effect, with a warning — the isolated layout *is* its symlink graph |
+| **Yarn** | `nodeLinker`, `nmHoistingLimits`, `nmMode` in `.yarnrc.yml` | No effect |
+| **Yarn** | `nodeLinker: pnp` | Refused — `ERR_NUB_PNP_UNSUPPORTED`, before any write |
+| **Bun** | `linker` under `[install]` in `bunfig.toml` | No effect |
+
+Plug'n'Play is the one that errors instead of being ignored, because it is not a preference Nub can decline: a PnP project has no `node_modules` tree to install into at all. Everything else in those files — registries, auth, resolution settings, overrides — is read exactly as before. To pick a layout, see [the flat opt-out](/docs/install/virtual-store#the-flat-opt-out).
 
 ### Nub identity
 
@@ -244,6 +263,24 @@ An extension only *adds* what's missing — it never overrides a range the packa
 ### Compat mode
 
 Runtime augmentation is reversible. Passing `--node`, or setting a truthy `NODE_COMPAT` for a whole tree, runs the project's pinned Node vanilla — version provisioning stays on, augmentation comes off. See [the runtime overview](/docs/runtime#--node) for the full contract.
+
+### Project configuration
+
+A Nub-identity project carries its install settings in the [`nub.jsonc`](/docs/config#install) block. A project owned by npm, pnpm, Yarn, or Bun keeps its incumbent package-manager settings, and Nub reports any ignored `nub.jsonc` install fields.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "install": {
+    // an integer plus one of s, m, h, d, w
+    // a bare number is rejected
+    "minimumReleaseAge": "3d",
+    "minimumReleaseAgeExclude": ["@company/*"]  // exempt from the window
+  }
+}
+```
+
+Layout settings live in the same block; see [the virtual store](/docs/install/virtual-store#project-configuration).
 
 ## CLI
 
@@ -468,7 +505,7 @@ A foreign lockfile that carries no publish-time data — notably an incumbent `b
 
 ### Advisory gate
 
-The OSV check queries `api.osv.dev` on a fresh resolve. A confirmed `MAL-*` hit is a **hard block** — the install aborts with `ERR_NUB_MALICIOUS_PACKAGE`, never a skip-and-warn, because a malicious-package advisory isn't a judgement call. An osv.dev **outage** is treated differently: the check fails *open*, warning and proceeding so a network blip can't brick an offline install. That asymmetry is deliberate — a hit always blocks, an outage never does. To fail closed on outages too, set `advisoryCheck=required` (also bundled into `paranoid` below).
+The OSV check queries `api.osv.dev` on a fresh resolve. A confirmed `MAL-*` hit is a **hard block** — the install aborts with `ERR_NUB_MALICIOUS_PACKAGE`, never a skip-and-warn, because a malicious-package advisory isn't a judgement call. An osv.dev **outage** is treated differently: the check fails *open*, warning and proceeding so a network blip can't brick an offline install. To fail closed on outages too, set `advisoryCheck=required` (also bundled into `paranoid` below).
 
 Frozen reinstalls — `nub ci`, `--frozen-lockfile`, a teammate's clone — inherit the advisory vetting recorded when the lockfile was written and skip the per-install round-trip, but still enforce the cooling and provenance gates on every install.
 
@@ -524,8 +561,6 @@ In CI, and under `nub ci`, each project gets its own self-contained virtual stor
 ```ini
 enableGlobalVirtualStore=false
 ```
-
-Either layout resolves the same packages — including type packages (`@types/*`) pulled in transitively but not declared, which stay reachable in both.
 
 A few packages statically import a backend you pick at runtime — `@hookform/resolvers/zod` imports the `zod` your app installs, without declaring it. Under the shared store the adapter's real path sits outside the project, so Node's directory walk can't reach that backend and the import throws. Nub materializes those adapters into the project automatically so they resolve, while the rest of the tree keeps sharing.
 

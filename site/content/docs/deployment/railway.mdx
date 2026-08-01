@@ -1,0 +1,79 @@
+---
+title: Railway
+description: Deploy a Nub web service from a Dockerfile. Railway builds the official Nub image, supplies PORT, and creates a public domain.
+---
+
+Railway [detects a root `Dockerfile`](https://docs.railway.com/builds/dockerfiles) and builds it instead of choosing a language buildpack. Use the official Nub image so the same Node and Nub versions run in the build and service.
+
+## Dockerfile
+
+```dockerfile title="Dockerfile"
+FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
+
+COPY --chown=node:node package.json package-lock.json ./
+RUN nub ci
+
+COPY --chown=node:node . .
+CMD ["nub", "run", "start"]
+```
+
+Change `package-lock.json` to the lockfile the project already uses. The start script must bind its HTTP server to `0.0.0.0` and read Railway's `PORT`:
+
+```ts title="server.ts"
+import { createServer } from "node:http";
+
+const port = Number(process.env.PORT || 8080);
+createServer((request, response) => {
+  if (request.url !== "/alive") {
+    response.writeHead(404);
+    response.end();
+    return;
+  }
+
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(JSON.stringify({
+    alive: true,
+    runtime: "nub-on-node",
+  }));
+}).listen(port, "0.0.0.0");
+```
+
+## Dashboard deployment
+
+1. Create a project from the GitHub repository.
+2. Select the service and confirm the build log contains `Using detected Dockerfile!`.
+3. Open **Settings → Networking** and select **Generate Domain**.
+
+Railway deploys the container on every push to the connected branch. A service does not receive a public domain until one is generated.
+
+## CLI deployment
+
+Install and authenticate the [Railway CLI](https://docs.railway.com/guides/cli), then upload the local source:
+
+```bash
+railway login
+railway init --name nub-app
+railway add --service nub-app
+railway up --service nub-app --ci
+DOMAIN=$(railway domain --service nub-app --json \
+  | jq -r '.domain // .domains[0]')
+```
+
+The final command creates a free `*.up.railway.app` domain when needed and captures the assigned or existing URL.
+
+Request its aliveness endpoint:
+
+```bash
+curl --fail "$DOMAIN/alive"
+# {"alive":true,"runtime":"nub-on-node"}
+```
+
+## Port and health checks
+
+Railway supplies `PORT` when the project has not set one. The application must listen on `0.0.0.0:$PORT`; listening on localhost keeps it unreachable from the proxy.
+
+Add a health-check path in the service settings when the application has one. The container already runs as the non-root `node` user and forwards termination signals through Nub to Node.
+
+## Prebuilt images
+
+Railway can also run an application image published by [GitHub Actions](/docs/deployment#github-actions-and-registries). Point the service at that image instead of the repository when builds need to happen once in CI rather than again on Railway.

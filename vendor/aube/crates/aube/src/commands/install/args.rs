@@ -288,6 +288,7 @@ impl InstallArgs {
             dangerously_allow_all_builds: self.dangerously_allow_all_builds,
             network_mode,
             minimum_release_age_override: None,
+            revalidate_release_policy: false,
             strict_no_lockfile,
             force,
             cli_flags,
@@ -368,6 +369,12 @@ pub struct InstallOptions {
     /// resolver. There is no CLI flag yet, so this is always `None`
     /// today; reserved so future flags don't change the call site.
     pub minimum_release_age_override: Option<u64>,
+    /// Re-run resolution under an active `minimumReleaseAge` policy whenever a
+    /// prefer-frozen install has already missed the no-op warm shortcut. This
+    /// validates existing lockfile picks after resolved-settings drift while
+    /// leaving unchanged warm installs and explicit frozen installs untouched.
+    /// Default `false` preserves standalone aube behavior; embedders opt in.
+    pub revalidate_release_policy: bool,
     /// Error out if no lockfile is present. Matches pnpm's
     /// `ERR_PNPM_NO_LOCKFILE`: set by an explicit `--frozen-lockfile`
     /// flag and by `aube ci` / `aube clean-install`. The auto-CI
@@ -475,6 +482,7 @@ impl InstallOptions {
             dangerously_allow_all_builds: false,
             network_mode: aube_registry::NetworkMode::Online,
             minimum_release_age_override: None,
+            revalidate_release_policy: false,
             strict_no_lockfile: false,
             force: false,
             cli_flags: Vec::new(),

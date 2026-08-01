@@ -435,8 +435,17 @@ fn read_workspace_yaml_raw(cwd: &Path) -> BTreeMap<String, yaml_serde::Value> {
 fn read_yaml_flat(
     map: &std::collections::BTreeMap<String, yaml_serde::Value>,
 ) -> Vec<(String, String)> {
+    // `config get/list` must report what an install would actually use, so a
+    // key the resolver's YAML source no longer supplies is dropped here too —
+    // by NAME as well as by setting, since the trailing scalar pass would
+    // otherwise re-admit it as an unrecognized pass-through key.
+    let mut suppressed: Vec<&str> = Vec::new();
     let mut out: Vec<(String, String)> = Vec::new();
     for meta in settings_meta::all() {
+        if aube_settings::workspace_yaml_suppressed(meta) {
+            suppressed.extend(meta.workspace_yaml_keys.iter().copied());
+            continue;
+        }
         for key in meta.workspace_yaml_keys {
             let Some(raw) = yaml_setting_string(meta, map, key) else {
                 continue;
@@ -448,6 +457,7 @@ fn read_yaml_flat(
     }
     let scalar_entries: Vec<_> = map
         .iter()
+        .filter(|(k, _)| !suppressed.contains(&k.as_str()))
         .filter_map(|(k, v)| yaml_scalar_string(v).map(|raw| (k.clone(), raw)))
         .collect();
     for (key, raw) in scalar_entries {
@@ -702,6 +712,12 @@ mod tests {
     }
 
     #[test]
+    fn canonical_list_key_prefers_nub_lock_alias() {
+        assert_eq!(list::canonical_list_key("aubeNoLock"), "nubNoLock");
+        assert_eq!(list::canonical_list_key("nub-no-lock"), "nubNoLock");
+    }
+
+    #[test]
     fn canonical_list_key_collapses_workspace_only_alias_to_setting_name() {
         assert_eq!(
             list::canonical_list_key("jailBuildPermissions"),
@@ -934,11 +950,9 @@ mod tests {
     #[test]
     fn config_get_reads_global_config_yaml_independent_of_the_project_gate() {
         // GLOBAL config.yaml is gated by `read_pnpm_global_config`, NOT the
-        // project-scope `read_branded_pnpm_config`. So even with the PROJECT
-        // gate OFF (non-pnpm incumbent), the user's GLOBAL pnpm config.yaml is
-        // still read when the global gate is on (the asymmetric-read model:
-        // honor whatever global config the user has, ungated by cwd). With the
-        // global gate OFF, it goes inert.
+        // project-scope `read_branded_pnpm_config`. Prove the two controls stay
+        // independent: an embedding host may enable the global tier while
+        // suppressing the project tier. With the global gate off, it goes inert.
         let _lock = config_test_lock();
         let _gate = PnpmReadGateGuard::set(false);
         let dir = tempfile::tempdir().unwrap();

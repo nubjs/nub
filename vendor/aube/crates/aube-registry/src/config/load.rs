@@ -11,13 +11,13 @@ use super::yarnrc;
 /// the file is read on every load and its auth tokens merged into the
 /// user-scope config).
 ///
-/// This is a GLOBAL / user-scope pnpm-named file, so it is gated by
+/// This is a global / user-scope pnpm-named file, so it is gated by
 /// `read_pnpm_global_config` — NOT by the project-derived
-/// `read_branded_pnpm_config`. Global config has no project incumbent, so an
-/// embedder whose global config is its own neutral surface (e.g. nub) clears
-/// `read_pnpm_global_config` UNCONDITIONALLY and this file is never read,
-/// regardless of the cwd's incumbent PM. The `.npmrc` / `npmrcAuthFile`
-/// sources are unaffected; only the pnpm-named `auth.ini` is gated.
+/// `read_branded_pnpm_config`. The two postures are separate because these
+/// files are loaded by different readers; an embedder may still derive both
+/// from project identity. Nub enables this one only under a provable
+/// pnpm-v11+ incumbent. The `.npmrc` / `npmrcAuthFile` sources are unaffected;
+/// only the pnpm-named `auth.ini` is gated.
 fn pnpm_auth_ini_enabled() -> bool {
     aube_util::engine_context().read_pnpm_global_config
 }
@@ -50,12 +50,22 @@ fn is_pnpm11_npmrc_readable_key(key: &str) -> bool {
 /// `.npmrc` on its own path and keeps every auth key regardless, so this never
 /// affects auth resolution.
 fn apply_npmrc_settings_allowlist(entries: Vec<(String, String)>) -> Vec<(String, String)> {
-    if !aube_util::engine_context().npmrc_settings_allowlist {
+    let ctx = aube_util::engine_context();
+    if !ctx.npmrc_settings_allowlist {
         return entries;
     }
+    // The allowlist drops layout keys only because pnpm 11 takes them from the
+    // workspace YAML instead. An embedder that also refuses the YAML as a
+    // layout source (`read_layout_from_workspace_yaml = false`) would otherwise
+    // be left with no config file at all for its own layout axis, so the two
+    // postures move together.
+    let keep_layout = !ctx.read_layout_from_workspace_yaml;
     entries
         .into_iter()
-        .filter(|(k, _)| is_pnpm11_npmrc_readable_key(k))
+        .filter(|(k, _)| {
+            is_pnpm11_npmrc_readable_key(k)
+                || (keep_layout && aube_settings::is_layout_npmrc_key(k))
+        })
         .collect()
 }
 

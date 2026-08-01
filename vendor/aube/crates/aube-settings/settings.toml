@@ -52,6 +52,15 @@
 #                   TLS, npm-standard scalars). Aube-only or
 #                   pnpm-only settings leave this `false` and route
 #                   to aube's own config.
+#   layout        = bool. Marks a setting that shapes how node_modules is
+#                   physically ARRANGED (the linker strategy, hoisting, the
+#                   modules/virtual-store directories) rather than which
+#                   version resolves or how a module is found. Read by the
+#                   `read_layout_from_workspace_yaml` engine-context posture,
+#                   which an embedder turns off when layout is its own axis
+#                   and must not be directed by another tool's branded YAML.
+#                   Default `false`; the posture defaults on, so standalone
+#                   aube resolves these from workspace YAML exactly as before.
 #
 # Key names match pnpm's canonical camelCase spelling so a future generator
 # can link directly to anchors on pnpm.io/next/settings. Settings with
@@ -786,6 +795,7 @@ sources.cli = []
 sources.env = ["npm_config_hoist", "NPM_CONFIG_HOIST", "AUBE_HOIST"]
 sources.npmrc = ["hoist"]
 sources.workspaceYaml = ["hoist"]
+layout = true
 examples = [
   "echo 'hoist=false' >> .npmrc && aube install",
 ]
@@ -807,6 +817,7 @@ sources.cli = []
 sources.env = ["npm_config_hoist_workspace_packages", "NPM_CONFIG_HOIST_WORKSPACE_PACKAGES", "AUBE_HOIST_WORKSPACE_PACKAGES"]
 sources.npmrc = ["hoist-workspace-packages", "hoistWorkspacePackages"]
 sources.workspaceYaml = ["hoistWorkspacePackages"]
+layout = true
 examples = []
 
 [hoistingLimits]
@@ -834,6 +845,7 @@ sources.cli = []
 sources.env = ["npm_config_hoisting_limits", "NPM_CONFIG_HOISTING_LIMITS", "AUBE_HOISTING_LIMITS"]
 sources.npmrc = ["hoistingLimits", "hoisting-limits"]
 sources.workspaceYaml = ["hoistingLimits"]
+layout = true
 examples = [
   "echo 'node-linker=hoisted' >> .npmrc",
   "echo 'hoisting-limits=dependencies' >> .npmrc",
@@ -861,6 +873,7 @@ sources.cli = []
 sources.env = ["npm_config_hoist_pattern", "NPM_CONFIG_HOIST_PATTERN", "AUBE_HOIST_PATTERN"]
 sources.npmrc = ["hoist-pattern", "hoistPattern"]
 sources.workspaceYaml = ["hoistPattern"]
+layout = true
 examples = []
 
 [publicHoistPattern]
@@ -883,6 +896,7 @@ sources.cli = ["public-hoist-pattern"]
 sources.env = ["npm_config_public_hoist_pattern", "NPM_CONFIG_PUBLIC_HOIST_PATTERN", "AUBE_PUBLIC_HOIST_PATTERN"]
 sources.npmrc = ["public-hoist-pattern", "publicHoistPattern"]
 sources.workspaceYaml = ["publicHoistPattern"]
+layout = true
 examples = []
 
 [shamefullyHoist]
@@ -897,6 +911,7 @@ sources.cli = ["shamefully-hoist"]
 sources.env = ["npm_config_shamefully_hoist", "NPM_CONFIG_SHAMEFULLY_HOIST", "AUBE_SHAMEFULLY_HOIST"]
 sources.npmrc = ["shamefully-hoist", "shamefullyHoist"]
 sources.workspaceYaml = ["shamefullyHoist"]
+layout = true
 examples = []
 
 # ========================================= node_modules =========================================
@@ -926,6 +941,7 @@ sources.cli = []
 sources.env = ["npm_config_modules_dir", "NPM_CONFIG_MODULES_DIR", "AUBE_MODULES_DIR"]
 sources.npmrc = ["modulesDir", "modules-dir"]
 sources.workspaceYaml = ["modulesDir"]
+layout = true
 examples = []
 
 [nodeLinker]
@@ -943,6 +959,7 @@ sources.cli = ["node-linker"]
 sources.env = ["npm_config_node_linker", "NPM_CONFIG_NODE_LINKER", "AUBE_NODE_LINKER"]
 sources.npmrc = ["nodeLinker"]
 sources.workspaceYaml = ["nodeLinker"]
+layout = true
 examples = []
 
 [symlink]
@@ -988,6 +1005,7 @@ equivalent to `--lockfile-only` as a persistent `.npmrc` /
 sources.cli = []
 sources.env = ["npm_config_enable_modules_dir", "NPM_CONFIG_ENABLE_MODULES_DIR", "AUBE_ENABLE_MODULES_DIR"]
 sources.npmrc = ["enableModulesDir"]
+layout = true
 examples = []
 
 [virtualStoreDir]
@@ -1019,6 +1037,7 @@ sources.cli = []
 sources.env = ["npm_config_virtual_store_dir", "NPM_CONFIG_VIRTUAL_STORE_DIR", "AUBE_VIRTUAL_STORE_DIR"]
 sources.npmrc = ["virtualStoreDir", "virtual-store-dir"]
 sources.workspaceYaml = ["virtualStoreDir"]
+layout = true
 examples = []
 
 [virtualStoreDirMaxLength]
@@ -1038,6 +1057,7 @@ matrices) stay under filesystem `NAME_MAX` limits on unusual setups
 sources.cli = []
 sources.env = ["npm_config_virtual_store_dir_max_length", "NPM_CONFIG_VIRTUAL_STORE_DIR_MAX_LENGTH", "AUBE_VIRTUAL_STORE_DIR_MAX_LENGTH"]
 sources.npmrc = ["virtualStoreDirMaxLength"]
+layout = true
 examples = []
 
 [virtualStoreOnly]
@@ -1058,6 +1078,7 @@ target the same top-level directory.
 sources.cli = []
 sources.env = ["npm_config_virtual_store_only", "NPM_CONFIG_VIRTUAL_STORE_ONLY", "AUBE_VIRTUAL_STORE_ONLY"]
 sources.npmrc = ["virtualStoreOnly"]
+layout = true
 examples = []
 
 [packageImportMethod]
@@ -1165,6 +1186,7 @@ sources.cli = ["enable-global-virtual-store", "disable-global-virtual-store"]
 sources.env = ["npm_config_enable_global_virtual_store", "NPM_CONFIG_ENABLE_GLOBAL_VIRTUAL_STORE", "AUBE_ENABLE_GLOBAL_VIRTUAL_STORE"]
 sources.npmrc = ["enableGlobalVirtualStore", "enable-global-virtual-store"]
 sources.workspaceYaml = ["enableGlobalVirtualStore"]
+layout = true
 examples = [
   "echo 'enableGlobalVirtualStore=false' >> .npmrc",
   "aube --disable-global-virtual-store install",
@@ -1202,6 +1224,7 @@ sources.cli = []
 sources.env = ["npm_config_global_virtual_store_dir", "NPM_CONFIG_GLOBAL_VIRTUAL_STORE_DIR", "AUBE_GLOBAL_VIRTUAL_STORE_DIR"]
 sources.npmrc = ["globalVirtualStoreDir", "global-virtual-store-dir"]
 sources.workspaceYaml = ["globalVirtualStoreDir"]
+layout = true
 examples = [
     "AUBE_GLOBAL_VIRTUAL_STORE_DIR=/mnt/dev/aube-virtual-store aube install",
 ]
@@ -1246,6 +1269,7 @@ sources.cli = []
 sources.env = ["npm_config_disable_global_virtual_store_for_packages", "NPM_CONFIG_DISABLE_GLOBAL_VIRTUAL_STORE_FOR_PACKAGES", "AUBE_DISABLE_GLOBAL_VIRTUAL_STORE_FOR_PACKAGES"]
 sources.npmrc = ["disableGlobalVirtualStoreForPackages", "disable-global-virtual-store-for-packages"]
 sources.workspaceYaml = ["disableGlobalVirtualStoreForPackages"]
+layout = true
 examples = []
 
 [diskMaterializePackages]
@@ -1278,6 +1302,7 @@ sources.cli = []
 sources.env = ["npm_config_disk_materialize_packages", "NPM_CONFIG_DISK_MATERIALIZE_PACKAGES", "AUBE_DISK_MATERIALIZE_PACKAGES"]
 sources.npmrc = ["diskMaterializePackages", "disk-materialize-packages"]
 sources.workspaceYaml = ["diskMaterializePackages"]
+layout = true
 examples = []
 
 # ========================================= Store =========================================
@@ -1550,7 +1575,7 @@ examples = [
 
 [defaultLockfileFormat]
 description = "Lockfile format written when the project has no lockfile yet."
-type = '"aube" | "pnpm" | "npm" | "yarn" | "bun"'
+type = '"aube" | "nub" | "pnpm" | "npm" | "yarn" | "bun"'
 default = "\"aube\""
 docs = """
 When a project already has a lockfile, aube preserves its format in
@@ -3258,7 +3283,7 @@ unset, empty string, or arbitrary text) leaves the default
 """
 sources.cli = []
 sources.env = ["npm_config_aube_no_lock", "NPM_CONFIG_AUBE_NO_LOCK", "AUBE_NO_LOCK"]
-sources.npmrc = ["aubeNoLock", "aube-no-lock"]
+sources.npmrc = ["nubNoLock", "nub-no-lock", "aubeNoLock", "aube-no-lock"]
 sources.workspaceYaml = ["aubeNoLock"]
 examples = [
     "AUBE_NO_LOCK=1 aube install",

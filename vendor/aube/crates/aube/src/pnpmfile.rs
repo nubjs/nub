@@ -1013,12 +1013,54 @@ pub async fn exports_hooks(pnpmfile: &Path) -> Result<bool> {
     Ok(output.stdout.first() == Some(&b'1'))
 }
 
+/// `pnpmfile_default_enabled` is a process-global embedder seam, so a test that
+/// flips it races every test that relies on its default under cargo's parallel
+/// runner — the reader observes the flipped value and `detect` returns `None`.
+/// Both sides of the seam take this lock.
+///
+/// It lives at module scope, not inside `mod tests`, because the readers are
+/// NOT all in this file: every module of this crate shares one lib test binary,
+/// so `state`'s and `commands::install::settings`'s tests reach the same seam
+/// through `detect` and have to be able to take the same lock.
+///
+/// Restoring the seam from a trailing statement is not enough on its own
+/// either: a panic mid-body would skip it and leak the flipped value into the
+/// rest of the run, which is why the writers pair this with a drop guard.
+#[cfg(test)]
+pub(crate) fn default_gate_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    match LOCK.get_or_init(|| std::sync::Mutex::new(())).lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    struct DefaultGateGuard {
+        old: bool,
+    }
+
+    impl DefaultGateGuard {
+        fn set(enabled: bool) -> Self {
+            let old = pnpmfile_default_enabled();
+            aube_util::update_engine_context(|ctx| ctx.pnpmfile_default_enabled = enabled);
+            Self { old }
+        }
+    }
+
+    impl Drop for DefaultGateGuard {
+        fn drop(&mut self) {
+            let old = self.old;
+            aube_util::update_engine_context(|ctx| ctx.pnpmfile_default_enabled = old);
+        }
+    }
+
     #[test]
     fn detect_returns_default_when_present_and_no_override() {
+        let _lock = default_gate_lock();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(PNPMFILE_CJS_NAME), "").unwrap();
         let found = detect(dir.path(), None, None);
@@ -1030,6 +1072,7 @@ mod tests {
 
     #[test]
     fn detect_returns_mjs_when_only_mjs_present() {
+        let _lock = default_gate_lock();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(PNPMFILE_MJS_NAME), "").unwrap();
         let found = detect(dir.path(), None, None);
@@ -1041,6 +1084,7 @@ mod tests {
 
     #[test]
     fn detect_prefers_mjs_over_cjs() {
+        let _lock = default_gate_lock();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(PNPMFILE_MJS_NAME), "").unwrap();
         std::fs::write(dir.path().join(PNPMFILE_CJS_NAME), "").unwrap();
@@ -1053,6 +1097,10 @@ mod tests {
 
     #[test]
     fn detect_returns_none_when_default_missing_and_no_override() {
+        // Holds the lock even though a flipped seam would also return `None`:
+        // without it this passes for the gated reason rather than the absent-file
+        // one it names.
+        let _lock = default_gate_lock();
         let dir = tempfile::tempdir().unwrap();
         assert!(detect(dir.path(), None, None).is_none());
     }
@@ -1157,11 +1205,8 @@ mod tests {
 
     #[test]
     fn default_gate_off_suppresses_cwd_default_but_default_path_still_sees_it() {
-        // The embedder seam is a process-global; flip it for the body of
-        // this test and restore it so sibling tests keep upstream-default
-        // behavior regardless of run order.
-        let prev = pnpmfile_default_enabled();
-        aube_util::update_engine_context(|ctx| ctx.pnpmfile_default_enabled = false);
+        let _lock = default_gate_lock();
+        let _gate = DefaultGateGuard::set(false);
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join(PNPMFILE_CJS_NAME);
         std::fs::write(&f, "").unwrap();
@@ -1173,7 +1218,6 @@ mod tests {
         // default_path() ignores the gate so an embedder can warn about
         // the file it just suppressed.
         assert_eq!(default_path(dir.path()).as_deref(), Some(f.as_path()));
-        aube_util::update_engine_context(|ctx| ctx.pnpmfile_default_enabled = prev);
     }
 
     #[test]
@@ -1181,14 +1225,13 @@ mod tests {
         // Gating the cwd default off must NOT suppress an explicitly named
         // `--pnpmfile` path — a path the user pointed at on purpose still
         // loads regardless of the incumbent.
-        let prev = pnpmfile_default_enabled();
-        aube_util::update_engine_context(|ctx| ctx.pnpmfile_default_enabled = false);
+        let _lock = default_gate_lock();
+        let _gate = DefaultGateGuard::set(false);
         let dir = tempfile::tempdir().unwrap();
         let custom = dir.path().join("hooks.cjs");
         std::fs::write(&custom, "").unwrap();
         let found = detect(dir.path(), Some(custom.as_path()), None);
         assert_eq!(found.as_deref(), Some(custom.as_path()));
-        aube_util::update_engine_context(|ctx| ctx.pnpmfile_default_enabled = prev);
     }
 
     /// True iff `node --version` exits 0. The `exports_hooks` tests gate

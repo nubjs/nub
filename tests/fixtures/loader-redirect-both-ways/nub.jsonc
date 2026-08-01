@@ -1,0 +1,6 @@
+{
+  // Every direction at once: a data extension redirected to code, a code
+  // extension redirected to data, and plain JS redirected to data — the last
+  // one is owned by the plain-JS wrapper rather than the registration loop.
+  "loader": { ".yaml": "ts", ".cts": "text", ".js": "text" }
+}
