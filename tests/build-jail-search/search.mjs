@@ -352,18 +352,20 @@ function search(nub, pkg, version, root, keep) {
         // floor. Capped, with the true count kept, so one pathological package cannot make
         // the results file unreadable — a silent truncation would be worse than a number.
         boughtCount: floor ? controlOnly(control, floor).length : null,
-        // ⚠ DID THE ARTEFACT LAND SOMEWHERE THAT SURVIVES? The jail redirects `$HOME` to a
-        // throwaway per-package directory, so a package caching under `~/.cache/<vendor>`
-        // writes into `jail-home/` — the install PASSES and the artefact is DISCARDED. At run
-        // time `HOME` is the real home and the package finds nothing. MEASURED: puppeteer's
-        // browser landed in `jail-home/puppeteer-<hash>/.cache/` with ZERO entries under the
-        // real `~/.cache/puppeteer`. The oracle cannot catch this — the install reproduced the
-        // control exactly — so it is flagged from WHERE the bought paths landed instead.
-        ephemeralArtifacts: floor
-          ? (() => {
-              const b = controlOnly(control, floor).filter((p) => !p.startsWith('proj/node_modules/.nub'));
-              return b.length > 0 && b.every((p) => p.startsWith('jailhome/'));
-            })()
+        // HOW MANY bought paths land in the THROWAWAY home — a count, not a verdict.
+        //
+        // The jail redirects `$HOME` to a per-package directory that is discarded, so a
+        // package caching under `~/.cache/<vendor>` writes there: the install passes,
+        // reproduces the control exactly, and the artefact is thrown away. MEASURED —
+        // puppeteer's browser is 359 paths under `jail-home/puppeteer/.cache/puppeteer/`
+        // with ZERO under the real `~/.cache/puppeteer`.
+        //
+        // A BOOLEAN WAS WRONG TWICE: first it tested a `jailhome/` prefix the whole-root
+        // scan stopped producing, then "every bought path is ephemeral" read False because
+        // a few bookkeeping paths sit elsewhere. A count cannot be quietly inert — 0 means
+        // nothing landed there, and any other number is the promotion list's raw material.
+        ephemeralPaths: floor
+          ? controlOnly(control, floor).filter((p) => p.includes('/jail-home/')).length
           : null,
         bought: floor ? controlOnly(control, floor).slice(0, 40) : null,
         control: brief(control),
