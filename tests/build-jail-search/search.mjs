@@ -342,7 +342,7 @@ function escalate(grant, scopes) {
 /** Paths that exist after the UNJAILED run but not after the no-grant run — what the script
  *  produced that confinement prevented. Store and jail-home hashes are already normalised by
  *  `runCell`, so these compare directly. */
-function controlOnly(controlU, floor) {
+function controlOnly(control, floor) {
   const had = new Set(floor.seen);
   return control.seen.filter((p) => !had.has(p));
 }
