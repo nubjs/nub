@@ -121,6 +121,13 @@ function ensureExecutable(binPath, verb) {
 // (a regular #!/bin/sh file), every quoted path it references is $basedir-resolved
 // and realpath'd; one must equal our launcher. Comparing realpaths (not substrings)
 // matches pnpm's fresh AND regenerated shim forms and rejects comment-only mentions.
+//
+// The quote scan MUST tolerate empty pairs (`[^"]*`, not `[^"]+`). pnpm 11's cmd-shim
+// opens with `exe=""` / `msys=""`; a `+` class cannot match `""`, so those two lines
+// consumed one quote each and re-paired every subsequent quote off-by-one — the real
+// target token was never produced and the heal silently never fired under pnpm 11
+// (pnpm 10, whose template has no empty assignment, was unaffected). That is a SILENT
+// perf regression, not a crash: every call kept paying the ~50ms node hop forever.
 function leadsToUs(entry, st, ourReal) {
   try {
     if (st.isSymbolicLink()) {
@@ -129,7 +136,14 @@ function leadsToUs(entry, st, ourReal) {
     if (st.isFile()) {
       const body = fs.readFileSync(entry, "utf8");
       const basedir = path.dirname(entry);
-      const quoted = body.match(/"([^"]+)"/g) || [];
+      // pnpm >=11 emits an explicit `# cmd-shim-target=<abs path>` trailer. Prefer it:
+      // it is the shim's own declaration of what it dispatches to, so it cannot drift
+      // with template changes the way quote-scraping does.
+      const declared = body.match(/^#\s*cmd-shim-target=(.+)$/m);
+      if (declared) {
+        try { if (fs.realpathSync(declared[1].trim()) === ourReal) return true; } catch {}
+      }
+      const quoted = body.match(/"([^"]*)"/g) || [];
       for (const q of quoted) {
         let p = q.slice(1, -1).replace(/\$\{?basedir\}?/g, basedir);
         if (!p.includes("/")) continue;

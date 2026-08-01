@@ -146,10 +146,10 @@ run_foreign() {
 
 # Sweep the matrix. Concurrency + foreign run once per Node (style varies inside).
 for nodedir in "${NODE_DIRS[@]}"; do
-  for style in symlink pnpm; do
+  for style in symlink pnpm pnpm11; do
     run_block "$style" "$nodedir"
   done
-  for style in symlink pnpm; do
+  for style in symlink pnpm pnpm11; do
     run_concurrency "$style" "$nodedir"
   done
   run_foreign "$nodedir"
