@@ -1,76 +1,83 @@
 {
   "packages": {
-    "bcrypt": [
-      {
-        "network": true,
-        "versions": "5.1.1",
-        "notes": "measured: 5.1.1 -> network"
+    "bcrypt": {
+      "default": {
+        "notes": "latest measured 6.0.0"
+      },
+      "versions": {
+        "<6.0.0": {
+          "network": true,
+          "notes": "measured 5.1.1; covers everything below 6.0.0"
+        }
       }
-    ],
-    "better-sqlite3": [
-      {
+    },
+    "better-sqlite3": {
+      "default": {
         "network": true,
         "writePaths": [
           ".npm/_prebuilds"
         ],
-        "versions": "12.6.0",
-        "notes": "measured: 12.6.0 -> network"
+        "notes": "latest measured 12.6.0"
       }
-    ],
-    "canvas": [
-      {
+    },
+    "canvas": {
+      "default": {
         "write": "disk",
-        "notes": "measured: 2.11.2 -> write.disk"
+        "notes": "latest measured 2.11.2"
       }
-    ],
-    "cypress": [
-      {
+    },
+    "cypress": {
+      "default": {
         "network": true,
         "writePaths": [
           "Library/Caches/Cypress"
         ],
-        "notes": "measured: 12.17.4, 15.19.0 -> network"
+        "notes": "latest measured 15.19.0"
       }
-    ],
-    "esbuild": [
-      {
-        "network": true,
-        "writePaths": [
-          ".npm/_cacache",
-          ".npm/_logs",
-          "Library/Caches/esbuild"
-        ],
-        "versions": "0.12.29",
-        "notes": "measured: 0.12.29 -> network"
+    },
+    "esbuild": {
+      "default": {
+        "notes": "latest measured 0.28.1"
+      },
+      "versions": {
+        "<0.28.1": {
+          "network": true,
+          "writePaths": [
+            ".npm/_cacache",
+            ".npm/_logs",
+            "Library/Caches/esbuild"
+          ],
+          "notes": "measured 0.12.29; covers everything below 0.28.1"
+        }
       }
-    ],
-    "lefthook": [
-      {
+    },
+    "lefthook": {
+      "default": {
         "write": {
           "project": true
         },
-        "notes": "measured: 2.1.10 -> write.project"
+        "notes": "latest measured 2.1.10"
       }
-    ],
-    "puppeteer": [
-      {
+    },
+    "puppeteer": {
+      "default": {
         "network": true,
         "writePaths": [
           ".cache/puppeteer"
         ],
-        "notes": "measured: 19.11.1, 25.4.0 -> network"
+        "notes": "latest measured 25.4.0"
       }
-    ],
-    "sharp": [
-      {
+    },
+    "sharp": {
+      "default": {
         "write": "disk",
         "network": true,
         "writePaths": [
           "Library/Caches/Homebrew"
         ],
-        "notes": "measured: 0.32.6, 0.34.4 -> write.disk + network"
+        "notes": "latest measured 0.34.4"
       }
-    ]
+    }
   },
   "baseline": [],
   "env": [

@@ -104,6 +104,35 @@ function grantKey(r) {
   return JSON.stringify({ g: norm(g), w: (r.writePaths ?? []).slice().sort() });
 }
 
+/** Semver ordering, enough for catalog banding: numeric release triple, and a prerelease sorts
+ *  BELOW its release (1.0.0-rc.1 < 1.0.0) per semver §11. Build metadata is ignored. This is a
+ *  comparator, not a range parser -- the catalog's only range form is `<X`, which the Rust side
+ *  resolves; here we just need to order measured versions. */
+function cmpVer(a, b) {
+  const split = (v) => {
+    const [core, pre] = String(v).split('+')[0].split('-');
+    return [core.split('.').map((n) => parseInt(n, 10) || 0), pre ?? null];
+  };
+  const [ac, ap] = split(a);
+  const [bc, bp] = split(b);
+  for (let i = 0; i < 3; i++) if ((ac[i] ?? 0) !== (bc[i] ?? 0)) return (ac[i] ?? 0) - (bc[i] ?? 0);
+  if (ap === bp) return 0;
+  if (ap === null) return 1;        // release outranks its own prerelease
+  if (bp === null) return -1;
+  return ap < bp ? -1 : 1;
+}
+
+/** Capability identity, ignoring prose. Two grants are the same grant iff this matches. */
+function capsKey(g) {
+  const norm = (x) => {
+    if (x === null || typeof x !== 'object') return x;
+    if (Array.isArray(x)) return x.slice().sort().map(norm);
+    return Object.fromEntries(Object.keys(x).filter((k) => k !== 'notes').sort()
+      .map((k) => [k, norm(x[k])]));
+  };
+  return JSON.stringify(norm(g ?? {}));
+}
+
 /** The catalog names platforms `macos | linux | windows`; provenance records them as
  *  `darwin-arm64`, `linux-x64`, `win32-x64`. Map once, here, so nothing downstream has to
  *  know both vocabularies. Architecture is deliberately dropped: the grant model has no
@@ -191,63 +220,103 @@ for (const [pkg, rsRaw] of [...byPackage.entries()].sort()) {
     group[0].grant || (group[0].writePaths ?? []).length);
   if (!meaningful.length) continue;
 
-  const grants = [];
+  // ── `default` + `<` BANDS ────────────────────────────────────────────────────
+  //
+  // `default` is generated from LATEST, and every band key is a `<` bound. That pairing is what
+  // makes coverage total: bands reach DOWNWARD without limit, so every old version -- including
+  // the ones too unpopular to probe -- is caught by the lowest band, while `default` covers
+  // today's release and every future one. Bands nest by construction, so resolution is
+  // NARROWEST-BOUND-WINS with no ordering rule and no key-order dependence.
+  //
+  // ⛔ NEVER emit a point version as a matcher. The first real catalog emitted `versions: 5.1.1`
+  // for bcrypt, which grants 5.1.1 and leaves 5.0.0 on the base profile -- it BREAKS. That is
+  // under-granting, the one direction this project rejects everywhere.
+  const byVersion = new Map();
   for (const [, group] of meaningful) {
-    const g = { ...(group[0].grant ?? {}) };
-    const wp = group[0].writePaths ?? [];
-    if (wp.length) g.writePaths = wp;
+    for (const r of group) {
+      const cur = byVersion.get(r.version);
+      const here = { ...(r.grant ?? {}) };
+      if ((r.writePaths ?? []).length) here.writePaths = r.writePaths;
+      byVersion.set(r.version, cur ? unionGrant(cur, here) : here);
+    }
+  }
+  // A version measured as needing NOTHING is absent from `meaningful` but is still evidence --
+  // it bounds a band from above. Seed those as empty so the ordering below sees every version.
+  for (const v of allVersions) if (!byVersion.has(v)) byVersion.set(v, {});
 
-    // VERSIONS ARE ONLY PINNED WHEN THE MEASUREMENTS DISAGREE. A package measured at one version
-    // gets a matcher-less grant, because pinning it to that one version would silently deny every
-    // other version the grant it was never measured at -- and install scripts concentrate in OLD
-    // pins. Where bands genuinely differ the versions are named, and the widest band is placed
-    // last so it acts as the fallback under first-match-wins.
-    // VERSIONS ARE PINNED ONLY WHEN THE VERSIONS ARE WHAT DIFFER. Two bands that differ by
-    // PLATFORM, at the same version, must not both carry a `versions` matcher — that reads as a
-    // version-specific rule and is noise. Compare the version sets across bands: pin only when
-    // this band's versions are not the whole set.
-    const bandVersions = [...new Set(group.map((r) => r.version))].sort();
-    // A writePaths entry embedding the measured version names a directory that moves on the next
-    // release, so the grant MUST carry a versions matcher even when nothing else distinguishes
-    // this band — otherwise it ships matcher-less and silently stops matching.
-    const pinned = [...new Set(group.flatMap((r) => r.writePathsVersionPinned ?? []))];
-    if (bandVersions.length < allVersions.size || pinned.length) {
-      g.versions = bandVersions.join(' || ');
-    }
-    if (pinned.length) {
-      g.notes = `${g.notes ?? ''}; version-pinned writePaths (${pinned.join(', ')}) — re-measure on a new release`;
-      notes.push(`${pkg}: writePaths pinned to ${bandVersions.join(', ')} by ${pinned.join(', ')}`);
-    }
-    // PER-PLATFORM MATCHERS, ONLY WHEN THE PLATFORMS DISAGREE.
-    //
-    // Where every measured platform reached the same grant — the common case — the entry is
-    // matcher-less and one line covers all three. A `platforms` key is emitted only when this
-    // band genuinely does not span every platform that measured the package, so the catalog
-    // does not fill with redundant per-OS duplicates of an identical grant.
-    const bandPlatforms = [...new Set(group.map((r) => osOf(r)).filter(Boolean))];
-    if (bandPlatforms.length && bandPlatforms.length < allPlatforms.size) {
-      g.platforms = bandPlatforms.sort();
-    } else if (PLATFORM) {
-      g.platforms = [PLATFORM];
-    }
-    g.notes = `measured: ${group.map((r) => `${r.version}`).sort().join(', ')} -> ${group[0].state}`;
+  const ordered = [...allVersions].sort(cmpVer);
+  // LATEST: the probe's recorded dist-tag when present, else the highest measured version. The
+  // mega script always probes `latest` explicitly, so the fallback only serves legacy records --
+  // and if it ever picks wrong, `default` is generated from an older version and FUTURE releases
+  // are under-granted, which is why the dist-tag is preferred rather than merely nice.
+  const tagged = rs.find((r) => r.standing?.latestVersion
+    && ordered.includes(r.standing.latestVersion))?.standing.latestVersion;
+  const latest = tagged ?? ordered[ordered.length - 1];
+  if (!tagged) notes.push(`${pkg}: no dist-tag in records — treating ${latest} as latest`);
 
-    const unmeasured = group.flatMap((r) => r.unmeasuredScopesGranted ?? []);
-    if (unmeasured.length) {
-      g.notes += `; widened for unmeasured scopes (${[...new Set(unmeasured)].join(', ')})`;
-      notes.push(`${pkg}: widened for ${[...new Set(unmeasured)].join(', ')}`);
-    }
-    // A verdict that could not see the project axis is recorded, because "did not need project"
-    // and "was never placed where it could try" are byte-identical outcomes.
-    if (group.some((r) => r.declaresInstallScript && !r.projectAxisConclusive)) {
-      g.notes += '; project axis inconclusive (package was not materialized)';
-    }
-    grants.push({ group, g });
+  const dflt = { ...(byVersion.get(latest) ?? {}) };
+
+  // A BAND IS WRITTEN ONLY WHERE AN OLDER VERSION NEEDS *MORE* THAN LATEST. A version needing
+  // LESS gets no band at all: it falls to `default` and is harmlessly over-granted, the safe
+  // direction. That is also what dissolves the INVERTED case (better-sqlite3 needs network at
+  // 12.6.0 and nothing at 9.6.0), which has no clean `<`-band expression.
+  //
+  // A band's grant is the UNION of every measured grant BELOW its bound, unioned with `default`
+  // -- so it covers the unmeasured gaps between probed versions, and can never grant less than
+  // `default`. Nothing merges at resolution time, so each band must be complete on its own.
+  const bandList = [];
+  for (let i = 1; i < ordered.length; i++) {
+    const bound = ordered[i];
+    let acc = { ...dflt };
+    for (let j = 0; j < i; j++) acc = unionGrant(acc, byVersion.get(ordered[j]) ?? {});
+    if (capsKey(acc) === capsKey(dflt)) continue;          // needs no more than latest
+    bandList.push({ bound, caps: acc, covers: ordered.slice(0, i) });
+  }
+  // Same grant at two bounds means the narrower is redundant (narrowest wins), so keep the
+  // WIDEST bound per distinct grant.
+  const widest = new Map();
+  for (const b of bandList) widest.set(capsKey(b.caps), b);
+
+  const entry = { default: dflt };
+  dflt.notes = `latest measured ${latest}`;
+
+  const versions = {};
+  for (const b of [...widest.values()].sort((x, y) => cmpVer(y.bound, x.bound))) {
+    b.caps.notes = `measured ${b.covers.join(', ')}; covers everything below ${b.bound}`;
+    versions[`<${b.bound}`] = b.caps;
+  }
+  if (Object.keys(versions).length) entry.versions = versions;
+
+  // A writePaths entry embedding the measured version names a directory that moves on the next
+  // release. Under `<` bands that is no longer expressible as a matcher, so it is surfaced as a
+  // re-measure note rather than silently pinning the grant to one point.
+  const pinned = [...new Set(rs.flatMap((r) => r.writePathsVersionPinned ?? []))];
+  if (pinned.length) {
+    dflt.notes += `; version-pinned writePaths (${pinned.join(', ')}) — re-measure on a new release`;
+    notes.push(`${pkg}: writePaths embed a version (${pinned.join(', ')}) — re-measure each release`);
+  }
+  // PER-PLATFORM: only when the platforms disagree, else one line covers all three.
+  if (allPlatforms.size === 1 && PLATFORM) dflt.platforms = [PLATFORM];
+
+  const unmeasured = [...new Set(rs.flatMap((r) => r.unmeasuredScopesGranted ?? []))];
+  if (unmeasured.length) {
+    dflt.notes += `; widened for unmeasured scopes (${unmeasured.join(', ')})`;
+    notes.push(`${pkg}: widened for ${unmeasured.join(', ')}`);
+  }
+  if (rs.some((r) => r.declaresInstallScript && !r.projectAxisConclusive)) {
+    dflt.notes += '; project axis inconclusive (package was not materialized)';
   }
 
-  // First match wins, so a matcher-less grant must be LAST or it shadows everything after it.
-  grants.sort((a, b) => (a.g.versions ? 0 : 1) - (b.g.versions ? 0 : 1));
-  packages[pkg] = grants.map(({ g }) => g);
+  // A band that grants strictly LESS than `default` is a generator bug by construction -- bands
+  // are unioned WITH default above, so this can only fire if that invariant is broken. Assert it
+  // rather than shipping a silently narrowed old-version grant.
+  for (const [k, v] of Object.entries(versions)) {
+    const merged = unionGrant(v, dflt);
+    if (capsKey(merged) !== capsKey(v)) {
+      throw new Error(`${pkg} band ${k} grants less than default — generator invariant broken`);
+    }
+  }
+  packages[pkg] = entry;
 }
 
 // ── overrides ─────────────────────────────────────────────────────────────────
@@ -273,19 +342,28 @@ for (const f of (fs.existsSync(OVERRIDES) ? fs.readdirSync(OVERRIDES) : []).sort
   const r = o.rationale ?? {};
   const missing = ['investigator', 'evidence', 'date'].filter((k) => !r[k]);
   if (missing.length) { rejected.push(`${f}: missing rationale.${missing.join(', rationale.')}`); continue; }
-  if (!Array.isArray(o.grants) || !o.grants.length) { rejected.push(`${f}: no grants`); continue; }
-  // COMPARE CAPABILITIES, NOT THE WHOLE GRANT. `notes` always differs — the measured note
-  // records what was observed, the override's records why a human wrote it — so comparing
-  // serialised grants made this check STRUCTURALLY UNABLE TO FIRE. Verified by a fixture whose
-  // override matched the measured result exactly and was still not reported.
-  const caps = (gs) => JSON.stringify((gs ?? []).map(({ notes, ...rest }) => {
-    const o = {};
-    for (const k of Object.keys(rest).sort()) o[k] = rest[k];
-    return o;
-  }));
+  // An override is an ENTRY -- `{default, versions?}` -- the same shape the generator emits, so a
+  // human writing one never has to learn a second grammar. The legacy `grants: [...]` array is
+  // rejected rather than silently coerced: its first-match-wins semantics do not survive the move
+  // to `<` bands, so a quietly-converted override would resolve differently than its author read.
+  if (Array.isArray(o.grants)) {
+    rejected.push(`${f}: legacy 'grants' array — rewrite as { default, versions? }`);
+    continue;
+  }
+  const ent = o.entry ?? (o.default ? { default: o.default, ...(o.versions ? { versions: o.versions } : {}) } : null);
+  if (!ent?.default) { rejected.push(`${f}: no entry.default`); continue; }
+  // COMPARE CAPABILITIES, NOT THE WHOLE ENTRY. `notes` always differs — the measured note records
+  // what was observed, the override's records why a human wrote it — so comparing serialised
+  // entries made this check STRUCTURALLY UNABLE TO FIRE. Verified by a fixture whose override
+  // matched the measured result exactly and was still not reported.
+  const caps = (e) => JSON.stringify({
+    d: capsKey(e?.default ?? {}),
+    v: Object.fromEntries(Object.entries(e?.versions ?? {}).sort()
+      .map(([k, v]) => [k, capsKey(v)])),
+  });
   const before = packages[name] ? caps(packages[name]) : null;
-  packages[name] = o.grants;
-  if (before && before === caps(o.grants)) deadWeight.push(name);
+  packages[name] = ent;
+  if (before && before === caps(ent)) deadWeight.push(name);
   applied.push({ name, why: r.evidence, by: r.investigator, on: r.date });
 }
 
@@ -299,14 +377,17 @@ fs.writeFileSync(OUT, `${JSON.stringify(catalog, null, 2)}\n`);
 
 // ── report ────────────────────────────────────────────────────────────────────
 
-const grantCount = Object.values(packages).reduce((n, g) => n + g.length, 0);
+const grantCount = Object.values(packages)
+  .reduce((n, e) => n + 1 + Object.keys(e.versions ?? {}).length, 0);
+const bandCount = Object.values(packages)
+  .reduce((n, e) => n + Object.keys(e.versions ?? {}).length, 0);
 console.log(`records read        ${records.length}`);
 console.log(`platforms           ${[...platforms].join(', ') || '(none recorded)'}`);
 const hh = Object.entries(harnessHashes).sort((a, b) => b[1] - a[1]);
 console.log(`harness revisions   ${hh.map(([h, n]) => `${h}:${n}`).join('  ')}`);
 if (hh.length > 1) console.log(`  ⚠ RECORDS SPAN ${hh.length} HARNESS REVISIONS — re-run the minority under ${hh[0][0]} before shipping this catalog`);
 console.log(`packages with entry ${Object.keys(packages).length}`);
-console.log(`grants emitted      ${grantCount}`);
+console.log(`grants emitted      ${grantCount}  (${Object.keys(packages).length} default + ${bandCount} version bands)`);
 console.log(`needed nothing      ${byPackage.size - Object.keys(packages).length}`);
 for (const [k, v] of Object.entries(excluded)) {
   if (v.length) console.log(`excluded (${k})  ${v.length}: ${v.slice(0, 6).join(', ')}${v.length > 6 ? ' …' : ''}`);
