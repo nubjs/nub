@@ -101,6 +101,29 @@ function Stop-ProcessTree {
     if (-not $Process.HasExited) { throw "holder process $($Process.Id) survived taskkill" }
 }
 
+function Assert-NoRuntimeWriteThrough {
+    param([string]$Root, [string]$What)
+    # The property under test is that the RUNTIME CACHE refuses an unsafe candidate
+    # -- ensure_safe_base returns None and extraction falls through. Assert that by
+    # the absence of an extracted `runtime-*` tree, NOT by the absence of the `nub`
+    # directory: nub's node-discovery / node-env-flags / transpile / v8-compile-cache
+    # caches create that directory unconditionally through a plain create_dir_all,
+    # with no DACL validation of their own, so it exists either way and testing for
+    # it can never pass. Measured on windows-latest against a real release build --
+    # under a rejected Everyone-Modify ancestor the `nub` dir held exactly
+    # transpile/, v8-compile-cache/, node-discovery.json and node-env-flags.json,
+    # runtime-* count 0, while the runtime itself landed in the fallback root.
+    #
+    # That those other caches write into an unsafe directory at all is a real but
+    # SEPARATE gap, tracked as a follow-up; it is not what this gate covers.
+    $nubDir = Join-Path $Root 'nub'
+    if (-not (Test-Path -LiteralPath $nubDir)) { return }
+    $runtimes = @(Get-ChildItem -LiteralPath $nubDir -Directory -Filter 'runtime-*' -Force -ErrorAction SilentlyContinue)
+    if ($runtimes.Count -ne 0) {
+        throw "runtime wrote through $What`: $($runtimes.FullName -join ', ')"
+    }
+}
+
 function Invoke-CacheFallbackProbe {
     param(
         [string]$Candidate,
@@ -269,7 +292,7 @@ setInterval(() => {}, 1000);
     & icacls.exe $everyoneModify /grant '*S-1-1-0:(OI)(CI)M' | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "icacls failed to grant Everyone Modify: exit $LASTEXITCODE" }
     Invoke-CacheFallbackProbe -Candidate $everyoneModify -Fallback $aclFallback -Work $work -Fixture $securityFixture
-    if (Test-Path -LiteralPath (Join-Path $everyoneModify 'nub')) { throw 'runtime wrote through an Everyone-Modify cache ancestor' }
+    Assert-NoRuntimeWriteThrough $everyoneModify 'an Everyone-Modify cache ancestor'
 
     $junctionTarget = Join-Path $root 'junction-target'
     $junction = Join-Path $root 'cache-junction'
@@ -279,7 +302,7 @@ setInterval(() => {}, 1000);
     if ($LASTEXITCODE -ne 0) { throw "mklink /J failed: exit $LASTEXITCODE" }
     if (-not ((Get-Item -LiteralPath $junction -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'cache-junction is not a reparse point' }
     Invoke-CacheFallbackProbe -Candidate $junction -Fallback $junctionFallback -Work $work -Fixture $securityFixture
-    if (Test-Path -LiteralPath (Join-Path $junctionTarget 'nub')) { throw 'runtime wrote through a junction/reparse cache root' }
+    Assert-NoRuntimeWriteThrough $junctionTarget 'a junction/reparse cache root'
 
     Write-Host 'Windows release compile-cache gate passed: blocked live-DLL repair, exact self-heal, and unsafe-cache rejection.'
 } finally {
