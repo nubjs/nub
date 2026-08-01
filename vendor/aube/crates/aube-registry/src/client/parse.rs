@@ -25,7 +25,7 @@ fn excerpt(bytes: &[u8], offset: usize) -> String {
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect::<String>();
     format!(
-        "{}{flattened}{}",
+        "near: {}{flattened}{}",
         if start == 0 { "" } else { "…" },
         if end == bytes.len() { "" } else { "…" }
     )
@@ -71,7 +71,7 @@ where
     let parse_t0 = std::time::Instant::now();
     let result = sonic_rs::from_slice::<T>(&bytes).map_err(|e| Error::Decode {
         context: context.to_string(),
-        near: excerpt(&bytes, e.offset()),
+        locator: excerpt(&bytes, e.offset()),
         message: e.to_string(),
     });
     aube_util::diag::event_lazy(

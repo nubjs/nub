@@ -997,11 +997,16 @@ pub enum Error {
     /// fetch surfaced first and the same bug appeared to move between
     /// packages run to run. `context` and `near` are what make it
     /// readable in one pass.
-    #[error("failed to decode {context}: {message}{}", render_near(.near))]
+    #[error("failed to decode {context}: {message}{}", render_locator(.locator))]
     #[diagnostic(code(ERR_AUBE_METADATA_DECODE))]
     Decode {
         context: String,
-        near: String,
+        /// Rendered locator for the offending field — a payload excerpt
+        /// (`near: …"unpackedSize":{…`) on the byte-oriented sonic-rs
+        /// decode, a JSON path (`at versions.1.0.0.dist.unpackedSize`)
+        /// on the `from_value` paths, which have no input text to quote.
+        /// Empty when neither is available.
+        locator: String,
         message: String,
     },
     #[error("registry rejected write: HTTP {status}: {body}")]
@@ -1029,14 +1034,15 @@ pub enum Error {
 /// so credentials never reach an error message or log; the redacted host
 /// is preserved for debuggability. Errors with no attached URL render
 /// unchanged (reqwest's Display emits no URL in that case).
-/// Render the payload excerpt clause of [`Error::Decode`], or nothing
-/// when the body was too short to quote. Kept out of the `#[error]`
-/// format string so an empty excerpt doesn't leave a dangling ` near ""`.
-fn render_near(near: &str) -> String {
-    if near.is_empty() {
+/// Render the locator clause of [`Error::Decode`], or nothing when the
+/// decode gave us neither an excerpt nor a path. Kept out of the
+/// `#[error]` format string so an absent locator doesn't leave a
+/// dangling ` — `.
+fn render_locator(locator: &str) -> String {
+    if locator.is_empty() {
         String::new()
     } else {
-        format!(" — near: {near}")
+        format!(" — {locator}")
     }
 }
 
@@ -1095,7 +1101,7 @@ mod tests {
     fn decode_error_renders_the_package_and_the_offending_field() {
         let rendered = Error::Decode {
             context: "packument @img/colour".to_string(),
-            near: r#"…"shasum":"0000","unpackedSize":{"bytes":1}},"depend…"#.to_string(),
+            locator: r#"near: …"shasum":"0000","unpackedSize":{"bytes":1}},"depend…"#.to_string(),
             message: "invalid type: map, expected u64".to_string(),
         }
         .to_string();
@@ -1112,7 +1118,7 @@ mod tests {
     fn decode_error_omits_the_excerpt_clause_when_there_is_none() {
         let rendered = Error::Decode {
             context: "packument lodash".to_string(),
-            near: String::new(),
+            locator: String::new(),
             message: "invalid type: map, expected a string".to_string(),
         }
         .to_string();

@@ -10,16 +10,27 @@ use std::path::{Path, PathBuf};
 /// `serde_json::from_value` sibling of `parse_full_response`'s error
 /// mapping, for the paths that already hold a parsed `Value`.
 ///
-/// `near` is empty here on purpose: `from_value` reports no byte offset
-/// (it walks an in-memory tree, so there is no input to quote), and
-/// re-serializing a multi-megabyte packument just to excerpt it would
-/// cost more than the diagnostic is worth. The package attribution —
-/// the part that made this class of failure unreadable — still lands.
+/// These paths have no byte offset to quote — `from_value` walks an
+/// in-memory tree, so there is no input text — which is why they carry
+/// a JSON path (`versions.1.0.0.dist.unpackedSize`) as their locator
+/// of a payload excerpt. Both answer the same question the raw serde
+/// message can't: WHICH field. Reaching for the path rather than
+/// re-serializing the tree matters because these are the
+/// full-packument paths (`minimumReleaseAge`, time-based resolution,
+/// `trustPolicy=no-downgrade`), where the document routinely runs to
+/// megabytes.
 fn decode_value(value: serde_json::Value, name: &str) -> Result<Packument, Error> {
-    serde_json::from_value(value).map_err(|e| Error::Decode {
-        context: format!("packument {name}"),
-        near: String::new(),
-        message: e.to_string(),
+    serde_path_to_error::deserialize(value).map_err(|e| {
+        let path = e.path().to_string();
+        Error::Decode {
+            context: format!("packument {name}"),
+            locator: if path.is_empty() || path == "." {
+                String::new()
+            } else {
+                format!("at {path}")
+            },
+            message: e.into_inner().to_string(),
+        }
     })
 }
 
