@@ -37,8 +37,14 @@
 // instead of guarding method by method.
 "use strict";
 
-const { createRequire } = require("node:module");
-const __require = createRequire(__filename);
+const compileBootstrap = process[Symbol.for("nub.compile.bootstrap")];
+const getBuiltin = typeof compileBootstrap?.getBuiltin === "function"
+  ? compileBootstrap.getBuiltin
+  : require;
+const { createRequire } = getBuiltin("node:module");
+const runtimeRequire = typeof compileBootstrap?.createRequire === "function"
+  ? compileBootstrap.createRequire(__filename)
+  : createRequire(__filename);
 
 // Install every globalThis/prototype polyfill that doesn't depend on loading the
 // ESM side-effect modules (worker-polyfill, navigator-locks). Synchronous and
@@ -131,7 +137,7 @@ function installSyncPolyfills(preloaded) {
       return origEmitWarning.call(this, warning, ...rest);
     };
     try {
-      const buffer = require("node:buffer");
+      const buffer = getBuiltin("node:buffer");
       const sampleArgs = { File: [[], ""], Blob: [[]] };
       for (const name of ["File", "Blob"]) {
         const Ctor = buffer[name];
@@ -2027,10 +2033,10 @@ function installKeyedPromiseCombinators() {
 function installEsmPolyfillsSync() {
   // ── navigator.locks (native on Node 24+, missing on 22.x) ──────────
   if (typeof globalThis.navigator?.locks === "undefined") {
-    __require("./navigator-locks.mjs");
+    runtimeRequire("./navigator-locks.mjs");
   }
   // ── Worker (browser-shape global, not in any Node) ──────────────────
-  __require("./worker-polyfill.mjs");
+  runtimeRequire("./worker-polyfill.mjs");
 }
 
 module.exports = { installSyncPolyfills, installEsmPolyfillsSync };

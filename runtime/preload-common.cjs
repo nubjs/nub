@@ -15,10 +15,14 @@
 // on the fast tier; the compat entry passes its already-imported core bindings in
 // (it imported them as ESM), so this module never require()s the core there.
 
-const module_ = require("node:module");
-const { readdirSync, existsSync } = require("node:fs");
-const { fileURLToPath, pathToFileURL } = require("node:url");
-const { join, dirname, extname: pathExtname } = require("node:path");
+const compileBootstrap = process[Symbol.for("nub.compile.bootstrap")];
+const getBuiltin = typeof compileBootstrap?.getBuiltin === "function"
+  ? compileBootstrap.getBuiltin
+  : require;
+const module_ = getBuiltin("node:module");
+const { readdirSync, existsSync } = getBuiltin("node:fs");
+const { fileURLToPath, pathToFileURL } = getBuiltin("node:url");
+const { join, dirname, extname: pathExtname } = getBuiltin("node:path");
 
 // Internal `__NUB_*` plumbing var carrying the running binary's version (set by
 // the Rust spawn layer, coupled to preload injection). Read by installVersionMarker.
@@ -534,7 +538,7 @@ function makeHooks(core, watchReporting) {
         if (r) return r;
       }
       if (ext in core.DATA_EXTS) return core.loadData(url, ext);
-      const { readFileSync } = require("node:fs");
+      const { readFileSync } = getBuiltin("node:fs");
       const source = readFileSync(path);
       const pkgType = core.getPackageType(dirname(path));
       const format = core.moduleFormatFor(ext, pkgType, path, source.toString("utf8"));
@@ -742,7 +746,7 @@ function makeHooks(core, watchReporting) {
       typeof url === "string" && url.startsWith("file:")
     ) {
       try {
-        const { readFileSync } = require("node:fs");
+        const { readFileSync } = getBuiltin("node:fs");
         return { ...r, source: readFileSync(fileURLToPath(url)) };
       } catch { /* fall through with the original result */ }
     }
@@ -1010,16 +1014,44 @@ function preloadPolyfillPackages(reqFromRuntime) {
 // a program inspecting `RegExp.$_` on its first line would otherwise see a leaked
 // path (test-startup-empty-regexp-statics). Deferring the resolve keeps `RegExp.$_`
 // empty at user-code start; the cost is paid only by a program that touches Temporal.
-function installTemporalLazyGlobal(reqFromRuntime) {
-  if (typeof globalThis.Temporal !== "undefined") return;
+const defineTemporal = (value) =>
+  Object.defineProperty(globalThis, "Temporal", {
+    value,
+    configurable: true,
+    writable: true,
+    enumerable: false,
+  });
 
-  const defineTemporal = (value) =>
-    Object.defineProperty(globalThis, "Temporal", {
-      value,
+function installTemporalValue(polyfill) {
+  // @js-temporal/polyfill exports `toTemporalInstant` as a function but does
+  // NOT auto-install it on Date.prototype (you assign it yourself). Install it
+  // here so that on the floor (no native Temporal) `date.toTemporalInstant()`
+  // AND the package clobber's re-export of `Date.prototype.toTemporalInstant`
+  // both work — matching native Node. Guarded so we never replace a native
+  // implementation on a runtime that ships Temporal.
+  if (
+    typeof Date.prototype.toTemporalInstant !== "function" &&
+    typeof polyfill.toTemporalInstant === "function"
+  ) {
+    Object.defineProperty(Date.prototype, "toTemporalInstant", {
+      value: polyfill.toTemporalInstant,
       configurable: true,
       writable: true,
       enumerable: false,
     });
+  }
+  const T = polyfill.Temporal;
+  defineTemporal(T);
+  return T;
+}
+
+function installTemporalGlobal(polyfill) {
+  if (typeof globalThis.Temporal !== "undefined") return globalThis.Temporal;
+  return installTemporalValue(polyfill);
+}
+
+function installTemporalLazyGlobal(reqFromRuntime) {
+  if (typeof globalThis.Temporal !== "undefined") return;
   Object.defineProperty(globalThis, "Temporal", {
     configurable: true,
     enumerable: false,
@@ -1028,26 +1060,7 @@ function installTemporalLazyGlobal(reqFromRuntime) {
       try { temporalPath = reqFromRuntime.resolve("@js-temporal/polyfill"); } catch {}
       if (!temporalPath) return undefined;
       const polyfill = reqFromRuntime(temporalPath);
-      // @js-temporal/polyfill exports `toTemporalInstant` as a function but does
-      // NOT auto-install it on Date.prototype (you assign it yourself). Install it
-      // here so that on the floor (no native Temporal) `date.toTemporalInstant()`
-      // AND the package clobber's re-export of `Date.prototype.toTemporalInstant`
-      // both work — matching native Node. Guarded so we never replace a native
-      // implementation on a runtime that ships Temporal.
-      if (
-        typeof Date.prototype.toTemporalInstant !== "function" &&
-        typeof polyfill.toTemporalInstant === "function"
-      ) {
-        Object.defineProperty(Date.prototype, "toTemporalInstant", {
-          value: polyfill.toTemporalInstant,
-          configurable: true,
-          writable: true,
-          enumerable: false,
-        });
-      }
-      const T = polyfill.Temporal;
-      defineTemporal(T);
-      return T;
+      return installTemporalValue(polyfill);
     },
     set: defineTemporal,
   });
@@ -1107,7 +1120,7 @@ function compileCacheSentinelPath() {
 
 function restoreCompileCacheEnv() {
   try {
-    const { readFileSync, rmSync } = require("node:fs");
+    const { readFileSync, rmSync } = getBuiltin("node:fs");
     const value = readFileSync(compileCacheSentinelPath(), "utf8");
     try { rmSync(compileCacheSentinelPath()); } catch {}
     if (value) process.env.NODE_COMPILE_CACHE = value;
@@ -1136,6 +1149,35 @@ function restoreCompileCacheEnv() {
 // require() has zero added overhead. If the user never requires child_process, the
 // module is never loaded and the builtins stay out of the load list — matching Node.
 let __cpWrapArmed = false;
+// `nub compile` replaces process.execPath with the outer artifact so programs can
+// identify themselves as that executable. fork() must instead keep launching the
+// real Node binary, unless the caller selected an execPath explicitly.
+let __compiledForkExecPath;
+let __compiledForkRequireArg;
+let __compiledForkCompiledExecPath;
+let __compiledForkNeutralizeLocalStorage;
+
+function installCompiledForkExecPath(
+  realNodeExecPath,
+  requireArg,
+  compiledExecPath,
+  neutralizeLocalStorage,
+) {
+  if (typeof realNodeExecPath !== "string" || realNodeExecPath.length === 0) return;
+  __compiledForkExecPath = realNodeExecPath;
+  __compiledForkRequireArg = requireArg;
+  __compiledForkCompiledExecPath = compiledExecPath;
+  __compiledForkNeutralizeLocalStorage = neutralizeLocalStorage;
+  // ESM `import { fork } from "node:child_process"` bypasses Module._load, so a
+  // compiled artifact must eagerly load + patch the builtin and synchronize its
+  // named ESM exports. This startup cost is compiled-only; normal Nub preloads
+  // continue to defer child_process until CommonJS user code requires it.
+  try {
+    wrapChildProcessCompileCache(getBuiltin("node:child_process"));
+    module_.syncBuiltinESMExports();
+  } catch {}
+}
+
 function armChildProcessCompileCacheWrap() {
   if (__cpWrapArmed || __cpWrapped) return;
   __cpWrapArmed = true;
@@ -1165,8 +1207,8 @@ let __cpWrapped = false;
 function wrapChildProcessCompileCache(cp) {
   if (__cpWrapped || !cp) return;
   __cpWrapped = true;
-  const { writeFileSync } = require("node:fs");
-  const { basename } = require("node:path");
+  const { writeFileSync } = getBuiltin("node:fs");
+  const { basename } = getBuiltin("node:path");
 
   const isNodeTarget = (command) => {
     if (typeof command !== "string" || command.length === 0) return false;
@@ -1249,17 +1291,68 @@ function wrapChildProcessCompileCache(cp) {
   cp.execFile = wrapSpawnLike(cp.execFile);
   cp.execFileSync = wrapSpawnLike(cp.execFileSync);
 
-  // fork() always runs `process.execPath`, so it is always a node target. Its
-  // signature is (modulePath, args?, options?); reuse the same options rewrite.
+  const compiledForkExecArgv = (execArgv) => {
+    if (execArgv && !Array.isArray(execArgv)) return execArgv;
+    const args = execArgv || process.execArgv;
+    if (!Array.isArray(args)) return args;
+    return [
+      __compiledForkRequireArg,
+      ...args.filter((arg) => arg !== __compiledForkRequireArg),
+    ];
+  };
+
+  // fork() normally runs `process.execPath`, so it is a node target. Compiled
+  // artifacts expose their outer path there, but must fork with the captured real
+  // Node executable unless the caller supplied a truthy `options.execPath`. Its
+  // signature is (modulePath, args?, options?); retain every call shape while
+  // combining the compile-cache rewrite with the compiled-executable override.
   const origFork = cp.fork;
   cp.fork = function (modulePath, ...rest) {
     let optIdx = -1;
-    for (let i = rest.length - 1; i >= 0; i--) {
-      const a = rest[i];
-      if (a && typeof a === "object" && !Array.isArray(a)) { optIdx = i; break; }
-      if (Array.isArray(a)) break;
+    if (rest.length === 0) {
+      optIdx = 0;
+    } else if (rest.length === 1) {
+      const [arg] = rest;
+      if (Array.isArray(arg)) optIdx = 1;
+      else if (arg == null || typeof arg === "object") optIdx = 0;
+    } else if (rest.length === 2) {
+      const [args, options] = rest;
+      if ((Array.isArray(args) || args == null) &&
+          (options == null || (typeof options === "object" && !Array.isArray(options)))) {
+        optIdx = 1;
+      }
     }
-    if (optIdx >= 0) rest[optIdx] = stripFromOptions(rest[optIdx]);
+    if (optIdx >= 0 && __compiledForkExecPath) {
+      const originalOptions = optIdx < rest.length ? rest[optIdx] : undefined;
+      const customEnv = originalOptions && typeof originalOptions === "object"
+        ? originalOptions.env
+        : undefined;
+      const hasCustomEnv =
+        customEnv !== null &&
+        typeof customEnv === "object" &&
+        !Array.isArray(customEnv);
+      const options = originalOptions && typeof originalOptions === "object"
+        ? stripFromOptions(originalOptions)
+        : {};
+      const compiledOptions = { ...options };
+      if (!compiledOptions.execPath) compiledOptions.execPath = __compiledForkExecPath;
+      if (__compiledForkRequireArg) {
+        compiledOptions.execArgv = compiledForkExecArgv(compiledOptions.execArgv);
+      }
+      if (hasCustomEnv) {
+        compiledOptions.env = {
+          ...compiledOptions.env,
+          ...(typeof __compiledForkCompiledExecPath === "string" && __compiledForkCompiledExecPath.length > 0
+            ? { __NUB_COMPILED_EXEC_PATH: __compiledForkCompiledExecPath }
+            : {}),
+          ...(__compiledForkNeutralizeLocalStorage
+            ? { __NUB_NEUTRALIZE_LOCALSTORAGE: "1" }
+            : {}),
+        };
+      }
+      if (optIdx === rest.length) rest.push(compiledOptions);
+      else rest[optIdx] = compiledOptions;
+    }
     return origFork.call(this, modulePath, ...rest);
   };
 }
@@ -1370,7 +1463,9 @@ module.exports = {
   shouldAutoAsyncTierAtPreload,
   installCjsRequireHooks,
   preloadPolyfillPackages,
+  installTemporalGlobal,
   installTemporalLazyGlobal,
   restoreCompileCacheEnv,
+  installCompiledForkExecPath,
   reenableUserCompileCache,
 };
