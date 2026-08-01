@@ -83,11 +83,10 @@ function once(fn) {
   };
 }
 
-function tcp() {
+function tcp(label, host, port) {
   return new Promise((resolve) => {
-    // A literal IP, so a refusal is the capability and not name resolution.
-    const fin = once((v) => resolve(['net:tcp-1.1.1.1:443', v]));
-    const s = net.connect({ host: '1.1.1.1', port: 443 });
+    const fin = once((v) => resolve([label, v]));
+    const s = net.connect({ host, port });
     const t = setTimeout(() => {
       s.destroy();
       fin('ERR:TIMEOUT');
@@ -143,7 +142,16 @@ function httpGet() {
   });
 }
 
-Promise.all([tcp(), lookup(), httpGet()]).then((rows) => {
+Promise.all([
+  // A literal IP, so a refusal is the capability and not name resolution.
+  tcp('net:tcp-1.1.1.1:443', '1.1.1.1', 443),
+  // LOOPBACK, because it is the obvious escape from a coarse egress deny: a helper listening
+  // outside the container would relay for it. AppContainer restricts loopback separately from
+  // `internetClient`, so this must be checked rather than assumed from the outbound result.
+  tcp('net:tcp-127.0.0.1:135', '127.0.0.1', 135),
+  lookup(),
+  httpGet(),
+]).then((rows) => {
   for (const [k, v] of rows) say(k, v);
   // The completion marker. An arm whose log lacks it was truncated or hung, and its ops must NOT
   // be read as denials — the failure mode §5h lost a whole run to.

@@ -90,9 +90,24 @@ $childJs = Join-Path $stage 'child.js'
 # The locations, in the order the maintainer named them plus the three that DISCRIMINATE: a shared
 # directory a standard user can write but cannot re-ACL (`C:\Users\Public`, `C:\Windows\Temp`), and
 # the two controls (`armtmp` must always pass, `C:\Windows` must always fail).
+# THE LEAD THE FIRST RUN TURNED UP. A standard user cannot re-ACL `C:\` or `C:\ProgramData` — but
+# `mkdir` there succeeds, and the creator OWNS what it creates, which should carry `WRITE_DAC`. If
+# so, "the ceiling is `%USERPROFILE%`" is too narrow: it is `%USERPROFILE%` PLUS anything the user
+# creates. These two directories are created BY THE DE-ELEVATED USER and then flow through the
+# whole matrix — canary, raw Win32 pass, DACL reach, broad-grant target selection, every arm.
+$ownRoot = "C:\fxown-$tag"
+$ownPd = "C:\ProgramData\fxown-$tag"
+$impF = [Fx]::BeginDeelevated()
+$mkOwn1 = [Fx]::TryMkdir($ownRoot)
+$mkOwn2 = [Fx]::TryMkdir($ownPd)
+[void][Fx]::EndDeelevated()
+Write-Host "user-created dirs (de-elevated): $ownRoot -> $mkOwn1 ; $ownPd -> $mkOwn2 (impersonate=$impF)"
+
 $locs = [ordered]@{
   'C:\'                 = 'C:\'
   'C:\ProgramData'      = 'C:\ProgramData'
+  'C:\<user-made>'      = $ownRoot
+  'C:\ProgramData\<um>' = $ownPd
   'C:\Users'            = 'C:\Users'
   'C:\Users\Public'     = 'C:\Users\Public'
   'C:\Windows\Temp'     = 'C:\Windows\Temp'
@@ -188,6 +203,13 @@ Check 'deelev-is-really-deelevated' ($w32deelev['C:\Windows|create'] -ne 'OK') `
   "deelev-create-in-C:\Windows = $($w32deelev['C:\Windows|create'])"
 Check 'deelev-can-still-write-its-own-profile' ($w32deelev['%USERPROFILE%|create'] -eq 'OK') `
   "= $($w32deelev['%USERPROFILE%|create'])"
+Check 'user-created-dirs-were-created-de-elevated' (($mkOwn1 -eq 'OK') -and ($mkOwn2 -eq 'OK')) `
+  "C:\=$mkOwn1 C:\ProgramData\=$mkOwn2"
+# THE LEAD, reported not asserted: does OWNING a directory under a root you cannot ACE let you ACE
+# the directory? If yes, the ceiling is not the profile — it is the profile plus whatever the user
+# makes, anywhere it can make it.
+Write-Host "PROPERTY deelev-dacl-write-on-user-created-C-root = $($w32deelev['C:\<user-made>|dacl'])"
+Write-Host "PROPERTY deelev-dacl-write-on-user-created-ProgramData = $($w32deelev['C:\ProgramData\<um>|dacl'])"
 
 Write-Host ''
 Write-Host '--- THE CONTRADICTION, both halves at the same target, same context ---'
@@ -340,7 +362,7 @@ foreach ($k in $locs.Keys) {
     Write-Host $row
   }
 }
-foreach ($nk in @('net:tcp-1.1.1.1:443', 'net:dns', 'net:https-get')) {
+foreach ($nk in @('net:tcp-1.1.1.1:443', 'net:tcp-127.0.0.1:135', 'net:dns', 'net:https-get')) {
   $row = 'NETWORK'.PadRight(23) + ($nk -replace '^net:', '').PadRight(16)
   foreach ($n in $armNames) {
     $v = $results[$n][$nk]; if ($null -eq $v) { $v = 'MISSING' }
