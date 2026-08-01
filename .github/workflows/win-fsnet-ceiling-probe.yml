@@ -1,0 +1,58 @@
+# Branch-scoped ad-hoc probe, NO pull request required (`.claude/skills/ci-adhoc-test/SKILL.md`).
+#
+# THE QUESTION: can a lifecycle script be granted the widest filesystem access obtainable WITHOUT
+# elevation while still being denied the network? Coarse egress denial on Windows is a withheld
+# AppContainer capability (`internetClient`), so declining the LowBox token to widen the filesystem
+# hands the package the network too. Whether a "widest grantable" tier exists that keeps the token
+# is a measurement, not an argument.
+#
+# CI IS THE ONLY VENUE. An AppContainer cannot be launched over OpenSSH — sshd lands in services
+# session 0, which has no window station a LowBox token can attach to, and every launch returns
+# 0xC0000142 (MECHANISM-FACTS §5e/§5h). The standing `nub-win` VM therefore cannot answer this.
+#
+# NO RUST BUILD: PowerShell + a C# P/Invoke launcher, so a run is minutes rather than the 35+ a
+# cold Windows cargo cache costs.
+#
+# BOTH IMAGES, `fail-fast: false`: a single-image answer to a kernel-physics question is a guess
+# about the other one, and one image's failure must never hide the other's table.
+name: win-fsnet-ceiling-probe
+
+on:
+  push:
+    branches: [probe/win-fsnet-ceiling]
+  workflow_dispatch: # inert until this file reaches the default branch; `push` is what fires it
+
+permissions:
+  contents: read
+
+jobs:
+  fsnet:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Probe — filesystem ceiling vs egress separability
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          pwsh -NoLogo -NonInteractive -File tests/win-fsnet-ceiling/probe.ps1 *>&1 |
+            Tee-Object -FilePath fsnet-${{ matrix.os }}.log
+          exit 0
+
+      - name: Upload the raw log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fsnet-${{ matrix.os }}
+          path: fsnet-${{ matrix.os }}.log
+          if-no-files-found: warn
