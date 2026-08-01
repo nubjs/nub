@@ -328,11 +328,41 @@ fn assert_native_node_identity(value: &str, context: &str) {
 
 #[cfg(feature = "compile")]
 fn assert_compile_path_eq(actual: &str, expected: &str, context: &str) {
+    // Windows serves the same file under several spellings at once: the verbatim
+    // `\\?\` prefix, either separator, either case, and — the one that bit here —
+    // an 8.3 short name, so a runner reports `C:\Users\RUNNER~1\...` where the test
+    // built `...\runneradmin\...`. Canonicalizing the deepest ancestor that still
+    // exists resolves short names and verbatim together; the artifact itself is
+    // already deleted by this point, so canonicalizing the full path cannot work.
     #[cfg(windows)]
     let normalize = |value: &str| {
-        value
+        let raw = std::path::Path::new(value);
+        let mut tail = Vec::new();
+        let mut probe = raw;
+        let resolved = loop {
+            if let Ok(real) = std::fs::canonicalize(probe) {
+                break Some(real);
+            }
+            match (probe.parent(), probe.file_name()) {
+                (Some(parent), Some(name)) => {
+                    tail.push(name.to_os_string());
+                    probe = parent;
+                }
+                _ => break None,
+            }
+        };
+        let joined = match resolved {
+            Some(mut real) => {
+                for name in tail.iter().rev() {
+                    real.push(name);
+                }
+                real.to_string_lossy().into_owned()
+            }
+            None => value.to_owned(),
+        };
+        joined
             .strip_prefix(r"\\?\")
-            .unwrap_or(value)
+            .unwrap_or(&joined)
             .replace('/', "\\")
             .to_ascii_lowercase()
     };
