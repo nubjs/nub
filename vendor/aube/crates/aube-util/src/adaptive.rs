@@ -218,6 +218,8 @@ struct ColdState {
      * with upstream queueing.
      */
     cusum_shrink_disabled: AtomicBool,
+    #[cfg(test)]
+    waiter_enrollments: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Debug)]
@@ -278,6 +280,8 @@ impl AdaptiveLimit {
                  */
                 regime: RegimeDetector::new(5_000_000),
                 cusum_shrink_disabled: AtomicBool::new(false),
+                #[cfg(test)]
+                waiter_enrollments: std::sync::atomic::AtomicUsize::new(0),
             },
         })
     }
@@ -301,6 +305,11 @@ impl AdaptiveLimit {
 
     pub fn inflight(&self) -> usize {
         unpack(self.hot.state.load(Ordering::Relaxed)).0 as usize
+    }
+
+    #[cfg(test)]
+    fn waiter_enrollments(&self) -> usize {
+        self.cold.waiter_enrollments.load(Ordering::Relaxed)
     }
 
     /**
@@ -332,25 +341,12 @@ impl AdaptiveLimit {
 
     pub async fn acquire(self: &Arc<Self>) -> AdaptivePermit {
         loop {
-            let waiter = self.cold.available.notified();
-            tokio::pin!(waiter);
-            // Enroll before inspecting capacity. A concurrent growth which
-            // follows wakes this future; one which precedes it is observed by
-            // the state load below.
-            waiter.as_mut().enable();
+            // The normal path stays a single state load plus CAS: creating or
+            // enabling a `Notified` here would enroll every successful
+            // request in Tokio's waiter list.
             let s = self.hot.state.load(Ordering::Acquire);
             let (inflight, limit) = unpack(s);
             if inflight < limit {
-                // `compare_exchange` (strong) instead of weak: a
-                // spurious failure here would drop us into
-                // `waiter.as_mut().await` even though a permit
-                // slot was available. If no `release()` has fired
-                // since we registered the waiter, the await sleeps
-                // until the next release — which can be the full
-                // duration of an in-flight request. Strong CAS
-                // pays a tiny extra cost on the contended path
-                // (LL/SC archs may retry internally) in exchange
-                // for not gambling latency on a CPU mispredict.
                 match self.hot.state.compare_exchange(
                     s,
                     pack(inflight + 1, limit),
@@ -366,6 +362,23 @@ impl AdaptiveLimit {
                     }
                     Err(_) => continue,
                 }
+            }
+
+            // We saw saturation. Enroll before the second state observation:
+            // a release or one-slot growth after `enable` wakes us, while one
+            // before it is visible in the re-read below. Multiplicative growth
+            // uses `notify_waiters`, which also covers a future created before
+            // it is enabled.
+            let waiter = self.cold.available.notified();
+            tokio::pin!(waiter);
+            waiter.as_mut().enable();
+            #[cfg(test)]
+            self.cold.waiter_enrollments.fetch_add(1, Ordering::Relaxed);
+
+            let s = self.hot.state.load(Ordering::Acquire);
+            let (inflight, limit) = unpack(s);
+            if inflight < limit {
+                continue;
             }
             waiter.as_mut().await;
         }
@@ -435,16 +448,21 @@ impl AdaptiveLimit {
         self.cold.available.notify_one();
     }
 
-    fn wake_growth_waiters(&self) {
-        /*
-         * A single broadcast does work only for the waiters that actually
-         * exist; it is never proportional to the numerical capacity change.
-         * `acquire` creates and enables its `Notified` before loading state,
-         * while Tokio guarantees `notify_waiters` reaches futures created
-         * before the broadcast even if they have not yet been polled. Thus a
-         * growth cannot strand an acquirer racing between registration and
-         * its capacity check.
-         */
+    fn wake_growth_waiters(&self, added: u32) {
+        debug_assert!(added > 0, "wake requested without added capacity");
+        if added == 1 {
+            // Additive recovery opens one slot, so wake precisely one queued
+            // acquirer. A broadcast here makes every other waiter contend,
+            // observe saturation, and re-enroll for no useful work.
+            self.cold.available.notify_one();
+            return;
+        }
+
+        // A multiplicative increase opens multiple slots. Wake the current
+        // queue once, not once per numerical permit. The saturated acquire
+        // path creates/enables its future before re-reading state; Tokio also
+        // guarantees `notify_waiters` reaches futures created before their
+        // first poll, so this broadcast cannot strand a racing acquirer.
         self.cold.available.notify_waiters();
     }
 
@@ -511,7 +529,7 @@ impl AdaptiveLimit {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    self.wake_growth_waiters();
+                    self.wake_growth_waiters(next_limit - limit);
                     return;
                 }
                 Err(observed) => s = observed,
@@ -538,7 +556,7 @@ impl AdaptiveLimit {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    self.wake_growth_waiters();
+                    self.wake_growth_waiters(next_limit - limit);
                     return;
                 }
                 Err(observed) => s = observed,
@@ -661,6 +679,16 @@ mod tests {
         assert_eq!(limit.current_limit(), 16);
     }
 
+    #[tokio::test]
+    async fn uncontended_acquires_do_not_enroll_waiters() {
+        let limit = AdaptiveLimit::new(1, 1, 1);
+        for _ in 0..128 {
+            limit.acquire().await.record_cancelled();
+        }
+
+        assert_eq!(limit.waiter_enrollments(), 0);
+    }
+
     #[test]
     fn growth_near_u32_max_clamps_before_narrowing() {
         let max = u32::MAX as usize;
@@ -732,6 +760,61 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), waiter.as_mut())
             .await
             .expect("growth must wake a waiter that raced with the capacity check");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn additive_growth_wakes_one_queued_waiter_without_reenrollment() {
+        const QUEUED: usize = 128;
+
+        let limit = AdaptiveLimit::new(1, 1, QUEUED + 1);
+        let hold = limit.acquire().await;
+        let acquired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut tasks = Vec::with_capacity(QUEUED);
+        for _ in 0..QUEUED {
+            let limit = Arc::clone(&limit);
+            let acquired = Arc::clone(&acquired);
+            tasks.push(tokio::spawn(async move {
+                let _permit = limit.acquire().await;
+                acquired.fetch_add(1, Ordering::Relaxed);
+                std::future::pending::<()>().await;
+            }));
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while limit.waiter_enrollments() < QUEUED {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all queued acquirers must enroll");
+        assert_eq!(limit.waiter_enrollments(), QUEUED);
+
+        limit.bump_limit_by(1);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while acquired.load(Ordering::Relaxed) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("additive growth must wake one queued acquirer");
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(acquired.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            limit.waiter_enrollments(),
+            QUEUED,
+            "one added slot must not broadcast and re-enroll the remaining queue"
+        );
+
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            assert!(task.await.unwrap_err().is_cancelled());
+        }
+        drop(hold);
     }
 
     #[tokio::test]

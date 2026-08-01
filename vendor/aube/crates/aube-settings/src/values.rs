@@ -396,6 +396,65 @@ fn is_stringish(ty: &str) -> bool {
     matches!(ty, "string" | "path" | "url") || ty.starts_with('"')
 }
 
+/// A raw integer source value. `NonText` records that a source supplied a
+/// non-text YAML value, which must still stop a lower-precedence raw source
+/// from being considered.
+#[derive(Clone, Copy)]
+pub(crate) enum RawIntValue<'a> {
+    Text(&'a str),
+    NonText,
+}
+
+impl<'a> RawIntValue<'a> {
+    pub(crate) fn text(self) -> Option<&'a str> {
+        match self {
+            Self::Text(raw) => Some(raw),
+            Self::NonText => None,
+        }
+    }
+}
+
+/// Return the last raw `.npmrc` integer value for a setting, without parsing
+/// it. Unlike [`u64_from_npmrc`], this intentionally preserves a malformed
+/// final value so callers that need strict source precedence can validate it.
+pub(crate) fn raw_int_from_npmrc<'a>(
+    setting: &str,
+    entries: &'a [(String, String)],
+) -> Option<RawIntValue<'a>> {
+    let meta = meta::find(setting)?;
+    if meta.type_ != "int" {
+        return None;
+    }
+    entries.iter().rev().find_map(|(key, raw)| {
+        meta.npmrc_keys
+            .contains(&key.as_str())
+            .then_some(RawIntValue::Text(raw))
+    })
+}
+
+/// Return the first raw workspace-YAML integer setting value, without
+/// parsing it. A non-text scalar deliberately stops raw precedence without
+/// manufacturing a string that could be confused with user-supplied text.
+pub(crate) fn raw_int_from_workspace_yaml<'a>(
+    setting: &str,
+    raw: &'a std::collections::BTreeMap<String, yaml_serde::Value>,
+) -> Option<RawIntValue<'a>> {
+    let meta = meta::find(setting)?;
+    if meta.type_ != "int" || workspace_yaml_suppressed(meta) {
+        return None;
+    }
+    for key in meta.workspace_yaml_keys {
+        let Some(value) = workspace_yaml_value(raw, key) else {
+            continue;
+        };
+        return Some(match value {
+            yaml_serde::Value::String(text) => RawIntValue::Text(text),
+            _ => RawIntValue::NonText,
+        });
+    }
+    None
+}
+
 /// Resolve an `int` setting from `.npmrc` entries, parsed as `u64`.
 /// Mirrors [`bool_from_npmrc`].
 pub(crate) fn u64_from_npmrc(setting: &str, entries: &[(String, String)]) -> Option<u64> {
@@ -550,6 +609,18 @@ pub fn string_from_env(setting: &str, env: &[(String, String)]) -> Option<String
     raw_from_env(meta, env).map(ToOwned::to_owned)
 }
 
+/// Return the raw environment integer setting value without parsing it.
+pub(crate) fn raw_int_from_env<'a>(
+    setting: &str,
+    env: &'a [(String, String)],
+) -> Option<RawIntValue<'a>> {
+    let meta = meta::find(setting)?;
+    if meta.type_ != "int" {
+        return None;
+    }
+    raw_from_env(meta, env).map(RawIntValue::Text)
+}
+
 /// Resolve an `int` setting from a captured environment snapshot.
 pub(crate) fn u64_from_env(setting: &str, env: &[(String, String)]) -> Option<u64> {
     let meta = meta::find(setting)?;
@@ -677,6 +748,17 @@ pub fn string_from_cli(setting: &str, cli: &[(String, String)]) -> Option<String
         return None;
     }
     cli_raw_for(meta, cli, |_| true).map(ToOwned::to_owned)
+}
+/// Return the latest raw CLI integer setting value without parsing it.
+pub(crate) fn raw_int_from_cli<'a>(
+    setting: &str,
+    cli: &'a [(String, String)],
+) -> Option<RawIntValue<'a>> {
+    let meta = meta::find(setting)?;
+    if meta.type_ != "int" {
+        return None;
+    }
+    cli_raw_for(meta, cli, |_| true).map(RawIntValue::Text)
 }
 
 /// Resolve an `int` setting from a parsed CLI flag bag.

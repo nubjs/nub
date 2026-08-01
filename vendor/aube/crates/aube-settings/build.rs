@@ -330,13 +330,6 @@ fn generate_resolved_accessors(settings: &BTreeMap<String, SettingDef>) -> Strin
         // at build time — cheaper to catch a typo here than in a user
         // bug report.
         let order = resolve_precedence(&def.precedence);
-        writeln!(
-            out,
-            "/// Resolved `{name}` — delegates to the generic helpers in\n\
-             /// `super::*` so precedence stays central.\n\
-             pub fn {fn_name}(ctx: &ResolveCtx<'_>) -> {return_ty} {{"
-        )
-        .unwrap();
         // Enum settings walk the source chain for a *raw string* first
         // and parse once at the end. If we pushed the parse into each
         // source-specific `.and_then`, an unrecognized value in a
@@ -347,6 +340,7 @@ fn generate_resolved_accessors(settings: &BTreeMap<String, SettingDef>) -> Strin
         // surfaces the parse failure as `None` so the caller's default
         // applies instead of a silently-overridden value.
         let mut source_exprs = Vec::new();
+        let mut raw_int_source_exprs = Vec::new();
         for src in &order {
             let (call, arg) = match src.as_str() {
                 "cli" => (cli_call, "ctx.cli"),
@@ -366,7 +360,28 @@ fn generate_resolved_accessors(settings: &BTreeMap<String, SettingDef>) -> Strin
                 other => panic!("{name}: unknown source `{other}` in precedence"),
             };
             source_exprs.push(format!("super::{call}({name:?}, {arg})"));
+            if kind == Kind::U64 {
+                let raw_call = match src.as_str() {
+                    "cli" => "raw_int_from_cli",
+                    "env" => "raw_int_from_env",
+                    "projectConfig" | "projectAubeConfig" | "projectNpmrc" | "userAubeConfig"
+                    | "userNpmrc" | "embedderDefaults" => "raw_int_from_npmrc",
+                    "workspaceYaml" | "globalConfigYaml" => "raw_int_from_workspace_yaml",
+                    other => panic!("{name}: unknown source `{other}` in precedence"),
+                };
+                raw_int_source_exprs.push(format!("super::{raw_call}({name:?}, {arg})"));
+            }
         }
+        if kind == Kind::U64 {
+            emit_raw_int_accessor(&mut out, name, &fn_name, &raw_int_source_exprs);
+        }
+        writeln!(
+            out,
+            "/// Resolved `{name}` — delegates to the generic helpers in\n\
+             /// `super::*` so precedence stays central.\n\
+             pub fn {fn_name}(ctx: &ResolveCtx<'_>) -> {return_ty} {{"
+        )
+        .unwrap();
         if kind == Kind::Enum {
             emit_raw_resolution(&mut out, &source_exprs);
             match &default_expr {
@@ -462,6 +477,29 @@ fn generate_resolved_accessors(settings: &BTreeMap<String, SettingDef>) -> Strin
     }
 
     out
+}
+
+fn emit_raw_int_accessor(out: &mut String, name: &str, fn_name: &str, source_exprs: &[String]) {
+    writeln!(
+        out,
+        "/// Unparsed text from the highest-precedence source for `{name}`.\n\
+         ///\n\
+         /// A non-text workspace-YAML value deliberately stops the source walk,\n\
+         /// because it still outranks every lower source."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "pub fn {fn_name}_raw<'a>(ctx: &'a ResolveCtx<'_>) -> Option<&'a str> {{"
+    )
+    .unwrap();
+    for expr in source_exprs {
+        writeln!(out, "    if let Some(value) = {expr} {{").unwrap();
+        writeln!(out, "        return value.text();").unwrap();
+        writeln!(out, "    }}").unwrap();
+    }
+    writeln!(out, "    None").unwrap();
+    writeln!(out, "}}\n").unwrap();
 }
 
 fn emit_resolution(out: &mut String, source_exprs: &[String]) {

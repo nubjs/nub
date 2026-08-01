@@ -1802,7 +1802,10 @@ Set this value explicitly to override the automatic scaling. Values
 must be in `1..=4294967295`: zero and values that cannot fit the
 adaptive limiter's `u32` counter are warned about and fall back to the
 automatic default rather than being truncated or panicking. The
-resolver's packument fetcher still uses its own internal cap for now;
+highest-precedence source text is checked before numeric parsing, so
+unsigned decimal text above `u64::MAX` is warned and falls back to the
+automatic default instead of allowing a lower-precedence value to apply.
+The resolver's packument fetcher still uses its own internal cap for now;
 plumbing that cap through is tracked as a follow-up.
 
 Examples:

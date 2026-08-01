@@ -309,6 +309,13 @@ pub(super) fn maybe_cleanup_unused_catalogs(
     Ok(())
 }
 
+fn numeric_text_exceeds_u64(raw: &str) -> bool {
+    let digits = raw.trim().strip_prefix('+').unwrap_or(raw.trim());
+    !digits.is_empty()
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+        && digits.parse::<u64>().is_err()
+}
+
 /// Resolve `networkConcurrency` from cli / env / `.npmrc` /
 /// workspace yaml. Returns `None` on miss or an invalid value so the
 /// caller can fall back to its own hardcoded default (different sites
@@ -317,7 +324,21 @@ pub(super) fn maybe_cleanup_unused_catalogs(
 /// The adaptive tarball limiter packs its limit into a `u32`. A zero
 /// or unrepresentable configured value is warned about and ignored,
 /// rather than being truncated or reaching the limiter as a panic.
+
 pub(super) fn resolve_network_concurrency(ctx: &aube_settings::ResolveCtx<'_>) -> Option<usize> {
+    let ceiling = u32::MAX;
+    if let Some(raw) = aube_settings::resolved::network_concurrency_raw(ctx)
+        && numeric_text_exceeds_u64(raw)
+    {
+        tracing::warn!(
+            code = aube_codes::warnings::WARN_AUBE_INVALID_CONCURRENCY,
+            value = raw,
+            ceiling,
+            "ignoring network-concurrency={raw} (must be in 1..={ceiling}); using automatic default"
+        );
+        return None;
+    }
+
     aube_settings::resolved::network_concurrency(ctx).and_then(|raw| {
         if raw == 0 {
             tracing::warn!(
@@ -326,9 +347,6 @@ pub(super) fn resolve_network_concurrency(ctx: &aube_settings::ResolveCtx<'_>) -
             );
             return None;
         }
-
-        let ceiling = u32::MAX;
-
         let Some(value) = u32::try_from(raw)
             .ok()
             .and_then(|value| usize::try_from(value).ok())
@@ -1352,6 +1370,32 @@ mod network_concurrency_tests {
         let npmrc_entries = vec![("network-concurrency".to_string(), "4294967296".to_string())];
         let workspace_yaml = std::collections::BTreeMap::new();
         let ctx = aube_settings::ResolveCtx::files_only(&npmrc_entries, &workspace_yaml);
+
+        assert_eq!(resolve_network_concurrency(&ctx), None);
+    }
+
+    #[test]
+    fn text_above_u64_from_env_does_not_fall_through_to_npmrc() {
+        let npmrc_entries = vec![("network-concurrency".to_string(), "1".to_string())];
+        let workspace_yaml = std::collections::BTreeMap::new();
+        let global_config_yaml = std::collections::BTreeMap::new();
+        let env = vec![(
+            "npm_config_network_concurrency".to_string(),
+            "18446744073709551616".to_string(),
+        )];
+        let ctx = aube_settings::ResolveCtx {
+            managed_aube_config: &[],
+            project_aube_config: &[],
+            project_npmrc: &npmrc_entries,
+            project_config: &[],
+            user_aube_config: &[],
+            user_npmrc: &[],
+            workspace_yaml: &workspace_yaml,
+            global_config_yaml: &global_config_yaml,
+            env: &env,
+            cli: &[],
+            embedder_defaults: &[],
+        };
 
         assert_eq!(resolve_network_concurrency(&ctx), None);
     }

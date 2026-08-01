@@ -274,7 +274,7 @@ pub const ALL: &[CodeMeta] = &[
     CodeMeta {
         name: WARN_AUBE_INVALID_CONCURRENCY,
         category: category::SETTINGS_CONFIG,
-        description: "`network-concurrency` or `link-concurrency` was 0, or `network-concurrency` exceeded `u32::MAX`; the value was ignored.",
+        description: "`network-concurrency` or `link-concurrency` was 0, or `network-concurrency` exceeded `u32::MAX` (including unsigned decimal text above `u64::MAX`); the value was ignored.",
         exit_code: None,
     },
     CodeMeta {
