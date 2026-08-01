@@ -913,7 +913,7 @@ fn generate_sh_shim(
          esac\n\
          \n\
          {node_path}\
-         if [ -x \"$basedir/{prog}\" ]; then\n\
+         if [ -x \"$basedir/{prog}\" ] && [ \"`basename \"$0\"`\" != \"{prog}\" ]; then\n\
          \x20 exec \"$basedir/{prog}\" \"$basedir/{rel_target_fwdslash}\" \"$@\"\n\
          else\n\
          \x20 exec {prog} \"$basedir/{rel_target_fwdslash}\" \"$@\"\n\
@@ -961,7 +961,7 @@ fn generate_posix_shim(
          {POSIX_SHIM_MARKER_PREFIX}{rel_target_fwdslash}\n\
          basedir=$(dirname \"$0\")\n\
          {node_path}\
-         if [ -x \"$basedir/{prog}\" ]; then\n\
+         if [ -x \"$basedir/{prog}\" ] && [ \"`basename \"$0\"`\" != \"{prog}\" ]; then\n\
          \x20 exec \"$basedir/{prog}\" \"$basedir/{rel_target_fwdslash}\" \"$@\"\n\
          else\n\
          \x20 exec {prog} \"$basedir/{rel_target_fwdslash}\" \"$@\"\n\
@@ -1818,6 +1818,33 @@ mod tests {
         assert!(
             content.contains("export NODE_PATH="),
             "the direct-exec shim carries NODE_PATH the symlink could not:\n{content}"
+        );
+    }
+
+    /// A package whose BIN IS NAMED AFTER ITS INTERPRETER must not exec itself.
+    ///
+    /// `node@26.5.1` ships a bin called `node`, so the "prefer a locally-installed
+    /// interpreter" branch resolved `$basedir/node` to THE SHIM, which exec'd itself
+    /// forever: `nub install node` never terminated. npm installs it fine, and pnpm skips
+    /// the shim outright. Measured before the guard — `ps` showed `/bin/sh …/.bin/node`
+    /// running its own path and an install spinning past two minutes.
+    #[cfg(unix)]
+    #[test]
+    fn a_shim_named_after_its_interpreter_does_not_exec_itself() {
+        let shim = generate_posix_shim(
+            &BinLaunch::Interpreter("node".to_string()),
+            "../.store/node@26.5.1/node_modules/node/bin/node",
+            None,
+        );
+        assert!(
+            shim.contains("!= \"node\""),
+            "the self-exec guard must be present, or `nub install node` hangs:\n{shim}"
+        );
+        // The guard is what makes the fallback reachable: with `$0` basename == prog, the
+        // first branch is skipped and the bare interpreter from PATH runs the target.
+        assert!(
+            shim.contains("exec node \"$basedir/../.store/node@26.5.1"),
+            "the PATH fallback must still launch the real target:\n{shim}"
         );
     }
 
