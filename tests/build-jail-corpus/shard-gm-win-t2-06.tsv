@@ -1,0 +1,16 @@
+lzma-native	latest	git-repo
+swiftlint	latest	git-repo
+ms-chromium-edge-driver	latest	git-repo
+msnodesqlv8	latest	git-repo
+clientjs	latest	git-repo
+iedriver	latest	git-repo
+playwright-firefox	latest	git-repo
+modern-syslog	latest	git-repo
+pre-push	latest	git-repo
+faunadb	latest	git-repo
+@bazel/esbuild	latest	git-repo
+applicationinsights-native-metrics	latest	git-repo
+spellchecker	latest	git-repo
+@ghaiklor/x509	latest	git-repo
+detox-recorder	latest	git-repo
+subrequests-express	latest	git-repo

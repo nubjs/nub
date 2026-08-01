@@ -1,0 +1,17 @@
+chromium	latest	git-repo
+heapdump	latest	git-repo
+tree-sitter-kotlin	latest	git-repo
+cldr-data	latest	git-repo
+ghooks	latest	git-repo
+@ffprobe-installer/linux-arm64	latest	git-repo
+@ffprobe-installer/darwin-arm64	latest	git-repo
+ffi-napi	latest	git-repo
+react-particles	latest	git-repo
+wrtc	latest	git-repo
+mmmagic	latest	git-repo
+xxhash	latest	git-repo
+go-ios	latest	git-repo
+@bahmutov/add-typescript-to-cypress	latest	git-repo
+@cloudflare/wrangler	latest	git-repo
+sockopt	latest	git-repo
+@sitespeed.io/edgedriver	latest	git-repo

@@ -1,0 +1,16 @@
+fast-folder-size	latest	git-repo
+gc-stats	latest	git-repo
+@bazel/concatjs	latest	git-repo
+registry-js	latest	git-repo
+@ffmpeg-installer/linux-arm	latest	git-repo
+@netlify/esbuild	latest	git-repo
+v8-profiler-next	latest	git-repo
+install-peers	latest	git-repo
+ttag-cli	latest	git-repo
+vue-inbrowser-compiler-demi	latest	git-repo
+robotjs	latest	git-repo
+@bazel/protractor	latest	git-repo
+gif2webp-bin	latest	git-repo
+hummus	latest	git-repo
+ffi	latest	git-repo
+subrequests	latest	git-repo

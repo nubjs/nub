@@ -1,0 +1,16 @@
+macos-alias	latest	git-repo
+tsparticles-engine	latest	git-repo
+realm	latest	git-repo
+@bazel/typescript	latest	git-repo
+@splunk/otel	latest	git-repo
+git-commit-msg-linter	latest	git-repo
+git-win	latest	git-repo
+elm-format	latest	git-repo
+@serialport/bindings	latest	git-repo
+egg-ci	latest	git-repo
+@intlify/vue-i18n-bridge	latest	git-repo
+jpeg-recompress-bin	latest	git-repo
+wordpos	latest	git-repo
+@shopify/ngrok	latest	git-repo
+@matteodisabatino/gc_info	latest	git-repo
+@bazel/terser	latest	git-repo

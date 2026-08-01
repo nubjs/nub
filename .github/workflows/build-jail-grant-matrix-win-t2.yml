@@ -1,0 +1,133 @@
+# WINDOWS GRANT MATRIX, TIER 2 — the 163 below-threshold install-scripted packages.
+#
+# The sibling workflow `build-jail-grant-matrix-win.yml` measured the 387 above-threshold
+# names and left Windows at 387 of the census's 550. These are the remaining 163: every
+# package the census marks `has_install_script_top_n` that sits below the 100k weekly
+# download threshold. Linux and macOS already carry them, so finishing Windows closes the
+# last gap in the three-platform set rather than adding a new axis.
+#
+# The harness, the env floor and the ladder are identical to the tier-1 workflow — same
+# script, same binary features, same cell definitions — deliberately, so a tier-2 row is
+# comparable to a tier-1 row and to the Linux tier-2 set measured from the same list.
+#
+# SHARDS ARE ROUND-ROBIN OVER DOWNLOAD ORDER, not sequential blocks. Tier 2 spans 97k down
+# to zero weekly downloads, so sequential blocks would put every zero-download package in
+# one shard; interleaving keeps each shard's class and popularity mix representative and
+# means a lost shard costs a slice of the range rather than its whole tail.
+name: build-jail-grant-matrix-win-t2
+
+on:
+  push:
+    branches: [probe/gm-win-t2]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      # Windows gives the main thread a 1 MB stack against Linux's 8 MB, and the unoptimized
+      # `fast` profile overflows it inside `nub install` before any lifecycle script runs
+      # (0xC00000FD). A separate defect; linking with a Linux-sized stack lets this measure
+      # the jail rather than a debug-build frame-size artifact.
+      RUSTFLAGS: '-C link-arg=/STACK:8388608'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: gm-win
+      - name: Build the dev binary
+        run: cargo build -p nub-cli --profile fast --features build-jail-catalog-override
+      - name: Stage the binary
+        shell: bash
+        run: |
+          mkdir -p stage
+          cp target/fast/nub.exe stage/nub.exe
+          ls -l stage
+          sha256sum stage/nub.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nub-gm-win-t2
+          path: stage
+          retention-days: 7
+
+  matrix:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: nub-gm-win-t2
+          path: stage
+
+      - name: Run the ladder
+        shell: bash
+        env:
+          NUB_BIN: ${{ github.workspace }}\stage\nub.exe
+        run: |
+          chmod +x stage/nub.exe || true
+          out="$RUNNER_TEMP/gm"
+          # THREE SLOTS. Packages are independent and each cell gets its own fixture root,
+          # so this is concurrency across packages rather than inside one. Each slot's exit
+          # code is captured on its own; `wait` alone reports only the last one.
+          rc=0
+          for i in 0 1 2; do
+            node tests/build-jail-corpus/grant-matrix.mjs \
+              --list tests/build-jail-corpus/shard-gm-win-t2-${{ matrix.shard }}.tsv \
+              --out "$out" --jobs 3 --slot $i > "slot-$i.log" 2>&1 &
+          done
+          wait || rc=$?
+          echo "slots finished rc=$rc"
+          for i in 0 1 2; do echo "---- slot $i tail ----"; tail -20 "slot-$i.log"; done
+          cp "$out/matrix.ndjson" "matrix-t2-${{ matrix.shard }}.ndjson" 2>/dev/null || echo "(no ndjson produced)"
+          wc -l "matrix-t2-${{ matrix.shard }}.ndjson" 2>/dev/null || true
+
+      # THE ANTI-VACUOUS GATE. A shard that produced no records must be red, not green:
+      # a silently-empty run is the failure mode that has cost this effort the most, and
+      # a job whose only signal is "no step errored" cannot tell it apart from a clean pass.
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          f="matrix-t2-${{ matrix.shard }}.ndjson"
+          if [ ! -s "$f" ]; then
+            echo "VERDICT: FAILED — shard ${{ matrix.shard }} produced no records."
+            exit 1
+          fi
+          n=$(wc -l < "$f")
+          echo "records: $n"
+          echo "--- verdict tally ---"
+          node -e '
+            const fs=require("fs");
+            const t={};
+            for(const l of fs.readFileSync(process.argv[1],"utf8").split("\n")){
+              if(!l.trim())continue; try{const o=JSON.parse(l); t[o.verdict]=(t[o.verdict]||0)+1}catch{}
+            }
+            for(const [k,v] of Object.entries(t).sort((a,b)=>b[1]-a[1])) console.log(String(v).padStart(4), k);
+          ' "$f"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gm-win-t2-${{ matrix.shard }}
+          path: |
+            matrix-t2-${{ matrix.shard }}.ndjson
+            slot-*.log
+          if-no-files-found: warn

@@ -1,0 +1,16 @@
+@ffmpeg-installer/darwin-arm64	latest	git-repo
+@pact-foundation/pact-node	latest	git-repo
+event-loop-stats	latest	git-repo
+mbt	latest	git-repo
+@sematext/gc-stats	latest	git-repo
+truffle	latest	git-repo
+@instana/autoprofile	latest	git-repo
+@go-task/cli	latest	git-repo
+ursa-optional	latest	git-repo
+oniguruma	latest	git-repo
+abstract-socket	latest	git-repo
+git-validate	latest	git-repo
+electron-prebuilt	latest	git-repo
+posix	latest	git-repo
+minidump	latest	git-repo
+incremental-json-parser	latest	git-repo

@@ -1,0 +1,17 @@
+sauce-connect-launcher	latest	git-repo
+segfault-handler	latest	git-repo
+@ffmpeg-installer/linux-ia32	latest	git-repo
+hasura-cli	latest	git-repo
+local-cypress	latest	git-repo
+node-libcurl	latest	git-repo
+contextify	latest	git-repo
+@sap/hana-theme-vscode	latest	git-repo
+@ffprobe-installer/linux-arm	latest	git-repo
+mongodb-crypt-library-dummy	latest	git-repo
+iobroker.js-controller	latest	git-repo
+@typescript-tools/rust-implementation	latest	git-repo
+gentype	latest	git-repo
+@bazel/hide-bazel-files	latest	git-repo
+@bazel/cypress	latest	git-repo
+@notarize/qlc-cli	latest	git-repo
+@cubejs-backend/native	latest	git-repo

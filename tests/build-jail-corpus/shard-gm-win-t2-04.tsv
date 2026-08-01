@@ -1,0 +1,16 @@
+cld	latest	git-repo
+gl	latest	git-repo
+node-rdkafka	latest	git-repo
+phantomjs	latest	git-repo
+compresion	latest	git-repo
+node-zopfli-es	latest	git-repo
+ref-napi	latest	git-repo
+gcstats.js	latest	git-repo
+@sitespeed.io/chromedriver	latest	git-repo
+zlib-sync	latest	git-repo
+protoc-gen-grpc-web	latest	git-repo
+@intlify/vue-router-bridge	latest	git-repo
+@airbnb/node-memwatch	latest	git-repo
+esoftplay	latest	git-repo
+handbrake-js	latest	git-repo
+wdeasync	latest	git-repo
