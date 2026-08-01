@@ -1,0 +1,66 @@
+name: Windows directory-handle collision
+
+# Can a collision that actually yields OS error 5/32 on the target rename be
+# constructed RELIABLY on a runner? A mapped DLL demonstrably cannot (measured).
+# A process whose CURRENT DIRECTORY is the target holds a real directory handle
+# opened without FILE_SHARE_DELETE, which should.
+on:
+  push:
+    branches: [win-probe-rt2]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cwd:
+    name: Does a CWD-held directory handle block the rename?
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch]
+        with:
+          toolchain: stable
+      - name: Probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustc tests/win-rename-probe/rename_probe.rs -o rename_probe.exe
+          $probe = Join-Path $PWD 'rename_probe.exe'
+
+          # Repeat the whole experiment: a one-shot pass would not tell us whether
+          # this is RELIABLE enough to gate CI on.
+          foreach ($round in 1..5) {
+            $base = Join-Path $env:RUNNER_TEMP ('cwdprobe-' + [Guid]::NewGuid().ToString('N'))
+            $target = Join-Path $base 'runtime-0.0.0-deadbeef'
+            New-Item -ItemType Directory -Force -Path (Join-Path $target 'addons') | Out-Null
+            $stale = Join-Path $base '.stale.runtime'
+
+            $out = Join-Path $base 'holder.out'
+            $holder = Start-Process pwsh -PassThru -WorkingDirectory $target -RedirectStandardOutput $out `
+              -ArgumentList @('-NoProfile','-Command','Write-Host CWD_HOLDER_READY; while ($true) { Start-Sleep -Seconds 1 }')
+            for ($i = 0; $i -lt 100; $i++) {
+              if ((Get-Content -Raw $out -ErrorAction SilentlyContinue) -match 'CWD_HOLDER_READY') { break }
+              Start-Sleep -Milliseconds 100
+            }
+            if ((Get-Content -Raw $out -ErrorAction SilentlyContinue) -notmatch 'CWD_HOLDER_READY') { throw "round ${round}: holder never became ready" }
+
+            Write-Host "--- round $round : rename WITH a live CWD holder (want raw=5 or 32) ---"
+            & $probe $target $stale
+
+            Stop-Process -Id $holder.Id -Force
+            $holder.WaitForExit()
+            # NEGATIVE CONTROL: with the holder gone the very same rename must
+            # succeed, which is what proves the CWD handle caused the block.
+            Write-Host "--- round $round : same rename after the holder exits (want RENAME_OK) ---"
+            & $probe $target $stale
+            Write-Host ""
+          }
