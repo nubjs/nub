@@ -1,0 +1,141 @@
+# WINDOWS GRANT MATRIX — the ladder, on the platform that has zero coverage.
+#
+# Linux has 424 of 550 install-relevant packages measured and macOS 219; Windows has NONE.
+# This runs the committed `grant-matrix.mjs` ladder over the 387 above-threshold packages in
+# DOWNLOAD ORDER, so a partial run is still a useful catalog rather than a random sample.
+#
+# WHY WINDOWS HAD NO COVERAGE, and what had to change for this to be possible at all: the
+# ladder spawned each cell with `{PATH, HOME, TMPDIR}` only. On Windows a native process
+# resolves system DLLs and the winsock catalogue relative to `%SystemRoot%`, so a child
+# without it fails to START — every cell would have scored INSTALL-FAILED and every package
+# would have read as fails-at-every-cell, which is indistinguishable from the one category
+# we actually care about. The env floor `grant-matrix.mjs` now applies is transplanted from
+# `run-shard.sh`, deliberately, so the matrix and the corpus measure the same environment.
+#
+# THE SHAPE. One build, uploaded once; every shard job downloads it. Building inside each
+# shard would pay a cold Rust build ten times and make the shard wall clock a build
+# measurement. The binary needs `--features build-jail-catalog-override` — without it the
+# ladder cannot vary the catalog, and `grant-matrix.mjs` fails on the FIRST cell rather than
+# silently scoring the compiled catalog in every arm (a failure this harness has had).
+name: build-jail-grant-matrix-win
+
+on:
+  push:
+    branches: [probe/gm-win]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      # Windows gives the main thread a 1 MB stack against Linux's 8 MB, and the unoptimized
+      # `fast` profile overflows it inside `nub install` before any lifecycle script runs
+      # (0xC00000FD). A separate defect; linking with a Linux-sized stack lets this measure
+      # the jail rather than a debug-build frame-size artifact.
+      RUSTFLAGS: '-C link-arg=/STACK:8388608'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: gm-win
+      - name: Build the dev binary
+        run: cargo build -p nub-cli --profile fast --features build-jail-catalog-override
+      - name: Stage the binary
+        shell: bash
+        run: |
+          mkdir -p stage
+          cp target/fast/nub.exe stage/nub.exe
+          ls -l stage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nub-gm-win
+          path: stage
+          retention-days: 7
+
+  matrix:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        # Sequential blocks of the download-ordered list, so shard 01 carries the most
+        # popular packages and a run that loses a shard still has the highest-value rows.
+        # Class mixing comes free: download order interleaves binary-downloaders, native
+        # builds and nag scripts, which is what keeps a shard from measuring its own
+        # contention the way a homogeneous native-build shard does.
+        shard: ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: nub-gm-win
+          path: stage
+
+      - name: Run the ladder
+        shell: bash
+        env:
+          NUB_BIN: ${{ github.workspace }}\stage\nub.exe
+        run: |
+          chmod +x stage/nub.exe || true
+          out="$RUNNER_TEMP/gm"
+          # THREE SLOTS. Packages are independent and each cell gets its own fixture root,
+          # so this is concurrency across packages rather than inside one — the shape that
+          # made a homogeneous corpus shard contend does not apply. Its own exit code is
+          # captured per slot; `wait` alone reports only the last one.
+          rc=0
+          for i in 0 1 2; do
+            node tests/build-jail-corpus/grant-matrix.mjs \
+              --list tests/build-jail-corpus/shard-gm-win-${{ matrix.shard }}.tsv \
+              --out "$out" --jobs 3 --slot $i > "slot-$i.log" 2>&1 &
+          done
+          wait || rc=$?
+          echo "slots finished rc=$rc"
+          for i in 0 1 2; do echo "---- slot $i tail ----"; tail -20 "slot-$i.log"; done
+          cp "$out/matrix.ndjson" "matrix-${{ matrix.shard }}.ndjson" 2>/dev/null || echo "(no ndjson produced)"
+          wc -l "matrix-${{ matrix.shard }}.ndjson" 2>/dev/null || true
+
+      # THE ANTI-VACUOUS GATE. A shard that produced no records must be red, not green:
+      # a silently-empty run is the failure mode that has cost this effort the most, and
+      # a job whose only signal is "no step errored" cannot tell it apart from a clean pass.
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          f="matrix-${{ matrix.shard }}.ndjson"
+          if [ ! -s "$f" ]; then
+            echo "VERDICT: FAILED — shard ${{ matrix.shard }} produced no records."
+            exit 1
+          fi
+          n=$(wc -l < "$f")
+          echo "records: $n"
+          echo "--- verdict tally ---"
+          node -e '
+            const fs=require("fs");
+            const t={};
+            for(const l of fs.readFileSync(process.argv[1],"utf8").split("\n")){
+              if(!l.trim())continue; try{const o=JSON.parse(l); t[o.verdict]=(t[o.verdict]||0)+1}catch{}
+            }
+            for(const [k,v] of Object.entries(t).sort((a,b)=>b[1]-a[1])) console.log(String(v).padStart(4), k);
+          ' "$f"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gm-win-${{ matrix.shard }}
+          path: |
+            matrix-${{ matrix.shard }}.ndjson
+            slot-*.log
+          if-no-files-found: warn

@@ -1,0 +1,39 @@
+esbuild	0.28.1	
+sharp	0.34.5	git-repo
+protobufjs	7.6.5	git-repo
+core-js	3.49.0	
+unrs-resolver	1.12.2	
+ejs	2.7.4	git-repo
+@swc/core	1.15.47	
+fsevents	2.3.3	
+environment	0.0.2	git-repo
+@parcel/watcher	2.6.0	
+msgpackr-extract	3.0.4	
+@sentry/cli	3.6.2	
+msw	2.15.0	
+@firebase/util	1.15.1	
+workerd	1.20260730.1	
+@google/genai	2.14.0	
+core-js-pure	3.49.0	
+@prisma/engines	7.9.1	
+@prisma/client	7.9.1	
+prisma	7.9.1	
+es5-ext	0.10.64	
+@nestjs/core	10.4.22	git-repo
+@scarf/scarf	1.4.0	
+@biomejs/biome	1.9.4	git-repo
+puppeteer	25.4.0	
+@datadog/pprof	5.14.1	git-repo
+identity-obj-proxy	1.0.0	git-repo
+ssh2	1.17.0	
+cpu-features	0.0.10	
+nx	23.1.0	
+yarn	1.22.22	
+@anthropic-ai/claude-code	2.1.220	
+dd-trace	5.100.0	git-repo
+aws-sdk	2.1693.0	
+@datadog/native-iast-taint-tracking	4.2.0	
+@datadog/native-appsec	11.0.1	
+@datadog/native-metrics	3.1.2	
+better-sqlite3	13.0.2	
+vue-demi	0.14.10	

@@ -1,0 +1,39 @@
+postinstall-postinstall	2.1.0	git-repo
+@vscode/vsce-sign	2.0.0	git-repo
+@stdlib/math-base-assert-is-nan	0.0.1	git-repo
+@stdlib/number-float64-base-from-words	0.0.1	git-repo
+@pulumi/docker	3.6.1	git-repo
+pizzip	3.0.0	git-repo
+@ffmpeg-installer/linux-x64	4.1.0	
+@stdlib/math-base-assert-is-infinite	0.0.1	git-repo
+@stdlib/number-float64-base-exponent	0.1.1	git-repo
+@stdlib/number-float64-base-get-high-word	0.0.1	git-repo
+@newrelic/fn-inspect	4.4.0	git-repo
+node-llama-cpp	3.19.0	git-repo
+@confluentinc/kafka-javascript	1.8.0	git-repo
+node-sass	9.0.0	
+tree-sitter-javascript	0.23.1	git-repo
+@posthog/cli	0.7.34	git-repo
+samlify	2.0.0-rc.1	git-repo
+lz4	0.6.5	
+@matrix-org/matrix-sdk-crypto-nodejs	0.1.0-beta.0	git-repo
+aws-crt	1.32.3	
+appium-uiautomator2-driver	0.0.1	git-repo
+bigint-buffer	1.1.5	
+oracledb	7.0.1	
+chromedriver	151.0.1	
+snappy	6.3.5	git-repo
+path-equal	1.2.2	git-repo
+docxtemplater	0.3.0	git-repo
+tree-sitter-typescript	0.23.2	
+@ast-grep/cli	0.27.1	git-repo
+@pulumi/docker-build	0.0.14	git-repo
+uglifyjs-webpack-plugin	0.4.6	git-repo
+leveldown	6.1.1	
+react-virtual	1.0.0	git-repo
+pyright	1.0.1	git-repo
+@pulumi/command	1.2.1	
+snyk	1.1306.2	
+autoevals	0.3.0	git-repo
+simple-git-hooks	2.13.1	
+tree-sitter-go	0.1.0	git-repo

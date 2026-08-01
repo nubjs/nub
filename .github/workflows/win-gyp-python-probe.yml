@@ -1,0 +1,149 @@
+# Branch-scoped ad-hoc probe: does `python_toolchain_grant` fire on Windows, and resolve?
+#
+# node-gyp reporting `Could not find any Python installation to use` is the dominant Windows
+# corpus break (96 confined against 9 unconfined). nub is supposed to make node-gyp's own
+# discovery irrelevant by pre-resolving Python out of jail and naming it in
+# `npm_config_python` — but whether that pre-resolution runs on Windows at all had never
+# been measured, because its failure is silent: an unresolved grant just leaves the variable
+# unset, and node-gyp then reports ITS search failing, which looks identical whether the
+# gyp-manifest gate bailed, nothing resolved off PATH, or the probe spawn died.
+#
+# THE DIAGNOSTIC IS THE DELIVERABLE. `NUB_DIAG_PRINT=1` makes `build_jail.python_grant`
+# name the gate result, the PATH key spellings present, the resolved candidates, the stage
+# that rejected each, and the winner. LINUX IS THE CONTROL, and it is load-bearing rather
+# than decorative: the same code path is known to resolve there, so a Linux run that emits
+# a populated line and a Windows run that does not is a one-variable differential on the
+# platform. Without it, an empty Windows log cannot be told from a diagnostic that never
+# fired.
+#
+# Every step is `if: always()`, because a red step must never hide the log lines this job
+# exists to produce.
+name: win-gyp-python-probe
+
+on:
+  push:
+    branches: [gyp-python]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    env:
+      # Windows gives the main thread a 1MB stack against Linux's 8MB, and the unoptimized
+      # `fast` profile overflows it inside `nub install` before any lifecycle script runs
+      # (measured as rc 0xC00000FD by the win-jail-native-build probe, identically in every
+      # arm, so it is a pre-existing defect rather than anything measured here). Linking the
+      # probe binary with a Linux-sized stack lets this measure the grant instead of a
+      # debug-build frame-size artifact.
+      RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-C link-arg=/STACK:8388608' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Toolchain baseline
+        if: always()
+        shell: bash
+        run: |
+          node -p "process.versions.node + ' ' + process.platform + '/' + process.arch"
+          echo "--- what an UNCONFINED search would find ---"
+          python3 --version || true
+          python --version || true
+          command -v python3 || true
+          command -v python || true
+          echo "--- PATH key spelling in this shell ---"
+          node -p "JSON.stringify(Object.keys(process.env).filter(k => k.toLowerCase() === 'path'))"
+
+      - name: Build nub
+        if: always()
+        run: cargo build -p nub-cli --profile fast
+
+      # ARM 1 — a fixture guaranteed to reach node-gyp configure. `scripts.install` is
+      # `node preflight.cjs && node-gyp rebuild` against a root `binding.gyp`, so nothing can
+      # short-circuit ahead of Python discovery, and the preflight records
+      # `npm_config_python` from INSIDE the jail — which is the only place the delivery half
+      # of the question is answerable.
+      - name: Probe — synthetic addon fixture
+        if: always()
+        shell: bash
+        env:
+          NUB_DIAG_PRINT: "1"
+        run: |
+          rc=0
+          node tests/win-jail-native-build/probe.mjs "$(bash tests/win-jail-native-build/nubpath.sh)" > synthetic.log 2>&1 || rc=$?
+          echo "probe exit=$rc"
+          cat synthetic.log
+
+      # ARM 2 — three real registry packages of MIXED class, each in its own project. A root
+      # `binding.gyp` (deasync), a manifest three levels down (ssh2, the shape the gate's
+      # subdirectory search exists for), and a node-pre-gyp package that only reaches node-gyp
+      # after a prebuilt lookup declines (bcrypt).
+      - name: Probe — real registry packages
+        if: always()
+        shell: bash
+        run: |
+          rc=0
+          node tests/win-gyp-python/probe.mjs "$(bash tests/win-jail-native-build/nubpath.sh)" > registry.log 2>&1 || rc=$?
+          echo "probe exit=$rc"
+          cat registry.log
+
+      # THE ANSWER, pulled out of both logs. This deliberately asserts only that the
+      # diagnostic FIRED — the grant's actual outcome is the finding to read, not a
+      # condition to pass. A job that went green on zero diag lines would be exactly the
+      # vacuous result this repo keeps being burned by, so that one case is a hard failure.
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          echo "======== build_jail.python_grant — nub's side ========"
+          grep -hF "build_jail.python_grant" synthetic.log registry.log || echo "(NONE EMITTED)"
+
+          echo
+          echo "======== npm_config_python as seen INSIDE the jail ========"
+          grep -hF "npm_config_python=" synthetic.log || echo "(no marker line)"
+
+          echo
+          echo "======== the CHILD's PATH shape, and route 2 walked from inside the jail ========"
+          # An empty `hits` with a well-formed PATH and EPERM codes is a denial; an empty
+          # `hits` with a short PATH is a delivery defect. node-gyp's own `executable path
+          # is ""` cannot tell those apart, which is the whole reason this is recorded.
+          grep -hF "child-bare-lookup=" synthetic.log || echo "(no bare-lookup line)"
+
+          echo
+          echo "======== node-gyp's own Python discovery ========"
+          grep -hE "Could not find any Python|is not set from environment variable PYTHON|checking if \"|Found Python" synthetic.log registry.log || echo "(no node-gyp python lines)"
+
+          echo
+          # `grep -c` counts PER FILE and `bc` is not on Windows Git Bash, so the obvious
+          # `paste -sd+ | bc` spelling made this step die with `bc: command not found` and
+          # report a red job for a harness defect rather than a finding. Count the lines
+          # once, across both files, with nothing but grep and wc.
+          n=$(cat synthetic.log registry.log 2>/dev/null | grep -cF "build_jail.python_grant" || true)
+          echo "grant diag lines: ${n:-0}"
+          if [ "${n:-0}" -gt 0 ]; then
+            echo "VERDICT: diagnostic fired on ${{ matrix.os }} — read the lines above."
+          else
+            echo "VERDICT: FAILED on ${{ matrix.os }} — zero diag lines, so this run answers nothing."
+            exit 1
+          fi
+
+      - name: Upload probe logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-gyp-python-${{ matrix.os }}
+          path: |
+            synthetic.log
+            registry.log
+          if-no-files-found: warn
