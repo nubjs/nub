@@ -157,8 +157,16 @@ mod loader {
             return match crate::catalog_v2::parse(&text) {
                 Ok(catalog) => {
                     let grants: usize = catalog.packages.values().map(Vec::len).sum();
-                    let summary =
-                        format!("v2: {} packages, {} grants", catalog.packages.len(), grants);
+                    // Baseline and env are in the summary so a harness can ASSERT they
+                    // engaged. A cell that cannot prove the configuration it is testing is
+                    // actually in force is not a measurement.
+                    let summary = format!(
+                        "v2: {} packages, {} grants, {} baseline paths, {} env",
+                        catalog.packages.len(),
+                        grants,
+                        catalog.baseline.len(),
+                        catalog.env.len()
+                    );
                     let _ = LOADED.set(None);
                     let _ = LOADED_V2.set(Some(Box::leak(Box::new(catalog))));
                     Decision::Loaded {
@@ -223,6 +231,18 @@ use loader::{active, active_v2, load};
 #[cfg(feature = "build-jail-catalog-override")]
 pub(crate) fn v2_grants_for(package: &str) -> Option<&'static [crate::catalog_v2::Grant]> {
     Some(active_v2()?.packages.get(package)?.as_slice())
+}
+
+/// The catalog's baseline filesystem paths, or empty when no v2 catalog is in force.
+#[cfg(feature = "build-jail-catalog-override")]
+pub(crate) fn baseline_paths() -> &'static [crate::catalog_v2::BaselinePath] {
+    active_v2().map_or(&[], |c| c.baseline.as_slice())
+}
+
+/// The catalog's baseline environment, or empty when no v2 catalog is in force.
+#[cfg(feature = "build-jail-catalog-override")]
+pub(crate) fn baseline_env() -> &'static [crate::catalog_v2::BaselineEnv] {
+    active_v2().map_or(&[], |c| c.env.as_slice())
 }
 
 /// Is a v2 catalog in force AT ALL, whatever it contains?

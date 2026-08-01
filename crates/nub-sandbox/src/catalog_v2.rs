@@ -136,10 +136,51 @@ impl Grant {
     }
 }
 
+/// One path every jailed script gets, regardless of package.
+///
+/// THE BASELINE LIVES IN THE CATALOG so it can be iterated without a rebuild. The alternative —
+/// baking it into the binary — makes every "does this package work if we also allow X?"
+/// experiment a 3-minute compile, which is what made the shape of this allowlist guesswork for
+/// so long. A path discovered here (a toolchain's cache written beside its own sources, say)
+/// can be added and re-measured in seconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselinePath {
+    /// A symbolic path pattern in the compiler's own vocabulary — `$cache/...`, `~/...`.
+    pub path: String,
+    /// WRITE IS THE EXCEPTION AND MUST BE ARGUED. The baseline already grants write on four
+    /// things (the private `$HOME`, `$tmp`, the package's own store entry, its own package
+    /// dir); everything added here should be READ unless a measurement shows a build genuinely
+    /// fails without the write — not merely that the write was attempted and denied. A denied
+    /// cache write is usually harmless: Python's `__pycache__` is refused today and every
+    /// native build still succeeds.
+    pub write: bool,
+    pub notes: String,
+}
+
+/// One environment variable set for EVERY jailed script.
+///
+/// Here for the same reason as [`BaselinePath`] — so the jail's shape is data, not a rebuild.
+/// The motivating case: `PYTHONDONTWRITEBYTECODE=1`. node-gyp ships `gyp/pylib`, CPython tries
+/// to write `__pycache__/*.pyc` beside those sources, the jail refuses (correctly — that is
+/// another package's store entry), and the build succeeds anyway because bytecode is a cache.
+/// Setting the variable means Python never ATTEMPTS the write: no refused syscall, and no
+/// phantom "side effect" for a grant search to trip over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineEnv {
+    pub name: String,
+    pub value: String,
+    pub notes: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Catalog {
     /// Package name -> its grants, in written order. FIRST MATCH WINS.
     pub packages: BTreeMap<String, Vec<Grant>>,
+    /// Paths granted to EVERY jailed script, before any package grant applies. Empty means the
+    /// compiled-in baseline stands.
+    pub baseline: Vec<BaselinePath>,
+    /// Variables set for every jailed script, after the credential scrub.
+    pub env: Vec<BaselineEnv>,
 }
 
 /// Parse and validate. Every rejection names the offending path so a contributor sees which
@@ -168,7 +209,137 @@ pub fn parse(text: &str) -> Result<Catalog, String> {
         reject_unreachable(&grants, name)?;
         packages.insert(name.clone(), grants);
     }
-    Ok(Catalog { packages })
+    Ok(Catalog {
+        packages,
+        baseline: parse_baseline(&root)?,
+        env: parse_env(&root)?,
+    })
+}
+
+fn parse_env(root: &serde_json::Value) -> Result<Vec<BaselineEnv>, String> {
+    let Some(value) = root.get("env") else {
+        return Ok(Vec::new());
+    };
+    let arr = value
+        .as_array()
+        .ok_or_else(|| "`env` must be an array of {name, value, notes}".to_string())?;
+    let mut out: Vec<BaselineEnv> = Vec::with_capacity(arr.len());
+    for (i, entry) in arr.iter().enumerate() {
+        let at = format!("env[{i}]");
+        let obj = entry
+            .as_object()
+            .ok_or_else(|| format!("{at}: must be an object"))?;
+        for key in obj.keys() {
+            if !matches!(key.as_str(), "name" | "value" | "notes") {
+                return Err(format!("{at}: unknown field `{key}`"));
+            }
+        }
+        let name = obj
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("{at}: `name` is required and must be a string"))?
+            .to_string();
+        if name.is_empty() || name.contains('=') || name.contains('\0') {
+            return Err(format!("{at}: `{name}` is not a usable variable name"));
+        }
+        // The scrub exists to keep credentials out of a dependency's script. A catalog entry
+        // that re-introduced one would quietly undo it, and the catalog is the LEAST reviewed
+        // place that could — so refuse the shapes outright rather than trusting authorship.
+        let upper = name.to_ascii_uppercase();
+        const SECRETY: &[&str] = &[
+            "TOKEN",
+            "SECRET",
+            "PASSWORD",
+            "CREDENTIAL",
+            "APIKEY",
+            "AUTH",
+        ];
+        if SECRETY.iter().any(|s| upper.contains(s)) || upper.ends_with("_KEY") {
+            return Err(format!(
+                "{at}: `{name}` looks like a credential; the jail scrubs those deliberately and \
+                 the catalog must not put one back"
+            ));
+        }
+        let value = obj
+            .get("value")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("{at}: `value` is required and must be a string"))?
+            .to_string();
+        let notes = obj
+            .get("notes")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if notes.len() < 12 {
+            return Err(format!(
+                "{at}: `notes` must say why every jailed script needs this variable"
+            ));
+        }
+        if out.iter().any(|e| e.name == name) {
+            return Err(format!("{at}: `{name}` is set twice"));
+        }
+        out.push(BaselineEnv { name, value, notes });
+    }
+    Ok(out)
+}
+
+fn parse_baseline(root: &serde_json::Value) -> Result<Vec<BaselinePath>, String> {
+    let Some(value) = root.get("baseline") else {
+        return Ok(Vec::new());
+    };
+    let arr = value
+        .as_array()
+        .ok_or_else(|| "`baseline` must be an array of {path, write?, notes}".to_string())?;
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, entry) in arr.iter().enumerate() {
+        let at = format!("baseline[{i}]");
+        let obj = entry
+            .as_object()
+            .ok_or_else(|| format!("{at}: must be an object"))?;
+        for key in obj.keys() {
+            if !matches!(key.as_str(), "path" | "write" | "notes") {
+                return Err(format!("{at}: unknown field `{key}`"));
+            }
+        }
+        let path = obj
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("{at}: `path` is required and must be a string"))?
+            .to_string();
+        if path.trim().is_empty() {
+            return Err(format!("{at}: `path` is empty"));
+        }
+        // A bare `/` (or a lone symbolic root) is `disk` wearing a baseline's clothes, and it
+        // would apply to EVERY package with none of the per-package review a `disk` grant gets.
+        if path == "/" || path == "~" || path == "$home" {
+            return Err(format!(
+                "{at}: `{path}` is the whole filesystem — that is the `disk` capability, and it \
+                 belongs on a package, not on every script at once"
+            ));
+        }
+        let write = match obj.get("write") {
+            None => false,
+            Some(serde_json::Value::Bool(b)) => *b,
+            Some(_) => return Err(format!("{at}: `write` must be a boolean")),
+        };
+        let notes = obj
+            .get("notes")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if notes.len() < 12 {
+            return Err(format!(
+                "{at}: `notes` must say why every jailed script needs this path"
+            ));
+        }
+        if out.iter().any(|b: &BaselinePath| b.path == path) {
+            return Err(format!("{at}: `{path}` is listed twice"));
+        }
+        out.push(BaselinePath { path, write, notes });
+    }
+    Ok(out)
 }
 
 fn parse_grant(value: &serde_json::Value, at: &str) -> Result<Grant, String> {

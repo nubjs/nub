@@ -592,6 +592,14 @@ fn build_jail_surface(
     // free on Linux (the minimal root binds `/etc` LEAVES, never the directory), and on
     // macOS by the Seatbelt base granting the specific `/private/etc` files it needs instead
     // of the whole subpath (`macos_seatbelt_base.sbpl`).
+    // The catalog's BASELINE paths, applied to every jailed script. Last, so an entry can widen
+    // a path the skeleton above already granted; a catalog cannot NARROW one, which keeps this
+    // a purely additive surface and means a bad entry cannot break confinement's floor.
+    #[cfg(feature = "build-jail-catalog-override")]
+    for b in crate::catalog_override::baseline_paths() {
+        fs.insert(b.path.clone(), json!(if b.write { "rw" } else { "r" }));
+    }
+
     json!({
         "fs": Value::Object(fs),
         "net": build_jail_net(package_name, package_version),
@@ -805,6 +813,15 @@ pub fn compile_build_jail(
     }
     enforce_pure_allowlist("build-jail", &mut policy);
     policy.env = defaults::lifecycle_scrubbed_env(&ambient_env);
+    // The catalog's baseline env, AFTER the scrub so it cannot be stripped by it, and before
+    // the per-package overlay so a package can still win. `PYTHONDONTWRITEBYTECODE=1` is the
+    // motivating entry: Python otherwise tries to write `__pycache__` beside node-gyp's own
+    // sources, the jail refuses correctly, and the refusal is pure noise because bytecode is a
+    // cache. The parser refuses credential-shaped names, so this cannot undo the scrub.
+    #[cfg(feature = "build-jail-catalog-override")]
+    for e in crate::catalog_override::baseline_env() {
+        defaults::insert_env(&mut policy.env.constructed, e.name.clone(), e.value.clone());
+    }
     policy.build_jail = true;
     // AFTER the scrub, which admits the ambient `HOME`/`USERPROFILE` verbatim — without
     // this the grant above is invisible, because the script still spells its home the
