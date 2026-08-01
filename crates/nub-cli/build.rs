@@ -50,7 +50,38 @@ fn manifest_dir() -> PathBuf {
     )
 }
 
+/// Give the Windows main thread the 8 MiB every Unix already gives it.
+///
+/// A PE image reserves 1 MiB for the main thread unless the linker is told
+/// otherwise, i.e. one eighth of the Linux/macOS default. nub's own startup —
+/// clap materializing the full derived `Command` tree inside `Cli::parse_from` —
+/// needs about 1.2 MiB unoptimized, so an unoptimized `nub.exe` aborted with
+/// "thread 'main' has overflowed its stack" before reaching ANY subcommand.
+/// Measured by shrinking the main stack with `ulimit -s`: `run --help`,
+/// `install --help` and `compile` all die at 1152 KiB and all pass at 1280 KiB,
+/// while a release build clears 256 KiB — so this is a budget mismatch, not
+/// runaway recursion, and the ceiling belongs on the binary rather than on any
+/// one call site.
+///
+/// Emitted from the build script, not `.cargo/config.toml`: an ambient
+/// `RUSTFLAGS` silently discards a config-file `[target.*] rustflags` block,
+/// which would reintroduce the cliff invisibly. Reserve is address space, not
+/// committed memory.
+fn reserve_windows_main_thread_stack() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    const RESERVE: usize = 8 * 1024 * 1024;
+    match std::env::var("CARGO_CFG_TARGET_ENV").as_deref() {
+        Ok("msvc") => println!("cargo:rustc-link-arg=/STACK:{RESERVE}"),
+        Ok("gnu") => println!("cargo:rustc-link-arg=-Wl,--stack,{RESERVE}"),
+        _ => {}
+    }
+}
+
 fn main() {
+    reserve_windows_main_thread_stack();
+
     let manifest_dir = manifest_dir();
     let docs_dir = manifest_dir.join("../../site/content/docs");
     let docs_dir = docs_dir
