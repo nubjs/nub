@@ -18,8 +18,10 @@
 #   pnpm     pnpm 10 cmd-shim   -> a #!/bin/sh shim that `exec node .../bin/<verb>`
 #   pnpm11   pnpm >=11 cmd-shim -> same, plus empty `exe=""` assignments and a
 #            trailing `# cmd-shim-target=` line (both parse hazards for leadsToUs)
+#   pnpm11rel  as pnpm11, but the trailer is RELATIVE (pnpm resolves it against the
+#            shim dir, not cwd — see leadsToUs)
 #
-# Usage: make-fixture.sh [dest] [symlink|pnpm|pnpm11]
+# Usage: make-fixture.sh [dest] [symlink|pnpm|pnpm11|pnpm11rel]
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -77,11 +79,19 @@ printf '{"name":"@nubjs/nub-host","version":"9.9.9","files":["bin"]}\n' \
 for v in nub nubx; do
   if [ "$STYLE" = symlink ]; then
     ln -s "../node_modules/@nubjs/nub/bin/$v" "$DEST/bin/$v"
-  elif [ "$STYLE" = pnpm11 ]; then
+  elif [ "$STYLE" = pnpm11 ] || [ "$STYLE" = pnpm11rel ]; then
     # pnpm >=11 cmd-shim. Two shape changes vs pnpm 10 that the heal must survive, both
     # copied from a real `pnpm@11.18.0 add` shim: the `exe=""`/`msys=""` EMPTY quote
     # pairs (which broke leadsToUs's quote scan — see launch.js), and the trailing
     # `# cmd-shim-target=` declaration. Keep both; either alone under-tests the parse.
+    #
+    # pnpm does NOT guarantee the trailer is absolute — its own reader path.resolve's it
+    # against the shim's dir. pnpm11rel pins that shape; pnpm11 pins the absolute one.
+    if [ "$STYLE" = pnpm11rel ]; then
+      TARGET="../node_modules/@nubjs/nub/bin/$v"
+    else
+      TARGET="$LAUNCHER/bin/$v"
+    fi
     cat > "$DEST/bin/$v" <<EOF
 #!/bin/sh
 basedir=\$(dirname "\$(echo "\$0" | sed -e 's,\\\\,/,g')")
@@ -101,7 +111,7 @@ if [ -n "\$exe" ] && [ -x "\$basedir/node.exe" ]; then
 else
   exec node  "\$basedir/../node_modules/@nubjs/nub/bin/$v" "\$@"
 fi
-# cmd-shim-target=$LAUNCHER/bin/$v
+# cmd-shim-target=$TARGET
 EOF
     chmod +x "$DEST/bin/$v"
   else

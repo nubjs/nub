@@ -136,12 +136,28 @@ function leadsToUs(entry, st, ourReal) {
     if (st.isFile()) {
       const body = fs.readFileSync(entry, "utf8");
       const basedir = path.dirname(entry);
-      // pnpm >=11 emits an explicit `# cmd-shim-target=<abs path>` trailer. Prefer it:
-      // it is the shim's own declaration of what it dispatches to, so it cannot drift
-      // with template changes the way quote-scraping does.
+      // pnpm >=11 emits an explicit `# cmd-shim-target=` trailer. Prefer it: it is the
+      // shim's own declaration of what it dispatches to, so it cannot drift with
+      // template changes the way quote-scraping does.
+      //
+      // The value is NOT guaranteed absolute — resolve it against the SHIM's directory,
+      // which is what pnpm's own reader does (`path.resolve(path.dirname(shShim),
+      // target)` in engine/pm/commands/src/self-updater/selfUpdate.ts, with a dedicated
+      // test for the relative form). `path.resolve` is a no-op on an already-absolute
+      // value, so one call serves both shapes; bare `realpathSync` would silently
+      // resolve a relative target against CWD instead.
+      //
+      // In a FULL pnpm 11 shim this is masked — the quoted-path scan below resolves the
+      // same target anyway (measured: the pnpm11rel fixture passes with or without the
+      // resolve). It bites only on pnpm's trailer-ONLY legacy shim shape
+      // (`#!/bin/sh\n# cmd-shim-target=<rel>\n`, the body selfUpdate.test.ts writes),
+      // where there is no quoted path to fall back to: absolute-only → ENOENT → heal
+      // skipped; resolved → match. That shape has no exec line, so the fixture harness
+      // cannot drive it end-to-end — hence a comment rather than a matrix style.
       const declared = body.match(/^#\s*cmd-shim-target=(.+)$/m);
       if (declared) {
-        try { if (fs.realpathSync(declared[1].trim()) === ourReal) return true; } catch {}
+        const target = path.resolve(basedir, declared[1].trim());
+        try { if (fs.realpathSync(target) === ourReal) return true; } catch {}
       }
       const quoted = body.match(/"([^"]*)"/g) || [];
       for (const q of quoted) {
