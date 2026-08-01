@@ -248,6 +248,17 @@ function discoverTree(nub, dir, pkg, version) {
   }))];
 }
 
+
+/** The exact v2 catalog fragment this state corresponds to — the thing a collator writes
+ *  into the catalog. Without it a record carries only a HUMAN LABEL ("write.deps") and
+ *  building a catalog means parsing prose back into structure. `null` for state 0, because
+ *  the catalog spells "needs nothing" as NO ENTRY. */
+function grantFor(state) {
+  if (state.atoms.size === 0) return null;
+  const g = catalogFor('X', state).packages.X;
+  return g ? g[0] : null;
+}
+
 // ── the walk ──────────────────────────────────────────────────────────────────
 
 /** Paths the CONTROL produced that the no-grant floor did not — i.e. what a grant must
@@ -331,10 +342,11 @@ function search(nub, pkg, version, root, keep) {
         pkg, version,
         verdict: 'MINIMUM',
         cells,
+        // THE CATALOG FRAGMENT, machine-readable. `state` beside it is for humans.
+        grant: (() => { const g = grantFor(STATES[i]); if (g) delete g.notes; return g; })(),
         state: STATES[i].label,
         cost: STATES[i].cost,
-        stateIndex: i,
-        sideEffectful,
+        declaresInstallScript: hasScript,
         materialized: r.materialized,
         // IS THIS VERDICT CONCLUSIVE ABOUT PROJECT ACCESS? Only if nub actually placed the
         // package inside the project. When it did not, the script could not reach the project

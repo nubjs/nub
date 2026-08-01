@@ -123,6 +123,25 @@ pub struct Grant {
     pub read: Reach,
     pub write: Reach,
     pub network: bool,
+    /// Subpaths of the package's PRIVATE `$HOME` that nub moves into the REAL home once the
+    /// lifecycle scripts finish. Relative to that home — `.cache/puppeteer`, not an absolute
+    /// path.
+    ///
+    /// WHY PROMOTION RATHER THAN A GRANT. The jail redirects `$HOME` to a throwaway directory,
+    /// so a package caching under `~/.cache/<vendor>` installs cleanly and its artefact is
+    /// discarded: puppeteer's browser was 355 of 359 written paths, with none under the real
+    /// `~/.cache/puppeteer`. The obvious fix is to grant write on the real home, but that hands
+    /// a dependency script a live handle on `$HOME` for the whole run. Promotion never does:
+    /// the script writes to the throwaway, and NUB moves the declared subpaths afterwards. Same
+    /// end state, and the script never touches the user's home.
+    ///
+    /// DECLARED, never "everything in the private home" — that would let any package land
+    /// arbitrary files in a real `$HOME`. The entries are derived from a run record's
+    /// `ephemeralPaths`, so they are measured rather than authored.
+    ///
+    /// The move is a rename: `jail-home` and the real cache are on one filesystem (verified),
+    /// so a 300 MB browser costs nothing.
+    pub promote: Vec<String>,
     /// Free text, optional, unvalidated. A CATCHALL — the earlier `evidence` enum was
     /// validated and then discarded by every consumer, and a minimum-length rule on this
     /// field was the same mistake in cheaper clothing: it rejected real catalogs written by
@@ -342,7 +361,7 @@ fn parse_grant(value: &serde_json::Value, at: &str) -> Result<Grant, String> {
     for key in obj.keys() {
         if !matches!(
             key.as_str(),
-            "versions" | "platforms" | "read" | "write" | "network" | "notes"
+            "versions" | "platforms" | "read" | "write" | "network" | "promote" | "notes"
         ) {
             return Err(format!("{at}: unknown field `{key}`"));
         }
@@ -432,7 +451,40 @@ fn parse_grant(value: &serde_json::Value, at: &str) -> Result<Grant, String> {
         }
     };
 
-    if read.is_none() && write.is_none() && !network {
+    let mut promote = Vec::new();
+    if let Some(v) = obj.get("promote") {
+        let arr = v
+            .as_array()
+            .ok_or_else(|| format!("{at}: `promote` must be an array of home-relative paths"))?;
+        for entry in arr {
+            let rel = entry
+                .as_str()
+                .ok_or_else(|| format!("{at}: `promote` entries must be strings"))?
+                .trim()
+                .to_string();
+            // ABSOLUTE PATHS AND TRAVERSAL ARE REFUSED. A promote entry names a destination in
+            // the user's REAL home; anything that escapes the private home would let a catalog
+            // line write outside it, which is exactly the authority promotion exists to avoid.
+            if rel.is_empty() || rel == "." {
+                return Err(format!("{at}: `promote` entry is empty"));
+            }
+            if rel.starts_with('/') || rel.starts_with('~') || rel.contains("..") {
+                return Err(format!(
+                    "{at}: `promote` entry `{rel}` must be RELATIVE to the package's home and \
+                     must not traverse out of it"
+                ));
+            }
+            if promote.contains(&rel) {
+                return Err(format!("{at}: `promote` entry `{rel}` is listed twice"));
+            }
+            promote.push(rel);
+        }
+        if promote.is_empty() {
+            return Err(format!("{at}: `promote` is empty; omit it instead"));
+        }
+    }
+
+    if read.is_none() && write.is_none() && !network && promote.is_empty() {
         return Err(format!(
             "{at}: grants nothing; the base profile is what a package gets without an entry"
         ));
@@ -444,6 +496,7 @@ fn parse_grant(value: &serde_json::Value, at: &str) -> Result<Grant, String> {
         read,
         write,
         network,
+        promote,
         notes,
     })
 }
