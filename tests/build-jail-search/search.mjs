@@ -108,7 +108,27 @@ function makeFixture(dir, pkg, version, { jailOff }) {
   return { proj, home: path.join(dir, 'home') };
 }
 
-function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts }) {
+/** Was the package placed INSIDE the project, rather than symlinked into the global
+ *  store? Materialization alone gates project access — measured, jail-irrelevant — so a
+ *  verdict of "needed no project grant" means nothing unless this is true.
+ *
+ *  READ FROM THE LAYOUT, NOT THE LOG. An earlier version matched nub's
+ *  `materialized <pkg> (build script reads the project)` line, which is not always emitted:
+ *  `ghooks` is materialized (its `.store` entry is a real directory) and prints nothing, so
+ *  all 12 packages of a batch reported `materialized: false` and I drew a conclusion from it.
+ *  A symlinked entry points into `~/.cache/nub/pm/store`; a materialized one is a real dir. */
+function isMaterialized(proj, pkgSpec) {
+  const store = path.join(proj, 'node_modules', '.store');
+  let entries;
+  try { entries = fs.readdirSync(store); } catch { return false; }
+  // `.store` names scoped packages `@scope+name@version`, so match on the leading name.
+  const name = pkgSpec.replace(/@[^@/]*$/, '').replace('/', '+');
+  const hit = entries.find((e) => e.startsWith(`${name}@`));
+  if (!hit) return false;
+  try { return !fs.lstatSync(path.join(store, hit)).isSymbolicLink(); } catch { return false; }
+}
+
+function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg }) {
   const env = { ...process.env, HOME: home };
   if (catalogFile) env[OVERRIDE_ENV] = catalogFile;
   let log = '';
@@ -136,11 +156,7 @@ function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts }) {
     digest: digestOf(seen),
     files: seen.length,
     overrideOk: !catalogFile || (log.includes(BANNER_OK) && !log.includes(BANNER_BAD)),
-    // nub prints this when it places a package inside the project rather than
-    // symlinking it into the global store. Materialization ALONE gates project
-    // access — measured, jail-irrelevant — so `needs nothing` on a NON-materialized
-    // package is ambiguous and is flagged, not recorded.
-    materialized: /materialized\s+\S+\s+\(build script reads the project\)/.test(log),
+    materialized: isMaterialized(proj, pkg),
   };
 }
 
@@ -152,7 +168,7 @@ function search(nub, pkg, version, root, keep) {
   const cell = (name, opts) => {
     const dir = path.join(root, name);
     const fx = makeFixture(dir, pkg, version, { jailOff: !!opts.jailOff });
-    const r = runCell(nub, fx, opts);
+    const r = runCell(nub, fx, { ...opts, pkg });
     if (!keep) fs.rmSync(dir, { recursive: true, force: true });
     return r;
   };
