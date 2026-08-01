@@ -8,11 +8,11 @@
 //! and no re-signing (a Mach-O's ad-hoc signature survives a byte copy). Both
 //! verified on macOS/arm64, 2026-07-30.
 //!
-//! So the whole feature is: notice the `.node`, put its bytes in the payload
-//! beside the chunks, and make the require find it there. It rides the SAME
-//! `Assets` collector as the `file` loader and `new URL(…)`, so it inherits the
-//! content-hashed naming, the flat layout, the payload cache key, and the
-//! drop-what-nothing-references pass for free.
+//! A native addon is carried as a reached package island rather than a flat
+//! content-hashed asset. The island preserves the owning package and its
+//! installed production dependency geometry, which is required by addons such
+//! as sharp whose loader finds companion shared libraries relative to the
+//! `.node` file. See [`super::native_layout`].
 //!
 //! THE EMITTED MODULE IS CommonJS ON PURPOSE. Every real addon is reached by a
 //! `require()` from a CJS loader, and Rolldown's ESM→CJS interop hands a CJS
@@ -36,7 +36,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use anyhow::{Result, bail};
 use nub_core::compile::{TargetArch, TargetOs, TargetPlatform};
@@ -49,20 +49,19 @@ use rolldown_common::ModuleType;
 use rolldown_common::side_effects::HookSideEffects;
 use rolldown_utils::url::clean_url;
 
-use super::loaders::Assets;
+use super::native_layout::{DroppedEdge, IslandFile, Seed};
 
 /// The module a `.node` import evaluates to: the addon, `dlopen`ed from its
-/// extracted copy.
+/// extracted package-island copy.
 ///
 /// `createRequire(import.meta.url)` rather than a baked path — the build
 /// machine's directory layout has nothing to do with the deploy machine's, and
 /// the app dir is content-hash-keyed, so the only base that is right on both is
-/// the chunk's own URL. Every chunk and every asset land in one flat directory,
-/// which is the invariant this rests on (asserted by `reject_nested_chunks`).
+/// the chunk's own URL. `name` is already a nested, payload-relative island path.
 fn addon_module(name: &str) -> String {
     format!(
-        "const {{ createRequire: __nubCreateRequire }} = require(\"node:module\");\n\
-         module.exports = __nubCreateRequire(import.meta.url)({});\n",
+        "const record = process[Symbol.for(\"nub.compile.bootstrap\")];\n\
+         module.exports = record.createRequire(import.meta.url)({});\n",
         serde_json::to_string(&format!("./{name}")).expect("an asset name serializes")
     )
 }
@@ -75,15 +74,13 @@ pub struct NativeAddons {
     /// against it, because an addon for the wrong platform is unloadable and
     /// nothing later in the pipeline would notice.
     target: TargetPlatform,
-    collected: Arc<Assets>,
     /// Whether `--loader` claimed `.node` itself. A user who maps it wants the
     /// other behavior (a path to hand `process.dlopen`, say), and silently
     /// overriding their flag is worse than not having the default.
     user_mapped: bool,
-    /// Payload name → the build-machine file name it came from, for the compile
-    /// summary. Keyed by PAYLOAD name because that is what survives to the far
-    /// side of tree-shaking; see [`Self::survivors`].
-    embedded: Mutex<BTreeMap<String, String>>,
+    /// Fixed-width wrapper token → cheap seed metadata. Package traversal and
+    /// copying happen only in [`Self::plan_survivors`], after tree-shaking.
+    seeds: Mutex<BTreeMap<String, Seed>>,
     /// Why an addon was refused, for `bundle` to attach to the failure.
     ///
     /// Kept here rather than carried by the hook's error because Rolldown
@@ -96,12 +93,11 @@ pub struct NativeAddons {
 }
 
 impl NativeAddons {
-    pub fn new(target: TargetPlatform, collected: Arc<Assets>, user_mapped: bool) -> Self {
+    pub fn new(target: TargetPlatform, user_mapped: bool) -> Self {
         Self {
             target,
-            collected,
             user_mapped,
-            embedded: Mutex::new(BTreeMap::new()),
+            seeds: Mutex::new(BTreeMap::new()),
             rejections: Mutex::new(BTreeSet::new()),
         }
     }
@@ -114,30 +110,126 @@ impl NativeAddons {
             .unwrap_or_default()
     }
 
-    /// The addons that actually reached the payload, named as the user knows them.
-    ///
-    /// Filtered against `kept` rather than reported straight from the load hook:
-    /// bytes are collected while the graph is being built, but an addon in a
-    /// module nothing ends up referencing is dropped afterwards by
-    /// `retain_referenced`. Reporting the load-time set would announce an addon
-    /// the binary does not carry — the exact mis-signal this summary exists to
-    /// prevent.
-    pub fn survivors(&self, kept: &BTreeSet<&str>) -> Vec<String> {
-        self.embedded
+    /// Plan only islands whose fixed-width seed token survived into emitted
+    /// JavaScript. Replacing it with the equal-length content digest does not
+    /// move generated lines or columns, so source-map geometry stays valid.
+    pub fn plan_survivors(
+        &self,
+        chunks: &mut [super::bundle::BundledFile],
+    ) -> Result<PlannedNative> {
+        let seeds = self
+            .seeds
             .lock()
-            .map(|e| {
-                e.iter()
-                    .filter(|(payload, _)| kept.contains(payload.as_str()))
-                    .map(|(_, source)| source.clone())
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect()
-            })
-            .unwrap_or_default()
+            .map_err(|_| anyhow::anyhow!("the native-addon seed collector was poisoned"))?
+            .clone();
+        let mut files = BTreeMap::<String, (Vec<u8>, bool)>::new();
+        let mut summaries = BTreeSet::new();
+        for seed in seeds.values() {
+            let token = seed.token.as_bytes();
+            if !chunks
+                .iter()
+                .any(|chunk| contains_bytes(&chunk.bytes, token))
+            {
+                continue;
+            }
+            let bytes = std::fs::read(&seed.source).map_err(|e| {
+                anyhow::anyhow!("reading native addon {}: {e}", seed.source.display())
+            })?;
+            check_target(&bytes, &seed.source, &self.target)?;
+            let planned = seed.plan(&self.target)?;
+            debug_assert_eq!(planned.token.len(), planned.digest.len());
+            // Only for a survivor: an island whose wrapper was shaken out ships
+            // nothing, so its missing companions cannot fail anything.
+            warn_dropped_edges(&seed.source, &planned.dropped);
+            for chunk in chunks.iter_mut() {
+                replace_bytes(
+                    &mut chunk.bytes,
+                    planned.token.as_bytes(),
+                    planned.digest.as_bytes(),
+                );
+            }
+            summaries.insert(planned.summary);
+            for file in planned.files {
+                let body = (file.bytes, file.executable);
+                match files.entry(file.name) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(body);
+                    }
+                    std::collections::btree_map::Entry::Occupied(entry) if entry.get() == &body => {
+                    }
+                    std::collections::btree_map::Entry::Occupied(entry) => bail!(
+                        "native package island path {:?} identifies different bytes",
+                        entry.key()
+                    ),
+                }
+            }
+        }
+        Ok(PlannedNative {
+            files: files
+                .into_iter()
+                .map(|(name, (bytes, executable))| IslandFile {
+                    name,
+                    bytes,
+                    executable,
+                })
+                .collect(),
+            summaries: summaries.into_iter().collect(),
+        })
     }
 
     fn claims(&self, id: &str) -> bool {
         !self.user_mapped && Path::new(id).extension().is_some_and(|e| e == "node")
+    }
+}
+
+pub struct PlannedNative {
+    pub files: Vec<IslandFile>,
+    pub summaries: Vec<String>,
+}
+
+/// Say when an island shipped without an optional dependency that is not
+/// installed.
+///
+/// Refusing is not available. An optional edge is also how a package names
+/// companions for the platforms and configurations this target does NOT need —
+/// the same mechanism that makes a cross-compile resolve — and a manifest gives
+/// no way to tell those apart from a companion the addon genuinely loads (sharp
+/// against a system libvips is the case a refusal would break). So the build says
+/// what it left out while the author can still act, instead of either failing
+/// correct builds or letting the artifact die at `dlopen` on a user's machine.
+fn warn_dropped_edges(addon: &Path, dropped: &[DroppedEdge]) {
+    for edge in dropped {
+        eprintln!(
+            "note: {} optionally depends on {}, which is not installed, so nothing\n\
+             \x20\x20from it is embedded. If this addon loads a companion shared library from\n\
+             \x20\x20that package, the compiled binary will fail at run time: {}",
+            edge.owner,
+            edge.name,
+            addon.display()
+        );
+    }
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+fn replace_bytes(bytes: &mut [u8], from: &[u8], to: &[u8]) {
+    assert_eq!(from.len(), to.len(), "native island tokens are fixed-width");
+    if from.is_empty() {
+        return;
+    }
+    let mut offset = 0;
+    while let Some(index) = bytes[offset..]
+        .windows(from.len())
+        .position(|window| window == from)
+    {
+        let start = offset + index;
+        bytes[start..start + from.len()].copy_from_slice(to);
+        offset = start + to.len();
     }
 }
 
@@ -165,19 +257,35 @@ impl Plugin for NativeAddons {
                 return Ok(None);
             }
             let path = Path::new(&id);
-            let bytes = std::fs::read(path)
-                .map_err(|e| anyhow::anyhow!("reading the native addon {id}: {e}"))?;
-            if let Err(why) = check_target(&bytes, path, &self.target) {
+            // Ownership is the only work done for every resolved variant. Object
+            // and package target checks, dependency traversal, and package reads
+            // wait until emitted chunks prove this wrapper survived.
+            let seed = match Seed::discover(path) {
+                Ok(seed) => seed,
+                Err(why) => {
+                    if let Ok(mut seen) = self.rejections.lock() {
+                        seen.insert(format!("{why:#}"));
+                    }
+                    return Err(why);
+                }
+            };
+            let payload = match seed.wrapper_path() {
+                Ok(path) => path,
+                Err(why) => {
+                    if let Ok(mut seen) = self.rejections.lock() {
+                        seen.insert(format!("{why:#}"));
+                    }
+                    return Err(why);
+                }
+            };
+            if let Ok(mut seen) = self.seeds.lock() {
+                seen.insert(seed.token.clone(), seed);
+            } else {
+                let why = anyhow::anyhow!("the native-addon seed collector was poisoned");
                 if let Ok(mut seen) = self.rejections.lock() {
                     seen.insert(format!("{why:#}"));
                 }
                 return Err(why);
-            }
-            let payload = self.collected.add(path, bytes)?;
-            if let Some(name) = path.file_name().and_then(|n| n.to_str())
-                && let Ok(mut seen) = self.embedded.lock()
-            {
-                seen.insert(payload.clone(), name.to_string());
             }
             let code = addon_module(&payload);
             Ok(Some(HookLoadOutput {
@@ -257,15 +365,18 @@ impl Plugin for NativeAddons {
 /// `createRequire(__filename)` that survives bundling, so the statement is not
 /// just removable — it is redundant.
 ///
-/// NARROW ON PURPOSE, three ways: the statement must be at module top level, the
-/// target must be a bare `require` the module never declares, and the value must
-/// be a `createRequire(…)` call. A module that declares its own `require` is
-/// writing to a real local binding and is left alone; anything but `createRequire`
-/// on the right could have side effects worth keeping.
+/// NARROW ON PURPOSE, four ways: the statement must be at module top level, the
+/// target must be a bare `require` the module never declares, the callee must be
+/// a binding imported from Node's `module` builtin, and its one argument must be
+/// the side-effect-free `__filename` or `import.meta.url`. A module that declares
+/// its own `require` is writing to a real local binding and is left alone; a local
+/// function coincidentally named `createRequire` is not evidence that removing its
+/// call preserves the program.
 fn require_rebindings(id: &str, source: &str) -> Vec<(usize, usize)> {
     use oxc_allocator::Allocator;
     use oxc_ast::ast::{
-        AssignmentOperator, AssignmentTarget, BindingPattern, Declaration, Expression, Statement,
+        AssignmentOperator, AssignmentTarget, BindingPattern, Declaration, Expression,
+        ImportDeclarationSpecifier, ImportOrExportKind, Statement, VariableDeclarationKind,
     };
     use oxc_parser::Parser;
     use oxc_span::{GetSpan, SourceType};
@@ -293,15 +404,106 @@ fn require_rebindings(id: &str, source: &str) -> Vec<(usize, usize)> {
         }
     }
 
-    /// `createRequire(…)` in either of its two spellings — the destructured
-    /// identifier, or a member call off the `module` namespace.
-    fn is_create_require(expr: &Expression<'_>) -> bool {
+    fn is_module_builtin(specifier: &str) -> bool {
+        matches!(specifier, "module" | "node:module")
+    }
+
+    /// A direct CommonJS import from Node's `module` builtin. `require` is only
+    /// accepted after the module has established that it has not been rebound;
+    /// otherwise this syntactically identical call could load arbitrary code.
+    fn is_module_builtin_require(expr: &Expression<'_>) -> bool {
         let Expression::CallExpression(call) = expr else {
             return false;
         };
+        matches!(&call.callee, Expression::Identifier(id) if id.name == "require")
+            && call.arguments.len() == 1
+            && matches!(
+                call.arguments[0].as_expression(),
+                Some(Expression::StringLiteral(specifier)) if is_module_builtin(specifier.value.as_str())
+            )
+    }
+
+    /// `createRequire` has no observable work when called with one of the two
+    /// ordinary module-location values NAPI-RS emits. Anything more expressive
+    /// might run user code, so the whole assignment must remain intact.
+    fn is_napi_rs_base(expr: &Expression<'_>) -> bool {
+        matches!(expr, Expression::Identifier(id) if id.name == "__filename")
+            || matches!(
+                expr,
+                Expression::StaticMemberExpression(member)
+                    if member.property.name == "url"
+                        && matches!(
+                            &member.object,
+                            Expression::MetaProperty(meta)
+                                if meta.meta.name == "import" && meta.property.name == "meta"
+                        )
+            )
+    }
+
+    fn add_module_bindings(
+        declaration: &oxc_ast::ast::VariableDeclaration<'_>,
+        create_require_bindings: &mut BTreeSet<String>,
+        module_namespaces: &mut BTreeSet<String>,
+        require_rebound: bool,
+    ) {
+        if declaration.kind != VariableDeclarationKind::Const || require_rebound {
+            return;
+        }
+        for declarator in &declaration.declarations {
+            if !declarator
+                .init
+                .as_ref()
+                .is_some_and(is_module_builtin_require)
+            {
+                continue;
+            }
+            match &declarator.id {
+                BindingPattern::BindingIdentifier(id) => {
+                    module_namespaces.insert(id.name.to_string());
+                }
+                BindingPattern::ObjectPattern(pattern) => {
+                    for property in &pattern.properties {
+                        if !property.computed
+                            && property.key.is_specific_static_name("createRequire")
+                            && let BindingPattern::BindingIdentifier(id) = &property.value
+                        {
+                            create_require_bindings.insert(id.name.to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Only the two NAPI-RS shapes are eligible: a named `createRequire`
+    /// binding, or `.createRequire` on a namespace imported from the same Node
+    /// builtin. Tracking the binding avoids treating a custom API with the same
+    /// spelling as Node's side-effect-free helper.
+    fn is_napi_rs_create_require(
+        expr: &Expression<'_>,
+        create_require_bindings: &BTreeSet<String>,
+        module_namespaces: &BTreeSet<String>,
+    ) -> bool {
+        let Expression::CallExpression(call) = expr else {
+            return false;
+        };
+        if call.arguments.len() != 1
+            || !call.arguments[0]
+                .as_expression()
+                .is_some_and(is_napi_rs_base)
+        {
+            return false;
+        }
         match &call.callee {
-            Expression::Identifier(id) => id.name == "createRequire",
-            Expression::StaticMemberExpression(m) => m.property.name == "createRequire",
+            Expression::Identifier(id) => create_require_bindings.contains(id.name.as_str()),
+            Expression::StaticMemberExpression(member) => {
+                member.property.name == "createRequire"
+                    && matches!(
+                        &member.object,
+                        Expression::Identifier(id) if module_namespaces.contains(id.name.as_str())
+                    )
+            }
             _ => false,
         }
     }
@@ -318,11 +520,54 @@ fn require_rebindings(id: &str, source: &str) -> Vec<(usize, usize)> {
         return Vec::new();
     }
 
+    let mut create_require_bindings = BTreeSet::new();
+    let mut module_namespaces = BTreeSet::new();
+
+    // ESM imports are hoisted, so their bindings are available irrespective of
+    // where their declaration text appears in the module.
+    for stmt in &parsed.program.body {
+        let Statement::ImportDeclaration(import) = stmt else {
+            continue;
+        };
+        if !is_module_builtin(import.source.value.as_str())
+            || import.import_kind != ImportOrExportKind::Value
+        {
+            continue;
+        }
+        let Some(specifiers) = import.specifiers.as_ref() else {
+            continue;
+        };
+        for specifier in specifiers {
+            match specifier {
+                ImportDeclarationSpecifier::ImportSpecifier(specifier)
+                    if specifier.import_kind == ImportOrExportKind::Value
+                        && specifier.imported.name() == "createRequire" =>
+                {
+                    create_require_bindings.insert(specifier.local.name.to_string());
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    module_namespaces.insert(specifier.local.name.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut require_rebound = false;
     parsed
         .program
         .body
         .iter()
         .filter_map(|stmt| {
+            if let Statement::VariableDeclaration(declaration) = stmt {
+                add_module_bindings(
+                    declaration,
+                    &mut create_require_bindings,
+                    &mut module_namespaces,
+                    require_rebound,
+                );
+                return None;
+            }
             let Statement::ExpressionStatement(st) = stmt else {
                 return None;
             };
@@ -333,10 +578,16 @@ fn require_rebindings(id: &str, source: &str) -> Vec<(usize, usize)> {
                 &assign.left,
                 AssignmentTarget::AssignmentTargetIdentifier(id) if id.name == "require"
             );
-            (assign.operator == AssignmentOperator::Assign
+            let eligible = !require_rebound
+                && assign.operator == AssignmentOperator::Assign
                 && targets_require
-                && is_create_require(&assign.right))
-            .then(|| (st.span().start as usize, st.span().end as usize))
+                && is_napi_rs_create_require(
+                    &assign.right,
+                    &create_require_bindings,
+                    &module_namespaces,
+                );
+            require_rebound |= targets_require;
+            eligible.then(|| (st.span().start as usize, st.span().end as usize))
         })
         .collect()
 }
@@ -364,12 +615,52 @@ fn blank_spans(source: &str, spans: &[(usize, usize)]) -> String {
 
 // ---- target matching ----------------------------------------------------------
 
-/// What a `.node` file's object header says it is. `arch: None` is a Mach-O
-/// universal binary, which carries several and satisfies any of them.
+/// What a `.node` file's object header says it is.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Object {
     os: TargetOs,
-    arch: Option<TargetArch>,
+    arches: TargetArches,
+}
+
+/// The supported architectures an object can load on. Unlike an `Option`, this
+/// never turns an unrecognized machine value into a wildcard match.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TargetArches(u8);
+
+impl TargetArches {
+    const X64: Self = Self(1);
+    const ARM64: Self = Self(2);
+
+    fn from_cpu(cpu: u32) -> Option<Self> {
+        match cpu {
+            // CPU_TYPE_ARM64 / CPU_TYPE_X86_64 (`mach/machine.h`).
+            0x0100_000C => Some(Self::ARM64),
+            0x0100_0007 => Some(Self::X64),
+            _ => None,
+        }
+    }
+
+    fn contains(self, arch: TargetArch) -> bool {
+        self.0
+            & match arch {
+                TargetArch::X64 => Self::X64.0,
+                TargetArch::Arm64 => Self::ARM64.0,
+            }
+            != 0
+    }
+
+    fn insert(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+}
+
+/// The three native formats have recognizable headers even when their machine
+/// field is not one nub can target. Keep that distinct from malformed or wholly
+/// unrecognized input so unsupported machines never become a wildcard match.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Classification {
+    Object(Object),
+    UnsupportedMachine { os: TargetOs },
 }
 
 /// Refuse an addon the target cannot load.
@@ -385,14 +676,23 @@ fn check_target(bytes: &[u8], path: &Path, target: &TargetPlatform) -> Result<()
     let advice = "\x20\x20A native addon is machine code for one platform, and a compiled binary \
                   loads it\n\x20\x20from a real file at run time — there is no later step that \
                   could translate it.\n\x20\x20Install this dependency for the target (its \
-                  platform package) and compile again,\n\x20\x20or drop --platform to build for \
+                  platform package) and compile again. For cross-platform installs,\n\x20\x20configure \
+                  supportedArchitectures.os, supportedArchitectures.cpu, and\n\x20\x20supportedArchitectures.libc \
+                  so the target's native packages are present;\n\x20\x20or drop --platform to build for \
                   this machine.";
-    let Some(found) = classify(bytes) else {
-        bail!(
+    let found = match classify(bytes) {
+        Some(Classification::Object(found)) => found,
+        Some(Classification::UnsupportedMachine { os }) => bail!(
+            "this native addon is built for an unsupported {} architecture: {}\n\
+             \x20\x20nub can embed native addons only for x64 or arm64 targets.",
+            os_name(os),
+            path.display()
+        ),
+        None => bail!(
             "this file is not a native addon any supported platform can load: {}\n\
              \x20\x20Expected a Mach-O, ELF, or PE shared library; its header is none of those.",
             path.display()
-        );
+        ),
     };
     if found.os != target.os {
         bail!(
@@ -402,11 +702,11 @@ fn check_target(bytes: &[u8], path: &Path, target: &TargetPlatform) -> Result<()
             path.display()
         );
     }
-    if found.arch.is_some_and(|a| a != target.arch) {
+    if !found.arches.contains(target.arch) {
         bail!(
-            "this native addon is built for {} {}, but the binary targets {}: {}\n{advice}",
+            "this native addon has no {} slice for {}, but the binary targets {}: {}\n{advice}",
             os_name(found.os),
-            arch_name(found.arch.expect("checked")),
+            arch_name(target.arch),
             target.triple(),
             path.display()
         );
@@ -432,10 +732,11 @@ fn arch_name(arch: TargetArch) -> &'static str {
 /// Read the object header. Covers exactly the three formats nub targets, so a
 /// file matching none of them cannot load anywhere and is reported as such.
 ///
-/// glibc-vs-musl is deliberately NOT distinguished: both are ordinary ELF and the
-/// difference lives in the dynamic-link requirements, not the header. A musl/glibc
-/// mismatch still fails at run time, as it does uncompiled.
-fn classify(bytes: &[u8]) -> Option<Object> {
+/// glibc-vs-musl is deliberately NOT distinguished here: both are ordinary ELF
+/// and the difference lives in the dynamic-link requirements, not the header.
+/// [`super::native_layout`] checks package `libc` metadata against the target;
+/// packages that omit it retain Node's ordinary best-effort behavior.
+fn classify(bytes: &[u8]) -> Option<Classification> {
     let magic: [u8; 4] = bytes.get(..4)?.try_into().ok()?;
     let le32 = |at: usize| -> Option<u32> {
         bytes
@@ -449,63 +750,146 @@ fn classify(bytes: &[u8]) -> Option<Object> {
             .and_then(|s| s.try_into().ok())
             .map(u16::from_le_bytes)
     };
+    let classified = |os: TargetOs, arches: Option<TargetArches>| {
+        arches
+            .map(|arches| Classification::Object(Object { os, arches }))
+            .unwrap_or(Classification::UnsupportedMachine { os })
+    };
     match magic {
         // Mach-O, 64-bit, either byte order.
         [0xcf, 0xfa, 0xed, 0xfe] | [0xfe, 0xed, 0xfa, 0xcf] => {
-            let cpu = if magic[0] == 0xcf {
-                le32(4)?
-            } else {
-                u32::from_be_bytes(bytes.get(4..8)?.try_into().ok()?)
-            };
-            Some(Object {
-                os: TargetOs::Darwin,
-                arch: match cpu {
-                    // CPU_TYPE_ARM64 / CPU_TYPE_X86_64 (`mach/machine.h`).
-                    0x0100_000C => Some(TargetArch::Arm64),
-                    0x0100_0007 => Some(TargetArch::X64),
-                    _ => None,
-                },
-            })
+            let cpu = thin_macho_cpu(bytes)?;
+            Some(classified(TargetOs::Darwin, TargetArches::from_cpu(cpu)))
         }
         // Mach-O universal ("fat"), 32- and 64-bit headers, either byte order.
-        // The slice list is not decoded: a universal binary is accepted for any
-        // darwin arch, which can only ever be too permissive — and a false ACCEPT
-        // degrades to the run-time failure the addon would have had anyway, while
-        // a false REJECT would break a build that works.
-        [0xca, 0xfe, 0xba, 0xbe]
-        | [0xbe, 0xba, 0xfe, 0xca]
-        | [0xca, 0xfe, 0xba, 0xbf]
-        | [0xbf, 0xba, 0xfe, 0xca] => Some(Object {
-            os: TargetOs::Darwin,
-            arch: None,
-        }),
-        [0x7f, b'E', b'L', b'F'] => Some(Object {
-            os: TargetOs::Linux,
-            arch: match le16(18)? {
+        [0xca, 0xfe, 0xba, 0xbe] => Some(classified(
+            TargetOs::Darwin,
+            fat_arches(bytes, Endian::Big, 20)?,
+        )),
+        [0xbe, 0xba, 0xfe, 0xca] => Some(classified(
+            TargetOs::Darwin,
+            fat_arches(bytes, Endian::Little, 20)?,
+        )),
+        [0xca, 0xfe, 0xba, 0xbf] => Some(classified(
+            TargetOs::Darwin,
+            fat_arches(bytes, Endian::Big, 32)?,
+        )),
+        [0xbf, 0xba, 0xfe, 0xca] => Some(classified(
+            TargetOs::Darwin,
+            fat_arches(bytes, Endian::Little, 32)?,
+        )),
+        [0x7f, b'E', b'L', b'F'] => Some(classified(
+            TargetOs::Linux,
+            match le16(18)? {
                 // EM_X86_64 / EM_AARCH64.
-                0x3E => Some(TargetArch::X64),
-                0xB7 => Some(TargetArch::Arm64),
+                0x3E => Some(TargetArches::X64),
+                0xB7 => Some(TargetArches::ARM64),
                 _ => None,
             },
-        }),
+        )),
         // PE: the DOS stub points at the real header, whose Machine field is the
         // arch. A truncated or non-PE `MZ` file falls through to `None`.
         [b'M', b'Z', ..] => {
             let pe = le32(0x3C)? as usize;
             let sig = pe.checked_add(4)?;
             (bytes.get(pe..sig)? == b"PE\0\0".as_slice()).then_some(())?;
-            Some(Object {
-                os: TargetOs::Win32,
-                arch: match le16(sig)? {
+            Some(classified(
+                TargetOs::Win32,
+                match le16(sig)? {
                     // IMAGE_FILE_MACHINE_AMD64 / _ARM64.
-                    0x8664 => Some(TargetArch::X64),
-                    0xAA64 => Some(TargetArch::Arm64),
+                    0x8664 => Some(TargetArches::X64),
+                    0xAA64 => Some(TargetArches::ARM64),
                     _ => None,
                 },
-            })
+            ))
         }
         _ => None,
     }
+}
+
+#[derive(Clone, Copy)]
+enum Endian {
+    Big,
+    Little,
+}
+
+impl Endian {
+    fn u32(self, bytes: &[u8]) -> Option<u32> {
+        let bytes: [u8; 4] = bytes.try_into().ok()?;
+        Some(match self {
+            Self::Big => u32::from_be_bytes(bytes),
+            Self::Little => u32::from_le_bytes(bytes),
+        })
+    }
+
+    fn u64(self, bytes: &[u8]) -> Option<u64> {
+        let bytes: [u8; 8] = bytes.try_into().ok()?;
+        Some(match self {
+            Self::Big => u64::from_be_bytes(bytes),
+            Self::Little => u64::from_le_bytes(bytes),
+        })
+    }
+}
+
+/// Read the CPU type from a loadable 64-bit Mach-O header. Fat slice records are
+/// only dispatch metadata; the inner header is the authoritative object the
+/// platform loader will actually open.
+fn thin_macho_cpu(bytes: &[u8]) -> Option<u32> {
+    let magic: [u8; 4] = bytes.get(..4)?.try_into().ok()?;
+    match magic {
+        [0xcf, 0xfa, 0xed, 0xfe] => Endian::Little.u32(bytes.get(4..8)?),
+        [0xfe, 0xed, 0xfa, 0xcf] => Endian::Big.u32(bytes.get(4..8)?),
+        _ => None,
+    }
+}
+
+/// Parse a Mach-O universal header and every declared slice record. The parser
+/// deliberately validates the slice ranges too: a header that merely claims a
+/// target CPU but has no bytes for that slice is not a usable target addon.
+fn fat_arches(bytes: &[u8], endian: Endian, record_size: usize) -> Option<Option<TargetArches>> {
+    let count = usize::try_from(endian.u32(bytes.get(4..8)?)?).ok()?;
+    let table_len = count.checked_mul(record_size)?.checked_add(8)?;
+    bytes.get(..table_len)?;
+
+    let mut arches: Option<TargetArches> = None;
+    for index in 0..count {
+        let start = 8usize.checked_add(index.checked_mul(record_size)?)?;
+        let record = bytes.get(start..start.checked_add(record_size)?)?;
+        let cpu = endian.u32(record.get(..4)?)?;
+        let (offset, size) = if record_size == 20 {
+            (
+                u64::from(endian.u32(record.get(8..12)?)?),
+                u64::from(endian.u32(record.get(12..16)?)?),
+            )
+        } else {
+            (
+                endian.u64(record.get(8..16)?)?,
+                endian.u64(record.get(16..24)?)?,
+            )
+        };
+        // A zero-length range is just another header-only claim, not a loadable
+        // architecture slice.
+        (size != 0).then_some(())?;
+        // A fat-arch offset names an inner Mach-O object, so it cannot point
+        // back into the fat header or its slice table.
+        (offset >= table_len as u64).then_some(())?;
+        let end = offset.checked_add(size)?;
+        let start = usize::try_from(offset).ok()?;
+        let end = usize::try_from(end).ok()?;
+        let slice = bytes.get(start..end)?;
+        let Some(arch) = TargetArches::from_cpu(cpu) else {
+            continue;
+        };
+        if thin_macho_cpu(slice) != Some(cpu) {
+            continue;
+        }
+        if let Some(arches) = &mut arches {
+            arches.insert(arch);
+        } else {
+            arches = Some(arch);
+        }
+    }
+    Some(arches)
 }
 
 #[cfg(test)]
@@ -516,9 +900,24 @@ mod tests {
         TargetPlatform::parse(triple).expect("a supported triple")
     }
 
+    #[test]
+    fn survivor_token_replacement_is_fixed_width_and_complete() {
+        let mut bytes = b"aa1111bb1111cc".to_vec();
+        replace_bytes(&mut bytes, b"1111", b"2222");
+        assert_eq!(bytes, b"aa2222bb2222cc");
+        assert!(!contains_bytes(&bytes, b"1111"));
+    }
+
     fn macho(cpu: u32) -> Vec<u8> {
         let mut v = vec![0xcf, 0xfa, 0xed, 0xfe];
         v.extend_from_slice(&cpu.to_le_bytes());
+        v.resize(64, 0);
+        v
+    }
+
+    fn macho_big_endian(cpu: u32) -> Vec<u8> {
+        let mut v = vec![0xfe, 0xed, 0xfa, 0xcf];
+        v.extend_from_slice(&cpu.to_be_bytes());
         v.resize(64, 0);
         v
     }
@@ -539,39 +938,209 @@ mod tests {
         v
     }
 
+    fn write_u32(bytes: &mut [u8], value: u32, endian: Endian) {
+        bytes.copy_from_slice(&match endian {
+            Endian::Big => value.to_be_bytes(),
+            Endian::Little => value.to_le_bytes(),
+        });
+    }
+
+    fn write_u64(bytes: &mut [u8], value: u64, endian: Endian) {
+        bytes.copy_from_slice(&match endian {
+            Endian::Big => value.to_be_bytes(),
+            Endian::Little => value.to_le_bytes(),
+        });
+    }
+
+    fn fat(uses_64_bit_records: bool, endian: Endian, cpus: &[u32]) -> Vec<u8> {
+        let record_size = if uses_64_bit_records { 32 } else { 20 };
+        let table_len = 8 + record_size * cpus.len();
+        let mut v = vec![0u8; table_len + 64 * cpus.len()];
+        v[..4].copy_from_slice(match (uses_64_bit_records, endian) {
+            (false, Endian::Big) => &[0xca, 0xfe, 0xba, 0xbe],
+            (false, Endian::Little) => &[0xbe, 0xba, 0xfe, 0xca],
+            (true, Endian::Big) => &[0xca, 0xfe, 0xba, 0xbf],
+            (true, Endian::Little) => &[0xbf, 0xba, 0xfe, 0xca],
+        });
+        write_u32(&mut v[4..8], cpus.len() as u32, endian);
+        for (index, cpu) in cpus.iter().enumerate() {
+            let start = 8 + record_size * index;
+            write_u32(&mut v[start..start + 4], *cpu, endian);
+            let offset = table_len + 64 * index;
+            if uses_64_bit_records {
+                write_u64(&mut v[start + 8..start + 16], offset as u64, endian);
+                write_u64(&mut v[start + 16..start + 24], 64, endian);
+            } else {
+                write_u32(&mut v[start + 8..start + 12], offset as u32, endian);
+                write_u32(&mut v[start + 12..start + 16], 64, endian);
+            }
+            v[offset..offset + 64].copy_from_slice(&macho(*cpu));
+        }
+        v
+    }
+
     #[test]
     fn every_targetable_object_format_is_recognized() {
         assert_eq!(
             classify(&macho(0x0100_000C)),
-            Some(Object {
+            Some(Classification::Object(Object {
                 os: TargetOs::Darwin,
-                arch: Some(TargetArch::Arm64)
-            })
+                arches: TargetArches::ARM64,
+            }))
         );
         assert_eq!(
             classify(&elf(0x3E)),
-            Some(Object {
+            Some(Classification::Object(Object {
                 os: TargetOs::Linux,
-                arch: Some(TargetArch::X64)
-            })
+                arches: TargetArches::X64,
+            }))
         );
         assert_eq!(
             classify(&pe(0xAA64)),
-            Some(Object {
+            Some(Classification::Object(Object {
                 os: TargetOs::Win32,
-                arch: Some(TargetArch::Arm64)
-            })
-        );
-        // A universal binary carries every slice, so it pins no single arch.
-        assert_eq!(
-            classify(&[0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 2]),
-            Some(Object {
-                os: TargetOs::Darwin,
-                arch: None
-            })
+                arches: TargetArches::ARM64,
+            }))
         );
         assert_eq!(classify(b"#!/bin/sh\n"), None);
         assert_eq!(classify(b""), None);
+    }
+
+    #[test]
+    fn fat_macho_only_accepts_arches_in_its_slice_table() {
+        let x64 = fat(false, Endian::Big, &[0x0100_0007]);
+        check_target(&x64, Path::new("x.node"), &target("darwin-x64")).expect("x64 slice");
+        assert!(
+            check_target(&x64, Path::new("x.node"), &target("darwin-arm64")).is_err(),
+            "an x64-only universal binary cannot load on arm64"
+        );
+
+        let arm64 = fat(false, Endian::Big, &[0x0100_000C]);
+        check_target(&arm64, Path::new("x.node"), &target("darwin-arm64")).expect("arm64 slice");
+        assert!(
+            check_target(&arm64, Path::new("x.node"), &target("darwin-x64")).is_err(),
+            "an arm64-only universal binary cannot load on x64"
+        );
+
+        let universal = fat(false, Endian::Big, &[0x0100_0007, 0x0100_000C]);
+        for triple in ["darwin-x64", "darwin-arm64"] {
+            check_target(&universal, Path::new("x.node"), &target(triple))
+                .expect("both-slice universal binary");
+        }
+    }
+
+    #[test]
+    fn fat_macho_parses_32_and_64_bit_headers_in_both_byte_orders() {
+        for (uses_64_bit_records, endian) in [
+            (false, Endian::Big),
+            (false, Endian::Little),
+            (true, Endian::Big),
+            (true, Endian::Little),
+        ] {
+            let universal = fat(uses_64_bit_records, endian, &[0x0100_0007, 0x0100_000C]);
+            for triple in ["darwin-x64", "darwin-arm64"] {
+                check_target(&universal, Path::new("x.node"), &target(triple)).unwrap_or_else(
+                    |err| panic!("{triple} must parse from this universal header: {err:#}"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fat_macho_accepts_a_matching_big_endian_inner_slice() {
+        let mut universal = fat(false, Endian::Big, &[0x0100_0007]);
+        let inner = 8 + 20;
+        universal[inner..inner + 64].copy_from_slice(&macho_big_endian(0x0100_0007));
+        check_target(&universal, Path::new("x.node"), &target("darwin-x64"))
+            .expect("a valid big-endian x64 inner Mach-O slice");
+    }
+
+    #[test]
+    fn fat_macho_rejects_truncated_slice_tables_and_overflowing_counts() {
+        let header_only = [0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 1];
+        assert_eq!(
+            classify(&header_only),
+            None,
+            "a header is not a universal binary"
+        );
+
+        let mut truncated_record = fat(false, Endian::Big, &[0x0100_0007]);
+        truncated_record.truncate(8 + 19);
+        assert_eq!(classify(&truncated_record), None, "every record must fit");
+
+        let overflowing_count = [0xca, 0xfe, 0xba, 0xbe, 0xff, 0xff, 0xff, 0xff];
+        assert_eq!(
+            classify(&overflowing_count),
+            None,
+            "a count whose table cannot fit is not trusted"
+        );
+
+        let mut truncated_slice = fat(false, Endian::Big, &[0x0100_0007]);
+        truncated_slice.truncate(8 + 20 + 63);
+        assert_eq!(
+            classify(&truncated_slice),
+            None,
+            "a declared slice must be present in the file"
+        );
+
+        let mut empty_slice = fat(false, Endian::Big, &[0x0100_0007]);
+        empty_slice[20..24].fill(0);
+        assert_eq!(
+            classify(&empty_slice),
+            None,
+            "a target slice needs bytes to load"
+        );
+
+        let mut overlapping_slice = fat(false, Endian::Big, &[0x0100_0007]);
+        overlapping_slice[16..20].fill(0);
+        assert_eq!(
+            classify(&overlapping_slice),
+            None,
+            "a target slice cannot overlap the fat header or slice table"
+        );
+
+        let mut zero_filled_inner = fat(false, Endian::Big, &[0x0100_0007]);
+        zero_filled_inner[28..].fill(0);
+        assert!(
+            check_target(
+                &zero_filled_inner,
+                Path::new("x.node"),
+                &target("darwin-x64"),
+            )
+            .is_err(),
+            "a fat record alone cannot make a zero-filled slice targetable"
+        );
+
+        let mut mismatched_inner = fat(false, Endian::Big, &[0x0100_0007]);
+        mismatched_inner[28..].copy_from_slice(&macho(0x0100_000C));
+        assert!(
+            check_target(
+                &mismatched_inner,
+                Path::new("x.node"),
+                &target("darwin-x64"),
+            )
+            .is_err(),
+            "the inner Mach-O CPU must match the fat record"
+        );
+    }
+
+    #[test]
+    fn unsupported_elf_and_pe_machines_are_rejected() {
+        for (bytes, platform, description) in [
+            (elf(0xF3), "linux-x64", "RISC-V ELF"),
+            (pe(0x014C), "win32-x64", "PE i386"),
+        ] {
+            assert!(matches!(
+                classify(&bytes),
+                Some(Classification::UnsupportedMachine { .. })
+            ));
+            let err = check_target(&bytes, Path::new("x.node"), &target(platform))
+                .expect_err("{description} is not a supported target architecture");
+            assert!(
+                format!("{err:#}").contains("unsupported"),
+                "must explain why {description} was refused: {err:#}"
+            );
+        }
     }
 
     // The cross-compile guarantee: a host-built addon must not ride into a
@@ -603,7 +1172,7 @@ mod tests {
         check_target(&pe(0x8664), Path::new("x"), &target("win32-x64")).expect("match");
         for triple in ["darwin-x64", "darwin-arm64"] {
             check_target(
-                &[0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 2],
+                &fat(false, Endian::Big, &[0x0100_0007, 0x0100_000C]),
                 Path::new("x"),
                 &target(triple),
             )
@@ -654,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_bare_require_assigned_a_create_require_call_is_touched() {
+    fn only_a_bare_require_assigned_a_node_module_create_require_call_is_touched() {
         // A module that DECLARES require owns that binding; rewriting there would
         // also stop Rolldown rewriting its calls, which is strictly worse.
         for declared in [
@@ -666,17 +1235,67 @@ mod tests {
                 "a declared require must be left alone: {declared}"
             );
         }
-        // Anything other than createRequire on the right could have side effects.
-        assert!(require_rebindings("i.js", "require = makeRequire(__filename)\n").is_empty());
         // A nested assignment is out of scope — see `require_rebindings`.
         assert!(
             require_rebindings("i.js", "function f() { require = createRequire(1) }\n").is_empty()
         );
-        // The member spelling is the same idiom.
-        assert_eq!(
-            require_rebindings("i.js", "require = Module.createRequire(__filename)\n").len(),
-            1
-        );
+    }
+
+    #[test]
+    fn napi_rs_node_module_bindings_are_blanked() {
+        // NAPI-RS's generated preamble uses the first spelling. The other cases
+        // prove the same binding-aware treatment for Node's compatible `module`
+        // specifier, aliases, namespaces, and ESM import bindings.
+        for source in [
+            "const { createRequire } = require('node:module')\nrequire = createRequire(__filename)\n",
+            "const { createRequire: makeRequire } = require('module')\nrequire = makeRequire(__filename)\n",
+            "const Module = require('node:module')\nrequire = Module.createRequire(__filename)\n",
+            "import { createRequire as makeRequire } from 'node:module'\nrequire = makeRequire(import.meta.url)\n",
+            "import * as Module from 'module'\nrequire = Module.createRequire(import.meta.url)\n",
+        ] {
+            assert_eq!(
+                require_rebindings("index.js", source).len(),
+                1,
+                "the Node builtin binding is the generated-loader idiom: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_create_require_bindings_and_side_effects_are_preserved() {
+        for source in [
+            // Matching a local helper by spelling deleted real program behavior.
+            "const { createRequire } = require('./module')\nrequire = createRequire(__filename)\n",
+            "import { createRequire } from './module'\nrequire = createRequire(import.meta.url)\n",
+            "const Module = require('./module')\nrequire = Module.createRequire(__filename)\n",
+            "const createRequire = makeRequire()\nrequire = createRequire(__filename)\n",
+            // Even Node's own helper must remain when evaluating its base does
+            // work; blanking the entire assignment would skip that call.
+            "const { createRequire } = require('node:module')\nrequire = createRequire(recordSideEffect())\n",
+            "const { createRequire } = require('node:module')\nrequire = createRequire(__filename, recordSideEffect())\n",
+        ] {
+            assert!(
+                require_rebindings("index.js", source).is_empty(),
+                "only a side-effect-free Node builtin binding is removable: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_prior_require_rebinding_preserves_later_canonical_assignments() {
+        for source in [
+            "const { createRequire } = require('node:module')\n\
+             require = custom\n\
+             require = createRequire(__filename)\n",
+            "const { createRequire } = require('node:module')\n\
+             require += custom\n\
+             require = createRequire(__filename)\n",
+        ] {
+            assert!(
+                require_rebindings("index.js", source).is_empty(),
+                "a prior simple or compound assignment makes later require behavior observable: {source}"
+            );
+        }
     }
 
     // The interop contract: a CJS consumer must receive the addon's own exports,
@@ -691,6 +1310,15 @@ mod tests {
         assert!(
             code.contains("import.meta.url"),
             "must locate itself from the chunk, not a build-machine path: {code}"
+        );
+        assert!(
+            code.contains(r#"process[Symbol.for("nub.compile.bootstrap")]"#)
+                && code.contains("record.createRequire(import.meta.url)"),
+            "the captured factory must create the loader-visible require: {code}"
+        );
+        assert!(
+            !code.contains(r#"require("node:module")"#),
+            "the addon helper must not perform a late builtin require: {code}"
         );
         assert!(
             code.contains(r#""./watcher-a1b2c3d4.node""#),
