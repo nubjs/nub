@@ -488,6 +488,45 @@ function screenForMalicious(specs) {
   return flagged;
 }
 
+/** A comparable failure signature: the FIRST real error, not the last.
+ *
+ *  Logs end with a stack trace and a "failed to execute" summary; the cause sits far earlier.
+ *  Reading the tail is how one canvas failure got diagnosed four different wrong ways in a row
+ *  (Node 26, then Python 3.14, then gyp, then a missing prebuilt) when the log had said
+ *  `node-pre-gyp ERR! install response status 404` and `pkg-config pixman-1 ... exit status 127`
+ *  from the first run.
+ *
+ *  Normalised so two runs are comparable: absolute paths, versions and hashes differ between npm
+ *  and nub for reasons that are not the failure. */
+function failureSignature(log) {
+  const line = (log || '').split('\n').find((l) => /\b(ERR!|error|fatal|failed|not ok)\b/i.test(l)
+    && !/^\s*(npm )?(warn|notice)/i.test(l));
+  if (!line) return null;
+  return line
+    .replace(/\/[^\s"']+/g, '<path>')
+    .replace(/\bv?\d+\.\d+\.\d+\b/g, '<ver>')
+    .replace(/\b[0-9a-f]{8,}\b/g, '<hash>')
+    .trim()
+    .slice(0, 160);
+}
+
+/** Does npm fail the same way? npm is the REFERENCE: nub's job is to match it.
+ *
+ *  A package that cannot install in this environment AT ALL — no prebuilt for this
+ *  architecture, a missing system library, a toolchain nub does not control — is not a grant
+ *  problem, and no entry in the catalog can fix it. MEASURED: `canvas@2.11.2` publishes 40
+ *  release assets and ZERO for darwin-arm64, so on Apple Silicon it always compiles from source
+ *  and always needs cairo/pkg-config. Recording that as "needs write.disk" would ship a wide
+ *  grant for a package that never installs here regardless. */
+function npmReference(dir, pkg, version) {
+  const d = path.join(dir, 'npmref');
+  const fx = makeFixture(d, pkg, version, { jailOff: true });
+  const r = spawnSync('npm', ['install', '--no-audit', '--no-fund'],
+    { cwd: fx.proj, env: { ...process.env, HOME: fx.home }, encoding: 'utf8' });
+  const log = (r.stdout || '') + (r.stderr || '');
+  return { rc: r.status ?? 1, signature: failureSignature(log), log };
+}
+
 // ── the walk ──────────────────────────────────────────────────────────────────
 
 /** Which capability scope a tokenised path falls in — the vocabulary a GRANT is written in.
@@ -652,10 +691,34 @@ function search(nub, pkg, version, root, keep, runDir) {
     };
   }
   if (control.rc !== 0 || controlB.rc !== 0) {
-    // THE TAIL GOES IN THE RECORD. "Broken at the widest grant" is useless without the reason,
-    // and the reason is in a log that will not exist by the time anyone reads the verdict.
+    // ⛔ ASK NPM BEFORE BLAMING THE JAIL. npm is the REFERENCE — nub's job is to match it — so a
+    // package failing IDENTICALLY under npm is broken in this ENVIRONMENT, not under-granted.
+    // No grant can supply a missing system library or an architecture with no published binary,
+    // and inventing one would ship a wide grant for a package that never installs here anyway.
+    //
+    // MEASURED, and it is why this check exists: `canvas@2.11.2` publishes 40 release assets —
+    // 12 darwin-x64, 14 linux-x64, 14 win32-x64 — and ZERO for darwin-arm64 at ANY ABI. On Apple
+    // Silicon it therefore always compiles from source and always needs cairo/pkg-config, which
+    // npm needs too. It is also 3.1M weekly downloads, 39.8% of all canvas traffic, so this is
+    // the COMMON case for that package rather than an obscure old pin.
+    //
+    // ⚠ THE VERDICT IS LOUD, NOT SILENT. It records both signatures and that they matched, so a
+    // reader can see WHY it was dismissed and re-open it. A bin that hides its reasoning is how
+    // six false failures survived earlier in this effort. During probing, look in this bin.
+    //
+    // npm SUCCEEDING where nub fails is the opposite finding — a nub defect, the most valuable
+    // thing this harness can surface, and never a grant gap.
+    const ref = npmReference(root, pkg, version);
+    const ours = failureSignature(control.log);
+    const matched = ref.rc !== 0 && !!ours && !!ref.signature && ours === ref.signature;
     return {
-      pkg, version, verdict: 'BROKEN-EVEN-WITH-EVERYTHING', cells,
+      pkg, version,
+      verdict: matched ? 'BROKEN-IN-ENVIRONMENT' : 'BROKEN-EVEN-WITH-EVERYTHING',
+      grant: null,
+      npmReference: { rc: ref.rc, signature: ref.signature },
+      failureSignature: ours,
+      signaturesMatched: matched,
+      cells,
       control: baseCase(control),
       controlLogTail: (control.log || '').split('\n').slice(-40).join('\n'),
       logDir: runDirFor(runDir, pkg, version),
