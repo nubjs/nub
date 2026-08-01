@@ -101,6 +101,11 @@ pub mod backend;
 #[cfg(feature = "build-jail-catalog-override")]
 pub mod catalog;
 pub mod catalog_override;
+/// The v2 catalog parser. Same compilation story as [`catalog`] above: `build.rs` pulls this
+/// file in with `#[path]` and always runs it, so a shipped build carries the parsed TABLE
+/// and none of the parsing code.
+#[cfg(feature = "build-jail-catalog-override")]
+pub mod catalog_v2;
 pub mod compiler;
 pub mod conformance;
 pub mod matcher;
