@@ -562,28 +562,42 @@ pub fn group_on_spawn(cmd: &mut Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // Captured BEFORE fork: the child's TOCTOU re-check below must compare
-        // getppid() against the REAL parent, not a post-fork read that would
-        // already name the reaper if the parent died between fork and prctl.
+        // ⛔ INSTALLING ANY `pre_exec` FORCES std OFF `posix_spawn` ONTO fork+exec, and forking
+        // from this process is not safe: Nub runs a multithreaded tokio runtime, so if another
+        // thread holds libSystem's once-gate at fork time the child aborts inside libSystem's
+        // OWN atfork handler — before our closure ever runs. Measured on macOS: 14 crashes with
+        // `Command::spawn -> fork -> libSystem_atfork_child -> _notify_fork_child ->
+        // _os_once_gate_corruption_abort`, EXC_BREAKPOINT/SIGKILL. The closure body was always
+        // async-signal-safe; that was never the problem.
+        //
+        // `process_group` sets the group through `posix_spawnattr_setpgroup`, so std STAYS on
+        // posix_spawn and no fork happens. Where that is all we need, it is strictly better.
+        cmd.process_group(0);
+
+        // Linux still needs a hook for the pdeathsig, which has no posix_spawn equivalent — and
+        // pays the fork to get it. That is acceptable there and not on macOS: the abort above is
+        // a Darwin libSystem behaviour, and Linux's fork-from-threaded-process path does not
+        // carry it.
         #[cfg(target_os = "linux")]
-        let parent = unsafe { libc::getpid() };
-        // SAFETY: setpgid(0, 0) / prctl / getppid / raise between fork and exec
-        // are all async-signal-safe and touch no parent state.
-        unsafe {
-            cmd.pre_exec(move || {
-                libc::setpgid(0, 0);
-                #[cfg(target_os = "linux")]
-                {
+        {
+            // Captured BEFORE fork: the child's TOCTOU re-check must compare getppid() against
+            // the REAL parent, not a post-fork read that would already name the reaper if the
+            // parent died between fork and prctl.
+            let parent = unsafe { libc::getpid() };
+            // SAFETY: prctl / getppid / raise between fork and exec are async-signal-safe and
+            // touch no parent state.
+            unsafe {
+                cmd.pre_exec(move || {
                     libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-                    // The pdeathsig only fires for deaths AFTER registration; if
-                    // the parent died in the fork→prctl window, deliver the same
-                    // signal ourselves instead of running on orphaned.
+                    // The pdeathsig only fires for deaths AFTER registration; if the parent died
+                    // in the fork->prctl window, deliver the same signal ourselves instead of
+                    // running on orphaned.
                     if libc::getppid() != parent {
                         libc::raise(libc::SIGTERM);
                     }
-                }
-                Ok(())
-            });
+                    Ok(())
+                });
+            }
         }
     }
     #[cfg(not(unix))]
