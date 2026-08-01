@@ -26,6 +26,9 @@
 // 4. PRINTS WHAT IT CHANGED, so the result is reviewable as a diff rather than as a
 //    before/after file nobody reads.
 //
+// 5. A FULL-DISK GRANT NEEDS CORROBORATION FROM OUTSIDE ITS OWN RUN. See the section
+//    below; this is the only guard that exists because the terminal rung was added.
+//
 // REMOVALS ARE PROPOSED, NEVER APPLIED. A minimality record saying a shipped grant is
 // redundant is the one direction where being wrong BREAKS a package, which is the failure
 // mode the jail cares most about. So `--apply` adds; removals print as a proposal and
@@ -86,6 +89,97 @@ for (const f of files) {
   }
 }
 
+// ── GUARD 5: a full-disk grant needs corroboration from outside its own run ────
+//
+// ADDING THE TERMINAL RUNG CHANGED WHAT A UNIFORM ENVIRONMENTAL DENIAL COSTS. Before it,
+// a package that failed every cell landed as FAILS-AT-BOTH: recorded, applied to nothing,
+// moved past. Now the same shape runs one cell further and lands NEEDS-FULL-DISK, which
+// WRITES THE MOST PERMISSIVE GRANT THE CATALOG HAS. So a misconfigured host no longer
+// produces a harmless row — it produces a whole-disk grant, and the ladder cannot tell the
+// difference, because a host-level denial fails every cell exactly as a real need does.
+//
+// MEASURED, not hypothetical (linux-x64, 2026-08-01). A sweep host had node installed at
+// `/opt/node` with `/usr/local/bin/node` a symlink; the jail grants the toolchain at its
+// real path, so every script shelling out to bare `npm` was denied. `eth-gas-reporter` and
+// `exiftool-vendored` walked the whole ladder and scored NEEDS-FULL-DISK. Both need only
+// egress — which is what they score on macOS, and what they score on the same host once
+// node is installed at the canonical prefix. Two whole-disk grants would have shipped.
+//
+// THE TELL GENERALISES AND IS MECHANICAL: `sh: 1: npm: Permission denied` appears in ZERO
+// committed records across every platform. A failure signature never seen in the corpus,
+// appearing on a new host, is the host. So a full-disk record must clear one of two bars:
+//
+//   (a) its failing signature is already KNOWN to the committed corpus, from a different
+//       host — someone else's machine hit this too, so it is not local; or
+//   (b) the same package is CROSS-PLATFORM CORROBORATED — a committed record from another
+//       platform also failed the `both` cell. Both survivors have this: `wordpos` and
+//       `unrs-resolver`, each a sibling-store write seen on two platforms.
+//
+// (b) is separate from (a) because the errno spelling is per-OS: Linux reports the
+// `unrs-resolver` sibling-store write as `EACCES ... mkdir`, macOS the same write as
+// `EPERM ... mkdir`, so signature matching alone would reject a genuinely corroborated row.
+//
+// A record clearing neither is reported as NEEDS-FULL-DISK:UNCORROBORATED and NOT written.
+// It is not silently dropped either — the whole point is that a human looks at it, because
+// the honest reading is "we cannot yet tell a real need from this host", not "no".
+const RESULTS_DIR = path.join(HARNESS, 'results');
+const inputPaths = new Set(files.map((f) => path.resolve(f)));
+
+// Everything already committed, minus whatever is being ingested right now — a run must
+// not be allowed to corroborate itself, which is exactly what a contaminated sweep would do.
+const corpus = [];
+try {
+  for (const f of fs.readdirSync(RESULTS_DIR)) {
+    if (!f.endsWith('.ndjson')) continue;
+    const p = path.join(RESULTS_DIR, f);
+    if (inputPaths.has(path.resolve(p))) continue;
+    for (const l of fs.readFileSync(p, 'utf8').split('\n')) {
+      if (!l.trim()) continue;
+      try { corpus.push(JSON.parse(l)); } catch { /* partial line */ }
+    }
+  }
+} catch { /* no results dir — every full-disk row is then uncorroborated, which is correct */ }
+
+// Run-specific detail is noise: fixture paths, nonces, store hashes and byte counts differ
+// on every cell of every run. What survives is the error class and the shape of the
+// message, which is the part that is a property of the package rather than of the machine.
+function signature(line) {
+  if (!line) return null;
+  return String(line)
+    .replace(/'[^']*'/g, "'P'").replace(/"[^"]*"/g, '"P"')
+    .replace(/[A-Za-z]:\\[^\s'"]+/g, 'P')
+    .replace(/\/[^\s'"]+/g, 'P')
+    .replace(/\b[0-9a-f]{8,}\b/gi, 'H')
+    .replace(/\b\d+\b/g, 'N')
+    .replace(/\s+/g, ' ').trim().toLowerCase() || null;
+}
+
+const knownSignatures = new Map(); // signature -> Set of hosts that produced it
+const failedBothElsewhere = new Map(); // package -> Set of platforms where `both` failed
+for (const r of corpus) {
+  const s = signature(r.evidence?.failing_line);
+  if (s) {
+    if (!knownSignatures.has(s)) knownSignatures.set(s, new Set());
+    knownSignatures.get(s).add(r.host);
+  }
+  if (r.cells?.both === 1) {
+    if (!failedBothElsewhere.has(r.package)) failedBothElsewhere.set(r.package, new Set());
+    failedBothElsewhere.get(r.package).add(r.platform);
+  }
+}
+
+// Returns null when the record may be written, or the reason it may not.
+function fullDiskObjection(r) {
+  const platforms = failedBothElsewhere.get(r.package);
+  if (platforms && [...platforms].some((p) => p !== r.platform)) return null; // (b)
+  const s = signature(r.evidence?.failing_line);
+  const hosts = s ? knownSignatures.get(s) : null;
+  if (hosts && [...hosts].some((h) => h !== r.host)) return null;             // (a)
+  return s
+    ? `failure signature "${s}" is novel to ${r.host} and no other platform failed the both cell for this package`
+    : `no failing line recorded, and no other platform failed the both cell for this package`;
+}
+
 const catalog = JSON.parse(fs.readFileSync(CATALOG, 'utf8'));
 const refusedPkgs = new Set((catalog.notGranted?.packages || []).map((e) => e.package));
 const granted = {
@@ -96,7 +190,27 @@ const granted = {
   project: new Set((catalog.packageGrants || []).map((e) => e.package)),
 };
 
-const added = [], skipped = [], rejected = [], proposedRemovals = [];
+// A guard that silently stops guarding is worse than no guard, and this one is a single
+// `if` in the middle of a long loop — exactly the shape a later refactor drops. The two
+// cases are the two real ones, kept as a regression check rather than as evidence: the
+// evidence is the measured run in the comment above.
+if (argv.includes('--selftest')) {
+  const base = { package: 'p', version: '1', verdict: 'NEEDS-FULL-DISK', platform: 'linux-x64', host: 'H' };
+  const cases = [
+    ['a host-local denial is refused', { ...base, package: 'eth-gas-reporter', evidence: { failing_line: 'sh: 1: npm: Permission denied' } }, false],
+    ['a cross-platform failure is admitted', { ...base, package: 'unrs-resolver', evidence: { failing_line: 'Error: EACCES: permission denied, mkdir \'/x\'' } }, true],
+    ['no failing line is refused', { ...base, package: 'never-measured-anywhere', evidence: {} }, false],
+  ];
+  let bad = 0;
+  for (const [name, rec, wantAdmit] of cases) {
+    const admitted = fullDiskObjection(rec) === null;
+    if (admitted !== wantAdmit) { console.error(`FAIL ${name}: admitted=${admitted}, want ${wantAdmit}`); bad++; }
+    else console.log(`ok  ${name}`);
+  }
+  process.exit(bad ? 1 : 0);
+}
+
+const added = [], skipped = [], rejected = [], proposedRemovals = [], uncorroborated = [];
 
 for (const r of records) {
   const where = `${r.package}@${r.version}`;
@@ -124,6 +238,12 @@ for (const r of records) {
   // recorded reasoning; that a script needs the capability is what the refusal already
   // assumed, not new information.
   if (refusedPkgs.has(r.package)) { rejected.push(`${where}: listed in notGranted.packages — a refusal is not overridable by measurement`); continue; }
+
+  // GUARD 5 — the terminal rung is the one verdict a broken host can manufacture.
+  if (r.verdict === 'NEEDS-FULL-DISK') {
+    const objection = fullDiskObjection(r);
+    if (objection) { uncorroborated.push(`${where}: ${objection}`); continue; }
+  }
 
   const observed = `${MARK} ${r.verdict} on ${r.platform}, ${String(r.measured_at).slice(0, 10)}. `
     + `Cells jail_off=${r.cells.jail_off} no_grants=${r.cells.no_grants} network=${r.cells.network} project_write=${r.cells.project_write} both=${r.cells.both}`
@@ -182,6 +302,7 @@ for (const r of records) {
 const say = (title, xs) => { if (xs.length) { console.log(`\n${title} (${xs.length})`); for (const x of xs) console.log(`  ${x}`); } };
 say('CHANGES', added);
 say('REJECTED — not applied', rejected);
+say('NEEDS-FULL-DISK:UNCORROBORATED — not applied, needs a human look', uncorroborated);
 say(`PROPOSED REMOVALS — ${REMOVE ? 'applying' : 'NOT applied; pass --remove-redundant'}`, proposedRemovals.map((r) => `- ${r.package}@${r.version}: passes ungranted (${r.evidence?.detail || ''})`));
 if (process.env.VERBOSE) say('skipped', skipped);
 else console.log(`\nskipped: ${skipped.length} (VERBOSE=1 to list)`);
