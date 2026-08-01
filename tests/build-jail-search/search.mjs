@@ -39,11 +39,23 @@ const BANNER_BAD = 'was REJECTED';
  *
  *  Every one of the 54 states is expressible — that is the point of v2 and the
  *  reason the earlier v1 translation was thrown away: it could express 14. */
-function catalogFor(pkg, state) {
-  // State 0 is the BASE PROFILE, and the catalog spells that as NO ENTRY. Emitting an
-  // entry with no capabilities is a different thing — the parser rejects it, correctly,
-  // because a grant that widens nothing is an authoring mistake everywhere except here.
-  if (state.atoms.size === 0) return { packages: {} };
+function catalogFor(pkg, state, others = []) {
+  // EVERY OTHER PACKAGE IN THE TREE IS HELD AT FULL GRANT, in every arm including the
+  // control. Without this the control ran under nub's compiled-in catalog — where other
+  // packages keep their grants — while each cell swapped in a catalog naming only the
+  // package under test, silently stripping everyone else. Two arms then differed by more
+  // than the one variable. `prisma@7.9.1` read as "no grant helps" purely because of it:
+  // the missing artefact was a 24 MB engine downloaded by `@prisma/engines`, a DEPENDENCY,
+  // and no grant on prisma can restore what another package was denied.
+  const packages = {};
+  for (const o of others) {
+    if (o === pkg) continue;
+    packages[o] = [{ write: 'disk', network: true, notes: 'held at full grant: not the variable' }];
+  }
+
+  // State 0 is the BASE PROFILE, and the catalog spells that as NO ENTRY for this package.
+  // An entry with no capabilities is a different thing and the parser rejects it, correctly.
+  if (state.atoms.size === 0) return { packages };
 
   const grant = { notes: `grant-search cell probing "${state.label}"` };
 
@@ -70,7 +82,8 @@ function catalogFor(pkg, state) {
 
   if (state.atoms.has('network')) grant.network = true;
 
-  return { packages: { [pkg]: [grant] } };
+  packages[pkg] = [grant];
+  return { packages };
 }
 
 // ── fixture + measurement ─────────────────────────────────────────────────────
@@ -205,6 +218,24 @@ function provenance(nub) {
   };
 }
 
+
+/** Every package name in the installed tree, from the virtual store. Needed because the
+ *  background grant must name each one — the catalog is keyed by name and has no wildcard,
+ *  deliberately (a wildcard would be `disk` for everything, which is the shape this whole
+ *  model exists to avoid). Learned by one cheap `--ignore-scripts` install. */
+function discoverTree(nub, dir, pkg, version) {
+  const fx = makeFixture(dir, pkg, version, { jailOff: true });
+  runCell(nub, fx, { label: 'discover', ignoreScripts: true, pkg });
+  const store = path.join(fx.proj, 'node_modules', '.store');
+  let entries = [];
+  try { entries = fs.readdirSync(store); } catch { return []; }
+  // `.store` names entries `<name>@<version>`; scoped packages use `+` for the separator.
+  return [...new Set(entries.map((e) => {
+    const at = e.lastIndexOf('@');
+    return (at > 0 ? e.slice(0, at) : e).replace('+', '/');
+  }))];
+}
+
 // ── the walk ──────────────────────────────────────────────────────────────────
 
 /** Paths the CONTROL produced that the no-grant floor did not — i.e. what a grant must
@@ -226,7 +257,7 @@ function search(nub, pkg, version, root, keep) {
   };
   const write = (state) => {
     const f = path.join(root, `cat-${state.cost}-${state.label.replace(/[^a-z]+/gi, '')}.json`);
-    fs.writeFileSync(f, JSON.stringify(catalogFor(pkg, state), null, 2));
+    fs.writeFileSync(f, JSON.stringify(catalogFor(pkg, state, others), null, 2));
     return f;
   };
 
@@ -247,25 +278,24 @@ function search(nub, pkg, version, root, keep) {
 
   // CONTROL — scripts on, jail off. EVERY cell runs the identical two steps, so full path
   // sets are directly comparable and no baseline subtraction is needed.
+  const others = discoverTree(nub, path.join(root, 'discover'), pkg, version);
+
   const cells = [];
-  const control = cell('control', { jailOff: true, label: 'control' });
-  cells.push({ index: null, state: 'CONTROL (jail off)', cost: null, pass: control.rc === 0,
+  // THE CONTROL IS THE TOP CELL. With every other package pinned at full grant, "the tested
+  // package gets everything" is the most permissive state that exists — so it doubles as the
+  // control and the top-of-ladder check, and the two can no longer disagree about the regime
+  // they run under. A failure here means the package is broken for reasons no grant fixes.
+  const control = cell('control', { catalogFile: write(STATES[STATES.length - 1]), label: 'control (tested pkg: everything)' });
+  cells.push({ index: null, state: 'CONTROL (tested pkg: everything; all others: everything)', cost: null, pass: control.rc === 0,
                rc: control.rc, digest: control.digest, files: control.files,
                overrideEngaged: null, materialized: control.materialized });
-  if (control.rc !== 0) return { pkg, version, verdict: 'CONTROL-FAILED', cells, control: brief(control) };
+  // One check, because the control IS the most permissive state. Failing here means no
+  // grant can help — the package is broken for reasons confinement does not cause.
+  if (control.rc !== 0 || !control.overrideOk) {
+    return { pkg, version, verdict: 'BROKEN-EVEN-WITH-EVERYTHING', cells, control: brief(control) };
+  }
   const sideEffectful = hasScript;
   const matches = (r) => r.rc === control.rc && (!sideEffectful || r.digest === control.digest);
-
-  // 2. TOP first — if the widest grant cannot make it pass, no state can, so skip
-  //    the other 52. The one step that assumes monotonicity; dropping it changes
-  //    no answer, only the cost.
-  const top = cell('top', { catalogFile: write(STATES[STATES.length - 1]), label: 'top' });
-  cells.push({ index: STATES.length - 1, state: `TOP (${STATES[STATES.length - 1].label})`,
-               cost: STATES[STATES.length - 1].cost, pass: matches(top), rc: top.rc,
-               digest: top.digest, files: top.files, overrideEngaged: top.overrideOk,
-               materialized: top.materialized });
-  if (!top.overrideOk) return { pkg, version, cells, verdict: 'HARNESS-ERROR', why: 'override did not engage at top', log: top.log.slice(-400) };
-  if (!matches(top)) return { pkg, version, verdict: 'FAILS-AT-TOP', cells, control: brief(control), top: brief(top) };
 
   // 3. Ascending walk. The first pass IS the minimum.
   //    WHAT THE GRANT BUYS is recorded, not just that it was needed. State 0 is the
