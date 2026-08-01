@@ -518,6 +518,25 @@ function failureSignature(log) {
  *  release assets and ZERO for darwin-arm64, so on Apple Silicon it always compiles from source
  *  and always needs cairo/pkg-config. Recording that as "needs write.disk" would ship a wide
  *  grant for a package that never installs here regardless. */
+/** Publish date and weekly downloads, for judging whether an npm failure is suspicious.
+ *
+ *  Best-effort and never fatal: no network, no metadata, no flag — the verdict still stands on
+ *  the signature comparison. */
+function packageStanding(pkg, version) {
+  const j = (cmd, args) => {
+    const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 30_000 });
+    if (r.status !== 0) return null;
+    try { return JSON.parse(r.stdout); } catch { return null; }
+  };
+  const time = j('npm', ['view', `${pkg}@${version}`, 'time', '--json']);
+  const published = time && typeof time === 'object' ? time[version] ?? null : null;
+  const dl = j('curl', ['-sS', '--max-time', '20',
+    `https://api.npmjs.org/downloads/point/last-week/${encodeURIComponent(pkg)}`]);
+  const weekly = dl && typeof dl.downloads === 'number' ? dl.downloads : null;
+  const ageDays = published ? Math.floor((Date.now() - Date.parse(published)) / 86_400_000) : null;
+  return { published, ageDays, weeklyDownloads: weekly };
+}
+
 function npmReference(dir, pkg, version) {
   const d = path.join(dir, 'npmref');
   const fx = makeFixture(d, pkg, version, { jailOff: true });
@@ -711,6 +730,22 @@ function search(nub, pkg, version, root, keep, runDir) {
     const ref = npmReference(root, pkg, version);
     const ours = failureSignature(control.log);
     const matched = ref.rc !== 0 && !!ours && !!ref.signature && ours === ref.signature;
+
+    // ⛔ A RECENT, POPULAR PACKAGE FAILING UNDER NPM INDICTS OUR ENVIRONMENT, NOT THE PACKAGE.
+    //
+    // "npm fails too" is a sound dismissal for something old and rarely installed. It is a RED
+    // FLAG for something current with real traffic: thousands of people install that package
+    // successfully every week, so if it fails here the missing piece is almost certainly a
+    // toolchain WE have not provided, and dismissing it would silently drop a package the
+    // catalog needs.
+    //
+    // Recorded as the raw numbers, not just a boolean — the thresholds are a starting point and
+    // a reader needs the figures to re-judge them. A count cannot go quietly inert the way a
+    // flag can.
+    const standing = packageStanding(pkg, version);
+    const recent = standing.ageDays !== null && standing.ageDays < 730;
+    const popular = standing.weeklyDownloads !== null && standing.weeklyDownloads > 100_000;
+    const needsInvestigation = matched && recent && popular;
     return {
       pkg, version,
       verdict: matched ? 'BROKEN-IN-ENVIRONMENT' : 'BROKEN-EVEN-WITH-EVERYTHING',
@@ -718,6 +753,13 @@ function search(nub, pkg, version, root, keep, runDir) {
       npmReference: { rc: ref.rc, signature: ref.signature },
       failureSignature: ours,
       signaturesMatched: matched,
+      standing,
+      needsInvestigation,
+      investigationReason: needsInvestigation
+        ? `npm ALSO fails, but this is ${standing.ageDays}d old with ${standing.weeklyDownloads} `
+          + 'weekly downloads — people install it successfully every week, so suspect a missing '
+          + 'toolchain on the measuring host before accepting the dismissal'
+        : null,
       cells,
       control: baseCase(control),
       controlLogTail: (control.log || '').split('\n').slice(-40).join('\n'),
