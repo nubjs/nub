@@ -181,6 +181,12 @@
       "exit_code": 42
     },
     {
+      "name": "ERR_AUBE_METADATA_DECODE",
+      "category": "Registry / network",
+      "description": "A registry response body failed to decode. Carries the package it belongs to and an excerpt of the payload around the offending field.",
+      "exit_code": null
+    },
+    {
       "name": "ERR_AUBE_FORBIDDEN",
       "category": "Registry / network",
       "description": "Registry returned 403 — authenticated but forbidden (insufficient permissions, token scope, or blocked by policy). The registry's message is included.",
@@ -701,7 +707,7 @@
     {
       "name": "WARN_AUBE_INVALID_CONCURRENCY",
       "category": "Settings / config validation",
-      "description": "`network-concurrency` or `link-concurrency` was 0 (must be ≥ 1).",
+      "description": "`network-concurrency` or `link-concurrency` was 0, or `network-concurrency` exceeded `u32::MAX`; the value was ignored.",
       "exit_code": null
     },
     {

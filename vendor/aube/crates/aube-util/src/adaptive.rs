@@ -520,8 +520,11 @@ impl AdaptiveLimit {
         let mut s = self.hot.state.load(Ordering::Relaxed);
         loop {
             let (inflight, limit) = unpack(s);
-            let scaled = ((limit as u64).saturating_mul(num) / den.max(1)) as u32;
-            let next_limit = scaled.clamp(self.cold.bounds.0, self.cold.bounds.1);
+            // Keep the intermediate wide until it is clamped. Narrowing a
+            // value above u32::MAX first wraps it and can make a growth look
+            // like a decrease, which underflows the permit notification count.
+            let scaled = u64::from(limit).saturating_mul(num) / den.max(1);
+            let next_limit = scaled.clamp(u64::from(limit), u64::from(self.cold.bounds.1)) as u32;
             if next_limit == limit {
                 return;
             }
@@ -656,6 +659,16 @@ mod tests {
             limit.bump_limit_by(1);
         }
         assert_eq!(limit.current_limit(), 16);
+    }
+
+    #[test]
+    fn growth_near_u32_max_clamps_before_narrowing() {
+        let max = u32::MAX as usize;
+        let limit = AdaptiveLimit::new(max - 1, 1, max);
+
+        limit.scale_limit_grow(2, 1);
+
+        assert_eq!(limit.current_limit(), max);
     }
 
     #[tokio::test]

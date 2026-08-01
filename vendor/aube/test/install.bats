@@ -1313,6 +1313,17 @@ JSON
 	assert_dir_exists node_modules
 }
 
+@test "aube install --frozen-lockfile accepts large valid network-concurrency" {
+	# AdaptiveLimit stores its packed limit as u32. This valid value must
+	# remain a no-op at its configured maximum during slow-start growth,
+	# rather than wrapping into a smaller limit and panicking.
+	_setup_basic_fixture
+	run aube -v install --frozen-lockfile --network-concurrency 2147483648
+	assert_success
+	refute_output --partial "ignoring network-concurrency"
+	assert_dir_exists node_modules
+}
+
 # Fresh resolve: `"<alias>": "npm:<real>@<ver>"` must land as
 # `node_modules/<alias>/`, not `node_modules/<real>/`. The resolver
 # used to clobber `task.name` to the real name at the `npm:` rewrite
