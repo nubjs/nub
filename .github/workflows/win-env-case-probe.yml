@@ -1,0 +1,155 @@
+# Branch-scoped ad-hoc probe: does nub's lifecycle env see a Windows-spelled variable?
+#
+# THE CLAIM UNDER TEST. `reconstruct_child_env` builds an exact-case `BTreeMap` and every
+# lookup in `build_jail.rs` reads it exact-case — on a platform where env names are
+# case-INSENSITIVE. Windows' own spelling of the search path is `Path`, and npm's documented
+# env form for a config key is uppercase `NPM_CONFIG_<KEY>`, so `ambient.get("PATH")` and
+# `ambient.get("npm_config_python")` can both miss a value that is present. The miss is
+# silent: the Python grant simply resolves something else, or nothing.
+#
+# THE DIFFERENTIAL, and it is the reason this is not a self-confirming green. Two binaries
+# built in ONE job from ONE checkout — the merge-base and this branch — run the SAME native
+# build fixture under the SAME env, in which an interpreter is named ONLY through a
+# non-canonical spelling. `build_jail.python_grant`'s `chosen=` field is the readout:
+#   BEFORE  the named interpreter is invisible, so `chosen` is the PATH default (or none)
+#   AFTER   `chosen` is the interpreter the env named
+# A run where both arms choose the same thing REFUTES the fix, and says so.
+#
+# `path_keys=` on the same line answers the second half for free: it prints the spelling
+# this runner's block actually uses for the search path, which no local host can be asked.
+#
+# Two Pythons are installed on purpose. With only one, "the named interpreter" and "the PATH
+# default" are the same path and the arms cannot differ whatever the code does — a control
+# that varied nothing, which is the failure mode this repo keeps being burned by.
+name: win-env-case-probe
+
+on:
+  push:
+    branches: [probe/win-env-case]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # The merge-base this branch was cut from. Pinned rather than derived so the "before" arm
+  # cannot drift onto a moving branch head mid-probe.
+  BEFORE_REF: 676dcfcfb11a17b31c97abf782dc46e333dbeb50
+  # Windows gives the main thread a 1MB stack against Linux's 8MB and the unoptimized `fast`
+  # profile overflows it before any lifecycle script runs (measured by the win-jail-native-build
+  # probe, identically in every arm). Linking with a Linux-sized stack lets this measure the
+  # env rule instead of a debug-build frame-size artifact.
+  RUSTFLAGS: "-C link-arg=/STACK:8388608"
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The SECOND setup-python wins PATH, so 3.11 is a real, runnable interpreter that a
+      # bare-name search will NOT reach. That is what makes `chosen=` discriminating.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+        id: py_alt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # POWERSHELL, NOT BASH, and the distinction is the finding rather than a preference:
+      # Git Bash rewrites the inherited block into POSIX shape and hands `PATH` to whatever
+      # it spawns. Every Windows corpus run so far went through `run-shard.sh`, so all of
+      # them measured bash's spelling and none measured Windows'.
+      - name: Record the spellings this runner actually uses
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host "--- keys whose lowercase is 'path', as a native Windows block spells them ---"
+          node -p "JSON.stringify(Object.keys(process.env).filter(k => k.toLowerCase() === 'path'))"
+          Write-Host "--- the same question asked through Git Bash ---"
+          bash -c "node -p `"JSON.stringify(Object.keys(process.env).filter(k => k.toLowerCase() === 'path'))`""
+          Write-Host "--- what a bare-name search reaches ---"
+          (Get-Command python).Source
+          python --version
+          Write-Host "--- the interpreter this probe names through a non-canonical spelling ---"
+          & "${{ steps.py_alt.outputs.python-path }}" --version
+
+      - name: Build AFTER (this branch)
+        shell: bash
+        run: |
+          cargo build -p nub-cli --profile fast
+          cp target/fast/nub.exe nub-after.exe
+
+      - name: Build BEFORE (the merge-base)
+        shell: bash
+        run: |
+          git checkout --detach "$BEFORE_REF"
+          cargo build -p nub-cli --profile fast
+          cp target/fast/nub.exe nub-before.exe
+          git checkout -
+
+      # ONE VARIABLE between the two runs below: the binary. The env is byte-identical, and
+      # names the alt interpreter ONLY through spellings nub's exact-case lookups miss —
+      # `Python` for the `PYTHON` key, `NPM_CONFIG_PYTHON` for `npm_config_python`.
+      - name: Arm BEFORE
+        if: always()
+        shell: pwsh
+        env:
+          NUB_DIAG_PRINT: "1"
+        run: |
+          $env:Python = "${{ steps.py_alt.outputs.python-path }}"
+          $env:NPM_CONFIG_PYTHON = "${{ steps.py_alt.outputs.python-path }}"
+          node tests/win-jail-native-build/probe.mjs "$PWD/nub-before.exe" *> before.log
+          Write-Host "probe exit=$LASTEXITCODE"
+
+      - name: Arm AFTER
+        if: always()
+        shell: pwsh
+        env:
+          NUB_DIAG_PRINT: "1"
+        run: |
+          $env:Python = "${{ steps.py_alt.outputs.python-path }}"
+          $env:NPM_CONFIG_PYTHON = "${{ steps.py_alt.outputs.python-path }}"
+          node tests/win-jail-native-build/probe.mjs "$PWD/nub-after.exe" *> after.log
+          Write-Host "probe exit=$LASTEXITCODE"
+
+      # Asserts only that BOTH arms emitted the diagnostic — an arm that emitted none
+      # answers nothing, and a job green on zero lines is the vacuous result this repo keeps
+      # paying for. The grant's outcome is the FINDING to read, not a condition to pass.
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          for arm in before after; do
+            echo "======== $arm ========"
+            grep -hF "build_jail.python_grant" "$arm.log" || echo "(NONE EMITTED)"
+            echo
+          done
+          nb=$(grep -cF "build_jail.python_grant" before.log || true)
+          na=$(grep -cF "build_jail.python_grant" after.log || true)
+          echo "diag lines: before=${nb:-0} after=${na:-0}"
+          if [ "${nb:-0}" -eq 0 ] || [ "${na:-0}" -eq 0 ]; then
+            echo "VERDICT: FAILED — an arm emitted no diagnostic, so this run answers nothing."
+            exit 1
+          fi
+          echo "VERDICT: both arms measured. Compare the chosen= fields above."
+
+      - name: Upload probe logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-env-case
+          path: |
+            before.log
+            after.log
+          if-no-files-found: warn

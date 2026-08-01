@@ -689,12 +689,19 @@ fn opted_out(project_root: &Path, name: &str) -> bool {
 /// The effective child env: the current (aube) process env with the command's explicit
 /// operations applied (`Some` = set/override, `None` = removed). Non-UTF-8 keys/values
 /// are skipped.
+///
+/// WINDOWS FOLDS THE KEYS; POSIX DOES NOT. Windows env names are case-INSENSITIVE while
+/// this map is exact-case, so on that platform the raw block is the wrong shape twice over
+/// and both failures are silent — see [`canonical_env_key`].
 fn reconstruct_child_env(
     delta: &[(std::ffi::OsString, Option<std::ffi::OsString>)],
 ) -> BTreeMap<String, String> {
-    let mut env: BTreeMap<String, String> = std::env::vars_os()
-        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
-        .collect();
+    let mut env = EffectiveEnv::for_host();
+    for (key, value) in std::env::vars_os() {
+        if let (Ok(key), Ok(value)) = (key.into_string(), value.into_string()) {
+            env.set(key, value);
+        }
+    }
     for (key, value) in delta {
         let Ok(key) = key.clone().into_string() else {
             continue;
@@ -702,16 +709,127 @@ fn reconstruct_child_env(
         match value {
             Some(value) => {
                 if let Ok(value) = value.clone().into_string() {
-                    env.insert(key, value);
+                    env.set(key, value);
                 }
             }
-            None => {
-                env.remove(&key);
-            }
+            None => env.unset(&key),
         }
     }
-    env
+    env.into_map()
 }
+
+/// Accumulates the effective child env under the SPAWNING platform's name-equality rule.
+///
+/// The rule is the whole point: on POSIX two spellings are two variables, on Windows they
+/// are one. Folding at the single point the map is built is what makes every downstream
+/// `get`/`contains_key`/`insert` in this module correct without each becoming case-aware.
+///
+/// `case_insensitive` is a FIELD rather than a `cfg` so the Windows rule — ordinary string
+/// logic, and where any bug in this will be — is exercised by the tests on the dev host and
+/// not only on a Windows runner. Same reason `jail_msvc`/`jail_bin` compile everywhere.
+struct EffectiveEnv {
+    /// Folded name -> (the spelling to emit, value). Under the identity fold the key IS
+    /// the spelling.
+    inner: BTreeMap<String, (String, String)>,
+    case_insensitive: bool,
+}
+
+impl EffectiveEnv {
+    fn for_host() -> Self {
+        Self {
+            inner: BTreeMap::new(),
+            case_insensitive: cfg!(windows),
+        }
+    }
+
+    /// Last write wins, spelling included — the same rule the child block's own dedupe
+    /// (`dedupe_windows_env_pairs`) already documents, applied early enough that nub's
+    /// lookups see the folded map rather than racing it.
+    fn set(&mut self, key: String, value: String) {
+        let key = self.canonical(&key).into_owned();
+        self.inner.insert(self.fold(&key), (key, value));
+    }
+
+    fn unset(&mut self, key: &str) {
+        let folded = self.fold(&self.canonical(key));
+        self.inner.remove(&folded);
+    }
+
+    fn canonical<'a>(&self, key: &'a str) -> std::borrow::Cow<'a, str> {
+        if self.case_insensitive {
+            canonical_env_key(key)
+        } else {
+            std::borrow::Cow::Borrowed(key)
+        }
+    }
+
+    fn fold(&self, key: &str) -> String {
+        if self.case_insensitive {
+            key.to_ascii_uppercase()
+        } else {
+            key.to_string()
+        }
+    }
+
+    fn into_map(self) -> BTreeMap<String, String> {
+        self.inner.into_values().collect()
+    }
+}
+
+/// npm's own env spelling for a config key, and the prefix nub reads a dozen of them under.
+const NPM_CONFIG_PREFIX: &str = "npm_config_";
+
+/// The spelling nub's own code uses for the env names it reads or writes, given an ambient
+/// key that names the same variable in some other case.
+///
+/// TWO REAL WINDOWS SPELLINGS MAKE THIS LOAD-BEARING, not a hypothetical: Windows' OWN
+/// spelling of the search path is `Path`, and npm's documented env form for a config key is
+/// UPPERCASE `NPM_CONFIG_<KEY>` (it lowercases them itself before anything reads them). An
+/// exact-case `ambient.get("PATH")` / `get("npm_config_python")` misses both, and the miss
+/// is invisible: the Python grant returns no candidates at all, and the `npm_config_nodedir`
+/// set-if-absent reads "absent" for a value the user deliberately set. nub then inserts its
+/// own spelling beside the ambient one, and which of the two reaches the child is decided by
+/// exact-case `BTreeMap` order — nobody chose that.
+///
+/// A name outside the table keeps its ambient spelling; the fold above still collapses it to
+/// one entry. Applied only under the case-insensitive rule, i.e. never on POSIX, where the
+/// two spellings are genuinely two variables.
+fn canonical_env_key(key: &str) -> std::borrow::Cow<'_, str> {
+    if key
+        .get(..NPM_CONFIG_PREFIX.len())
+        .is_some_and(|p| p.eq_ignore_ascii_case(NPM_CONFIG_PREFIX))
+    {
+        return std::borrow::Cow::Owned(key.to_ascii_lowercase());
+    }
+    CANONICAL_ENV_KEYS
+        .iter()
+        .find(|canonical| canonical.eq_ignore_ascii_case(key))
+        .map_or(std::borrow::Cow::Borrowed(key), |canonical| {
+            std::borrow::Cow::Borrowed(*canonical)
+        })
+}
+
+/// Every env name this crate reads from or writes into the reconstructed child env with a
+/// fixed spelling. The `npm_config_*` family is a prefix rule above rather than entries here
+/// because it is open-ended — `build_prefetch` alone reads a dozen of them.
+const CANONICAL_ENV_KEYS: &[&str] = &[
+    "INIT_CWD",
+    "LIBC",
+    "NODE",
+    "NODE_COMPAT",
+    "NODE_EXECUTABLE",
+    NODE_GYP_FORCE_PYTHON,
+    "NODE_OPTIONS",
+    "PATH",
+    "PYTHON",
+    "npm_node_execpath",
+    // node-gyp's MSVC short-circuit trio, whose stamp is all-three-or-nothing
+    // (`jail_msvc`): an ambient spelling surviving beside one of nub's would be exactly the
+    // half-nub/half-ambient trio that module refuses to produce.
+    "VCINSTALLDIR",
+    "VSCMD_VER",
+    "WindowsSDKVersion",
+];
 
 /// The per-OS home anchors for the build-jail compile, with the project anchored at
 /// the install's project root. Mirrors `cli::sandbox_homes`, differing only in the
@@ -1034,7 +1152,7 @@ fn python_grant_diag(
 /// How far below the package root a gyp manifest is looked for. `ssh2` needs 3
 /// (`lib/protocol/crypto/binding.gyp`); the extra level is headroom for the same idiom one
 /// directory deeper, not a claim any package uses it.
-const GYP_MANIFEST_SEARCH_DEPTH: usize = 4;
+pub(super) const GYP_MANIFEST_SEARCH_DEPTH: usize = 4;
 
 /// Does this package ship a gyp manifest node-gyp could be pointed at?
 ///
@@ -1052,7 +1170,7 @@ const GYP_MANIFEST_SEARCH_DEPTH: usize = 4;
 /// what bounds what may be executed. `node_modules` is skipped: a dependency's manifest
 /// describes that dependency's build, not this one's. Symlinked directories are not
 /// descended (`DirEntry::file_type` does not follow them), so the walk cannot loop.
-fn has_gyp_manifest(dir: &Path, depth: usize) -> bool {
+pub(super) fn has_gyp_manifest(dir: &Path, depth: usize) -> bool {
     if dir.join("binding.gyp").exists() {
         return true;
     }
@@ -1408,6 +1526,84 @@ mod tests {
         assert!(supports_import("22.23.1"));
         assert!(!supports_import(""));
         assert!(!supports_import("v20.6.0"));
+    }
+
+    fn effective_env(case_insensitive: bool, pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        let mut env = EffectiveEnv {
+            inner: BTreeMap::new(),
+            case_insensitive,
+        };
+        for (k, v) in pairs {
+            env.set((*k).to_string(), (*v).to_string());
+        }
+        env.into_map()
+    }
+
+    /// The two spellings that are not hypothetical: `Path` is Windows' OWN spelling of the
+    /// search path, and `NPM_CONFIG_<KEY>` is npm's documented env form. Both were invisible
+    /// to the exact-case lookups this module makes — `python_candidates` reads `PATH` and
+    /// `npm_config_python`, and a miss on either silently empties the interpreter search
+    /// rather than failing.
+    #[test]
+    fn the_windows_rule_folds_the_two_spellings_windows_and_npm_actually_use() {
+        let raw = &[
+            ("Path", r"C:\Windows"),
+            ("NPM_CONFIG_PYTHON", r"C:\Python312\python.exe"),
+            ("NPM_CONFIG_NODEDIR", r"C:\hdrs"),
+        ];
+
+        let win = effective_env(true, raw);
+        assert_eq!(win.get("PATH").map(String::as_str), Some(r"C:\Windows"));
+        assert_eq!(
+            win.get("npm_config_python").map(String::as_str),
+            Some(r"C:\Python312\python.exe"),
+            "an uppercase npm config key must reach the lookup that reads it"
+        );
+        assert!(
+            win.contains_key("npm_config_nodedir"),
+            "the set-if-absent gate must see a user-set nodedir, not insert over it"
+        );
+
+        // POSIX spellings are genuinely distinct variables, so nothing is rewritten there.
+        let posix = effective_env(false, raw);
+        assert!(posix.contains_key("Path") && !posix.contains_key("PATH"));
+        assert!(posix.contains_key("NPM_CONFIG_PYTHON"));
+    }
+
+    /// Under the Windows rule a name has ONE entry however it was spelled. Two surviving
+    /// spellings is the shape that reaches a .NET consumer down the chain as
+    /// `ArgumentException: Item has already been added` (dotnet/msbuild#5726), and — before
+    /// that — leaves which value the child gets to exact-case map order.
+    #[test]
+    fn the_windows_rule_keeps_one_entry_per_name_and_the_last_write_wins() {
+        let folded = effective_env(
+            true,
+            &[
+                ("HTTP_PROXY", "http://first"),
+                ("http_proxy", "http://second"),
+            ],
+        );
+        assert_eq!(folded.len(), 1);
+        // Not in CANONICAL_ENV_KEYS, so the spelling is the last writer's, not a rewrite.
+        assert_eq!(
+            folded.get("http_proxy").map(String::as_str),
+            Some("http://second")
+        );
+    }
+
+    /// A removal in the spawn's env delta has to honour the same name-equality rule as a
+    /// set, or a variable aube meant to clear survives under another case.
+    #[test]
+    fn the_windows_rule_unsets_a_variable_however_it_was_spelled() {
+        let mut env = EffectiveEnv {
+            inner: BTreeMap::new(),
+            case_insensitive: true,
+        };
+        env.set("Path".to_string(), r"C:\Windows".to_string());
+        env.set("SomeVar".to_string(), "v".to_string());
+        env.unset("path");
+        env.unset("SOMEVAR");
+        assert!(env.into_map().is_empty());
     }
 
     /// Only an explicit `false` unjails. The `true` and absent cases are not symmetry

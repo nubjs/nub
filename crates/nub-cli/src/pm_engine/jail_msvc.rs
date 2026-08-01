@@ -113,21 +113,50 @@ pub(super) fn resolve(
     }
     // Same gate, and the same reason, as the Python pre-resolution: resolving spends two
     // process spawns, and only a package node-gyp will configure can spend them usefully.
-    if !spawn.package_dir.join("binding.gyp").exists() {
+    // SEARCHED, not root-only, for the reason `has_gyp_manifest` documents: `ssh2` keeps its
+    // manifest at `lib/protocol/crypto/binding.gyp`, and a root-only gate reads that as "no
+    // native build here" — which is exactly the miss that cost the Python grant a lane.
+    if !super::build_jail::has_gyp_manifest(
+        &spawn.package_dir,
+        super::build_jail::GYP_MANIFEST_SEARCH_DEPTH,
+    ) {
         return None;
     }
     if ENV_KEYS.iter().all(|key| lookup(ambient, key).is_some()) {
         return None;
     }
+    // `None` means the machine genuinely has no Visual Studio, so node-gyp's own report of
+    // that is true and there is nothing to translate.
     let toolchain = cached()?;
     // Re-gated per call rather than inside the cache, because the scope is per-package while
     // the machine's Visual Studio is not. A path under the project or any `node_modules` is
     // not a toolchain nub will name or grant, however it was arrived at.
-    toolchain
-        .reads
-        .iter()
-        .all(|read| probe.allows(read))
-        .then_some(toolchain)
+    if !toolchain.reads.iter().all(|read| probe.allows(read)) {
+        warn_toolchain_will_look_absent();
+        return None;
+    }
+    Some(toolchain)
+}
+
+/// Say out loud that the "no Visual Studio" node-gyp is about to print is nub's doing.
+///
+/// THE ONLY STATE THIS FIRES IN is: the machine HAS an installation nub resolved out of jail,
+/// and nub withheld the stamp anyway. node-gyp then falls back to discovery routes an
+/// AppContainer cannot complete — the COM server is denied outright, and the PowerShell route
+/// compiles a C# assembly into `%TEMP%`, which is measurably where a jailed node-gyp reports
+/// `find VS could not use PowerShell to find Visual Studio 2017 or newer` and
+/// `Could not find any Visual Studio installation to use`. That message names a broken
+/// toolchain and the toolchain is fine; without this line the reader spends the afternoon on
+/// their VS install. Once per process, because the resolution is a property of the machine.
+fn warn_toolchain_will_look_absent() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        super::present::warn(
+            "warning: a Visual Studio installation is present but outside what the build \
+             sandbox may name, so native builds will report that no Visual Studio was found. \
+             The toolchain is not the problem.",
+        );
+    });
 }
 
 /// The resolution is a property of the MACHINE, so it is computed once per process and reused
