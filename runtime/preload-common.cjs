@@ -1230,26 +1230,16 @@ function restoreCompileCacheEnv() {
 // require() has zero added overhead. If the user never requires child_process, the
 // module is never loaded and the builtins stay out of the load list — matching Node.
 let __cpWrapArmed = false;
-// `nub compile` replaces process.execPath with the outer artifact so programs can
-// identify themselves as that executable. fork() must instead keep launching the
-// real Node binary, unless the caller selected an execPath explicitly.
-let __compiledForkExecPath;
-let __compiledForkRequireArg;
-let __compiledForkCompiledExecPath;
-let __compiledForkNeutralizeLocalStorage;
+// Compiled artifacts spawn children whose NODE_COMPILE_CACHE needs the same R8
+// treatment as an ordinary Nub run. Their fork IDENTITY policy (real executable,
+// bootstrap-first execArgv, private env channel) is NOT here: it has to be armed
+// before the entry chunk's static builtin imports evaluate, so compile-bootstrap.cjs
+// owns it. See the note there before adding fork behavior to this file.
+let __compiledArtifact = false;
 
-function installCompiledForkExecPath(
-  realNodeExecPath,
-  requireArg,
-  compiledExecPath,
-  neutralizeLocalStorage,
-) {
-  if (typeof realNodeExecPath !== "string" || realNodeExecPath.length === 0) return;
-  __compiledForkExecPath = realNodeExecPath;
-  __compiledForkRequireArg = requireArg;
-  __compiledForkCompiledExecPath = compiledExecPath;
-  __compiledForkNeutralizeLocalStorage = neutralizeLocalStorage;
-  // ESM `import { fork } from "node:child_process"` bypasses Module._load, so a
+function installCompiledChildProcess() {
+  __compiledArtifact = true;
+  // ESM `import { spawn } from "node:child_process"` bypasses Module._load, so a
   // compiled artifact must eagerly load + patch the builtin and synchronize its
   // named ESM exports. This startup cost is compiled-only; normal Nub preloads
   // continue to defer child_process until CommonJS user code requires it.
@@ -1388,67 +1378,26 @@ function wrapChildProcessCompileCache(cp) {
   cp.execFile = wrapSpawnLike(cp.execFile);
   cp.execFileSync = wrapSpawnLike(cp.execFileSync);
 
-  const compiledForkExecArgv = (execArgv) => {
-    if (execArgv && !Array.isArray(execArgv)) return execArgv;
-    const args = execArgv || process.execArgv;
-    if (!Array.isArray(args)) return args;
-    return [
-      __compiledForkRequireArg,
-      ...args.filter((arg) => arg !== __compiledForkRequireArg),
-    ];
-  };
-
-  // fork() normally runs `process.execPath`, so it is a node target. Compiled
-  // artifacts expose their outer path there, but must fork with the captured real
-  // Node executable unless the caller supplied a truthy `options.execPath`. Its
-  // signature is (modulePath, args?, options?); retain every call shape while
-  // combining the compile-cache rewrite with the compiled-executable override.
+  // fork() always launches a node target, so the compile-cache rewrite applies to
+  // every (modulePath, args?, options?) shape — but only where the caller passed an
+  // options object, matching what the spawn-like wrappers do. Restricted to compiled
+  // artifacts because an ordinary Nub run reaches fork through the same
+  // `restoreCompileCacheEnv` path its children already use.
   const origFork = cp.fork;
   cp.fork = function (modulePath, ...rest) {
     let optIdx = -1;
-    if (rest.length === 0) {
-      optIdx = 0;
-    } else if (rest.length === 1) {
+    if (rest.length === 1) {
       const [arg] = rest;
-      if (Array.isArray(arg)) optIdx = 1;
-      else if (arg == null || typeof arg === "object") optIdx = 0;
+      if (arg !== null && typeof arg === "object" && !Array.isArray(arg)) optIdx = 0;
     } else if (rest.length === 2) {
       const [args, options] = rest;
       if ((Array.isArray(args) || args == null) &&
-          (options == null || (typeof options === "object" && !Array.isArray(options)))) {
+          options !== null && typeof options === "object" && !Array.isArray(options)) {
         optIdx = 1;
       }
     }
-    if (optIdx >= 0 && __compiledForkExecPath) {
-      const originalOptions = optIdx < rest.length ? rest[optIdx] : undefined;
-      const customEnv = originalOptions && typeof originalOptions === "object"
-        ? originalOptions.env
-        : undefined;
-      const hasCustomEnv =
-        customEnv !== null &&
-        typeof customEnv === "object" &&
-        !Array.isArray(customEnv);
-      const options = originalOptions && typeof originalOptions === "object"
-        ? stripFromOptions(originalOptions)
-        : {};
-      const compiledOptions = { ...options };
-      if (!compiledOptions.execPath) compiledOptions.execPath = __compiledForkExecPath;
-      if (__compiledForkRequireArg) {
-        compiledOptions.execArgv = compiledForkExecArgv(compiledOptions.execArgv);
-      }
-      if (hasCustomEnv) {
-        compiledOptions.env = {
-          ...compiledOptions.env,
-          ...(typeof __compiledForkCompiledExecPath === "string" && __compiledForkCompiledExecPath.length > 0
-            ? { __NUB_COMPILED_EXEC_PATH: __compiledForkCompiledExecPath }
-            : {}),
-          ...(__compiledForkNeutralizeLocalStorage
-            ? { __NUB_NEUTRALIZE_LOCALSTORAGE: "1" }
-            : {}),
-        };
-      }
-      if (optIdx === rest.length) rest.push(compiledOptions);
-      else rest[optIdx] = compiledOptions;
+    if (__compiledArtifact && optIdx >= 0) {
+      rest[optIdx] = stripFromOptions(rest[optIdx]);
     }
     return origFork.call(this, modulePath, ...rest);
   };
@@ -1563,6 +1512,6 @@ module.exports = {
   installTemporalGlobal,
   installTemporalLazyGlobal,
   restoreCompileCacheEnv,
-  installCompiledForkExecPath,
+  installCompiledChildProcess,
   reenableUserCompileCache,
 };

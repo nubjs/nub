@@ -1,6 +1,5 @@
 // Runtime globals compiled artifacts need without Nub's loader or installed runtime.
 const bootstrap = process[Symbol.for("nub.compile.bootstrap")];
-const realNodeExecPath = process.execPath;
 const COMPILED_WORKER_STATE = "nub.compile.worker-state";
 const workerThreads = bootstrap.getBuiltin("node:worker_threads");
 
@@ -59,7 +58,7 @@ import * as float16 from "@petamoriken/float16";
 import { Temporal, toTemporalInstant } from "@js-temporal/polyfill";
 import { installSyncPolyfills } from "./polyfills.cjs";
 import {
-  installCompiledForkExecPath,
+  installCompiledChildProcess,
   installTemporalGlobal,
 } from "./preload-common.cjs";
 import {
@@ -80,12 +79,7 @@ export function installCompilePreamble() {
   setWorkerCreateRequire(bootstrap.createRequire);
   setCompiledBootstrapRequireArg(bootstrap.requireArg);
 
-  installCompiledForkExecPath(
-    realNodeExecPath,
-    bootstrap.requireArg,
-    compiledExecPath,
-    neutralizeLocalStorage,
-  );
+  installCompiledChildProcess();
   if (compiledExecPath !== undefined) {
     process.execPath = compiledExecPath;
     process.argv[0] = compiledExecPath;
