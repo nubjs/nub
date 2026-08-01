@@ -229,17 +229,48 @@ fn nub_internal_seed(resolved_seed: &[String]) -> Vec<String> {
 /// closure/seed policy — is unit-tested with injected flags and never touches
 /// the host store. The resolved seed is filtered through [`nub_internal_seed`].
 fn expand(graph: &LockfileGraph, seed_names: &[String]) -> DiskMaterializePlan {
-    let mut plan = plan_from_flags(
-        graph,
-        &nub_internal_seed(seed_names),
-        &dynamic_phantom_flags(graph),
-    );
+    // THE STORE IS BUILT FIRST because the script seed below needs it. Same handle the
+    // nested-optional-dep predicate uses; no store means no manifest to read, which reports no
+    // scripts and leaves every package on the unchanged sibling-symlink path.
+    let store = crate::dynamic_phantom::store_v1_dir()
+        .map(|store_v1| aube_store::Store::at(store_v1.join("files")));
+
+    // EVERY PACKAGE THAT DECLARES A LIFECYCLE SCRIPT IS SEEDED, replacing a curated 21-name
+    // list. A script cannot read the consuming project from the global store: it walks UP from
+    // its own directory looking for the project root and lands in `~/.cache/` instead, so a
+    // hook installer writes nothing and exits 0 — a silent no-op no grant can fix, because it
+    // is a LAYOUT problem wearing a permissions costume.
+    //
+    // Keyed on the manifest, not on names. `declares_install_script` reads package.json out of
+    // the CAS and checks preinstall/install/postinstall, so a package nobody thought to list is
+    // covered and a listed package that stopped needing it costs nothing.
+    //
+    // This is where bun, yarn PnP and pnpm independently converged: bun excludes script-runners
+    // from its global store ("a shared global copy would either diverge from the patch or be
+    // mutated underneath other projects"), yarn PnP unplugs build-script packages, pnpm defaults
+    // builds off under its global virtual store. None of them uses a name list. Bun had to seed
+    // on trusted-ness instead because `hasInstallScript` is absent from `bun.lock`; nub reads
+    // the manifest at plan time, so it can seed on the precise predicate.
+    //
+    // Over-seeding is the SAFE direction: an extra package materializes project-local and loses
+    // store sharing. Under-seeding is a package that silently does nothing.
+    let mut script_seeds: Vec<String> = Vec::new();
+    if let Some(store) = store.as_ref() {
+        let mut seen: HashSet<&str> = HashSet::new();
+        for pkg in graph.packages.values() {
+            if seen.insert(pkg.name.as_str()) && declares_install_script(store, pkg) {
+                script_seeds.push(pkg.name.clone());
+            }
+        }
+    }
+    let mut all_seeds = nub_internal_seed(seed_names);
+    all_seeds.extend(script_seeds);
+
+    let mut plan = plan_from_flags(graph, &all_seeds, &dynamic_phantom_flags(graph));
     // Store handle built ONCE and captured, matching `dynamic_phantom_flags`
     // above. No store (a `storeDir` override the sidecar helpers do not know
     // about) reports no scripts, which leaves every package on the unchanged
     // sibling-symlink path.
-    let store = crate::dynamic_phantom::store_v1_dir()
-        .map(|store_v1| aube_store::Store::at(store_v1.join("files")));
     plan.nested_optional_deps = nested_optional_dep_pairs(graph, &|pkg: &LockedPackage| {
         store
             .as_ref()
