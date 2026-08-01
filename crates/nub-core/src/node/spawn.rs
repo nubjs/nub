@@ -510,16 +510,15 @@ pub fn spawn_group_reaper(child_pid: u32) -> Option<GroupReaper> {
         }
     };
     // `current_exe()` is whatever NAME nub is running under — for any workload
-    // spawned through nub's own PATH shim that is `node`, not `nub`. The verb
-    // below is therefore dispatched in `cli::run()` ABOVE argv0 detection; when
-    // it hung off the `nub`-only argv0 arm, a shim-named re-invocation ran
-    // `__pdeath-watch` as a SCRIPT and spawned another watcher per level (regression from #504).
+    // spawned through nub's own PATH shim that is `node`, not `nub`. Select the
+    // watcher with the launcher's private mode env instead of a reserved argv
+    // token, so its PID/read-fd payload stays ordinary process arguments.
     let Ok(exe) = std::env::current_exe() else {
         close_both();
         return None;
     };
     let mut cmd = Command::new(exe);
-    cmd.arg("__pdeath-watch")
+    cmd.env("__NUB_COMPILED_LAUNCHER_MODE", "pdeath-watch")
         .arg(child_pid.to_string())
         .arg("3")
         .stdin(std::process::Stdio::null())
@@ -611,7 +610,7 @@ impl Drop for GroupReaper {
     }
 }
 
-/// The `__pdeath-watch` hidden-verb entry: `<child-pgid> <read-fd>` — the
+/// The `pdeath-watch` private launcher mode: `<child-pgid> <read-fd>` — the
 /// watcher half of [`spawn_group_reaper`]. Returns the process exit code.
 #[cfg(unix)]
 pub fn run_pdeath_watch(args: &[String]) -> i32 {
@@ -853,7 +852,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // supplied `--experimental-webstorage` / `--no-experimental-webstorage` (no
         // double-add; respect an explicit disable — nub never re-enables over a user
         // negation).
-        if should_inject_webstorage_flag(
+        if flags::should_inject_experimental_webstorage(
             &config.node.version,
             config.user_args,
             node_options.as_deref(),
@@ -872,12 +871,12 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // When the user passes `--localstorage-file`, this is skipped and
         // `localStorage` works normally. The signal is an internal `__NUB_*` env var
         // (brand-boundary-permitted plumbing); the preload deletes it after reading.
-        if should_neutralize_localstorage(
+        if flags::should_neutralize_experimental_webstorage_localstorage(
             &config.node.version,
             config.user_args,
             node_options.as_deref(),
         ) {
-            cmd.env(NEUTRALIZE_LOCALSTORAGE_ENV, "1");
+            cmd.env(flags::NEUTRALIZE_LOCALSTORAGE_ENV, "1");
         }
 
         // PATH shim: prepend a temp dir with a `node` symlink → nub.
@@ -1102,7 +1101,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // `node` re-invocation inherits the flag and `sessionStorage` works out of
         // the box. nub never synthesizes `--localstorage-file`. Same guard: only
         // in-band, and not if the user already supplied/disabled the flag.
-        if should_inject_webstorage_flag(
+        if flags::should_inject_experimental_webstorage(
             &config.node.version,
             config.user_args,
             node_options.as_deref(),
@@ -1821,7 +1820,11 @@ pub fn compute_augmentation_env(
     // `--localstorage-file`. (Scripts have no argv here — the only user channel is
     // NODE_OPTIONS.) Guarded against double-add / a user
     // `--no-experimental-webstorage` disable.
-    if should_inject_webstorage_flag(&node_version, &[], existing_node_options.as_deref()) {
+    if flags::should_inject_experimental_webstorage(
+        &node_version,
+        &[],
+        existing_node_options.as_deref(),
+    ) {
         node_opts_parts.push("--experimental-webstorage".to_string());
     }
     // localStorage-neutralize decision: compute BEFORE `existing_node_options` is
@@ -1829,8 +1832,11 @@ pub fn compute_augmentation_env(
     // NODE_OPTIONS. Neutralize when nub injects the flag (flag-needed band, no user
     // `--no-experimental-webstorage`) AND the user hasn't opted into persistence via
     // `--localstorage-file`.
-    let neutralize_localstorage =
-        should_neutralize_localstorage(&node_version, &[], existing_node_options.as_deref());
+    let neutralize_localstorage = flags::should_neutralize_experimental_webstorage_localstorage(
+        &node_version,
+        &[],
+        existing_node_options.as_deref(),
+    );
     if let Some(existing) = existing_node_options {
         // Snip below-floor version-gated flags out of the inherited NODE_OPTIONS
         // before appending (mirror of the direct-spawn site above) — a gated flag
@@ -1879,7 +1885,7 @@ pub struct AugmentationEnv {
     /// child so nub's preload replaces the throwing `localStorage` getter with
     /// `undefined` (the flag-needed band, no user `--localstorage-file`). Consumers
     /// apply it via [`AugmentationEnv::apply_localstorage_env`]. See
-    /// `should_neutralize_localstorage`.
+    /// `flags::should_neutralize_experimental_webstorage_localstorage`.
     pub neutralize_localstorage: bool,
 }
 
@@ -1902,7 +1908,7 @@ impl AugmentationEnv {
     /// the minimal `env`-setting shape they share.
     pub fn apply_localstorage_env(&self, set_env: impl FnOnce(&str, &str)) {
         if self.neutralize_localstorage {
-            set_env(NEUTRALIZE_LOCALSTORAGE_ENV, "1");
+            set_env(flags::NEUTRALIZE_LOCALSTORAGE_ENV, "1");
         }
     }
 
@@ -1947,84 +1953,6 @@ fn is_permission_flag(arg: &str) -> bool {
     let token = arg.split('=').next().unwrap_or(arg);
     PERMISSION_FLAGS.contains(&token)
 }
-
-/// Whether the user already supplied the `--experimental-webstorage` flag in
-/// either polarity (`--experimental-webstorage` or `--no-experimental-webstorage`)
-/// via argv or NODE_OPTIONS. When true, nub must NOT add its own
-/// `--experimental-webstorage`: a duplicate positive is redundant, and overriding a
-/// user's explicit `--no-experimental-webstorage` would defeat their disable
-/// (and nub never re-enables over a user negation). Pure over its inputs.
-fn user_has_webstorage_flag(user_args: &[String], node_options: Option<&str>) -> bool {
-    let is_ws = |t: &str| t == "--experimental-webstorage" || t == "--no-experimental-webstorage";
-    let in_argv = user_args.iter().any(|a| is_ws(a));
-    let in_opts = node_options
-        .map(|o| o.split_whitespace().any(is_ws))
-        .unwrap_or(false);
-    in_argv || in_opts
-}
-
-/// Whether nub should inject `--experimental-webstorage` for this invocation
-/// (the maintainer, 2026-06-15: "a flag that we inject no matter what"). True iff the Node
-/// version is on the flag-needed band (22.4 through <25, where the flag both EXISTS
-/// and is still REQUIRED) AND the user hasn't already supplied the flag in either
-/// polarity. The inject is UNCONDITIONAL on the band — it does not depend on any
-/// `--localstorage-file` opt-in — so `sessionStorage` works out of the box; it
-/// installs the `localStorage` getter too (which throws on access until the user
-/// supplies their own `--localstorage-file`; nub never synthesizes one). Below 22.4
-/// the flag is a "bad option" startup crash; on 25+ Web Storage is native so the
-/// flag is unnecessary. Pure over its inputs for testability.
-fn should_inject_webstorage_flag(
-    node_version: &super::version::NodeVersion,
-    user_args: &[String],
-    node_options: Option<&str>,
-) -> bool {
-    flags::webstorage_flag_needed(node_version)
-        && !user_has_webstorage_flag(user_args, node_options)
-}
-
-/// Whether the user supplied a `--localstorage-file[=<path>]` (in either argv or
-/// NODE_OPTIONS). When true, the user has explicitly opted into persistent
-/// `localStorage`, so nub must NOT neutralize the global — it forwards the file
-/// verbatim and `localStorage` works normally. Matches both the `=`-joined form
-/// (`--localstorage-file=/p`) and the space-separated form (`--localstorage-file /p`),
-/// which appears as a bare `--localstorage-file` token. Pure over its inputs.
-fn user_has_localstorage_file(user_args: &[String], node_options: Option<&str>) -> bool {
-    let is_lsf = |t: &str| t == "--localstorage-file" || t.starts_with("--localstorage-file=");
-    let in_argv = user_args.iter().any(|a| is_lsf(a));
-    let in_opts = node_options
-        .map(|o| o.split_whitespace().any(is_lsf))
-        .unwrap_or(false);
-    in_argv || in_opts
-}
-
-/// Whether nub should NEUTRALIZE the `localStorage` global to read `undefined`
-/// (matching Node 25+'s clean shape) for this invocation (the maintainer, 2026-06-15). True
-/// iff nub is injecting `--experimental-webstorage` on the flag-needed band AND the
-/// user did NOT supply their own `--localstorage-file`. On that band the injected
-/// flag installs a `localStorage` getter that THROWS `ERR_INVALID_ARG_VALUE` on
-/// access (even `typeof localStorage` throws) until a `--localstorage-file` is
-/// supplied — so when the user hasn't opted into persistence, nub replaces that
-/// throwing getter with a plain `undefined` value in its startup preload, leaving
-/// `sessionStorage` (which needs only the flag) fully working and making
-/// `typeof localStorage === "undefined"` feature-detection safe. When the user DOES
-/// pass `--localstorage-file`, this is false — `localStorage` works normally. The
-/// neutralization is signaled to the preload via the internal
-/// `__NUB_NEUTRALIZE_LOCALSTORAGE` env var. Pure over its inputs for testability.
-fn should_neutralize_localstorage(
-    node_version: &super::version::NodeVersion,
-    user_args: &[String],
-    node_options: Option<&str>,
-) -> bool {
-    should_inject_webstorage_flag(node_version, user_args, node_options)
-        && !user_has_localstorage_file(user_args, node_options)
-}
-
-/// Internal env var that tells nub's startup preload to neutralize the
-/// `localStorage` global (replace the throwing getter with `undefined`). An
-/// internal `__NUB_*` plumbing var, NOT a user knob — explicitly permitted by the
-/// brand boundary. The preload deletes it after reading so it does not leak to
-/// grandchild processes.
-const NEUTRALIZE_LOCALSTORAGE_ENV: &str = "__NUB_NEUTRALIZE_LOCALSTORAGE";
 
 /// Carries the running binary's version (`env!("CARGO_PKG_VERSION")`) to the
 /// preload, which publishes it as `process.versions.nub` — the universal
@@ -2181,7 +2109,7 @@ fn is_reentrant_in(node_options: Option<&str>, preload: Option<&str>) -> bool {
 /// `\\?\UNC\`) that `fs::canonicalize` emits. Node's module loader and NODE_PATH
 /// reject them. Returns a native Windows path (backslashes preserved — valid for
 /// NODE_PATH and fs ops). Pure over `windows` so both branches test on any host.
-fn strip_verbatim(path: &str, windows: bool) -> String {
+pub(crate) fn strip_verbatim(path: &str, windows: bool) -> String {
     if windows {
         if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
             return format!(r"\\{rest}");
@@ -2658,191 +2586,74 @@ mod tests {
     }
 
     #[test]
-    fn webstorage_flag_always_injected_on_band_without_localstorage_file() {
-        // the maintainer, 2026-06-15: nub injects --experimental-webstorage "no matter what"
-        // on the flag-needed band (22.4–24), with NO --localstorage-file present —
-        // so sessionStorage works out of the box. (a) in-band with no file → inject.
-        for ver in [
-            NodeVersion::new(22, 4, 0),
-            NodeVersion::new(22, 15, 0),
-            NodeVersion::new(24, 0, 0),
-            NodeVersion::new(24, 99, 0),
-        ] {
-            assert!(
-                should_inject_webstorage_flag(&ver, &[], None),
-                "must inject --experimental-webstorage on {ver:?} with no --localstorage-file"
-            );
-        }
+    fn direct_spawn_policy_respects_quoted_node_options() {
+        // `spawn_node` passes its original argv plus inherited NODE_OPTIONS to the
+        // shared policy. A quoted explicit disable must prevent a direct child
+        // from receiving nub's positive Web Storage flag.
+        let version = NodeVersion::new(22, 15, 0);
+        let user_args = ["app.js".to_string()];
+        assert!(!flags::should_inject_experimental_webstorage(
+            &version,
+            &user_args,
+            Some("\"--no-experimental-webstorage\""),
+        ));
+        assert!(
+            !flags::should_neutralize_experimental_webstorage_localstorage(
+                &version,
+                &user_args,
+                Some("\"--no-experimental-webstorage\""),
+            )
+        );
+
+        // A quoted storage-file value preserves the flag injection for
+        // sessionStorage while keeping localStorage usable.
+        let storage_file = "--localstorage-file=\"/tmp/nub storage.sqlite\"";
+        assert!(flags::should_inject_experimental_webstorage(
+            &version,
+            &user_args,
+            Some(storage_file),
+        ));
+        assert!(
+            !flags::should_neutralize_experimental_webstorage_localstorage(
+                &version,
+                &user_args,
+                Some(storage_file),
+            )
+        );
     }
 
     #[test]
-    fn webstorage_flag_not_injected_below_floor_or_when_native() {
-        // (b) below 22.4 the flag is an unrecognized "bad option" → never inject.
-        for ver in [NodeVersion::new(18, 19, 0), NodeVersion::new(22, 3, 0)] {
-            assert!(
-                !should_inject_webstorage_flag(&ver, &[], None),
-                "must NOT inject below the 22.4 floor ({ver:?}) — would crash startup"
-            );
-        }
-        // (c) on 25+ Web Storage is native → the flag is unnecessary, don't inject.
-        for ver in [NodeVersion::new(25, 0, 0), NodeVersion::new(26, 2, 0)] {
-            assert!(
-                !should_inject_webstorage_flag(&ver, &[], None),
-                "must NOT inject on {ver:?} — Web Storage is native there"
-            );
-        }
-    }
-
-    #[test]
-    fn webstorage_flag_not_double_injected_when_user_supplied() {
-        // (e) user already passed the flag (either polarity, either channel) → nub
-        // must not double-inject / must respect an explicit disable.
-        let s = |v: &str| v.to_string();
-        let v = NodeVersion::new(22, 15, 0);
-        assert!(!should_inject_webstorage_flag(
-            &v,
-            &[s("--experimental-webstorage")],
-            None
-        ));
-        assert!(!should_inject_webstorage_flag(
-            &v,
+    fn script_spawn_policy_respects_quoted_node_options() {
+        // `compute_augmentation_env` has no argv channel: its script-shell
+        // Web Storage decision comes solely from inherited NODE_OPTIONS. Keep
+        // quoted user intent identical to the ordinary/direct spawn path.
+        let version = NodeVersion::new(22, 15, 0);
+        assert!(!flags::should_inject_experimental_webstorage(
+            &version,
             &[],
-            Some("--experimental-webstorage")
+            Some("'--experimental-webstorage'"),
         ));
-        assert!(!should_inject_webstorage_flag(
-            &v,
-            &[s("--no-experimental-webstorage")],
-            None
-        ));
-        assert!(!should_inject_webstorage_flag(
-            &v,
+        assert!(
+            !flags::should_neutralize_experimental_webstorage_localstorage(
+                &version,
+                &[],
+                Some("'--experimental-webstorage'"),
+            )
+        );
+
+        let storage_file = "--localstorage-file='/tmp/nub storage.sqlite'";
+        assert!(flags::should_inject_experimental_webstorage(
+            &version,
             &[],
-            Some("--no-experimental-webstorage")
+            Some(storage_file),
         ));
-        // A --localstorage-file opt-in does NOT change the in-band decision — the
-        // flag injects either way; (d) nub never synthesizes --localstorage-file, so
-        // its presence/absence is irrelevant to whether the flag is injected.
-        assert!(should_inject_webstorage_flag(
-            &v,
-            &[s("--localstorage-file=/tmp/x.sqlite")],
-            None
-        ));
-    }
-
-    #[test]
-    fn existing_user_webstorage_flag_suppresses_injection() {
-        let s = |v: &str| v.to_string();
-        // Neither polarity present → nub may inject.
-        assert!(!user_has_webstorage_flag(&[s("app.js")], None));
-        // User already passed the positive → don't double-add.
-        assert!(user_has_webstorage_flag(
-            &[s("--experimental-webstorage")],
-            None
-        ));
-        assert!(user_has_webstorage_flag(
-            &[],
-            Some("--experimental-webstorage")
-        ));
-        // User explicitly disabled → respect it, never re-enable.
-        assert!(user_has_webstorage_flag(
-            &[s("--no-experimental-webstorage")],
-            None
-        ));
-        assert!(user_has_webstorage_flag(
-            &[],
-            Some("--no-experimental-webstorage --localstorage-file=/tmp/x")
-        ));
-    }
-
-    #[test]
-    fn user_localstorage_file_detected_in_either_channel() {
-        let s = |v: &str| v.to_string();
-        // Absent → not detected.
-        assert!(!user_has_localstorage_file(&[s("app.js")], None));
-        // `=`-joined form, argv.
-        assert!(user_has_localstorage_file(
-            &[s("--localstorage-file=/tmp/x.sqlite")],
-            None
-        ));
-        // Space-separated form (bare token), argv.
-        assert!(user_has_localstorage_file(
-            &[s("--localstorage-file"), s("/tmp/x.sqlite")],
-            None
-        ));
-        // Via NODE_OPTIONS.
-        assert!(user_has_localstorage_file(
-            &[],
-            Some("--experimental-webstorage --localstorage-file=/tmp/x.sqlite")
-        ));
-        // A look-alike that is NOT the flag must not match.
-        assert!(!user_has_localstorage_file(
-            &[s("--localstorage-file-extra")],
-            None
-        ));
-    }
-
-    #[test]
-    fn neutralize_localstorage_gate_set_iff_flag_injected_and_no_user_file() {
-        let s = |v: &str| v.to_string();
-        // (a) On the flag-needed band with NO user --localstorage-file → neutralize:
-        // nub injects the flag, the user didn't opt into persistence, so the throwing
-        // getter must be replaced with `undefined`.
-        for ver in [
-            NodeVersion::new(22, 4, 0),
-            NodeVersion::new(22, 15, 0),
-            NodeVersion::new(24, 99, 0),
-        ] {
-            assert!(
-                should_neutralize_localstorage(&ver, &[], None),
-                "must neutralize on {ver:?} with no --localstorage-file"
-            );
-        }
-
-        // (b) User passed --localstorage-file (either channel/form) → do NOT
-        // neutralize; localStorage works normally.
-        let v = NodeVersion::new(22, 15, 0);
-        assert!(!should_neutralize_localstorage(
-            &v,
-            &[s("--localstorage-file=/tmp/x.sqlite")],
-            None
-        ));
-        assert!(!should_neutralize_localstorage(
-            &v,
-            &[s("--localstorage-file"), s("/tmp/x.sqlite")],
-            None
-        ));
-        assert!(!should_neutralize_localstorage(
-            &v,
-            &[],
-            Some("--localstorage-file=/tmp/x.sqlite")
-        ));
-
-        // (c) Off the flag-needed band (pre-22.4 / 25+ native) → no flag injected, so
-        // never neutralize regardless of file.
-        for ver in [
-            NodeVersion::new(18, 19, 0),
-            NodeVersion::new(22, 3, 0),
-            NodeVersion::new(25, 0, 0),
-            NodeVersion::new(26, 2, 0),
-        ] {
-            assert!(
-                !should_neutralize_localstorage(&ver, &[], None),
-                "must NOT neutralize off the flag-needed band ({ver:?})"
-            );
-        }
-
-        // User-supplied/disabled --experimental-webstorage suppresses the inject, so
-        // there is no nub-installed throwing getter to neutralize.
-        assert!(!should_neutralize_localstorage(
-            &v,
-            &[s("--experimental-webstorage")],
-            None
-        ));
-        assert!(!should_neutralize_localstorage(
-            &v,
-            &[s("--no-experimental-webstorage")],
-            None
-        ));
+        assert!(
+            !flags::should_neutralize_experimental_webstorage_localstorage(
+                &version,
+                &[],
+                Some(storage_file),
+            )
+        );
     }
 
     #[test]
