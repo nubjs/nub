@@ -1,0 +1,244 @@
+# RE-MEASURE THE 89 BIASED win32-x64 FAILURE ROWS, ON THE FIXED CELL FLOOR.
+#
+# THE DEFECT. The Windows cell floor carried no `python`, no `python3` and no `git`, while
+# the POSIX floor gets all three free from `/usr/bin`. So 643 Linux and macOS rows were
+# measured with an interpreter and a git in-cell and 550 Windows rows were not — and under
+# that floor node-gyp is forced down its last discovery route, the `py` launcher, which the
+# LowBox token cannot use to exec the real interpreter in `hostedtoolcache`. Five packages
+# walked the ladder to a WHOLE-DISK grant on a `Could not find any Python installation to
+# use` that describes the harness. `grant-matrix.mjs` was fixed; `run-shard.sh`, which shares
+# the same floor and produced every corpus survive/break number, is fixed in the same commit.
+#
+# THE POPULATION. Every admissible Windows row whose verdict is a failure or a whole-disk
+# need: 54 FAILS-AT-BOTH, 17 FAILS-AT-FULL-DISK, 18 NEEDS-FULL-DISK. That is a deliberate
+# SUPERSET of the 49-row python-at-risk subset scoped earlier by header-shelf size and
+# recorded failure text — a detector its own author called a FLOOR, since a native package
+# whose UNCONFINED arm also no-opped shows no shelf. `registry-js` and `msnodesqlv8` were
+# caught only by their failure line; re-running the whole failure population does not rest
+# on it.
+#
+# WHY A PLAIN RE-RUN IS NOT ENOUGH, and what this workflow refuses to do without. A
+# host-level denial fails every cell exactly as a real need does, so the ladder cannot tell
+# them apart — that is how a linux-x64 host with node symlinked out of the granted prefix
+# minted two whole-disk grants for packages needing only egress. So no row is publishable
+# until the host has proved itself from BOTH sides:
+#
+#   1. `--toolchain-proof` resolves and RUNS node, npm, every python spelling, git and MSVC
+#      in the CELL's environment — not the runner's — and fails the job if any is missing.
+#      It probes from outside the jail, which is its limit.
+#   2. THE POSITIVE CONTROL closes that limit. Three bare node-gyp compiles committed as
+#      NEEDS-NOTHING on win32-x64 lead every shard; each must pass its `no_grants` cell,
+#      which means node-gyp reached Python and MSVC from INSIDE the jail with no grants at
+#      all. A control failure makes the shard red and every row it produced unusable.
+#
+# ONE BINARY, built once and downloaded by every shard, so `binary_sha256` is a single
+# distinct value across the whole run and no row can be attributed to a stale build. The
+# original 89 span three binaries; this run collapses that to one.
+name: build-jail-grant-matrix-win-floor
+
+on:
+  push:
+    branches: [probe/gm-win-floor]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      # Windows gives the main thread a 1 MB stack against Linux's 8 MB, and the unoptimized
+      # `fast` profile overflows it inside `nub install` before any lifecycle script runs
+      # (0xC00000FD). A separate defect; linking with a Linux-sized stack lets this measure
+      # the jail rather than a debug-build frame-size artifact.
+      RUSTFLAGS: '-C link-arg=/STACK:8388608'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: gm-win
+      # Without `build-jail-catalog-override` the ladder cannot vary the catalog, and
+      # `grant-matrix.mjs` fails on the FIRST cell rather than silently scoring the compiled
+      # catalog in every arm — a failure this harness has actually had.
+      - name: Build the dev binary
+        run: cargo build -p nub-cli --profile fast --features build-jail-catalog-override
+      - name: Stage the binary
+        shell: bash
+        run: |
+          mkdir -p stage
+          cp target/fast/nub.exe stage/nub.exe
+          ls -l stage
+          sha256sum stage/nub.exe | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nub-gm-win-floor
+          path: stage
+          retention-days: 7
+
+  # THE `run-shard.sh` HALF OF THE FIX, PROVED ON REAL HARDWARE. `grant-matrix.mjs`'s floor
+  # is asserted by `--toolchain-proof` in every shard below; `run-shard.sh` has its own
+  # copy of the floor and its own guard, and a fix nothing exercises is a fix nobody knows
+  # about. This runs one tiny shard through it and requires the guard's own log lines to
+  # show all three tools resolving to real host directories.
+  run-shard-floor-proof:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: nub-gm-win-floor
+          path: stage
+      - name: 'One shard through run-shard.sh, then read its floor lines'
+        working-directory: tests/build-jail-corpus
+        shell: bash
+        env:
+          NUB_BIN: ${{ github.workspace }}\stage\nub.exe
+          NUB_EXPECT_GIT_SHA: ${{ github.sha }}
+          OUTROOT: ${{ runner.temp }}/floor-proof
+          PER_PKG: '1'
+        run: |
+          set -u
+          # The pre-fix floor, verbatim from the corpus workflow. The point is that
+          # run-shard.sh now REPAIRS it; handing it an already-repaired PATH would prove
+          # nothing.
+          export STUDY_PATH="/c/Windows/system32:/c/Windows:/c/Windows/System32/Wbem"
+          chmod +x run-shard.sh
+          rc=0
+          ./run-shard.sh floorproof shard-gm-win-floor-proof.tsv PROD || rc=$?
+          echo "run-shard rc=$rc" | tee -a "$GITHUB_STEP_SUMMARY"
+          L="$OUTROOT/floorproof-PROD/run.log"
+          echo '### floor lines from run-shard.sh' | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -E '^study_path_(tool|tool_run|node)=' "$L" | tee -a "$GITHUB_STEP_SUMMARY"
+          # THE ASSERTION, not the printout. A `grep | tee` cannot fail this step, so the
+          # facts are re-read here and each is required explicitly: an interpreter that RAN
+          # and a git that RAN, in the cell's own environment.
+          grep -qE '^study_path_tool_run=(python|python3|py) -> Python ' "$L" \
+            || { echo "FAILED: no python spelling ran on the repaired floor"; exit 1; }
+          grep -qE '^study_path_tool_run=git -> git version ' "$L" \
+            || { echo "FAILED: git did not run on the repaired floor"; exit 1; }
+          [ "$rc" -eq 0 ] || { echo "FAILED: the shard itself was inadmissible"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: run-shard-floor-proof
+          path: ${{ runner.temp }}/floor-proof/*/run.log
+          if-no-files-found: warn
+
+  matrix:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      # Eight shards of ~11 target rows plus three controls — the size the fulldisk recheck
+      # completed at. These rows are the expensive ones: a failing row walks the FULL ladder
+      # (six cells) where a NEEDS-NOTHING row short-circuits at two, so a shard here is
+      # heavier per row than one from the original sweep.
+      matrix:
+        shard: ['01', '02', '03', '04', '05', '06', '07', '08']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: nub-gm-win-floor
+          path: stage
+
+      # THE HOST PROOF, BEFORE ANY CELL RUNS. Not `if: always()` and not tolerant: a run
+      # whose host cannot reach the toolchain must stop here rather than emit rows that look
+      # like findings. This is the check that caught the floor defect in the first place.
+      - name: Toolchain proof
+        shell: bash
+        env:
+          NUB_BIN: ${{ github.workspace }}\stage\nub.exe
+        run: |
+          chmod +x stage/nub.exe || true
+          sha256sum stage/nub.exe
+          node tests/build-jail-corpus/grant-matrix.mjs --toolchain-proof --out "$RUNNER_TEMP/gm"
+          cp "$RUNNER_TEMP/gm/toolchain-proof.json" "toolchain-proof-${{ matrix.shard }}.json"
+
+      - name: Run the ladder
+        shell: bash
+        env:
+          NUB_BIN: ${{ github.workspace }}\stage\nub.exe
+        run: |
+          out="$RUNNER_TEMP/gm"
+          # THREE SLOTS. Packages are independent and each cell gets its own fixture root,
+          # so this is concurrency across packages rather than inside one. Each slot's exit
+          # code is captured separately; `wait` alone reports only the last one.
+          rc=0
+          for i in 0 1 2; do
+            node tests/build-jail-corpus/grant-matrix.mjs \
+              --list tests/build-jail-corpus/shard-gm-win-floor-${{ matrix.shard }}.tsv \
+              --out "$out" --jobs 3 --slot $i > "slot-$i.log" 2>&1 &
+          done
+          wait || rc=$?
+          echo "slots finished rc=$rc"
+          for i in 0 1 2; do echo "---- slot $i tail ----"; tail -40 "slot-$i.log"; done
+          cp "$out/matrix.ndjson" "matrix-floor-${{ matrix.shard }}.ndjson" 2>/dev/null || echo "(no ndjson produced)"
+          wc -l "matrix-floor-${{ matrix.shard }}.ndjson" 2>/dev/null || true
+
+      # THE CONTROL GATE AND THE ANTI-VACUOUS GATE. An empty run must be red — a job whose
+      # only signal is "no step errored" cannot tell a clean pass from a silent nothing. A
+      # run whose controls did not pass their ungranted cell must also be red, and loudly,
+      # because its rows are exactly the shape that mints a false whole-disk grant.
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          f="matrix-floor-${{ matrix.shard }}.ndjson"
+          if [ ! -s "$f" ]; then
+            echo "VERDICT: FAILED — shard ${{ matrix.shard }} produced no records." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          node -e '
+            const fs=require("fs");
+            const CONTROLS={"dtrace-provider":"0.8.8","bigint-buffer":"1.1.5","websocket":"1.0.31"};
+            const rows=fs.readFileSync(process.argv[1],"utf8").split("\n").filter(l=>l.trim()).map(l=>JSON.parse(l));
+            const shas=new Set(rows.map(r=>r.binary_sha256));
+            console.log("records:",rows.length,"distinct binaries:",shas.size,[...shas].map(s=>String(s).slice(0,12)).join(","));
+            const t={}; for(const r of rows) t[r.verdict]=(t[r.verdict]||0)+1;
+            for(const [k,v] of Object.entries(t).sort((a,b)=>b[1]-a[1])) console.log(String(v).padStart(4),k);
+            let bad=0;
+            console.log("--- positive controls ---");
+            for(const [name,version] of Object.entries(CONTROLS)){
+              const r=rows.find(x=>x.package===name&&x.version===version);
+              if(!r){ console.log("MISSING",name,version); bad++; continue; }
+              const ok=r.cells.no_grants===0;
+              console.log(`${ok?"ok  ":"FAIL"} ${name}@${version} no_grants=${r.cells.no_grants} verdict=${r.verdict}`);
+              if(!ok) bad++;
+            }
+            if(shas.size!==1){ console.log("FAIL: rows span",shas.size,"binaries"); bad++; }
+            if(bad){
+              console.log("");
+              console.log("VERDICT: FAILED — the host did not prove itself. NO ROW FROM THIS SHARD MAY BE PUBLISHED.");
+              process.exit(1);
+            }
+            console.log("VERDICT: controls passed on one binary — rows are publishable.");
+          ' "$f" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gm-win-floor-${{ matrix.shard }}
+          path: |
+            matrix-floor-${{ matrix.shard }}.ndjson
+            toolchain-proof-${{ matrix.shard }}.json
+            slot-*.log
+          if-no-files-found: warn

@@ -1,0 +1,16 @@
+# THE run-shard.sh HALF OF THE FLOOR FIX, EXERCISED ON REAL WINDOWS.
+#
+# `grant-matrix.mjs` and `run-shard.sh` share the cell floor and each carries its own copy
+# of it. The Windows floor had no `python`, no `python3` and no `git` while the POSIX floor
+# gets all three free from `/usr/bin`; grant-matrix was fixed first, run-shard.sh — the
+# harness behind every corpus survive/break number, including the Windows 41.7% figure —
+# was not. A fix nothing exercises is a fix nobody knows about, so this shard exists purely
+# to drive the repaired floor and let the job assert its `study_path_tool_run=` lines.
+#
+# THREE BARE node-gyp COMPILES, the same positive controls the ladder shards lead with.
+# node-gyp is what needs Python, so a shard of anything else would run green on a floor
+# that still had none. Versions pinned: a control whose meaning drifts with a new release
+# is not a control.
+dtrace-provider	0.8.8	native-build-prebuilt	
+bigint-buffer	1.1.5	native-build-prebuilt	
+websocket	1.0.31	native-build-prebuilt	git-repo

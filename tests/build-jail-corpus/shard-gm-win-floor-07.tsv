@@ -1,0 +1,46 @@
+# WINDOWS FLOOR RE-MEASUREMENT — shard 07 of 8.
+#
+# The 89 admissible win32-x64 rows whose verdict is a failure or a whole-disk need
+# (54 FAILS-AT-BOTH, 17 FAILS-AT-FULL-DISK, 18 NEEDS-FULL-DISK), re-run on the FIXED cell
+# floor. Every one was measured on a floor with no `python`, no `python3` and no `git`,
+# while the 643 Linux and macOS rows got all three free from `/usr/bin` — so their
+# native-build verdicts describe the harness as much as the jail, and five packages walked
+# the ladder to a WHOLE-DISK grant on `Could not find any Python installation to use`.
+#
+# The 89 are a deliberate SUPERSET of the 49-row python-at-risk subset a prior lane scoped
+# by two unioned signals (a node-gyp header shelf in the unconfined arm, or gyp/python named
+# in the recorded failure). That lane stated plainly that 49 is a FLOOR: a native package
+# whose UNCONFINED arm also no-opped shows no shelf, which is how `registry-js` (1603 files)
+# and `msnodesqlv8` (1496) were caught only by their recorded failure line. Re-running the
+# whole failure population avoids resting on a detector known to under-count.
+#
+# The 54 FAILS-AT-BOTH rows additionally carry `project_cell_inert: true` — they ran the old
+# `.` project spelling AND predate the terminal rung, so they get three fixes at once.
+#
+# SPECS ARE REPRODUCED EXACTLY AS THE ORIGINAL RUN WAS GIVEN THEM (a `latest` stays
+# `latest`), so the floor is the variable and not the request.
+#
+# THE FIRST THREE ROWS ARE THE POSITIVE CONTROL AND THEY ARE PINNED. Each is a bare node-gyp
+# compile committed as NEEDS-NOTHING on win32-x64, so each already demonstrates that node-gyp
+# reaches Python and MSVC from INSIDE the jail with no grants — the one question
+# `--toolchain-proof` cannot answer, since it necessarily probes from outside. If any fails
+# its `no_grants` cell the host is wrong and NO row from the run may be published. They lead
+# the file so each of the three slots takes one first.
+#
+# Rows are round-robined over the download-ordered population, so each shard carries a mix of
+# classes rather than a block of native builds contending with each other — the shape that
+# made a homogeneous control shard measure itself.
+dtrace-provider	0.8.8
+bigint-buffer	1.1.5
+websocket	1.0.31	git-repo
+cypress	15.19.0
+agent-browser	0.26.0	git-repo
+libxmljs2	0.37.0
+@apollo/rover	0.0.1-rc.5	git-repo
+lzo	0.4.11
+hnswlib-node	3.0.0
+cld	latest	git-repo
+registry-js	latest	git-repo
+electron-chromedriver	latest	git-repo
+purescript	latest	git-repo
+wordpos	latest	git-repo

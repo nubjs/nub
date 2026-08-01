@@ -338,6 +338,41 @@ case ":$STUDY_PATH:" in
   *":$NODE_DIR:"*) ;;
   *) STUDY_PATH="$NODE_DIR:$STUDY_PATH" ;;
 esac
+# ★ THE WINDOWS FLOOR HAD NO `python`, NO `python3` AND NO `git`, AND IT BIASED EVERY
+# NATIVE-BUILD ROW THIS HARNESS EVER MEASURED ON THE PLATFORM. The POSIX floor gets all
+# three free — `/usr/bin` holds `python3` and `git` — so the 643 Linux and macOS rows were
+# taken with an interpreter and a git on the cell's PATH while the 550 Windows rows were
+# not. Windows has no equivalent aggregate directory, so the transplanted floor
+# (`C:\Windows\system32`, `C:\Windows`, `Wbem`) silently gave the cell neither.
+#
+# That is not a clean room, it is a machine no developer has: the Python installer's own
+# default puts `python.exe` on PATH, and `python_toolchain_grant` then resolves it OUT of
+# jail so node-gyp never walks PATH at all. Under this floor node-gyp was forced down its
+# last route — the `py` launcher in `C:\Windows` — which under the LowBox token cannot exec
+# the real interpreter in `hostedtoolcache`, and packages walked the ladder to a WHOLE-DISK
+# grant on a `Could not find any Python installation to use` that describes the harness.
+#
+# Prepending the tools' real directories RESTORES PARITY with the POSIX floor; it widens
+# nothing. WINDOWS ONLY, for the same reason `NODE_DIR` is unconditional but this is not:
+# the POSIX floor already carries both, and touching it would change which interpreter the
+# 643 already-measured rows used and break comparability with them for no gain.
+#
+# Resolved from the CALLER's PATH — the host's own view — because the question is where the
+# tool actually lives on this machine, and the cell is precisely the environment that
+# cannot answer it. Mirrors `grant-matrix.mjs`'s `STUDY_PATH` construction, which is the
+# same floor; the two harnesses must not diverge.
+if [ "$PLATFORM" = windows ]; then
+  for TOOL in python python3 git; do
+    TOOL_PATH="$(command -v "$TOOL" 2>/dev/null || true)"
+    [ -n "$TOOL_PATH" ] || { echo "study_path_tool=$TOOL NOT-FOUND-ON-HOST" >> "$LOG"; continue; }
+    TOOL_DIR="$(cd "$(dirname "$TOOL_PATH")" && pwd)"
+    echo "study_path_tool=$TOOL dir=$TOOL_DIR" >> "$LOG"
+    case ":$STUDY_PATH:" in
+      *":$TOOL_DIR:"*) ;;
+      *) STUDY_PATH="$TOOL_DIR:$STUDY_PATH" ;;
+    esac
+  done
+fi
 # `$BASH`, NEVER a bare `bash`. This probe deliberately runs on a SCRUBBED PATH, and the
 # scrubbed PATH is exactly where the wrong shell lives: `C:\Windows\system32` contains
 # `bash.exe`, which is the WSL LAUNCHER. The probe therefore asked WSL for a Node and got
@@ -354,6 +389,31 @@ case "$JAILED_NODE_V" in
   *) echo "FATAL: node on STUDY_PATH is unusable: '$JAILED_NODE' -> '$JAILED_NODE_V'" | tee -a "$LOG" >&2
      exit 7 ;;
 esac
+# PROVE THE FLOOR IN THE CELL'S OWN ENV, AND REFUSE TO MEASURE WITHOUT IT. The bias above
+# was invisible for 550 rows precisely because nothing asserted it: a floor missing the
+# interpreter produces rows that look like findings, and the widest grant we ship was
+# written off five of them. `--toolchain-proof` is the same assertion in `grant-matrix.mjs`;
+# this is its half of the shared floor. An interpreter that RESOLVES is not one that RUNS
+# (the linux-x64 burn was a symlink into an ungranted prefix), so each is executed.
+if [ "$PLATFORM" = windows ]; then
+  FLOOR_MISSING=""
+  # `py` is the Windows launcher, in the system directory, and node-gyp accepts it — so any
+  # spelling that runs satisfies the interpreter requirement, exactly as the proof scores it.
+  PY_OK=""
+  for PY in python python3 py; do
+    V="$(env -i PATH="$STUDY_PATH" ${WIN_ENV[@]+"${WIN_ENV[@]}"} "$BASH" -c "$PY --version" 2>&1 || true)"
+    echo "study_path_tool_run=$PY -> ${V%%$'\n'*}" >> "$LOG"
+    case "$V" in Python*) PY_OK="$PY" ;; esac
+  done
+  [ -n "$PY_OK" ] || FLOOR_MISSING="$FLOOR_MISSING python"
+  GIT_V="$(env -i PATH="$STUDY_PATH" ${WIN_ENV[@]+"${WIN_ENV[@]}"} "$BASH" -c 'git --version' 2>&1 || true)"
+  echo "study_path_tool_run=git -> ${GIT_V%%$'\n'*}" >> "$LOG"
+  case "$GIT_V" in git\ version*) ;; *) FLOOR_MISSING="$FLOOR_MISSING git" ;; esac
+  if [ -n "$FLOOR_MISSING" ]; then
+    echo "FATAL: the Windows cell floor is missing:$FLOOR_MISSING — the POSIX floor supplies both from /usr/bin, so this run is not comparable to any Linux or macOS row and its native-build verdicts would be the harness, not the jail" | tee -a "$LOG" >&2
+    exit 8
+  fi
+fi
 # `env -i` is what makes a run hermetic, so the dev-only catalog override must be
 # forwarded EXPLICITLY — otherwise a grant iteration silently measures the COMPILED
 # catalog and every "the grant changed nothing" verdict is an artefact of the harness.
