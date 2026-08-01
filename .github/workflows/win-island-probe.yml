@@ -67,12 +67,12 @@ jobs:
           cp target/release/nub_native.dll runtime/addons/nub-native.node
           cargo build -p nub-cli --release --features embed-runtime,compile
           (cd crates/nub-launcher && cargo build --release)
-      - name: Compile and run prebuilt native island with a resolution tracer
+      - name: Compile and run prebuilt native island
         shell: bash
         run: |
           set -euo pipefail
           export COMPILE_NATIVE_LOG_DIR="$RUNNER_TEMP/compile-native-islands-logs"
-          export NUB_ISLAND_TRACE="$GITHUB_WORKSPACE/tests/win-island-probe/trace.cjs"
+          # No tracer: this run must be byte-identical to ci.yml's own win32 job.
           mkdir -p "$COMPILE_NATIVE_LOG_DIR"
           target="$(node --version)"
           target="${target#v}"

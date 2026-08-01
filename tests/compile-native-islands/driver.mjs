@@ -297,11 +297,7 @@ async function main() {
     await rm(join(workspace, "source-hidden", "node_modules"), { recursive: true, force: true });
     await mkdir(foreign, { recursive: true });
 
-    // PROBE-ONLY: preload a resolution tracer into the artifact's Node.
-    const artifactEnv = process.env.NUB_ISLAND_TRACE
-      ? { ...env, NODE_OPTIONS: `--require=${process.env.NUB_ISLAND_TRACE}` }
-      : env;
-    const cold = command("cold artifact run", artifact, [], { cwd: foreign, env: artifactEnv });
+    const cold = command("cold artifact run", artifact, [], { cwd: foreign, env });
     const coldProof = parseProof(cold.stdout, "cold");
     const extracted = await records(cache, "extracted-after-cold");
     const extractedByHash = new Map();
@@ -314,7 +310,7 @@ async function main() {
       fail("--verify-companion-dll-rename requested but no sharp companion DLL was preserved");
     }
 
-    const warm = command("warm artifact run", artifact, [], { cwd: foreign, env: artifactEnv });
+    const warm = command("warm artifact run", artifact, [], { cwd: foreign, env });
     const warmProof = parseProof(warm.stdout, "warm");
     await writeFile(proofPath, `${JSON.stringify({
       artifact: { path: artifact, sha256: await digest(artifact), bytes: (await stat(artifact)).size },

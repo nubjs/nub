@@ -131,5 +131,11 @@ console.log(
   "fileURLToPath(pathToFileURL(verbatimEntry)) =",
   url.fileURLToPath(url.pathToFileURL(join(appVerbatim, "entry.mjs"))),
 );
-console.log("realpathSync(verbatimEntry) =", (await import("node:fs")).realpathSync(join(appVerbatim, "entry.mjs")));
+// THE CULPRIT, isolated: Node's own realpathSync cannot walk a verbatim path.
+// Reported so the probe still exits 0 and the run conclusion stays meaningful.
+try {
+  console.log("realpathSync(verbatimEntry) =", (await import("node:fs")).realpathSync(join(appVerbatim, "entry.mjs")));
+} catch (error) {
+  console.log(`realpathSync(verbatimEntry) THREW ${error.code} path=${JSON.stringify(error.path)} :: ${error.message}`);
+}
 console.log("PROBE_GEOMETRY_DONE");
