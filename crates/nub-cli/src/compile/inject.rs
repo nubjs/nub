@@ -3,8 +3,8 @@
 //! Three container formats, three legs, dispatched on the TARGET platform and
 //! never on the host — that dispatch is the whole of cross-compilation on the
 //! writer side. Each leg has a matching STATIC SCANNER that finds the payload
-//! back in a produced file, because the compile-time smoke check (`__probe`,
-//! which execs the artifact) only works when target == host: a cross-compiled
+//! back in a produced file, because the compile-time smoke check (which execs
+//! the artifact in launcher probe mode) only works when target == host: a cross-compiled
 //! artifact is verified by locating and decoding its payload instead of running
 //! it.
 //!
@@ -117,10 +117,13 @@ pub fn verify_template(target: &TargetPlatform, template: &[u8]) -> Result<()> {
             target.triple(),
             arch_name(target.arch)
         ),
-        // An unreadable arch field means a truncated or exotic image. libsui is
-        // about to parse it properly; refusing here would turn a format nub
-        // simply cannot introspect into a hard failure.
-        None => Ok(()),
+        None => bail!(
+            "the launcher template has an unsupported or unreadable {} architecture; \
+             --platform {} needs {}. The template must be the launcher built FOR the target platform.",
+            format_name(expected),
+            target.triple(),
+            arch_name(target.arch)
+        ),
     }
 }
 
@@ -493,6 +496,7 @@ mod tests {
             shape: Shape::Smol,
             entry: entry.into(),
             node_version: "24.10.0".into(),
+            smol_exact_target: false,
             triple: "linux-x64".into(),
             node_sha256: String::new(),
             app_sha256: "aa".into(),
@@ -501,7 +505,10 @@ mod tests {
         };
         nub_core::compile::encode(
             &manifest,
-            &[(entry.to_string(), b"console.log(1)\n".to_vec())],
+            &[nub_core::compile::AppFile::plain(
+                entry,
+                b"console.log(1)\n".to_vec(),
+            )],
             &[],
         )
     }
@@ -533,7 +540,7 @@ mod tests {
             .unwrap_or_else(|| panic!("{triple}: no payload found in the produced artifact"));
         let view = nub_core::compile::decode(found).expect("decode");
         assert_eq!(view.manifest.entry, "main.js");
-        assert_eq!(view.app_files[0].1, b"console.log(1)\n");
+        assert_eq!(view.app_files[0].bytes, b"console.log(1)\n");
         let _ = fs::remove_file(&out);
     }
 
@@ -621,6 +628,39 @@ mod tests {
     }
 
     #[test]
+    fn a_template_with_an_unknown_arch_is_rejected() {
+        let mut unknown = fixtures::elf();
+        unknown[18..20].copy_from_slice(&0x28u16.to_le_bytes()); // EM_ARM
+        let target = TargetPlatform::parse("linux-x64").unwrap();
+        let err = inject(&target, &unknown, &payload("main.js"), &tmp("unknownarch")).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("unsupported or unreadable"), "{msg}");
+        assert!(msg.contains("x64"), "{msg}");
+    }
+
+    #[test]
+    fn macho_template_with_an_unknown_cpu_type_is_rejected() {
+        let target = TargetPlatform::parse("darwin-x64").unwrap();
+        let err = verify_template(&target, &fixtures::macho(18)).unwrap_err(); // CPU_TYPE_POWERPC
+        let msg = format!("{err:#}");
+        assert!(msg.contains("unsupported or unreadable"), "{msg}");
+        assert!(msg.contains("Mach-O (macOS)"), "{msg}");
+        assert!(msg.contains("darwin-x64"), "{msg}");
+    }
+
+    #[test]
+    fn pe_template_with_an_unknown_machine_is_rejected() {
+        let mut unknown = fixtures::pe();
+        unknown[0x84..0x86].copy_from_slice(&0x1c0u16.to_le_bytes()); // ARM
+        let target = TargetPlatform::parse("win32-x64").unwrap();
+        let err = verify_template(&target, &unknown).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("unsupported or unreadable"), "{msg}");
+        assert!(msg.contains("PE (Windows)"), "{msg}");
+        assert!(msg.contains("win32-x64"), "{msg}");
+    }
+
+    #[test]
     fn garbage_is_not_mistaken_for_an_executable() {
         assert_eq!(detect_format(b"not an executable at all"), None);
         assert!(find_payload(ContainerFormat::Elf, b"nope").is_err());
@@ -633,6 +673,18 @@ mod tests {
     /// header fields documents the layout the scanners depend on, and cannot rot
     /// into an opaque blob nobody can regenerate.
     mod fixtures {
+        use super::super::MH_MAGIC_64;
+
+        /// A thin 64-bit little-endian Mach-O header up through `cputype`.
+        /// Template verification only needs the magic and CPU field; injection
+        /// deliberately continues to require a real Mach-O image.
+        pub fn macho(cpu_type: u32) -> Vec<u8> {
+            let mut m = vec![0u8; 8];
+            m[0..4].copy_from_slice(&MH_MAGIC_64.to_le_bytes());
+            m[4..8].copy_from_slice(&cpu_type.to_le_bytes());
+            m
+        }
+
         /// A 64-bit LE ELF executable with one `PT_LOAD` covering the file. Enough
         /// for libsui's `append`, which only reads the ELF + program headers.
         pub fn elf() -> Vec<u8> {
@@ -723,7 +775,7 @@ mod tests {
             if !cfg!(target_os = "macos") {
                 return None;
             }
-            let path = std::env::var_os("NUB_LAUNCHER_TEMPLATE")?;
+            let path = std::env::var_os("__NUB_LAUNCHER_TEMPLATE")?;
             std::fs::read(path).ok()
         }
     }

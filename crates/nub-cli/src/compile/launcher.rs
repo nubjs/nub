@@ -31,21 +31,21 @@
 //! caught — `nub_core::compile::decode` refuses an unknown `FORMAT_VERSION` —
 //! but it is caught on the end user's machine, which is the wrong place.
 //!
-//! `NUB_LAUNCHER_TEMPLATE` still wins over everything and is the offline answer:
-//! it is the one spelling that needs no network and no published release.
+//! An internal development override still wins over everything and is the one
+//! path that needs no network and no published release.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use nub_core::compile::TargetPlatform;
 use nub_core::node::discovery;
 
 use super::inject;
 use crate::cli::{curl_download, fetch_expected_sha256, sha256_hex};
 
-/// Explicit override, and the only path that works with no network.
-const TEMPLATE_ENV: &str = "NUB_LAUNCHER_TEMPLATE";
+/// Internal development override, and the only path that works with no network.
+const TEMPLATE_ENV: &str = "__NUB_LAUNCHER_TEMPLATE";
 
 /// Cache subdirectory, under the nub cache root and keyed by THIS binary's
 /// version — the key is what makes a cache hit version-exact.
@@ -118,7 +118,7 @@ fn find_local(target: &TargetPlatform, sources: &Sources) -> Result<Option<PathB
         // network: silently fetching would hide the mistake behind a working
         // build and ship a template the user did not choose.
         bail!(
-            "NUB_LAUNCHER_TEMPLATE points at a missing file: {}",
+            "launcher template override points at a missing file: {}",
             p.display()
         );
     }
@@ -148,14 +148,16 @@ fn find_local(target: &TargetPlatform, sources: &Sources) -> Result<Option<PathB
     Ok(None)
 }
 
-/// Whether a cache entry still matches the digest recorded beside it. An entry
-/// with no sidecar predates that record and is taken on trust: the cache key is
-/// this binary's exact version, so those exist only across rebuilds of one
-/// version, and forcing a network round trip on them would cost the offline
-/// guarantee the cache exists to give.
+/// Whether a cache entry still matches the digest recorded beside it.
+///
+/// Missing sidecars fail closed. Every entry this implementation publishes
+/// records its digest before making the launcher visible, and compiled
+/// executables have not shipped an older sidecar-less cache contract. Trusting a
+/// bare file would let a crash, manual copy, or local attacker bypass the only
+/// byte-integrity check on a template injected into every artifact.
 fn cache_entry_is_intact(entry: &Path) -> bool {
     let Ok(recorded) = fs::read_to_string(sidecar_path(entry)) else {
-        return true;
+        return false;
     };
     let Some(expected) = recorded.split_whitespace().next() else {
         return false;
@@ -229,7 +231,7 @@ fn fetch(target: &TargetPlatform, sources: &Sources) -> Result<PathBuf> {
     // verified release asset. Windows refuses a rename over an existing file,
     // which also happens when a previous crash left a corrupt cache entry: do
     // not mistake that repair case for a good concurrent winner.
-    commit_template(&staged, &dest, &actual, fs::rename)?;
+    commit_template(&staged, &dest, &actual, |src, dest| fs::rename(src, dest))?;
 
     // The rename itself is only durable once the directory entry is synced.
     // Best effort: a lost rename costs a refetch, not a bad cache entry. Windows
@@ -266,7 +268,7 @@ where
             })?;
             match rename(staged, dest) {
                 Ok(()) => Ok(()),
-                Err(retry) if entry_matches_digest(dest, expected) => Ok(()),
+                Err(_retry) if entry_matches_digest(dest, expected) => Ok(()),
                 Err(retry) => Err(install(retry)),
             }
         }
@@ -276,9 +278,9 @@ where
 
 /// Whether `entry` is the exact launcher digest the current fetch verified.
 ///
-/// This deliberately does not use [`cache_entry_is_intact`]: missing sidecars
-/// are accepted for pre-existing offline cache hits, but they cannot prove that
-/// an existing destination is the verified winner of this fetch race.
+/// This deliberately does not use [`cache_entry_is_intact`]: the fetch has
+/// already verified `expected` from the immutable release, so the destination's
+/// bytes alone prove whether an existing entry is the winner of this race.
 fn entry_matches_digest(entry: &Path, expected: &str) -> bool {
     fs::read(entry).is_ok_and(|bytes| sha256_hex(&bytes).eq_ignore_ascii_case(expected))
 }
@@ -291,17 +293,32 @@ fn commit_sidecar(dir: &Path, dest: &Path, hex: &str, target: &TargetPlatform) -
     let name = asset_name(target);
     let staged = dir.join(format!("{name}.{}.sha256.part", std::process::id()));
     let _guard = FileGuard(staged.clone());
-    fs::write(&staged, format!("{hex}  {name}\n"))
-        .with_context(|| format!("writing {}", staged.display()))?;
+    let contents = format!("{hex}  {name}\n");
+    fs::write(&staged, &contents).with_context(|| format!("writing {}", staged.display()))?;
 
     let sidecar = sidecar_path(dest);
-    if let Err(e) = fs::rename(&staged, &sidecar) {
-        if !sidecar.is_file() {
-            return Err(anyhow::Error::new(e)
-                .context(format!("recording the digest at {}", sidecar.display())));
+    let install = |error: std::io::Error| {
+        anyhow::Error::new(error).context(format!("recording the digest at {}", sidecar.display()))
+    };
+    match fs::rename(&staged, &sidecar) {
+        Ok(()) => Ok(()),
+        Err(_first) if fs::read_to_string(&sidecar).is_ok_and(|s| s == contents) => Ok(()),
+        Err(_first) if sidecar.is_file() => {
+            if let Err(remove) = fs::remove_file(&sidecar)
+                && remove.kind() != std::io::ErrorKind::NotFound
+                && !fs::read_to_string(&sidecar).is_ok_and(|s| s == contents)
+            {
+                return Err(anyhow::Error::new(remove)
+                    .context(format!("removing stale digest {}", sidecar.display())));
+            }
+            match fs::rename(&staged, &sidecar) {
+                Ok(()) => Ok(()),
+                Err(_retry) if fs::read_to_string(&sidecar).is_ok_and(|s| s == contents) => Ok(()),
+                Err(retry) => Err(install(retry)),
+            }
         }
+        Err(first) => Err(install(first)),
     }
-    Ok(())
 }
 
 /// Where a cache entry's digest lives.
@@ -351,25 +368,15 @@ fn cache_path(cache_root: &Path, target: &TargetPlatform) -> PathBuf {
         .join(asset_name(target))
 }
 
-/// The release tag carrying this binary's launchers. A stable build pins its own
-/// `v<version>`. A canary build has no versioned release — the pipeline recreates
-/// one rolling `canary` tag per built commit — so it reads that, accepting that
-/// the assets there may already be a newer canary. Same channel split
-/// `nub upgrade` makes. Be precise about what that costs: `decode` gates the
-/// CONTAINER format byte only, so two canary commits that change launcher
-/// behavior without bumping `FORMAT_VERSION` pair silently. It is a narrow
-/// exposure — a canary host target takes the sibling, so only a canary
-/// CROSS-compile is affected — but it is not "fails closed".
+/// The immutable release tag carrying this binary's launchers.
+///
+/// Every build, including a canary, pins the template to its exact package
+/// version. The release workflow publishes a matching immutable prerelease for
+/// each canary before updating the rolling `canary` release used by installers.
+/// A launcher and payload writer are a format-coupled pair, so a mutable tag
+/// would allow a later canary launcher to be injected into an earlier build.
 fn release_tag() -> String {
-    // Both borrowed from the upgrade channel rather than restated: a change to
-    // the canary marker or the tag name there must move this with it, and a
-    // duplicated literal would instead point the fetch at a tag that does not
-    // exist.
-    if crate::cli::is_canary_build() {
-        crate::cli::CANARY_TAG.to_string()
-    } else {
-        format!("v{}", env!("CARGO_PKG_VERSION"))
-    }
+    format!("v{}", env!("CARGO_PKG_VERSION"))
 }
 
 /// The release-asset URL for the target's template.
@@ -384,8 +391,8 @@ fn asset_url(base: &str, target: &TargetPlatform) -> String {
 
 /// The error for a template that is nowhere and could not be fetched. It has to
 /// carry the whole lookup, because every entry is a place the user can act: the
-/// override is the offline answer, the sibling is what a normal install has, and
-/// `why` is the reason the network attempt did not close the gap.
+/// sibling is what a normal install has, and `why` is the reason the network
+/// attempt did not close the gap.
 fn unavailable(target: &TargetPlatform, sources: &Sources, why: &str) -> anyhow::Error {
     let triple = target.triple();
     let cached = sources
@@ -399,8 +406,7 @@ fn unavailable(target: &TargetPlatform, sources: &Sources, why: &str) -> anyhow:
          \x20\x20\x20\x20{}\x20— beside this nub binary\n\
          \x20\x20\x20\x20{cached}\n\
          \x20\x20\x20\x20{url}\n\
-         \x20\x20{why}\n\
-         \x20\x20Set NUB_LAUNCHER_TEMPLATE to a launcher built for {triple} to compile offline.",
+         \x20\x20{why}",
         asset_name(target),
         url = asset_url(&sources.base_url, target),
     )
@@ -489,8 +495,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A cached template is used without a fetch — that is the whole point of the
-    /// cache, and the assertion that a second cross-compile costs no network.
+    /// A cached template is used without a fetch only when its release digest is
+    /// present and matches. That is the assertion that a second cross-compile
+    /// costs no network without trusting an unauthenticated local file.
     #[test]
     fn a_cached_template_satisfies_a_foreign_target() {
         let dir = fresh_dir("cached");
@@ -502,7 +509,45 @@ mod tests {
         let cached = cache_path(&dir, &foreign);
         fs::create_dir_all(cached.parent().unwrap()).unwrap();
         fs::write(&cached, b"foreign").unwrap();
+        fs::write(
+            sidecar_path(&cached),
+            format!("{}  launcher\n", sha256_hex(b"foreign")),
+        )
+        .unwrap();
         assert_eq!(find_local(&foreign, &sources).unwrap(), Some(cached));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cache_entry_without_a_digest_is_not_reused() {
+        let dir = fresh_dir("cached-no-digest");
+        let foreign = foreign();
+        let mut sources = local(None);
+        sources.cache_root = Some(dir.clone());
+        let cached = cache_path(&dir, &foreign);
+        fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        fs::write(&cached, b"unverified").unwrap();
+        assert_eq!(
+            find_local(&foreign, &sources).unwrap(),
+            None,
+            "a bare cache file cannot authenticate the launcher bytes"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn publishing_repairs_a_stale_digest_sidecar() {
+        let dir = fresh_dir("stale-sidecar");
+        let target = TargetPlatform::parse("linux-x64").unwrap();
+        let dest = cache_path(&dir, &target);
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::write(sidecar_path(&dest), "stale  launcher\n").unwrap();
+
+        let expected = sha256_hex(b"verified launcher");
+        commit_sidecar(dest.parent().unwrap(), &dest, &expected, &target)
+            .expect("a stale digest must not make every future cache hit refetch");
+        let recorded = fs::read_to_string(sidecar_path(&dest)).unwrap();
+        assert_eq!(recorded, format!("{expected}  {}\n", asset_name(&target)));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -522,9 +567,10 @@ mod tests {
         );
     }
 
-    /// The fetch resolves against the release that published THIS binary — a
-    /// stable build asks for its own `v<version>` tag and never for "latest",
-    /// because the launcher and the payload writer share a container format.
+    /// The fetch resolves against the immutable release that published THIS
+    /// binary — including a canary's exact `v<version>` prerelease, never a
+    /// rolling channel tag or "latest", because the launcher and payload writer
+    /// share a container format.
     #[test]
     fn the_asset_url_pins_this_release() {
         let target = TargetPlatform::parse("win32-arm64").unwrap();
@@ -537,14 +583,15 @@ mod tests {
             )
         );
         assert!(
-            url.contains(env!("CARGO_PKG_VERSION")) || release_tag() == "canary",
-            "a stable build must pin its own version: {url}"
+            url.contains(env!("CARGO_PKG_VERSION")),
+            "every build must pin its own immutable version: {url}"
         );
+        assert_eq!(release_tag(), format!("v{}", env!("CARGO_PKG_VERSION")));
     }
 
     /// A release ships only the HOST's template, so this error is the whole
     /// cross-compile UX when the network cannot close the gap. It must name the
-    /// triple, the file it wanted, the URL it tried, and the offline escape.
+    /// triple, the file it wanted, and the URL it tried.
     #[test]
     fn an_unavailable_template_names_every_place_it_looked() {
         let dir = fresh_dir("no-template");
@@ -563,8 +610,8 @@ mod tests {
         );
         assert!(msg.contains("404 Not Found"), "should carry why: {msg}");
         assert!(
-            msg.contains("NUB_LAUNCHER_TEMPLATE"),
-            "should name the offline escape: {msg}"
+            !msg.contains("NUB_LAUNCHER_TEMPLATE"),
+            "must not advertise an internal override as configuration: {msg}"
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -580,7 +627,7 @@ mod tests {
         sources.cache_root = Some(dir.clone());
         let err = find_local(&foreign(), &sources).unwrap_err();
         assert!(
-            format!("{err:#}").contains("NUB_LAUNCHER_TEMPLATE"),
+            !format!("{err:#}").contains("NUB_LAUNCHER_TEMPLATE"),
             "{err:#}"
         );
         let _ = fs::remove_dir_all(&dir);
@@ -884,9 +931,10 @@ mod tests {
             .unwrap_err()
         );
         assert!(msg.contains("linux-arm64"), "{msg}");
+        assert_eq!(TEMPLATE_ENV, "__NUB_LAUNCHER_TEMPLATE");
         assert!(
-            msg.contains("NUB_LAUNCHER_TEMPLATE"),
-            "the offline escape must be named: {msg}"
+            !msg.contains("NUB_LAUNCHER_TEMPLATE"),
+            "must not advertise an internal override as configuration: {msg}"
         );
         assert!(!cache_path(&cache, &target).exists());
         let _ = fs::remove_dir_all(&dir);

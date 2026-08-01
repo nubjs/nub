@@ -38,8 +38,13 @@ compile = [
     "dep:oxc_ast",
     "dep:oxc_ast_visit",
     "dep:oxc_parser",
+    "dep:oxc_semantic",
     "dep:oxc_span",
+    "dep:string_wizard",
     "dep:glob-match",
+    "dep:pathdiff",
+    "dep:unicode-casefold",
+    "dep:unicode-normalization",
     "dep:oxc_resolver",
     "tokio/full",
 ]
@@ -64,7 +69,13 @@ oxc_allocator = { version = "=0.140.0", optional = true }
 oxc_ast = { version = "=0.140.0", optional = true }
 oxc_ast_visit = { version = "=0.140.0", optional = true }
 oxc_parser = { version = "=0.140.0", optional = true }
+oxc_semantic = { version = "=0.140.0", optional = true }
 oxc_span = { version = "=0.140.0", optional = true }
+# Used directly for insertion-aware source maps in Nub's Rolldown transforms.
+# This exact version is already transitive under Rolldown; declare it here only
+# to construct the map, pinned in lockstep because Rolldown's crate APIs are
+# explicitly non-semver.
+string_wizard = { version = "=1.2.0", optional = true }
 # Reads the entry's effective tsconfig (`extends` chain applied) to decide whether
 # `compilerOptions.jsx` is "preserve". Pinned to the version already in Rolldown's
 # graph — it is the SAME resolver Rolldown loads tsconfigs with, so the answer
@@ -79,6 +90,12 @@ zstd = { version = "0.13", optional = true }
 # nub-core dependency, so the compile feature adds no build cost — declared here
 # rather than reached through nub-core, which does not re-export it.
 glob-match = { version = "0.2", optional = true }
+# Full default/non-Turkic folding for Darwin filesystem collision keys. Simple
+# lowercase misses multi-codepoint folds such as `ß` → `ss`.
+unicode-casefold = { version = "0.2", optional = true }
+# Default macOS APFS folds canonically equivalent Unicode filename spellings,
+# so compile normalizes Darwin payload names before collision detection.
+unicode-normalization = { version = "0.1", optional = true }
 # Shared phantom-classification primitives (specifier extraction + guard modeling
 # + builtin/name classification) for the pre-run phantom scan (src/phantom_scan.rs).
 # Depends on the LEAN oxc parser subset, not the full `oxc` umbrella — see the
@@ -192,6 +209,7 @@ semver = "1"
 # don't match npm ranges (`x`-ranges, `||` unions, hyphen ranges); node-semver
 # is the same resolver aube already uses.
 node-semver = "2"
+pathdiff = { version = "0.2", optional = true }
 # pnpm-workspace.yaml read + regeneration for `nub pm use nub` / `use pnpm`
 # (pm_engine/use_nub.rs). serde_yaml is archived/unmaintained; serde_yaml_ng
 # is the maintained, API-compatible fork, aliased as `serde_yaml` so the

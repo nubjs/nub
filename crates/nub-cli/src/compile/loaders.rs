@@ -34,7 +34,7 @@
 //! (`.css`, `.html`) are left to Rolldown and to `--loader`.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -181,12 +181,11 @@ impl Assets {
     /// for the emitting code to reference.
     pub fn add(&self, source: &Path, bytes: Vec<u8>) -> Result<String> {
         let name = asset_name(source, &bytes);
-        // A silent drop here would ship a chunk naming a file that is not in the
-        // payload — a runtime ENOENT with nothing to attribute it to.
-        self.0
+        let mut assets = self
+            .0
             .lock()
-            .map_err(|_| anyhow::anyhow!("the asset collector was poisoned by an earlier panic"))?
-            .insert(name.clone(), bytes);
+            .map_err(|_| anyhow::anyhow!("the asset collector was poisoned by an earlier panic"))?;
+        record_asset(&mut assets, name.clone(), bytes)?;
         Ok(name)
     }
 
@@ -201,6 +200,23 @@ impl Assets {
             .into_iter()
             .map(|(name, bytes)| FileAsset { name, bytes })
             .collect()
+    }
+}
+
+fn record_asset(
+    assets: &mut BTreeMap<String, Vec<u8>>,
+    name: String,
+    bytes: Vec<u8>,
+) -> Result<()> {
+    match assets.entry(name.clone()) {
+        Entry::Vacant(entry) => {
+            entry.insert(bytes);
+            Ok(())
+        }
+        Entry::Occupied(entry) if entry.get() == &bytes => Ok(()),
+        Entry::Occupied(_) => {
+            bail!("generated asset name {name:?} identifies different payload bytes")
+        }
     }
 }
 
@@ -318,7 +334,7 @@ fn loader_name(ty: &ModuleType) -> &'static str {
     }
 }
 
-/// The payload name for an asset: its stem, a content hash, its extension.
+/// The payload name for an asset: its stem, a full content hash, its extension.
 ///
 /// Content-hashed, not path-hashed, so two imports of the same bytes dedupe to
 /// one payload entry while two different files that merely share a basename
@@ -326,7 +342,7 @@ fn loader_name(ty: &ModuleType) -> &'static str {
 ///
 /// The hash suffix is UNCONDITIONAL, and that is what keeps a generated name off
 /// Win32's reserved-device list: a source named `aux.txt` ships as
-/// `aux-4873c02a.txt`, whose stem is no longer `AUX`. `assemble_app`'s payload-name
+/// `aux-<sha256>.txt`, whose stem is no longer `AUX`. `assemble_app`'s payload-name
 /// gate refuses an `--include`d `aux.txt` for a Windows target while the same file
 /// reached through `new URL(…)` or a `file` import compiles and runs — the
 /// asymmetry is safe only because of this construction, so a refactor that makes
@@ -360,9 +376,13 @@ fn asset_name(source: &Path, bytes: &[u8]) -> String {
         stem
     };
     let hash = format!("{:x}", Sha256::digest(bytes));
+    asset_name_with_hash(source, &stem, &hash)
+}
+
+fn asset_name_with_hash(source: &Path, stem: &str, hash: &str) -> String {
     match source.extension().and_then(|e| e.to_str()) {
-        Some(ext) => format!("{stem}-{}.{}", &hash[..8], ext.to_lowercase()),
-        None => format!("{stem}-{}", &hash[..8]),
+        Some(ext) => format!("{stem}-{hash}.{}", ext.to_lowercase()),
+        None => format!("{stem}-{hash}"),
     }
 }
 
@@ -377,8 +397,8 @@ fn file_module(name: &str) -> String {
     // first component contained a colon would parse as a URL SCHEME, and the
     // prefix removes that class of surprise entirely.
     format!(
-        "import {{ fileURLToPath as __nubFileURLToPath }} from \"node:url\";\n\
-         export default __nubFileURLToPath(new URL({}, import.meta.url));\n",
+        "const record = process[Symbol.for(\"nub.compile.bootstrap\")];\n\
+         export default record.getBuiltin(\"node:url\").fileURLToPath(new URL({}, import.meta.url));\n",
         serde_json::to_string(&format!("./{name}")).expect("a file name serializes")
     )
 }
@@ -631,6 +651,62 @@ mod tests {
     // assets nub named itself can collide — and the collision error would tell
     // the user to rename a file they never wrote.
     #[test]
+    fn asset_names_retain_digest_suffixes_past_a_shared_prefix() {
+        let a = asset_name_with_hash(
+            Path::new("/p/logo.png"),
+            "logo",
+            "deadbeef00000000000000000000000000000000000000000000000000000001",
+        );
+        let b = asset_name_with_hash(
+            Path::new("/p/logo.png"),
+            "logo",
+            "deadbeef00000000000000000000000000000000000000000000000000000002",
+        );
+        assert_ne!(a, b, "a shared digest prefix must not alias payload names");
+    }
+
+    #[test]
+    fn assets_dedupe_identical_bytes_without_overwriting_distinct_entries() {
+        let assets = Assets::default();
+        let first = assets
+            .add(Path::new("/p/logo.png"), b"first".to_vec())
+            .unwrap();
+        let second = assets
+            .add(Path::new("/p/logo.png"), b"second".to_vec())
+            .unwrap();
+        let duplicate = assets
+            .add(Path::new("/p/logo.png"), b"first".to_vec())
+            .unwrap();
+
+        assert_ne!(
+            first, second,
+            "distinct bytes must retain distinct payloads"
+        );
+        assert_eq!(first, duplicate, "identical bytes must dedupe");
+        let emitted = assets.take();
+        assert_eq!(
+            emitted.len(),
+            2,
+            "distinct payloads must not be overwritten"
+        );
+        assert!(
+            emitted
+                .iter()
+                .any(|asset| asset.name == first && asset.bytes == b"first")
+        );
+        assert!(
+            emitted
+                .iter()
+                .any(|asset| asset.name == second && asset.bytes == b"second")
+        );
+
+        let mut named = BTreeMap::new();
+        record_asset(&mut named, "forced-name".to_string(), b"first".to_vec()).unwrap();
+        record_asset(&mut named, "forced-name".to_string(), b"first".to_vec()).unwrap();
+        assert!(record_asset(&mut named, "forced-name".to_string(), b"second".to_vec()).is_err());
+    }
+
+    #[test]
     fn generated_names_cannot_differ_only_in_case() {
         let upper = asset_name(Path::new("/p/a/Logo.BIN"), b"SAME");
         let lower = asset_name(Path::new("/p/b/logo.bin"), b"SAME");
@@ -684,7 +760,15 @@ mod tests {
     fn the_file_module_resolves_against_the_module_not_the_cwd() {
         let code = file_module("logo-a1b2c3d4.png");
         assert!(code.contains("import.meta.url"), "{code}");
-        assert!(code.contains("fileURLToPath"), "{code}");
+        assert!(
+            code.contains(r#"process[Symbol.for("nub.compile.bootstrap")]"#)
+                && code.contains(r#"record.getBuiltin("node:url").fileURLToPath"#),
+            "the bootstrap record must provide node:url: {code}"
+        );
+        assert!(
+            !code.contains(r#"from "node:url""#),
+            "the generated module must not statically link a redirectable builtin: {code}"
+        );
         assert!(code.contains("\"./logo-a1b2c3d4.png\"") || code.contains("\"logo-a1b2c3d4.png\""));
         assert!(!code.contains("process.cwd"), "{code}");
     }

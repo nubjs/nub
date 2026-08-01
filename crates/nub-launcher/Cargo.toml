@@ -7,8 +7,9 @@
 # nub-core is linked with default features; the launcher only ever calls its pure
 # paths (flag computation, discovery, signal-forwarding spawn), so fat LTO drops
 # the reqwest/liblzma network stack from the final binary even though nub-core
-# compiles it. `--smol` provisioning is a curl/wget/tar shell-out (below), NOT
-# nub-core's in-process HTTP path — the design's no-in-binary-TLS rule.
+# compiles it. `--smol` downloads through curl/wget and uses nub-core's capped
+# archive extractor, NOT nub-core's in-process HTTP path — the design's
+# no-in-binary-TLS rule.
 [package]
 name = "nub-launcher"
 version = "0.0.0"

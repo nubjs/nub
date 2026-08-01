@@ -1278,23 +1278,33 @@ pub enum SourcemapArg {
 
 /// Top-level entry point. Returns the process exit code.
 pub fn run() -> Result<i32> {
-    // The macOS parent-death watcher (#480) re-invokes `current_exe()` with this
-    // hidden verb — and `current_exe()` is whatever NAME nub is running under,
-    // which for any workload spawned through nub's own PATH shim is `node`, not
-    // `nub`. Dispatching it here, BEFORE `Argv0::detect()`, is what makes the
-    // verb argv0-independent. Routing it through the argv0 match instead let
-    // `Argv0::Node` treat `__pdeath-watch` as a SCRIPT to run, which spawned a
-    // workload — and therefore another watcher — per level, an unbounded
-    // self-replicating chain that exhausted the process table (regression from #504).
+    // The macOS parent-death watcher (#480) re-invokes `current_exe()` under
+    // the private launcher mode, with its `<child-pgid> <read-fd>` payload as
+    // ordinary arguments. `current_exe()` is whatever NAME nub is running
+    // under — `node` for workloads spawned through nub's PATH shim — so this
+    // must dispatch before `Argv0::detect()`. Otherwise `Argv0::Node` would
+    // treat the payload as an application script, spawning another watcher per
+    // level (regression from #504).
     //
+    // The legacy `__pdeath-watch` hidden token remains accepted for already
+    // built callers, but new watchers select the mode through the internal env
+    // channel so no application argument is reserved. Both forms require the
+    // exact two-item watcher payload before they bypass normal CLI dispatch.
     // Landing above the guards below is also deliberate: the watcher must not
     // reclaim or reap PATH shim dirs, which belong to the nub that spawned it.
     #[cfg(unix)]
     {
-        let mut args = env::args().skip(1);
-        if args.next().as_deref() == Some("__pdeath-watch") {
-            let rest: Vec<String> = args.collect();
-            return Ok(nub_core::node::spawn::run_pdeath_watch(&rest));
+        let args: Vec<String> = env::args().skip(1).collect();
+        let env_mode = env::var("__NUB_COMPILED_LAUNCHER_MODE").ok();
+        let pdeath_args = if env_mode.as_deref() == Some("pdeath-watch") && args.len() == 2 {
+            Some(args.as_slice())
+        } else if args.first().map(String::as_str) == Some("__pdeath-watch") && args.len() == 3 {
+            Some(&args[1..])
+        } else {
+            None
+        };
+        if let Some(pdeath_args) = pdeath_args {
+            return Ok(nub_core::node::spawn::run_pdeath_watch(pdeath_args));
         }
     }
 
@@ -4626,6 +4636,7 @@ impl PipeReaders {
 /// Non-Unix has no `poll` here; it falls back to sequential draining, accepting
 /// the rare large-output deadlock window (the abort this replaces was Linux-only,
 /// and Windows never exhibited the thread-exhaustion bug).
+#[cfg(unix)]
 fn drain_both_inline(
     out: std::process::ChildStdout,
     out_policy: DrainPolicy,
