@@ -229,7 +229,7 @@ fn bundle_inner(
     // Rolldown resolves files through the real filesystem. On macOS `/tmp` is
     // commonly a `/private/tmp` symlink; keep its output cwd in that same
     // spelling or relative region/map ids fall back to the build-machine path.
-    let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+    let cwd = canonicalize_for_bundler(&cwd);
     let stem = entry_abs
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -1181,7 +1181,7 @@ impl CompilePreamble {
     }
 
     fn from_source(entry: &Path, runtime_dir: PathBuf, source: String) -> Self {
-        let entry = std::fs::canonicalize(entry).unwrap_or_else(|_| entry.into());
+        let entry = canonicalize_for_bundler(entry);
         Self {
             roots: Mutex::new(BTreeMap::from([(COMPILE_ROOT_ID.to_string(), entry)])),
             runtime_dir,
@@ -1219,7 +1219,7 @@ impl CompilePreamble {
     /// an internal module identity; the existing emitted filename remains keyed
     /// on the source path and retains its current layout.
     fn worker_root(&self, source: &Path) -> Result<String> {
-        let source = std::fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
+        let source = canonicalize_for_bundler(source);
         let hash = format!("{:x}", Sha256::digest(source.to_string_lossy().as_bytes()));
         let id = format!("\0nub:compile-worker-{hash}");
         let mut roots = self
@@ -1259,6 +1259,37 @@ impl CompilePreamble {
 /// side-effectful: prelude first, program second.  JSON quoting keeps Windows
 /// separators and every filename character out of JavaScript grammar concerns;
 /// Rolldown resolves the absolute id only while building and never emits it.
+/// Drop a Windows verbatim (`\\?\`) prefix. Pure over `windows` so both branches
+/// test on any host.
+fn strip_verbatim_prefix(path: PathBuf, windows: bool) -> PathBuf {
+    if !windows {
+        return path;
+    }
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) => PathBuf::from(rest),
+        None => path,
+    }
+}
+
+/// Canonicalize a path that will reach Rolldown as a module specifier.
+///
+/// `fs::canonicalize` returns the verbatim spelling on Windows, and Rolldown
+/// cannot resolve one: every Windows compile died with
+/// `Could not resolve '\\?\C:\...' in \0nub:compile-root`. The ordinary spelling
+/// denotes the same file and both Rolldown and Node accept it, so strip the
+/// prefix at the point the path stops being a filesystem handle and becomes a
+/// specifier.
+fn canonicalize_for_bundler(path: &Path) -> PathBuf {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    strip_verbatim_prefix(canonical, cfg!(windows))
+}
+
 fn compile_root_source(source: &Path) -> String {
     let prelude = serde_json::to_string(COMPILE_PREAMBLE_ID).expect("a virtual id serializes");
     let source =
@@ -1963,7 +1994,9 @@ impl NewUrlAssets {
         let chunk = worker_chunk_output_name(&entry);
         // Idempotent for the same source: one worker referenced from two modules
         // must emit once, while a generated-name collision must never alias it.
-        let source = std::fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
+        // Same spelling as `worker_root` below, or the two derive different ids for
+        // one file and the worker emits twice.
+        let source = canonicalize_for_bundler(source);
         // Scoped so the guard is released before `worker_root` below, which takes
         // its own locks.
         let fresh = {
@@ -3238,8 +3271,7 @@ impl ExternalImports {
             // Rolldown canonicalizes module ids. Match that spelling before
             // deriving portable importer paths (`/tmp` is `/private/tmp` on
             // macOS), or provenance can accidentally encode the build root.
-            launch_root: std::fs::canonicalize(launch_root)
-                .unwrap_or_else(|_| launch_root.to_path_buf()),
+            launch_root: canonicalize_for_bundler(launch_root),
             private_importers,
             records: Mutex::new(BTreeMap::new()),
         }
@@ -4693,6 +4725,30 @@ mod tests {
             ],
         )
         .expect("a delayed CJS back-edge must compile");
+    }
+
+    /// Rolldown resolves a module specifier through the real filesystem and cannot
+    /// resolve a Windows verbatim path, so every Windows compile failed with
+    /// `Could not resolve '\\?\C:\...' in \0nub:compile-root`. `fs::canonicalize`
+    /// hands back exactly that spelling, and no macOS or Linux test can reach it —
+    /// hence the pure `windows` parameter.
+    #[test]
+    fn a_verbatim_canonical_path_is_reduced_to_the_spelling_rolldown_resolves() {
+        let drive = PathBuf::from(r"\\?\C:\Users\r\app.cjs");
+        assert_eq!(
+            strip_verbatim_prefix(drive.clone(), true),
+            PathBuf::from(r"C:\Users\r\app.cjs")
+        );
+        let unc = PathBuf::from(r"\\?\UNC\server\share\app.cjs");
+        assert_eq!(
+            strip_verbatim_prefix(unc, true),
+            PathBuf::from(r"\\server\share\app.cjs")
+        );
+        // An ordinary Windows path is already resolvable and must survive untouched.
+        let plain = PathBuf::from(r"C:\Users\r\app.cjs");
+        assert_eq!(strip_verbatim_prefix(plain.clone(), true), plain);
+        // Off Windows the prefix is not a prefix at all, so nothing is stripped.
+        assert_eq!(strip_verbatim_prefix(drive.clone(), false), drive);
     }
 
     #[test]
