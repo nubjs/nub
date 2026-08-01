@@ -1221,7 +1221,26 @@ mod tests {
             "a clean tree outside the exact cache-key target is not authority"
         );
 
-        let lexical = base.join(".").join(CACHE_KEY);
+        // A real alias reaches this check through `find_public_preload`, which
+        // hands over a verbatim-STRIPPED path — and that stripping is what makes
+        // the fixture constructible at all: `PathBuf::push` deletes `.` from a
+        // VERBATIM (`\\?\`) path, because Windows does not resolve it there, so
+        // `base.join(".")` on the canonicalized base returns the canonical target
+        // itself and this block would assert the exact opposite of the assertion
+        // above. Stripping is a no-op off Windows, so unix keeps testing what it
+        // always did.
+        let alias_base = PathBuf::from(crate::node::spawn::strip_verbatim(
+            base.to_str().expect("cache base is UTF-8"),
+            cfg!(windows),
+        ));
+        let lexical = alias_base.join(".").join(CACHE_KEY);
+        // Byte-wise on purpose: `Path`'s `PartialEq` drops `.`, so a `Path`
+        // comparison here would pass against the very normalization it guards.
+        assert_ne!(
+            lexical.as_os_str(),
+            alias_base.join(CACHE_KEY).as_os_str(),
+            "the `.` must survive into the fixture, or this tests nothing"
+        );
         assert!(
             verify_runtime_tree(&lexical),
             "control: lexical alias hashes clean"
