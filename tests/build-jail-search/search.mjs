@@ -250,12 +250,20 @@ function discoverTree(nub, dir, pkg, version) {
   runCell(nub, fx, { label: 'discover', ignoreScripts: true, pkg });
   const store = path.join(fx.proj, 'node_modules', '.store');
   let entries = [];
-  try { entries = fs.readdirSync(store); } catch { return []; }
+  try { entries = fs.readdirSync(store); } catch { return { names: [], specs: [] }; }
   // `.store` names entries `<name>@<version>`; scoped packages use `+` for the separator.
-  return [...new Set(entries.map((e) => {
+  // Returns BOTH the bare names (the catalog is keyed by name) and name@version specs (the
+  // malicious-package screen needs the exact version that is about to execute).
+  const names = new Set();
+  const specs = new Set();
+  for (const e of entries) {
     const at = e.lastIndexOf('@');
-    return (at > 0 ? e.slice(0, at) : e).replace('+', '/');
-  }))];
+    const name = (at > 0 ? e.slice(0, at) : e).replace('+', '/');
+    names.add(name);
+    // Strip the store's content hash: `pkg@1.2.3-93d5bfce` -> `1.2.3`.
+    if (at > 0) specs.add(`${name}@${e.slice(at + 1).replace(/-[0-9a-f]{8,}$/, '')}`);
+  }
+  return { names: [...names], specs: [...specs] };
 }
 
 
@@ -316,6 +324,63 @@ function homeWritePaths(paths) {
   // Drop any entry already covered by a shallower one, so the set is minimal by construction.
   const out = [...dirs].sort();
   return out.filter((d) => !out.some((o) => o !== d && d.startsWith(`${o}/`)));
+}
+
+/** The winning grant WITH its derived `writePaths`, for the verification cell.
+ *
+ *  `writePaths` is deliberately absent from every search cell: the move happens AFTER the
+ *  scripts finish, so it cannot change what a script did in the run being scored, and leaving
+ *  it out of the control too keeps the comparison symmetric. That is correct — but it means the
+ *  derived value is an OUTPUT NOTHING EVER TESTS, which is the exact shape of the inert checks
+ *  that have cost this harness repeatedly. So it gets one cell of its own at the end. */
+function catalogWithWritePaths(pkg, state, others, writePaths) {
+  const cat = catalogFor(pkg, state, others);
+  const g = cat.packages[pkg]?.[0] ?? { notes: 'writePaths verification' };
+  g.writePaths = writePaths;
+  cat.packages[pkg] = [g];
+  return cat;
+}
+
+/** Refuse to execute lifecycle scripts from a package OSV flags as MALICIOUS.
+ *
+ *  This harness runs arbitrary install scripts from the npm ecosystem, on a real machine, by
+ *  design — which is precisely the delivery mechanism a Shai-Hulud-style worm uses. The jail is
+ *  BEST EFFORT and explicitly not a boundary against a targeted attacker, so it must not be the
+ *  only thing between a known-malicious package and this box.
+ *
+ *  Screens the WHOLE INSTALLED TREE, not just the package under test: the worm propagates
+ *  through dependencies, and a clean target with a compromised transitive dep is the case that
+ *  matters. The tree is enumerated by the `--ignore-scripts` discovery install, so nothing has
+ *  executed at the point this runs.
+ *
+ *  OSV `MAL-*` ids come from the ossf/malicious-packages dataset. Verified able to fire:
+ *  `@ctrl/tinycolor@4.1.2`, a real Shai-Hulud compromise, returns MAL-2025-47141 — an
+ *  all-clear from an instrument never shown to alarm is worth nothing.
+ *
+ *  FAILS CLOSED on a network or API error. A screen that silently passes when it could not
+ *  reach the data is the same inert check this harness has produced seven times.
+ */
+function screenForMalicious(specs) {
+  const queries = specs.map((sp) => {
+    const at = sp.lastIndexOf('@');
+    const name = at > 0 ? sp.slice(0, at) : sp;
+    const version = at > 0 ? sp.slice(at + 1) : undefined;
+    return version ? { package: { name, ecosystem: 'npm' }, version } : { package: { name, ecosystem: 'npm' } };
+  });
+  const body = JSON.stringify({ queries });
+  const r = spawnSync('curl', ['-sS', '--max-time', '60', '-X', 'POST',
+    'https://api.osv.dev/v1/querybatch', '-H', 'Content-Type: application/json', '-d', body],
+    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  if (r.status !== 0) throw new Error(`OSV screen FAILED (curl ${r.status}): ${(r.stderr || '').slice(0, 200)}`);
+  let parsed;
+  try { parsed = JSON.parse(r.stdout); } catch (e) { throw new Error(`OSV screen FAILED to parse: ${e.message}`); }
+  const results = parsed.results ?? [];
+  if (results.length !== specs.length) throw new Error(`OSV screen returned ${results.length} results for ${specs.length} queries`);
+  const flagged = [];
+  results.forEach((res, i) => {
+    for (const v of res.vulns ?? []) if ((v.id ?? '').startsWith('MAL-')) flagged.push({ spec: specs[i], id: v.id });
+  });
+  return flagged;
 }
 
 // ── the walk ──────────────────────────────────────────────────────────────────
@@ -410,7 +475,18 @@ function search(nub, pkg, version, root, keep) {
 
   // CONTROL — scripts on, jail off. EVERY cell runs the identical two steps, so full path
   // sets are directly comparable and no baseline subtraction is needed.
-  const others = discoverTree(nub, path.join(root, 'discover'), pkg, version);
+  const tree = discoverTree(nub, path.join(root, 'discover'), pkg, version);
+  const others = tree.names;
+
+  // ⛔ SCREEN BEFORE ANY SCRIPT RUNS. Everything above this line used --ignore-scripts;
+  // everything below EXECUTES third-party code on this machine.
+  const flagged = screenForMalicious(tree.specs);
+  if (flagged.length) {
+    return {
+      pkg, version, verdict: 'MALICIOUS-PACKAGE-DETECTED',
+      flagged, provenance: provenance(nub),
+    };
+  }
 
   const cells = [];
   // THE CONTROL IS THE TOP CELL. With every other package pinned at full grant, "the tested
@@ -481,6 +557,24 @@ function search(nub, pkg, version, root, keep) {
     });
     if (!r.overrideOk) return { pkg, version, cells, verdict: 'HARNESS-ERROR', why: `override did not engage at state ${i}`, log: r.log.slice(-400) };
     if (matches(r)) {
+      const wp = floor ? homeWritePaths(controlOnly(controlU, floor)) : null;
+      const verifyWritePaths = () => {
+        if (!wp || !wp.length) return null;
+        const v = cell(`verify${i}`, {
+          catalogFile: (() => {
+            const f = path.join(root, `cat-verify-${i}.json`);
+            fs.writeFileSync(f, JSON.stringify(catalogWithWritePaths(pkg, STATES[i], others, wp), null, 2));
+            return f;
+          })(),
+          label: 'writePaths verification',
+        });
+        // A promoted path lands in the fixture's REAL home (`home/<entry>/...`), which
+        // `tokenise` leaves alone; an unpromoted one stays in the throwaway and tokenises to
+        // `$home/<entry>/...`. So the two are distinguishable in one scan.
+        const real = v.seen.filter((q) => wp.some((e) => q.startsWith(`home/${e}/`) || q === `home/${e}`)).length;
+        const kept = v.seen.filter((q) => wp.some((e) => q.startsWith(`$home/${e}/`) || q === `$home/${e}`)).length;
+        return { rc: v.rc, promotedIntoRealHome: real, leftInThrowaway: kept, entries: wp };
+      };
       return {
         pkg, version,
         verdict: 'MINIMUM',
@@ -520,7 +614,12 @@ function search(nub, pkg, version, root, keep) {
         // a few bookkeeping paths sit elsewhere. A count cannot be quietly inert — 0 means
         // nothing landed there, and any other number is the promotion list's raw material.
         // The derived `writePaths` entry: the minimal directories that must survive.
-        writePaths: floor ? homeWritePaths(controlOnly(controlU, floor)) : null,
+        writePaths: wp,
+        // DID THE PROMOTION ACTUALLY HAPPEN? Counts, not a boolean — a number cannot go
+        // quietly inert, and this is the field that says whether the catalog's `writePaths`
+        // is worth anything. `promotedIntoRealHome` 0 with a non-empty `writePaths` is a
+        // defect in the MOVER, not in the package.
+        writePathsVerified: verifyWritePaths(),
         pathsLandingInThrowawayHome: floor
           ? controlOnly(controlU, floor).filter((p) => p.startsWith('$home/')).length
           : null,
