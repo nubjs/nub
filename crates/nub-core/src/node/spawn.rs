@@ -2630,7 +2630,15 @@ fn is_reentrant_in(node_options: Option<&str>, preload: Option<&str>) -> bool {
 /// `\\?\UNC\`) that `fs::canonicalize` emits. Node's module loader and NODE_PATH
 /// reject them. Returns a native Windows path (backslashes preserved — valid for
 /// NODE_PATH and fs ops). Pure over `windows` so both branches test on any host.
-pub(crate) fn strip_verbatim(path: &str, windows: bool) -> String {
+///
+/// The loader's refusal is not cosmetic. CJS resolution ends in
+/// `fs.realpathSync`, whose Windows walk lstats the path's ROOT first; for
+/// `\\?\C:\…` that root is `\\?\C:\`, which Node's native `ToNamespacedPath`
+/// re-resolves to `\\?\C:` — the volume DEVICE rather than its root directory —
+/// and the call fails `EISDIR: illegal operation on a directory, lstat 'C:'`
+/// (the bare `C:` is the namespace prefix stripped back off for the message).
+/// So a single `\\?\` path handed to Node kills every `require` in the process.
+pub fn strip_verbatim(path: &str, windows: bool) -> String {
     if windows {
         if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
             return format!(r"\\{rest}");
@@ -2640,6 +2648,19 @@ pub(crate) fn strip_verbatim(path: &str, windows: bool) -> String {
         }
     }
     path.to_string()
+}
+
+/// [`strip_verbatim`] for a path that is about to become a Node command-line
+/// argument rather than a filesystem handle.
+///
+/// A path that is not valid UTF-8 is returned untouched: it cannot be handed to
+/// Node as an argument in any spelling, so re-spelling it would only mask the
+/// real failure. Pure over `windows` so both branches test on any host.
+pub fn strip_verbatim_path(path: &Path, windows: bool) -> PathBuf {
+    match path.to_str() {
+        Some(text) => PathBuf::from(strip_verbatim(text, windows)),
+        None => path.to_path_buf(),
+    }
 }
 
 /// Convert a filesystem path to a `file://` URL Node's loader accepts on every
@@ -5061,6 +5082,15 @@ mod tests {
         assert_eq!(strip_verbatim(r"C:\a\b", true), r"C:\a\b"); // no prefix: unchanged
         // Non-Windows host never strips (a unix path could legitimately start oddly).
         assert_eq!(strip_verbatim(r"\\?\C:\a", false), r"\\?\C:\a");
+        // The `Path` form is the same rule for a path headed to Node's argv.
+        assert_eq!(
+            strip_verbatim_path(Path::new(r"\\?\C:\a\b"), true),
+            PathBuf::from(r"C:\a\b")
+        );
+        assert_eq!(
+            strip_verbatim_path(Path::new(r"\\?\C:\a\b"), false),
+            PathBuf::from(r"\\?\C:\a\b")
+        );
     }
 
     #[test]
