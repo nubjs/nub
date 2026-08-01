@@ -141,6 +141,26 @@ foreach ($k in $locs.Keys) {
 Check 'every-location-has-a-canary' (@($locs.Keys | Where-Object { -not $canary[$_] }).Count -eq 0) `
   "missing=$(($locs.Keys | Where-Object { -not $canary[$_] }) -join ',')"
 
+# A SECOND canary, planted by the DE-ELEVATED USER wherever it can. Run 30689267117 showed the AC
+# arm creating and listing freely inside a user-created directory under `C:\` while READ of the
+# canary there came back EPERM — which reads as a kernel limit and is not one. An inheritable ACE
+# propagates into an existing child only where the GRANTOR holds WRITE_DAC on that child, and the
+# first canary is planted by the ELEVATED parent, so under `C:\<user-made>` it is an
+# Administrators-owned file inside a user-owned directory and the de-elevated grant skips it.
+# Measuring the read row against BOTH a canary the grantor can re-ACL and one it cannot is what
+# tells a fixture artefact from confinement.
+Write-Host ''
+Write-Host '========== FIXTURES — second canary, planted DE-ELEVATED =========='
+$canary2 = @{}
+$imp0 = [Fx]::BeginDeelevated()
+foreach ($k in $locs.Keys) {
+  $p = Join-Path $locs[$k] "fxcanary2-$tag.txt"
+  $r = [Fx]::TryCreateFile($p)
+  $canary2[$k] = if ($r -eq 'OK') { $p } else { $null }
+  Write-Host ("{0,-22} canary2(de-elevated)={1}" -f $k, $r)
+}
+[void][Fx]::EndDeelevated()
+
 # ═══════════ SECTION 1 — RAW WIN32, EXACT ERROR NUMBERS, ELEVATED vs DE-ELEVATED ═══════════
 # libuv collapses several distinct Win32 statuses onto one errno, so the child's `EPERM` does not
 # by itself name the OS error. These calls run in the parent and report `GetLastError()` verbatim.
@@ -164,6 +184,7 @@ function Win32-Pass($ctx) {
     $out["$k|create"] = [Fx]::TryCreateFile((Join-Path $d "fxw32-$ctx-$tag.txt"))
     $out["$k|mkdir"] = [Fx]::TryMkdir((Join-Path $d "fxw32d-$ctx-$tag"))
     $out["$k|read"] = if ($canary[$k]) { [Fx]::TryReadFile($canary[$k]) } else { 'N/A' }
+    $out["$k|read2"] = if ($canary2[$k]) { [Fx]::TryReadFile($canary2[$k]) } else { 'N/A' }
     $out["$k|list"] = [Fx]::TryListDir($d)
     # The DACL question, at the same target in the same context, so the two halves of the
     # contradiction are answered side by side rather than in two different runs.
@@ -184,7 +205,7 @@ Check 'impersonation-engaged' ($imp -eq 'OK') "= $imp"
 Write-Host ''
 Write-Host 'location               | op     | elevated   | DE-ELEVATED (a standard user)'
 foreach ($k in $locs.Keys) {
-  foreach ($op in @('create', 'mkdir', 'read', 'list', 'dacl')) {
+  foreach ($op in @('create', 'mkdir', 'read', 'read2', 'list', 'dacl')) {
     $e = $w32elev["$k|$op"]; $d = $w32deelev["$k|$op"]
     if ($null -eq $e) { $e = 'BLANK' }
     if ($null -eq $d) { $d = 'BLANK' }
@@ -195,7 +216,7 @@ foreach ($k in $locs.Keys) {
 # ENGAGEMENT: a blank cell means the call never reached the OS, and "not OK" would then be
 # indistinguishable from "denied" — the exact false PASS an earlier revision of this harness
 # produced. Elevated-can-ACE-`C:\` is what makes the de-elevated refusal about privilege.
-$blank = @($locs.Keys | ForEach-Object { $k = $_; @('create', 'mkdir', 'read', 'list', 'dacl') |
+$blank = @($locs.Keys | ForEach-Object { $k = $_; @('create', 'mkdir', 'read', 'read2', 'list', 'dacl') |
       Where-Object { -not $w32elev["$k|$_"] -or -not $w32deelev["$k|$_"] } })
 Check 'win32-rows-all-answered' ($blank.Count -eq 0) "blanks=$($blank.Count)"
 Check 'runner-really-is-elevated' ($w32elev['C:\|dacl'] -eq 'OK') "elevated-dacl-on-C:\ = $($w32elev['C:\|dacl'])"
@@ -230,6 +251,7 @@ function Build-Ops($arm) {
     $o += @{ id = "$k|create"; kind = 'create'; path = (Join-Path $d "fxnew-$arm-$tag.txt") }
     $o += @{ id = "$k|mkdir"; kind = 'mkdir'; path = (Join-Path $d "fxdir-$arm-$tag") }
     if ($canary[$k]) { $o += @{ id = "$k|read"; kind = 'read'; path = $canary[$k] } }
+    if ($canary2[$k]) { $o += @{ id = "$k|read2"; kind = 'read'; path = $canary2[$k] } }
     $o += @{ id = "$k|list"; kind = 'list'; path = $d }
   }
   return $o
@@ -295,7 +317,9 @@ foreach ($t in $broadTargets) {
 # The ACE read-back probe set: a PRE-EXISTING file in each location. A propagation slip and a
 # kernel denial are otherwise indistinguishable in a child's output.
 $readbackPaths = @($canary['%USERPROFILE%'], $canary['%TEMP%'], $canary['%LOCALAPPDATA%'],
-  $canary['C:\'], $canary['C:\ProgramData'], $canary['C:\Users\Public'], $canary['armtmp (POSITIVE)'])
+  $canary['C:\'], $canary['C:\ProgramData'], $canary['C:\Users\Public'], $canary['armtmp (POSITIVE)'],
+  $canary['C:\<user-made>'], $canary2['C:\<user-made>'],
+  $canary['C:\ProgramData\<um>'], $canary2['C:\ProgramData\<um>'])
 function Readback($sid) {
   ($readbackPaths | ForEach-Object { if ($_) { [Fx]::ReadAceMask($_, $sid) } else { 'N/A' } }) -join ' '
 }
@@ -352,7 +376,7 @@ $hdr = 'location'.PadRight(23) + 'op'.PadRight(16)
 foreach ($n in $armNames) { $hdr += $n.PadRight(19) }
 Write-Host $hdr
 foreach ($k in $locs.Keys) {
-  foreach ($op in @('create', 'mkdir', 'read', 'list')) {
+  foreach ($op in @('create', 'mkdir', 'read', 'read2', 'list')) {
     $row = $k.PadRight(23) + $op.PadRight(16)
     foreach ($n in $armNames) {
       $v = $results[$n]["op:$k|$op"]
@@ -449,7 +473,7 @@ Check 'broad-net-reaches-egress' `
 function Cls($v) { if ($v -like 'OK*') { 'OK' } elseif ($null -eq $v) { 'MISSING' } else { $v } }
 $drift = @()
 foreach ($k in $locs.Keys) {
-  foreach ($op in @('create', 'mkdir', 'read', 'list')) {
+  foreach ($op in @('create', 'mkdir', 'read', 'read2', 'list')) {
     if ((Cls $results['plain-elev']["op:$k|$op"]) -ne (Cls $results['plain-elev-2']["op:$k|$op"])) {
       $drift += "$k|$op"
     }
