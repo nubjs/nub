@@ -1,0 +1,197 @@
+name: Windows loaded-DLL rename semantics
+
+# Branch-scoped ad-hoc probe. The `Gate — release compiled-runtime cache repair`
+# step asserts compile CANNOT repair a runtime tree while a live process has the
+# addon loaded, and swap_extract's comment states "A loaded Windows DLL blocks
+# this first rename". On a real runner the repair succeeded. Settle the premise.
+on:
+  push:
+    branches: [win-probe-ci]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Minutes, no cargo build. Does a mapped DLL block renaming its ANCESTOR
+  # directory, the way swap_extract assumes? Carries its own positive control:
+  # renaming the DLL FILE must fail, which is what proves the DLL really is
+  # mapped and that a RENAME_OK on the directory is a real answer, not a
+  # setup that quietly failed to load anything.
+  semantics:
+    name: Does a mapped DLL block an ancestor-directory rename?
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch]
+        with:
+          toolchain: stable
+      - name: Probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustc tests/win-rename-probe/rename_probe.rs -o rename_probe.exe
+          $probe = Join-Path $PWD 'rename_probe.exe'
+
+          $base = Join-Path $env:RUNNER_TEMP ('renameprobe-' + [Guid]::NewGuid().ToString('N'))
+          $target = Join-Path $base 'runtime-0.0.0-deadbeef'
+          $addons = Join-Path $target 'addons'
+          New-Item -ItemType Directory -Force -Path $addons | Out-Null
+          $dll = Join-Path $addons 'nub-native.node'
+          # A real, loadable DLL under the same .node name the runtime tree uses.
+          Copy-Item C:\Windows\System32\version.dll $dll
+
+          $out = Join-Path $base 'holder.out'
+          $holder = Start-Process pwsh -PassThru -RedirectStandardOutput $out `
+            -ArgumentList @('-NoProfile','-File','tests/win-rename-probe/hold-dll.ps1','-Dll',$dll)
+          for ($i = 0; $i -lt 100; $i++) {
+            if ((Get-Content -Raw $out -ErrorAction SilentlyContinue) -match 'HOLDER_READY') { break }
+            Start-Sleep -Milliseconds 100
+          }
+          if ((Get-Content -Raw $out -ErrorAction SilentlyContinue) -notmatch 'HOLDER_READY') { throw 'holder never loaded the DLL' }
+          Write-Host "holder pid $($holder.Id) reports the DLL mapped"
+          Write-Host "modules matching nub-native:"
+          (Get-Process -Id $holder.Id).Modules | Where-Object { $_.FileName -like '*nub-native*' } |
+            ForEach-Object { Write-Host "  $($_.FileName)" }
+
+          Write-Host "=== POSITIVE CONTROL: rename the mapped DLL FILE (must fail) ==="
+          & $probe $dll (Join-Path $addons 'moved.node')
+
+          Write-Host "=== THE QUESTION: rename the ANCESTOR directory ==="
+          & $probe $target (Join-Path $base '.stale.runtime-0.0.0-deadbeef')
+
+          Write-Host "=== after ==="
+          Get-ChildItem $base | Select-Object Name | Out-String | Write-Host
+          Stop-Process -Id $holder.Id -Force
+
+  # The other half: in the real gate, does the holder actually map the addon at
+  # all? holder.ts is plain JavaScript with a .ts extension, and app.ts is
+  # annotations-only, which Node 24 strips natively — the same shape that made
+  # the round-trip fixture vacuous.
+  holder:
+    name: Does the gate's holder actually map the addon?
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch]
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: ci-win-embed-roundtrip
+          save-if: false
+          workspaces: |
+            .
+            crates/nub-native
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "24"
+      - name: Install and stage runtime dependencies for embedded compile
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          rm -rf runtime/node_modules
+          mkdir -p \
+            runtime/node_modules/@js-temporal \
+            runtime/node_modules/@oxc-project \
+            runtime/node_modules/@petamoriken
+          cp -R node_modules/@js-temporal/polyfill runtime/node_modules/@js-temporal/
+          cp -R node_modules/@oxc-project/runtime runtime/node_modules/@oxc-project/
+          cp -R node_modules/@petamoriken/float16 runtime/node_modules/@petamoriken/
+          cp -R node_modules/jsbi node_modules/urlpattern-polyfill runtime/node_modules/
+      - name: Build + stage release nub-native addon
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd crates/nub-native && cargo build --release)
+          mkdir -p runtime/addons
+          cp target/release/nub_native.dll runtime/addons/nub-native.node
+      - name: Build release nub.exe and launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p nub-cli --release --features embed-runtime,compile
+          (cd crates/nub-launcher && cargo build --release)
+      - name: Reproduce the gate's holder and inspect it
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustc tests/win-rename-probe/rename_probe.rs -o rename_probe.exe
+          $probe = Join-Path $PWD 'rename_probe.exe'
+          $nub = Join-Path $PWD 'target\release\nub.exe'
+          $launcher = Join-Path $PWD 'crates\nub-launcher\target\release\nub-launcher.exe'
+
+          $root = Join-Path $env:RUNNER_TEMP ('holderprobe-' + [Guid]::NewGuid().ToString('N'))
+          $work = Join-Path $root 'work'; $cache = Join-Path $root 'cache'
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+
+          # Byte-for-byte the gate's two fixtures.
+          [System.IO.File]::WriteAllText((Join-Path $work 'app.ts'), @'
+          const message: string = "compile-cache-release-ok";
+          console.log(message);
+          '@, [System.Text.UTF8Encoding]::new($false))
+          [System.IO.File]::WriteAllText((Join-Path $work 'holder.ts'), @'
+          console.log("compile-cache-holder-ready");
+          setInterval(() => {}, 1000);
+          '@, [System.Text.UTF8Encoding]::new($false))
+
+          $env:XDG_CACHE_HOME = $cache
+          $env:__NUB_LAUNCHER_TEMPLATE = $launcher
+          $env:NUB_RELEASE_BASE_URL = 'http://127.0.0.1:9'
+
+          Push-Location $work
+          & $nub (Join-Path $work 'app.ts') | Out-String | Write-Host
+          Pop-Location
+
+          $nubRoot = Join-Path $cache 'nub'
+          $runtime = (Get-ChildItem -LiteralPath $nubRoot -Directory -Filter 'runtime-*')[0].FullName
+          Write-Host "runtime = $runtime"
+
+          $out = Join-Path $root 'holder.out'
+          $holder = Start-Process -FilePath $nub -PassThru -WorkingDirectory $work `
+            -RedirectStandardOutput $out -ArgumentList ('"' + (Join-Path $work 'holder.ts') + '"')
+          for ($i = 0; $i -lt 150; $i++) {
+            if ((Get-Content -Raw $out -ErrorAction SilentlyContinue) -match 'compile-cache-holder-ready') { break }
+            Start-Sleep -Milliseconds 100
+          }
+          if ((Get-Content -Raw $out -ErrorAction SilentlyContinue) -notmatch 'compile-cache-holder-ready') { throw 'holder never became ready' }
+
+          # THE question this job exists for.
+          Write-Host "=== holder module list, filtered to the addon ==="
+          $mods = @((Get-Process -Id $holder.Id).Modules | Where-Object { $_.FileName -like '*nub-native*' })
+          if ($mods.Count -eq 0) {
+            Write-Host "ADDON_NOT_MAPPED — the holder never dlopen'd nub-native.node"
+          } else {
+            $mods | ForEach-Object { Write-Host "ADDON_MAPPED $($_.FileName)" }
+          }
+          Write-Host "=== every node/nub process holding a handle in the runtime tree ==="
+          Get-Process | Where-Object { $_.ProcessName -match 'node|nub' } | ForEach-Object {
+            $p = $_
+            try {
+              $m = @($p.Modules | Where-Object { $_.FileName -like "$runtime*" })
+              if ($m.Count) { Write-Host "  pid $($p.Id) $($p.ProcessName): $($m.Count) module(s) under the runtime" }
+            } catch {}
+          }
+
+          Write-Host "=== rename the runtime dir aside, exactly as swap_extract does ==="
+          & $probe $runtime (Join-Path $nubRoot '.stale.probe')
+          Write-Host "=== after ==="
+          Get-ChildItem $nubRoot | Select-Object Name | Out-String | Write-Host
+          Stop-Process -Id $holder.Id -Force
