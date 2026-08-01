@@ -1301,6 +1301,18 @@ JSON
 	assert_dir_exists node_modules
 }
 
+@test "aube install --frozen-lockfile ignores an unrepresentable network-concurrency" {
+	# The CLI accepts an unsigned 64-bit value, but AdaptiveLimit packs its
+	# maximum into a u32. The invalid setting must warn and select the
+	# automatic ceiling instead of panicking during the frozen fetch path.
+	_setup_basic_fixture
+	run aube -v install --frozen-lockfile --network-concurrency 4294967296
+	assert_success
+	assert_output --partial "ignoring network-concurrency=4294967296"
+	assert_output --partial "using automatic default"
+	assert_dir_exists node_modules
+}
+
 # Fresh resolve: `"<alias>": "npm:<real>@<ver>"` must land as
 # `node_modules/<alias>/`, not `node_modules/<real>/`. The resolver
 # used to clobber `task.name` to the real name at the `npm:` rewrite

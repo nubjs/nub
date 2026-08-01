@@ -1848,7 +1848,10 @@ docs = """
 Caps the tokio semaphores that gate concurrent tarball downloads
 inside `crates/aube/src/commands/install.rs`. When unset, aube
 matches pnpm's dynamic default: worker count x3, clamped to 16-64.
-Set this value explicitly to override the automatic scaling. The
+Set this value explicitly to override the automatic scaling. Values
+must be in `1..=4294967295`: zero and values that cannot fit the
+adaptive limiter's `u32` counter are warned about and fall back to the
+automatic default rather than being truncated or panicking. The
 resolver's packument fetcher still uses its own internal cap for now;
 plumbing that cap through is tracked as a follow-up.
 """

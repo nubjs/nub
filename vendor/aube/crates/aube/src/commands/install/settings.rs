@@ -310,20 +310,39 @@ pub(super) fn maybe_cleanup_unused_catalogs(
 }
 
 /// Resolve `networkConcurrency` from cli / env / `.npmrc` /
-/// workspace yaml. Returns `None` on miss so the caller can fall
-/// back to its own hardcoded default (different sites intentionally
-/// ship different defaults).
+/// workspace yaml. Returns `None` on miss or an invalid value so the
+/// caller can fall back to its own hardcoded default (different sites
+/// intentionally ship different defaults).
+///
+/// The adaptive tarball limiter packs its limit into a `u32`. A zero
+/// or unrepresentable configured value is warned about and ignored,
+/// rather than being truncated or reaching the limiter as a panic.
 pub(super) fn resolve_network_concurrency(ctx: &aube_settings::ResolveCtx<'_>) -> Option<usize> {
-    aube_settings::resolved::network_concurrency(ctx).and_then(|n| {
-        if n == 0 {
+    aube_settings::resolved::network_concurrency(ctx).and_then(|raw| {
+        if raw == 0 {
             tracing::warn!(
                 code = aube_codes::warnings::WARN_AUBE_INVALID_CONCURRENCY,
                 "ignoring network-concurrency=0 (must be >= 1)"
             );
-            None
-        } else {
-            Some(n as usize)
+            return None;
         }
+
+        let ceiling = u32::MAX;
+
+        let Some(value) = u32::try_from(raw)
+            .ok()
+            .and_then(|value| usize::try_from(value).ok())
+        else {
+            tracing::warn!(
+                code = aube_codes::warnings::WARN_AUBE_INVALID_CONCURRENCY,
+                value = raw,
+                ceiling,
+                "ignoring network-concurrency={raw} (must be in 1..={ceiling}); using automatic default"
+            );
+            return None;
+        };
+
+        Some(value)
     })
 }
 
@@ -1326,6 +1345,15 @@ mod network_concurrency_tests {
         assert_eq!(network_concurrency_for_workers(24), 64);
         assert_eq!(network_concurrency_for_workers(64), 64);
         assert_eq!(network_concurrency_for_workers(usize::MAX), 64);
+    }
+
+    #[test]
+    fn unrepresentable_network_concurrency_falls_back_to_default() {
+        let npmrc_entries = vec![("network-concurrency".to_string(), "4294967296".to_string())];
+        let workspace_yaml = std::collections::BTreeMap::new();
+        let ctx = aube_settings::ResolveCtx::files_only(&npmrc_entries, &workspace_yaml);
+
+        assert_eq!(resolve_network_concurrency(&ctx), None);
     }
 }
 

@@ -460,9 +460,9 @@ pub(in crate::commands) async fn fetch_packages(
 }
 
 // `network_concurrency`: override for the tarball-fetch semaphore.
-//   `None` uses the built-in default (128). Surfaced so the
-//   `networkConcurrency` setting, resolved once at the install-run
-//   entry point, can cap parallel downloads.
+//   `None` uses the auto-scaled worker-count x3 default, clamped to 16-64.
+//   Surfaced so the `networkConcurrency` setting, resolved once at the
+//   install-run entry point, can cap parallel downloads.
 // `verify_integrity`: whether to verify each tarball's SHA-512 against
 //   its lockfile integrity before importing into the store. `false`
 //   skips the check entirely; corresponds to `verifyStoreIntegrity=false`.
