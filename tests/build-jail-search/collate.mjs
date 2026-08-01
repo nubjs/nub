@@ -26,7 +26,12 @@ const RUNS_DIRS = argv.reduce((acc, a, i) => (a === '--runs' ? [...acc, argv[i +
 const RUNS = RUNS_DIRS.length ? RUNS_DIRS : [path.join(here, 'results', 'runs')];
 const PLATFORM_FILTER = opt('--only-platform', null);
 const BASELINE = opt('--baseline', path.join(here, 'baseline.json'));
-const OUT = opt('--out', path.join(here, 'results', 'catalog-v2.json'));
+// OUTSIDE `results/`, which is gitignored. The raw run records and per-cell logs are
+// regenerable measurements and large — ~236K per package, so ~127 MB for a 550-package corpus
+// on one platform and ~380 MB across three — but the COLLATED CATALOG is the deliverable and
+// belongs in the repo. Defaulting it into the ignored tree would have quietly kept the one
+// artefact that matters out of version control.
+const OUT = opt('--out', path.join(here, 'catalog-v2.json'));
 const PLATFORM = opt('--platform', null);
 const OVERRIDES = opt('--overrides', path.join(here, 'overrides'));
 

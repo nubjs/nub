@@ -32,7 +32,9 @@ for spec in "$@"; do
     env -u CI HOME="$d/home" "$@" > out.log 2>&1
     local rc=$?
     # First real error line, for the report.
-    err=$(grep -oiE "(ERR_[A-Z_]+|error[: ][^\"]{0,80}|not supported|EBADENGINE|gyp ERR![^\"]{0,60})" out.log | head -1)
+    if [ ! -s out.log ]; then err="(EMPTY LOG — arm produced no output, do not classify on rc alone)"
+    else err=$(grep -oiE "(node-pre-gyp ERR![^\"]{0,60}|gyp ERR![^\"]{0,60}|ERR_[A-Z_]+|error[: ][^\"]{0,70}|not supported|EBADENGINE)" out.log | head -1); fi
+    [ -n "$err" ] || err="(no recognised error line; see $d/out.log)"
     return $rc
   }
 

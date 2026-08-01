@@ -149,3 +149,9 @@ internal
 
 # Maintainer-local fray worker norms (names private orchestration tooling).
 FRAY.md
+
+# Build-jail catalog probe: raw run records and per-cell logs.
+# REGENERABLE MEASUREMENTS, and large — ~236K per package, so ~127 MB for a 550-package corpus
+# on ONE platform and ~380 MB across macOS/Linux/Windows. The collated catalog is the deliverable
+# and is tracked separately at tests/build-jail-search/catalog-v2.json.
+tests/build-jail-search/results/
