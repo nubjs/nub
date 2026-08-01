@@ -99,7 +99,7 @@ const RESULTS = path.join(ROOT, MINIMALITY ? 'minimality.ndjson' : 'matrix.ndjso
 // answer, so both are cleared and the result is asserted below.
 const baseCatalog = JSON.parse(fs.readFileSync(BASE_CATALOG, 'utf8'));
 
-function cellCatalog(pkg, cell) {
+function cellCatalog(pkg, cell, version) {
   const c = JSON.parse(JSON.stringify(baseCatalog));
   c.packageNetwork.full = (c.packageNetwork.full || []).filter((e) => e.package !== pkg);
   for (const h of c.networkHosts || []) if (Array.isArray(h.fetchedBy)) h.fetchedBy = h.fetchedBy.filter((n) => n !== pkg);
@@ -114,8 +114,21 @@ function cellCatalog(pkg, cell) {
     // cell's question is "does this script need the project at all", and a scoped probe
     // that missed the real path would answer no for the wrong reason. Scoping is a
     // follow-up decision, made once a package is known to need project access.
+    //
+    // `**`, NOT `.` — and this cell spelled it `.` until 2026-07-31, which made it INERT.
+    // `contained()` (compiler/curated.rs) returns None when the joined path EQUALS the
+    // project root: `(joined != root && joined.starts_with(&root))`. The catalog VALIDATOR
+    // accepts `.`, so nothing errored; the compiler just dropped it, leaving `projectCwd`
+    // (by its own comment "the NODE alone") as the whole grant. Measured by intervention,
+    // one variable, four arms on nx@15.9.7 with banners engaged in all of them: no grant
+    // rc=1 EPERM on `<proj>/nx.json`; `.` rc=1, the SAME EPERM; `nx.json` rc=0; `*` rc=0;
+    // `**` rc=0. So every `project`/`both` cell before this measured cwd and nothing else,
+    // and the corrupted verdict is FAILS-AT-BOTH specifically — a package needing project
+    // access failed the `both` cell and was recorded as "something the catalog cannot
+    // express" when the catalog expresses it fine. NEEDS-NOTHING and NEEDS-EGRESS rows are
+    // unaffected, since neither depends on this grant compiling.
     c.packageGrants.push({
-      package: pkg, projectReads: ['.'], projectWrites: { literal: ['.'] }, projectCwd: true,
+      package: pkg, projectReads: ['**'], projectWrites: { literal: ['**'] }, projectCwd: true,
       mechanism: 'Matrix probe arm: unscoped project read/write/cwd, to determine empirically whether this install script needs project access at all.',
       evidence: 'measured', observed, platform: 'macos-arm64',
     });
@@ -133,7 +146,10 @@ function cellCatalog(pkg, cell) {
   if (egress.has(pkg) !== wantNet) throw new Error(`cell ${cell}/${pkg}: egress=${egress.has(pkg)} want ${wantNet}`);
   if (c.packageGrants.some((e) => e.package === pkg) !== wantProject) throw new Error(`cell ${cell}/${pkg}: grant mismatch`);
 
-  const file = path.join(ROOT, 'catalogs', `${slug(pkg)}-${cell}.json`);
+  // The VERSION is in the filename only to keep two slots running the same package at
+  // different versions off one path: `writeFileSync` truncates, so a concurrent read of a
+  // half-written catalog would trip the banner check and waste an otherwise good row.
+  const file = path.join(ROOT, 'catalogs', `${slug(pkg)}-${slug(version)}-${cell}.json`);
   fs.writeFileSync(file, JSON.stringify(c, null, 2));
   // The exact substring the binary's banner must contain. Deriving it here and matching
   // it there is what makes "the edit took effect" a measurement rather than an assumption.
@@ -243,7 +259,7 @@ function runCell(pkg, version, cell, nonce, need) {
 
   // The catalog is forwarded even into the jail-off control, so a binary silently lacking
   // the override feature fails on the FIRST cell rather than part-way through a sweep.
-  const { file: catalog, banner } = cellCatalog(pkg, jailOff ? 'none' : cell);
+  const { file: catalog, banner } = cellCatalog(pkg, jailOff ? 'none' : cell, version);
   const env = {
     PATH: STUDY_PATH, HOME: home, TMPDIR: tmp,
     NUB_CACHE_DIR: STORE, NUB_BUILD_JAIL_CATALOG: catalog,
@@ -420,8 +436,13 @@ function shapeRecord(raw, meta) {
   // human rather than something to apply.
   const grant =
     raw.requirement === 'NEEDS-EGRESS' ? { packageNetwork: 'full' }
-      : raw.requirement === 'NEEDS-PROJECT' ? { packageGrant: { projectReads: ['.'], projectWrites: { literal: ['.'] }, projectCwd: true } }
-        : raw.requirement === 'NEEDS-BOTH' ? { packageNetwork: 'full', packageGrant: { projectReads: ['.'], projectWrites: { literal: ['.'] }, projectCwd: true } }
+      // `**` for the same reason the probe cell uses it: a `.` here would have had
+      // `apply-matrix.mjs` write a grant into the shipped catalog that the compiler
+      // silently drops — a catalog entry that looks like a capability and is not. No
+      // record ever reached this branch (with `.` inert, the ladder produced FAILS-AT-BOTH
+      // instead of NEEDS-PROJECT), so nothing shipped; the bug was latent, not live.
+      : raw.requirement === 'NEEDS-PROJECT' ? { packageGrant: { projectReads: ['**'], projectWrites: { literal: ['**'] }, projectCwd: true } }
+        : raw.requirement === 'NEEDS-BOTH' ? { packageNetwork: 'full', packageGrant: { projectReads: ['**'], projectWrites: { literal: ['**'] }, projectCwd: true } }
           : raw.requirement === 'GRANT-REDUNDANT' ? { remove: true }
             : null;
   return {
@@ -461,12 +482,18 @@ const weeklyOf = (() => {
   return (n) => m.get(n) ?? null;
 })();
 
+// Resume and log keys are name@VERSION, not name. A worklist may legitimately carry the
+// same package at several versions — that is the whole shape of the old-pinned-version
+// study, where the comparison IS latest-vs-older of one package. Keyed on the name alone,
+// a resume would silently drop every band but the first, and the second band's log would
+// overwrite the first's; both failures are invisible in the output.
+const key = (name, version) => `${name}@${version}`;
 const work = worklist().slice(0, LIMIT || undefined);
 const done = new Set();
 if (fs.existsSync(RESULTS)) {
-  for (const l of fs.readFileSync(RESULTS, 'utf8').split('\n')) { if (!l.trim()) continue; try { done.add(JSON.parse(l).package); } catch { /* partial line */ } }
+  for (const l of fs.readFileSync(RESULTS, 'utf8').split('\n')) { if (!l.trim()) continue; try { const o = JSON.parse(l); done.add(key(o.package, o.version)); } catch { /* partial line */ } }
 }
-const pending = work.filter((w) => !done.has(w.name));
+const pending = work.filter((w) => !done.has(key(w.name, w.version)));
 console.log(`${MINIMALITY ? 'minimality' : 'ladder'}: ${pending.length} to run (${done.size} already recorded) -> ${RESULTS}`);
 
 // A worker per job slot, each pulling the next name. Written as processes rather than
@@ -482,7 +509,7 @@ if (slot >= 0) {
     const secs = Math.round((Date.now() - t) / 1000);
     const rec = shapeRecord(raw, { weekly: weeklyOf(name), need, secs });
     fs.appendFileSync(RESULTS, JSON.stringify(rec) + '\n');
-    if (raw.log) fs.writeFileSync(path.join(ROOT, 'logs', `${slug(name)}.log`), raw.log);
+    if (raw.log) fs.writeFileSync(path.join(ROOT, 'logs', `${slug(name)}-${slug(version)}.log`), raw.log);
     console.log(`[${slot}] ${name}@${version}\t${rec.verdict}\t${secs}s\t${rec.evidence.detail || ''}`);
   }
   process.exit(0);
