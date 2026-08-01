@@ -115,9 +115,26 @@ jobs:
           # nothing.
           export STUDY_PATH="/c/Windows/system32:/c/Windows:/c/Windows/System32/Wbem"
           chmod +x run-shard.sh
+          # BOTH ARMS. The first version of this job ran PROD only, and its three node-gyp
+          # controls failed on `could not use PowerShell to find Visual Studio 2017 or
+          # newer` — with no A0 to compare against, "the jail blocks node-gyp's VS
+          # discovery" and "this floor blocks it in both arms" are indistinguishable, so
+          # the result was a lead rather than an answer. A0 is jail-OFF on the identical
+          # fixture and identical floor, which is the one variable that separates them.
+          rc=0
+          ./run-shard.sh floorproof shard-gm-win-floor-proof.tsv A0 || rc=$?
+          echo "run-shard A0 rc=$rc" | tee -a "$GITHUB_STEP_SUMMARY"
           rc=0
           ./run-shard.sh floorproof shard-gm-win-floor-proof.tsv PROD || rc=$?
-          echo "run-shard rc=$rc" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "run-shard PROD rc=$rc" | tee -a "$GITHUB_STEP_SUMMARY"
+          { echo '| arm | no-Python | no-Visual-Studio | gyp ERR |'
+            echo '| --- | --- | --- | --- |'
+            for a in A0 PROD; do
+              A="$OUTROOT/floorproof-$a/run.log"
+              echo "| $a | $(grep -cF 'Could not find any Python installation' "$A" || true)" \
+                   "| $(grep -cF 'Could not find any Visual Studio installation' "$A" || true)" \
+                   "| $(grep -cF 'gyp ERR' "$A" || true) |"
+            done; } | tee -a "$GITHUB_STEP_SUMMARY"
           L="$OUTROOT/floorproof-PROD/run.log"
           echo '### floor lines from run-shard.sh' | tee -a "$GITHUB_STEP_SUMMARY"
           grep -E '^study_path_(tool|tool_run|node)=' "$L" | tee -a "$GITHUB_STEP_SUMMARY"
