@@ -155,7 +155,7 @@ impl RegistryClient {
             self.fetch_policy.packument_max_bytes,
             "version-metadata",
         )?;
-        parse_full_response(resp).await
+        parse_full_response(resp, &format!("version metadata {name}@{version}")).await
     }
 
     /// Fetch the *full* (non-corgi) packument as raw JSON, bypassing the

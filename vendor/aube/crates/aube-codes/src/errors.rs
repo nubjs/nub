@@ -44,6 +44,7 @@ pub const ERR_AUBE_ACCESS_ENTITY_NOT_FOUND: &str = "ERR_AUBE_ACCESS_ENTITY_NOT_F
 pub const ERR_AUBE_VERSION_NOT_FOUND: &str = "ERR_AUBE_VERSION_NOT_FOUND";
 pub const ERR_AUBE_UNAUTHORIZED: &str = "ERR_AUBE_UNAUTHORIZED";
 pub const ERR_AUBE_FORBIDDEN: &str = "ERR_AUBE_FORBIDDEN";
+pub const ERR_AUBE_METADATA_DECODE: &str = "ERR_AUBE_METADATA_DECODE";
 pub const ERR_AUBE_OFFLINE: &str = "ERR_AUBE_OFFLINE";
 pub const ERR_AUBE_INVALID_PACKAGE_NAME: &str = "ERR_AUBE_INVALID_PACKAGE_NAME";
 pub const ERR_AUBE_REGISTRY_WRITE_REJECTED: &str = "ERR_AUBE_REGISTRY_WRITE_REJECTED";
@@ -338,6 +339,12 @@ pub const ALL: &[CodeMeta] = &[
         category: category::REGISTRY_NETWORK,
         description: "Registry returned 401 — missing or invalid auth. Run `aube login`.",
         exit_code: Some(42),
+    },
+    CodeMeta {
+        name: ERR_AUBE_METADATA_DECODE,
+        category: category::REGISTRY_NETWORK,
+        description: "A registry response body failed to decode. Carries the package it belongs to and an excerpt of the payload around the offending field.",
+        exit_code: None,
     },
     CodeMeta {
         name: ERR_AUBE_FORBIDDEN,

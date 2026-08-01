@@ -252,7 +252,7 @@ impl RegistryClient {
                     let max_age_secs = parse_cache_control_max_age(&resp);
                     let resp = resp.error_for_status()?;
                     check_body_cap(&resp, self.fetch_policy.packument_max_bytes, &label)?;
-                    match parse_full_response::<serde_json::Value>(resp).await {
+                    match parse_full_response::<serde_json::Value>(resp, &label).await {
                         Ok(packument) => {
                             if let Err(e) = write_cached_full_packument(
                                 &cache_path,
@@ -490,7 +490,7 @@ impl RegistryClient {
                     let max_age_secs = parse_cache_control_max_age(&resp);
                     let resp = resp.error_for_status()?;
                     check_body_cap(&resp, self.fetch_policy.packument_max_bytes, &label)?;
-                    match parse_full_response::<serde_json::Value>(resp).await {
+                    match parse_full_response::<serde_json::Value>(resp, &label).await {
                         Ok(value) => {
                             if let Err(e) = write_cached_full_packument(
                                 &cache_path,
@@ -640,7 +640,7 @@ impl RegistryClient {
                     .with_meta_fn(|| format!(r#"{{"name":{}}}"#, aube_util::diag::jstr(name)));
                     let resp = resp.error_for_status()?;
                     check_body_cap(&resp, self.fetch_policy.packument_max_bytes, &label)?;
-                    match parse_full_response::<Packument>(resp).await {
+                    match parse_full_response::<Packument>(resp, &label).await {
                         Ok(packument) => {
                             drop(_diag_parse);
                             self.maybe_record_slow_metadata(&label, started);
@@ -852,7 +852,7 @@ impl RegistryClient {
 
                     let resp = resp.error_for_status()?;
                     check_body_cap(&resp, self.fetch_policy.packument_max_bytes, &label)?;
-                    match parse_full_response::<Packument>(resp).await {
+                    match parse_full_response::<Packument>(resp, &label).await {
                         Ok(packument) => {
                             let to_cache = CachedPackument {
                                 etag,
