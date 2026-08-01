@@ -75,7 +75,7 @@ pub struct InstallArgs {
     /// `aube-workspace.yaml` when set. Falls back to an auto-scaled
     /// default of worker count x3, clamped to 16-64.
     #[arg(long, value_name = "N")]
-    pub network_concurrency: Option<u64>,
+    pub network_concurrency: Option<String>,
     /// Skip optionalDependencies; don't install optional native modules
     #[arg(long)]
     pub no_optional: bool,
@@ -213,7 +213,7 @@ impl InstallArgs {
             let (k, v) = ovr.cli_flag_bag_entry();
             out.push((k.to_string(), v.to_string()));
         }
-        if let Some(n) = self.network_concurrency {
+        if let Some(n) = self.network_concurrency.as_deref() {
             out.push(("network-concurrency".to_string(), n.to_string()));
         }
         if self.verify_store_integrity {

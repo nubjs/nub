@@ -1355,6 +1355,50 @@ mod yarn_package_extensions_tests {
 #[cfg(test)]
 mod network_concurrency_tests {
     use super::*;
+    use clap::Parser;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::{Layer, layer::Context, prelude::*};
+
+    #[derive(Clone, Default)]
+    struct WarningCodes(Arc<Mutex<Vec<String>>>);
+
+    struct CodeVisitor<'a>(&'a mut Vec<String>);
+
+    impl Visit for CodeVisitor<'_> {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "code" {
+                self.0.push(value.to_string());
+            }
+        }
+
+        fn record_debug(&mut self, _: &Field, _: &dyn std::fmt::Debug) {}
+    }
+
+    impl<S: tracing::Subscriber> Layer<S> for WarningCodes {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            let Ok(mut codes) = self.0.lock() else {
+                return;
+            };
+            event.record(&mut CodeVisitor(&mut codes));
+        }
+    }
+
+    fn assert_invalid_concurrency_warning(ctx: &aube_settings::ResolveCtx<'_>) {
+        let warnings = WarningCodes::default();
+        let subscriber = tracing_subscriber::registry().with(warnings.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            assert_eq!(resolve_network_concurrency(ctx), None);
+        });
+        assert_eq!(
+            warnings
+                .0
+                .lock()
+                .expect("warning collector must not poison")
+                .as_slice(),
+            [aube_codes::warnings::WARN_AUBE_INVALID_CONCURRENCY],
+        );
+    }
 
     #[test]
     fn dynamic_default_matches_pnpm_worker_clamp() {
@@ -1398,6 +1442,69 @@ mod network_concurrency_tests {
         };
 
         assert_eq!(resolve_network_concurrency(&ctx), None);
+    }
+
+    #[test]
+    fn direct_cli_text_above_u64_warns_and_does_not_fall_through_to_npmrc() {
+        const OVERFLOW: &str = "18446744073709551616";
+        let cli =
+            crate::Cli::try_parse_from(["aube", "install", "--network-concurrency", OVERFLOW])
+                .expect("the command boundary must retain raw network-concurrency text");
+        let Some(crate::Commands::Install(args)) = cli.command else {
+            panic!("expected install command");
+        };
+        assert_eq!(args.network_concurrency.as_deref(), Some(OVERFLOW));
+
+        let npmrc_entries = vec![("network-concurrency".to_string(), "1".to_string())];
+        let workspace_yaml = std::collections::BTreeMap::new();
+        let global_config_yaml = std::collections::BTreeMap::new();
+        let cli_flags = args.to_cli_flag_bag(
+            None,
+            crate::commands::install::GlobalVirtualStoreFlags::default(),
+        );
+        let ctx = aube_settings::ResolveCtx {
+            managed_aube_config: &[],
+            project_aube_config: &[],
+            project_npmrc: &npmrc_entries,
+            project_config: &[],
+            user_aube_config: &[],
+            user_npmrc: &[],
+            workspace_yaml: &workspace_yaml,
+            global_config_yaml: &global_config_yaml,
+            env: &[],
+            cli: &cli_flags,
+            embedder_defaults: &[],
+        };
+
+        assert_eq!(
+            aube_settings::resolved::network_concurrency_raw(&ctx).as_deref(),
+            Some(OVERFLOW)
+        );
+        assert_invalid_concurrency_warning(&ctx);
+    }
+
+    #[test]
+    fn quoted_and_unquoted_workspace_text_above_u64_warn_without_fallthrough() {
+        const OVERFLOW: &str = "18446744073709551616";
+        for yaml in [
+            format!("networkConcurrency: {OVERFLOW}\n"),
+            format!("networkConcurrency: \"{OVERFLOW}\"\n"),
+        ] {
+            let project = tempfile::tempdir().expect("workspace fixture");
+            let workspace_path = aube_manifest::workspace::workspace_yaml_target(project.path());
+            std::fs::write(&workspace_path, yaml).expect("workspace config write");
+            let (typed, raw_workspace) = aube_manifest::workspace::load_both(project.path())
+                .expect("oversized scalar must not reject the whole workspace config");
+            assert_eq!(typed.network_concurrency, None);
+
+            let npmrc_entries = vec![("network-concurrency".to_string(), "1".to_string())];
+            let ctx = aube_settings::ResolveCtx::files_only(&npmrc_entries, &raw_workspace);
+            assert_eq!(
+                aube_settings::resolved::network_concurrency_raw(&ctx).as_deref(),
+                Some(OVERFLOW),
+            );
+            assert_invalid_concurrency_warning(&ctx);
+        }
     }
 }
 

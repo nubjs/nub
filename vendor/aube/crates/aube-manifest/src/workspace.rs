@@ -212,6 +212,40 @@ patchedDependencies:
     }
 
     #[test]
+    fn load_both_preserves_oversized_network_concurrency_scalars() {
+        const OVERFLOW: &str = "18446744073709551616";
+        for yaml in [
+            format!("networkConcurrency: {OVERFLOW}\n"),
+            format!("networkConcurrency: \"{OVERFLOW}\"\n"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("aube-workspace.yaml"), yaml).unwrap();
+
+            let (typed, raw) = load_both(dir.path()).unwrap();
+            assert_eq!(typed.network_concurrency, None);
+            let value = raw.get("networkConcurrency").unwrap();
+            let text = match value {
+                yaml_serde::Value::String(text) => text.clone(),
+                yaml_serde::Value::Number(number) => number.to_string(),
+                other => panic!("expected scalar networkConcurrency, got {other:?}"),
+            };
+            assert_eq!(text, OVERFLOW);
+        }
+    }
+
+    #[test]
+    fn network_concurrency_tolerance_does_not_swallow_other_type_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("aube-workspace.yaml"),
+            "networkConcurrency:\n  unexpected: value\n",
+        )
+        .unwrap();
+
+        assert!(load_both(dir.path()).is_err());
+    }
+
+    #[test]
     fn aube_workspace_preferred_over_pnpm_workspace() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(

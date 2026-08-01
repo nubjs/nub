@@ -140,6 +140,54 @@ fn install_dir_initializes_one_project_snapshot_from_final_cwd() {
     }
 }
 
+/// The embedded Aube command must retain oversized direct YAML scalars long
+/// enough to issue its invalid-concurrency warning and choose the automatic
+/// default, rather than reviving the lower-precedence `.npmrc=1` cap.
+#[test]
+fn install_workspace_u64_overflow_warns_and_uses_automatic_default() {
+    const OVERFLOW: &str = "18446744073709551616";
+    for workspace_yaml in [
+        format!("networkConcurrency: {OVERFLOW}\n"),
+        format!("networkConcurrency: \"{OVERFLOW}\"\n"),
+    ] {
+        let dir = pm_tmpdir("network-concurrency-overflow");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"network-concurrency-overflow","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join(".npmrc"), "network-concurrency=1\n").unwrap();
+        std::fs::write(dir.join("pnpm-workspace.yaml"), workspace_yaml).unwrap();
+
+        let output = Command::new(nub_binary())
+            .args(["install", "--lockfile-only", "--offline"])
+            .current_dir(&dir)
+            .env("RUST_LOG", "aube=warn")
+            .env(
+                "XDG_DATA_HOME",
+                pm_tmpdir("network-concurrency-overflow-data"),
+            )
+            .env(
+                "XDG_CACHE_HOME",
+                pm_tmpdir("network-concurrency-overflow-cache"),
+            )
+            .output()
+            .expect("run offline install with an oversized workspace setting");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "workspace overflow must not reject install: {stderr}"
+        );
+        assert!(
+            stderr.contains("WARN_NUB_INVALID_CONCURRENCY")
+                && stderr.contains("using automatic default"),
+            "install must surface the invalid-concurrency fallback: {stderr}"
+        );
+    }
+}
+
 /// Truly-fresh project (no lockfile, no PM declaration, no pnpm-named file):
 /// nub claims identity via the neutral lockfile only. The engine resolves, links
 /// the isolated (pnpm-style) layout under `node_modules/.store`, and writes nub's

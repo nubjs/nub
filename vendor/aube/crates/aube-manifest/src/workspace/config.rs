@@ -7,7 +7,8 @@
 //! workspace yaml).
 
 use crate::UpdateConfig;
-use serde::Deserialize;
+use serde::de::{MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -39,6 +40,192 @@ fn find_and_read(project_dir: &Path) -> Result<Option<(PathBuf, String)>, crate:
         }
     }
     Ok(None)
+}
+
+/// Deserialize `networkConcurrency` for the typed workspace view without
+/// discarding an unsigned decimal scalar that is too large for `u64`. The raw
+/// workspace map still carries that scalar to the settings resolver, which
+/// owns its warning and automatic-default policy. Other malformed values stay
+/// errors here so this narrow handoff cannot hide generic workspace mistakes.
+fn deserialize_network_concurrency<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct NetworkConcurrencyVisitor;
+
+    impl<'de> Visitor<'de> for NetworkConcurrencyVisitor {
+        type Value = Option<u64>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("an unsigned integer")
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+            Ok(Some(value))
+        }
+
+        fn visit_u128<E: serde::de::Error>(self, value: u128) -> Result<Self::Value, E> {
+            Ok(u64::try_from(value).ok())
+        }
+
+        fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+            u64::try_from(value)
+                .map(Some)
+                .map_err(|_| E::custom("networkConcurrency must be an unsigned integer"))
+        }
+
+        fn visit_i128<E: serde::de::Error>(self, value: i128) -> Result<Self::Value, E> {
+            if value < 0 {
+                return Err(E::custom("networkConcurrency must be an unsigned integer"));
+            }
+            Ok(u64::try_from(value).ok())
+        }
+
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+            let trimmed = value.trim();
+            match trimmed.parse::<u64>() {
+                Ok(value) => Ok(Some(value)),
+                Err(_)
+                    if !trimmed.is_empty() && trimmed.bytes().all(|byte| byte.is_ascii_digit()) =>
+                {
+                    Ok(None)
+                }
+                Err(_) => Err(E::custom("networkConcurrency must be an unsigned integer")),
+            }
+        }
+
+        fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+            self.visit_str(&value)
+        }
+    }
+
+    deserializer.deserialize_any(NetworkConcurrencyVisitor)
+}
+
+/// Raw `networkConcurrency` scalar for the parallel metadata-driven settings
+/// map. `yaml_serde::Value` cannot itself hold a `u128`, so only an oversized
+/// unsigned number is represented as text; all representable values retain
+/// their ordinary YAML value kind.
+struct RawNetworkConcurrencyScalar(yaml_serde::Value);
+
+impl<'de> Deserialize<'de> for RawNetworkConcurrencyScalar {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct RawNetworkConcurrencyVisitor;
+
+        impl<'de> Visitor<'de> for RawNetworkConcurrencyVisitor {
+            type Value = RawNetworkConcurrencyScalar;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a scalar networkConcurrency value")
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(RawNetworkConcurrencyScalar(yaml_serde::Value::Null))
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(RawNetworkConcurrencyScalar(yaml_serde::Value::Bool(value)))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(RawNetworkConcurrencyScalar(yaml_serde::Value::Number(
+                    value.into(),
+                )))
+            }
+
+            fn visit_i128<E: serde::de::Error>(self, value: i128) -> Result<Self::Value, E> {
+                Ok(RawNetworkConcurrencyScalar(yaml_serde::Value::String(
+                    value.to_string(),
+                )))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(RawNetworkConcurrencyScalar(yaml_serde::Value::Number(
+                    value.into(),
+                )))
+            }
+
+            fn visit_u128<E: serde::de::Error>(self, value: u128) -> Result<Self::Value, E> {
+                Ok(RawNetworkConcurrencyScalar(yaml_serde::Value::String(
+                    value.to_string(),
+                )))
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+                Ok(RawNetworkConcurrencyScalar(yaml_serde::Value::Number(
+                    value.into(),
+                )))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(RawNetworkConcurrencyScalar(yaml_serde::Value::String(
+                    value.to_owned(),
+                )))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+                Ok(RawNetworkConcurrencyScalar(yaml_serde::Value::String(
+                    value,
+                )))
+            }
+        }
+
+        deserializer.deserialize_any(RawNetworkConcurrencyVisitor)
+    }
+}
+
+/// Top-level raw workspace-YAML map. It uses the normal YAML-value decoder for
+/// every field except `networkConcurrency`, whose scalar decoder preserves an
+/// unquoted value beyond `u64::MAX` as text.
+struct RawWorkspaceMap(BTreeMap<String, yaml_serde::Value>);
+
+impl<'de> Deserialize<'de> for RawWorkspaceMap {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct RawWorkspaceMapVisitor;
+
+        impl<'de> Visitor<'de> for RawWorkspaceMapVisitor {
+            type Value = RawWorkspaceMap;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a top-level workspace YAML map")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut values = BTreeMap::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    let value = if key == "networkConcurrency" {
+                        map.next_value::<RawNetworkConcurrencyScalar>()?.0
+                    } else {
+                        map.next_value::<yaml_serde::Value>()?
+                    };
+                    values.insert(key, value);
+                }
+                Ok(RawWorkspaceMap(values))
+            }
+        }
+
+        deserializer.deserialize_map(RawWorkspaceMapVisitor)
+    }
+}
+
+fn parse_raw_workspace_map(
+    path: &Path,
+    content: String,
+) -> Result<BTreeMap<String, yaml_serde::Value>, crate::Error> {
+    crate::parse_yaml::<RawWorkspaceMap>(path, content).map(|raw| raw.0)
 }
 
 /// Extra privileges granted to one package pattern under `jailBuilds`.
@@ -453,9 +640,14 @@ pub struct WorkspaceConfig {
     pub child_concurrency: Option<u64>,
 
     /// Cap concurrent tarball downloads. When unset, aube uses an
-    /// auto-scaled worker count x3 default, clamped to 16-64. Same
-    /// typed/raw duality as `child_concurrency`.
-    #[serde(default, rename = "networkConcurrency")]
+    /// auto-scaled worker count x3 default, clamped to 16-64. The typed view
+    /// retains valid values as `Option<u64>` while oversized unsigned decimal
+    /// scalars remain in the raw map for centralized validation.
+    #[serde(
+        default,
+        rename = "networkConcurrency",
+        deserialize_with = "deserialize_network_concurrency"
+    )]
     pub network_concurrency: Option<u64>,
 
     /// Cap package materialization/linking worker count. When unset,
@@ -833,17 +1025,15 @@ pub fn load_raw(project_dir: &Path) -> Result<BTreeMap<String, yaml_serde::Value
         raw_cache_insert(project_dir, BTreeMap::new());
         return Ok(BTreeMap::new());
     }
-    let parsed: BTreeMap<String, yaml_serde::Value> = crate::parse_yaml(&path, content)?;
+    let parsed = parse_raw_workspace_map(&path, content)?;
     raw_cache_insert(project_dir, parsed.clone());
     Ok(parsed)
 }
 
-/// Load the workspace yaml once and return both the typed
-/// `WorkspaceConfig` view and the raw `BTreeMap` view, parsed from
-/// the same file contents. Callers that need both (e.g. `install::run`,
-/// which wants typed `allow_builds_raw()` *and* the raw map for
-/// metadata-driven setting resolution) avoid the two-read hit this
-/// way. Errors propagate instead of being silently swallowed.
+/// Load one workspace-yaml file read as both its typed `WorkspaceConfig` view
+/// and raw `BTreeMap` view. The raw parser has a narrow scalar representation
+/// for unquoted `networkConcurrency` values above `u64::MAX`; both views still
+/// report every other parse or type error.
 #[allow(clippy::type_complexity)]
 pub fn load_both(
     project_dir: &Path,
@@ -856,11 +1046,8 @@ pub fn load_both(
         raw_cache_insert(project_dir, BTreeMap::new());
         return Ok((WorkspaceConfig::default(), BTreeMap::new()));
     }
-    let value: yaml_serde::Value = crate::parse_yaml(&path, content.clone())?;
-    let typed: WorkspaceConfig = yaml_serde::from_value(value.clone())
-        .map_err(|e| crate::Error::parse_yaml_err(&path, content.clone(), &e))?;
-    let raw: BTreeMap<String, yaml_serde::Value> = yaml_serde::from_value(value)
-        .map_err(|e| crate::Error::parse_yaml_err(&path, content, &e))?;
+    let typed: WorkspaceConfig = crate::parse_yaml(&path, content.clone())?;
+    let raw = parse_raw_workspace_map(&path, content)?;
     raw_cache_insert(project_dir, raw.clone());
     Ok((typed, raw))
 }
