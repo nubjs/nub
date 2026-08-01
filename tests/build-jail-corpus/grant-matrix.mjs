@@ -59,6 +59,12 @@
 // USAGE
 //   node grant-matrix.mjs --list packages.tsv [--out DIR] [--limit N] [--jobs N]
 //   node grant-matrix.mjs --minimality [--out DIR] [--jobs N]
+//   node grant-matrix.mjs --toolchain-proof [--out DIR]
+//
+//   --toolchain-proof  resolve and RUN every build tool a cell can reach, in the cell's own
+//                 environment, and exit non-zero if any is missing. A full-disk verdict from
+//                 a host without the toolchain is worthless, so run this BEFORE any sweep
+//                 whose rows may reach the terminal rung, and keep the JSON it writes.
 //
 //   --list        TSV: name <TAB> version  (blank version = resolve `latest`)
 //   --minimality  instead of the ladder, run cell c2 ONLY for every package the catalog
@@ -341,6 +347,124 @@ function winEnvFloor(home, tmp) {
   };
 }
 
+// ── the toolchain proof ───────────────────────────────────────────────────────
+//
+// WHY A VERDICT IS WORTHLESS WITHOUT THIS. The terminal rung writes the most permissive
+// grant the catalog has, and a host-level denial fails every cell exactly as a real need
+// does — so a host missing a build tool mints whole-disk grants. That is not a
+// hypothetical: a linux-x64 sweep with node at `/opt/node` and `/usr/local/bin/node` a
+// symlink scored `eth-gas-reporter` and `exiftool-vendored` NEEDS-FULL-DISK, and both need
+// only egress. The tell was a failure string never seen in any committed record.
+//
+// This proof runs in the CELL's environment, not the runner's, which is the only version
+// of the question that matters: a tool on the workflow's PATH but not on `STUDY_PATH` is
+// invisible to every cell. It is built into this file rather than sitting beside it so the
+// env it describes cannot drift from the env the cells get.
+//
+// WHAT IT CANNOT ESTABLISH, deliberately: reachability from INSIDE the jail. That is a
+// property of the LowBox/Landlock/Seatbelt policy, not of the host, and no out-of-jail
+// probe can answer it. The positive control does — a package whose install is a bare
+// node-gyp compile and which is committed as NEEDS-NOTHING must still pass the `no_grants`
+// cell. The two together are the gate: this proof says the toolchain exists and the cell
+// env can see it, the control says the jail does not stand between a package and it.
+function which(cmd, env) {
+  const exts = WINDOWS ? (env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean) : [''];
+  for (const dir of (env.PATH || '').split(path.delimiter)) {
+    if (!dir) continue;
+    for (const ext of exts) {
+      const p = path.join(dir, cmd + ext);
+      try { if (fs.statSync(p).isFile()) return p; } catch { /* next */ }
+    }
+  }
+  return null;
+}
+
+function toolchainProof() {
+  const dir = path.join(ROOT, 'toolchain-proof');
+  fs.rmSync(dir, RM);
+  const home = path.join(dir, 'home'), tmp = path.join(dir, 'tmp');
+  for (const d of [home, tmp]) fs.mkdirSync(d, { recursive: true });
+  const env = { ...winEnvFloor(home, tmp), PATH: STUDY_PATH, HOME: home, TMPDIR: tmp };
+
+  // `py` is the Windows launcher and lives in the system directory, so it can resolve when
+  // no `python` does; node-gyp tries it, so the proof must record it separately rather
+  // than folding it into a single "python" answer.
+  const probes = WINDOWS
+    ? [['node', '--version'], ['npm', '--version'], ['python', '--version'], ['python3', '--version'], ['py', '--version'], ['git', '--version']]
+    : [['node', '--version'], ['npm', '--version'], ['python3', '--version'], ['python', '--version'], ['cc', '--version'], ['git', '--version']];
+
+  const tools = {};
+  for (const [cmd, flag] of probes) {
+    const resolved = which(cmd, env);
+    // A RESOLVED PATH IS NOT A REACHED TOOL. The Linux burn was a symlink into a prefix
+    // the jail does not grant: the name resolved, the file existed, and the exec was
+    // denied. So record the real path alongside the resolved one — a divergence is the
+    // shape of that failure — and then actually RUN it.
+    let real = null, runs = null, out = null;
+    if (resolved) {
+      try { real = fs.realpathSync.native(resolved); } catch { real = null; }
+      const r = spawnSync(resolved, [flag], { env, encoding: 'utf8', timeout: 60_000 });
+      runs = r.status === 0;
+      out = ((r.stdout || '') + (r.stderr || '')).trim().split('\n')[0] || null;
+    }
+    const sameTarget = resolved && real
+      && (WINDOWS ? resolved.toLowerCase() === real.toLowerCase() : resolved === real);
+    tools[cmd] = { resolved, real, indirect: resolved ? !sameTarget : null, runs, first_line: out };
+  }
+
+  // MSVC is NOT found on PATH — it needs vcvars, and node-gyp locates it through vswhere at
+  // a fixed, versionless path instead. Probing `cl.exe` on PATH would fail on every healthy
+  // Windows host, so this asks the question the way the toolchain itself asks it.
+  let msvc = null;
+  if (WINDOWS) {
+    const vswhere = path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)',
+      'Microsoft Visual Studio', 'Installer', 'vswhere.exe');
+    const present = fs.existsSync(vswhere);
+    const r = present
+      ? spawnSync(vswhere, ['-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property', 'installationPath'], { encoding: 'utf8', timeout: 60_000 })
+      : null;
+    const installPath = (r?.stdout || '').trim().split('\n')[0] || null;
+    msvc = { vswhere, vswhere_present: present, install_path: installPath || null, ok: Boolean(installPath && fs.existsSync(installPath)) };
+  }
+
+  const pythonOk = WINDOWS
+    ? ['python', 'python3', 'py'].some((c) => tools[c]?.runs)
+    : ['python3', 'python'].some((c) => tools[c]?.runs);
+  const failures = [];
+  if (!tools.node?.runs) failures.push('node does not resolve and run in the cell environment');
+  if (!tools.npm?.runs) failures.push('npm does not resolve and run in the cell environment');
+  if (!pythonOk) failures.push('no python interpreter resolves and runs in the cell environment');
+  if (WINDOWS && !msvc.ok) failures.push('vswhere reports no Visual Studio install carrying the VC x86/x64 tools');
+
+  // INDIRECTION IS WARNED, NOT FAILED, and the distinction is the whole design. A symlinked
+  // `npm` is normal on every POSIX host and is not a defect; the defect is the jail granting
+  // the LINK's prefix and not the TARGET's, which is what the linux-x64 burn was. No
+  // out-of-jail probe can tell those apart — the positive control can, because a package
+  // that execs the tool from inside the jail fails outright when the target is ungranted.
+  // So the proof's job here is to RECORD the real paths for a human, not to adjudicate.
+  const warnings = [];
+  for (const [cmd, t] of Object.entries(tools)) {
+    if (t.indirect) warnings.push(`${cmd} resolves to ${t.resolved} but its real path is ${t.real} — the jail must grant the REAL path`);
+  }
+
+  const proof = { ...PROVENANCE, measured_at: new Date().toISOString(), study_path: STUDY_PATH, tools, msvc, ok: failures.length === 0, failures, warnings };
+  const file = path.join(ROOT, 'toolchain-proof.json');
+  fs.writeFileSync(file, JSON.stringify(proof, null, 2));
+  fs.rmSync(dir, RM);
+
+  console.log(`toolchain proof — ${PROVENANCE.platform} on ${PROVENANCE.host}`);
+  console.log(`  STUDY_PATH ${STUDY_PATH}`);
+  for (const [cmd, t] of Object.entries(tools)) {
+    console.log(`  ${cmd.padEnd(8)} ${t.resolved ? `${t.runs ? 'RUNS' : 'FAILS'} ${t.resolved}${t.indirect ? ` -> ${t.real}` : ''}  ${t.first_line || ''}` : 'NOT FOUND'}`);
+  }
+  if (msvc) console.log(`  msvc     ${msvc.ok ? 'OK' : 'MISSING'} ${msvc.install_path || msvc.vswhere}`);
+  for (const w of warnings) console.log(`  WARN ${w}`);
+  console.log(`  -> ${file}`);
+  if (failures.length) { for (const f of failures) console.error(`TOOLCHAIN PROOF FAILED: ${f}`); process.exit(1); }
+  console.log('toolchain proof OK');
+  process.exit(0);
+}
+
 function runCell(pkg, version, cell, nonce, need) {
   const jailOff = cell === 'off';
   const dir = path.join(ROOT, 'fx', `${slug(pkg)}-${cell}-${nonce}`);
@@ -518,6 +642,10 @@ const PROVENANCE = {
   host: os.hostname(),
   harness: 'grant-matrix.mjs',
 };
+
+// Dispatched here rather than beside the other flags because the proof stamps itself with
+// PROVENANCE: a proof that cannot name the binary and host it describes is not evidence.
+if (has('--toolchain-proof')) toolchainProof();
 
 // Machine-specific prefixes stripped from a line before it can reach the catalog. The
 // catalog is a TRACKED, world-readable file, and a filesystem-shaped failure — which is

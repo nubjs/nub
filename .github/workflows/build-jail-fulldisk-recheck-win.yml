@@ -1,0 +1,164 @@
+# RE-MEASURE THE ELEVEN UNCORROBORATED win32-x64 FULL-DISK GRANTS, ON A PROVEN HOST.
+#
+# `fullDisk` is the most permissive grant the catalog has. On Windows it is broader than on
+# the other two platforms, because it launches the lifecycle script without the LowBox token
+# and egress is an AppContainer capability — so declining the token concedes the network too.
+# Eleven live entries reached that rung without clearing the corroboration guard, and five of
+# them failed on `Could not find any Python installation to use`, which is a statement about
+# a HOST, not about a package.
+#
+# WHY A PLAIN RE-RUN WOULD NOT SETTLE IT. A host-level denial fails every cell exactly as a
+# real need does, so the ladder cannot tell them apart — that is how a linux-x64 sweep with
+# node symlinked out of the granted prefix minted two whole-disk grants for packages that
+# need only egress. So this workflow refuses to produce a publishable row until the host has
+# proved itself twice, from opposite sides:
+#
+#   1. `--toolchain-proof` resolves and RUNS node, npm, every python spelling, git and MSVC
+#      in the CELL's environment — not the runner's — and fails the job if any is missing.
+#      It probes from outside the jail, which is its limit.
+#   2. THE POSITIVE CONTROL closes that limit. Three bare node-gyp compiles committed as
+#      NEEDS-NOTHING on win32-x64 lead the worklist; each must pass its `no_grants` cell.
+#      A pass means node-gyp reached Python and MSVC from INSIDE the jail with no grants,
+#      so a python failure on any other row is that package's property and not the host's.
+#      If a control fails, the job is red and every row it produced is discarded.
+#
+# ONE BINARY, built once and downloaded by the measuring job, so `binary_sha256` is a single
+# distinct value across every emitted record and no row can be attributed to a stale build.
+name: build-jail-fulldisk-recheck-win
+
+on:
+  push:
+    branches: [probe/gm-win-fulldisk]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      # Windows gives the main thread a 1 MB stack against Linux's 8 MB, and the unoptimized
+      # `fast` profile overflows it inside `nub install` before any lifecycle script runs
+      # (0xC00000FD). A separate defect; linking with a Linux-sized stack lets this measure
+      # the jail rather than a debug-build frame-size artifact.
+      RUSTFLAGS: '-C link-arg=/STACK:8388608'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: gm-win
+      - name: Build the dev binary
+        run: cargo build -p nub-cli --profile fast --features build-jail-catalog-override
+      - name: Stage the binary
+        shell: bash
+        run: |
+          mkdir -p stage
+          cp target/fast/nub.exe stage/nub.exe
+          ls -l stage
+          sha256sum stage/nub.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nub-gm-win-fulldisk
+          path: stage
+          retention-days: 7
+
+  matrix:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: nub-gm-win-fulldisk
+          path: stage
+
+      # THE HOST PROOF, BEFORE ANY CELL RUNS. Not `if: always()` and not tolerant: a run
+      # whose host cannot reach the toolchain must stop here rather than emit rows that
+      # look like findings.
+      - name: Toolchain proof
+        shell: bash
+        env:
+          NUB_BIN: ${{ github.workspace }}\stage\nub.exe
+        run: |
+          chmod +x stage/nub.exe || true
+          sha256sum stage/nub.exe
+          node tests/build-jail-corpus/grant-matrix.mjs --toolchain-proof --out "$RUNNER_TEMP/gm"
+          cp "$RUNNER_TEMP/gm/toolchain-proof.json" toolchain-proof.json
+
+      - name: Run the ladder
+        shell: bash
+        env:
+          NUB_BIN: ${{ github.workspace }}\stage\nub.exe
+        run: |
+          out="$RUNNER_TEMP/gm"
+          rc=0
+          for i in 0 1 2; do
+            node tests/build-jail-corpus/grant-matrix.mjs \
+              --list tests/build-jail-corpus/shard-gm-win-fulldisk-recheck.tsv \
+              --out "$out" --jobs 3 --slot $i > "slot-$i.log" 2>&1 &
+          done
+          wait || rc=$?
+          echo "slots finished rc=$rc"
+          for i in 0 1 2; do echo "---- slot $i tail ----"; tail -40 "slot-$i.log"; done
+          cp "$out/matrix.ndjson" matrix-fulldisk-recheck.ndjson 2>/dev/null || echo "(no ndjson produced)"
+          wc -l matrix-fulldisk-recheck.ndjson 2>/dev/null || true
+
+      # THE CONTROL GATE AND THE ANTI-VACUOUS GATE, in one place. An empty run must be red —
+      # a job whose only signal is "no step errored" cannot tell a clean pass from a silent
+      # nothing. A run whose controls did not pass their ungranted cell must also be red,
+      # and loudly, because its other rows are exactly the shape that mints a false grant.
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          f=matrix-fulldisk-recheck.ndjson
+          if [ ! -s "$f" ]; then
+            echo "VERDICT: FAILED — the run produced no records."
+            exit 1
+          fi
+          node -e '
+            const fs=require("fs");
+            const CONTROLS={"dtrace-provider":"0.8.8","bigint-buffer":"1.1.5","websocket":"1.0.31"};
+            const rows=fs.readFileSync(process.argv[1],"utf8").split("\n").filter(l=>l.trim()).map(l=>JSON.parse(l));
+            const shas=new Set(rows.map(r=>r.binary_sha256));
+            console.log("records:",rows.length,"distinct binaries:",shas.size,[...shas].map(s=>String(s).slice(0,12)).join(","));
+            const t={}; for(const r of rows) t[r.verdict]=(t[r.verdict]||0)+1;
+            for(const [k,v] of Object.entries(t).sort((a,b)=>b[1]-a[1])) console.log(String(v).padStart(4),k);
+            let bad=0;
+            console.log("--- positive controls ---");
+            for(const [name,version] of Object.entries(CONTROLS)){
+              const r=rows.find(x=>x.package===name&&x.version===version);
+              if(!r){ console.log("MISSING",name,version); bad++; continue; }
+              const ok=r.cells.no_grants===0;
+              console.log(`${ok?"ok  ":"FAIL"} ${name}@${version} no_grants=${r.cells.no_grants} verdict=${r.verdict}`);
+              if(!ok) bad++;
+            }
+            if(shas.size!==1){ console.log("FAIL: rows span",shas.size,"binaries"); bad++; }
+            if(bad){
+              console.log("");
+              console.log("VERDICT: FAILED — the host did not prove itself. NO ROW FROM THIS RUN MAY BE PUBLISHED.");
+              process.exit(1);
+            }
+            console.log("VERDICT: controls passed on one binary — rows are publishable.");
+          ' "$f"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gm-win-fulldisk-recheck
+          path: |
+            matrix-fulldisk-recheck.ndjson
+            toolchain-proof.json
+            slot-*.log
+          if-no-files-found: warn
