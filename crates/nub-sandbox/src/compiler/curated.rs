@@ -804,13 +804,15 @@ pub fn apply_v2_grant(
                 // cost a deliberate bound.
                 Scope::Deps => {
                     for dep in declared_dependencies(package_dir) {
-                        // One-element chains only: each name is LOOKED UP the way Node would,
-                        // never joined onto a directory, so the reachable set is exactly what
-                        // the package can already `require`. That bound is the security
-                        // argument for `deps` being narrower than "the store".
-                        if let Some(path) =
-                            resolve_dependency_dir(project_root, package_dir, &[&dep])
-                        {
+                        // NOT `resolve_dependency_dir`: that clamps the result to INSIDE THE
+                        // PROJECT, which is right for v1's `dependencyDirs` (authored against
+                        // project-local layouts) and fatal here. Under the default global
+                        // virtual store a declared dependency resolves to
+                        // `~/.cache/nub/pm/store/<dep>@<hash>/…`, outside the project, so the
+                        // clamp dropped every path and `deps` compiled to NOTHING — measured
+                        // end-to-end: a real jailed script writing to a declared dependency
+                        // got EPERM with `write: {deps: true}` in force.
+                        if let Some(path) = resolve_declared_dep(homes, package_dir, &dep) {
                             push_rw(&mut rules, &path);
                         }
                     }
@@ -865,6 +867,41 @@ pub struct V2Outcome {
 /// platform builds there, and a grant that missed them would break exactly the native
 /// packages this capability exists for. `devDependencies` are NOT — they are absent from a
 /// consumer's install by definition.
+/// Resolve one DECLARED dependency name to the directory `deps` may write.
+///
+/// The name is LOOKED UP the way Node would ([`resolve_package_from`]), never joined onto a
+/// directory, so the reachable set is exactly what the package can already `require` — that
+/// bound is the security argument for `deps` being narrower than "the store", and a separator
+/// in a name cannot escape because no name is ever joined.
+///
+/// WHERE THE RESULT MAY LAND, and why this is not [`resolve_dependency_dir`]'s clamp. That one
+/// requires the resolved path to be inside the PROJECT, which under the default global virtual
+/// store is never true of a dependency — it lives at `~/.cache/nub/pm/store/<dep>@<hash>/…` —
+/// so the v1 clamp silently dropped every path. Here the path is accepted when it is inside the
+/// project OR inside a virtual store root, which is the same pair
+/// [`super::preset::store_entry_write_root`] recognises for the package's own entry.
+///
+/// A `node_modules` container itself is still refused: it holds `.bin` (run UNCONFINED by later
+/// tooling) and every sibling's source. A symlink could otherwise land the resolution there.
+#[cfg(feature = "build-jail-catalog-override")]
+fn resolve_declared_dep(homes: &Homes, package_dir: &Path, name: &str) -> Option<PathBuf> {
+    let resolved = resolve_package_from(package_dir, name)?;
+    if resolved.file_name().is_some_and(|n| n == "node_modules") {
+        return None;
+    }
+    let under = |root: PathBuf| {
+        let root = crate::matcher::path::canonicalize_including_nonexistent(&root);
+        resolved != root && resolved.starts_with(&root)
+    };
+    let global_store = homes.cache.join("nub").join("pm").join("store");
+    let project_store = homes
+        .project
+        .join("node_modules")
+        .join(super::preset::PROJECT_VIRTUAL_STORE_LEAF);
+    (inside_project(&homes.project, &resolved) || under(global_store) || under(project_store))
+        .then_some(resolved)
+}
+
 #[cfg(feature = "build-jail-catalog-override")]
 fn declared_dependencies(package_dir: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(package_dir.join("package.json")) else {
