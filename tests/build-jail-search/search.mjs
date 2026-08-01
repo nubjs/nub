@@ -286,27 +286,20 @@ function grantFor(state) {
  *  would pin a version (`chrome/mac_arm-151.0.7922.47`) that changes on the next release and
  *  turn a stable entry into a churning one. Going shallower would hand over all of `.cache`.
  */
-function homeWritePaths(paths, pkg = '') {
-  // ONLY THE PACKAGE'S OWN DIRECTORY IS PROMOTED — measured necessity, not a style rule.
+function homeWritePaths(paths) {
+  // PROMOTE EVERY DIRECTORY THE SCRIPT WROTE — do not try to be clever about which ones.
   //
-  // `ip-num@1.6.1` runs `npx only-allow` and writes 21 paths under the jail's throwaway home,
-  // deriving `.npm/_cacache` and `.npm/_npx`. Those are NPM'S state, not ip-num's: `_cacache`
-  // is the content-addressed cache including its `index-v5` key-to-content map, and `_npx`
-  // holds cached executables (`.bin/only-allow` among them). Moving either into the user's
-  // REAL `~/.npm` would hand a dependency's install script a write into npm's cache index and
-  // a way to plant binaries a later `npx` invocation runs — a supply-chain channel of exactly
-  // the kind the jail exists to close, created by the promotion mechanism itself.
+  // The build jail is DEFENCE IN DEPTH, not a security boundary, and the failure mode it
+  // exists to avoid is PACKAGES BREAKING. Lifecycle scripts run with COMPLETE access in the
+  // status quo, so promoting anything the script already wrote is a REDUCTION from the
+  // baseline, never an escalation — a package can write `~/.npm` today with nothing stopping
+  // it.
   //
-  // What distinguishes the legitimate case is OWNERSHIP: `.cache/puppeteer` is puppeteer's own
-  // vendor directory. So the prefix must name the package. That is a mechanical test, not a
-  // judgement about which directories are dangerous, and it fails CLOSED — a package whose
-  // cache directory is named after something else keeps working and merely re-downloads,
-  // which is a performance cost rather than a break.
-  // A SCOPED PACKAGE MATCHES ON EITHER HALF. `@puppeteer/browsers` owns `.cache/puppeteer`,
-  // which the bare name `browsers` does not appear in — dropping it would discard a real
-  // artefact rather than a hazard.
-  const owner = [pkg.replace(/^@([^/]+)\/.*/, '$1'), pkg.replace(/^@[^/]+\//, '')]
-    .map((x) => x.toLowerCase()).filter(Boolean);
+  // The stronger reason is fidelity: unjailed, `ip-num`'s `npx only-allow` warms
+  // `~/.npm/_cacache`, so promoting it REPRODUCES unconfined behaviour and withholding it
+  // DIVERGES from it. An earlier version here required the directory to be named after the
+  // package, which dropped `.npm/_cacache` and `.npm/_npx` and discarded real artefacts to
+  // buy nothing.
   const dirs = new Set();
   for (const p of paths) {
     if (!p.startsWith('$home/')) continue;
@@ -322,10 +315,8 @@ function homeWritePaths(paths, pkg = '') {
     // A bare file directly in $HOME (`segs.length < 2`) was already excluded, which is why
     // `.npmrc` — the config root whose capture the private home exists to prevent — can never
     // reach this list.
-    if (segs.length < 3) continue;
-    const prefix = segs.slice(0, 2).join('/');
-    if (owner.length && !owner.some((o) => prefix.toLowerCase().includes(o))) continue;
-    dirs.add(prefix);
+    if (segs.length < 2) continue;   // a bare file in $HOME is not a directory grant
+    dirs.add(segs.slice(0, 2).join('/'));
   }
   // Drop any entry already covered by a shallower one, so the set is minimal by construction.
   const out = [...dirs].sort();
@@ -527,7 +518,7 @@ function search(nub, pkg, version, root, keep) {
         // a few bookkeeping paths sit elsewhere. A count cannot be quietly inert — 0 means
         // nothing landed there, and any other number is the promotion list's raw material.
         // The derived `writePaths` entry: the minimal directories that must survive.
-        writePaths: floor ? homeWritePaths(controlOnly(controlU, floor), pkg) : null,
+        writePaths: floor ? homeWritePaths(controlOnly(controlU, floor)) : null,
         pathsLandingInThrowawayHome: floor
           ? controlOnly(controlU, floor).filter((p) => p.startsWith('$home/')).length
           : null,
