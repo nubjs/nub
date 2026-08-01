@@ -20,7 +20,10 @@ const argv = process.argv.slice(2);
 const opt = (name, dflt) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : dflt);
 const here = new URL('.', import.meta.url).pathname;
 
-const RUNS = opt('--runs', path.join(here, 'results', 'runs'));
+// Several --runs may be given: the catalog is reconciled from runs on different machines and
+// operating systems, so merging result sets is the normal case, not an edge one.
+const RUNS_DIRS = argv.reduce((acc, a, i) => (a === '--runs' ? [...acc, argv[i + 1]] : acc), []);
+const RUNS = RUNS_DIRS.length ? RUNS_DIRS : [path.join(here, 'results', 'runs')];
 const PLATFORM_FILTER = opt('--only-platform', null);
 const BASELINE = opt('--baseline', path.join(here, 'baseline.json'));
 const OUT = opt('--out', path.join(here, 'results', 'catalog-v2.json'));
@@ -45,8 +48,8 @@ function walk(dir) {
   return out;
 }
 
-for (const full of walk(RUNS)) {
-  const f = path.relative(RUNS, full);
+for (const [root, full] of RUNS.flatMap((d) => walk(d).map((f) => [d, f]))) {
+  const f = path.relative(root, full);
   try {
     const rec = { file: f, ...JSON.parse(fs.readFileSync(full, 'utf8')) };
     // The platform is the top directory level, but the record's own provenance is the
@@ -99,7 +102,59 @@ function grantKey(r) {
 const packages = {};
 const notes = [];
 
-for (const [pkg, rs] of [...byPackage.entries()].sort()) {
+/** Merge two grants by UNION — the wider of each axis.
+ *
+ *  Reconciliation across machines is where this matters. A package that probes for host tooling
+ *  takes different code paths on different hosts, so one run measures narrower than another;
+ *  `sharp` is the worked example, needing full disk write only on the branch that shells out to
+ *  brew. The wider grant covers both branches, and the narrower one BREAKS for every user whose
+ *  machine takes the richer path. Over-granting is the failure this project accepts; under-
+ *  granting is the one it does not. So: never intersect. */
+function unionGrant(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  const out = { ...a };
+  const widest = (x, y) => {
+    if (x === 'disk' || y === 'disk') return 'disk';
+    if (!x) return y;
+    if (!y) return x;
+    return { ...x, ...y };
+  };
+  if (a.write || b.write) out.write = widest(a.write, b.write);
+  if (a.read || b.read) out.read = widest(a.read, b.read);
+  if (a.network || b.network) out.network = true;
+  // A read the widened write now covers is rejected by the parser, so drop it.
+  if (out.read && out.write === 'disk') delete out.read;
+  else if (out.read && typeof out.read === 'object' && typeof out.write === 'object') {
+    const r = { ...out.read };
+    for (const k of Object.keys(out.write)) delete r[k];
+    if (Object.keys(r).length) out.read = r; else delete out.read;
+  }
+  const wp = [...new Set([...(a.writePaths ?? []), ...(b.writePaths ?? [])])].sort();
+  if (wp.length) out.writePaths = wp.filter((d) => !wp.some((o) => o !== d && d.startsWith(`${o}/`)));
+  return out;
+}
+
+for (const [pkg, rsRaw] of [...byPackage.entries()].sort()) {
+  // RECONCILE FIRST: several machines may have measured the SAME platform and version. Fold
+  // those into one record per (platform, version) by UNION before banding, so a host that took
+  // a narrower code path cannot erase a grant a richer host proved necessary.
+  const folded = new Map();
+  for (const r of rsRaw) {
+    const key = `${r.provenance?.platform ?? '?'}\u0000${r.version}`;
+    const prev = folded.get(key);
+    if (!prev) { folded.set(key, r); continue; }
+    folded.set(key, {
+      ...prev,
+      grant: unionGrant(prev.grant, r.grant),
+      writePaths: [...new Set([...(prev.writePaths ?? []), ...(r.writePaths ?? [])])].sort(),
+      _mergedFrom: (prev._mergedFrom ?? 1) + 1,
+    });
+  }
+  const rs = [...folded.values()];
+  for (const r of rs) {
+    if (r._mergedFrom) notes.push(`${pkg}@${r.version}: reconciled ${r._mergedFrom} runs by union`);
+  }
   const bands = new Map();
   for (const r of rs) {
     const k = grantKey(r);
