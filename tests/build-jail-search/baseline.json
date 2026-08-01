@@ -1,0 +1,22 @@
+{
+  "_comment": [
+    "GLOBAL floor for every jailed script — NOT package-specific. The parser takes `baseline`",
+    "and `env` as top-level arrays for exactly this reason: they are the profile every package",
+    "starts from, so a fix ships by editing the catalog rather than rebuilding the binary.",
+    "",
+    "The collator merges this file into the catalog it emits, and the search merges it into",
+    "every cell, so a package is measured against the same floor it will run under.",
+    "",
+    "PREFER AN ENTRY HERE OVER A FILTER IN THE HARNESS. A filter hides a write after the fact and",
+    "has to be re-derived for every tool that does the same thing; a baseline entry stops the write",
+    "or permits it for everyone. Two tool-specific filters have already been retired this way."
+  ],
+  "baseline": [],
+  "env": [
+    {
+      "name": "PYTHONDONTWRITEBYTECODE",
+      "value": "1",
+      "notes": "node-gyp ships gyp/pylib and CPython writes __pycache__/*.pyc beside any module it imports. The jail refuses correctly and the build succeeds either way, because bytecode is a pure cache — but the refused writes were counted as side effects and made nine native packages (keccak, lz4, ssh2, ...) demand write.userHome, the second-widest grant, when bytecode was the ENTIRE delta between arms. Setting this stops the write happening at all, which is the general fix; the harness previously filtered .pyc after the fact, which is the same fix re-derived per tool."
+    }
+  ]
+}

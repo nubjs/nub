@@ -39,6 +39,16 @@ const BANNER_BAD = 'was REJECTED';
  *
  *  Every one of the 54 states is expressible — that is the point of v2 and the
  *  reason the earlier v1 translation was thrown away: it could express 14. */
+// THE GLOBAL FLOOR, loaded once. `baseline` and `env` are top-level in the catalog — not
+// package-keyed — because they are the profile every jailed script starts from. Merging them
+// into every cell means a package is measured against the SAME floor it will run under; a
+// search that omitted them would attribute a baseline gap to the package.
+const BASELINE = (() => {
+  try { return JSON.parse(fs.readFileSync(new URL('./baseline.json', import.meta.url), 'utf8')); }
+  catch { return { baseline: [], env: [] }; }
+})();
+const withFloor = (cat) => ({ ...cat, baseline: BASELINE.baseline ?? [], env: BASELINE.env ?? [] });
+
 function catalogFor(pkg, state, others = []) {
   // EVERY OTHER PACKAGE IN THE TREE IS HELD AT FULL GRANT, in every arm including the
   // control. Without this the control ran under nub's compiled-in catalog — where other
@@ -55,7 +65,7 @@ function catalogFor(pkg, state, others = []) {
 
   // State 0 is the BASE PROFILE, and the catalog spells that as NO ENTRY for this package.
   // An entry with no capabilities is a different thing and the parser rejects it, correctly.
-  if (state.atoms.size === 0) return { packages };
+  if (state.atoms.size === 0) return withFloor({ packages });
 
   const grant = { notes: `grant-search cell probing "${state.label}"` };
 
@@ -83,7 +93,7 @@ function catalogFor(pkg, state, others = []) {
   if (state.atoms.has('network')) grant.network = true;
 
   packages[pkg] = [grant];
-  return { packages };
+  return withFloor({ packages });
 }
 
 // ── fixture + measurement ─────────────────────────────────────────────────────
@@ -98,13 +108,6 @@ function paths(root, prefix = '') {
   for (const e of entries) {
     const rel = prefix ? `${prefix}/${e.name}` : e.name;
     if (!prefix && e.name === '.git') { out.push(...paths(path.join(root, e.name, 'hooks'), '.git/hooks')); continue; }
-    // PYTHON BYTECODE IS NOT A SIDE EFFECT. node-gyp ships `gyp/pylib`, and CPython writes
-    // `__pycache__/*.pyc` beside any module it imports. Unjailed it can; jailed it cannot —
-    // and the build SUCCEEDS either way, because .pyc is a pure cache. Counting them made
-    // nine native packages (keccak, lz4, ssh2, …) demand `write.userHome`, the second-widest
-    // grant we have, when the only difference between arms was bytecode. Verified by diffing
-    // the two path sets: __pycache__ entries were the ENTIRE delta.
-    if (e.name === '__pycache__' || e.name.endsWith('.pyc')) continue;
     if (e.isDirectory()) out.push(...paths(path.join(root, e.name), rel));
     else out.push(rel);
   }
