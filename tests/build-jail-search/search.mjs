@@ -290,38 +290,35 @@ function grantFor(state) {
  *  turn a stable entry into a churning one. Going shallower would hand over all of `.cache`.
  */
 function homeWritePaths(paths) {
-  // PROMOTE EVERY DIRECTORY THE SCRIPT WROTE — do not try to be clever about which ones.
+  // COLLAPSE, BUT NEVER PAST A SHARED ROOT.
   //
-  // The build jail is DEFENCE IN DEPTH, not a security boundary, and the failure mode it
-  // exists to avoid is PACKAGES BREAKING. Lifecycle scripts run with COMPLETE access in the
-  // status quo, so promoting anything the script already wrote is a REDUCTION from the
-  // baseline, never an escalation — a package can write `~/.npm` today with nothing stopping
-  // it.
+  // Many observed paths must become one directory entry — cypress wrote 18,673 of them — so
+  // some collapsing is required. But an unbounded collapse walks up to the shared ancestor,
+  // and collapsing cypress by a fixed depth produced `Library/Caches`: the cache root of every
+  // application on the machine, when the vendor directory was one segment further down. The
+  // failure got WIDER the more a package wrote, which is exactly backwards.
   //
-  // The stronger reason is fidelity: unjailed, `ip-num`'s `npx only-allow` warms
-  // `~/.npm/_cacache`, so promoting it REPRODUCES unconfined behaviour and withholding it
-  // DIVERGES from it. An earlier version here required the directory to be named after the
-  // package, which dropped `.npm/_cacache` and `.npm/_npx` and discarded real artefacts to
-  // buy nothing.
+  // So the entry is the LONGEST shared root that prefixes the path, plus ONE segment — the
+  // first directory the package itself owns. `.cache` + `puppeteer`, `Library/Caches` +
+  // `Cypress`. Two vendors under one root therefore yield TWO entries and never their parent,
+  // which is the case a shared-ancestor collapse gets most wrong.
+  //
+  // A path with nothing below the root is a FILE, not a directory grant, and is dropped.
+  const roots = (BASELINE.sharedHomeRoots ?? []).map((r) => r.toLowerCase())
+    .sort((a, b) => b.length - a.length);
   const dirs = new Set();
   for (const p of paths) {
     if (!p.startsWith('$home/')) continue;
-    const segs = p.slice('$home/'.length).split('/');
-    // A DIRECTORY GRANT NEEDS A DIRECTORY. Two segments with nothing beneath them is a FILE,
-    // and promoting it moves another tool's bookkeeping into the user's real home for nothing:
-    // `unrs-resolver` derived `.npm/_update-notifier-last-checked`, npm's update-notifier
-    // timestamp, which is not the package's artefact at all. Requiring something below the
-    // prefix is a structural test, not a judgement about which files are worth keeping —
-    // `.cache/puppeteer` has paths beneath it and survives. Audited over every record: one
-    // junk entry, one legitimate entry, and this separates them.
-    //
-    // A bare file directly in $HOME (`segs.length < 2`) was already excluded, which is why
-    // `.npmrc` — the config root whose capture the private home exists to prevent — can never
-    // reach this list.
-    if (segs.length < 2) continue;   // a bare file in $HOME is not a directory grant
-    dirs.add(segs.slice(0, 2).join('/'));
+    const rel = p.slice('$home/'.length);
+    const low = rel.toLowerCase();
+    const root = roots.find((r) => low === r || low.startsWith(`${r}/`));
+    const depth = root ? root.split('/').length + 1 : 1;
+    const segs = rel.split('/');
+    if (segs.length <= depth) continue;
+    dirs.add(segs.slice(0, depth).join('/'));
   }
-  // Drop any entry already covered by a shallower one, so the set is minimal by construction.
+  // A shallower entry still subsumes a deeper one when both survived (a package owning both
+  // `x` and `x/y`); keep only the shallowest.
   const out = [...dirs].sort();
   return out.filter((d) => !out.some((o) => o !== d && d.startsWith(`${o}/`)));
 }

@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "GLOBAL floor for every jailed script — NOT package-specific. The parser takes `baseline`",
+    "GLOBAL floor for every jailed script \u2014 NOT package-specific. The parser takes `baseline`",
     "and `env` as top-level arrays for exactly this reason: they are the profile every package",
     "starts from, so a fix ships by editing the catalog rather than rebuilding the binary.",
     "",
@@ -16,7 +16,40 @@
     {
       "name": "PYTHONDONTWRITEBYTECODE",
       "value": "1",
-      "notes": "node-gyp ships gyp/pylib and CPython writes __pycache__/*.pyc beside any module it imports. The jail refuses correctly and the build succeeds either way, because bytecode is a pure cache — but the refused writes were counted as side effects and made nine native packages (keccak, lz4, ssh2, ...) demand write.userHome, the second-widest grant, when bytecode was the ENTIRE delta between arms. Setting this stops the write happening at all, which is the general fix; the harness previously filtered .pyc after the fact, which is the same fix re-derived per tool."
+      "notes": "node-gyp ships gyp/pylib and CPython writes __pycache__/*.pyc beside any module it imports. The jail refuses correctly and the build succeeds either way, because bytecode is a pure cache \u2014 but the refused writes were counted as side effects and made nine native packages (keccak, lz4, ssh2, ...) demand write.userHome, the second-widest grant, when bytecode was the ENTIRE delta between arms. Setting this stops the write happening at all, which is the general fix; the harness previously filtered .pyc after the fact, which is the same fix re-derived per tool."
     }
+  ],
+  "_sharedHomeRoots_comment": [
+    "Directories under $HOME that BELONG TO THE PLATFORM OR ANOTHER TOOL, not to any one",
+    "package. A writePaths entry may never BE one of these \u2014 it must name something inside one.",
+    "",
+    "Why: the derivation collapses many observed paths into one directory entry, and an",
+    "unbounded collapse walks up to the shared ancestor. cypress wrote 18,673 paths, all under",
+    "Library/Caches/Cypress/15.19.0/, and collapsing them by fixed depth produced",
+    "'Library/Caches' -- the cache root of every application on the machine -- when the vendor",
+    "directory was one level further down. The failure got WORSE the more a package wrote,",
+    "which is backwards.",
+    "",
+    "This also stops two vendors under one root collapsing into the root: a package writing",
+    "Library/Caches/A and Library/Caches/B yields TWO entries, never their parent."
+  ],
+  "sharedHomeRoots": [
+    ".cache",
+    ".npm",
+    ".config",
+    ".local",
+    ".local/share",
+    ".local/state",
+    ".yarn",
+    ".pnpm-store",
+    "Library",
+    "Library/Caches",
+    "Library/Application Support",
+    "Library/Preferences",
+    "Library/Logs",
+    "AppData",
+    "AppData/Local",
+    "AppData/Roaming",
+    "AppData/LocalLow"
   ]
 }
