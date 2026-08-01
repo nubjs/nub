@@ -2714,6 +2714,32 @@ fn strip_verbatim(path: &str, windows: bool) -> String {
     path.to_string()
 }
 
+/// Whether a preload spec names an absolute path rather than a bare module
+/// specifier, deciding whether it needs the `file://` spelling.
+///
+/// Pure over `windows`, for the same reason [`to_file_url`] is: `Path::is_absolute`
+/// answers for the HOST, so a fixture like `/proj/pre.cjs` reads absolute on Unix
+/// and NOT absolute on Windows (there it is rooted but not drive-qualified). Mixing
+/// that into an otherwise-`windows`-parameterized function makes the pair disagree
+/// on a Windows host and silently emit a bare `--import=/proj/pre.cjs`. Matches
+/// `Path::is_absolute` on each platform for the paths that actually reach here.
+fn is_absolute_path(spec: &str, windows: bool) -> bool {
+    if !windows {
+        return spec.starts_with('/');
+    }
+    // UNC (`\\server\share`, `//server/share`) and the verbatim `\\?\C:\…` form
+    // both lead with a doubled separator; everything else must be drive-qualified
+    // (`C:\a`, `C:/a`). A lone leading slash is rooted-but-relative on Windows.
+    if spec.starts_with(r"\\") || spec.starts_with("//") {
+        return true;
+    }
+    let bytes = spec.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
 /// Convert a filesystem path to a `file://` URL Node's loader accepts on every
 /// platform. On Windows a path is `C:\a\b` (or a canonicalized `\\?\C:\a\b`); a
 /// naive `format!("file://{path}")` yields `file://C:\a\b`, which Node's
@@ -2924,7 +2950,7 @@ fn user_preload_injection_for(
         // as an import from the cwd. Only a real path needs the file:// spelling,
         // which is what stops a Windows `C:\…` from parsing its drive as the URL
         // authority (ERR_INVALID_FILE_URL_PATH).
-        value: if path.is_absolute() {
+        value: if is_absolute_path(spec, windows) {
             to_file_url(spec, windows)
         } else {
             spec.to_string()
@@ -5394,6 +5420,38 @@ mod tests {
                 "Node {version}: a bare specifier must not be mangled into a file:// URL"
             );
         }
+    }
+
+    /// Whether a spec needs the file:// spelling is decided from the `windows`
+    /// parameter, never the host — so both spellings are exercised wherever the
+    /// suite runs. Deciding it with `Path::is_absolute` instead passed everywhere
+    /// locally and failed all three POSIX-fixture cases above on the Windows CI leg,
+    /// where `/proj/pre.cjs` is rooted but not drive-qualified: the injection fell
+    /// through to the bare-specifier branch and emitted `--import=/proj/pre.cjs`.
+    #[test]
+    fn file_url_worthiness_is_decided_by_the_windows_flag_not_the_host() {
+        assert!(is_absolute_path("/proj/pre.cjs", false));
+        assert!(!is_absolute_path("telemetry-pkg", false));
+
+        // Rooted but not drive-qualified — Windows agrees this is not absolute.
+        assert!(!is_absolute_path("/proj/pre.cjs", true));
+        assert!(is_absolute_path(r"C:\proj\pre.cjs", true));
+        assert!(is_absolute_path("C:/proj/pre.cjs", true));
+        assert!(is_absolute_path(r"\\server\share\pre.cjs", true));
+        assert!(is_absolute_path(r"\\?\C:\proj\pre.cjs", true));
+        assert!(!is_absolute_path("telemetry-pkg", true));
+        assert!(!is_absolute_path("C:", true));
+
+        // End to end: a Windows drive path reaches Node as a drive-qualified URL,
+        // not as `file://C:\…` (whose drive would parse as the URL authority).
+        let specs = vec![r"C:\proj\pre.mjs".to_string()];
+        let win = user_preload_injections_for(&specs, &NodeVersion::new(20, 11, 0), true);
+        assert_eq!(
+            win.iter()
+                .map(|injection| injection.node_options_token())
+                .collect::<Vec<_>>(),
+            ["--import=file:///C:/proj/pre.mjs"]
+        );
     }
 
     #[test]
