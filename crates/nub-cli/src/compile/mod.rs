@@ -861,7 +861,8 @@ fn node_binary_in(version_dir: &Path, target: &TargetPlatform) -> PathBuf {
 ///   (or, worse, mangle) the other's.
 /// - **Verification by execution** happens only when target == host; a foreign
 ///   binary cannot be run, so the check degrades to "is it still a well-formed
-///   image of the expected format".
+///   image of the expected format". Execution alone is NOT sufficient — see
+///   `retains_node_api_exports`.
 fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8>> {
     let original = fs::read(node_bin).with_context(|| format!("reading {}", node_bin.display()))?;
     let format = target.format();
@@ -899,7 +900,9 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
     set_executable(&tmp)?;
     let _guard = FileGuard(tmp.clone());
 
-    let mut ok = run_ok(&strip, &[tmp.as_os_str()]);
+    let mut argv: Vec<&std::ffi::OsStr> = strip_flags(format).iter().map(AsRef::as_ref).collect();
+    argv.push(tmp.as_os_str());
+    let mut ok = run_ok(&strip, &argv);
     if ok && needs_resign {
         ok = run_ok(
             "codesign",
@@ -911,28 +914,199 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
             ],
         );
     }
-    if ok {
-        ok = if target.is_host() {
+
+    let stripped = if ok {
+        fs::read(&tmp).with_context(|| format!("reading stripped {}", tmp.display()))?
+    } else {
+        Vec::new()
+    };
+    // A foreign binary cannot be executed — settle for "still the right kind of
+    // image, and not obviously truncated".
+    let intact = ok
+        && if target.is_host() {
             node_runs(&tmp)
         } else {
-            // Can't execute a foreign binary — settle for "still the right kind
-            // of image, and not obviously truncated".
-            fs::read(&tmp)
-                .is_ok_and(|b| b.len() > 1_000_000 && inject::detect_format(&b) == Some(format))
+            stripped.len() > 1_000_000 && inject::detect_format(&stripped) == Some(format)
         };
-    }
-    if ok {
-        let how = if needs_resign {
-            "Stripped + ad-hoc re-signed the embedded Node"
-        } else {
-            "Stripped the embedded Node"
-        };
-        eprintln!("{how}");
-        return fs::read(&tmp).with_context(|| format!("reading stripped {}", tmp.display()));
+    let reject = if !ok {
+        Some("strip failed")
+    } else if !intact {
+        Some("the stripped Node failed verification")
+    } else if !retains_node_api_exports(&original, &stripped) {
+        Some("stripping dropped the Node-API exports that native addons resolve against")
+    } else {
+        None
+    };
+    if let Some(why) = reject {
+        eprintln!("note: {why} — embedding the Node binary unstripped");
+        return Ok(original);
     }
 
-    eprintln!("note: strip failed verification — embedding Node unstripped");
-    Ok(original)
+    if needs_resign {
+        eprintln!("Stripped + ad-hoc re-signed the embedded Node");
+    } else {
+        eprintln!("Stripped the embedded Node");
+    }
+    Ok(stripped)
+}
+
+/// Flags this format's stripper needs to leave a usable Node behind.
+///
+/// Mach-O gets `-x` (discard local symbols only). Apple's `/usr/bin/strip` with
+/// NO flags rewrites an executable's dyld export trie, leaving Node exporting 4
+/// of its 159 `napi_*` symbols — and a macOS addon binds Node-API against the
+/// host executable's flat namespace, so every addon then dies at `dlopen` with
+/// `symbol not found in flat namespace '_napi_create_error'`. `-x` is spelled
+/// the same by Apple strip, GNU strip and llvm-strip, keeps all 159, and still
+/// recovers 36 of the 38 MB the default flags do (measured, Node 26 darwin-arm64:
+/// 145.3 MB original → 104.6 MB default → 107.0 MB with `-x`).
+///
+/// ELF and PE keep their default flags: `strip` never touches ELF `.dynsym` or
+/// the PE export directory, and `-x` there would only retain `.symtab` globals
+/// for no gain.
+fn strip_flags(format: ContainerFormat) -> &'static [&'static str] {
+    match format {
+        ContainerFormat::MachO => &["-x"],
+        _ => &[],
+    }
+}
+
+/// Did the strip preserve the Node-API symbols a native addon resolves against?
+///
+/// This is the check `node_runs` structurally cannot make: a Node with no
+/// exported Node-API answers `--version` perfectly and then fails every single
+/// `dlopen`. The defect that motivated it surfaced only on hosts without
+/// `llvm-strip` — a stock macOS runner, never a dev box with Homebrew LLVM —
+/// because execution was the only gate.
+///
+/// Differential, never absolute: an original that does not export Node-API, or
+/// an image this build cannot read, passes. The check can therefore only fire on
+/// a real regression, and no future Node layout can silently veto every strip.
+///
+/// Mach-O only, deliberately. That is where the defect exists and where the
+/// answer is subtle; `strip` leaves ELF `.dynsym` and the PE export directory
+/// alone, so there is nothing to catch and no second parser to get wrong.
+fn retains_node_api_exports(original: &[u8], stripped: &[u8]) -> bool {
+    !exports_node_api(original) || exports_node_api(stripped)
+}
+
+/// Does this Mach-O export any `napi_*` symbol?
+///
+/// Reads the dyld EXPORT TRIE, which is what resolves an addon's flat-namespace
+/// references — NOT the classic symbol table. The two disagree exactly where it
+/// matters: `llvm-strip` drops the symbol table and keeps the trie (addons still
+/// load), Apple's `strip` rewrites the trie itself (addons no longer load). A
+/// symbol-table reader calls the working case broken.
+fn exports_node_api(image: &[u8]) -> bool {
+    macho_export_trie(image)
+        .and_then(|trie| trie_has_export_prefix(trie, b"_napi_"))
+        .unwrap_or(false)
+}
+
+/// The `LC_DYLD_EXPORTS_TRIE` (or legacy `LC_DYLD_INFO`) payload of a 64-bit
+/// little-endian Mach-O. Anything else — fat, 32-bit, big-endian, truncated —
+/// reads as "no trie", which the differential above treats as "cannot verify".
+fn macho_export_trie(image: &[u8]) -> Option<&[u8]> {
+    const MH_MAGIC_64: u32 = 0xfeed_facf;
+    const LC_DYLD_INFO: u32 = 0x22;
+    const LC_DYLD_INFO_ONLY: u32 = 0x8000_0022;
+    const LC_DYLD_EXPORTS_TRIE: u32 = 0x8000_0033;
+
+    fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
+        let raw = bytes.get(offset..offset.checked_add(4)?)?;
+        Some(u32::from_le_bytes(raw.try_into().ok()?))
+    }
+
+    if u32_at(image, 0)? != MH_MAGIC_64 {
+        return None;
+    }
+    let ncmds = u32_at(image, 16)?;
+    let mut offset = 32usize;
+    for _ in 0..ncmds {
+        let cmd = u32_at(image, offset)?;
+        let cmdsize = u32_at(image, offset + 4)? as usize;
+        if cmdsize < 8 {
+            return None;
+        }
+        // `linkedit_data_command` carries its (offset, size) pair at +8; in
+        // `dyld_info_command` the export pair is the sixth, at +40.
+        let pair = match cmd {
+            LC_DYLD_EXPORTS_TRIE => Some(offset + 8),
+            LC_DYLD_INFO | LC_DYLD_INFO_ONLY => Some(offset + 40),
+            _ => None,
+        };
+        if let Some(at) = pair {
+            let start = u32_at(image, at)? as usize;
+            let len = u32_at(image, at + 4)? as usize;
+            return image.get(start..start.checked_add(len)?);
+        }
+        offset = offset.checked_add(cmdsize)?;
+    }
+    None
+}
+
+/// Does any exported name in this trie start with `prefix`?
+///
+/// The trie splits a name across edge labels, so a plain byte search cannot
+/// answer this. Descent is pruned to the one path that still spells `prefix`,
+/// making the walk O(prefix length) rather than O(exports). A trie has no dead
+/// branches, so spelling out `prefix` proves a real export sits below it.
+fn trie_has_export_prefix(trie: &[u8], prefix: &[u8]) -> Option<bool> {
+    // (node offset, how much of `prefix` the path to it has already spelled)
+    let mut stack = vec![(0usize, 0usize)];
+    // Child offsets are unvalidated file data, so bound the walk rather than
+    // trusting them to form a DAG.
+    let mut budget = 10_000u32;
+
+    while let Some((node, matched)) = stack.pop() {
+        budget = budget.checked_sub(1)?;
+        let (terminal_size, width) = uleb128(trie, node)?;
+        let mut at = node
+            .checked_add(width)?
+            .checked_add(usize::try_from(terminal_size).ok()?)?;
+        let children = *trie.get(at)?;
+        at += 1;
+        for _ in 0..children {
+            let start = at;
+            while *trie.get(at)? != 0 {
+                at += 1;
+            }
+            let label = trie.get(start..at)?;
+            at += 1;
+            let (child, width) = uleb128(trie, at)?;
+            at = at.checked_add(width)?;
+
+            let want = prefix.get(matched..)?;
+            let common = want.len().min(label.len());
+            if label.get(..common)? != want.get(..common)? {
+                continue;
+            }
+            if label.len() >= want.len() {
+                return Some(true);
+            }
+            stack.push((usize::try_from(child).ok()?, matched + label.len()));
+        }
+    }
+    Some(false)
+}
+
+/// Returns the decoded value and the number of bytes it occupied.
+fn uleb128(bytes: &[u8], offset: usize) -> Option<(u64, usize)> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    let mut at = offset;
+    loop {
+        let byte = *bytes.get(at)?;
+        at += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Some((value, at - offset));
+        }
+        shift += 7;
+        if shift > 56 {
+            return None;
+        }
+    }
 }
 
 /// Does this Node binary still execute? Asks it for `--version` with the ambient
@@ -1366,6 +1540,84 @@ mod tests {
         reject_missing_output_parent(Path::new("app")).expect("a bare filename is accepted");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Apple's `strip` needs `-x` on Mach-O or it rewrites the export trie and
+    /// leaves a Node that runs but cannot `dlopen` a single native addon. The
+    /// end-to-end proof is `tests/compile-native-islands/` on a host whose only
+    /// stripper is `/usr/bin/strip` — no unit test can strip a real Node image.
+    #[test]
+    fn only_mach_o_carries_a_strip_flag() {
+        assert_eq!(strip_flags(ContainerFormat::MachO), &["-x"]);
+        assert!(strip_flags(ContainerFormat::Elf).is_empty());
+        assert!(strip_flags(ContainerFormat::Pe).is_empty());
+    }
+
+    /// A Mach-O export trie holding exactly one name, one edge per segment —
+    /// the shape the real encoder produces when a name shares a prefix with a
+    /// sibling.
+    fn export_trie(segments: &[&[u8]]) -> Vec<u8> {
+        // Leaf: a terminal payload of (flags, address), no children.
+        let mut nodes = vec![vec![0x02, 0x00, 0x00, 0x00]];
+        for segment in segments.iter().rev() {
+            let mut node = vec![0x00, 0x01];
+            node.extend_from_slice(segment);
+            node.push(0);
+            node.push(0); // child offset, patched once the layout is known
+            nodes.push(node);
+        }
+        nodes.reverse();
+
+        let mut offsets = Vec::new();
+        let mut at = 0usize;
+        for node in &nodes {
+            offsets.push(at);
+            at += node.len();
+        }
+        assert!(
+            at < 0x80,
+            "this builder only emits single-byte ULEB offsets"
+        );
+
+        let mut trie = Vec::new();
+        for (index, node) in nodes.iter().enumerate() {
+            let mut node = node.clone();
+            if let Some(child) = offsets.get(index + 1) {
+                let last = node.len() - 1;
+                node[last] = *child as u8;
+            }
+            trie.extend_from_slice(&node);
+        }
+        trie
+    }
+
+    /// The trie splits a name across edges wherever it shares a prefix with a
+    /// sibling, so `_napi_` routinely straddles an edge boundary — which is why
+    /// this cannot be a byte search. `_nanosleep` is the adversarial neighbour:
+    /// it shares `_na` and must not count.
+    #[test]
+    fn the_export_scan_follows_a_name_split_across_trie_edges() {
+        let split = export_trie(&[b"_na", b"pi_create_error"]);
+        assert_eq!(trie_has_export_prefix(&split, b"_napi_"), Some(true));
+
+        let whole = export_trie(&[b"_napi_create_error"]);
+        assert_eq!(trie_has_export_prefix(&whole, b"_napi_"), Some(true));
+
+        let neighbour = export_trie(&[b"_nanosleep"]);
+        assert_eq!(trie_has_export_prefix(&neighbour, b"_napi_"), Some(false));
+
+        // Truncated trie data reads as unanswerable, never as a panic.
+        assert_eq!(trie_has_export_prefix(&whole[..6], b"_napi_"), None);
+    }
+
+    /// The export check is a DIFFERENTIAL so it can only ever fire on a real
+    /// regression: an original that exports no Node-API, or bytes this parser
+    /// does not understand, must never veto a strip that is actually fine.
+    #[test]
+    fn the_node_api_export_check_never_vetoes_what_it_cannot_read() {
+        assert!(retains_node_api_exports(b"not a mach-o", b"still not"));
+        assert!(!exports_node_api(b"not a mach-o"));
+        assert!(!exports_node_api(&[]));
     }
 
     #[test]

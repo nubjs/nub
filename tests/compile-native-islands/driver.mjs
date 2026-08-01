@@ -205,8 +205,19 @@ async function rejectSourceBuildResidue(nodeModules) {
 
 function runtimeEnvironment(workspace, cache) {
   const home = join(workspace, "home");
+  const inherited = { ...process.env };
+  // run.sh drives this file THROUGH the candidate nub, so `process.env` already
+  // carries the host nub's injected NODE_OPTIONS — version-gated Node flags plus
+  // a `--require` of the host's runtime tree. Handing that to the artifact is
+  // both a false pass (the run under test is preloaded by an outside runtime, so
+  // "self-contained" is never actually proven) and a false failure (targeting a
+  // Node older than the host injects a flag that Node rejects outright: Node 24
+  // exits 9 on the `--experimental-import-text` the host's Node 26 wants). Only
+  // invisible on CI, where the runner's Node happens to equal `--target`.
+  delete inherited.NODE_OPTIONS;
+  delete inherited.NODE_REPL_EXTERNAL_MODULE;
   return {
-    ...process.env,
+    ...inherited,
     HOME: home,
     USERPROFILE: home,
     XDG_CACHE_HOME: join(home, "xdg-cache"),
