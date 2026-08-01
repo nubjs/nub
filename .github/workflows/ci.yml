@@ -428,16 +428,20 @@ jobs:
           if (-not (Test-Path $nub)) { throw "nub.exe not found at $nub" }
 
           # Isolated work dir (no package.json/.nvmrc) so nub uses the PATH Node and
-          # no project pin interferes. A typed fixture forces real transpilation
-          # (annotations stripped) -> addon dlopen -> execute.
+          # no project pin interferes. `enum` is NON-ERASABLE, and that is the whole
+          # point: Node has stripped type ANNOTATIONS natively since 23.6, so a
+          # types-only fixture executes on plain Node and proves nothing about nub —
+          # measured, this job printed its success marker even in a run where
+          # extraction had failed outright. Node rejects `enum`, so only a real
+          # extract -> dlopen -> transpile can execute this file.
           $work = Join-Path $env:RUNNER_TEMP "fixture"
           if (Test-Path $work) { Remove-Item -Recurse -Force $work }
           New-Item -ItemType Directory -Force -Path $work | Out-Null
           $fixture = Join-Path $work "embed.ts"
           @'
+          enum Answer { Value = 42 }
           const greeting: string = "embed-roundtrip-ok";
-          const n: number = 21 * 2;
-          console.log(`${greeting}-${n}`);
+          console.log(`${greeting}-${Answer.Value}`);
           '@ | Set-Content -Encoding utf8 $fixture
 
           # --- First run: must extract runtime + dlopen addon + transpile + execute ---
@@ -608,10 +612,14 @@ jobs:
           work="$RUNNER_TEMP/fixture"
           rm -rf "$work"; mkdir -p "$work"
           fixture="$work/embed.ts"
+          # `enum` is NON-ERASABLE — see the Windows twin of this step. Node strips
+          # type ANNOTATIONS natively since 23.6, so a types-only fixture proves
+          # nothing about nub; Node rejects `enum`, so this file executes only if
+          # the extract -> dlopen -> transpile round-trip really happened.
           cat > "$fixture" <<'EOF'
+          enum Answer { Value = 42 }
           const greeting: string = "embed-roundtrip-ok";
-          const n: number = 21 * 2;
-          console.log(`${greeting}-${n}`);
+          console.log(`${greeting}-${Answer.Value}`);
           EOF
 
           # --- First run: extract -> verify -> dlopen -> transpile -> execute ---
