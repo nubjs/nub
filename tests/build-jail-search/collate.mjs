@@ -34,7 +34,7 @@ const OVERRIDES = opt('--overrides', path.join(here, 'overrides'));
 
 const records = [];
 /** Every record under `dir`, at any depth. Records are partitioned
- *  `<platform>/<package>/<version>.json`, so this walks rather than lists — and it still
+ *  `<platform>/<package>/<version>/results.json`, so this walks rather than lists — and it still
  *  reads a FLAT directory, which keeps older result sets collatable. */
 function walk(dir) {
   const out = [];
@@ -43,7 +43,9 @@ function walk(dir) {
   for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     const full = path.join(dir, e.name);
     if (e.isDirectory()) out.push(...walk(full));
-    else if (e.name.endsWith('.json')) out.push(full);
+    // ONLY `results.json`. A version directory holds the record plus every cell's log, and
+    // a future artefact dropped beside them must not silently become a record.
+    else if (e.name === 'results.json') out.push(full);
   }
   return out;
 }

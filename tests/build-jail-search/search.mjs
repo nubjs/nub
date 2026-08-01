@@ -215,7 +215,7 @@ function isMaterialized(proj, pkgSpec) {
   try { return !fs.lstatSync(path.join(store, hit)).isSymbolicLink(); } catch { return false; }
 }
 
-function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg }) {
+function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg, logDir }) {
   // Environment a real project would carry. `DATABASE_URL` is the prisma family's precondition —
   // without it `prisma generate` bails and measures as "needs nothing". Kept generic and
   // non-secret for the same reason as the fixture files above.
@@ -228,6 +228,13 @@ function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg }
   // Scrubbed rather than forced to a value: we want the DEVELOPER-MACHINE path, which is the one
   // that runs more code, and a wider measured grant is the safe direction.
   const env = { ...process.env, HOME: home, DATABASE_URL: 'postgresql://user:pass@localhost:5432/db' };
+  // NO PYTHON PIN. A pin was added here on the theory that gyp rejects Python 3.14 — REFUTED:
+  // node-gyp 12.4.0 declares `semverRange = '>=3.6.0'` in `lib/find-python.js`, which 3.14
+  // satisfies, and `canvas@2.11.2` compiled cleanly under it once `pkg-config` was reachable.
+  // The real failure was `pkg-config pixman-1` exiting 127 — a missing SYSTEM library, nothing
+  // to do with Python. Left unpinned so the harness inherits whatever the host resolves, which
+  // is what a user gets.
+
   for (const k of ['CI', 'CONTINUOUS_INTEGRATION', 'BUILD_NUMBER', 'RUN_ID', 'GITHUB_ACTIONS',
                    'GITLAB_CI', 'CIRCLECI', 'TRAVIS', 'JENKINS_URL', 'TEAMCITY_VERSION',
                    'BUILDKITE', 'DRONE', 'APPVEYOR', 'CODEBUILD_BUILD_ID', 'TF_BUILD']) {
@@ -273,6 +280,15 @@ function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg }
     return p;
   };
   const seen = paths(root).map(tokenise);
+  // ALWAYS PERSIST THE RAW LOG. Reconstructing a failure after the fact means re-running it,
+  // and by then the fixture is gone and the binary may have moved. A log costs kilobytes and
+  // removes an entire class of "I had to guess what went wrong".
+  if (logDir) {
+    try {
+      fs.mkdirSync(logDir, { recursive: true });
+      fs.writeFileSync(path.join(logDir, `${(label || 'cell').replace(/[^a-z0-9]+/gi, '-')}.log`), log);
+    } catch {}
+  }
   return {
     label, rc, log, seen,
     digest: digestOf(seen),
@@ -288,23 +304,20 @@ function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg }
 /** Where one package@version's measurement lives. One file per pair, so re-running a
  *  single package rewrites exactly its own record and a batch is resumable — the catalog
  *  is COLLATED from these later, never edited in place by a run. */
+function runDirFor(dir, pkg, version) {
+  // A VERSION IS A DIRECTORY, not a file. The record is one artefact of a run; the per-cell
+  // logs are the rest, and they are what a later reader actually needs when a verdict is
+  // surprising. Keeping them in one directory means nothing has to stay in sync with a
+  // parallel tree, and `ls` on a version shows everything that run produced.
+  //
+  //   results/runs/<platform>/<package>/<version>/results.json
+  //   results/runs/<platform>/<package>/<version>/control.log
+  //   results/runs/<platform>/<package>/<version>/s13-write-project.log
+  return path.join(dir, `${process.platform}-${process.arch}`, pkg.replace('/', '+'), version);
+}
+
 function runPath(dir, pkg, version) {
-  // PARTITIONED BY PLATFORM, THEN PACKAGE, THEN VERSION.
-  //
-  // The catalog is per-platform and is reconciled from runs on several machines, so the
-  // platform has to be a DIRECTORY rather than a field buried in each record's provenance —
-  // otherwise merging result sets means parsing every file just to group them, and "which
-  // platforms have we measured this package on" is not answerable with `ls`.
-  //
-  // Version is its own level for the same reason: version banding needs several versions of one
-  // package side by side, and a flat `pkg@version.json` scatters them through one large
-  // directory. Scoped names keep the existing '+' convention.
-  return path.join(
-    dir,
-    `${process.platform}-${process.arch}`,
-    pkg.replace('/', '+'),
-    `${version}.json`,
-  );
+  return path.join(runDirFor(dir, pkg, version), 'results.json');
 }
 
 /** What produced this record. Without it a results directory is a pile of numbers with no
@@ -536,11 +549,12 @@ const baseCase = (r, root) => ({
   pathsUnderThrowawayHome: r.seen.filter((p) => p.startsWith('$home/')).length,
 });
 
-function search(nub, pkg, version, root, keep) {
+function search(nub, pkg, version, root, keep, runDir) {
+  const logDir = runDirFor(runDir, pkg, version);
   const cell = (name, opts) => {
     const dir = path.join(root, name);
     const fx = makeFixture(dir, pkg, version, { jailOff: !!opts.jailOff });
-    const r = runCell(nub, fx, { ...opts, pkg });
+    const r = runCell(nub, fx, { ...opts, pkg, logDir });
     if (!keep) fs.rmSync(dir, { recursive: true, force: true });
     return r;
   };
@@ -638,7 +652,15 @@ function search(nub, pkg, version, root, keep) {
     };
   }
   if (control.rc !== 0 || controlB.rc !== 0) {
-    return { pkg, version, verdict: 'BROKEN-EVEN-WITH-EVERYTHING', cells, control: baseCase(control) };
+    // THE TAIL GOES IN THE RECORD. "Broken at the widest grant" is useless without the reason,
+    // and the reason is in a log that will not exist by the time anyone reads the verdict.
+    return {
+      pkg, version, verdict: 'BROKEN-EVEN-WITH-EVERYTHING', cells,
+      control: baseCase(control),
+      controlLogTail: (control.log || '').split('\n').slice(-40).join('\n'),
+      logDir: runDirFor(runDir, pkg, version),
+      provenance: provenance(nub),
+    };
   }
   const sideEffectful = hasScript;
   // A cell passes iff it reproduces every path BOTH control runs produced. Paths only one
@@ -841,7 +863,7 @@ try {
     const prior = JSON.parse(fs.readFileSync(out, 'utf8'));
     console.log(JSON.stringify({ ...prior, skipped: 'already measured; pass --force to redo' }));
   } else {
-    const record = search(nub, pkg, version, root, keep);
+    const record = search(nub, pkg, version, root, keep, runDir);
     record.provenance = provenance(nub);
     fs.mkdirSync(runDir, { recursive: true });
     fs.writeFileSync(out, JSON.stringify(record, null, 2));
