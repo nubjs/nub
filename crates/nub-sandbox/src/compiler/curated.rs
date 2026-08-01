@@ -883,12 +883,47 @@ pub struct V2Outcome {
 ///
 /// A `node_modules` container itself is still refused: it holds `.bin` (run UNCONFINED by later
 /// tooling) and every sibling's source. A symlink could otherwise land the resolution there.
+///
+/// THE DEPENDENCY'S ENTRY, NOT ITS PACKAGE DIRECTORY, when the two differ. `unrs-resolver`
+/// mkdirs `<napi-postinstall entry>/node_modules/unrs-resolver` — a SIBLING of the dependency's
+/// package dir, inside that dependency's store entry. Granting the package dir alone left that
+/// one level short, which the search caught: `unrs-resolver` settled on `userHome` (cost 7)
+/// when `deps` (cost 3) was meant to carry it.
+///
+/// Widening to the entry stays bounded. It is ONE declared dependency's entry, not the store;
+/// the entry's own `node_modules` holds symlinks to ITS dependencies, and a write THROUGH one
+/// resolves outside the granted root, where the backends match on the canonical path and refuse
+/// it. So the reachable set is still what the package could already `require`, one hop.
 #[cfg(feature = "build-jail-catalog-override")]
 fn resolve_declared_dep(homes: &Homes, package_dir: &Path, name: &str) -> Option<PathBuf> {
     let resolved = resolve_package_from(package_dir, name)?;
     if resolved.file_name().is_some_and(|n| n == "node_modules") {
         return None;
     }
+    // `<store>/<dep>@<hash>/node_modules/<dep>` -> `<store>/<dep>@<hash>`. Only when the result
+    // really is a store entry: `enclosing_node_modules(..).parent()` is the entry root, and it
+    // is accepted below only if it sits directly under a virtual store.
+    let resolved = enclosing_node_modules(&resolved)
+        .and_then(|nm| nm.parent().map(Path::to_path_buf))
+        .filter(|entry| {
+            let parent = entry
+                .parent()
+                .map(crate::matcher::path::canonicalize_including_nonexistent);
+            let is_store_root = |root: PathBuf| {
+                parent.as_deref()
+                    == Some(
+                        crate::matcher::path::canonicalize_including_nonexistent(&root).as_path(),
+                    )
+            };
+            is_store_root(homes.cache.join("nub").join("pm").join("store"))
+                || is_store_root(
+                    homes
+                        .project
+                        .join("node_modules")
+                        .join(super::preset::PROJECT_VIRTUAL_STORE_LEAF),
+                )
+        })
+        .unwrap_or(resolved);
     let under = |root: PathBuf| {
         let root = crate::matcher::path::canonicalize_including_nonexistent(&root);
         resolved != root && resolved.starts_with(&root)
@@ -1774,10 +1809,28 @@ mod tests {
                 .iter()
                 .map(|r| r.matcher.as_str().to_string())
                 .collect();
+            // REACHABILITY, and the direction of containment is the point: the grant is the
+            // dependency's ENTRY, which is a PREFIX of its package dir. Ask whether some rule's
+            // root CONTAINS the dependency, not whether a rule sits exactly at it.
+            let covers = |p: &str| {
+                got.iter()
+                    .any(|g| p.starts_with(g.trim_end_matches("/**").trim_end_matches('/')))
+            };
             assert!(
-                got.iter().any(|g| g.starts_with(&want)),
+                covers(&want),
                 "a declared dependency in the GLOBAL store must be reachable — this is the case \
-                 the project clamp silently dropped. wanted a rule under {want}, got {got:?}"
+                 the project clamp silently dropped. wanted a rule covering {want}, got {got:?}"
+            );
+            // The widening stops AT that entry: an undeclared package's entry sitting beside it
+            // in the same store must stay out of reach, or `deps` has become "the store".
+            let stranger = crate::matcher::path::canonicalize_including_nonexistent(
+                &store.join("stranger@1.0.0-cccc/node_modules/stranger"),
+            )
+            .to_string_lossy()
+            .to_string();
+            assert!(
+                !covers(&stranger),
+                "an UNDECLARED package's store entry must stay unreachable: {got:?}"
             );
             let _ = std::fs::remove_dir_all(&tmp);
         }

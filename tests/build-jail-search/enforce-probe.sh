@@ -18,6 +18,9 @@
 set -u
 NUB="${1:-}"
 [ -x "$NUB" ] || { echo "usage: $0 /path/to/nub"; exit 2; }
+# ABSOLUTE, always: every arm cds into its own fixture before invoking nub, so a relative path
+# silently stops resolving and every arm reports "no marker" instead of a result.
+case "$NUB" in /*) ;; *) NUB="$(cd "$(dirname "$NUB")" && pwd)/$(basename "$NUB")" ;; esac
 
 # NEVER /tmp: a /tmp/package.json on some machines is found by walking up, and it silently
 # becomes the project root.
