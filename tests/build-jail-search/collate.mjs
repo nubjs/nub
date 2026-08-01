@@ -25,6 +25,7 @@ const PLATFORM_FILTER = opt('--only-platform', null);
 const BASELINE = opt('--baseline', path.join(here, 'baseline.json'));
 const OUT = opt('--out', path.join(here, 'results', 'catalog-v2.json'));
 const PLATFORM = opt('--platform', null);
+const OVERRIDES = opt('--overrides', path.join(here, 'overrides'));
 
 // ── read ──────────────────────────────────────────────────────────────────────
 
@@ -149,6 +150,45 @@ for (const [pkg, rs] of [...byPackage.entries()].sort()) {
   packages[pkg] = grants.map(({ g }) => g);
 }
 
+// ── overrides ─────────────────────────────────────────────────────────────────
+//
+// A hand-authored grant REPLACES the measured one. This is the seam for a package a sweep
+// cannot answer — sharp, where the honest move is to read the source rather than infer from a
+// run whose result depended on whether a download succeeded.
+//
+// EVERY override is reported, every run. An override that applies silently is how a catalog
+// stops reflecting measurement without anyone noticing, and the whole value of this pipeline is
+// that its output is derived rather than asserted.
+const applied = [];
+const deadWeight = [];
+const rejected = [];
+for (const f of (fs.existsSync(OVERRIDES) ? fs.readdirSync(OVERRIDES) : []).sort()) {
+  if (!f.endsWith('.json')) continue;
+  let o;
+  try { o = JSON.parse(fs.readFileSync(path.join(OVERRIDES, f), 'utf8')); }
+  catch (e) { rejected.push(`${f}: unparseable (${e.message})`); continue; }
+  const name = o.package ?? f.replace(/\.json$/, '').replace('+', '/');
+  // RATIONALE IS MANDATORY. An override without one is indistinguishable from a guess a year
+  // later, and the reader has no measurement to fall back on — that is the point of the file.
+  const r = o.rationale ?? {};
+  const missing = ['investigator', 'evidence', 'date'].filter((k) => !r[k]);
+  if (missing.length) { rejected.push(`${f}: missing rationale.${missing.join(', rationale.')}`); continue; }
+  if (!Array.isArray(o.grants) || !o.grants.length) { rejected.push(`${f}: no grants`); continue; }
+  // COMPARE CAPABILITIES, NOT THE WHOLE GRANT. `notes` always differs — the measured note
+  // records what was observed, the override's records why a human wrote it — so comparing
+  // serialised grants made this check STRUCTURALLY UNABLE TO FIRE. Verified by a fixture whose
+  // override matched the measured result exactly and was still not reported.
+  const caps = (gs) => JSON.stringify((gs ?? []).map(({ notes, ...rest }) => {
+    const o = {};
+    for (const k of Object.keys(rest).sort()) o[k] = rest[k];
+    return o;
+  }));
+  const before = packages[name] ? caps(packages[name]) : null;
+  packages[name] = o.grants;
+  if (before && before === caps(o.grants)) deadWeight.push(name);
+  applied.push({ name, why: r.evidence, by: r.investigator, on: r.date });
+}
+
 const baseline = fs.existsSync(BASELINE)
   ? JSON.parse(fs.readFileSync(BASELINE, 'utf8'))
   : { baseline: [], env: [] };
@@ -172,4 +212,10 @@ for (const [k, v] of Object.entries(excluded)) {
   if (v.length) console.log(`excluded (${k})  ${v.length}: ${v.slice(0, 6).join(', ')}${v.length > 6 ? ' …' : ''}`);
 }
 for (const n of notes) console.log(`  note: ${n}`);
+if (applied.length) {
+  console.log(`\noverrides applied   ${applied.length}`);
+  for (const a of applied) console.log(`  ${a.name}  — ${a.by}, ${a.on}: ${a.why}`);
+}
+for (const d of deadWeight) console.log(`  ⚠ ${d}: override MATCHES the measured result — prune it`);
+for (const r of rejected) console.log(`  ⛔ REJECTED ${r}`);
 console.log(`\nwrote ${OUT}`);
