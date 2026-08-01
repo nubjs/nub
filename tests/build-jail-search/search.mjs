@@ -571,7 +571,15 @@ function packageStanding(pkg, version) {
     `https://api.npmjs.org/downloads/point/last-week/${encodeURIComponent(pkg)}`]);
   const weekly = dl && typeof dl.downloads === 'number' ? dl.downloads : null;
   const ageDays = published ? Math.floor((Date.now() - Date.parse(published)) / 86_400_000) : null;
-  return { published, ageDays, weeklyDownloads: weekly };
+  // THE DIST-TAG, because the collator generates the catalog's `default` grant from LATEST and
+  // must not have to guess which measured version that is. Guessing highest-measured is right
+  // only when latest was actually probed; when it was not, `default` comes from an older version
+  // and every FUTURE release is under-granted — silently, in the one direction that breaks
+  // packages. Recorded per run so a catalog collated months later still knows what `latest`
+  // meant at measurement time rather than at collation time.
+  const tags = j('npm', ['view', pkg, 'dist-tags', '--json']);
+  const latestVersion = tags && typeof tags === 'object' ? tags.latest ?? null : null;
+  return { published, ageDays, weeklyDownloads: weekly, latestVersion };
 }
 
 function npmReference(dir, pkg, version) {
@@ -855,6 +863,11 @@ function search(nub, pkg, version, root, keep, runDir) {
       return {
         pkg, version,
         verdict: 'MINIMUM',
+        // RECORDED ON THE SUCCESS PATH TOO, not just on failure: these are the records that
+        // BECOME catalog entries, and the collator generates `default` from whichever measured
+        // version is `latest`. Without the dist-tag here it falls back to highest-measured,
+        // which is right only when latest happened to be probed.
+        standing: packageStanding(pkg, version),
         cells,
         // THE CATALOG FRAGMENT, machine-readable. `state` beside it is for humans.
         grant: (() => { let g = grantFor(STATES[i]); if (g) delete g.notes; return escalate(g, unmeasuredScopes); })(),

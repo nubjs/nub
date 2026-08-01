@@ -149,6 +149,12 @@ function osOf(r) {
 
 const packages = {};
 const notes = [];
+/** Packages whose `default` was generated from something other than npm's real `latest`. A GATE,
+ *  not a note — see the comment at the assignment site. */
+const staleDefaults = [];
+/** Packages whose records predate the dist-tag being recorded, so latest could not be checked
+ *  at all. Distinct from staleDefaults: unknown-and-unchecked, rather than known-and-wrong. */
+const missingTag = [];
 
 /** Merge two grants by UNION — the wider of each axis.
  *
@@ -249,10 +255,17 @@ for (const [pkg, rsRaw] of [...byPackage.entries()].sort()) {
   // mega script always probes `latest` explicitly, so the fallback only serves legacy records --
   // and if it ever picks wrong, `default` is generated from an older version and FUTURE releases
   // are under-granted, which is why the dist-tag is preferred rather than merely nice.
-  const tagged = rs.find((r) => r.standing?.latestVersion
-    && ordered.includes(r.standing.latestVersion))?.standing.latestVersion;
+  const distTag = rs.map((r) => r.standing?.latestVersion).find(Boolean) ?? null;
+  const tagged = distTag && ordered.includes(distTag) ? distTag : null;
   const latest = tagged ?? ordered[ordered.length - 1];
-  if (!tagged) notes.push(`${pkg}: no dist-tag in records — treating ${latest} as latest`);
+  // ⛔ `default` GENERATED FROM A NON-LATEST VERSION IS AN UNDER-GRANT RISK, so it is a GATE and
+  // not a note. If the true latest needs MORE than the highest version we measured, every release
+  // from that point on silently falls to a grant that is too narrow — the one direction this
+  // project rejects. MEASURED on the first real corpus: the highest-measured fallback was wrong
+  // for 3 of 8 packages (better-sqlite3 13.0.2 vs 12.6.0, canvas 3.2.3 vs 2.11.2, sharp 0.35.3
+  // vs 0.34.4), which is what turned this from a note into a gate.
+  if (distTag && !tagged) staleDefaults.push(`${pkg}: latest is ${distTag}, highest measured ${latest}`);
+  else if (!distTag) missingTag.push(pkg);
 
   const dflt = { ...(byVersion.get(latest) ?? {}) };
 
@@ -389,6 +402,16 @@ if (hh.length > 1) console.log(`  ⚠ RECORDS SPAN ${hh.length} HARNESS REVISION
 console.log(`packages with entry ${Object.keys(packages).length}`);
 console.log(`grants emitted      ${grantCount}  (${Object.keys(packages).length} default + ${bandCount} version bands)`);
 console.log(`needed nothing      ${byPackage.size - Object.keys(packages).length}`);
+if (staleDefaults.length) {
+  console.log(`\n⚠ ${staleDefaults.length} PACKAGE(S) HAVE A STALE \`default\` — latest was never measured,`);
+  console.log('  so their default grant comes from an older version and a newer release that needs');
+  console.log('  MORE is silently under-granted. Probe latest and re-collate before shipping:');
+  for (const s of staleDefaults) console.log(`    ${s}`);
+}
+if (missingTag.length) {
+  console.log(`\n⚠ ${missingTag.length} package(s) predate dist-tag recording, so latest is UNCHECKED`);
+  console.log(`  (assumed = highest measured): ${missingTag.join(', ')}`);
+}
 for (const [k, v] of Object.entries(excluded)) {
   if (v.length) console.log(`excluded (${k})  ${v.length}: ${v.slice(0, 6).join(', ')}${v.length > 6 ? ' …' : ''}`);
 }
