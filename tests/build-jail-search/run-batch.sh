@@ -14,6 +14,36 @@ NUB="${1:-}"; shift || true
 [ -x "$NUB" ] || { echo "usage: $0 <nub> [--force] <pkg@ver>... | --file <list>"; exit 2; }
 case "$NUB" in /*) ;; *) NUB="$(cd "$(dirname "$NUB")" && pwd)/$(basename "$NUB")" ;; esac
 
+# ⛔ SNAPSHOT THE BINARY, and run the batch against the COPY.
+#
+# A batch takes hours. Any cargo command on the same profile during that window rewrites
+# `target/fast/nub` with WHATEVER FEATURES that command specified — and a binary without
+# `build-jail-catalog-override` refuses every override, so every package measured after the
+# rebuild records a control failure. MEASURED: a `cargo test --profile fast` run concurrently
+# with a batch silently invalidated six packages, which then read as broken-at-the-widest-grant
+# while installing fine jailed, unjailed and under npm.
+#
+# Copying is the fix that does not depend on remembering. The batch reads a file nothing else
+# writes, so a rebuild mid-run cannot reach it.
+SNAP="${TMPDIR:-/tmp}/nub-batch-$$"
+cp "$NUB" "$SNAP" && chmod +x "$SNAP"
+trap 'rm -f "$SNAP"' EXIT
+echo "batch binary: $(shasum -a256 "$SNAP" | cut -c1-16)  (snapshot of $NUB)" >&2
+
+# And PROVE the override engages before spending hours on it, rather than discovering per-cell.
+_probe="${TMPDIR:-/tmp}/nub-ovcheck-$$"; rm -rf "$_probe"; mkdir -p "$_probe/home"
+printf '{"name":"ovcheck","version":"1.0.0"}\n' > "$_probe/package.json"
+printf '{"packages":{},"baseline":[],"env":[]}\n' > "$_probe/c.json"
+if ! ( cd "$_probe" && NUB_BUILD_JAIL_CATALOG="$_probe/c.json" HOME="$_probe/home" \
+        "$SNAP" install 2>&1 | grep -q "build-jail catalog OVERRIDDEN from" ); then
+  echo "REFUSING TO RUN: the override does not engage with this binary." >&2
+  echo "  Rebuild: scripts/rust-build.sh build -p nub-cli --profile fast \\" >&2
+  echo "             --features nub-cli/build-jail-catalog-override" >&2
+  rm -rf "$_probe"; exit 2
+fi
+rm -rf "$_probe"
+NUB="$SNAP"
+
 FORCE=""
 [ "${1:-}" = "--force" ] && { FORCE="--force"; shift; }
 

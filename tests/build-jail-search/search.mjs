@@ -616,7 +616,28 @@ function search(nub, pkg, version, root, keep) {
                overrideEngaged: null, materialized: control.materialized });
   // One check, because the control IS the most permissive state. Failing here means no
   // grant can help — the package is broken for reasons confinement does not cause.
-  if (control.rc !== 0 || !control.overrideOk || controlB.rc !== 0 || !controlB.overrideOk) {
+  // ⛔ AN OVERRIDE THAT DID NOT ENGAGE IS A HARNESS FAULT, NOT A BROKEN PACKAGE.
+  //
+  // These are opposite verdicts and they were being merged. `BROKEN-EVEN-WITH-EVERYTHING` says
+  // "no grant can save this package" — a fact about the package, worth recording. A control
+  // whose override never applied says "this run measured nothing", which must never enter the
+  // catalog as a fact about anything.
+  //
+  // MEASURED: six packages (core-js, es5-ext, union, bufferutil@4.0.9, @parcel/watcher@2.6.0,
+  // nx@18.3.5, @sentry/cli@2.21.2) were recorded broken-at-the-widest-grant while installing
+  // FINE jailed, unjailed and under npm. A `cargo test --profile fast` running CONCURRENTLY with
+  // the batch had rebuilt the binary without the `build-jail-catalog-override` feature, so every
+  // package measured after that moment failed its control. The old code returned here before
+  // ever consulting `overrideOk`, so a build accident was written down as a package property.
+  if (!control.overrideOk || !controlB.overrideOk) {
+    return {
+      pkg, version, verdict: 'HARNESS-ERROR',
+      why: 'the catalog override did not engage in the control — is the binary built with '
+         + '`--features nub-cli/build-jail-catalog-override`, and did anything rebuild it mid-run?',
+      cells, control: baseCase(control), provenance: provenance(nub),
+    };
+  }
+  if (control.rc !== 0 || controlB.rc !== 0) {
     return { pkg, version, verdict: 'BROKEN-EVEN-WITH-EVERYTHING', cells, control: baseCase(control) };
   }
   const sideEffectful = hasScript;
