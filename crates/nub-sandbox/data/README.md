@@ -197,10 +197,54 @@ fetching — recording the observation must not become a grant.
 | `projectReads` | Project-relative subtrees it may read. |
 | `projectWrites` | Where its project write targets come from — `manifestField` or `literal`. See below. |
 | `projectCwd` | Grant read on the project root directory node alone. |
+| `fullDisk` | The terminal tier: the whole filesystem, read and write. See below. |
 | `mechanism` | What the package's own code does. This is what bounds the grant. |
 | `evidence` / `observed` / `platform` | As for hosts. |
 
 Omit any field that is not needed; the jail's baseline already covers it.
+
+### `fullDisk` — the terminal tier
+
+The last rung of the grant ladder, for a package that fails under every narrower grant. It is
+not a rule: the filesystem axis stops confining that package's lifecycle scripts entirely.
+
+```json
+{ "package": "wordpos", "fullDisk": true, "evidence": "measured" }
+```
+
+It exists so the ladder terminates. Without it, a package no targeted grant fixes is an open
+investigation, and a catalog that has to root-cause its own tail never reaches full
+compatibility. With it, that package is one line, and narrowing the scope back down becomes a
+later optimisation against a working baseline rather than a prerequisite.
+
+**It is a reduction, not an escalation.** Outside nub a lifecycle script already runs with the
+user's complete authority. This withholds two of the three axes: the environment is still
+scrubbed of the credential family and `HOME` is still redirected, and egress is still decided
+by `packageNetwork`, which this field does not touch. The gate is unchanged — the entry names
+ONE package, matched on the installer-resolved name, so an uncatalogued package still gets
+nothing.
+
+`evidence` must be `measured`. Nothing else can establish that every narrower rung was tried
+and failed: `policy` is a judgement, and `vendor-documented` / `source-read` say what a package
+intends. Name the rungs you ran in `mechanism` — `grant-matrix.mjs` writes that sentence itself
+for a `NEEDS-FULL-DISK` record. An explicit `"fullDisk": false` is rejected; omit the key, or
+record the refusal under `notGranted`.
+
+Other filesystem fields in the same entry are subsumed rather than contradicted, so they are
+allowed but pointless. `homePaths` is the exception worth keeping: its environment half still
+matters, because the environment axis keeps redirecting `HOME` and the tool still has to be
+pointed at its real cache.
+
+**Windows is broader than macOS and Linux here, and it is announced.** macOS renders the tier
+as one `(allow file*)` line and Linux as one Landlock rule on `/`; both leave the network axis
+untouched. Windows cannot render it inside the AppContainer at all — a LowBox token reaches an
+object only where that object's own ACL names its container SID, so "everything" would mean an
+inheritable modify ACE on each drive root, which is refused as a filesystem-wide write hole and
+would in any case be ruinous to write on a launch that installs and revokes ACEs every time. So
+a full-disk package launches without the token, and since egress is an AppContainer
+*capability*, the network axis goes with it. That loss is reported through the degradation
+channel and printed at the spawn. The environment axis is unaffected on every platform: it is
+enforced by constructing the child's environment, which needs no token.
 
 ### `versions` — scoping an entry to the versions that need it
 

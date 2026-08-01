@@ -1139,6 +1139,12 @@
         "platform": "all"
       },
       {
+        "package": "wordpos",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: EPERM: operation not permitted, open '<run>/fx/wordpos-both-Nms9law8d3clu/home/.cache/nub/pm/store/wordnet-db@3.1.14-f249a5f12212c55c/node_modules/wordnet-db/dict/fast-index.adv.json'. Unconfined artifact 23471700 B / 2331 files. nub v0.6.0 def1b2a4f916.",
+        "platform": "darwin-arm64"
+      },
+      {
         "package": "workerd",
         "evidence": "policy",
         "observed": "POLICY grant, not measured. 17,444,312 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
@@ -1436,6 +1442,14 @@
       "evidence": "measured",
       "observed": "Isolated macOS arm on nub 1731fc6e (`e12e1d2ca8`, which includes the project-root cwd grant from `65c51530cb`), 2026-07-31. THREE ARMS, all jail-ON, catalog the only variable. (a) HEAD's catalog: `fatal: not a git repository (or any of the parent directories): .git`, ZERO hooks. (b) This catalog WITHOUT this entry — i.e. the cwd grant alone: identical `fatal: not a git repository`, ZERO hooks, which is what shows the cwd fix does not close this row on its own. (c) With this entry: all 17 hooks present as symlinks at `<store cell>/shared-git-hooks/hook.sh`, matching the jail-off arm's 17 name-for-name. The corpus triage had filed this row under BUG-CWD; the cwd grant is necessary and is NOT sufficient. Granting the whole `.git` subtree instead of the two files was measured separately and reached the same rc 0, so the narrower grant is not a guess.",
       "platform": "macos-arm64"
+    },
+    {
+      "package": "wordpos",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: EPERM: operation not permitted, open '<run>/fx/wordpos-both-Nms9law8d3clu/home/.cache/nub/pm/store/wordnet-db@3.1.14-f249a5f12212c55c/node_modules/wordnet-db/dict/fast-index.adv.json'. Unconfined artifact 23471700 B / 2331 files. nub v0.6.0 def1b2a4f916.",
+      "platform": "darwin-arm64"
     }
   ],
   "notGranted": {

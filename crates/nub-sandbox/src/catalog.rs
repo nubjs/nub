@@ -58,6 +58,10 @@ pub struct PackageGrant {
     pub package: String,
     /// The semver range this grant is scoped to, or `None` for every version.
     pub versions: Option<String>,
+    /// The TERMINAL tier: this package's lifecycle scripts see the whole filesystem,
+    /// read and write. See [`parse_full_disk`] for what it is and why it is not an
+    /// escalation.
+    pub full_disk: bool,
     pub sibling_dirs: Vec<String>,
     /// `$HOME`-anchored artifact caches, with the env var that redirects each one.
     pub home_paths: Vec<HomePath>,
@@ -194,6 +198,7 @@ fn parse_grants(catalog: &serde_json::Value) -> Result<Vec<PackageGrant>, String
             return Err(format!("{at}: `{package}` is listed twice"));
         }
         let versions = parse_version_range(entry, &at)?;
+        let full_disk = parse_full_disk(entry, &at)?;
 
         let sibling_dirs = opt_strings(entry, "siblingDirs", &at)?;
         for dir in &sibling_dirs {
@@ -237,6 +242,7 @@ fn parse_grants(catalog: &serde_json::Value) -> Result<Vec<PackageGrant>, String
         grants.push(PackageGrant {
             package,
             versions,
+            full_disk,
             sibling_dirs,
             home_paths,
             dependency_dirs,
@@ -296,6 +302,66 @@ fn parse_version_range(entry: &serde_json::Value, at: &str) -> Result<Option<Str
         )
     })?;
     Ok(Some(text.to_string()))
+}
+
+/// The last rung of the grant ladder: this package's lifecycle scripts get the whole
+/// filesystem, read and write.
+///
+/// WHY THIS IS A REDUCTION AND NOT AN ESCALATION. Outside nub a lifecycle script already
+/// runs with the user's COMPLETE authority — every file the user can touch, plus the
+/// network, plus their environment. `fullDisk` withholds two of those three: the env axis
+/// still scrubs the credential family and redirects `HOME`, and egress is still decided by
+/// `packageNetwork`, which this field does not touch. So the widest thing this grant can
+/// produce is strictly narrower than `npm install` on the same package.
+///
+/// PACKAGE IDENTITY REMAINS THE ENTIRE GATE, exactly as for every narrower field. The key
+/// is aube's installer-resolved `registry_name()` (see the module docs on `curated`), an
+/// UNCATALOGUED package gets nothing whatsoever, and a dependency has no spelling by which
+/// it can name itself in here. Adding a terminal rung does not weaken that; it only means a
+/// package nub has already chosen to trust by name is trusted the way the ecosystem already
+/// trusts it.
+///
+/// WHY IT EXISTS. Without it, a package that fails under every targeted grant is an open
+/// investigation — and a catalog campaign that has to root-cause its own tail never
+/// finishes. With it, that package is one catalog line, so 100% compatibility is reachable
+/// by construction and scope-narrowing becomes an optimisation to do LATER, from a green
+/// baseline, rather than a prerequisite.
+///
+/// `evidence: "measured"` IS REQUIRED, and it is the only enforceable form of "the narrower
+/// grants were tried first". A `policy` full-disk row would be a guess that hands over the
+/// disk; `vendor-documented` and `source-read` establish what a package INTENDS, never that
+/// every narrower cell of the grant ladder was run and failed. Only a measurement can, so
+/// the widest tier is the one tier that may not be taken on anything else. The prose naming
+/// which rungs were tried belongs in `mechanism`, which every grant already carries.
+///
+/// An explicit `false` is REJECTED rather than read as absent. The refusal channel is
+/// `notGranted`; a `"fullDisk": false` in a grant entry reads as a deliberate denial the
+/// schema has no such meaning for, and silently treating it as absence is how a reader ends
+/// up believing a field constrains something it does not — the exact trap `versions` was in
+/// until it was made to parse.
+fn parse_full_disk(entry: &serde_json::Value, at: &str) -> Result<bool, String> {
+    let Some(value) = entry.get("fullDisk") else {
+        return Ok(false);
+    };
+    match value.as_bool() {
+        Some(true) => {}
+        Some(false) => {
+            return Err(format!(
+                "{at}: `fullDisk` is present and false — omit the key entirely, or record \
+                 the refusal under `notGranted`"
+            ));
+        }
+        None => return Err(format!("{at}: `fullDisk` must be the boolean true")),
+    }
+    let evidence = string(entry, "evidence", at)?;
+    if evidence != "measured" {
+        return Err(format!(
+            "{at}: a `fullDisk` grant requires evidence `measured`, not `{evidence}` — it is \
+             the widest tier, and only a measurement can establish that every narrower grant \
+             was tried and insufficient"
+        ));
+    }
+    Ok(true)
 }
 
 /// Validate `homePaths` — the `$HOME`-anchored artifact caches, one entry per override var.
@@ -931,6 +997,63 @@ mod tests {
             assert!(
                 catalog(rejected).is_err(),
                 "homePaths {rejected} must be rejected"
+            );
+        }
+    }
+
+    /// `fullDisk` is the widest tier the catalog can express, so the two things that keep it
+    /// honest are enforced here rather than left to review: it may only be taken on a
+    /// MEASUREMENT (nothing else can establish that every narrower rung was tried and
+    /// failed), and it may not be spelled as an explicit `false`, which would read as a
+    /// refusal the schema has no meaning for.
+    ///
+    /// Paired with an accepted control, and the control asserts the field actually ARRIVES —
+    /// a parser that returned `false` unconditionally would satisfy every rejection below
+    /// while making the whole tier inert.
+    #[test]
+    fn a_full_disk_grant_is_a_measurement_or_it_is_not_a_grant() {
+        let catalog = |fields: &str, evidence: &str| {
+            super::parse(&format!(
+                r#"{{
+                  "networkHosts": [],
+                  "packageGrants": [{{
+                    "package": "pkg",
+                    {fields}
+                    "mechanism": "every narrower rung was measured and failed; the script writes into another package's store entry",
+                    "evidence": "{evidence}",
+                    "observed": "fails ungranted and with project+egress together, passes with the whole filesystem",
+                    "platform": "darwin-arm64"
+                  }}],
+                  "notGranted": {{}}
+                }}"#
+            ))
+        };
+
+        let granted = catalog(r#""fullDisk": true,"#, "measured")
+            .expect("a measured full-disk grant is valid");
+        assert!(
+            granted.package_grants[0].full_disk,
+            "the accepted control must carry the field — a parser that always returned false \
+             would pass every rejection below and grant nothing"
+        );
+        let absent = catalog("", "measured").expect("an absent key is valid");
+        assert!(!absent.package_grants[0].full_disk);
+
+        for (fields, evidence) in [
+            // Judgement, vendor prose and source-reading can each say what a package
+            // INTENDS; none can say that the narrower rungs were run and failed.
+            (r#""fullDisk": true,"#, "policy"),
+            (r#""fullDisk": true,"#, "vendor-documented"),
+            (r#""fullDisk": true,"#, "source-read"),
+            // A refusal has its own channel; this spelling is not it.
+            (r#""fullDisk": false,"#, "measured"),
+            // Shapes that read as a grant and are not a boolean.
+            (r#""fullDisk": "true","#, "measured"),
+            (r#""fullDisk": 1,"#, "measured"),
+        ] {
+            assert!(
+                catalog(fields, evidence).is_err(),
+                "fullDisk {fields} with evidence {evidence} must be rejected"
             );
         }
     }

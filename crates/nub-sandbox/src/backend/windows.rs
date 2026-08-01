@@ -353,6 +353,44 @@ fn fs_confines(fs: &FsPolicy) -> bool {
     fs.rules.default_effect != Effect::Allow || !fs.rules.entries.is_empty()
 }
 
+/// The child command for a launch that takes no LowBox token — the relaxed case and the
+/// build jail's full-disk tier.
+///
+/// The env axis is still ENFORCED here, which is the half worth stating: it is carried by
+/// constructing the child's environment rather than by the token, so declining the
+/// AppContainer costs the fs and net axes and nothing else. `env_clear` first, so the
+/// constructed map is the whole environment and an ambient credential cannot survive by
+/// simply not being named.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn plain_command(
+    policy: &crate::policy::SandboxPolicy,
+    spec: super::CommandSpec,
+    proxy_port: Option<u16>,
+    proxy_token: Option<&str>,
+    ca_bundle: Option<&std::path::Path>,
+    tmp_dir: Option<&std::path::Path>,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(&spec.program);
+    spec.args.apply_to(&mut command);
+    if let Some(cwd) = &spec.cwd {
+        command.current_dir(cwd);
+    }
+    command.env_clear();
+    for (k, v) in &policy.env.constructed {
+        command.env(k, v);
+    }
+    if let Some(port) = proxy_port {
+        super::set_proxy_env(&mut command, port, proxy_token);
+    }
+    if let Some(bundle) = ca_bundle {
+        super::set_ca_env(&mut command, bundle);
+    }
+    if let Some(dir) = tmp_dir {
+        super::set_tmp_env(&mut command, dir);
+    }
+    command
+}
+
 /// The Windows net posture the backend can achieve for a policy, given whether nub runs
 /// elevated. THE WINDOWS DIFFERENCE (design.md; `wiki/research/sandbox-windows-net-parity.md`):
 /// per-host + MITM ride nub's loopback egress proxy, but an AppContainer child is blocked
@@ -498,6 +536,54 @@ pub(crate) fn apply(
         spec.cwd = Some(strip_verbatim_prefix(effective_cwd));
     }
 
+    // ── the catalog's full-disk tier ─────────────────────────────────────────────
+    // A build-jail policy whose fs axis confines NOTHING is what a `fullDisk` catalog grant
+    // compiles to, and Windows is the platform that cannot render it inside the sandbox.
+    //
+    // THERE IS NO CHEAP ACE FOR "EVERYTHING", and no expensive one either. A LowBox token
+    // reaches an object only where that object's own ACL names its AppContainer SID, so a
+    // whole-disk grant means an ACE on each drive root — which `is_dangerous_write_root`
+    // refuses outright (an inheritable modify ACE on `C:\` is a filesystem-wide write hole
+    // for every AppContainer on the machine, outliving this launch's teardown if anything
+    // goes wrong), and which `set_ace` would pay for by re-propagating inheritance across
+    // the entire volume on a launch whose ACEs are written and revoked EVERY TIME. Nor does
+    // the non-propagating variant help: Windows inheritance is static, copied into a child's
+    // DACL when the child is created, so an inheritable ACE written without propagation
+    // grants nothing to a single file that already exists. The cheapest correct form is
+    // therefore not an ACE at all — it is not taking the LowBox token, which costs zero.
+    //
+    // WHAT THAT COSTS, stated rather than hidden: egress is an AppContainer CAPABILITY here
+    // (`internetClient`), so declining the token declines the net axis with it. A full-disk
+    // package that the catalog does NOT admit to the network therefore reaches it anyway on
+    // Windows, and the loss is reported so the frontend prints it rather than promising
+    // confinement it does not have. The env axis is unaffected — it is enforced by
+    // constructing the child's environment, which needs no token — so the credential scrub
+    // and the `HOME` redirect still hold.
+    if policy.build_jail && !confine_fs {
+        let mut deg = Degradation::full();
+        if policy.net.enforce {
+            deg.lost.push("net".to_string());
+            deg.reason = Some(
+                "a full-disk build-jail grant cannot run inside an AppContainer on Windows \
+                 (the allowlist has no spelling for the whole filesystem), and egress is an \
+                 AppContainer capability — so this package's network access is not confined"
+                    .to_string(),
+            );
+        }
+        if let Some(axis) = tmp_lost {
+            deg.lost.push(axis.to_string());
+        }
+        return Ok(Prepared {
+            command: plain_command(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir),
+            degradation: deg,
+            proxy: None,
+            launch: None,
+            _private_tmp: None,
+            redact_stdout: false,
+            redact_stderr: false,
+        });
+    }
+
     // ── agent-sandbox route (dedicated account + WFP) ────────────────────────────
     // A policy the ALLOWLIST cannot carry — a generous-read base, a deny that must be carved
     // inside a grant, or per-host egress — goes to the dedicated-account backend, which
@@ -565,26 +651,8 @@ pub(crate) fn apply(
     // Nothing needs the AppContainer: only env-scrub (or nothing). Use the plain
     // command path — identical contract to the mac/linux relaxed case.
     if !sandboxing && tmp_lost.is_none() {
-        let mut command = std::process::Command::new(&spec.program);
-        spec.args.apply_to(&mut command);
-        if let Some(cwd) = &spec.cwd {
-            command.current_dir(cwd);
-        }
-        command.env_clear();
-        for (k, v) in &policy.env.constructed {
-            command.env(k, v);
-        }
-        if let Some(port) = proxy_port {
-            super::set_proxy_env(&mut command, port, proxy_token);
-        }
-        if let Some(bundle) = ca_bundle {
-            super::set_ca_env(&mut command, bundle);
-        }
-        if let Some(dir) = tmp_dir {
-            super::set_tmp_env(&mut command, dir);
-        }
         return Ok(Prepared {
-            command,
+            command: plain_command(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir),
             degradation: Degradation::full(),
             proxy: None,
             launch: None,

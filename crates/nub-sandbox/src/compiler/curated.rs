@@ -108,6 +108,30 @@ struct CuratedGrant {
     /// that do not use it rather than kept name-wide. `None` is the default and what every
     /// entry measured before this field existed still means. See [`super::version_scope`].
     versions: Option<&'static str>,
+    /// THE TERMINAL RUNG: the whole filesystem, read and write, for this package's
+    /// lifecycle spawns.
+    ///
+    /// It is the one field here that does not add a RULE. Every other field appends a
+    /// narrow positive grant to an otherwise default-deny fs axis; this one says the fs
+    /// axis does not confine at all, which the IR already has a spelling for (no entries,
+    /// `default_effect: Allow`) and which `preset::compile_build_jail` applies once, after
+    /// every other grant has compiled. A same-entry `sibling_dirs`/`project_reads`/… is
+    /// therefore subsumed rather than contradicted, and `home_paths` still does its OTHER
+    /// half — setting the package's cache variable, which stays load-bearing because the
+    /// ENV axis still redirects `HOME` even when the fs axis does not confine.
+    ///
+    /// WHY A TERMINAL RUNG AT ALL, since it looks like giving up: without one, a package
+    /// that fails under every targeted grant becomes an investigation, and a catalog whose
+    /// tail must be root-caused never reaches 100%. With one, that package is a catalog
+    /// line — so full compatibility is reachable by construction and narrowing the scope
+    /// back down becomes a later optimisation against a green baseline.
+    ///
+    /// AND IT IS STILL A REDUCTION FROM THE STATUS QUO. A lifecycle script outside nub runs
+    /// with the user's complete authority; this withholds the credential-scrubbed
+    /// environment and leaves egress to `packageNetwork`, which this field does not touch.
+    /// The gate is unchanged and is the whole security model: ONE NAMED package, keyed on
+    /// aube's resolver-assigned identity. An uncatalogued package still gets nothing.
+    full_disk: bool,
     /// Named entries of the package's OWN enclosing `node_modules` it may write —
     /// ENUMERATED, never a pattern. Correct under every linker: `enclosing_node_modules`
     /// resolves to the store cell's `node_modules` under the isolated layout and to the
@@ -238,6 +262,7 @@ include!(concat!(env!("OUT_DIR"), "/curated_grants.rs"));
 impl CuratedGrant {
     const NONE: Self = Self {
         versions: None,
+        full_disk: false,
         sibling_dirs: &[],
         dependency_dirs: &[],
         home_paths: &[],
@@ -528,10 +553,38 @@ static GOLDEN_PRE_CATALOG_GRANTS: &[(&str, CuratedGrant)] = &[
             ..CuratedGrant::NONE
         },
     ),
+    // THE TERMINAL TIER, and the row that motivated it. `wordpos`'s postinstall builds its
+    // index by writing into `wordnet-db`'s OWN store entry — a directory belonging to
+    // another package, reached not by resolution from `wordpos` but by an absolute store
+    // path — so no `sibling_dirs`, `dependency_dirs` or project grant has a spelling for it.
+    // Measured through the full ladder: fails ungranted, fails with unscoped project
+    // read/write/cwd AND egress together, passes with the whole filesystem.
+    (
+        "wordpos",
+        CuratedGrant {
+            full_disk: true,
+            ..CuratedGrant::NONE
+        },
+    ),
 ];
 
-/// Grant `package_name`'s curated exception, if it has one, and return the environment
-/// variables the caller must set for the [`CuratedGrant::home_paths`] grants to be reachable.
+/// What matching a curated entry left for the caller to finish.
+///
+/// TWO HALVES THE RULE LIST CANNOT CARRY, and both are silent-if-dropped, which is why they
+/// are RETURNED rather than written into the policy here. `env` is argued below. `full_disk`
+/// is the [`CuratedGrant::full_disk`] verdict: it is a statement about the whole fs axis, not
+/// a rule to append, and the axis is not final until every other grant has compiled.
+#[derive(Debug, Default)]
+pub struct CuratedOutcome {
+    /// Variables the caller must set for the [`CuratedGrant::home_paths`] grants to be
+    /// reachable, resolved during the same pass that emitted their rules.
+    pub env: Vec<(String, String)>,
+    /// The matched entry asked for the whole filesystem. The caller relaxes the fs axis.
+    pub full_disk: bool,
+}
+
+/// Grant `package_name`'s curated exception, if it has one, and return the parts the caller
+/// has to apply itself — see [`CuratedOutcome`].
 ///
 /// THE ENV HALF IS RETURNED RATHER THAN APPLIED because the caller replaces `policy.env`
 /// wholesale AFTER every grant is compiled (`preset::compile_build_jail` assigns
@@ -554,7 +607,7 @@ pub fn grant_curated_package(
     package_dir: &Path,
     package_name: Option<&str>,
     package_version: Option<&str>,
-) -> Vec<(String, String)> {
+) -> CuratedOutcome {
     grant_from_table(
         curated_table(),
         policy,
@@ -613,6 +666,7 @@ fn curated_table() -> &'static [(&'static str, CuratedGrant)] {
                                 }
                             },
                             project_cwd: g.project_cwd,
+                            full_disk: g.full_disk,
                         },
                     )
                 })
@@ -632,10 +686,10 @@ fn grant_from_table(
     package_dir: &Path,
     package_name: Option<&str>,
     package_version: Option<&str>,
-) -> Vec<(String, String)> {
+) -> CuratedOutcome {
     let project_root = homes.project.as_path();
     let Some(grant) = package_name.and_then(|n| lookup(table, n, package_version)) else {
-        return Vec::new();
+        return CuratedOutcome::default();
     };
     let mut rules = Vec::new();
     let mut env = Vec::new();
@@ -683,7 +737,10 @@ fn grant_from_table(
         push_rw(&mut rules, &path);
     }
     policy.fs.rules.entries.extend(rules);
-    env
+    CuratedOutcome {
+        env,
+        full_disk: grant.full_disk,
+    }
 }
 
 /// Expand one [`HomePath`] pattern and keep it only if it lands strictly under its anchor.
@@ -1068,7 +1125,11 @@ mod tests {
                     .entries
                     .iter()
                     .map(|r| format!("{} {:?} {:?}", r.matcher.as_str(), r.effect, r.access))
-                    .chain(env.iter().map(|(k, v)| format!("env {k}={v}")))
+                    .chain(env.env.iter().map(|(k, v)| format!("env {k}={v}")))
+                    // The full-disk verdict rides in too. It emits no RULE by design, so a
+                    // generator that dropped the field would leave both sides identical
+                    // here and the comparison would pass on a tier that had gone inert.
+                    .chain(env.full_disk.then(|| "full-disk".to_string()))
                     .collect::<Vec<_>>()
             };
             let from_catalog = compile(CURATED_GRANTS);
@@ -1081,6 +1142,7 @@ mod tests {
                 || !grant.project_reads.is_empty()
                 || grant.project_writes != ProjectWrites::None
                 || grant.project_cwd
+                || grant.full_disk
                 || grant.home_paths.iter().any(|h| h.pattern().is_some());
             assert!(
                 !applies_here || !from_catalog.is_empty(),
@@ -1484,7 +1546,7 @@ mod tests {
         let want_cache = real(cache.join("Tool"));
 
         assert_eq!(
-            env,
+            env.env,
             vec![
                 ("TOOL_HOME_CACHE".to_string(), want_home.clone()),
                 ("TOOL_XDG_CACHE".to_string(), want_cache.clone()),
@@ -1522,6 +1584,7 @@ mod tests {
                 Some("evil"),
                 Some("1.0.0"),
             )
+            .env
             .is_empty()
         );
         assert!(globs(&other).is_empty());
@@ -1562,7 +1625,10 @@ mod tests {
             Some("pkg"),
             Some("1.0.0"),
         );
-        assert!(env.is_empty(), "no variable may point at a dropped grant");
+        assert!(
+            env.env.is_empty(),
+            "no variable may point at a dropped grant"
+        );
         assert!(
             globs(&policy).is_empty(),
             "the anchor root itself must never be granted: {:?}",

@@ -62,7 +62,15 @@ function derive(c) {
   if (c.jail_off === 1) return 'CONTROL-FAILED';
   if (c.no_grants === 0) return 'NEEDS-NOTHING';
   if (c.no_grants === null) return null;
-  if (c.both === 1) return 'FAILS-AT-BOTH';
+  // The terminal rung. A record written before the full-disk cell existed carries no
+  // `full_disk` key at all and still derives FAILS-AT-BOTH, so archived runs stay
+  // ingestible; a record that HAS the key must be judged by it.
+  if (c.both === 1) {
+    if (!('full_disk' in c)) return 'FAILS-AT-BOTH';
+    if (c.full_disk === 0) return 'NEEDS-FULL-DISK';
+    if (c.full_disk === 1) return 'FAILS-AT-FULL-DISK';
+    return null;
+  }
   if (c.both === null) return null;
   if (c.network === 0) return 'NEEDS-EGRESS';
   if (c.project_write === 0) return 'NEEDS-PROJECT';
@@ -118,7 +126,8 @@ for (const r of records) {
   if (refusedPkgs.has(r.package)) { rejected.push(`${where}: listed in notGranted.packages — a refusal is not overridable by measurement`); continue; }
 
   const observed = `${MARK} ${r.verdict} on ${r.platform}, ${String(r.measured_at).slice(0, 10)}. `
-    + `Cells jail_off=${r.cells.jail_off} no_grants=${r.cells.no_grants} network=${r.cells.network} project_write=${r.cells.project_write} both=${r.cells.both} (0=pass). `
+    + `Cells jail_off=${r.cells.jail_off} no_grants=${r.cells.no_grants} network=${r.cells.network} project_write=${r.cells.project_write} both=${r.cells.both}`
+    + ('full_disk' in r.cells ? ` full_disk=${r.cells.full_disk}` : '') + ` (0=pass). `
     + (r.evidence?.failing_line ? `Ungranted failure: ${r.evidence.failing_line}. ` : '')
     + (r.evidence?.control_artifact ? `Unconfined artifact ${r.evidence.control_artifact.bytes} B / ${r.evidence.control_artifact.files} files. ` : '')
     + `nub ${r.nub_version} ${String(r.binary_sha256).slice(0, 12)}.`;
@@ -147,7 +156,13 @@ for (const r of records) {
       // pin every machine-generated grant to the single version it happened to run on.
       ...(r.version && r.version !== 'latest' ? { versionsObserved: r.version } : {}),
       ...r.grant.packageGrant,
-      mechanism: 'Measured by the grant-configuration matrix: the install script fails with the jail on and no grants, and succeeds with unscoped project read/write/cwd. The grant is UNSCOPED because the matrix measures whether project access is needed, not which paths — scoping it is a follow-up that needs the specific paths observed.',
+      // The mechanism sentence has to name the rung the grant came from, because that is
+      // the only thing a later reader can use to decide whether it is worth narrowing.
+      // A full-disk row in particular must say WHY the narrower grants were insufficient
+      // — its whole justification is that they were measured and failed.
+      mechanism: r.verdict === 'NEEDS-FULL-DISK'
+        ? 'Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.'
+        : 'Measured by the grant-configuration matrix: the install script fails with the jail on and no grants, and succeeds with unscoped project read/write/cwd. The grant is UNSCOPED because the matrix measures whether project access is needed, not which paths — scoping it is a follow-up that needs the specific paths observed.',
       evidence: 'measured',
       observed,
       platform: r.platform,

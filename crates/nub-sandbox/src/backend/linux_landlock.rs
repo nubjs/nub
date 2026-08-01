@@ -131,6 +131,18 @@ pub(crate) enum LandlockAccess {
     ReadWrite,
     /// A character device: read and write the node, never execute it.
     Device,
+    /// EVERY right the ruleset handles — the catalog's full-disk tier, attached to `/`.
+    ///
+    /// The one arm that deliberately aliases [`handled_access_fs`] where every other arm
+    /// enumerates. The enumeration exists so a right a future ABI adds is not granted by
+    /// accident; here granting exactly what is handled is the WHOLE MEANING — a ruleset
+    /// whose root grants every handled right restricts nothing, which is what "the whole
+    /// filesystem, read and write" has to compile to. Enumerating instead would make the
+    /// tier quietly narrower than the catalog says the moment an ABI grows: `ReadWrite`
+    /// already withholds `MAKE_SOCK`/`MAKE_FIFO`/`MAKE_CHAR`/`MAKE_BLOCK`, so a script
+    /// creating a unix socket would still fail under a grant that claims to be unconfined —
+    /// a residual failure in the one tier whose reason for existing is having none.
+    FullDisk,
 }
 
 impl LandlockAccess {
@@ -180,6 +192,7 @@ impl LandlockAccess {
             // so granting it back is a strict loss against the one kernel that offers the
             // control. Ordinary read/write on these nodes needs no ioctl.
             LandlockAccess::Device => ACCESS_READ_FILE | ACCESS_WRITE_FILE,
+            LandlockAccess::FullDisk => handled_access_fs(abi),
         }
     }
 }
@@ -301,6 +314,22 @@ pub(crate) fn derive_grants(
     tmp_dir: Option<&Path>,
     entry_program: Option<&Path>,
 ) -> Result<Vec<LandlockGrant>, String> {
+    // THE CATALOG'S FULL-DISK TIER, and the only fs shape this backend answers with a single
+    // rule. An fs axis that confines nothing (`entries: []`, `default_effect: Allow`) is what
+    // `preset::relax_fs_to_full_disk` compiles a `fullDisk` grant to; Landlock cannot express
+    // it by ABSENCE, because a child under a ruleset sees the whole host filesystem and is
+    // restricted by what the ruleset omits — so an empty ruleset denies EVERYTHING, the exact
+    // inverse. One rule on `/` carrying every handled right is the expression, and the rest of
+    // the confinement (the seccomp socket ceiling, `setsid`, the descriptor sweep, the
+    // capability drop) is untouched because none of it rides the fs ruleset. Returned before
+    // the system closure and device grants are added: they are all nested under `/`, so
+    // appending them would emit rules that grant strictly less than the one above them.
+    if !crate::backend::linux_grants::fs_confines(&policy.fs) {
+        return Ok(vec![LandlockGrant {
+            path: PathBuf::from("/"),
+            access: LandlockAccess::FullDisk,
+        }]);
+    }
     let plan = compile_mount_plan(policy)?;
     reject_narrowing_grants(&plan)?;
 

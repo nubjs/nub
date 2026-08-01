@@ -123,10 +123,12 @@ fn gen_grants(catalog: &catalog::Catalog) -> String {
             .collect::<Vec<_>>()
             .join(", ");
         let versions = opt_str(&grant.versions);
+        let full_disk = grant.full_disk;
         let _ = write!(
             src,
             "    (\n        {name:?},\n        CuratedGrant {{\n            \
              versions: {versions},\n            \
+             full_disk: {full_disk},\n            \
              sibling_dirs: &{siblings:?},\n            dependency_dirs: &[{chains}],\n            \
              home_paths: &[{homes}],\n            \
              project_reads: &{reads:?},\n            \

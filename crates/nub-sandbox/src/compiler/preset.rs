@@ -731,13 +731,16 @@ pub fn compile_build_jail(
     // LAST of the grants, so a curated rw wins under last-match-wins over the
     // front-inserted dependency-tree READ it nests inside. `ctx.homes.project` is the
     // consumer's project root, which aube guarantees whenever it hands over a name.
-    let home_cache_env = super::curated::grant_curated_package(
+    let curated = super::curated::grant_curated_package(
         &mut policy,
         &ctx.homes,
         package_dir,
         package_name,
         package_version,
     );
+    if curated.full_disk {
+        relax_fs_to_full_disk(&mut policy);
+    }
     enforce_pure_allowlist("build-jail", &mut policy);
     policy.env = defaults::lifecycle_scrubbed_env(&ambient_env);
     policy.build_jail = true;
@@ -820,10 +823,39 @@ pub fn compile_build_jail(
     // deliberate and argued at `curated::CuratedGrant::home_paths`: the rule was compiled
     // against nub's path, so a respected ambient value would aim the download at a directory
     // the policy denies.
-    for (key, value) in home_cache_env {
+    for (key, value) in curated.env {
         defaults::insert_env(&mut policy.env.constructed, key, value);
     }
     Ok(policy)
+}
+
+/// Turn the fs axis off for a [`super::curated::CuratedGrant::full_disk`] package — the
+/// catalog's terminal rung, and the one grant that is not a rule.
+///
+/// SPELLED IN THE IR, NOT IN A FLAG. `{ entries: [], default_effect: Allow }` is the shape
+/// [`crate::policy::FsPolicy`] already defines as "this axis confines nothing", and all three
+/// backends already agree on it (`fs_confines` is the same predicate in each). So a full-disk
+/// policy is self-describing in a dump — the record of a package running effectively
+/// unjailed is the compiled policy itself, not a boolean a reader would have to know to look
+/// for — and it needs no `#[serde(skip)]` marker riding alongside the data.
+///
+/// DISCARDING THE RULES IS THE POINT, not a shortcut. They are all positive grants nested
+/// inside what is now granted, so keeping them would change nothing an access check can see
+/// while leaving three backends to reconcile "everything" against a list of narrower
+/// everythings — the shape that has already produced two silent widenings here (Seatbelt
+/// rendering a node grant as a subtree, Landlock collapsing one into an inherited subtree).
+/// `home_paths`' ENV pairs survive, because they are returned separately and are still
+/// load-bearing: the env axis keeps redirecting `HOME`, so a tool still has to be pointed at
+/// its real cache.
+///
+/// TMP GOES BACK TO SHARED for the same reason. `TmpMode::Private` hides the host tmp — a
+/// genuine filesystem confinement that would otherwise survive "full disk" and leave a
+/// script writing a hardcoded `/tmp/...` still broken, which is exactly the residual failure
+/// this tier exists to have none of.
+fn relax_fs_to_full_disk(policy: &mut SandboxPolicy) {
+    policy.fs.rules.entries.clear();
+    policy.fs.rules.default_effect = Effect::Allow;
+    policy.fs.tmp = crate::policy::TmpMode::Shared;
 }
 
 #[cfg(test)]
@@ -896,6 +928,97 @@ mod tests {
             BTreeMap::new(),
         )
         .expect("build-jail compiles")
+    }
+
+    /// The build-jail policy for ONE named package, so a test can vary only the catalog
+    /// identity — the single input that selects a curated grant.
+    fn build_jail_policy_for_package(name: &str) -> SandboxPolicy {
+        let (interpreter, extra_reads) = POSIX_LAYOUT;
+        let homes = Homes {
+            home: PathBuf::from("/testhome"),
+            tmp: PathBuf::from("/testtmp"),
+            cache: PathBuf::from("/testhome/.cache"),
+            project: PathBuf::from("/proj"),
+        };
+        compile_build_jail(
+            homes,
+            Path::new("/proj/node_modules/somepkg"),
+            Some(name),
+            Some("1.0.0"),
+            vec![PathBuf::from(interpreter)],
+            extra_reads.iter().map(PathBuf::from).collect(),
+            BTreeMap::new(),
+        )
+        .expect("build-jail compiles")
+    }
+
+    /// The catalog's `fullDisk` tier opens the filesystem for the NAMED package and for
+    /// nobody else.
+    ///
+    /// BOTH DIRECTIONS IN ONE TEST, deliberately. The widening half alone ("a full-disk
+    /// package may open an arbitrary path") passes just as well against a compiler that had
+    /// stopped confining ANY package, which is the failure this tier could plausibly cause
+    /// and the one worth being unable to miss. So the same probe path is decided under three
+    /// identities compiled by the same code — the granted one, an ordinarily-granted one, and
+    /// a name the catalog has never heard of — and only the first may be admitted. Package
+    /// identity is the entire security model here; this is the assertion that says so.
+    ///
+    /// The three tail assertions are the SHAPE the tier compiles to rather than a restatement
+    /// of the effect: `fs_confines` (spelled identically in all three backends) is what each
+    /// of them keys on to render "the whole disk", and a private tmp surviving would leave a
+    /// script writing a hardcoded `/tmp/...` still broken under a grant that claims to have
+    /// no residual failures.
+    #[test]
+    fn a_full_disk_grant_opens_the_filesystem_for_that_package_and_no_other() {
+        // Outside every baseline grant and every curated one: not the project, not the
+        // package dir, not the private jail home, not an interpreter path.
+        let probe = Path::new("/testhome/.ssh/id_ed25519");
+        let decide = |name: &str| {
+            let policy = build_jail_policy_for_package(name);
+            let effect = crate::matcher::PathMatcher::new(&policy.fs.rules)
+                .decide(probe)
+                .effect;
+            (policy, effect)
+        };
+
+        let (full, full_effect) = decide("wordpos");
+        assert_eq!(
+            full_effect,
+            Effect::Allow,
+            "a full-disk package must reach a path outside every narrow grant"
+        );
+
+        // `cypress` holds an ordinary curated grant, so this arm also proves the relaxation
+        // is not something `grant_curated_package` does for any matched entry.
+        for name in ["cypress", "no-such-package-in-the-catalog"] {
+            let (other, effect) = decide(name);
+            assert_eq!(
+                effect,
+                Effect::Deny,
+                "{name} must still be denied the same path — the grant is keyed on ONE name"
+            );
+            assert_eq!(
+                other.fs.rules.default_effect,
+                Effect::Deny,
+                "{name}'s fs axis must still be a default-deny allowlist"
+            );
+        }
+
+        assert!(
+            full.fs.rules.entries.is_empty() && full.fs.rules.default_effect == Effect::Allow,
+            "full disk is spelled as an fs axis that does not confine — every backend reads \
+             exactly that shape"
+        );
+        assert_eq!(
+            full.fs.tmp,
+            crate::policy::TmpMode::Shared,
+            "a private tmp is a filesystem confinement and must not survive full disk"
+        );
+        assert!(
+            full.env.enforce,
+            "the env axis is unaffected: full disk is a FILESYSTEM tier, and the credential \
+             scrub is what keeps it a reduction from an unjailed script"
+        );
     }
 
     /// The project root resolves as a CWD without the project becoming readable.
