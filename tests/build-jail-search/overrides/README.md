@@ -41,3 +41,25 @@ fix wearing a disguise.
 `grants` is a list of ordinary v2 grants, first-match-wins, so version and platform matchers
 work exactly as they do in a measured entry. The parser validates them identically — an override
 cannot express something the schema forbids.
+
+## Investigated and deliberately NOT overridden
+
+**`sharp@0.32.6`** — measured `write.disk + network`. Source scan confirms the measurement
+rather than correcting it, so no override was written.
+
+Its install script is a fallback chain:
+
+```
+(node install/libvips && node install/dll-copy && prebuild-install)
+  || (node install/can-compile && node-gyp rebuild && node install/dll-copy)
+```
+
+The right-hand branch runs only when the libvips download fails. `lib/libvips.js:97` then shells
+out to `which brew >/dev/null && brew environment --plain` to find `PKG_CONFIG_LIBDIR`, and brew
+writes its own API cache and bootsnap compile-cache across `~/Library/Caches/Homebrew` — which is
+where the wide grant comes from.
+
+Two things follow. The verdict depends on which branch runs, so a machine whose download succeeds
+measures narrower than one whose download fails; and the wider answer is the correct one to ship,
+because a user hitting the fallback with a narrow grant gets a broken install. An override here
+would restate what the sweep already found, which is the definition of dead weight.
