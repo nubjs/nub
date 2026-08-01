@@ -1111,9 +1111,32 @@ fn read_version_cache(node_path: &Path) -> Option<NodeVersion> {
     }
 }
 
+/// The cache directory to write into, validated and owner-only where that check is
+/// compiled in. `None` means the base is not ours; a cache is an optimization, so
+/// the caller skips it rather than writing somewhere unvalidated.
+fn safe_cache_dir(dir: std::path::PathBuf) -> Option<std::path::PathBuf> {
+    #[cfg(feature = "embed-runtime")]
+    {
+        super::runtime_cache::ensure_safe_cache_dir(&dir)
+    }
+    #[cfg(not(feature = "embed-runtime"))]
+    {
+        let _ = fs::create_dir_all(&dir);
+        Some(dir)
+    }
+}
+
 fn write_version_cache(node_path: &Path, version: &NodeVersion) {
     let Some(dir) = cache_dir() else { return };
-    let _ = fs::create_dir_all(&dir);
+    // Share the runtime cache's validated base rather than creating this one
+    // ourselves: this write is what used to reach the root FIRST and leave it with
+    // its parent's inherited permissions, which every later validated caller then
+    // refused. The validator lives behind `embed-runtime`, which every shipped
+    // binary enables (release.yml builds `embed-runtime,compile`), so users always
+    // get the checked path; a feature-off dev build keeps the old create.
+    let Some(dir) = safe_cache_dir(dir) else {
+        return;
+    };
     let cache = dir.join("node-discovery.json");
 
     let mut data: serde_json::Value = fs::read_to_string(&cache)
@@ -1236,7 +1259,9 @@ fn read_env_flags_cache(node_path: &Path) -> Option<std::collections::BTreeSet<S
 
 fn write_env_flags_cache(node_path: &Path, flags: &std::collections::BTreeSet<String>) {
     let Some(dir) = cache_dir() else { return };
-    let _ = fs::create_dir_all(&dir);
+    let Some(dir) = safe_cache_dir(dir) else {
+        return;
+    };
     let cache = dir.join("node-env-flags.json");
 
     let mut data: serde_json::Value = fs::read_to_string(&cache)

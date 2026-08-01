@@ -265,6 +265,20 @@ fn ensure_safe_base(base: &Path) -> Option<PathBuf> {
     fs::canonicalize(base).ok()
 }
 
+/// The same validated, owner-only base the runtime cache uses, for the smaller
+/// caches that share the directory.
+///
+/// They previously reached it with a bare `create_dir_all`, so whichever of them
+/// ran first decided the security posture of the whole tree — measured on Windows,
+/// where node discovery's write left the root carrying its parent's inherited ACEs
+/// and every later validated caller then refused that root. Sharing one seam means
+/// the posture no longer depends on call order. `None` means the base is not ours
+/// to write to; a cache is an optimization, so the caller skips it rather than
+/// falling back to somewhere unvalidated.
+pub(crate) fn ensure_safe_cache_dir(base: &Path) -> Option<PathBuf> {
+    ensure_safe_base(base)
+}
+
 /// Resolve Unix's existing parent prefix before validating it component by
 /// component. This permits OS-owned aliases such as macOS `/var` while ensuring
 /// later validation sees only the real namespace that owns the cache path.
