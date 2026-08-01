@@ -304,7 +304,7 @@ setInterval(() => {}, 1000);
     Invoke-CacheFallbackProbe -Candidate $junction -Fallback $junctionFallback -Work $work -Fixture $securityFixture
     Assert-NoRuntimeWriteThrough $junctionTarget 'a junction/reparse cache root'
 
-    Write-Host 'Windows release compile-cache gate passed: blocked live-DLL repair, exact self-heal, and unsafe-cache rejection.'
+    Write-Host 'Windows release compile-cache gate passed: blocked repair while the tree was held, exact self-heal, and unsafe-cache rejection.'
 } finally {
     if ($null -ne $holder) {
         try { Stop-ProcessTree $holder } catch { Write-Warning "holder cleanup failed: $_" }
