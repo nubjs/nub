@@ -204,10 +204,18 @@ function search(nub, pkg, version, root, keep) {
         stateIndex: i,
         sideEffectful,
         materialized: r.materialized,
-        // `needs nothing` on a package nub never placed in the project is the
-        // ambiguous case: genuinely-needs-nothing and never-had-the-chance are
-        // byte-identical. Flag rather than record.
-        trustworthy: !(i === 0 && !r.materialized && !sideEffectful),
+        // IS THIS VERDICT CONCLUSIVE ABOUT PROJECT ACCESS? Only if nub actually placed the
+        // package inside the project. When it did not, the script could not reach the project
+        // whatever it wanted, so "did not need project" and "never had the chance" are
+        // byte-identical and this verdict says nothing about that axis. It remains conclusive
+        // about deps / userHome / disk / network, which is why this is a scoped caveat rather
+        // than a blanket "untrustworthy".
+        //
+        // An earlier form of this flag also required the package to have NO install script,
+        // so it never fired for anything that runs one — i.e. never for a package the search
+        // is about. Measured: 12 of 12 top-download packages came back `materialized=false`
+        // and every one was reported trustworthy.
+        projectAxisConclusive: r.materialized,
         control: brief(control),
       };
     }
