@@ -175,6 +175,16 @@ fn extract_with(candidates: &[PathBuf]) -> Option<PathBuf> {
     // writability by creating its tmp dir, so a read-only primary falls through.
     for base in candidates {
         let Some(safe_base) = ensure_safe_base(base) else {
+            // Never decline a candidate silently. A Windows-only relocation hid
+            // here for exactly that reason: the runtime cache moved to `$TMPDIR`
+            // while every other nub cache kept honouring `XDG_CACHE_HOME`, and
+            // nothing said so — the only symptom was a cache dir that never
+            // appeared where it was configured to.
+            eprintln!(
+                "nub: {} is not usable for the runtime cache (unsafe owner or permissions); \
+                 trying the next location",
+                base.display()
+            );
             continue;
         };
         if let Some((dir, self_extracted)) = try_extract(&safe_base) {
@@ -514,9 +524,27 @@ fn walk_windows_base(path: &Path, create_missing: bool) -> std::io::Result<()> {
             return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory));
         }
         if !crate::windows_security::directory_is_stable(component, leaf, volume_root)? {
-            return Err(std::io::Error::other(
-                "runtime cache path has an unsafe owner or DACL",
-            ));
+            // The leaf is nub's own cache root, and it is NOT necessarily created
+            // by this walk: node discovery writes `node-discovery.json` there
+            // through a plain `create_dir_all` long before spawn reaches
+            // `ensure_runtime`, so the root usually already exists carrying the
+            // parent's inherited ACEs. On a volume whose root grants
+            // `BUILTIN\Users:(CI)(AD)/(WD)` — the Windows default off the system
+            // drive — that made the leaf permanently unusable and silently
+            // relocated the runtime cache to `%TEMP%`, ignoring `XDG_CACHE_HOME`.
+            // Harden the directory we own instead of declining it; ownership is
+            // re-checked there, so a foreign-owned path is still refused. Only on
+            // the creating walk — `is_safe_dir` validates an existing target and
+            // must never mutate.
+            let recovered = leaf
+                && create_missing
+                && crate::windows_security::harden_private_directory(component).is_ok()
+                && crate::windows_security::directory_is_stable(component, leaf, volume_root)?;
+            if !recovered {
+                return Err(std::io::Error::other(
+                    "runtime cache path has an unsafe owner or DACL",
+                ));
+            }
         }
     }
     Ok(())

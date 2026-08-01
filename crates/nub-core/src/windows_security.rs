@@ -63,6 +63,21 @@ unsafe extern "system" {
         sacl: *mut *mut Acl,
         descriptor: *mut *mut c_void,
     ) -> u32;
+    fn SetNamedSecurityInfoW(
+        name: *mut u16,
+        object_type: u32,
+        security_info: u32,
+        owner: Sid,
+        group: Sid,
+        dacl: *mut Acl,
+        sacl: *mut Acl,
+    ) -> u32;
+    fn GetSecurityDescriptorDacl(
+        descriptor: *mut c_void,
+        present: *mut i32,
+        dacl: *mut *mut Acl,
+        defaulted: *mut i32,
+    ) -> i32;
     fn GetAce(acl: *const Acl, index: u32, ace: *mut *mut c_void) -> i32;
     fn EqualSid(first: Sid, second: Sid) -> i32;
     fn IsWellKnownSid(sid: Sid, kind: i32) -> i32;
@@ -89,6 +104,7 @@ const SDDL_REVISION_1: u32 = 1;
 const SE_FILE_OBJECT: u32 = 1;
 const OWNER_SECURITY_INFORMATION: u32 = 0x1;
 const DACL_SECURITY_INFORMATION: u32 = 0x4;
+const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
 const TOKEN_QUERY: u32 = 0x8;
 const TOKEN_USER_CLASS: i32 = 1;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
@@ -145,10 +161,103 @@ struct CurrentUserSid {
     sid: Sid,
 }
 
+/// Protected DACL: object/container-inheritable full access for the object owner,
+/// LocalSystem, and Administrators only. `P` blocks inheritance from the parent,
+/// which is the entire point — see [`harden_private_directory`].
+const PRIVATE_DACL: &str = "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+
 pub fn create_private_directory(path: &Path) -> io::Result<()> {
-    // Protected DACL: object/container-inheritable full access for the object
-    // owner, LocalSystem, and Administrators only.
-    create_directory_with_sddl(path, "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+    create_directory_with_sddl(path, PRIVATE_DACL)
+}
+
+/// Re-apply [`PRIVATE_DACL`] to a directory that already exists.
+///
+/// nub's cache root is created by whichever subsystem reaches it first, and the
+/// ordinary `fs::create_dir_all` path inherits the parent's ACEs instead of
+/// installing a protected DACL. A container-inheritable `BUILTIN\Users:(AD)/(WD)`
+/// on the parent — the DEFAULT on a secondary volume, and what GitHub's
+/// `D:\a\_temp` carries — therefore leaves the leaf writable by every local user,
+/// and the runtime cache correctly refuses to load code from it. Without this the
+/// refusal is silent and the cache relocates to `$TMPDIR`, ignoring an explicitly
+/// configured `XDG_CACHE_HOME`.
+///
+/// Strictly narrowing: it drops the inherited grants and leaves owner/SYSTEM/
+/// Administrators. Refuses unless the OWNER is already trusted — hardening a
+/// directory somebody else created would adopt a tree an attacker may have
+/// planted and hide it behind a now-clean DACL, so a foreign owner stays declined.
+pub(crate) fn harden_private_directory(path: &Path) -> io::Result<()> {
+    let current = current_user_sid()?;
+    let wide = wide_path(path);
+
+    let mut owner = ptr::null_mut();
+    let mut descriptor = ptr::null_mut();
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let _descriptor = LocalAllocation(descriptor);
+    if owner.is_null() || !trusted_sid(owner, current.sid) {
+        return Err(io::Error::other(
+            "refusing to harden a cache directory owned by another principal",
+        ));
+    }
+
+    let sddl: Vec<u16> = PRIVATE_DACL
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut template = ptr::null_mut();
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut template,
+            ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let _template = LocalAllocation(template);
+
+    let mut dacl = ptr::null_mut();
+    let mut present = 0i32;
+    let mut defaulted = 0i32;
+    if unsafe { GetSecurityDescriptorDacl(template, &mut present, &mut dacl, &mut defaulted) } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if present == 0 || dacl.is_null() {
+        return Err(io::Error::other("private DACL template carries no ACL"));
+    }
+
+    let mut wide = wide;
+    let status = unsafe {
+        SetNamedSecurityInfoW(
+            wide.as_mut_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            dacl,
+            ptr::null_mut(),
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
