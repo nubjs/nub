@@ -438,6 +438,13 @@ pub struct NpmUser {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Dist {
     pub tarball: String,
+    /// Strict on purpose, unlike `unpacked_size` below. A malformed
+    /// `integrity`/`shasum` aborts the packument parse rather than
+    /// degrading to `None`, because `None` here means "install this
+    /// tarball with no verification" — a mirror that can rewrite the
+    /// field is exactly the one whose bytes must not be trusted
+    /// unchecked. Failing loud on an off-spec value is the intended
+    /// outcome; do not make these tolerant without deciding that.
     pub integrity: Option<String>,
     pub shasum: Option<String>,
     /// Unpacked tarball size in bytes (`dist.unpackedSize`). Present
@@ -476,13 +483,16 @@ pub struct Attestations {
 /// concurrently the message named whichever fetch lost the race rather
 /// than the package actually at fault.
 ///
-/// This was the last strict field left in a struct whose every other
-/// tolerant deserializer already exists for the reasons
-/// [`non_string_tolerant_map`] documents (proxy mirrors that rewrite
-/// `dist` sub-fields, ancient publishes that serialized a structured
-/// value where a scalar belongs). Measured against pnpm on a registry
-/// serving `"unpackedSize": {...}`: pnpm resolves the packument and
-/// installs; aube was alone in failing.
+/// The tolerance exists for the reasons [`non_string_tolerant_map`]
+/// documents (proxy mirrors that rewrite `dist` sub-fields, ancient
+/// publishes that serialized a structured value where a scalar
+/// belongs). Measured against pnpm on a registry serving
+/// `"unpackedSize": {...}`: pnpm resolves the packument and installs;
+/// aube was alone in failing.
+///
+/// Deliberately NOT extended to the rest of [`Dist`] — see the
+/// strictness note on `integrity`. This field is safe to drop because
+/// nothing but a progress-bar estimate reads it.
 fn unpacked_size_tolerant<'de, D>(de: D) -> Result<Option<u64>, D::Error>
 where
     D: Deserializer<'de>,
