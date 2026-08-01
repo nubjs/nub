@@ -454,13 +454,18 @@ fn persist_declared_home_writes(spawn: &aube_util::LifecycleSandboxSpawn) {
         let Some(name) = spawn.package_name.as_deref() else {
             return;
         };
-        let Some(grants) = nub_sandbox::catalog_override_v2_grants(name) else {
+        // THE VERSION IS PART OF THE LOOKUP. The grant an old pin resolves to is not the one
+        // `latest` resolves to, and moving the wrong entry's directories would either strand a
+        // cache in the throwaway or promote one the resolved grant never declared.
+        let Some(grant) =
+            nub_sandbox::catalog_override_v2_grant(name, spawn.package_version.as_deref())
+        else {
             return;
         };
         let here = nub_sandbox::catalog_v2::Platform::current();
-        let Some(grant) = grants.iter().find(|g| g.matches_platform(here)) else {
+        if !grant.matches_platform(here) {
             return;
-        };
+        }
         if grant.write_paths.is_empty() {
             return;
         }

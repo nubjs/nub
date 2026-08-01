@@ -101,19 +101,23 @@ pub mod backend;
 #[cfg(feature = "build-jail-catalog-override")]
 pub mod catalog;
 pub mod catalog_override;
-/// The v2 catalog parser. Same compilation story as [`catalog`] above: `build.rs` pulls this
-/// file in with `#[path]` and always runs it, so a shipped build carries the parsed TABLE
-/// and none of the parsing code.
+/// The v2 catalog parser. Compiled only for the dev-only override, like [`catalog`] above —
+/// but unlike it, `build.rs` does NOT pull this file in: the baked-in table is still generated
+/// from the v1 document, so v2 exists solely on the override path today.
 #[cfg(feature = "build-jail-catalog-override")]
 pub mod catalog_v2;
 pub mod compiler;
 
-/// The v2 grants for one package, for an embedder that must act on them AFTER a lifecycle
-/// script has run — today the `writePaths` move. Exposed here rather than making the override
-/// module public, so the seam stays one function wide.
+/// The v2 grant for one package AT ONE VERSION, for an embedder that must act on it AFTER a
+/// lifecycle script has run — today the `writePaths` move. Exposed here rather than making the
+/// override module public, so the seam stays one function wide. Version selection lives behind
+/// this call, so an embedder cannot resolve a different band than the compiler did.
 #[cfg(feature = "build-jail-catalog-override")]
-pub fn catalog_override_v2_grants(package: &str) -> Option<&'static [catalog_v2::Grant]> {
-    catalog_override::v2_grants_for(package)
+pub fn catalog_override_v2_grant(
+    package: &str,
+    version: Option<&str>,
+) -> Option<&'static catalog_v2::Grant> {
+    catalog_override::v2_grant_for(package, version)
 }
 
 pub mod conformance;

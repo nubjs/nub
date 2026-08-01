@@ -1609,7 +1609,7 @@ mod tests {
         /// that silently emitted `ReadWrite` would pass any glob-only assertion.
         fn compiled(json: &str, package_dir: &Path) -> (Vec<(String, FsAccess)>, V2Outcome) {
             let catalog = crate::catalog_v2::parse(&format!(
-                r#"{{"packages":{{"p":[{{{json},"notes":"per-capability differential test"}}]}}}}"#
+                r#"{{"packages":{{"p":{{"default":{{{json},"notes":"per-capability differential test"}}}}}}}}"#
             ))
             .expect("test grant must parse");
             let mut policy = SandboxPolicy::default();
@@ -1617,7 +1617,7 @@ mod tests {
                 &mut policy,
                 &homes_for(&project()),
                 package_dir,
-                &catalog.packages["p"][0],
+                &catalog.packages["p"].default,
             );
             let rules = policy
                 .fs
@@ -1714,7 +1714,7 @@ mod tests {
             .expect("fixture");
 
             let catalog = crate::catalog_v2::parse(
-                r#"{"packages":{"p":[{"write":{"deps":true},"notes":"deps differential test"}]}}"#,
+                r#"{"packages":{"p":{"default":{"write":{"deps":true},"notes":"deps differential test"}}}}"#,
             )
             .expect("parses");
             let mut policy = SandboxPolicy::default();
@@ -1722,7 +1722,7 @@ mod tests {
                 project: tmp.clone(),
                 ..homes_for(&tmp)
             };
-            apply_v2_grant(&mut policy, &homes, &me, &catalog.packages["p"][0]);
+            apply_v2_grant(&mut policy, &homes, &me, &catalog.packages["p"].default);
             let rules: Vec<String> = policy
                 .fs
                 .rules
@@ -1787,7 +1787,7 @@ mod tests {
             let _ = &link;
 
             let catalog = crate::catalog_v2::parse(
-                r#"{"packages":{"p":[{"write":{"deps":true},"notes":"global-store deps reach"}]}}"#,
+                r#"{"packages":{"p":{"default":{"write":{"deps":true},"notes":"global-store deps reach"}}}}"#,
             )
             .expect("parses");
             let mut policy = SandboxPolicy::default();
@@ -1797,7 +1797,7 @@ mod tests {
                 home: tmp.join("home"),
                 tmp: tmp.join("tmp"),
             };
-            apply_v2_grant(&mut policy, &homes, &me, &catalog.packages["p"][0]);
+            apply_v2_grant(&mut policy, &homes, &me, &catalog.packages["p"].default);
 
             let want = crate::matcher::path::canonicalize_including_nonexistent(&dep)
                 .to_string_lossy()

@@ -687,14 +687,8 @@ fn build_jail_net(package_name: Option<&str>, package_version: Option<&str>) -> 
         if crate::catalog_override::v2_in_force() {
             let here = crate::catalog_v2::Platform::current();
             package_name
-                .and_then(crate::catalog_override::v2_grants_for)
-                .and_then(|grants| {
-                    grants.iter().find(|g| {
-                        g.matches_platform(here)
-                            && super::version_scope::applies(g.versions.as_deref(), package_version)
-                    })
-                })
-                .is_some_and(|g| g.network)
+                .and_then(|name| crate::catalog_override::v2_grant_for(name, package_version))
+                .is_some_and(|g| g.matches_platform(here) && g.network)
         } else {
             super::package_network::build_jail_net_allowed(package_name, package_version)
         }
@@ -791,17 +785,16 @@ pub fn compile_build_jail(
     #[cfg(feature = "build-jail-catalog-override")]
     if crate::catalog_override::v2_in_force() {
         applied_v2 = true;
-        let grants = package_name
-            .and_then(crate::catalog_override::v2_grants_for)
-            .unwrap_or(&[]);
         let here = crate::catalog_v2::Platform::current();
-        // FIRST MATCH WINS, on platform AND version. No match is a REAL state — a macOS-only
-        // grant evaluated on Linux — and it means the base profile, never a fall-through to
-        // v1, which would silently apply a different answer.
-        if let Some(grant) = grants.iter().find(|g| {
-            g.matches_platform(here)
-                && super::version_scope::applies(g.versions.as_deref(), package_version)
-        }) {
+        // ONE grant, resolved by version inside `v2_grant_for` (narrowest `<` band, else the
+        // entry's `default`), then gated on platform here. A grant that does not match the
+        // platform is a REAL state — a macOS-only entry evaluated on Linux — and it means the
+        // base profile, never a fall-through to v1, which would silently apply a different
+        // answer.
+        if let Some(grant) = package_name
+            .and_then(|name| crate::catalog_override::v2_grant_for(name, package_version))
+            .filter(|g| g.matches_platform(here))
+        {
             let out = super::curated::apply_v2_grant(&mut policy, &ctx.homes, package_dir, grant);
             if out.write_disk {
                 relax_fs_to_full_disk(&mut policy);

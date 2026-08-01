@@ -17,6 +17,20 @@
 //!
 //! `write` IMPLIES read at its own scope, so a `read` naming a scope its `write` already
 //! covers is rejected as redundant rather than silently honoured.
+//!
+//! VERSIONS ARE `default` PLUS `<`-BOUNDED BANDS, and NOTHING MERGES ACROSS THEM. A package's
+//! entry carries one `default` — generated from `latest`, so it covers today's release and
+//! every future one — beside optional bands whose keys are all `<X`. Bands therefore reach
+//! DOWNWARD without limit, which is what makes coverage total: a band catches every old
+//! release including the ones too unpopular to probe, and `default` catches the rest. Because
+//! all keys are `<`, any two bands either nest or are disjoint, so resolution is NARROWEST
+//! BOUND WINS with no ordering rule and no dependence on JSON key order.
+//!
+//! A version resolves to EXACTLY ONE grant, complete in itself. `default` is not a base a band
+//! extends, and a band is not a patch on `default` — reading one grant tells you the whole
+//! answer for the versions it covers. This is deliberately UNLIKE the per-OS overlays, which
+//! DO merge: a package is exactly one version, so bands are ALTERNATIVES, whereas an OS overlay
+//! refines a grant that still applies. The two cannot share a rule.
 
 use std::collections::BTreeMap;
 
@@ -113,11 +127,11 @@ impl Platform {
     }
 }
 
-/// One grant. The matchers select it; the capabilities say what it widens.
+/// One grant: what a package's scripts may reach beyond the base profile, at the versions its
+/// position in the entry covers. The version range is NOT here — it is the KEY of the entry's
+/// `versions` map, so one grant can never carry two answers about its own scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grant {
-    /// A cargo semver range, or `None` for every version.
-    pub versions: Option<String>,
     /// Empty means every platform.
     pub platforms: Vec<Platform>,
     pub read: Reach,
@@ -154,10 +168,68 @@ pub struct Grant {
 }
 
 impl Grant {
-    /// Does this grant apply on `platform`? Version matching is the caller's, because it
-    /// needs the semver parser the compiler already links.
+    /// Does this grant apply on `platform`? Version selection is [`Entry::grant_for`]'s; this
+    /// is the second, independent matcher the caller applies to whatever that returned.
     pub fn matches_platform(&self, platform: Platform) -> bool {
         self.platforms.is_empty() || self.platforms.contains(&platform)
+    }
+
+    /// Does this grant widen anything at all beyond the base profile?
+    fn widens_nothing(&self) -> bool {
+        self.read.is_none() && self.write.is_none() && !self.network && self.write_paths.is_empty()
+    }
+}
+
+/// One `<`-bounded version band: the grant for every release below its bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Band {
+    /// The range exactly as written — `<0.28.1` — so it can be handed to the shared range
+    /// matcher rather than reconstructed from the parsed bound.
+    pub range: String,
+    /// The bound, parsed at LOAD time. It is what orders bands against each other, and
+    /// ordering by a parsed bound rather than by the map's iteration is what makes
+    /// [`Entry::grant_for`] independent of the order the catalog happens to be written in.
+    /// Private because nothing outside this module has a reason to construct a band.
+    bound: semver::Version,
+    pub grant: Grant,
+}
+
+/// One package's entry: the grant for current and future releases, plus the bands that cover
+/// older ones.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    /// GENERATED FROM `latest`. Every band key is a `<` bound, so old versions are always
+    /// caught by the lowest band and `default` only ever applies from the highest bound upward
+    /// — today's releases and tomorrow's, which is exactly what a measurement at `latest`
+    /// predicts.
+    pub default: Grant,
+    /// The `<`-bounded bands, in no meaningful order. [`Entry::grant_for`] resolves by bound,
+    /// so nothing here depends on how they were written.
+    pub versions: Vec<Band>,
+}
+
+impl Entry {
+    /// The ONE grant that applies at `version`.
+    ///
+    /// NARROWEST BOUND WINS. All bands are `<X`, so any two either nest or are disjoint, and
+    /// among those matching `version` the smallest bound is the most specific answer —
+    /// `0.12.0` matching both `<0.13.0` and `<1.0.0` takes `<0.13.0`. Selecting by bound rather
+    /// than by position is what removes the first-match footgun the `Grant[]` shape had, where
+    /// a matcher-less grant written early silently shadowed every grant after it.
+    ///
+    /// NOTHING MERGES. The returned grant is complete on its own; `default` is not a base the
+    /// bands extend.
+    ///
+    /// No band matching — including an absent, non-semver, or PRERELEASE version, which the
+    /// shared range matcher deliberately refuses — falls to `default`. That fallback is
+    /// strictly better than the withhold-everything the matcher's refusal used to mean: a
+    /// prerelease now gets `latest`'s answer instead of no grant at all.
+    pub fn grant_for(&self, version: Option<&str>) -> &Grant {
+        self.versions
+            .iter()
+            .filter(|b| crate::compiler::version_scope::applies(Some(&b.range), version))
+            .min_by(|a, b| a.bound.cmp(&b.bound))
+            .map_or(&self.default, |b| &b.grant)
     }
 }
 
@@ -199,8 +271,8 @@ pub struct BaselineEnv {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Catalog {
-    /// Package name -> its grants, in written order. FIRST MATCH WINS.
-    pub packages: BTreeMap<String, Vec<Grant>>,
+    /// Package name -> its entry. Resolution within an entry is [`Entry::grant_for`].
+    pub packages: BTreeMap<String, Entry>,
     /// Paths granted to EVERY jailed script, before any package grant applies. Empty means the
     /// compiled-in baseline stands.
     pub baseline: Vec<BaselinePath>,
@@ -221,24 +293,73 @@ pub fn parse(text: &str) -> Result<Catalog, String> {
 
     let mut packages = BTreeMap::new();
     for (name, value) in obj {
-        let list = value
-            .as_array()
-            .ok_or_else(|| format!("packages[{name}]: must be an ARRAY of grants"))?;
-        if list.is_empty() {
-            return Err(format!("packages[{name}]: has no grants; drop the entry"));
-        }
-        let mut grants = Vec::with_capacity(list.len());
-        for (i, g) in list.iter().enumerate() {
-            grants.push(parse_grant(g, &format!("packages[{name}][{i}]"))?);
-        }
-        reject_unreachable(&grants, name)?;
-        packages.insert(name.clone(), grants);
+        packages.insert(name.clone(), parse_entry(value, name)?);
     }
     Ok(Catalog {
         packages,
         baseline: parse_baseline(&root)?,
         env: parse_env(&root)?,
     })
+}
+
+fn parse_entry(value: &serde_json::Value, name: &str) -> Result<Entry, String> {
+    let at = format!("packages[{name}]");
+    let obj = value.as_object().ok_or_else(|| {
+        format!("{at}: must be an OBJECT of the form {{default, versions?}} — a bare ARRAY is the retired first-match-wins shape")
+    })?;
+    for key in obj.keys() {
+        if !matches!(key.as_str(), "default" | "versions") {
+            return Err(format!("{at}: unknown field `{key}`"));
+        }
+    }
+
+    let default = parse_grant(
+        obj.get("default")
+            .ok_or_else(|| format!("{at}: `default` is required — it is what every version not caught by a band resolves to"))?,
+        &format!("{at}.default"),
+    )?;
+
+    let mut versions = Vec::new();
+    if let Some(v) = obj.get("versions") {
+        let map = v
+            .as_object()
+            .ok_or_else(|| format!("{at}.versions: must be an object keyed by a `<` bound"))?;
+        for (range, grant) in map {
+            let at = format!("{at}.versions[{range}]");
+            // EVERY band key is `<X`, and that is load-bearing rather than a style rule: it is
+            // what makes any two bands nest or be disjoint, which is what makes NARROWEST WINS
+            // an unambiguous rule instead of an ordering convention. A key in any other dialect
+            // is a generator bug, and parsing it would resolve versions by a rule nobody wrote.
+            let bound = range.strip_prefix('<').ok_or_else(|| {
+                format!(
+                    "{at}: a band key must be a `<` bound (e.g. `<0.28.1`); bands nest by \
+                     construction, which is what makes narrowest-wins unambiguous"
+                )
+            })?;
+            let bound = semver::Version::parse(bound.trim()).map_err(|e| {
+                format!("{at}: `{bound}` is not a complete semver version, so this band cannot be ordered against the others: {e}")
+            })?;
+            versions.push(Band {
+                range: range.clone(),
+                bound,
+                grant: parse_grant(grant, &at)?,
+            });
+        }
+    }
+
+    // AN ENTRY MUST WIDEN SOMETHING. An empty `default` is a real statement — "latest passes
+    // ungranted", which is exactly what esbuild and bcrypt measured — but only when a band
+    // hangs off it. With no band the entry is byte-for-byte the base profile, i.e. what the
+    // package gets by being absent from the catalog entirely, and an entry that LOOKS present
+    // while doing nothing is the failure mode this parser exists to catch.
+    if default.widens_nothing() && versions.is_empty() {
+        return Err(format!(
+            "{at}: `default` widens nothing and there are no version bands, so the entry grants \
+             exactly the base profile; drop it"
+        ));
+    }
+
+    Ok(Entry { default, versions })
 }
 
 fn parse_env(root: &serde_json::Value) -> Result<Vec<BaselineEnv>, String> {
@@ -363,9 +484,20 @@ fn parse_grant(value: &serde_json::Value, at: &str) -> Result<Grant, String> {
         .ok_or_else(|| format!("{at}: must be an object"))?;
 
     for key in obj.keys() {
+        // A STALE `versions` FIELD MUST NOT PARSE. It was a grant's own semver range under the
+        // retired first-match-wins shape; the range is now the KEY of the entry's `versions`
+        // map. Accepting it as an unknown-but-ignorable field would silently drop the scope and
+        // apply an old-version grant to every release — under-granting's mirror image, and
+        // invisible in a hand-edited catalog until something over-reaches.
+        if key == "versions" {
+            return Err(format!(
+                "{at}: `versions` is no longer a grant field — the range is the KEY of the \
+                 entry's `versions` map, so this grant's scope would be silently lost"
+            ));
+        }
         if !matches!(
             key.as_str(),
-            "versions" | "platforms" | "read" | "write" | "network" | "writePaths" | "notes"
+            "platforms" | "read" | "write" | "network" | "writePaths" | "notes"
         ) {
             return Err(format!("{at}: unknown field `{key}`"));
         }
@@ -377,15 +509,6 @@ fn parse_grant(value: &serde_json::Value, at: &str) -> Result<Grant, String> {
         .unwrap_or_default()
         .trim()
         .to_string();
-
-    let versions = match obj.get("versions") {
-        None => None,
-        Some(v) => Some(
-            v.as_str()
-                .ok_or_else(|| format!("{at}: `versions` must be a string semver range"))?
-                .to_string(),
-        ),
-    };
 
     let mut platforms = Vec::new();
     if let Some(v) = obj.get("platforms") {
@@ -488,14 +611,11 @@ fn parse_grant(value: &serde_json::Value, at: &str) -> Result<Grant, String> {
         }
     }
 
-    if read.is_none() && write.is_none() && !network && promote.is_empty() {
-        return Err(format!(
-            "{at}: grants nothing; the base profile is what a package gets without an entry"
-        ));
-    }
-
+    // NO "grants nothing" CHECK HERE. An empty grant is a positive statement under this shape —
+    // an empty `default` says "latest passes ungranted", which is what makes a `<` band below it
+    // meaningful. The emptiness that IS a defect is an entry with nothing anywhere, and
+    // [`parse_entry`] owns that because only it can see the whole entry.
     Ok(Grant {
-        versions,
         platforms,
         read,
         write,
@@ -547,51 +667,32 @@ fn parse_reach(
     Ok(Reach::Scopes(scopes))
 }
 
-/// A grant nothing can select is the failure mode that hurts: it LOOKS present in the file
-/// and never fires. `projectReads: ["."]` compiled to nothing for most of a measurement
-/// campaign and every result taken through it was worthless, so these are build errors.
-fn reject_unreachable(grants: &[Grant], name: &str) -> Result<(), String> {
-    for (i, g) in grants.iter().enumerate() {
-        let matches_everything = g.versions.is_none() && g.platforms.is_empty();
-        if matches_everything && i + 1 < grants.len() {
-            return Err(format!(
-                "packages[{name}][{i}]: matches every version and platform but is not last, \
-                 so the {} grant(s) after it can never be reached",
-                grants.len() - i - 1
-            ));
-        }
-        for (j, earlier) in grants.iter().enumerate().take(i) {
-            if selects_superset(earlier, g) {
-                return Err(format!(
-                    "packages[{name}][{i}]: is unreachable — grant {j} already matches \
-                     everything it does, and the FIRST match wins"
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Does `a` match every input `b` does? Version ranges are compared textually: proving
-/// containment needs a semver solver this crate does not link, so an EQUAL range counts and
-/// anything else is treated as distinct. That errs toward accepting, which is the right
-/// direction — this check exists to catch the obvious duplicate, not to be a decision
-/// procedure.
-fn selects_superset(a: &Grant, b: &Grant) -> bool {
-    let versions = a.versions.is_none() || a.versions == b.versions;
-    let platforms = a.platforms.is_empty()
-        || (!b.platforms.is_empty() && b.platforms.iter().all(|p| a.platforms.contains(p)));
-    versions && platforms
-}
+// AN UNREACHABLE-GRANT CHECK IS NO LONGER NEEDED, and that is the point of the shape rather
+// than an omission. Under `Grant[]` a matcher-less grant written early silently shadowed every
+// grant after it, so the parser had to reject the orderings that could not fire —
+// `projectReads: ["."]` compiling to nothing cost a whole measurement campaign, and that class
+// of defect is what those rejections guarded. `{default, versions}` removes the class by
+// construction: `default` cannot shadow a band because bands are consulted first, and two bands
+// cannot shadow each other because narrowest-wins picks between them by bound.
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn one(body: &str) -> Result<Catalog, String> {
-        parse(&format!(r#"{{"packages":{{"p":[{body}]}}}}"#))
-    }
     const NOTES: &str = r#""notes":"measured on macOS by the grant search""#;
+
+    /// One package whose entry is a bare `default`, which is the shape most of the corpus takes.
+    fn one(default: &str) -> Result<Catalog, String> {
+        parse(&format!(
+            r#"{{"packages":{{"p":{{"default":{default}}}}}}}"#
+        ))
+    }
+
+    /// The grant `p` resolves to at `version`, for a catalog written as `{"default":…}` plus
+    /// whatever `versions` map the test supplies.
+    fn resolve<'a>(catalog: &'a Catalog, version: &str) -> &'a Grant {
+        catalog.packages["p"].grant_for(Some(version))
+    }
 
     #[test]
     fn a_narrow_read_and_write_compose() {
@@ -599,7 +700,7 @@ mod tests {
             r#"{{"read":{{"userHome":true}},"write":{{"deps":true,"project":true}},{NOTES}}}"#
         ))
         .expect("valid");
-        let g = &c.packages["p"][0];
+        let g = &c.packages["p"].default;
         assert_eq!(g.read, Reach::Scopes(vec![Scope::UserHome]));
         assert_eq!(g.write, Reach::Scopes(vec![Scope::Deps, Scope::Project]));
         assert!(!g.network);
@@ -610,7 +711,8 @@ mod tests {
         assert_eq!(
             one(&format!(r#"{{"write":"disk",{NOTES}}}"#))
                 .expect("valid")
-                .packages["p"][0]
+                .packages["p"]
+                .default
                 .write,
             Reach::Disk
         );
@@ -652,49 +754,31 @@ mod tests {
         assert!(err.contains("not a scope read accepts"), "{err}");
     }
 
+    /// An empty `default` is legitimate ONLY beneath a band — it is how "latest passes
+    /// ungranted" is spelled, and esbuild and bcrypt both measured exactly that. With no band
+    /// the same entry is indistinguishable from the package being absent from the catalog.
     #[test]
-    fn a_grant_that_widens_nothing_is_rejected() {
+    fn an_entry_that_widens_nothing_anywhere_is_rejected_but_an_empty_default_under_a_band_is_not()
+    {
         let err = one(&format!(r#"{{{NOTES}}}"#)).unwrap_err();
-        assert!(err.contains("grants nothing"), "{err}");
+        assert!(err.contains("base profile"), "{err}");
+
+        let c = parse(&format!(
+            r#"{{"packages":{{"p":{{
+                 "default":{{{NOTES}}},
+                 "versions":{{"<6.0.0":{{"network":true,{NOTES}}}}}}}}}}}"#
+        ))
+        .expect("an empty default beneath a band states that latest passes ungranted");
+        assert!(
+            !c.packages["p"].default.network,
+            "the empty default must stay empty"
+        );
     }
 
     #[test]
     fn an_empty_platform_list_can_never_match() {
         let err = one(&format!(r#"{{"platforms":[],"network":true,{NOTES}}}"#)).unwrap_err();
         assert!(err.contains("can never match"), "{err}");
-    }
-
-    #[test]
-    fn a_match_everything_grant_must_be_last_or_it_shadows_the_rest() {
-        let err = parse(&format!(
-            r#"{{"packages":{{"p":[
-                 {{"network":true,{NOTES}}},
-                 {{"versions":"<1.0.0","write":"disk",{NOTES}}}]}}}}"#
-        ))
-        .unwrap_err();
-        assert!(err.contains("can never be reached"), "{err}");
-    }
-
-    #[test]
-    fn a_grant_an_earlier_one_already_selects_is_unreachable() {
-        let err = parse(&format!(
-            r#"{{"packages":{{"p":[
-                 {{"platforms":["macos","linux"],"network":true,{NOTES}}},
-                 {{"platforms":["macos"],"write":"disk",{NOTES}}}]}}}}"#
-        ))
-        .unwrap_err();
-        assert!(err.contains("unreachable"), "{err}");
-    }
-
-    #[test]
-    fn ordering_by_narrowness_is_accepted() {
-        // The reachable spelling of the same intent: narrowest first, catch-all last.
-        parse(&format!(
-            r#"{{"packages":{{"p":[
-                 {{"versions":"<0.13.0","write":"disk",{NOTES}}},
-                 {{"network":true,{NOTES}}}]}}}}"#
-        ))
-        .expect("narrow-then-general must be accepted");
     }
 
     #[test]
@@ -705,13 +789,140 @@ mod tests {
 
     #[test]
     fn platform_matching_selects_the_current_os() {
-        let g = one(&format!(
+        let c = one(&format!(
             r#"{{"platforms":["macos"],"network":true,{NOTES}}}"#
         ))
-        .expect("valid")
-        .packages["p"][0]
-            .clone();
+        .expect("valid");
+        let g = &c.packages["p"].default;
         assert!(g.matches_platform(Platform::Macos));
         assert!(!g.matches_platform(Platform::Linux));
+    }
+
+    // ── version resolution ────────────────────────────────────────────────────
+
+    /// The rule that replaced first-match-wins. `0.5.0` sits inside all three bands, so the
+    /// answer is decided by BOUND and nothing else — a resolver that stopped at the first
+    /// match, or preferred the widest, returns a different grant here.
+    #[test]
+    fn among_the_bands_that_match_the_narrowest_bound_wins() {
+        let c = parse(&format!(
+            r#"{{"packages":{{"p":{{
+                 "default":{{{NOTES}}},
+                 "versions":{{
+                   "<10.0.0":{{"write":"disk",{NOTES}}},
+                   "<1.0.0":{{"write":{{"userHome":true}},{NOTES}}},
+                   "<0.6.0":{{"network":true,{NOTES}}}}}}}}}}}"#
+        ))
+        .expect("valid");
+        assert_eq!(
+            resolve(&c, "0.5.0").write,
+            Reach::None,
+            "0.5.0 matches all three bands and must take <0.6.0, which grants no write"
+        );
+        assert!(resolve(&c, "0.5.0").network, "<0.6.0 grants network");
+        assert_eq!(
+            resolve(&c, "0.9.0").write,
+            Reach::Scopes(vec![Scope::UserHome]),
+            "0.9.0 is above <0.6.0, so the next-narrowest band <1.0.0 applies"
+        );
+        assert_eq!(
+            resolve(&c, "5.0.0").write,
+            Reach::Disk,
+            "5.0.0 matches only <10.0.0"
+        );
+    }
+
+    /// The invariant most likely to rot: resolution reads a JSON OBJECT, and any resolver that
+    /// walked it in iteration order would pass every other test in this file while silently
+    /// depending on how the generator happened to emit its keys.
+    #[test]
+    fn resolution_does_not_depend_on_the_order_the_bands_were_written_in() {
+        let narrow = r#""<0.6.0":{"network":true,NOTES}"#;
+        let wide = r#""<1.0.0":{"write":{"userHome":true},NOTES}"#;
+        let build = |first: &str, second: &str| {
+            let text = [
+                r#"{"packages":{"p":{"default":{NOTES},"versions":{"#,
+                first,
+                ",",
+                second,
+                "}}}}",
+            ]
+            .concat()
+            .replace("NOTES", NOTES);
+            parse(&text).expect("valid")
+        };
+        let ascending = build(narrow, wide);
+        let descending = build(wide, narrow);
+        assert_eq!(
+            resolve(&ascending, "0.5.0"),
+            resolve(&descending, "0.5.0"),
+            "the same bands in two key orders must resolve identically"
+        );
+        assert!(
+            resolve(&ascending, "0.5.0").network,
+            "and the answer must be the narrowest band, not merely a stable one"
+        );
+    }
+
+    /// `default` is the answer for everything the bands do not reach — today's release, every
+    /// future one, and anything the range matcher cannot judge (an absent version, a
+    /// `workspace:` pin, a prerelease). The last is a strict improvement on the retired shape,
+    /// where an unjudgeable version fell through to NO grant.
+    #[test]
+    fn a_version_no_band_matches_resolves_to_default() {
+        let c = parse(&format!(
+            r#"{{"packages":{{"p":{{
+                 "default":{{"write":{{"project":true}},{NOTES}}},
+                 "versions":{{"<1.0.0":{{"network":true,{NOTES}}}}}}}}}}}"#
+        ))
+        .expect("valid");
+        let entry = &c.packages["p"];
+        for version in [Some("2.0.0"), Some("0.9.0-rc.1"), Some("workspace:*"), None] {
+            let g = entry.grant_for(version);
+            assert!(
+                !g.network && g.write == Reach::Scopes(vec![Scope::Project]),
+                "{version:?} matches no band and must resolve to default, got {g:?}"
+            );
+        }
+        assert!(
+            entry.grant_for(Some("0.9.0")).network,
+            "the control: a version the band DOES match must not resolve to default"
+        );
+    }
+
+    // ── the two shapes a stale hand-written catalog takes ─────────────────────
+
+    #[test]
+    fn a_grant_carrying_its_own_versions_range_is_rejected() {
+        let err = one(&format!(
+            r#"{{"versions":"<1.0.0","network":true,{NOTES}}}"#
+        ))
+        .unwrap_err();
+        assert!(err.contains("no longer a grant field"), "{err}");
+        assert!(
+            err.contains("packages[p].default"),
+            "the rejection must name the offending path: {err}"
+        );
+    }
+
+    #[test]
+    fn a_band_key_that_is_not_a_bound_is_rejected() {
+        let err = parse(&format!(
+            r#"{{"packages":{{"p":{{
+                 "default":{{"network":true,{NOTES}}},
+                 "versions":{{">=14.0.0, <19.0.0":{{"write":"disk",{NOTES}}}}}}}}}}}"#
+        ))
+        .unwrap_err();
+        assert!(err.contains("must be a `<` bound"), "{err}");
+
+        // A `<` that is not a complete version cannot be ordered against the other bands, so it
+        // is refused for the same reason rather than silently sorted by string.
+        let err = parse(&format!(
+            r#"{{"packages":{{"p":{{
+                 "default":{{"network":true,{NOTES}}},
+                 "versions":{{"<1.0":{{"write":"disk",{NOTES}}}}}}}}}}}"#
+        ))
+        .unwrap_err();
+        assert!(err.contains("not a complete semver version"), "{err}");
     }
 }

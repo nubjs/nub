@@ -1,9 +1,10 @@
 //! Whether a version-scoped catalog entry applies to the package version being confined.
 //!
-//! One predicate, shared by the two tables that carry a scope ([`super::curated`] and
-//! [`super::package_network`]), because a grant that applied on one axis and not the other for
-//! the same package would be the silent-wrong-answer shape this whole subsystem is built
-//! against.
+//! One predicate, shared by every table that carries a scope — v1's [`super::curated`] and
+//! [`super::package_network`], and the v2 catalog's version bands
+//! ([`crate::catalog_v2::Entry::grant_for`]) — because a grant that applied on one axis and not
+//! the other for the same package would be the silent-wrong-answer shape this whole subsystem
+//! is built against.
 //!
 //! # Why version scoping is worth having at all
 //!
@@ -29,14 +30,16 @@
 /// `semver` admits a prerelease only when some comparator carries a prerelease at the SAME
 /// major.minor.patch, so a cutoff cannot be widened into one: measured, `<0.13.0`,
 /// `<0.13.0-0` and `>=0.0.0-0, <0.13.0` all refuse `0.12.0-rc.1`, and only a bound naming
-/// that version's own release (`>=0.12.0-rc, <0.13.0`) admits it. So a catalogued package
-/// installed at a prerelease falls back to no grant and fails as if unlisted.
+/// that version's own release (`>=0.12.0-rc, <0.13.0`) admits it. Where that lands depends on
+/// the caller: a v1 scoped entry falls back to no grant and fails as if unlisted, while a v2
+/// band falls through to the entry's `default` — the grant measured at `latest`, which is a
+/// strictly better answer for a prerelease than nothing.
 ///
 /// Accepted rather than worked around: no catalogued package ships an install-scripted
 /// prerelease, the direction is withhold-not-widen, and a hand-rolled precedence dialect
 /// would be a second range language for one corner. If it ever bites a real package, widen
 /// that entry — drop the scope, or name the prerelease bound — rather than changing this rule.
-pub(super) fn applies(range: Option<&str>, version: Option<&str>) -> bool {
+pub(crate) fn applies(range: Option<&str>, version: Option<&str>) -> bool {
     let Some(range) = range else {
         return true;
     };

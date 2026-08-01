@@ -156,7 +156,14 @@ mod loader {
         if is_v2 {
             return match crate::catalog_v2::parse(&text) {
                 Ok(catalog) => {
-                    let grants: usize = catalog.packages.values().map(Vec::len).sum();
+                    // One grant per entry for `default`, plus one per version band. A count that
+                    // only saw the entries would report a catalog with bands as smaller than it
+                    // is, and this line is what a harness ASSERTS the loaded configuration from.
+                    let grants: usize = catalog
+                        .packages
+                        .values()
+                        .map(|e| 1 + e.versions.len())
+                        .sum();
                     // Baseline and env are in the summary so a harness can ASSERT they
                     // engaged. A cell that cannot prove the configuration it is testing is
                     // actually in force is not a measurement.
@@ -225,12 +232,20 @@ mod loader {
 #[cfg(feature = "build-jail-catalog-override")]
 use loader::{active, active_v2, load};
 
-/// The v2 grants for one package, in written order, or `None` when no v2 override is in
-/// force. The CALLER picks the first whose matchers apply — first match wins, and the
-/// version predicate lives with the compiler because that is where the semver parser is.
+/// The ONE v2 grant that applies to `package` at `version`, or `None` when the package has no
+/// entry or no v2 override is in force.
+///
+/// VERSION SELECTION HAPPENS HERE AND NOWHERE ELSE. Every call site used to iterate a grant
+/// list and re-decide, which is three places to get narrowest-bound-wins subtly wrong and no
+/// way to notice — the fs axis and the net axis silently answering from different bands for one
+/// spawn is precisely the divergence this seam exists to make impossible. Platform matching
+/// stays with the caller, because it is an independent matcher on whatever this returns.
 #[cfg(feature = "build-jail-catalog-override")]
-pub(crate) fn v2_grants_for(package: &str) -> Option<&'static [crate::catalog_v2::Grant]> {
-    Some(active_v2()?.packages.get(package)?.as_slice())
+pub(crate) fn v2_grant_for(
+    package: &str,
+    version: Option<&str>,
+) -> Option<&'static crate::catalog_v2::Grant> {
+    Some(active_v2()?.packages.get(package)?.grant_for(version))
 }
 
 /// The catalog's baseline filesystem paths, or empty when no v2 catalog is in force.
@@ -247,7 +262,7 @@ pub(crate) fn baseline_env() -> &'static [crate::catalog_v2::BaselineEnv] {
 
 /// Is a v2 catalog in force AT ALL, whatever it contains?
 ///
-/// This is a DIFFERENT question from [`v2_grants_for`] and conflating them silently voided
+/// This is a DIFFERENT question from [`v2_grant_for`] and conflating them silently voided
 /// every search result: an EMPTY v2 catalog is how the search spells "this package gets no
 /// grant", and if that falls through to the compiled-in v1 table the package keeps whatever
 /// grant it shipped with. The cheapest cell in the walk then passes for a package that

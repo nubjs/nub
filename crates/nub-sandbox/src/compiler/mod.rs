@@ -20,7 +20,10 @@ mod package_network;
 mod preset;
 mod resolve;
 mod reuse;
-mod version_scope;
+// Crate-visible rather than module-private: `catalog_v2::Entry::grant_for` resolves its version
+// bands through the SAME range matcher the compiler's own scoped tables use, so the v2 bands
+// never become a second semver dialect.
+pub(crate) mod version_scope;
 
 /// Exposed on EVERY platform, unlike the stamp itself, so `stdio_shim_semantics` drives the
 /// payload that actually ships rather than the source file it is derived from — comment-stripping
