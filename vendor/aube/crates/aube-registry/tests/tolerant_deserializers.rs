@@ -149,6 +149,13 @@ fn arb_obj_or_null() -> impl Strategy<Value = Value> {
     ]
 }
 
+/// `dist.unpackedSize` keeps a non-negative integer byte count and
+/// drops every other shape — including the object that used to abort a
+/// whole install with `invalid type: map, expected u64`.
+fn ref_unpacked_size(v: &Value) -> Option<u64> {
+    v.as_u64()
+}
+
 // === Plumbing: wrap an arbitrary value into a minimal Packument /
 // VersionMetadata JSON and parse it through the production path. ===
 
@@ -165,6 +172,15 @@ fn parse_version_with(field: &str, value: &Value) -> VersionMetadata {
     m.insert("version".into(), Value::String("1.0.0".into()));
     m.insert(field.into(), value.clone());
     serde_json::from_value(Value::Object(m)).expect("version parses")
+}
+
+/// `dist` is the one tolerant field nested a level down, so it needs
+/// its own wrapper rather than `parse_version_with`.
+fn parse_dist_with(field: &str, value: &Value) -> VersionMetadata {
+    let mut dist = serde_json::Map::new();
+    dist.insert("tarball".into(), Value::String("https://x/t.tgz".into()));
+    dist.insert(field.into(), value.clone());
+    parse_version_with("dist", &Value::Object(dist))
 }
 
 // === Properties ===
@@ -233,6 +249,13 @@ proptest! {
     fn bin_matches_reference(v in arb_json()) {
         let parsed = parse_version_with("bin", &v);
         prop_assert_eq!(parsed.bin, ref_bin_map(&v));
+    }
+
+    #[test]
+    fn unpacked_size_matches_reference(v in arb_json()) {
+        let parsed = parse_dist_with("unpackedSize", &v);
+        let actual = parsed.dist.as_ref().and_then(|d| d.unpacked_size);
+        prop_assert_eq!(actual, ref_unpacked_size(&v));
     }
 
     #[test]

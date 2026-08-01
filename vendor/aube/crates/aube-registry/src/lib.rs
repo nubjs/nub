@@ -444,7 +444,11 @@ pub struct Dist {
     /// on most modern packuments, absent on older ones — used as the
     /// best-effort install-size estimate that the progress bar shows
     /// as `4.2 MB / ~13.8 MB`. Decimal MB to match every other PM.
-    #[serde(default, rename = "unpackedSize")]
+    #[serde(
+        default,
+        rename = "unpackedSize",
+        deserialize_with = "unpacked_size_tolerant"
+    )]
     pub unpacked_size: Option<u64>,
     /// Sigstore attestations block. The trust-policy check reads
     /// `dist.attestations.provenance` as rank-1 trust evidence when
@@ -459,6 +463,76 @@ pub struct Dist {
 pub struct Attestations {
     #[serde(default)]
     pub provenance: Option<serde_json::Value>,
+}
+
+/// Deserialize `dist.unpackedSize` tolerant to any non-integer shape,
+/// dropping to `None` rather than failing the packument parse.
+///
+/// The field is a cosmetic hint — it only feeds the progress bar's
+/// `4.2 MB / ~13.8 MB` estimate — so a strict `Option<u64>` traded a
+/// wrong pixel for a dead install: one odd value anywhere in the
+/// packument aborted the whole resolve with `ERR_AUBE_REGISTRY_ERROR:
+/// invalid type: map, expected u64`, and because packument fetches run
+/// concurrently the message named whichever fetch lost the race rather
+/// than the package actually at fault.
+///
+/// This was the last strict field left in a struct whose every other
+/// tolerant deserializer already exists for the reasons
+/// [`non_string_tolerant_map`] documents (proxy mirrors that rewrite
+/// `dist` sub-fields, ancient publishes that serialized a structured
+/// value where a scalar belongs). Measured against pnpm on a registry
+/// serving `"unpackedSize": {...}`: pnpm resolves the packument and
+/// installs; aube was alone in failing.
+fn unpacked_size_tolerant<'de, D>(de: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct V;
+
+    impl<'de> Visitor<'de> for V {
+        type Value = Option<u64>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a byte count or any other JSON value")
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+
+        // serde_json hands non-negative integers to `visit_u64`, so this
+        // only fires for a negative size (meaningless — drop it) or for a
+        // deserializer that signs its integers differently.
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(u64::try_from(v).ok())
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<Self::Value, D2::Error> {
+            d.deserialize_any(self)
+        }
+
+        fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        visit_seq_to!('de, None);
+        visit_map_to!('de, None);
+        visit_strings_to!('de, None);
+    }
+
+    de.deserialize_any(V)
 }
 
 fn deprecated_string<'de, D>(de: D) -> Result<Option<String>, D::Error>
