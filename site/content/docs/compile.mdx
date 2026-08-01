@@ -1,16 +1,16 @@
 ---
 title: Compiling executables
-description: Package a TypeScript or JavaScript entry into a standalone executable — one that embeds Node for a self-contained binary, or a tiny variant that finds or fetches Node on the target machine.
+description: Package a TypeScript or JavaScript entry into a target-specific executable that either embeds Node or locates it on the target machine, provisioning a copy when needed.
 ---
 
-Running `nub compile` turns an entry file into a single standalone executable. Point it at a file and run the result:
+Running `nub compile` turns an entry file into a single executable for one target platform. Point it at a file and run the result:
 
 ```bash
-nub compile app.ts       # → ./app, a standalone executable
-./app                    # runs it — no Node install, no node_modules
+nub compile app.ts       # → ./app
+./app                    # runs it without a Node install
 ```
 
-Everything the entry imports is transpiled and bundled at compile time on your machine. The output carries no `node_modules` and needs no toolchain on the target — TypeScript, JSX, and non-erasable syntax are already down-leveled and packaged.
+By default, everything the entry imports is transpiled and bundled at compile time. The output carries no `node_modules` and needs no toolchain on the target: TypeScript, JSX, and non-erasable syntax are already down-leveled and packaged. Builds using `--external` or `--allow-dynamic-import` can depend on files available on the target machine.
 
 ## Two shapes
 
@@ -19,17 +19,25 @@ The default embeds Node; `--smol` does not.
 | | Default | `--smol` |
 |---|---|---|
 | Size (macOS arm64) | ~26 MB | ~0.5 MB |
-| Node at runtime | Embedded, extracted once to a shared cache | Found on the machine, else fetched from nodejs.org |
-| Offline machine | Runs | Runs only if a usable Node is already present |
+| Node at runtime | Embedded, extracted once for matching compiled binaries | Found on the machine, else fetched from nodejs.org |
+| Offline machine | Runs with an executable cache location | Runs with a usable Node; the app cache may be `noexec` when that Node is outside it |
 
 ```bash
-nub compile app.ts           # self-contained: embeds Node, runs anywhere
+nub compile app.ts           # self-contained for this target: embeds Node
 nub compile app.ts --smol    # tiny: discovers or provisions Node at first run
 ```
 
-`--smol` is possible because Nub treats Node as a shared, cacheable resource rather than a private engine — the same Node it downloads for `nub run` backs a compiled binary.
+A `--smol` binary first looks in Nub's Node store, version-manager installations, and `PATH`. It provisions Node only when none satisfies its target.
 
-That sharing is also what the default shape's size means in practice. The embedded runtime is stripped and compressed, so the file you ship is a fraction of the ~100 MB of Node inside it, and it is extracted once into a cache that every compiled binary and every `nub run` project reuses — a second compiled app on the same machine adds its own bundled code, not another copy of Node.
+The embedded runtime is stripped and compressed, so the file you ship is a fraction of the ~100 MB of Node inside it. Matching compiled binaries share one extracted copy; a second compiled app adds its own bundled code, not another copy of Node.
+
+Both shapes target one operating system and architecture, and both extract the bundled app into a cache directory. The first run must be able to create that cache, or deployment must prewarm it as described below. The cache must allow execution only when Nub will run Node from it. A `--smol` binary that has already proved a usable Node elsewhere stores only app data there, so a `noexec` cache is valid. The default shape also extracts Node unless it can adopt a matching Node from Nub's ordinary store.
+
+## Runtime licenses
+
+The default shape embeds the aggregate `LICENSE` from the exact Node distribution it carries, so the runtime notice travels with every binary you ship. A `--smol` executable carries no runtime, and no notice with it.
+
+A compiled executable reserves no argument spelling. Every argument reaches your application unchanged — `--licenses` included, so a CLI that already defines that flag keeps it — and how the runtime notice is surfaced is the publisher's call.
 
 ## `--out`
 
@@ -42,14 +50,15 @@ nub compile app.ts --out bin/cli # → ./bin/cli
 
 ## `--smol`
 
-Ship an executable with no embedded Node. On first run it looks for a usable Node — Nub's own cache, a version-manager install, or one on `PATH` — and provisions one from nodejs.org only if none is found.
+Ship an executable with no embedded Node. On first run it looks for a usable Node — Nub's own store, a version-manager install, or one on `PATH` — and provisions one from nodejs.org only if none satisfies the binary's target.
 
 ```bash
 nub compile app.ts --smol                  # ~0.5 MB, finds or fetches Node
 nub compile app.ts --smol --target ">=22"  # accepts any host Node >= 22
+nub compile app.ts --smol --target 26.0.0  # uses or provisions exactly Node 26.0.0
 ```
 
-On a machine with no Node and no way to download one, a `--smol` binary exits with an error pointing at the default build. The default shape has no such dependency.
+A machine with no Node and no way to download one exits with an error pointing at the default build. The default shape has no such dependency.
 
 ## `--target`
 
@@ -68,14 +77,15 @@ nub compile app.ts --target {{NODE_VERSION}}     # an exact version
 nub compile app.ts --target latest    # the latest major ({{NODE_MAJOR}} today), not LTS
 ```
 
-The two shapes treat the version differently. The default shape bakes one **exact** version into the binary — a range resolves to the newest match at compile time. A `--smol` binary carries the resolved version as a **floor**: at runtime it accepts any Node at or above it, whatever the major, and provisions the floor only when nothing on the machine qualifies.
+The two shapes treat the version differently. The default shape bakes one **exact** version into the binary — a range resolves to the newest match at compile time. With `--smol`, an exact version such as `26.0.0` requires that exact Node at runtime and provisions it when it is unavailable, whether the version came from `--target` or an exact project pin. A major/minor pin, alias, or semver range resolves to a **floor**: at runtime it accepts any Node at or above it, whatever the major, and provisions the floor only when nothing on the machine qualifies.
 
 ```bash
 nub compile app.ts --target ">=22"          # default: bakes the newest >=22 now
 nub compile app.ts --smol --target ">=22"   # smol: accepts any host Node >= 22
+nub compile app.ts --smol --target 26.0.0   # smol: requires exactly Node 26.0.0
 ```
 
-An upper bound is not enforced at runtime. Compiling with `--smol --target "22.x"` accepts Node 26 on the target machine, because only the floor is checked. Use the default shape when the exact Node version has to be pinned.
+An upper bound is not enforced at runtime. Compiling with `--smol --target "22.x"` accepts Node 26 on the target machine, because only the floor is checked. Use an exact version in `--target` or a project pin when the runtime version has to be pinned.
 
 With nothing pinned up the tree and no `--target`, Nub refuses rather than guessing — a compiled binary's Node version has to be intentional and reproducible, so there is no silent "latest" fallback the way `nub run` has:
 
@@ -176,6 +186,15 @@ const icons = createReadStream(join(import.meta.dirname, "..", "assets", "icons.
 ```
 
 Because they are real files, every filesystem API works on them — `readFile`, `createReadStream`, `stat`, `readdir`, and a native addon opening the path itself.
+
+An embedded file that was executable stays executable, so a platform binary your app spawns keeps working:
+
+```ts
+// bin/tool was chmod +x in your source tree
+execFileSync(join(import.meta.dirname, "bin", "tool"));
+```
+
+The extracted copy is owner-only (`0700`) rather than world-readable, because it is your content and nothing outside the account running the binary needs it. On Windows there is no executable bit to carry; a `.exe` runs regardless. Cross-compiling a Unix target from a Windows host is the one case that loses the bit, since the source mode cannot be read there.
 
 Repeat the flag per path, and use a glob where a pattern is easier to write:
 
@@ -292,9 +311,42 @@ module.exports.config = () => join(__dirname, "config.json");
 That path resolves beside the entry rather than inside the package. Reading it gives `ENOENT` unless [`--include`](#--include) embeds the file — an error the code can catch, rather than the crash it used to be.
 
 An ES module is left alone. Node gives ESM no `__dirname`, so code that throws `ReferenceError` under `node` throws the same error in the compiled binary.
+
+## Workers
+
+The compiler treats a static file-backed worker as a second bundled entry:
+
+```ts
+new Worker(new URL("./worker.ts", import.meta.url));
+
+import { Worker as NodeWorker } from "node:worker_threads";
+new NodeWorker(new URL("./worker.ts", import.meta.url));
+```
+
+Each worker receives the compiled runtime preamble before its bundled entry runs, so the thread reports the same `process.execPath` as the program and sees the same globals.
+
+The constructor is followed through every spelling whose identity the build can prove:
+
+```ts
+new globalThis.Worker(new URL("./worker.ts", import.meta.url)); // also self, window, global
+const Spawn = Worker;                                           // and chains of aliases
+const { Worker: Spawn } = globalThis;
+const Spawn = globalThis.Worker ?? NodeWorker;                  // every arm must be a Worker
+```
+
+The URL itself is read only where it is written inline, as above. A specifier computed into a variable first is not bundled.
+
+Anything else that looks like a worker fails the build rather than shipping its entry as data, which would run untranspiled and outside the compiled runtime:
+
+- A `Worker` property on any other object, including one from `require("node:worker_threads")`.
+- A binding assigned more than once, or an arm of a `??` guard that resolves to something else.
+- A `data:` URL, a `blob:` URL, or source text with `{ eval: true }`, none of which have a module root to hold the preamble.
+
+Name the constructor directly — the global, a property of `globalThis`, or an import from `node:worker_threads` — and it compiles.
+
 ## Native addons
 
-Importing a package with a native addon works, and the `.node` file ships inside the executable:
+When the compiler can find a native addon's static import, it ships the `.node` file inside the executable:
 
 ```ts
 import { getCurrentProcessPriority } from "@napi-rs/nice";
@@ -302,7 +354,7 @@ import { getCurrentProcessPriority } from "@napi-rs/nice";
 console.log(getCurrentProcessPriority());
 ```
 
-The addon is written out beside the compiled entry and loaded from there, so the platform's dynamic loader gets a real file at a real path — the same thing it gets from `node_modules`. Nothing needs to be installed where the binary runs.
+The addon is written out beside the compiled entry and loaded from there, so the platform's dynamic loader gets a real file at a real path — the same thing it gets from `node_modules`.
 
 Most addons ship one package per platform and pick between them at load time. Compiling replaces `process.platform` and `process.arch` with the target's values, so that choice is settled while the binary is built and only the target's addon is embedded:
 
@@ -340,7 +392,7 @@ this native addon is built for macOS, but the binary targets linux-x64: node_mod
   or drop --platform to build for this machine.
 ```
 
-Installing the target's platform package is enough to fix it. Package managers skip a dependency whose `os` or `cpu` does not match the machine installing it, so a cross-compile usually has to ask for that package by name.
+Installing the target's platform package fixes an operating-system or architecture mismatch. Package managers skip a dependency whose `os` or `cpu` does not match the machine installing it, so a cross-compile usually has to ask for that package by name. The compiler does not validate libc requirements or compatibility with older Node ABIs; verify those against the target runtime.
 
 ### Addons the build cannot find
 
@@ -397,7 +449,7 @@ darwin-x64     linux-arm64-musl   linux-x64-musl   win32-x64
 
 Everything platform-dependent follows the target rather than the build machine: the Node it embeds, the executable format, the `.exe` suffix on a Windows output, and the values `process.platform` and `process.arch` are folded to in the bundle.
 
-Building for a platform other than the host also needs that platform's launcher, and an install ships only its own. Nub fetches the one it needs from the release it came from, checks it against the published checksum, and caches it — so the first cross-compile to a given platform downloads a few hundred kilobytes and later ones do not. Setting `NUB_LAUNCHER_TEMPLATE` to a launcher on disk skips that entirely, which is the way to cross-compile with no network at all.
+Building for a platform other than the host also needs that platform's launcher, and an install ships only its own. Nub fetches the launcher for its exact version, checks it against the published checksum, and caches it. An offline cross-build works only when that exact launcher is already cached, and an unpublished development version cannot fetch a launcher that has not been released.
 
 ## Unresolved imports fail the build
 
@@ -450,6 +502,8 @@ Error: 1 import could not be resolved at build time:
 ```
 
 Nub resolves a package's `module` field ahead of `main`, so a dual package reaches its ESM build and never hits this. A UMD-only package needs `--alias` pointed at an ESM entry. Guarded probes are left alone — a `require()` whose specifier is a variable is nearly always an optional loader inside a `try`/`catch`, and failing on those would break builds that work.
+
+A local `require` returned by `createRequire()` is another ordinary function binding, so the compiler cannot follow relative calls through it. Replace a relative `createRequire()` call with a static import. Generated native-addon loaders use a narrower recognized pattern and are handled automatically.
 
 ## Unparseable output fails the build
 
@@ -544,7 +598,7 @@ Two cases justify it:
 
 Bundle everything else.
 
-An externalized package must be installed on the machine that runs the binary — the executable is no longer self-contained, and that is the trade. Resolution starts at the directory the binary is started in and walks up from there, exactly as Node would resolve it for a script sitting in that directory. A package that isn't there fails at startup, naming it:
+An externalized package must be installed on the machine that runs the binary — the executable is no longer self-contained, and that is the trade. Resolution preserves the lookup base of the source module that imported it, rather than using one launch-directory base for every external. A package that cannot be found there fails at startup, naming it:
 
 ```console
 $ ./app
@@ -552,10 +606,10 @@ Error: Cannot find prettier.
 
   This executable was compiled with --external prettier, so prettier is not
   part of it — it is resolved when the executable runs, from the directory
-  it is started in.
+  of the module that imported it.
 
   Started in: /srv/app
-  Install prettier there, or run this from a directory that already has it.
+  Install prettier where that importing module can resolve it.
 ```
 
 Externals need Node 22.15 or newer, since the executable redirects them with a resolve hook added in that release. The build fails when the version it resolves is older, whether that came from `--target` or the project's pin.
@@ -623,37 +677,20 @@ nub compile app.ts --sourcemap=external --sourcemap-exclude-sources
 
 ## Where the runtime is extracted
 
-The default shape extracts Node once into a shared cache, keyed by the runtime's content hash — so every compiled binary and every `nub run` project that needs that Node reuses one extracted copy instead of each carrying a private one. The binary takes the first directory it can create, write to, and execute from:
+The default shape extracts Node under `compile-node/<version>-<hash>`, keyed by the runtime's content hash. Compiled binaries with matching embedded Node share that extraction. A compiled artifact can instead adopt a matching Node from Nub's ordinary store, but `nub run` does not reuse `compile-node` extractions. On systems using the XDG base-directory convention, the cache lives under `$XDG_CACHE_HOME/nub`; otherwise it uses `$HOME/.cache/nub` and falls back to a private per-user directory under `$TMPDIR` when needed.
 
-```bash
-NUB_COMPILE_CACHE_DIR   # explicit override, used exactly as given
-$XDG_CACHE_HOME/nub
-$HOME/.cache/nub
-$TMPDIR/nub-<uid>       # per-user, created mode 0700
-```
+Each candidate is tried for real. A read-only cold cache is skipped rather than fatal, and a `noexec` cache is skipped only when that cache must supply Node. A `--smol` binary with a proven external Node can use it for app data. A binary on AWS Lambda or in a `readOnlyRootFilesystem` pod falls through to the temp directory when needed. When no candidate works, the error reports the directories it tried and why each was unsuitable.
 
-Each candidate is tried for real, so a read-only home or a `noexec` mount is skipped rather than fatal — a binary on AWS Lambda or in a `readOnlyRootFilesystem` pod falls through to the temp directory and runs. When no candidate works, the error names every path it tried and what stopped it:
-
-```console
-$ ./app
-nub: no writable, executable cache directory was found.
-  Tried:
-    NUB_COMPILE_CACHE_DIR — not set
-    XDG_CACHE_HOME — not set
-    HOME (/root/.cache/nub) — read-only filesystem
-    TMPDIR (/tmp/nub-0) — mounted noexec
-```
-
-For a locked-down deploy, warm the cache at image-build time — run the binary once during the build with `NUB_COMPILE_CACHE_DIR` pointing inside the image. The extraction lands in an ordinary layer, and the runtime hit writes nothing at all.
+For a locked-down Linux deploy, warm the cache at image-build time in an executable XDG cache directory. The extraction lands in an ordinary layer, and the runtime hit writes nothing at all.
 
 ```dockerfile
-ENV NUB_COMPILE_CACHE_DIR=/opt/nub-cache
+ENV XDG_CACHE_HOME=/opt/cache
 RUN ./app --version || true   # the exit code is irrelevant; the extraction is the point
 ```
 
 ## Distributing on macOS
 
-A compiled macOS binary is ad-hoc-signed, not notarized. It runs locally without a prompt, but macOS quarantines anything downloaded — a release asset, a browser download, `curl` — so Gatekeeper blocks the first launch, reporting that it cannot verify the app is free of malware. Every non-notarized binary behaves this way; it is not specific to Nub, and `spctl --assess` rejects such a binary for the same reason.
+A compiled macOS binary is ad-hoc-signed, not notarized. The signature allows local execution but provides no Developer ID identity or Gatekeeper trust. When the download mechanism attaches the quarantine attribute, Gatekeeper may block the first launch; `spctl --assess` also rejects an unnotarized binary.
 
 Notarizing is yours to do, because it needs your Apple Developer identity. To ship a macOS binary without the warning, sign it with a Developer ID certificate and notarize it through [Apple's notarization service](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution). Someone who already holds an un-notarized binary can clear the quarantine flag instead:
 
@@ -661,13 +698,38 @@ Notarizing is yours to do, because it needs your Apple Developer identity. To sh
 xattr -d com.apple.quarantine ./app   # or, once: right-click the app → Open
 ```
 
+## Distributing on Windows
+
+A compiled Windows executable is not Authenticode-signed. Windows runs unsigned executables, but SmartScreen may warn. Sign the finished executable with your own code-signing certificate before distribution when your release requires Authenticode identity or reputation.
+
 ## Runtime behavior
 
-- **Dependencies are always bundled.** There is no install step on the target machine and no `node_modules` at runtime.
-- **Node flags pass through.** The compiled binary honors `NODE_OPTIONS` like plain Node, so an operator can raise the heap size or pass other flags without recompiling.
-- **Node stays stock.** The embedded or provisioned Node is official, unpatched Node; the binary spawns it with the version-appropriate flags Nub uses everywhere.
+The embedded or provisioned runtime is official, unpatched Node. The launcher starts it with a fixed internal CommonJS bootstrap, version-appropriate flags, and the bundled preamble. The inherited `NODE_OPTIONS` value is passed to Node unchanged, so supported Node flags keep their normal behavior.
+
+### Process identity
+
+The application sees the outer artifact as its executable while retaining Node's native process name:
+
+```js
+process.execPath  // the outer compiled executable
+process.argv[0]   // the outer compiled executable
+process.argv[1]   // the extracted bundled entry
+process.argv0     // the underlying Node argv0
+process.title     // the underlying Node process title
+process.execArgv  // the actual underlying Node CLI flags
+```
+
+The `process.execArgv` array can contain the private bootstrap path and version-dependent flags. Treat those values as runtime plumbing, not a stable application interface. In particular, spawning `process.execPath` with `process.execArgv` does not recreate plain Node: the executable path re-enters the launcher and runs the compiled app again. Discover and pass a Node executable explicitly when a subprocess needs plain Node.
+
+### Child processes and workers
+
+The `child_process.fork()` function uses the underlying Node when `options.execPath` is omitted or falsy. A truthy explicit `execPath` is honored. The forked module still needs a path available at runtime; bundling it does not preserve its original source path.
+
+Forks prepend the private compiled bootstrap exactly once. When `execArgv` is omitted or falsy, the child otherwise inherits the parent's actual Node flags. An explicit `execArgv` array keeps its authored order after that bootstrap.
+
+For `node:worker_threads`, an explicit `execArgv` keeps Node's replacement semantics. Compiled static workers use a generated wrapper that installs the private bootstrap independently. The global `Worker` API instead merges explicit flags after the inherited flags and keeps one bootstrap at the front.
 
 ## Related
 
 - [Running files](/docs/runtime) — how `nub <file>` transpiles and runs TypeScript.
-- [Node manager](/docs/node) — the version resolution `--target` reuses, and the shared cache the default shape extracts into.
+- [Node manager](/docs/node) — the version resolution `--target` reuses, and the ordinary Node store a compiled artifact may adopt.

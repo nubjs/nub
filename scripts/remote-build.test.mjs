@@ -10,7 +10,7 @@
 //      were real bugs during development.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseArgs, jobScript, instanceCreateArgs, filterSourceFiles, rsyncPushArgs, placementCandidates, isStray, remoteJobCommand } from "./remote-build.ts";
+import { parseArgs, jobScript, instanceCreateArgs, filterSourceFiles, sourceFilesForSync, REQUIRED_SOURCE_FILES, rsyncPushArgs, placementCandidates, isStray, remoteJobCommand } from "./remote-build.ts";
 
 // GCE returns ZONE_RESOURCE_POOL_EXHAUSTED for a specific shape in a specific zone, and it
 // took out the first image bake. A 10-way fanout requests ten instances at once, so a
@@ -67,15 +67,33 @@ for (const job of ["clippy", "test"]) {
   });
 }
 
-// Verified against .github/workflows/ci.yml: the Clippy job runs THREE things. nub-native
-// is its own workspace (panic=unwind cdylib) `exclude`d from the root, so a root-only
-// clippy goes green on code that CI then rejects — the exact --all-targets-shaped gap
-// AGENTS.md warns about.
-test("jobScript(clippy) reproduces all three legs of the CI clippy gate", () => {
+// Verified against .github/workflows/ci.yml: the Clippy job runs root and separate-workspace
+// Rust gates, then both static brand lints. nub-native and nub-launcher are excluded from the
+// root workspace, so a root-only clippy goes green on code that CI then rejects.
+test("jobScript(clippy) reproduces every CI clippy leg in order", () => {
   const s = jobScript("clippy", "fast");
-  assert.match(s, /cargo clippy --all-targets --all-features -- -D warnings/);
-  assert.match(s, /crates\/nub-native && cargo clippy --all-features -- -D warnings/, "root clippy does NOT cover nub-native");
-  assert.match(s, /tests\/brand-lint\/check-env-reads\.sh/);
+  const legs = [
+    "cargo clippy --all-targets --all-features --profile fast -- -D warnings",
+    "crates/nub-native && cargo clippy --all-features --profile fast -- -D warnings",
+    "crates/nub-launcher && cargo clippy --all-targets -- -D warnings && cargo build && cargo test",
+    "tests/brand-lint/check-env-reads.sh",
+    "tests/brand-lint/check-path-literals.sh",
+  ];
+  let previous = -1;
+  for (const leg of legs) {
+    const index = s.indexOf(leg);
+    assert.notEqual(index, -1, `missing CI clippy leg: ${leg}`);
+    assert.ok(index > previous, `CI clippy leg is out of order: ${leg}`);
+    previous = index;
+  }
+});
+
+test("jobScript(clippy) interpolates the selected profile only into root and nub-native", () => {
+  const s = jobScript("clippy", "release");
+  assert.match(s, /cargo clippy --all-targets --all-features --profile release -- -D warnings/);
+  assert.match(s, /crates\/nub-native && cargo clippy --all-features --profile release -- -D warnings/);
+  assert.match(s, /crates\/nub-launcher && cargo clippy --all-targets -- -D warnings/);
+  assert.doesNotMatch(s, /crates\/nub-launcher && cargo clippy[^\n]*--profile/);
 });
 
 // CI runs the WHOLE workspace (`cargo test`, not `-p nub-cli`) and builds the REAL addon
@@ -126,6 +144,23 @@ test("filterSourceFiles drops entries missing from the worktree and de-dupes the
   const listed = ["a.rs", "gone.rs", "a.rs", "tests/node-suite/x.js", "b.rs"].join("\n");
   const out = filterSourceFiles(listed, (f) => f !== "gone.rs");
   assert.deepEqual(out, ["a.rs", "b.rs"], "a deleted-but-tracked file aborts the whole rsync");
+});
+
+// `--exclude-standard` correctly prevents an rsync walk through ignored trees, but it also
+// hides this aube build input. It must be explicitly added to the allowlist: PREPARE sets
+// AUBE_REQUIRE_PRIMER=1, so omitting it makes both remote job types fail before their gate.
+test("sync allowlist provisions the required ignored aube popular-name index", () => {
+  const required = REQUIRED_SOURCE_FILES[0];
+  assert.deepEqual(
+    sourceFilesForSync("Cargo.toml\n", () => true),
+    ["Cargo.toml", required],
+    "the generated input must reach the fresh remote source tree without walking ignored files",
+  );
+  assert.throws(
+    () => sourceFilesForSync("Cargo.toml\n", (f) => f !== required),
+    new RegExp(`required generated source input missing: ${required}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    "fail locally before provisioning a VM when the caller has not generated the required input",
+  );
 });
 
 // Layer 2 is the ONLY orphan-proofing a SIGKILL cannot defeat, so it must cover EVERY

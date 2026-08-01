@@ -24,9 +24,19 @@ metadata:
 macOS runner, with no stub TBDs, no pinned zig, and a correct deployment target. Full measurements and the
 decision record: [`wiki/research/remote-build-offload.md`](../../../wiki/research/remote-build-offload.md).
 
+Remote VM operations require `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=~/.config/pullfrog/vertex-service-account.json`. The script sets that override for every `gcloud` call, so invoke the script normally rather than running its VM commands by hand.
+
+Before the first remote sync in a checkout, generate the ignored resolver data that the allowlisted sync needs:
+
+```sh
+nub vendor/aube/scripts/generate-primer.mjs --popular-names-only --popular-names-out vendor/aube/crates/aube-resolver/data/popular-top100000-v1.json
+```
+
+`popular-top100000-v1.json` is generated and gitignored; without it, `remote-build.ts` refuses to sync a clean checkout rather than sending a builder an incomplete source tree.
+
 ```sh
 nub scripts/remote-build.ts --job clippy                 # the CI gate, off-box
-nub scripts/remote-build.ts --job test                   # cargo test -p nub-cli
+nub scripts/remote-build.ts --job test                   # cargo test (whole workspace)
 nub scripts/remote-build.ts --fanout 10 --job clippy     # 10 builders at once
 nub scripts/remote-build.ts --reap                       # delete stray builder VMs
 nub scripts/remote-build.ts --build-image                # re-bake the golden image (rare)

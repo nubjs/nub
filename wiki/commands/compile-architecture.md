@@ -1,163 +1,104 @@
 # `nub compile` — system design
 
-How a Nub project becomes a single self-contained executable, and why it is built this way.
-This document is the orientation for anyone — human or agent — changing the compile subsystem.
-Keep it current: a change that invalidates a claim here should update it in the same commit.
+This document describes how a Nub project becomes a target-specific executable. Keep it synchronized with changes to the compile subsystem.
 
-The code it describes spans three places: `crates/nub-cli/src/compile/` (the build side),
-`crates/nub-launcher/` (the runtime side, a separate minimal binary), and
-`crates/nub-core/src/compile.rs` (the payload format both agree on).
+The implementation spans `crates/nub-cli/src/compile/` for the build, `crates/nub-launcher/` for the runtime launcher, and `crates/nub-core/src/compile.rs` for the shared payload format.
 
-## The premise: augmentation is resolved at COMPILE time
+## Compile-time transformation and runtime support
 
-This is the load-bearing idea, and almost every design choice below follows from it.
+Normal Nub execution augments the user's Node through Node's extension surfaces: preloads, module hooks, and injected flags. A compiled artifact does not carry Nub's general transpiler or resolver. Rolldown transpiles TypeScript and JSX, substitutes target values such as `process.platform` and `process.arch`, and resolves the static module graph during the build.
 
-Nub normally augments the user's Node through Node's own extension surfaces — a `--import`
-preload, `module.registerHooks`, injected V8 flags. A compiled binary does none of that at
-runtime. **The launcher spawns bit-exact official Node with NO preload**, passing only
-version-appropriate flags computed by `flags::compute_inject_flags`. Everything the preload
-would have done is already done: TypeScript and JSX are transpiled by Rolldown during the
-build, `process.platform`/`process.arch` are substituted as defines, module resolution is
-settled by bundling.
+The runtime is still more than a bare script spawn. The launcher starts official, unpatched Node with a fixed internal CommonJS bootstrap as its first CLI argument, followed by version-appropriate flags and the extracted bundled entry. The bootstrap captures fixed-root builtin access before user hooks run, and the bundle's preamble restores the runtime globals the compiled program needs.
 
-So "a compiled binary gets no runtime augmentation" is the design working, not a bug. It is
-precisely what lets the standalone executable ship **without a transpiler** — the single
-largest reason the binary is as small as it is, and why startup is a plain Node process spawn.
+The preamble is injected into the main root and each supported static worker root. It installs feature-detected polyfills, including the supported Web Storage surface for `sessionStorage`. That storage is process-local and does not add browser-origin sharing or unsupported Web Storage APIs.
 
-**The one thing this cannot cover is a preload-provided GLOBAL.** `Worker`, `sessionStorage`
-and friends exist because the preload defines them; there is no compile-time equivalent yet.
-Code using them compiles clean and fails at runtime. The intended fix is a **polyfill
-preamble** — a feature-detecting banner injected into the bundle at build time, version-gated
-the same way the runtime tier logic is. Not built. This is the known gap; do not rediscover it
-as a mystery.
+Static workers must use a file-backed `new Worker(new URL("./worker.js", import.meta.url))` shape through the global `Worker` or a named ESM import from `node:worker_threads`. Statically recognized data URLs, blob URLs, `{ eval: true }`, and CommonJS `require("node:worker_threads")` worker bindings are refused because the compiler cannot turn them into preamble-bearing roots.
 
 ## Two shapes
 
 | Shape | Size | Contains | Node comes from |
 | --- | --- | --- | --- |
 | default (embed) | ~26 MB | launcher + manifest + bundled JS + assets + a stripped, zstd-19 Node | inside the binary |
-| `--smol` | ~0.6 MB | launcher + manifest + bundled JS + assets | discovered on PATH, else provisioned |
+| `--smol` | ~0.6 MB | launcher + manifest + bundled JS + assets | discovered locally, else provisioned |
 
-`--smol` provisioning is implemented only for hosts served by `tar.xz` — **on Windows it is not
-implemented**, so a `--smol` Windows binary requires a pre-installed Node and fails loudly
-(exit 1, legible message) without one. That is a real limitation, not a defect; the embed shape
-is the answer there.
+The `--smol` launcher downloads through curl or wget, verifies the selected archive against `SHASUMS256.txt`, and extracts it through Nub core's capped archive reader. Unix hosts use the published `.tar.xz`; Windows hosts use the published `.zip`. The verified tree is staged and atomically published under the ordinary Node store before discovery can return it.
+
+Runtime selection depends on the target form. An exact version reuses only that Node and provisions it when unavailable. A major or minor pin, alias, or semver range resolves to a floor; any discovered Node at or above that floor qualifies. Upper bounds are not enforced at runtime.
 
 ## Anatomy of a compiled binary
 
-A compiled binary *is* the `nub-launcher` executable with one extra section injected into it.
-The section holds a JSON manifest plus the payload it describes. The launcher is a separate,
-deliberately minimal crate — it must not grow a dependency on the CLI, because every byte of it
-ships in every compiled binary.
+A compiled binary is a target-specific `nub-launcher` with one injected section. The section holds a JSON manifest and its payload. Payload V2 carries the app files and, for the default shape, the exact aggregate Node-root `LICENSE` as a compressed notice. The decoder remains compatible with V1 payloads, which have no notice field.
 
-Injection is per-format, via `libsui`:
+Injection is format-specific:
 
-- **Mach-O** — a new section; the `__probe` self-check exists because an under-padded injection
-  corrupts into a SIGILL trap, and it is cheaper to catch that at build time.
-- **ELF** — `.note.sui` plus `.sui.phdrs`.
-- **PE** — a resource.
+- **Mach-O** uses a new section and is ad-hoc-signed by the pure-Rust injector. The signature supplies neither a Developer ID identity nor notarization.
+- **ELF** uses `.note.sui` plus `.sui.phdrs` and remains unsigned.
+- **PE** uses a resource and remains unsigned. Authenticode signing is the distributor's responsibility.
 
-`compile/inject.rs::verify_template` validates the template's **architecture**, not merely its
-format — Mach-O cputype, ELF `e_machine`, PE COFF Machine. That gate exists because a checksum
-and a format check both pass for a darwin-arm64 template used against `--platform darwin-x64`,
-and the result was a binary labelled x64 containing arm64 code.
+The `compile/inject.rs::verify_template` function validates the template's format and architecture: Mach-O cputype, ELF `e_machine`, or PE COFF Machine. A checksum alone only proves that the downloaded bytes match their publisher; it does not prove that the asset matches the requested target.
 
-## The build pipeline
+## Build pipeline
 
-1. **Resolve the target.** `--target` picks the Node version (default: latest major, resolved
-   through the same `resolve_pin_chain` `nub run` uses). `--platform` picks the triple.
-2. **Bundle.** Rolldown runs **in-process** as a Rust library — there is no bundler subprocess.
-   Plugins are registered in `compile/bundle.rs`; ordering matters and is commented there.
-3. **Collect assets.** `--include` globs, loader-claimed extensions (`--loader`, `text`,
-   `file`, `.wasm`), `new URL(..., import.meta.url)` references, and `.node` native addons all
-   funnel into one shared `Assets` collector, which is what makes an asset reached twice ship
-   once and gives everything the same content-hashed flat naming.
-4. **Acquire the launcher template.** `NUB_LAUNCHER_TEMPLATE` → a sibling of the running `nub`
-   → the local cache → fetched from the release for the **exact** version (never "latest") and
-   verified against its `.sha256` sidecar.
-5. **Inject** the manifest and payload into a copy of the template.
+1. **Resolve the target.** The `--target` flag selects the Node version; otherwise the compiler uses the project's pin chain and refuses when it finds no pin. The `--platform` flag selects the target triple.
+2. **Bundle.** Rolldown runs in-process as a Rust library. The plugins and their ordering are defined in `compile/bundle.rs`.
+3. **Collect assets.** Include globs, loader-claimed files, literal `new URL(..., import.meta.url)` references, worker roots, and native addons feed one `Assets` collector. The payload stores identical physical bytes once while retaining each logical name.
+4. **Acquire the launcher.** Normal lookup checks beside the running `nub`, then the local cache, then the immutable release for this exact Nub version. Downloaded launchers and their `.sha256` sidecars are verified before the launcher is cached. A foreign target has no host-template fallback; an offline build needs the exact target launcher already cached, and an unpublished version cannot fetch a release asset that does not exist.
+5. **Inject and stage.** The compiler injects the payload into a staged copy, verifies what the host can verify, then replaces the requested output. A foreign artifact cannot be executed on the build host, so cross-target verification is structural rather than an execution probe.
 
-## The runtime path
+## Runtime path
 
-`nub-launcher/src/main.rs::launch` is short and the order is deliberate:
+1. The launcher decodes its payload. No argument spelling is reserved at any argument count; the embedded Node notice is reached only through the private `__NUB_COMPILED_LAUNCHER_MODE=licenses` channel with no application arguments (release CI's gate), which prints it before cache resolution or Node startup.
+2. A `--smol` launcher first proves whether a usable external Node exists. This determines whether the selected cache will hold app data only or must supply Node.
+3. `cache::resolve()` selects one cache root and threads it through the run. Normal candidates are the XDG cache, the home cache, and a per-user temporary directory. A cold cache must be writable; it must permit execution only when it will supply Node. A proven external `--smol` Node makes a `noexec` app cache valid.
+4. `acquire_node` extracts or provisions Node when no external `--smol` Node was found. `ensure_app` extracts the bundled entry and assets. Durable completion markers are written after each tree is complete, and later runs reject an incomplete publication.
+5. `compute_inject_flags` selects flags for the Node version. The launcher prepends the absolute compile bootstrap, appends the extracted entry and application arguments, and inherits `NODE_OPTIONS` unchanged.
+6. The launcher starts Node in its own process group, forwards signals and the exit status, and hands an interactive terminal to the child.
 
-1. `cache::resolve()` — pick an exec-capable cache root (writable too, unless this run's
-   artifacts are already extracted there), once, and thread it through. Candidates in order:
-   `NUB_COMPILE_CACHE_DIR` (used verbatim, the documented escape hatch) → `XDG_CACHE_HOME`
-   → `HOME` → a per-uid dir under `TMPDIR`.
-   The ownership and `noexec` gates ALWAYS run: the launcher execs Node out of this tree
-   whether or not it writes to it. Only the two steps that actually WRITE — the mkdir and a
-   zero-byte probe file — are skipped when the cache is already warm, which is what makes the
-   pre-warmed read-only image deployment (the one the error text recommends) actually work.
-2. `acquire_node` — use the embedded Node, or discover/provision one for `--smol`.
-3. `ensure_app` — extract the bundled JS and assets into the app dir.
-4. `compute_inject_flags` — version-appropriate flags only.
-5. Spawn Node: own process group, signal forwarding, TTY foreground handoff, `argv0` set to
-   `node` so `process.argv0` matches what a user expects. `NODE_OPTIONS` is inherited untouched.
+Cache selection validates the properties it relies on before using extracted files, including ownership or access control. It checks for an executable mount where supported only when Node will run from that cache. This protects the launcher's cache handoff from other principals; it is not a sandbox, and code running as the same user can modify user-owned files.
 
-## Why extract to real files instead of a virtual filesystem
+## Process identity
 
-Bun's compiled binaries serve embedded files from a virtual `/$bunfs/`. That cannot `dlopen`,
-so native addons do not work there. Nub extracts to real paths on disk, which means the
-platform's dynamic loader gets a real file at a real path — exactly what it gets from
-`node_modules`. **This is a structural advantage over Bun, not a workaround.** Do not "optimize"
-it into a VFS.
+The outer artifact remains the application's executable identity even though the operating-system child process is Node:
 
-Extracted addons are mode `644`: `dlopen` needs read, not exec. No `chmod` is required.
+| Value | Compiled artifact |
+| --- | --- |
+| `process.execPath` | outer compiled executable |
+| `process.argv[0]` | outer compiled executable |
+| `process.argv[1]` | extracted bundled entry |
+| `process.argv0` | underlying Node argv0 |
+| initial `process.title` | underlying Node process title |
+| `process.execArgv` | actual underlying Node CLI flags |
 
-## What is settled at build time vs. at run time
+The compile preamble rewrites `process.execPath` and `process.argv[0]`; `process.argv0` and the initial process title retain Node's native values. Directly spawning `process.execPath` re-enters the launcher and runs the compiled application again.
 
-**Build time:** TypeScript/JSX transpilation, `--define` substitution, `process.platform` and
-`process.arch` (which is how a multi-platform addon package picks the target's variant while
-building), tree-shaking, chunk layout, asset naming, worker entry chunking.
+The `process.execArgv` array truthfully exposes the flags passed to the underlying Node, including the private bootstrap and version-dependent flags. It is runtime plumbing rather than a stable API. Combining the outer `process.execPath` with those underlying Node flags is not a plain-Node re-execution recipe; a caller that needs plain Node must discover and pass a Node executable.
 
-**Run time, by deliberate exception:** `--external` packages, plus computed `import(expr)` AND
-variable-specifier `import(name)` sites allowed through by `--allow-dynamic-import`, are resolved
-by a `module.registerHooks` shim the build installs only when something actually needs it.
-Resolution order is shape-dependent and each direction guards a different silent wrong answer —
-path-like specifiers try the artifact first (chunk-to-chunk imports are indistinguishable at run
-time), bare specifiers try the launch directory first (the app dir has no `node_modules`, so
-Node's walk would climb out of the cache).
+## Forks and workers
 
-With the flag on there is nothing left to refuse, and a deferred import resolves from a launch
-directory that usually has no `node_modules` — so the build PRINTS the sites it deferred and what
-each resolves to. That listing is the only attribution the user gets for a later
-`Cannot find package …`, which is why it is not merely cosmetic.
+The compiled preamble patches both CommonJS and named ESM access to `child_process.fork()`. When `options.execPath` is omitted or falsy, the fork uses the captured underlying Node. A truthy explicit `execPath` remains authoritative.
 
-## Invariants worth knowing before you change something
+Each fork prepends the canonical private bootstrap exactly once. Missing or falsy `execArgv` otherwise inherits the parent's actual Node flags; an explicit `execArgv` array retains its authored relative order after the bootstrap. The requested module must still exist at a runtime path because bundling does not preserve its source-tree path.
 
-- **`CjsPathGlobals` runs last among transforms that rewrite user source**, so scanners ahead of
-  it see the module as authored and report line:column a user can find. It splices `__dirname`
-  and `__filename` from the virtual `\0nub-path-globals` module and never emits `createRequire`
-  — which is why `NativeAddons`, whose transform is gated on the source containing
-  `createRequire`, is safe to push after it.
-- **Refuse loudly rather than emit something that dies at run time.** The recurring failure mode
-  in this subsystem is the *silent wrong answer*: a build that succeeds and produces a binary
-  that resolves the wrong module, or embeds a `.ts` file as inert data. Where a case cannot be
-  handled, fail the build with a diagnostic naming the file and the reason.
-  **The one deliberate exception is a JS/TS module embedded as a DATA asset, which WARNS.**
-  A refusal is only legitimate when there is a flag on the far side of it — the computed-import
-  gate has `--allow-dynamic-import`, and this would have nothing. The build also cannot
-  distinguish meaning-to-execute from a correct, currently-working read of a script's TEXT (a
-  codegen template, browser-served source, a snippet for `new Worker(src, {eval:true})`), and the
-  decidable executed case is already emitted as a chunk. The defect was the absent signal, so a
-  note is the whole fix.
-- **Clean the Rolldown module id before deriving a `SourceType` from it.** An id can carry a
-  `?query`; `SourceType::from_path` on the raw id then falls back to `mjs()`, a TypeScript module
-  fails to parse, and the scan short-circuits — silently dropping every site in that module. This
-  cost a real silent-pass bug in `scan_unresolvable`. `scan_new_urls` still has the same shape
-  (cleans the id for the parent directory but not for the parse); its failure mode is only
-  "no embedding", which is silent by design there, but it is worth fixing.
-- **Emitted chunks are excluded from entry detection.** Rolldown marks them `is_entry`, so
-  without that guard a bundled worker is mistaken for the program's entry.
-- **Verification means running the produced binary**, from a foreign cwd, with the source tree
-  absent, asserting *which* file answered — not merely that something did. A reviewer reading
-  the diff cannot see any of the above.
+For native `node:worker_threads.Worker`, an explicit `execArgv` retains Node's replacement semantics. A compiled static worker uses a generated wrapper that installs the bootstrap independently, so replacing native worker flags does not remove compiled initialization. The global `Worker` compatibility API merges explicit flags after inherited flags and normalizes the bootstrap to one leading copy.
 
-## Known gaps
+## Why extraction uses real files
 
-- The polyfill preamble (preload-provided globals) — see the premise section.
-- `--smol` provisioning on Windows.
-- Node's license redistribution obligations for the embedded runtime.
-- Never executed on: musl (either variant — the `is_musl()` / `read_elf_interp_libc()` store-reuse
-  gate has never run), linux-arm64, win32-arm64, darwin-x64.
+The launcher extracts the app and runtime to real paths so native addons can load through the platform dynamic loader. Extracted addons use mode `644`; `dlopen` needs read access, not the executable bit.
+
+The default shape stores Node under `compile-node/<version>-<hash>`, keyed by content. Matching compiled binaries can share that extraction, and a compiled artifact can adopt a matching Node from Nub's ordinary store. The app files use their own payload-keyed extraction with a completion marker.
+
+## Build-time and runtime resolution
+
+Build time settles TypeScript and JSX transformation, definitions, platform and architecture branches, tree-shaking, chunk layout, asset names, and static worker roots.
+
+Runtime resolution is limited to deliberate exceptions. Packages named by `--external` and computed imports retained by `--allow-dynamic-import` use a bundled `module.registerHooks` shim. Path-like specifiers try the artifact first, while bare package specifiers try the launch directory first.
+
+CommonJS and ESM modules can participate in immediate and lazy cycles in the bundled output. A local function returned by `createRequire()` is not compiler syntax, however, so relative calls through it cannot be followed and must become static imports. The native-addon transform recognizes only the narrow generated-loader rebinding it can prove safe to remove.
+
+## Implementation invariants
+
+- The `CjsPathGlobals` transform runs after scanners that need authored source locations. It provides bundled CommonJS modules with `__dirname` and `__filename` without emitting a new `createRequire` binding.
+- Worker and asset scans clean query suffixes before choosing a parser source type. A TypeScript module must not silently fall back to JavaScript parsing and lose its sites.
+- Emitted chunks are excluded from entry detection even when Rolldown marks them as entries.
+- Unsupported executable code paths fail the build when the compiler can identify them. A JavaScript or TypeScript file embedded deliberately as data produces a warning instead because the compiler cannot infer whether the bytes are meant to execute.
+- End-to-end verification runs the produced binary from a foreign working directory with the source tree unavailable and asserts which runtime file answered.

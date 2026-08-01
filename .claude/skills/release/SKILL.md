@@ -5,8 +5,9 @@ description: >-
   tool) once a release thread's targeted fixes are ALL landed on `main` and
   CI-green. Encodes the full runbook: pick the version (patch bump in the
   0.0.x/0.1.x pre-release regime), `make version` + `make version-check`,
-  commit + tag + push (the `v*` tag triggers the 8-platform CI build → npm OIDC
-  publish → GitHub Release), then draft comprehensive FACTUAL + NEUTRAL release
+  commit + tag + push (the `v*` tag triggers the 8-platform build → glibc and
+  pre-publish native gates → immutable 32-asset prerelease → npm OIDC publish
+  → stable GitHub Release presentation), then draft comprehensive FACTUAL + NEUTRAL release
   notes from the full changeset and comment the version + release link on every
   closed issue + merged PR the release ships (mandatory maintainer hygiene). Do
   NOT cut until all fixes are green.
@@ -16,7 +17,7 @@ metadata:
 
 # Cutting a nub release
 
-A nub release is **tag-triggered and fully automated**. Pushing a `v*` tag fires `.github/workflows/release.yml`, which builds 8 platforms, gates them (test, lockfile conformance, glibc-floor, pre-publish smoke), publishes 10 npm packages via OIDC trusted publishing (no secrets), and creates a GitHub Release with 32 attached assets (8 platforms × {archive, `nub compile` launcher template} × {artifact, `.sha256`}). The human-side work is: confirm the fixes are green, bump the version, push the tag, then write good notes and close the loop on issues/PRs.
+A nub release is **tag-triggered and fully automated**. Pushing a `v*` tag fires `.github/workflows/release.yml`: the 8-platform build runs first, then the glibc and pre-publish native gates, followed by the immutable 32-asset prerelease, npm OIDC publishing, and the stable GitHub Release presentation. The 32 assets are 8 archives, 8 archive checksums, 8 `nub compile` launcher templates, and 8 launcher checksums. The human-side work is: confirm the fixes are green, bump the version, push the tag, then write the notes and close the loop on issues and PRs.
 
 **Guardrails (read first, non-negotiable):**
 
@@ -68,13 +69,13 @@ git push origin main --tags
 
 Post-merge, fast-forward the shared tree so it tracks origin: `git -C <shared-tree> pull --ff-only` (the eagerly-pull rule, AGENTS.md "Default to a PR flow" — the shared checkout otherwise drifts behind as PRs land).
 
-Pushing the `v<ver>` tag fires the release workflow. It runs, in order: `verify` (version + tag-match), `primer` (metadata primer generation), `test` + `conformance` + `glibc-floor-guard` + `pre-publish-gate` (the publish gates), `build` (8 platforms), then `publish-npm` (10 packages, idempotent), `github-release` (release + 32 assets, independently re-runnable), and `test-install` / `test-install-musl` (post-publish smoke of the published package).
+Pushing the `v<ver>` tag fires the release workflow. Its publication path is: `build` (8 platforms), `glibc-floor-guard` and `pre-publish-gate` (native gates), `stable-immutable-release` (stage the versioned prerelease and verify all 32 assets), `publish-npm` (10 packages, idempotent), then `github-release` (the stable presentation). `verify`, `primer`, `test`, and `conformance` also gate the path; `test-install` and `test-install-musl` smoke the published package afterward.
 
-**Watch CI, but never block the foreground on it.** Dispatch a background watcher (a sub-agent or a detached `gh run watch` writing to a log path) and report the log path; do not poll in the foreground. The release is not "done" until `publish-npm` + `github-release` are green.
+**Watch CI through the `ci-watch` skill until it returns a terminal verdict.** Keep the selected monitor in a tracked persistent process or an owned live agent; never detach `gh run watch` and infer completion from a log. The release is not done until `stable-immutable-release`, `publish-npm`, and `github-release` are green.
 
 ## Step 4 — Comprehensive release notes (Opus)
 
-CI's `github-release` job creates the release with `generate_release_notes: true` (GitHub's auto commit/PR list). **Replace that** with hand-written, scannable, factual notes — do not leave the release on the raw auto-list. Drive this on Opus.
+CI's `stable-immutable-release` job creates the prerelease with `generate_release_notes: true`, and `github-release` promotes it after npm succeeds. **Replace the generated body** with hand-written, scannable, factual notes; do not leave the release on the raw auto-list. Drive this on Opus.
 
 Build the notes from the **full** `git log "$PREV"..HEAD` changeset (Step 1), not just the headline fixes — every user-affecting change ships.
 
@@ -191,19 +192,46 @@ Confirm the automated publish actually landed:
 npm view @nubjs/nub@<ver> version            # the root package is on the registry
 npm view @nubjs/nub@<ver> dist.tarball        # sanity: published artifact exists
 gh release view v<ver> --json assets --jq '.assets[].name' | sort
-# expect 32 assets: 8 platforms × {archive, launcher} × {artifact, .sha256}
-#   nub-darwin-arm64.tar.gz(.sha256), nub-darwin-x64.tar.gz(.sha256),
-#   nub-linux-x64.tar.gz(.sha256), nub-linux-x64-musl.tar.gz(.sha256),
-#   nub-linux-arm64.tar.gz(.sha256), nub-linux-arm64-musl.tar.gz(.sha256),
-#   nub-win32-x64.zip(.sha256), nub-win32-arm64.zip(.sha256)
-#   nub-launcher-<platform>(.sha256) for the same 8, `.exe` on win32
+# expect these exact 32 assets:
+# nub-darwin-arm64.tar.gz
+# nub-darwin-arm64.tar.gz.sha256
+# nub-darwin-x64.tar.gz
+# nub-darwin-x64.tar.gz.sha256
+# nub-linux-arm64.tar.gz
+# nub-linux-arm64.tar.gz.sha256
+# nub-linux-arm64-musl.tar.gz
+# nub-linux-arm64-musl.tar.gz.sha256
+# nub-linux-x64.tar.gz
+# nub-linux-x64.tar.gz.sha256
+# nub-linux-x64-musl.tar.gz
+# nub-linux-x64-musl.tar.gz.sha256
+# nub-win32-arm64.zip
+# nub-win32-arm64.zip.sha256
+# nub-win32-x64.zip
+# nub-win32-x64.zip.sha256
+# nub-launcher-darwin-arm64
+# nub-launcher-darwin-arm64.sha256
+# nub-launcher-darwin-x64
+# nub-launcher-darwin-x64.sha256
+# nub-launcher-linux-arm64
+# nub-launcher-linux-arm64.sha256
+# nub-launcher-linux-arm64-musl
+# nub-launcher-linux-arm64-musl.sha256
+# nub-launcher-linux-x64
+# nub-launcher-linux-x64.sha256
+# nub-launcher-linux-x64-musl
+# nub-launcher-linux-x64-musl.sha256
+# nub-launcher-win32-arm64.exe
+# nub-launcher-win32-arm64.exe.sha256
+# nub-launcher-win32-x64.exe
+# nub-launcher-win32-x64.exe.sha256
 ```
 
-A complete release has: the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-<platform>` ×8, `@nubjs/types`), the GitHub Release present, and all 32 assets attached. CI's own `github-release` job already asserts the 32 assets and `test-install` smokes the published package — this step is the human confirmation that the workflow reached green.
+A complete release has: the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-<platform>` ×8, `@nubjs/types`), the stable GitHub Release present, and all 32 assets attached. CI's `stable-immutable-release` job asserts the 32 assets before npm can publish, `github-release` promotes that same release after npm succeeds, and `test-install` smokes the published package. This step confirms that the workflow reached green.
 
 The 8 `nub-launcher-*` assets are what `nub compile --platform <foreign>` fetches to cross-compile, so a release missing one silently disables cross-compiling to that platform for everyone on that version.
 
-**If CI failed partway:** `publish-npm` and `github-release` are split + idempotent on purpose — re-run the failed job from the Actions UI (npm publish skips already-published packages; the release job re-uploads only missing assets). A version is never re-cut for a flaky asset upload; just re-run the job.
+**If CI failed partway:** Re-run the failed job from the Actions UI. The `stable-immutable-release` job rebuilds the deterministic archives and re-uploads missing assets before npm starts; `publish-npm` skips packages already published during a partial attempt; `github-release` only promotes the asset-complete prerelease. Do not re-cut a version for a failed upload or partial npm publish.
 
 ---
 

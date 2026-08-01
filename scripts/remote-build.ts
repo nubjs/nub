@@ -343,6 +343,18 @@ async function deleteInstance(name: string, zone: string) {
 // tracked file deleted in the worktree is still listed, and rsync aborts the entire sync
 // when it cannot open it. So union in untracked-but-not-ignored files, and drop entries
 // that no longer exist (openrsync 2.6.9 has no --ignore-missing-args).
+//
+// Aube's popular-name index is deliberately gitignored: CI's primer producer creates it
+// alongside the ignored metadata-primer artifact, and local builds retain it as generated
+// data. `AUBE_REQUIRE_PRIMER=1` makes aube-resolver/build.rs require this exact input, but
+// `--exclude-standard` necessarily hides it. Declare the exceptional input here instead of
+// widening the rsync walk to ignored paths (which would rediscover target/, node_modules/,
+// and .repos/). Keeping this list explicit makes the remote build's generated-input contract
+// auditable and deterministic.
+export const REQUIRED_SOURCE_FILES = [
+  "vendor/aube/crates/aube-resolver/data/popular-top100000-v1.json",
+];
+
 export function filterSourceFiles(lsFilesOutput: string, exists: (f: string) => boolean = () => true) {
   const seen = new Set<string>();
   return lsFilesOutput
@@ -350,6 +362,17 @@ export function filterSourceFiles(lsFilesOutput: string, exists: (f: string) => 
     .filter((f) => f && !f.startsWith("tests/node-suite"))
     .filter((f) => (seen.has(f) ? false : (seen.add(f), true)))
     .filter((f) => exists(f));
+}
+
+export function sourceFilesForSync(lsFilesOutput: string, exists: (f: string) => boolean = () => true) {
+  const missing = REQUIRED_SOURCE_FILES.filter((f) => !exists(f));
+  if (missing.length) {
+    throw new Error(
+      `remote-build: required generated source input missing: ${missing.join(", ")}. ` +
+        "Generate the aube primer inputs before running a remote build.",
+    );
+  }
+  return filterSourceFiles([...lsFilesOutput.split("\n"), ...REQUIRED_SOURCE_FILES].join("\n"), exists);
 }
 
 // macOS ships openrsync ("rsync version 2.6.9 compatible"), NOT rsync 3.x, so any
@@ -363,7 +386,7 @@ export function rsyncPushArgs(listFile: string, source: string, ip: string, sshC
 
 function syncSource(source: string, ip: string) {
   const listed = sh("git", ["ls-files", "--cached", "--others", "--exclude-standard", "--deduplicate"], { cwd: source });
-  const files = filterSourceFiles(listed, (f) => existsSync(join(source, f)));
+  const files = sourceFilesForSync(listed, (f) => existsSync(join(source, f)));
   const listFile = join(tmpdir(), `remote-build-files-${process.pid}-${Math.random().toString(36).slice(2)}.txt`);
   writeFileSync(listFile, files.join("\n") + "\n");
   try {
@@ -404,13 +427,16 @@ mkdir -p runtime/addons
 `;
 
 export function jobScript(job: string, profile: string) {
-  // Mirror .github/workflows/ci.yml EXACTLY. The root clippy does NOT cover nub-native —
-  // it is its own workspace (panic=unwind cdylib), `exclude`d from the root — so a
-  // root-only run goes green on code CI then rejects. The brand lint is a cheap grep.
+  // Mirror .github/workflows/ci.yml EXACTLY. nub-native and nub-launcher are separate
+  // workspaces excluded from the root, so a root-only clippy goes green on code CI then
+  // rejects. The launcher leg also builds and tests its cache-directory probe chain; the
+  // two brand lints are cheap static gates that run alongside clippy.
   if (job === "clippy") {
-    return `${PREPARE}cargo clippy --all-targets --all-features -- -D warnings
-(cd crates/nub-native && cargo clippy --all-features -- -D warnings)
-tests/brand-lint/check-env-reads.sh`;
+    return `${PREPARE}cargo clippy --all-targets --all-features --profile ${profile} -- -D warnings
+(cd crates/nub-native && cargo clippy --all-features --profile ${profile} -- -D warnings)
+(cd crates/nub-launcher && cargo clippy --all-targets -- -D warnings && cargo build && cargo test)
+tests/brand-lint/check-env-reads.sh
+tests/brand-lint/check-path-literals.sh`;
   }
   // CI runs the WHOLE workspace, and builds the REAL addon first because the data-format
   // loader tests dlopen it — an 11-byte placeholder makes them fail on a malformed library
