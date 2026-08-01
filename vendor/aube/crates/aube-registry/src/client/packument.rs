@@ -7,6 +7,22 @@ use super::{
 use crate::{Error, NetworkMode, Packument};
 use std::path::{Path, PathBuf};
 
+/// `serde_json::from_value` sibling of `parse_full_response`'s error
+/// mapping, for the paths that already hold a parsed `Value`.
+///
+/// `near` is empty here on purpose: `from_value` reports no byte offset
+/// (it walks an in-memory tree, so there is no input to quote), and
+/// re-serializing a multi-megabyte packument just to excerpt it would
+/// cost more than the diagnostic is worth. The package attribution —
+/// the part that made this class of failure unreadable — still lands.
+fn decode_value(value: serde_json::Value, name: &str) -> Result<Packument, Error> {
+    serde_json::from_value(value).map_err(|e| Error::Decode {
+        context: format!("packument {name}"),
+        near: String::new(),
+        message: e.to_string(),
+    })
+}
+
 impl RegistryClient {
     pub fn cached_packument_lookup(&self, name: &str, cache_dir: &Path) -> CachedPackumentLookup {
         let registry_url = self.registry_url_for(name);
@@ -344,8 +360,7 @@ impl RegistryClient {
         // is amortized across the network round-trip so it doesn't
         // show up in steady-state resolves.
         let value = self.fetch_packument_full_cached(name, cache_dir).await?;
-        let packument: Packument = serde_json::from_value(value)
-            .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+        let packument: Packument = decode_value(value, name)?;
         Ok(packument)
     }
 
@@ -360,8 +375,7 @@ impl RegistryClient {
     /// silently disables the age gate at the pick site.
     pub async fn fetch_packument_with_time(&self, name: &str) -> Result<Packument, Error> {
         let value = self.fetch_packument_json_fresh(name).await?;
-        let packument: Packument = serde_json::from_value(value)
-            .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+        let packument: Packument = decode_value(value, name)?;
         Ok(packument)
     }
 
@@ -506,13 +520,7 @@ impl RegistryClient {
                                     cache_path.display()
                                 );
                             }
-                            let packument: Packument =
-                                serde_json::from_value(value).map_err(|e| {
-                                    Error::Io(std::io::Error::new(
-                                        std::io::ErrorKind::InvalidData,
-                                        e,
-                                    ))
-                                })?;
+                            let packument: Packument = decode_value(value, name)?;
                             self.maybe_record_slow_metadata(&label, started);
                             return Ok(packument);
                         }

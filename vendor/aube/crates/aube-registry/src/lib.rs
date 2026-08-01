@@ -1087,6 +1087,41 @@ mod tests {
         serde_json::from_str(json).unwrap()
     }
 
+    /// The whole point of `Error::Decode` is that the rendered string
+    /// carries the package and the offending field. Pin the rendering,
+    /// not just the fields — the excerpt reaches the user through a
+    /// `#[error(...)]` format call that a field-level test would miss.
+    #[test]
+    fn decode_error_renders_the_package_and_the_offending_field() {
+        let rendered = Error::Decode {
+            context: "packument @img/colour".to_string(),
+            near: r#"…"shasum":"0000","unpackedSize":{"bytes":1}},"depend…"#.to_string(),
+            message: "invalid type: map, expected u64".to_string(),
+        }
+        .to_string();
+        assert_eq!(
+            rendered,
+            r#"failed to decode packument @img/colour: invalid type: map, expected u64 — near: …"shasum":"0000","unpackedSize":{"bytes":1}},"depend…"#
+        );
+    }
+
+    /// The `from_value` decode paths have no byte offset to quote, so
+    /// they pass an empty excerpt; it must vanish rather than leave a
+    /// dangling ` — near: ` clause.
+    #[test]
+    fn decode_error_omits_the_excerpt_clause_when_there_is_none() {
+        let rendered = Error::Decode {
+            context: "packument lodash".to_string(),
+            near: String::new(),
+            message: "invalid type: map, expected a string".to_string(),
+        }
+        .to_string();
+        assert_eq!(
+            rendered,
+            "failed to decode packument lodash: invalid type: map, expected a string"
+        );
+    }
+
     /// A registry URL carrying both `user:pass@` userinfo and a
     /// `?token=` query param must never appear UNREDACTED in a surfaced
     /// HTTP error — reqwest's raw Display leaks both, so `Error::Http`'s
