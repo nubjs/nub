@@ -310,10 +310,13 @@ pub(super) fn maybe_cleanup_unused_catalogs(
 }
 
 fn numeric_text_exceeds_u64(raw: &str) -> bool {
-    let digits = raw.trim().strip_prefix('+').unwrap_or(raw.trim());
-    !digits.is_empty()
-        && digits.bytes().all(|byte| byte.is_ascii_digit())
-        && digits.parse::<u64>().is_err()
+    aube_util::concurrency::is_optional_plus_unsigned_decimal(raw)
+        && raw
+            .trim()
+            .strip_prefix('+')
+            .unwrap_or(raw.trim())
+            .parse::<u64>()
+            .is_err()
 }
 
 /// Resolve `networkConcurrency` from cli / env / `.npmrc` /
@@ -1445,8 +1448,8 @@ mod network_concurrency_tests {
     }
 
     #[test]
-    fn direct_cli_text_above_u64_warns_and_does_not_fall_through_to_npmrc() {
-        const OVERFLOW: &str = "18446744073709551616";
+    fn direct_cli_optional_plus_text_above_u64_warns_and_does_not_fall_through_to_npmrc() {
+        const OVERFLOW: &str = "+18446744073709551616";
         let cli =
             crate::Cli::try_parse_from(["aube", "install", "--network-concurrency", OVERFLOW])
                 .expect("the command boundary must retain raw network-concurrency text");
@@ -1484,11 +1487,70 @@ mod network_concurrency_tests {
     }
 
     #[test]
+    fn direct_cli_optional_plus_within_u64_remains_valid() {
+        let cli = crate::Cli::try_parse_from(["aube", "install", "--network-concurrency", "+1"])
+            .expect("a plus-prefixed valid integer must remain accepted");
+        let Some(crate::Commands::Install(args)) = cli.command else {
+            panic!("expected install command");
+        };
+        let cli_flags = args.to_cli_flag_bag(
+            None,
+            crate::commands::install::GlobalVirtualStoreFlags::default(),
+        );
+        let npmrc_entries = Vec::new();
+        let workspace_yaml = std::collections::BTreeMap::new();
+        let global_config_yaml = std::collections::BTreeMap::new();
+        let ctx = aube_settings::ResolveCtx {
+            managed_aube_config: &[],
+            project_aube_config: &[],
+            project_npmrc: &npmrc_entries,
+            project_config: &[],
+            user_aube_config: &[],
+            user_npmrc: &[],
+            workspace_yaml: &workspace_yaml,
+            global_config_yaml: &global_config_yaml,
+            env: &[],
+            cli: &cli_flags,
+            embedder_defaults: &[],
+        };
+        assert_eq!(resolve_network_concurrency(&ctx), Some(1));
+    }
+
+    #[test]
+    fn direct_cli_malformed_text_is_rejected_before_setting_resolution() {
+        let result = crate::Cli::try_parse_from([
+            "aube",
+            "install",
+            "--network-concurrency",
+            "not-a-number",
+        ]);
+        let Err(error) = result else {
+            panic!("malformed network-concurrency must be a CLI usage error");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("must be an unsigned decimal integer"),
+            "unexpected CLI error: {error}"
+        );
+    }
+
+    #[test]
     fn quoted_and_unquoted_workspace_text_above_u64_warn_without_fallthrough() {
         const OVERFLOW: &str = "18446744073709551616";
-        for yaml in [
-            format!("networkConcurrency: {OVERFLOW}\n"),
-            format!("networkConcurrency: \"{OVERFLOW}\"\n"),
+        for (yaml, expected) in [
+            (
+                format!("networkConcurrency: {OVERFLOW}\n"),
+                OVERFLOW.to_string(),
+            ),
+            (
+                format!("networkConcurrency: \"{OVERFLOW}\"\n"),
+                OVERFLOW.to_string(),
+            ),
+            (
+                format!("networkConcurrency: \"+{OVERFLOW}\"\n"),
+                format!("+{OVERFLOW}"),
+            ),
         ] {
             let project = tempfile::tempdir().expect("workspace fixture");
             let workspace_path = aube_manifest::workspace::workspace_yaml_target(project.path());
@@ -1501,7 +1563,7 @@ mod network_concurrency_tests {
             let ctx = aube_settings::ResolveCtx::files_only(&npmrc_entries, &raw_workspace);
             assert_eq!(
                 aube_settings::resolved::network_concurrency_raw(&ctx).as_deref(),
-                Some(OVERFLOW),
+                Some(expected.as_str()),
             );
             assert_invalid_concurrency_warning(&ctx);
         }

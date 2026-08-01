@@ -1,5 +1,14 @@
 use super::{DepSelection, FrozenMode, FrozenOverride, GlobalVirtualStoreFlags};
 
+fn parse_network_concurrency(raw: &str) -> Result<String, String> {
+    let value = raw.trim();
+    aube_util::concurrency::is_optional_plus_unsigned_decimal(value)
+        .then(|| value.to_owned())
+        .ok_or_else(|| {
+            "must be an unsigned decimal integer, optionally prefixed with '+'".to_string()
+        })
+}
+
 #[derive(Debug, clap::Args)]
 pub struct InstallArgs {
     /// Install only devDependencies
@@ -74,7 +83,7 @@ pub struct InstallArgs {
     /// Overrides `network-concurrency` from `.npmrc` /
     /// `aube-workspace.yaml` when set. Falls back to an auto-scaled
     /// default of worker count x3, clamped to 16-64.
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", value_parser = parse_network_concurrency)]
     pub network_concurrency: Option<String>,
     /// Skip optionalDependencies; don't install optional native modules
     #[arg(long)]

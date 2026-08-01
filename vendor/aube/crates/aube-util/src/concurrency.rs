@@ -43,6 +43,15 @@ pub const CONCURRENCY_FLOOR: u32 = 8;
 /// value cannot exhaust the Windows default fd ulimit.
 pub const CONCURRENCY_CEILING: u32 = 256;
 
+/// Whether `raw` is an unsigned decimal integer, optionally prefixed with
+/// one `+`. Leading and trailing whitespace is ignored so text captured from
+/// CLI, `.npmrc`, and YAML sources uses the same lexical policy.
+pub fn is_optional_plus_unsigned_decimal(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    let digits = trimmed.strip_prefix('+').unwrap_or(trimmed);
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 /// Read the `{config_env_prefix}_CONCURRENCY` override (`AUBE_CONCURRENCY`
 /// under standalone aube) as a clamped integer.
 /// Returns `None` when the variable is unset, missing, or outside
@@ -92,6 +101,22 @@ mod tests {
                 Some(v) => std::env::set_var("AUBE_CONCURRENCY", v),
                 None => std::env::remove_var("AUBE_CONCURRENCY"),
             }
+        }
+    }
+
+    #[test]
+    fn optional_plus_unsigned_decimal_accepts_only_decimal_tokens() {
+        for raw in ["0", "42", "+42", "  +42  "] {
+            assert!(
+                is_optional_plus_unsigned_decimal(raw),
+                "must accept {raw:?}"
+            );
+        }
+        for raw in ["", "+", "-1", "1.0", "not-a-number", "+1x"] {
+            assert!(
+                !is_optional_plus_unsigned_decimal(raw),
+                "must reject {raw:?}"
+            );
         }
     }
 

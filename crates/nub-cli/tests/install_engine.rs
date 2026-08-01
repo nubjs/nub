@@ -149,6 +149,7 @@ fn install_workspace_u64_overflow_warns_and_uses_automatic_default() {
     for workspace_yaml in [
         format!("networkConcurrency: {OVERFLOW}\n"),
         format!("networkConcurrency: \"{OVERFLOW}\"\n"),
+        format!("networkConcurrency: \"+{OVERFLOW}\"\n"),
     ] {
         let dir = pm_tmpdir("network-concurrency-overflow");
         std::fs::write(

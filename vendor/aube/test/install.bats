@@ -1333,15 +1333,23 @@ JSON
 	assert_dir_exists node_modules
 }
 
-@test "aube install ignores unquoted workspace networkConcurrency beyond u64" {
+@test "aube install ignores quoted +networkConcurrency beyond u64 without falling through" {
 	_setup_basic_fixture
-	printf 'networkConcurrency: 18446744073709551616\n' >aube-workspace.yaml
+	printf 'networkConcurrency: "+18446744073709551616"\n' >aube-workspace.yaml
 	echo 'network-concurrency=1' >.npmrc
 	run aube -v install --frozen-lockfile
 	assert_success
 	assert_output --partial "WARN_AUBE_INVALID_CONCURRENCY"
 	assert_output --partial "using automatic default"
 	assert_dir_exists node_modules
+}
+
+@test "aube install rejects malformed network-concurrency at the CLI boundary" {
+	_setup_basic_fixture
+	run aube install --network-concurrency not-a-number
+	assert_failure
+	assert_output --partial "must be an unsigned decimal integer"
+	assert_dir_not_exists node_modules
 }
 
 # Fresh resolve: `"<alias>": "npm:<real>@<ver>"` must land as

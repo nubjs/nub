@@ -214,9 +214,19 @@ patchedDependencies:
     #[test]
     fn load_both_preserves_oversized_network_concurrency_scalars() {
         const OVERFLOW: &str = "18446744073709551616";
-        for yaml in [
-            format!("networkConcurrency: {OVERFLOW}\n"),
-            format!("networkConcurrency: \"{OVERFLOW}\"\n"),
+        for (yaml, expected) in [
+            (
+                format!("networkConcurrency: {OVERFLOW}\n"),
+                OVERFLOW.to_string(),
+            ),
+            (
+                format!("networkConcurrency: \"{OVERFLOW}\"\n"),
+                OVERFLOW.to_string(),
+            ),
+            (
+                format!("networkConcurrency: \"+{OVERFLOW}\"\n"),
+                format!("+{OVERFLOW}"),
+            ),
         ] {
             let dir = tempfile::tempdir().unwrap();
             std::fs::write(dir.path().join("aube-workspace.yaml"), yaml).unwrap();
@@ -229,7 +239,7 @@ patchedDependencies:
                 yaml_serde::Value::Number(number) => number.to_string(),
                 other => panic!("expected scalar networkConcurrency, got {other:?}"),
             };
-            assert_eq!(text, OVERFLOW);
+            assert_eq!(text, expected);
         }
     }
 

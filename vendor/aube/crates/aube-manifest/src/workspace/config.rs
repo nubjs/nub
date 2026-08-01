@@ -89,9 +89,7 @@ where
             let trimmed = value.trim();
             match trimmed.parse::<u64>() {
                 Ok(value) => Ok(Some(value)),
-                Err(_)
-                    if !trimmed.is_empty() && trimmed.bytes().all(|byte| byte.is_ascii_digit()) =>
-                {
+                Err(_) if aube_util::concurrency::is_optional_plus_unsigned_decimal(trimmed) => {
                     Ok(None)
                 }
                 Err(_) => Err(E::custom("networkConcurrency must be an unsigned integer")),
