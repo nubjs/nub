@@ -1144,7 +1144,7 @@
       {
         "package": "wordpos",
         "evidence": "measured",
-        "observed": "[grant-matrix] NEEDS-FULL-DISK on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: EPERM: operation not permitted, open '<run>/fx/wordpos-both-Nms9law8d3clu/home/.cache/nub/pm/store/wordnet-db@3.1.14-f249a5f12212c55c/node_modules/wordnet-db/dict/fast-index.adv.json'. Unconfined artifact 23471700 B / 2331 files. nub v0.6.0 def1b2a4f916.",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: EPERM: operation not permitted, open '<run>/fx/wordpos-both-Nms9nl4khl6w6/home/.cache/nub/pm/store/wordnet-db@3.1.14-f249a5f12212c55c/node_modules/wordnet-db/dict/fast-index.adv.json'. Unconfined artifact 23471704 B / 2331 files. nub v0.6.0 633dccc87821.",
         "platform": "darwin-arm64"
       },
       {
@@ -1388,6 +1388,24 @@
       "platform": "macos-arm64"
     },
     {
+      "package": "nx",
+      "versions": ">=14.0.0, <19.0.0",
+      "projectReads": [
+        "nx.json"
+      ],
+      "projectWrites": {
+        "literal": [
+          "nx.json",
+          ".nx"
+        ]
+      },
+      "projectCwd": true,
+      "mechanism": "nx's postinstall starts the nx daemon client, which reads the consumer's `nx.json` eagerly and, from 18 on, creates `<project>/.nx/cache`. Both are the consumer's own project files, which nx is being installed to operate on.",
+      "evidence": "measured",
+      "observed": "MEASURED on macOS arm64, 2026-07-31, every version on ONE binary (sha256 89633e8db646). THE FIRST OLD-VERSION BREAK FOUND THAT THE SHIPPED CATALOG DID NOT ALREADY COVER, and it was invisible for a structural reason: nx needs nothing at latest, so every measurement taken at latest said so. Ladder cells: 13.10.6 passes confined-and-ungranted; 14.8.9, 15.9.7, 16.10.0, 17.3.2 and 18.3.5 each fail ungranted and pass with project access alone; 19.8.4, 21.6.11, 22.7.5 and 23.1.0 pass confined-and-ungranted again. So the requirement is a WINDOW, not a `<X` cutoff, and both edges are measured on adjacent majors. Ungranted, 15.9.7 dies `EPERM: operation not permitted, open <project>/nx.json` from `Workspaces.readNxJson` in the daemon client; 18.3.5 gets past that and dies `EPERM ... mkdir <project>/.nx/cache`, which is why the shape names both. INVERTED-RANGE CONTROL at all five in-window versions, one binary and catalogs differing only in this entry: the scoped range gives rc 0, `<14.0.0` gives rc 1, and the entry removed gives rc 1. Per-version weekly downloads inside the window are about 430,000 (15.9.7 alone is 257,980). Found only because the ladder's project cell was fixed the same day: it granted `projectReads: [\".\"]`, which `contained()` drops because the joined path equals the project root, so every past run scored this row FAILS-AT-BOTH - 'something the catalog cannot express' - when the catalog expresses it in two named paths.",
+      "platform": "macos-arm64"
+    },
+    {
       "package": "pre-commit",
       "versionsObserved": "2.0.0",
       "projectWrites": {
@@ -1447,29 +1465,11 @@
       "platform": "macos-arm64"
     },
     {
-      "package": "nx",
-      "versions": ">=14.0.0, <19.0.0",
-      "projectReads": [
-        "nx.json"
-      ],
-      "projectWrites": {
-        "literal": [
-          "nx.json",
-          ".nx"
-        ]
-      },
-      "projectCwd": true,
-      "mechanism": "nx's postinstall starts the nx daemon client, which reads the consumer's `nx.json` eagerly and, from 18 on, creates `<project>/.nx/cache`. Both are the consumer's own project files, which nx is being installed to operate on.",
-      "evidence": "measured",
-      "observed": "MEASURED on macOS arm64, 2026-07-31, every version on ONE binary (sha256 89633e8db646). THE FIRST OLD-VERSION BREAK FOUND THAT THE SHIPPED CATALOG DID NOT ALREADY COVER, and it was invisible for a structural reason: nx needs nothing at latest, so every measurement taken at latest said so. Ladder cells: 13.10.6 passes confined-and-ungranted; 14.8.9, 15.9.7, 16.10.0, 17.3.2 and 18.3.5 each fail ungranted and pass with project access alone; 19.8.4, 21.6.11, 22.7.5 and 23.1.0 pass confined-and-ungranted again. So the requirement is a WINDOW, not a `<X` cutoff, and both edges are measured on adjacent majors. Ungranted, 15.9.7 dies `EPERM: operation not permitted, open <project>/nx.json` from `Workspaces.readNxJson` in the daemon client; 18.3.5 gets past that and dies `EPERM ... mkdir <project>/.nx/cache`, which is why the shape names both. INVERTED-RANGE CONTROL at all five in-window versions, one binary and catalogs differing only in this entry: the scoped range gives rc 0, `<14.0.0` gives rc 1, and the entry removed gives rc 1. Per-version weekly downloads inside the window are about 430,000 (15.9.7 alone is 257,980). Found only because the ladder's project cell was fixed the same day: it granted `projectReads: [\".\"]`, which `contained()` drops because the joined path equals the project root, so every past run scored this row FAILS-AT-BOTH - 'something the catalog cannot express' - when the catalog expresses it in two named paths.",
-      "platform": "macos-arm64"
-    },
-    {
       "package": "wordpos",
       "fullDisk": true,
       "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
       "evidence": "measured",
-      "observed": "[grant-matrix] NEEDS-FULL-DISK on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: EPERM: operation not permitted, open '<run>/fx/wordpos-both-Nms9law8d3clu/home/.cache/nub/pm/store/wordnet-db@3.1.14-f249a5f12212c55c/node_modules/wordnet-db/dict/fast-index.adv.json'. Unconfined artifact 23471700 B / 2331 files. nub v0.6.0 def1b2a4f916.",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: EPERM: operation not permitted, open '<run>/fx/wordpos-both-Nms9nl4khl6w6/home/.cache/nub/pm/store/wordnet-db@3.1.14-f249a5f12212c55c/node_modules/wordnet-db/dict/fast-index.adv.json'. Unconfined artifact 23471704 B / 2331 files. nub v0.6.0 633dccc87821.",
       "platform": "darwin-arm64"
     }
   ],
