@@ -17,9 +17,12 @@
 //!   ~26 MB Node payload — it only reads the manifest + the tiny app files.
 //! - **No compression/hashing here.** The Node blob arrives already zstd-19'd
 //!   from the writer; the launcher decompresses it. Content hashes are computed
-//!   at compile time and carried verbatim in the manifest as cache keys — the
-//!   whole payload is inside the code-signed binary, so those hashes are
-//!   integrity-protected without re-verification at load.
+//!   at compile time and carried verbatim in the manifest as cache keys. The
+//!   launcher trusts the payload mapped from its own executable; publisher
+//!   signing, when applied, is what protects distribution integrity. These
+//!   hashes identify extracted cache content rather than authenticating it.
+
+use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -32,9 +35,27 @@ use serde::{Deserialize, Serialize};
 /// own `target_os`.
 pub const SECTION_NAME: &str = "__nubc";
 
+/// The fixed private file name for compile-time bootstrap code at the payload
+/// root. This is an internal compiler/launcher ABI: it is never manifest data
+/// and must not vary with the entry's layout.
+pub const COMPILE_BOOTSTRAP_NAME: &str = "__nub_compile_bootstrap.cjs";
+
 const MAGIC: &[u8; 4] = b"NUBC";
-const FORMAT_VERSION: u8 = 1;
-const HEADER_LEN: usize = 4 + 1 + 3 + 4 + 8 + 8; // magic, ver, pad, manifest_len, app_len, node_len
+const FORMAT_VERSION_V1: u8 = 1;
+const FORMAT_VERSION: u8 = 2;
+const HEADER_LEN_V1: usize = 4 + 1 + 3 + 4 + 8 + 8; // magic, ver, pad, manifest_len, app_len, node_len
+const HEADER_LEN_V2: usize = HEADER_LEN_V1 + 8; // + license_len
+
+/// Bit 31 of a V2 logical file's `data_index` marks the file executable.
+///
+/// The index addresses physical data records, each of which costs at least an
+/// 8-byte length header, so a payload cannot approach 2^31 of them — the bit is
+/// free, and spending it leaves the per-file record's shape, the header, and the
+/// format version untouched. A payload with no executable file is therefore
+/// byte-identical to what the pre-flag encoder produced. V1 has no such bit, so
+/// a V1 payload decodes as all-non-executable, exactly as it did before.
+const EXEC_FLAG: u32 = 1 << 31;
+const DATA_INDEX_MASK: u32 = EXEC_FLAG - 1;
 
 /// The two artifact shapes. `Embed` carries a compressed Node; `Smol` discovers
 /// or provisions one at runtime.
@@ -56,14 +77,20 @@ pub struct Manifest {
     /// directory, which nests it (`src/main.js`).
     pub entry: String,
     /// The concrete Node version this binary targets. Embed: the EXACT embedded
-    /// version. Smol: the acceptance FLOOR the launcher enforces (`discovered >=
-    /// node_version`) and the version it provisions when nothing is found.
+    /// version. Smol: the acceptance floor the launcher enforces by default
+    /// (`discovered >= node_version`) and the version it provisions when nothing
+    /// is found.
     ///
-    /// The floor is the WHOLE acceptance rule for smol: any discovered Node at or
-    /// above it qualifies, whatever the major. A compiled range's upper bound is
-    /// deliberately not carried into the artifact, so there is no second version
-    /// field here.
+    /// The floor is the whole default acceptance rule for smol: any discovered
+    /// Node at or above it qualifies, whatever the major. A compiled range's upper
+    /// bound is deliberately not carried into the artifact, so there is no second
+    /// version field here.
     pub node_version: String,
+    /// Whether `smol` requires a discovered Node to match `node_version` exactly
+    /// rather than accepting the legacy floor. Missing in legacy manifests means
+    /// floor mode.
+    #[serde(default)]
+    pub smol_exact_target: bool,
     /// The target triple this binary was compiled for (e.g. `darwin-arm64`).
     pub triple: String,
     /// Content hash (hex) of the DECOMPRESSED embedded Node — the cache key for
@@ -88,16 +115,75 @@ pub struct Manifest {
     pub install_message: Option<String>,
 }
 
+/// One logical file in the payload. `B` is `Vec<u8>` on the writing side and
+/// `&[u8]` on the reading side, which borrows out of the mapped image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppFile<B> {
+    pub name: String,
+    pub bytes: B,
+    /// Whether the launcher restores an executable bit when it extracts this
+    /// file. Set from the source file's Unix mode (`mode & 0o111 != 0`) for
+    /// content embedded verbatim — `--include`d assets and native-package
+    /// islands — and false for everything the compiler generates.
+    ///
+    /// Windows has no such mode, so a Windows BUILD host always records false;
+    /// see [`AppFile::from_source_mode`].
+    pub executable: bool,
+}
+
+impl<B> AppFile<B> {
+    /// A generated payload file: compiler output, never executable.
+    pub fn plain(name: impl Into<String>, bytes: B) -> Self {
+        Self {
+            name: name.into(),
+            bytes,
+            executable: false,
+        }
+    }
+
+    /// A payload file embedded verbatim from disk, carrying the source file's
+    /// executable bit.
+    ///
+    /// `mode` is a Unix mode, or `None` on a host that has none. Windows expresses
+    /// executability through ACLs and a filename extension rather than a mode bit,
+    /// so a Windows build host has nothing to read and records false — sniffing
+    /// content or guessing from an extension would make the same source tree
+    /// produce different payloads on different build machines. The cost is
+    /// confined to cross-compiling a Unix target FROM Windows, where an embedded
+    /// helper arrives non-executable; native Windows targets are unaffected
+    /// because the launcher has no bit to restore there either.
+    pub fn from_source_mode(name: impl Into<String>, bytes: B, mode: Option<u32>) -> Self {
+        Self {
+            name: name.into(),
+            bytes,
+            executable: mode.is_some_and(|mode| mode & 0o111 != 0),
+        }
+    }
+}
+
 /// A borrowed view over a decoded payload — app files and the Node blob are
 /// slices into the caller's section bytes, so no large copy happens on decode.
 pub struct PayloadView<'a> {
     pub manifest: Manifest,
-    /// `(name, bytes)` for every bundled app file, in write order. The entry is
-    /// located by NAME (`Manifest::entry`), never by position — `--external`
-    /// appends a generated wrapper that becomes the entry, so it is written last.
-    pub app_files: Vec<(String, &'a [u8])>,
+    /// Every bundled app file, in write order. The entry is located by NAME
+    /// (`Manifest::entry`), never by position — `--external` appends a generated
+    /// wrapper that becomes the entry, so it is written last.
+    pub app_files: Vec<AppFile<&'a [u8]>>,
     /// The zstd-compressed Node binary (`embed` shape), or empty (`smol`).
     pub node_blob: &'a [u8],
+    /// The zstd-19-compressed aggregate root `LICENSE` from the exact official
+    /// Node distribution embedded above. Empty for `smol` and V1 payloads.
+    pub node_license_blob: &'a [u8],
+}
+
+impl PayloadView<'_> {
+    /// Whether extracting this payload materializes something the application can
+    /// spawn. Decides whether the app cache is data storage or an execution
+    /// surface — a `smol` artifact running a Node it found elsewhere may keep its
+    /// payload on a `noexec` volume only while that stays true.
+    pub fn has_executable_file(&self) -> bool {
+        self.app_files.iter().any(|file| file.executable)
+    }
 }
 
 /// Whose path rules a payload name has to survive.
@@ -216,82 +302,201 @@ fn is_dos_device(stem: &str) -> bool {
 /// Encode a payload into the container blob written to the Mach-O section.
 ///
 /// `node_blob` is the already-zstd-compressed Node binary (empty for `smol`).
-pub fn encode(manifest: &Manifest, app_files: &[(String, Vec<u8>)], node_blob: &[u8]) -> Vec<u8> {
+///
+/// This compatibility wrapper produces V2 but carries no license. New compiled
+/// artifacts must use [`encode_with_license`]; keeping this spelling lets
+/// independent container-scanner fixtures continue to build V2 payloads without
+/// pretending they are redistributable Node artifacts.
+pub fn encode(manifest: &Manifest, app_files: &[AppFile<Vec<u8>>], node_blob: &[u8]) -> Vec<u8> {
+    encode_with_license(manifest, app_files, node_blob, &[])
+}
+
+/// Encode a V2 payload with the already-zstd-19-compressed official Node
+/// `LICENSE`. V2 stores each physical app byte sequence once: later logical
+/// names with identical bytes reference the first record, while the logical
+/// file order (and consequently `app_sha256`) stays unchanged.
+pub fn encode_with_license(
+    manifest: &Manifest,
+    app_files: &[AppFile<Vec<u8>>],
+    node_blob: &[u8],
+    node_license_blob: &[u8],
+) -> Vec<u8> {
     let manifest_bytes = serde_json::to_vec(manifest).expect("manifest serializes");
 
-    // App region: [file_count u32][per file: name_len u16, name, data_len u64, data].
+    // V2 app region:
+    // [logical file_count u32][physical data_count u32]
+    // [per logical file: name_len u16, name, data_index u32 (bit 31 = executable)]
+    // [per physical data: data_len u64, data]
+    // The input bodies outlive encoding, so keys borrow them rather than cloning
+    // every distinct asset just to find aliases. Slice hashing/equality is by
+    // bytes, and first occurrence still decides each record's index. The
+    // executable bit rides the LOGICAL record, so two names sharing one body may
+    // still differ in it.
+    let mut data_indices: HashMap<&[u8], u32> = HashMap::new();
+    let mut files = Vec::with_capacity(app_files.len());
+    let mut data_records: Vec<&[u8]> = Vec::new();
+    for file in app_files {
+        let data = file.bytes.as_slice();
+        let index = match data_indices.get(data) {
+            Some(&index) => index,
+            None => {
+                let index = u32::try_from(data_records.len())
+                    .ok()
+                    .filter(|index| *index < EXEC_FLAG)
+                    .expect("too many app data records");
+                data_indices.insert(data, index);
+                data_records.push(data);
+                index
+            }
+        };
+        let field = if file.executable {
+            index | EXEC_FLAG
+        } else {
+            index
+        };
+        files.push((&file.name, field));
+    }
+
     let mut app_region = Vec::new();
-    app_region.extend_from_slice(&(app_files.len() as u32).to_le_bytes());
-    for (name, data) in app_files {
-        app_region.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    app_region.extend_from_slice(
+        &u32::try_from(files.len())
+            .expect("too many app files")
+            .to_le_bytes(),
+    );
+    app_region.extend_from_slice(
+        &u32::try_from(data_records.len())
+            .expect("too many app data records")
+            .to_le_bytes(),
+    );
+    for (name, field) in files {
+        app_region.extend_from_slice(
+            &u16::try_from(name.len())
+                .expect("app file name exceeds payload format limit")
+                .to_le_bytes(),
+        );
         app_region.extend_from_slice(name.as_bytes());
-        app_region.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        app_region.extend_from_slice(&field.to_le_bytes());
+    }
+    for data in data_records {
+        app_region.extend_from_slice(
+            &u64::try_from(data.len())
+                .expect("app file length exceeds payload format limit")
+                .to_le_bytes(),
+        );
         app_region.extend_from_slice(data);
     }
 
-    let mut out =
-        Vec::with_capacity(HEADER_LEN + manifest_bytes.len() + app_region.len() + node_blob.len());
+    let mut out = Vec::with_capacity(
+        HEADER_LEN_V2
+            + manifest_bytes.len()
+            + app_region.len()
+            + node_blob.len()
+            + node_license_blob.len(),
+    );
     out.extend_from_slice(MAGIC);
     out.push(FORMAT_VERSION);
     out.extend_from_slice(&[0u8; 3]);
-    out.extend_from_slice(&(manifest_bytes.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(app_region.len() as u64).to_le_bytes());
-    out.extend_from_slice(&(node_blob.len() as u64).to_le_bytes());
+    out.extend_from_slice(
+        &u32::try_from(manifest_bytes.len())
+            .expect("manifest exceeds payload format limit")
+            .to_le_bytes(),
+    );
+    out.extend_from_slice(
+        &u64::try_from(app_region.len())
+            .expect("app region exceeds payload format limit")
+            .to_le_bytes(),
+    );
+    out.extend_from_slice(
+        &u64::try_from(node_blob.len())
+            .expect("Node blob exceeds payload format limit")
+            .to_le_bytes(),
+    );
+    out.extend_from_slice(
+        &u64::try_from(node_license_blob.len())
+            .expect("license blob exceeds payload format limit")
+            .to_le_bytes(),
+    );
     out.extend_from_slice(&manifest_bytes);
     out.extend_from_slice(&app_region);
     out.extend_from_slice(node_blob);
+    out.extend_from_slice(node_license_blob);
     out
 }
 
 /// Decode a container blob, borrowing the app-file and Node-blob bytes from
 /// `bytes` (which the launcher holds for the process lifetime — the mapped image).
 pub fn decode(bytes: &[u8]) -> Result<PayloadView<'_>> {
-    if bytes.len() < HEADER_LEN {
+    if bytes.len() < HEADER_LEN_V1 {
         bail!("compiled payload truncated (header)");
     }
     if &bytes[0..4] != MAGIC {
         bail!("compiled payload has a bad magic");
     }
-    if bytes[4] != FORMAT_VERSION {
+    let version = bytes[4];
+    if version != FORMAT_VERSION_V1 && version != FORMAT_VERSION {
         bail!(
             "compiled payload format version {} is unsupported",
             bytes[4]
         );
     }
-    let manifest_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
-    let app_len = u64::from_le_bytes(bytes[12..20].try_into().unwrap()) as usize;
-    let node_len = u64::from_le_bytes(bytes[20..28].try_into().unwrap()) as usize;
+    let corrupt = || anyhow::anyhow!("compiled payload corrupted (bad length)");
+    let header_len = match version {
+        FORMAT_VERSION_V1 => HEADER_LEN_V1,
+        FORMAT_VERSION => HEADER_LEN_V2,
+        _ => unreachable!("version was checked above"),
+    };
+    if bytes.len() < header_len {
+        bail!("compiled payload truncated (header)");
+    }
+    let manifest_len = usize::try_from(u32::from_le_bytes(bytes[8..12].try_into().unwrap()))
+        .map_err(|_| corrupt())?;
+    let app_len = usize::try_from(u64::from_le_bytes(bytes[12..20].try_into().unwrap()))
+        .map_err(|_| corrupt())?;
+    let node_len = usize::try_from(u64::from_le_bytes(bytes[20..28].try_into().unwrap()))
+        .map_err(|_| corrupt())?;
+    let license_len = if version == FORMAT_VERSION {
+        usize::try_from(u64::from_le_bytes(bytes[28..36].try_into().unwrap()))
+            .map_err(|_| corrupt())?
+    } else {
+        0
+    };
 
     // Cumulative offsets via checked_add: a corrupted section can carry garbage
     // lengths that would wrap under the launcher's panic=abort/no-overflow-checks
     // release profile, sneak past a `len < end` guard, and then panic-abort on the
     // slice. Overflow → clean Err instead.
-    let corrupt = || anyhow::anyhow!("compiled payload corrupted (bad length)");
-    let manifest_end = HEADER_LEN.checked_add(manifest_len).ok_or_else(corrupt)?;
+    let manifest_end = header_len.checked_add(manifest_len).ok_or_else(corrupt)?;
     let app_end = manifest_end.checked_add(app_len).ok_or_else(corrupt)?;
     let node_end = app_end.checked_add(node_len).ok_or_else(corrupt)?;
-    if bytes.len() < node_end {
+    let license_end = node_end.checked_add(license_len).ok_or_else(corrupt)?;
+    if bytes.len() < license_end {
         bail!("compiled payload truncated (body)");
     }
 
     // `.get(..)` rather than direct indexing: even with the checks above, never let
     // a bad range panic — a corrupted payload must error, not abort the process.
     let manifest: Manifest =
-        serde_json::from_slice(bytes.get(HEADER_LEN..manifest_end).ok_or_else(corrupt)?)
+        serde_json::from_slice(bytes.get(header_len..manifest_end).ok_or_else(corrupt)?)
             .context("parsing the compiled payload manifest")?;
 
     let app_region = bytes.get(manifest_end..app_end).ok_or_else(corrupt)?;
-    let app_files = decode_app_region(app_region)?;
+    let app_files = match version {
+        FORMAT_VERSION_V1 => decode_app_region_v1(app_region)?,
+        FORMAT_VERSION => decode_app_region_v2(app_region)?,
+        _ => unreachable!("version was checked above"),
+    };
     let node_blob = bytes.get(app_end..node_end).ok_or_else(corrupt)?;
+    let node_license_blob = bytes.get(node_end..license_end).ok_or_else(corrupt)?;
 
     Ok(PayloadView {
         manifest,
         app_files,
         node_blob,
+        node_license_blob,
     })
 }
 
-fn decode_app_region(region: &[u8]) -> Result<Vec<(String, &[u8])>> {
+fn decode_app_region_v1(region: &[u8]) -> Result<Vec<AppFile<&[u8]>>> {
     // Every advance is checked_add + `.get(..)`: a corrupted region must Err, never
     // panic (debug overflow-check) or wrap-then-mis-slice. `end = p.checked_add(n)`
     // → None on overflow → clean error.
@@ -312,11 +517,55 @@ fn decode_app_region(region: &[u8]) -> Result<Vec<(String, &[u8])>> {
         let name = std::str::from_utf8(take(name_len, &mut p)?)
             .context("app file name is not utf-8")?
             .to_string();
-        let data_len = u64::from_le_bytes(take(8, &mut p)?.try_into().unwrap()) as usize;
+        let data_len = usize::try_from(u64::from_le_bytes(take(8, &mut p)?.try_into().unwrap()))
+            .map_err(|_| corrupt())?;
         let data = take(data_len, &mut p)?;
-        files.push((name, data));
+        // V1 predates per-file metadata: nothing it carries can be executable.
+        files.push(AppFile::plain(name, data));
     }
     Ok(files)
+}
+
+fn decode_app_region_v2(region: &[u8]) -> Result<Vec<AppFile<&[u8]>>> {
+    let corrupt = || anyhow::anyhow!("compiled payload corrupted (app region)");
+    let mut p = 0usize;
+    let take = |len: usize, p: &mut usize| -> Result<&[u8]> {
+        let end = p.checked_add(len).ok_or_else(corrupt)?;
+        let slice = region.get(*p..end).ok_or_else(corrupt)?;
+        *p = end;
+        Ok(slice)
+    };
+    let file_count = u32::from_le_bytes(take(4, &mut p)?.try_into().unwrap());
+    let data_count = u32::from_le_bytes(take(4, &mut p)?.try_into().unwrap());
+    let mut names = Vec::new();
+    for _ in 0..file_count {
+        let name_len = u16::from_le_bytes(take(2, &mut p)?.try_into().unwrap()) as usize;
+        let name = std::str::from_utf8(take(name_len, &mut p)?)
+            .context("app file name is not utf-8")?
+            .to_string();
+        let field = u32::from_le_bytes(take(4, &mut p)?.try_into().unwrap());
+        names.push((name, field & DATA_INDEX_MASK, field & EXEC_FLAG != 0));
+    }
+    let mut records = Vec::new();
+    for _ in 0..data_count {
+        let data_len = usize::try_from(u64::from_le_bytes(take(8, &mut p)?.try_into().unwrap()))
+            .map_err(|_| corrupt())?;
+        records.push(take(data_len, &mut p)?);
+    }
+    if p != region.len() {
+        bail!("compiled payload corrupted (app region)");
+    }
+    names
+        .into_iter()
+        .map(|(name, index, executable)| {
+            let data = records.get(index as usize).copied().ok_or_else(corrupt)?;
+            Ok(AppFile {
+                name,
+                bytes: data,
+                executable,
+            })
+        })
+        .collect()
 }
 
 // ---- compile targets ----------------------------------------------------------
@@ -481,12 +730,33 @@ impl TargetPlatform {
 mod tests {
     use super::*;
 
+    fn test_manifest(shape: Shape) -> Manifest {
+        Manifest {
+            shape,
+            entry: "main.js".into(),
+            node_version: "24.10.0".into(),
+            smol_exact_target: false,
+            triple: "darwin-arm64".into(),
+            node_sha256: "abc123".into(),
+            app_sha256: "def456".into(),
+            minify: false,
+            install_message: None,
+        }
+    }
+
+    #[test]
+    fn compile_bootstrap_name_is_a_fixed_root_filename() {
+        assert_eq!(COMPILE_BOOTSTRAP_NAME, "__nub_compile_bootstrap.cjs");
+        assert!(!COMPILE_BOOTSTRAP_NAME.contains(['/', '\\']));
+    }
+
     #[test]
     fn roundtrips_embed_shape() {
         let manifest = Manifest {
             shape: Shape::Embed,
             entry: "main.js".into(),
             node_version: "24.10.0".into(),
+            smol_exact_target: false,
             triple: "darwin-arm64".into(),
             node_sha256: "abc123".into(),
             app_sha256: "def456".into(),
@@ -494,20 +764,22 @@ mod tests {
             install_message: Some("Setting up app".into()),
         };
         let app = vec![
-            ("main.js".to_string(), b"import './c.js'\n".to_vec()),
-            ("c.js".to_string(), b"export const x=1\n".to_vec()),
+            AppFile::plain("main.js", b"import './c.js'\n".to_vec()),
+            AppFile::plain("c.js", b"export const x=1\n".to_vec()),
         ];
         let node = vec![9u8; 4096];
-        let blob = encode(&manifest, &app, &node);
+        let license = b"Node.js license".to_vec();
+        let blob = encode_with_license(&manifest, &app, &node, &license);
 
         let view = decode(&blob).unwrap();
         assert_eq!(view.manifest.shape, Shape::Embed);
         assert_eq!(view.manifest.entry, "main.js");
         assert_eq!(view.app_files.len(), 2);
-        assert_eq!(view.app_files[0].0, "main.js");
-        assert_eq!(view.app_files[0].1, b"import './c.js'\n");
-        assert_eq!(view.app_files[1].0, "c.js");
+        assert_eq!(view.app_files[0].name, "main.js");
+        assert_eq!(view.app_files[0].bytes, b"import './c.js'\n");
+        assert_eq!(view.app_files[1].name, "c.js");
         assert_eq!(view.node_blob, &node[..]);
+        assert_eq!(view.node_license_blob, &license[..]);
     }
 
     #[test]
@@ -516,23 +788,26 @@ mod tests {
             shape: Shape::Smol,
             entry: "main.js".into(),
             node_version: "24.10.0".into(),
+            smol_exact_target: true,
             triple: "darwin-arm64".into(),
             node_sha256: String::new(),
             app_sha256: "aa".into(),
             minify: false,
             install_message: None,
         };
-        let app = vec![("main.js".to_string(), b"console.log(1)".to_vec())];
-        let blob = encode(&manifest, &app, &[]);
+        let app = vec![AppFile::plain("main.js", b"console.log(1)".to_vec())];
+        let blob = encode_with_license(&manifest, &app, &[], &[]);
         let view = decode(&blob).unwrap();
         assert_eq!(view.manifest.shape, Shape::Smol);
+        assert!(view.manifest.smol_exact_target);
         assert!(view.node_blob.is_empty());
-        assert_eq!(view.app_files[0].1, b"console.log(1)");
+        assert!(view.node_license_blob.is_empty());
+        assert_eq!(view.app_files[0].bytes, b"console.log(1)");
     }
 
     #[test]
     fn rejects_bad_magic() {
-        let bad = vec![0u8; HEADER_LEN + 4];
+        let bad = vec![0u8; HEADER_LEN_V1 + 4];
         assert!(decode(&bad).is_err());
     }
 
@@ -543,7 +818,7 @@ mod tests {
         // checks off, so an unchecked `+` would abort the process).
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
-        bytes.push(FORMAT_VERSION);
+        bytes.push(FORMAT_VERSION_V1);
         bytes.extend_from_slice(&[0u8; 3]);
         bytes.extend_from_slice(&0u32.to_le_bytes()); // manifest_len = 0
         bytes.extend_from_slice(&0u64.to_le_bytes()); // app_len = 0
@@ -557,6 +832,167 @@ mod tests {
             ),
             Ok(_) => panic!("an overflowing length must not decode successfully"),
         }
+    }
+
+    #[test]
+    fn decodes_handcrafted_v1_with_an_empty_license() {
+        let mut manifest = serde_json::to_value(test_manifest(Shape::Embed)).unwrap();
+        manifest
+            .as_object_mut()
+            .unwrap()
+            .remove("smol_exact_target");
+        let manifest = serde_json::to_vec(&manifest).unwrap();
+        let mut app = Vec::new();
+        app.extend_from_slice(&1u32.to_le_bytes());
+        app.extend_from_slice(&7u16.to_le_bytes());
+        app.extend_from_slice(b"main.js");
+        app.extend_from_slice(&3u64.to_le_bytes());
+        app.extend_from_slice(b"app");
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.push(FORMAT_VERSION_V1);
+        bytes.extend_from_slice(&[0; 3]);
+        bytes.extend_from_slice(&(manifest.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(app.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&2u64.to_le_bytes());
+        bytes.extend_from_slice(&manifest);
+        bytes.extend_from_slice(&app);
+        bytes.extend_from_slice(b"nz");
+
+        let view = decode(&bytes).expect("V1 payload decodes");
+        assert!(
+            !view.manifest.smol_exact_target,
+            "a legacy manifest without the policy bit remains floor mode"
+        );
+        assert_eq!(view.app_files, vec![AppFile::plain("main.js", &b"app"[..])]);
+        assert_eq!(view.node_blob, b"nz");
+        assert!(view.node_license_blob.is_empty());
+    }
+
+    #[test]
+    fn v2_aliases_deduplicate_physical_data_but_preserve_logical_files() {
+        let app = vec![
+            AppFile::plain("hash-a.js", b"same".to_vec()),
+            AppFile::plain("layout/a.js", b"same".to_vec()),
+            AppFile::plain("other.js", b"other".to_vec()),
+        ];
+        let blob = encode(&test_manifest(Shape::Smol), &app, &[]);
+        let manifest_len = u32::from_le_bytes(blob[8..12].try_into().unwrap()) as usize;
+        let app_start = HEADER_LEN_V2 + manifest_len;
+        assert_eq!(
+            u32::from_le_bytes(blob[app_start..app_start + 4].try_into().unwrap()),
+            3
+        );
+        assert_eq!(
+            u32::from_le_bytes(blob[app_start + 4..app_start + 8].try_into().unwrap()),
+            2
+        );
+
+        let view = decode(&blob).expect("V2 payload decodes");
+        assert_eq!(view.app_files.len(), 3);
+        assert_eq!(view.app_files[0], AppFile::plain("hash-a.js", &b"same"[..]));
+        assert_eq!(
+            view.app_files[1],
+            AppFile::plain("layout/a.js", &b"same"[..])
+        );
+        assert_eq!(view.app_files[2], AppFile::plain("other.js", &b"other"[..]));
+    }
+
+    #[test]
+    fn the_executable_bit_rides_the_existing_per_file_index_field() {
+        let plain = vec![
+            AppFile::plain("main.js", b"app".to_vec()),
+            AppFile::plain("bin/helper", b"#!/bin/sh\n".to_vec()),
+        ];
+        let mut marked = plain.clone();
+        marked[1].executable = true;
+
+        let without = encode(&test_manifest(Shape::Smol), &plain, &[]);
+        let with = encode(&test_manifest(Shape::Smol), &marked, &[]);
+        assert_eq!(
+            without.len(),
+            with.len(),
+            "marking a file executable must not change the container's size"
+        );
+        assert_eq!(
+            without.iter().zip(&with).filter(|(a, b)| a != b).count(),
+            1,
+            "the flag must live in the existing per-file index field, not a new one"
+        );
+
+        let view = decode(&with).expect("a payload carrying the flag decodes");
+        assert_eq!(view.app_files[0].name, "main.js");
+        assert!(
+            !view.app_files[0].executable,
+            "an unmarked file must stay non-executable"
+        );
+        assert_eq!(view.app_files[1].name, "bin/helper");
+        assert!(view.app_files[1].executable);
+        assert_eq!(view.app_files[1].bytes, b"#!/bin/sh\n");
+    }
+
+    #[test]
+    fn aliased_bodies_carry_independent_executable_bits() {
+        let app = vec![
+            AppFile::plain("tools/copy.sh", b"#!/bin/sh\n".to_vec()),
+            AppFile {
+                name: "bin/run.sh".to_owned(),
+                bytes: b"#!/bin/sh\n".to_vec(),
+                executable: true,
+            },
+        ];
+        let blob = encode(&test_manifest(Shape::Smol), &app, &[]);
+        let manifest_len = u32::from_le_bytes(blob[8..12].try_into().unwrap()) as usize;
+        let app_start = HEADER_LEN_V2 + manifest_len;
+        assert_eq!(
+            u32::from_le_bytes(blob[app_start + 4..app_start + 8].try_into().unwrap()),
+            1,
+            "identical bodies must still collapse to one physical record"
+        );
+
+        let view = decode(&blob).expect("V2 payload decodes");
+        assert!(!view.app_files[0].executable);
+        assert!(view.app_files[1].executable);
+        assert_eq!(view.app_files[0].bytes, view.app_files[1].bytes);
+    }
+
+    #[test]
+    fn the_source_mode_decides_executability_and_a_modeless_host_records_none() {
+        let exec = |mode| AppFile::from_source_mode("f", &b""[..], mode).executable;
+        assert!(exec(Some(0o755)));
+        assert!(exec(Some(0o700)));
+        assert!(exec(Some(0o100)), "owner-only execute still counts");
+        assert!(!exec(Some(0o644)));
+        // A Windows build host has no mode to read, and sniffing content or an
+        // extension would make the same source tree build differently per host.
+        assert!(!exec(None));
+    }
+
+    #[test]
+    fn rejects_truncated_overflowing_and_bad_alias_v2_payloads() {
+        let app = vec![AppFile::plain("main.js", b"app".to_vec())];
+        let blob = encode_with_license(&test_manifest(Shape::Embed), &app, b"node", b"license");
+        let mut truncated = blob.clone();
+        truncated.pop();
+        assert!(decode(&truncated).is_err(), "truncated V2 must not decode");
+
+        let mut overflowing = blob.clone();
+        overflowing[28..36].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(
+            decode(&overflowing).is_err(),
+            "overflowing V2 must not decode"
+        );
+
+        let mut bad_alias = encode(&test_manifest(Shape::Smol), &app, &[]);
+        let manifest_len = u32::from_le_bytes(bad_alias[8..12].try_into().unwrap()) as usize;
+        let app_start = HEADER_LEN_V2 + manifest_len;
+        let alias_offset = app_start + 8 + 2 + "main.js".len();
+        bad_alias[alias_offset..alias_offset + 4].copy_from_slice(&1u32.to_le_bytes());
+        assert!(
+            decode(&bad_alias).is_err(),
+            "out-of-range V2 alias must not decode"
+        );
     }
 
     #[test]

@@ -8,23 +8,29 @@
 //! right question for the CLI and the wrong one here: it returns `Some` whenever
 //! `$HOME` is set, so a fallback chained off its `None` can never fire on exactly
 //! the boxes that need one. This module answers "where can this process actually
-//! write and exec" by trying each candidate for real.
+//! write, and (when Node runs from it) exec" by trying each candidate for real.
 //!
 //! The write probe is skipped for a candidate that already holds this run's
 //! extracted artifacts. Such a run writes nothing, and demanding write access
 //! anyway is precisely what broke the pre-warmed read-only deploy the error text
-//! below recommends. The ownership and `noexec` gates still run either way — the
-//! launcher execs out of this tree whether or not it wrote to it.
+//! below recommends. The ownership gate always runs. The `noexec` gate runs only
+//! when something is exec'd out of this cache — the Node binary, or an app file
+//! the payload marked executable. A payload of ordinary data, loaded by a
+//! separately discovered external Node, is safe on a noexec volume.
 //!
-//! Security posture on the temp candidate: `vercel/pkg` extracted executable
-//! content to a hardcoded, world-shared `/tmp/pkg/*`, which let a local attacker
-//! pre-seed the path and get their code exec'd by someone else's binary
-//! (CVE-2024-24828). The temp candidate here is therefore per-uid, mode 0700,
-//! never a symlink, and rejected outright if it already exists owned by anyone
-//! else — the launcher falls through rather than exec'ing out of a directory a
-//! second principal can write. Extracted payloads stay keyed by content hash on
-//! top of that, so a same-uid path substitution changes the key rather than the
-//! contents behind it.
+//! Security posture: `vercel/pkg` extracted executable content to a hardcoded,
+//! world-shared `/tmp/pkg/*`, which let a local attacker pre-seed the path and
+//! get their code exec'd by someone else's binary (CVE-2024-24828). Every cache
+//! root here is therefore resolved onto its canonical ancestor chain, created
+//! component-by-component, and rejected when any principal other than this user
+//! (or the platform administrator) can replace an entry in that chain. Unix's
+//! sticky-directory rule keeps the per-uid temp fallback compatible without
+//! making a shared non-sticky parent safe. Windows cache directories receive a
+//! protected private DACL rather than inheriting a possibly-shared one. Extracted
+//! payloads stay keyed by content hash, and the launcher revalidates the exact
+//! runnable contents before accepting a completed cache. Processes already
+//! running as this same user are trusted; excluding them would require binding
+//! validation and execution to one open executable handle.
 
 use std::fmt;
 use std::fs;
@@ -45,7 +51,8 @@ enum Reject {
     ForeignOwner,
     /// Exists with write bits for a principal other than the owner.
     Shared,
-    /// Exists as a symlink where a private directory is required.
+    /// Exists as a symlink or Windows reparse point where a real directory is
+    /// required.
     Symlinked,
     /// Anything else — permissions, ENOSPC, ENOTDIR.
     Unusable(io::Error),
@@ -59,29 +66,51 @@ impl fmt::Display for Reject {
             Reject::NoExec => write!(f, "mounted noexec"),
             Reject::ForeignOwner => write!(f, "owned by another user"),
             Reject::Shared => write!(f, "writable by other users"),
-            Reject::Symlinked => write!(f, "is a symlink"),
+            Reject::Symlinked => write!(f, "is a symlink or reparse point"),
             Reject::Unusable(e) => write!(f, "{e}"),
         }
     }
 }
 
 struct Candidate {
-    /// How the path is spelled in the error report — the env var, not the value.
+    /// How the path is described in the error report.
     label: &'static str,
     path: Option<PathBuf>,
-    /// A world-writable parent (the temp dir) means this directory must be ours
-    /// alone: created 0700, never a symlink, no group/other write bits.
-    private: bool,
+}
+
+/// Whether this launch will execute anything out of the selected cache.
+///
+/// A compiled app still needs a private, writable cache for its payload, but a
+/// `--smol` launcher that has already proved an external Node can execute that
+/// Node outside the cache. In that one case a noexec cache is valid data storage
+/// — provided the payload itself carries nothing executable, which the launcher
+/// checks alongside the shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheUse {
+    Executable,
+    DataOnly,
+}
+
+impl CacheUse {
+    fn requires_exec(self) -> bool {
+        matches!(self, Self::Executable)
+    }
 }
 
 /// Every candidate that was tried and why each failed.
 pub struct CacheError {
     attempts: Vec<(&'static str, Option<PathBuf>, Reject)>,
+    use_: CacheUse,
 }
 
 impl fmt::Display for CacheError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "no writable, executable cache directory was found.")?;
+        match self.use_ {
+            CacheUse::Executable => {
+                writeln!(f, "no writable, executable cache directory was found.")?
+            }
+            CacheUse::DataOnly => writeln!(f, "no writable cache directory was found.")?,
+        }
         writeln!(f, "  Tried:")?;
         for (label, path, why) in &self.attempts {
             match path {
@@ -89,17 +118,24 @@ impl fmt::Display for CacheError {
                 None => writeln!(f, "    {label} — {why}")?,
             }
         }
-        write!(
-            f,
-            "  Any one of these fixes it:\n\
-             \x20   - point NUB_COMPILE_CACHE_DIR at a writable directory that permits exec\n\
-             \x20   - mount a writable exec volume (Docker: --tmpfs /tmp:exec; \
-             Kubernetes: an emptyDir volume)\n\
-             \x20   - run this binary once at image-build time with NUB_COMPILE_CACHE_DIR set \
-             to a path baked into the image, so the runtime hit is warm and writes nothing\n\
-             \x20   - build with --smol against a Node already installed on the box, \
-             which extracts no runtime"
-        )
+        match self.use_ {
+            CacheUse::Executable => write!(
+                f,
+                "  Any one of these fixes it:\n\
+                 \x20   - make one of the cache paths above writable and executable\n\
+                 \x20   - mount a writable exec volume (Docker: --tmpfs /tmp:exec; \
+                 Kubernetes: an emptyDir volume)\n\
+                 \x20   - pre-warm a cache path into the image at build time, so the runtime \
+                 hit is warm and writes nothing\n\
+                 \x20   - build with --smol against a Node already installed on the box, \
+                 which extracts no runtime"
+            ),
+            CacheUse::DataOnly => write!(
+                f,
+                "  Make one of the cache paths above writable, or pre-warm the compiled app \
+                 into the image at build time so the runtime writes nothing."
+            ),
+        }
     }
 }
 
@@ -111,68 +147,122 @@ impl fmt::Debug for CacheError {
 
 impl std::error::Error for CacheError {}
 
-/// The first candidate this process can actually create, write into, and exec
-/// from — or, where `warm` reports the candidate already holds everything this
-/// run needs, the first that passes the exec-source gates alone. Order:
-/// `NUB_COMPILE_CACHE_DIR` → `$XDG_CACHE_HOME/nub` → `$HOME/.cache/nub` → a
+/// The selected cache root and, when the caller verified a complete read-only
+/// hit while choosing it, the verified state to consume without repeating the
+/// potentially expensive content checks.
+pub struct Resolution<T> {
+    pub path: PathBuf,
+    pub warm: Option<T>,
+}
+
+/// The first candidate this process can actually create and write into. When
+/// `use_` is [`CacheUse::Executable`], it must also permit execution; otherwise
+/// it is app-data storage for an already-proven external Node. Order:
+/// internal override → `$XDG_CACHE_HOME/nub` → `$HOME/.cache/nub` → a
 /// per-uid directory under the temp dir.
 ///
 /// `warm` is the caller's because only it knows the payload: the launcher checks
 /// for the exact content-keyed artifacts its manifest names, so "warm" means
 /// genuinely nothing left to write rather than "the directory is there".
-pub fn resolve(warm: &dyn Fn(&Path) -> bool) -> Result<PathBuf, CacheError> {
-    resolve_from(candidates(), warm)
+pub fn resolve<T>(
+    use_: CacheUse,
+    warm: &dyn Fn(&Path) -> Option<T>,
+) -> Result<Resolution<T>, CacheError> {
+    resolve_from(candidates(), use_, warm)
+}
+
+/// Re-run the read-only namespace gate immediately before the launcher hands
+/// cache paths to `Command`. A different principal cannot change a chain that
+/// passed this gate, but the second check closes changes made by deployment
+/// tooling between extraction and spawn without writing to a warm cache.
+pub fn revalidate(path: &Path) -> io::Result<()> {
+    inspect_existing(path).map_err(|error| io::Error::other(error.to_string()))?;
+    fs::symlink_metadata(path).map(drop)
+}
+
+/// Validate one nested cache object against the Windows owner/DACL policy.
+/// Callers first validate the cache root's full namespace with [`revalidate`],
+/// then use this on every directory and file whose contents they trust.
+#[cfg(windows)]
+pub fn object_is_stable(path: &Path) -> io::Result<bool> {
+    nub_core::windows_security::directory_is_stable(path, true, false)
+}
+
+#[cfg(all(test, windows))]
+pub(crate) fn create_shared_test_directory(path: &Path) -> io::Result<()> {
+    fs::create_dir(path)?;
+    let status = std::process::Command::new("icacls")
+        .arg(path)
+        .args(["/grant", "*S-1-1-0:(OI)(CI)F"])
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            "icacls could not grant Everyone full control",
+        ))
+    }
 }
 
 /// The chain, over an explicit candidate list so it can be driven in a test
 /// without mutating process-global environment variables.
-fn resolve_from(
+fn resolve_from<T>(
     candidates: Vec<Candidate>,
-    warm: &dyn Fn(&Path) -> bool,
-) -> Result<PathBuf, CacheError> {
+    use_: CacheUse,
+    warm: &dyn Fn(&Path) -> Option<T>,
+) -> Result<Resolution<T>, CacheError> {
     let mut attempts = Vec::new();
     for cand in candidates {
         let Some(path) = cand.path else {
             attempts.push((cand.label, None, Reject::Unset));
             continue;
         };
-        let verdict = if warm(&path) {
-            probe_warm(&path, cand.private)
+        let path = match canonical_cache_path(&path) {
+            Ok(path) => path,
+            Err(why) => {
+                attempts.push((cand.label, Some(path), why));
+                continue;
+            }
+        };
+        // Never traverse a candidate to inspect its payload before the cache
+        // root and every ancestor used to reach it pass the namespace gate.
+        if let Err(why) = inspect_existing(&path) {
+            attempts.push((cand.label, Some(path), why));
+            continue;
+        }
+        let warm = warm(&path);
+        let verdict = if warm.is_some() {
+            probe_warm(&path, use_)
         } else {
-            probe(&path, cand.private)
+            probe(&path, use_)
         };
         match verdict {
-            Ok(()) => return Ok(path),
+            Ok(()) => return Ok(Resolution { path, warm }),
             Err(why) => attempts.push((cand.label, Some(path), why)),
         }
     }
-    Err(CacheError { attempts })
+    Err(CacheError { attempts, use_ })
 }
 
 fn candidates() -> Vec<Candidate> {
     vec![
         // An explicit override is used verbatim — no `nub` subdirectory appended.
-        // It is the documented escape hatch for read-only deploys and for warming
-        // the cache into an image layer at build time.
+        // This is internal launcher plumbing rather than a user-facing knob.
         Candidate {
-            label: "NUB_COMPILE_CACHE_DIR",
-            path: non_empty_var("NUB_COMPILE_CACHE_DIR").map(PathBuf::from),
-            private: false,
+            label: "configured cache directory",
+            path: non_empty_var("__NUB_COMPILE_CACHE_DIR").map(PathBuf::from),
         },
         Candidate {
             label: "XDG_CACHE_HOME",
             path: non_empty_var("XDG_CACHE_HOME").map(|v| PathBuf::from(v).join("nub")),
-            private: false,
         },
         Candidate {
             label: "HOME",
             path: home_cache(),
-            private: false,
         },
         Candidate {
             label: "TMPDIR",
             path: Some(std::env::temp_dir().join(temp_leaf())),
-            private: true,
         },
     ]
 }
@@ -207,23 +297,73 @@ fn non_empty_var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
-/// Create the directory if needed, verify it is ours, write a probe file, and
-/// confirm the mount permits exec. Every step is an action, not an inspection —
-/// the whole point is that `Some(path)` proves nothing.
-fn probe(path: &Path, private: bool) -> Result<(), Reject> {
-    inspect_existing(path, private)?;
-    create(path, private).map_err(classify)?;
+/// Resolve redirects only in the candidate's existing parent prefix, then use
+/// the resolved spelling for every later operation. This preserves legitimate
+/// homes/cache volumes reached through a stable symlink (macOS `/var` is one)
+/// without leaving a traversed redirect in the executable cache pathname.
+///
+/// Missing suffix components are appended after canonicalization and are later
+/// created one at a time behind the platform namespace gate.
+fn canonical_cache_path(path: &Path) -> Result<PathBuf, Reject> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().map_err(classify)?.join(path)
+    };
+    let leaf = absolute
+        .file_name()
+        .ok_or_else(|| Reject::Unusable(io::Error::other("cache path has no directory leaf")))?;
+    let mut existing = absolute
+        .parent()
+        .ok_or_else(|| Reject::Unusable(io::Error::other("cache path has no parent")))?
+        .to_path_buf();
+    let mut missing = Vec::new();
+
+    loop {
+        match fs::symlink_metadata(&existing) {
+            Ok(_) => break,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let name = existing.file_name().ok_or_else(|| classify(error))?;
+                missing.push(name.to_os_string());
+                existing = existing
+                    .parent()
+                    .ok_or_else(|| classify(io::Error::from(io::ErrorKind::NotFound)))?
+                    .to_path_buf();
+            }
+            Err(error) => return Err(classify(error)),
+        }
+    }
+
+    let mut resolved = fs::canonicalize(existing).map_err(classify)?;
+    for component in missing.iter().rev() {
+        resolved.push(component);
+    }
+    resolved.push(leaf);
+    Ok(resolved)
+}
+
+/// Atomically create the directory if needed, verify it without following a
+/// symlink, and write a probe file. When this cache supplies Node, also confirm
+/// the mount permits exec. Every step is an action, not an assumption — the whole
+/// point is that `Some(path)` proves nothing.
+fn probe(path: &Path, use_: CacheUse) -> Result<(), Reject> {
+    create(path)?;
     write_probe(path).map_err(classify)?;
-    exec_gate(path)
+    if use_.requires_exec() {
+        exec_gate(path)?;
+    }
+    Ok(())
 }
 
 /// [`probe`] minus the two steps that write. A warm candidate is only being read
-/// from, so requiring write access would reject a correct deployment; everything
-/// that guards the EXEC still applies, because the launcher spawns the Node it
-/// finds here regardless of who put it there.
-fn probe_warm(path: &Path, private: bool) -> Result<(), Reject> {
-    inspect_existing(path, private)?;
-    exec_gate(path)
+/// from, so requiring write access would reject a correct deployment. The exec
+/// gate still applies only when the selected cache supplies the Node executable.
+fn probe_warm(path: &Path, use_: CacheUse) -> Result<(), Reject> {
+    inspect_existing(path)?;
+    if use_.requires_exec() {
+        exec_gate(path)?;
+    }
+    Ok(())
 }
 
 fn exec_gate(path: &Path) -> Result<(), Reject> {
@@ -233,82 +373,235 @@ fn exec_gate(path: &Path) -> Result<(), Reject> {
     Ok(())
 }
 
-/// Ownership + mode gate on a directory that already exists.
+/// No-follow ownership + namespace gate on a directory that already exists.
 ///
 /// Foreign ownership disqualifies every candidate: the launcher exec's a binary
 /// out of this tree, so a directory another uid controls is a code-execution
-/// handoff. The write-bit rule is deliberately split. Other-write (`o+w`) is
-/// never legitimate for an exec source, so it disqualifies everywhere.
-/// Group-write is refused only for the temp candidate: under a user-private-group
-/// umask of 002 (the RHEL/Fedora default) `~/.cache/nub` is legitimately 0775
-/// with the group being the user alone, and rejecting that would push those hosts
-/// off the shared cache for no security gain — whereas in a world-writable temp
-/// dir the launcher creates its own directory 0700, so a group bit there means
-/// someone else made it.
+/// handoff. Group- and other-write disqualify every candidate: mode bits do not
+/// prove that a writable group contains only the current user. The same rule is
+/// enforced at every ancestor that controls a pathname component. A sticky
+/// shared parent is safe only for an existing child owned by this uid (or for an
+/// atomic child mkdir that is immediately checked that way), which is the Unix
+/// `/tmp/nub-<uid>` contract.
 #[cfg(unix)]
-fn inspect_existing(path: &Path, private: bool) -> Result<(), Reject> {
-    use std::os::unix::fs::MetadataExt;
-    use std::os::unix::fs::PermissionsExt;
+fn inspect_existing(path: &Path) -> Result<(), Reject> {
+    walk_unix_namespace(path, false)
+}
 
+/// Windows uses its DACL rather than Unix mode bits. Every existing component is
+/// checked after ancestor redirects have been canonicalized away; the final leaf
+/// must be owned by the current user (or the administrator/system boundary) and
+/// must not grant another SID mutation or delete rights.
+#[cfg(windows)]
+fn inspect_existing(path: &Path) -> Result<(), Reject> {
+    walk_windows_namespace(path, false)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn inspect_existing(path: &Path) -> Result<(), Reject> {
     let md = match fs::symlink_metadata(path) {
         Ok(md) => md,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(classify(e)),
     };
-    // A symlink at the private path redirects the extraction somewhere the
-    // ownership check below would then evaluate against the wrong inode.
-    if private && md.file_type().is_symlink() {
+    if md.file_type().is_symlink() {
         return Err(Reject::Symlinked);
-    }
-    let md = if md.file_type().is_symlink() {
-        match fs::metadata(path) {
-            Ok(md) => md,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(classify(e)),
-        }
-    } else {
-        md
-    };
-    if md.uid() != unsafe { libc::geteuid() } {
-        return Err(Reject::ForeignOwner);
-    }
-    let mode = md.permissions().mode();
-    let forbidden = if private { 0o077 } else { 0o002 };
-    if mode & forbidden != 0 {
-        return Err(Reject::Shared);
     }
     Ok(())
 }
 
-/// Windows has no uid and no mode bits to check. The temp directory is already
-/// per-user there (`%LOCALAPPDATA%\Temp`), which is the property the unix branch
-/// has to construct, so the write probe alone carries this platform.
-#[cfg(not(unix))]
-fn inspect_existing(_path: &Path, _private: bool) -> Result<(), Reject> {
+/// Windows marks junctions and other namespace redirects with this bit, even
+/// when [`std::fs::FileType::is_symlink`] does not report them as symlinks.
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+#[cfg(windows)]
+fn has_windows_reparse_point(file_attributes: u32) -> bool {
+    file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(unix)]
+fn walk_unix_namespace(path: &Path, create_missing: bool) -> Result<(), Reject> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    let euid = unsafe { libc::geteuid() };
+    let mut chain: Vec<_> = path.ancestors().map(Path::to_path_buf).collect();
+    chain.reverse();
+    let mut parent: Option<fs::Metadata> = None;
+
+    for (index, component) in chain.iter().enumerate() {
+        let is_leaf = index + 1 == chain.len();
+        let mut metadata = match fs::symlink_metadata(component) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(classify(error)),
+        };
+
+        if let Some(parent) = &parent {
+            unix_parent_protects_child(parent, metadata.as_ref(), euid)?;
+        }
+
+        if metadata.is_none() {
+            if !create_missing {
+                return Ok(());
+            }
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700);
+            if let Err(error) = builder.create(component)
+                && error.kind() != io::ErrorKind::AlreadyExists
+            {
+                return Err(classify(error));
+            }
+            metadata = Some(fs::symlink_metadata(component).map_err(classify)?);
+            if let Some(parent) = &parent {
+                unix_parent_protects_child(parent, metadata.as_ref(), euid)?;
+            }
+        }
+
+        let metadata = metadata.expect("created or existing namespace component");
+        if metadata.file_type().is_symlink() {
+            return Err(Reject::Symlinked);
+        }
+        if !metadata.file_type().is_dir() {
+            return Err(Reject::Unusable(io::Error::from(
+                io::ErrorKind::NotADirectory,
+            )));
+        }
+        if is_leaf {
+            if metadata.uid() != euid {
+                return Err(Reject::ForeignOwner);
+            }
+            if metadata.permissions().mode() & 0o022 != 0 {
+                return Err(Reject::Shared);
+            }
+        }
+        parent = Some(metadata);
+    }
     Ok(())
 }
 
 #[cfg(unix)]
-fn create(path: &Path, private: bool) -> io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-    let mut b = fs::DirBuilder::new();
-    b.recursive(true);
-    if private {
-        b.mode(0o700);
+fn unix_parent_protects_child(
+    parent: &fs::Metadata,
+    child: Option<&fs::Metadata>,
+    euid: u32,
+) -> Result<(), Reject> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    if parent.file_type().is_symlink() {
+        return Err(Reject::Symlinked);
     }
-    b.create(path)
+    if !parent.file_type().is_dir() {
+        return Err(Reject::Unusable(io::Error::from(
+            io::ErrorKind::NotADirectory,
+        )));
+    }
+
+    let mode = parent.permissions().mode();
+    // A foreign, non-root owner can chmod its directory and then rename children
+    // regardless of its present mode. uid 0 is the Unix administrator boundary,
+    // not a peer principal the cache can defend against.
+    if parent.uid() != euid && parent.uid() != 0 {
+        return Err(Reject::ForeignOwner);
+    }
+    if mode & 0o022 == 0 {
+        return Ok(());
+    }
+    if mode & 0o1000 == 0 {
+        return Err(Reject::Shared);
+    }
+
+    // Sticky directories protect an existing name only for its owner. A missing
+    // child is safe to create atomically; the post-mkdir call checks who won.
+    if let Some(child) = child
+        && child.uid() != euid
+    {
+        return Err(Reject::ForeignOwner);
+    }
+    Ok(())
 }
 
-#[cfg(not(unix))]
-fn create(path: &Path, _private: bool) -> io::Result<()> {
-    fs::create_dir_all(path)
+#[cfg(windows)]
+fn walk_windows_namespace(path: &Path, create_missing: bool) -> Result<(), Reject> {
+    use std::os::windows::fs::MetadataExt;
+
+    let mut chain: Vec<_> = path.ancestors().map(Path::to_path_buf).collect();
+    chain.reverse();
+    for (index, component) in chain.iter().enumerate() {
+        let is_leaf = index + 1 == chain.len();
+        let is_volume_root = index == 0;
+        let mut metadata = match fs::symlink_metadata(component) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(classify(error)),
+        };
+        if metadata.is_none() {
+            if !create_missing {
+                return Ok(());
+            }
+            if let Err(error) = nub_core::windows_security::create_private_directory(component)
+                && error.kind() != io::ErrorKind::AlreadyExists
+            {
+                return Err(classify(error));
+            }
+            metadata = Some(fs::symlink_metadata(component).map_err(classify)?);
+        }
+
+        let metadata = metadata.expect("created or existing namespace component");
+        if metadata.file_type().is_symlink()
+            || has_windows_reparse_point(metadata.file_attributes())
+        {
+            return Err(Reject::Symlinked);
+        }
+        if !metadata.file_type().is_dir() {
+            return Err(Reject::Unusable(io::Error::from(
+                io::ErrorKind::NotADirectory,
+            )));
+        }
+        if !nub_core::windows_security::directory_is_stable(component, is_leaf, is_volume_root)
+            .map_err(classify)?
+        {
+            return Err(if is_leaf {
+                Reject::Shared
+            } else {
+                Reject::ForeignOwner
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Create every missing component atomically behind the same namespace checks
+/// used for warm reads. No `create_dir_all`: it follows redirects and says
+/// nothing about who can rename an otherwise-private final leaf.
+#[cfg(unix)]
+fn create(path: &Path) -> Result<(), Reject> {
+    walk_unix_namespace(path, true)
+}
+
+#[cfg(windows)]
+fn create(path: &Path) -> Result<(), Reject> {
+    walk_windows_namespace(path, true)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create(path: &Path) -> Result<(), Reject> {
+    fs::create_dir_all(path).map_err(classify)?;
+    inspect_existing(path)
 }
 
 /// `create_dir_all` succeeding on an existing directory says nothing about
 /// writability, so write a real file.
 fn write_probe(dir: &Path) -> io::Result<()> {
     let probe = dir.join(format!(".nub-write-probe.{}", std::process::id()));
-    let result = fs::write(&probe, b"");
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let result = options.open(&probe).map(drop);
     let _ = fs::remove_file(&probe);
     result
 }
@@ -366,17 +659,19 @@ fn mount_is_noexec(_dir: &Path) -> bool {
 /// Whether an exec failure came from a `noexec` mount rather than a bad path or
 /// a missing exec bit. The launcher chmods the extracted Node 0755 and has just
 /// written it, so `EACCES` at exec time leaves the mount flag as the explanation.
+#[cfg(unix)]
 pub fn exec_denied(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::PermissionDenied
 }
 
 /// The remedies for a `noexec` cache directory, appended to the exec failure.
+#[cfg(unix)]
 pub fn noexec_remedy(dir: &Path) -> String {
     format!(
         "the cache directory {} is on a filesystem mounted noexec, so the Node \
          runtime extracted there cannot be executed.\n\
          \x20 Any one of these fixes it:\n\
-         \x20   - point NUB_COMPILE_CACHE_DIR at a directory that permits exec\n\
+         \x20   - use a cache filesystem that permits exec\n\
          \x20   - mount the volume with exec (Docker: --tmpfs /tmp:exec)\n\
          \x20   - build with --smol against a Node already installed on the box, \
          which extracts no runtime",
@@ -395,15 +690,28 @@ mod tests {
             std::thread::current().id()
         ));
         let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap();
-        d
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700);
+            builder.create(&d).unwrap();
+        }
+        #[cfg(windows)]
+        nub_core::windows_security::create_private_directory(&d).unwrap();
+        #[cfg(not(any(unix, windows)))]
+        fs::create_dir(&d).unwrap();
+        // Production candidates are canonicalized before any no-follow probe.
+        // Keep direct probe tests on that same side of the boundary: macOS's
+        // temp directory is spelled through the stable `/var` redirect.
+        fs::canonicalize(d).unwrap()
     }
 
     #[test]
     fn probe_creates_and_accepts_a_writable_directory() {
         let root = scratch("writable");
-        let target = root.join("cache");
-        assert!(probe(&target, false).is_ok());
+        let target = root.join("missing").join("parents").join("cache");
+        assert!(probe(&target, CacheUse::Executable).is_ok());
         assert!(target.is_dir());
         // The probe file must not survive the probe.
         assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
@@ -412,60 +720,221 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn private_probe_creates_the_directory_0700() {
+    fn probe_creates_every_cache_directory_0700() {
         use std::os::unix::fs::PermissionsExt;
-        let root = scratch("private-mode");
-        let target = root.join("nub-1234");
-        probe(&target, true).unwrap();
+        let root = scratch("cache-mode");
+        let target = root.join("cache");
+        probe(&target, CacheUse::Executable).unwrap();
         let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700, "private cache dir must be 0700, got {mode:o}");
+        assert_eq!(mode, 0o700, "cache dir must be 0700, got {mode:o}");
         let _ = fs::remove_dir_all(&root);
     }
 
     #[cfg(unix)]
     #[test]
-    fn private_probe_refuses_a_group_or_world_writable_directory() {
+    fn probe_refuses_a_group_or_world_writable_directory() {
         use std::os::unix::fs::PermissionsExt;
         let root = scratch("shared-perms");
 
-        for mode in [0o777, 0o770, 0o707] {
+        for mode in [0o777, 0o775, 0o770, 0o757, 0o707] {
             let target = root.join(format!("d{mode:o}"));
             fs::create_dir_all(&target).unwrap();
             fs::set_permissions(&target, fs::Permissions::from_mode(mode)).unwrap();
-            let err = probe(&target, true).unwrap_err();
+            let err = probe(&target, CacheUse::Executable).unwrap_err();
             assert!(
                 matches!(err, Reject::Shared),
                 "mode {mode:o} must be refused as shared, got {err}"
             );
         }
 
-        // The non-private candidates tolerate group-write (a user-private-group
-        // umask of 002 makes it routine) but never other-write.
-        let group = root.join("group-writable");
-        fs::create_dir_all(&group).unwrap();
-        fs::set_permissions(&group, fs::Permissions::from_mode(0o775)).unwrap();
-        assert!(probe(&group, false).is_ok());
-
-        let other = root.join("other-writable");
-        fs::create_dir_all(&other).unwrap();
-        fs::set_permissions(&other, fs::Permissions::from_mode(0o757)).unwrap();
-        assert!(matches!(probe(&other, false), Err(Reject::Shared)));
+        let readable = root.join("world-readable");
+        fs::create_dir_all(&readable).unwrap();
+        fs::set_permissions(&readable, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            probe(&readable, CacheUse::Executable).is_ok(),
+            "read and exec bits do not let another principal replace cached executables"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
 
     #[cfg(unix)]
     #[test]
-    fn private_probe_refuses_a_symlinked_directory() {
+    fn private_leaf_under_non_sticky_shared_parent_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = scratch("shared-ancestor");
+        for mode in [0o777, 0o770] {
+            let parent = root.join(format!("parent-{mode:o}"));
+            let leaf = parent.join("victim-cache");
+            fs::create_dir(&parent).unwrap();
+            fs::create_dir(&leaf).unwrap();
+            fs::set_permissions(&leaf, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(&parent, fs::Permissions::from_mode(mode)).unwrap();
+
+            let error = probe(&leaf, CacheUse::Executable).unwrap_err();
+            assert!(
+                matches!(error, Reject::Shared),
+                "a {mode:o} ancestor can rename its 0700 child, got {error}"
+            );
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sticky_shared_parent_accepts_an_atomic_per_uid_leaf() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = scratch("sticky-ancestor");
+        let parent = root.join("tmp");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o1777)).unwrap();
+        let leaf = parent.join(format!("nub-{}", unsafe { libc::geteuid() }));
+
+        probe(&leaf, CacheUse::Executable).unwrap();
+        let metadata = fs::symlink_metadata(&leaf).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_ancestor_symlink_is_canonicalized_out_of_the_cache_path() {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let root = scratch("canonical-parent");
+        let real = root.join("real");
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder.create(&real).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let requested = link.join("cache");
+
+        let canonical = canonical_cache_path(&requested).unwrap();
+        assert_eq!(canonical, real.join("cache"));
+        probe(&canonical, CacheUse::Executable).unwrap();
+        assert!(real.join("cache").is_dir());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_never_follows_a_symlinked_cache_directory() {
         let root = scratch("symlink");
         let real = root.join("real");
         fs::create_dir_all(&real).unwrap();
         let link = root.join("link");
         std::os::unix::fs::symlink(&real, &link).unwrap();
-        assert!(matches!(probe(&link, true), Err(Reject::Symlinked)));
-        // A non-private candidate may legitimately be a symlink (~/.cache often is).
-        assert!(probe(&link, false).is_ok());
+        assert!(matches!(
+            probe(&link, CacheUse::Executable),
+            Err(Reject::Symlinked)
+        ));
+        assert_eq!(
+            fs::read_dir(&real).unwrap().count(),
+            0,
+            "the write probe must not land through the symlink"
+        );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reparse_cache_root_is_rejected_before_callback_or_write_probe() {
+        use std::os::windows::fs::symlink_dir;
+        use std::process::Command;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = scratch("windows-reparse");
+        let target = root.join("target");
+        let reparse = root.join("cache");
+        fs::create_dir(&target).unwrap();
+
+        // Directory junctions are the unprivileged Windows reparse primitive.
+        // If policy disables them, use the standard-library directory-symlink
+        // fallback, which may need Developer Mode or symlink privilege.
+        let junction = Command::new("cmd")
+            .arg("/C")
+            .arg(format!(
+                "mklink /J \"{}\" \"{}\"",
+                reparse.display(),
+                target.display()
+            ))
+            .output()
+            .unwrap_or_else(|error| panic!("starting cmd to create directory junction: {error}"));
+        if !junction.status.success() {
+            if let Err(error) = symlink_dir(&target, &reparse) {
+                if error.raw_os_error() == Some(1314) {
+                    eprintln!(
+                        "skipping Windows cache reparse rejection: directory junction creation failed and symlink privilege is unavailable"
+                    );
+                    let _ = fs::remove_dir_all(&root);
+                    return;
+                }
+                panic!(
+                    "creating Windows directory reparse point (junction status {:?}; symlink error: {error})",
+                    junction.status.code()
+                );
+            }
+        }
+
+        let warm_calls = AtomicUsize::new(0);
+        let result = resolve_from(
+            vec![Candidate {
+                label: "configured cache directory",
+                path: Some(reparse.clone()),
+            }],
+            CacheUse::Executable,
+            &|_: &Path| {
+                warm_calls.fetch_add(1, Ordering::SeqCst);
+                None::<()>
+            },
+        );
+        assert!(result.is_err(), "directory reparse cache root was accepted");
+        assert_eq!(
+            warm_calls.load(Ordering::SeqCst),
+            0,
+            "cache resolution must reject the reparse root before reading it"
+        );
+        assert_eq!(
+            fs::read_dir(&target).unwrap().count(),
+            0,
+            "cache resolution must not write through the reparse root"
+        );
+        fs::remove_dir(&reparse).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_shared_dacl_cache_leaf_is_refused() {
+        let root = scratch("windows-shared-dacl");
+        let leaf = root.join("cache");
+        create_shared_test_directory(&leaf).unwrap();
+
+        assert!(
+            matches!(probe(&leaf, CacheUse::Executable), Err(Reject::Shared)),
+            "a normal directory writable through an Everyone DACL was accepted"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_created_cache_leaf_has_a_private_stable_dacl() {
+        let root = scratch("windows-private-dacl");
+        let leaf = root.join("cache");
+
+        probe(&leaf, CacheUse::Executable).unwrap();
+        assert!(
+            nub_core::windows_security::directory_is_stable(&leaf, true, false).unwrap(),
+            "created cache directory did not receive the protected private DACL"
+        );
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[cfg(unix)]
@@ -481,7 +950,10 @@ mod tests {
         let target = root.join("locked");
         fs::create_dir_all(&target).unwrap();
         fs::set_permissions(&target, fs::Permissions::from_mode(0o500)).unwrap();
-        assert!(matches!(probe(&target, false), Err(Reject::Unusable(_))));
+        assert!(matches!(
+            probe(&target, CacheUse::Executable),
+            Err(Reject::Unusable(_))
+        ));
         fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
         let _ = fs::remove_dir_all(&root);
     }
@@ -505,25 +977,24 @@ mod tests {
         let chosen = resolve_from(
             vec![
                 Candidate {
-                    label: "NUB_COMPILE_CACHE_DIR",
+                    label: "configured cache directory",
                     path: None,
-                    private: false,
                 },
                 Candidate {
                     label: "HOME",
                     path: Some(locked.clone()),
-                    private: false,
                 },
                 Candidate {
                     label: "TMPDIR",
                     path: Some(usable.clone()),
-                    private: true,
                 },
             ],
-            &|_: &Path| false,
+            CacheUse::Executable,
+            &|_: &Path| None::<()>,
         )
         .unwrap();
-        assert_eq!(chosen, usable);
+        assert_eq!(chosen.path, canonical_cache_path(&usable).unwrap());
+        assert!(chosen.warm.is_none());
 
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
         let _ = fs::remove_dir_all(&root);
@@ -548,14 +1019,16 @@ mod tests {
         let resolve_with = |warm: bool| {
             resolve_from(
                 vec![Candidate {
-                    label: "NUB_COMPILE_CACHE_DIR",
+                    label: "configured cache directory",
                     path: Some(locked.clone()),
-                    private: false,
                 }],
-                &|_: &Path| warm,
+                CacheUse::Executable,
+                &|_: &Path| warm.then_some(()),
             )
         };
-        assert_eq!(resolve_with(true).unwrap(), locked);
+        let resolved = resolve_with(true).unwrap();
+        assert_eq!(resolved.path, canonical_cache_path(&locked).unwrap());
+        assert!(resolved.warm.is_some());
         assert!(
             resolve_with(false).is_err(),
             "a run that still has to extract must prove it can write"
@@ -566,16 +1039,35 @@ mod tests {
     }
 
     #[test]
+    fn data_only_cache_does_not_require_exec_but_executable_cache_does() {
+        assert!(!CacheUse::DataOnly.requires_exec());
+        assert!(CacheUse::Executable.requires_exec());
+    }
+
+    #[test]
+    fn data_only_failure_does_not_recommend_smol_or_exec_storage() {
+        let error = CacheError {
+            use_: CacheUse::DataOnly,
+            attempts: vec![("TMPDIR", Some(PathBuf::from("/tmp/nub-0")), Reject::NoExec)],
+        };
+        let message = error.to_string();
+        assert!(message.contains("no writable cache directory"), "{message}");
+        assert!(!message.contains("executable cache"), "{message}");
+        assert!(!message.contains("--smol"), "{message}");
+    }
+
+    #[test]
     fn the_documented_chain_order_is_what_ships() {
         let labels: Vec<_> = candidates().iter().map(|c| c.label).collect();
         assert_eq!(
             labels,
-            ["NUB_COMPILE_CACHE_DIR", "XDG_CACHE_HOME", "HOME", "TMPDIR"]
+            [
+                "configured cache directory",
+                "XDG_CACHE_HOME",
+                "HOME",
+                "TMPDIR"
+            ]
         );
-        // Only the temp candidate is private — it is the one with a
-        // world-writable parent.
-        let private: Vec<_> = candidates().iter().map(|c| c.private).collect();
-        assert_eq!(private, [false, false, false, true]);
     }
 
     /// A directory another uid owns is a code-execution handoff — the launcher
@@ -588,7 +1080,7 @@ mod tests {
             return;
         }
         assert!(matches!(
-            probe(Path::new("/"), false),
+            probe(Path::new("/"), CacheUse::Executable),
             Err(Reject::ForeignOwner)
         ));
     }
@@ -605,8 +1097,9 @@ mod tests {
     #[test]
     fn the_error_names_every_candidate_and_a_remedy() {
         let err = CacheError {
+            use_: CacheUse::Executable,
             attempts: vec![
-                ("NUB_COMPILE_CACHE_DIR", None, Reject::Unset),
+                ("configured cache directory", None, Reject::Unset),
                 (
                     "HOME",
                     Some(PathBuf::from("/root/.cache/nub")),
@@ -619,7 +1112,7 @@ mod tests {
         assert!(msg.contains("/root/.cache/nub"), "{msg}");
         assert!(msg.contains("read-only filesystem"), "{msg}");
         assert!(msg.contains("mounted noexec"), "{msg}");
-        assert!(msg.contains("NUB_COMPILE_CACHE_DIR"), "{msg}");
+        assert!(!msg.contains("NUB_COMPILE_CACHE_DIR"), "{msg}");
         assert!(msg.contains("--smol"), "{msg}");
     }
 }
