@@ -30,15 +30,33 @@ cp "$NUB" "$SNAP" && chmod +x "$SNAP"
 trap 'rm -f "$SNAP"' EXIT
 echo "batch binary: $(shasum -a256 "$SNAP" | cut -c1-16)  (snapshot of $NUB)" >&2
 
+here="$(cd "$(dirname "$0")" && pwd)"
+
 # And PROVE the override engages before spending hours on it, rather than discovering per-cell.
+#
+# ⛔ THE PROBE CATALOG COMES FROM `catalogFor`, NEVER FROM A LITERAL HERE. This check used to write
+# `{"packages":{}}` — an EMPTY map, which parses under every packages shape there has ever been. So
+# when the catalog shape changed under it, the check passed happily while every SYNTHESIZED cell
+# catalog was rejected, and a 100-package batch produced 100 HARNESS-ERRORs before anyone looked.
+# An empty map is ADJACENT to the question; the artifact the cells actually use IS the question.
 _probe="${TMPDIR:-/tmp}/nub-ovcheck-$$"; rm -rf "$_probe"; mkdir -p "$_probe/home"
 printf '{"name":"ovcheck","version":"1.0.0"}\n' > "$_probe/package.json"
-printf '{"packages":{},"baseline":[],"env":[]}\n' > "$_probe/c.json"
-if ! ( cd "$_probe" && NUB_BUILD_JAIL_CATALOG="$_probe/c.json" HOME="$_probe/home" \
-        "$SNAP" install 2>&1 | grep -q "build-jail catalog OVERRIDDEN from" ); then
-  echo "REFUSING TO RUN: the override does not engage with this binary." >&2
-  echo "  Rebuild: scripts/rust-build.sh build -p nub-cli --profile fast \\" >&2
-  echo "             --features nub-cli/build-jail-catalog-override" >&2
+if ! node "$here/search.mjs" --emit-sample-catalog > "$_probe/c.json"; then
+  echo "REFUSING TO RUN: search.mjs could not emit a sample catalog." >&2
+  rm -rf "$_probe"; exit 2
+fi
+_ovlog="$_probe/ov.log"
+( cd "$_probe" && NUB_BUILD_JAIL_CATALOG="$_probe/c.json" HOME="$_probe/home" \
+    "$SNAP" install > "$_ovlog" 2>&1 )
+if ! grep -q "build-jail catalog OVERRIDDEN from" "$_ovlog"; then
+  echo "REFUSING TO RUN: the override did not engage with this binary + catalog." >&2
+  if grep -q "was REJECTED" "$_ovlog"; then
+    echo "  The catalog was REJECTED — the harness emits a shape the parser does not accept:" >&2
+    grep -o "was REJECTED ([^)]*)" "$_ovlog" | head -1 | sed 's/^/    /' >&2
+  else
+    echo "  Rebuild: scripts/rust-build.sh build -p nub-cli --profile fast \\" >&2
+    echo "             --features nub-cli/build-jail-catalog-override" >&2
+  fi
   rm -rf "$_probe"; exit 2
 fi
 rm -rf "$_probe"
@@ -52,7 +70,6 @@ if [ "${1:-}" = "--file" ]; then
   set -- $(grep -vE '^\s*(#|$)' "$2")
 fi
 
-here="$(cd "$(dirname "$0")" && pwd)"
 for spec in "$@"; do
   timeout 2400 node "$here/search.mjs" "$spec" --nub "$NUB" $FORCE 2>/dev/null \
     || echo "{\"pkg\":\"$spec\",\"verdict\":\"HARNESS-TIMEOUT-OR-CRASH\"}"

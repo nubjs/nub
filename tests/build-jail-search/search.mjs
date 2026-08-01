@@ -60,7 +60,9 @@ function catalogFor(pkg, state, others = []) {
   const packages = {};
   for (const o of others) {
     if (o === pkg) continue;
-    packages[o] = [{ write: 'disk', network: true, notes: 'held at full grant: not the variable' }];
+    // ENTRY SHAPE, not the retired `[grant]` array: the parser rejects an array outright, and a
+    // rejected catalog makes EVERY cell a HARNESS-ERROR rather than a measurement.
+    packages[o] = { default: { write: 'disk', network: true, notes: 'held at full grant: not the variable' } };
   }
 
   // State 0 is the BASE PROFILE, and the catalog spells that as NO ENTRY for this package.
@@ -92,7 +94,9 @@ function catalogFor(pkg, state, others = []) {
 
   if (state.atoms.has('network')) grant.network = true;
 
-  packages[pkg] = [grant];
+  // A cell probes ONE version, so the grant is the entry's `default` and there are no bands --
+  // version banding is a COLLATION concern, decided across records, never inside a single cell.
+  packages[pkg] = { default: grant };
   return withFloor({ packages });
 }
 
@@ -939,12 +943,23 @@ function search(nub, pkg, version, root, keep, runDir) {
 
 const argv = process.argv.slice(2);
 
+// THE PRE-FLIGHT MUST VALIDATE THE ARTIFACT THE CELLS ACTUALLY USE. run-batch.sh used to probe
+// the override with a hand-written `{"packages":{}}`, which parses under ANY packages shape --
+// so when the catalog shape changed under it, the check passed and every cell in the batch then
+// failed as HARNESS-ERROR. An empty map is adjacent to the question, not the question. This emits
+// a catalog straight out of `catalogFor`, so the thing proven is the thing used.
+if (argv.includes('--emit-sample-catalog')) {
+  const widest = STATES[STATES.length - 1];
+  process.stdout.write(JSON.stringify(catalogFor('ovcheck-probe', widest, ['other-pkg']), null, 2));
+  process.exit(0);
+}
+
 if (argv.includes('--selftest')) {
   let bad = 0;
   for (const s of STATES) {
     const emitted = catalogFor('x', s).packages.x;
     if (!emitted) continue;   // state 0 is 'no entry', correctly
-    const g = emitted[0];
+    const g = emitted.default;
     const has = (k) => {
       if (k === 'network') return !!g.network;
       if (k.startsWith('write.')) {
@@ -987,7 +1002,7 @@ if (argv.includes('--selftest')) {
   console.log('\nsample emissions:');
   for (const i of [0, 1, 5, 13, 16, 51, 53]) {
     const e = catalogFor('p', STATES[i]).packages.p;
-    console.log(' ', String(i).padStart(2), STATES[i].label, '->', e ? JSON.stringify(e[0]) : '(no entry — the base profile)');
+    console.log(' ', String(i).padStart(2), STATES[i].label, '->', e ? JSON.stringify(e.default) : '(no entry — the base profile)');
   }
   process.exit(bad ? 1 : 0);
 }
