@@ -164,25 +164,32 @@ function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg }
   }
   // SCAN THE WHOLE FIXTURE ROOT, not a list of subpaths I expect to matter.
   //
-  // The install runs with HOME pointed at this fixture, so everything it touches lands
-  // under here — that is why a package caching to `~/.cache/<vendor>` is visible at all.
-  // It is containment by construction, NOT disk-wide detection, and the boundary is
-  // verified: after a day of runs the real `~/.cache/puppeteer`, `~/.cache/node-gyp` and
-  // `~/.npm` had zero modifications.
+  // The install runs with HOME pointed at this fixture, so everything it touches lands under
+  // here — containment by construction, NOT disk-wide detection. Verified: after a day of runs
+  // the real ~/.cache/puppeteer, ~/.cache/node-gyp and ~/.npm had zero modifications.
   //
-  // Enumerating three roots was UNSOUND once the control started running at `write: disk`.
-  // A control that wrote somewhere unscanned, and a narrow cell that did not, would produce
-  // matching digests — both missing it identically — and the search would record too NARROW
-  // a minimum. Scanning the root removes that whole class.
+  // Enumerating a few roots was UNSOUND once the control began running at write:disk — a
+  // control that wrote somewhere unscanned and a narrow cell that did not would produce
+  // MATCHING digests, both missing it identically, and the search would record too NARROW a
+  // minimum. Still missed: writes outside the fixture entirely, which every cell below
+  // write:disk is denied (proven with EPERM) but a disk cell is not.
   //
-  // Still missed: a write outside the fixture entirely (`/usr/local`, the real home). Those
-  // are denied for every cell below `write: disk`, proven with EPERM, but a `disk` cell is
-  // not bounded by that. That residual is stated rather than papered over.
+  // PATHS ARE TOKENISED into the catalog's own vocabulary, so a record reads in the same terms
+  // an entry is written in and no one has to translate:
+  //   $proj/…   the user's project
+  //   $store/…  a package's store entry, content hash stripped so arms compare
+  //   $home/…   the package's HOME — throwaway under the jail, the REAL home in production,
+  //             which is exactly what a `writePaths` entry names
   const root = path.dirname(proj);
-  const unhash = (p) => p
-    .replace(/(store\/)([^/]+@[^/-]+(?:\.[^/-]+)*)-[0-9a-f]{8,}\//, '$1$2/')
-    .replace(/(jail-home\/)([^/]+)-[0-9a-f]{8,}\//, '$1$2/');
-  const seen = paths(root).map(unhash);
+  const tokenise = (p) => {
+    if (p.startsWith('proj/')) return `$proj/${p.slice(5)}`;
+    let m = p.match(/^home\/\.cache\/nub\/pm\/store\/(.+)$/);
+    if (m) return `$store/${m[1].replace(/^([^/]+@[^/-]+(?:\.[^/-]+)*)-[0-9a-f]{8,}\//, '$1/')}`;
+    m = p.match(/^home\/\.cache\/nub\/jail-home\/[^/]+\/(.+)$/);
+    if (m) return `$home/${m[1]}`;
+    return p;
+  };
+  const seen = paths(root).map(tokenise);
   return {
     label, rc, log, seen,
     digest: digestOf(seen),
@@ -259,16 +266,53 @@ function grantFor(state) {
   return g ? g[0] : null;
 }
 
+/** The MINIMAL set of `$home`-relative directories covering every path the script left in
+ *  its home — the `writePaths` entry, derived rather than authored.
+ *
+ *  puppeteer writes 355 paths, all under `$home/.cache/puppeteer/chrome/mac_arm-…/…`; the
+ *  answer is the single entry `.cache/puppeteer`. Grouping by longest common directory gets
+ *  there with no judgement, and a package writing to two unrelated caches yields two entries
+ *  rather than one bogus shared ancestor.
+ *
+ *  DEPTH IS CAPPED AT TWO SEGMENTS. `.cache/puppeteer` is the vendor directory; going deeper
+ *  would pin a version (`chrome/mac_arm-151.0.7922.47`) that changes on the next release and
+ *  turn a stable entry into a churning one. Going shallower would hand over all of `.cache`.
+ */
+function homeWritePaths(paths) {
+  const dirs = new Set();
+  for (const p of paths) {
+    if (!p.startsWith('$home/')) continue;
+    const segs = p.slice('$home/'.length).split('/');
+    if (segs.length < 2) continue;           // a bare file in $HOME is not a directory grant
+    dirs.add(segs.slice(0, 2).join('/'));
+  }
+  // Drop any entry already covered by a shallower one, so the set is minimal by construction.
+  const out = [...dirs].sort();
+  return out.filter((d) => !out.some((o) => o !== d && d.startsWith(`${o}/`)));
+}
+
 // ── the walk ──────────────────────────────────────────────────────────────────
 
-/** Paths the CONTROL produced that the no-grant floor did not — i.e. what a grant must
- *  restore. Store hashes are already normalised by `runCell`, so these compare directly. */
+/** Paths that exist after the UNJAILED run but not after the no-grant run — what the script
+ *  produced that confinement prevented. Store and jail-home hashes are already normalised by
+ *  `runCell`, so these compare directly. */
 function controlOnly(control, floor) {
   const had = new Set(floor.seen);
   return control.seen.filter((p) => !had.has(p));
 }
 
-const brief = (r) => ({ rc: r.rc, files: r.files, materialized: r.materialized });
+/** The unjailed run recorded as the BASE CASE every cell is compared against. Its own path
+ *  list is kept, not just a count: a path-valued grant cannot be found by enumeration the way
+ *  a capability can — the space of paths is open — so it has to be DERIVED from what the
+ *  script actually wrote. That derivation needs the paths, and needs them from the run that
+ *  was allowed to do everything. */
+const baseCase = (r, root) => ({
+  rc: r.rc,
+  fileCount: r.files,
+  digest: r.digest,
+  materialized: r.materialized,
+  pathsUnderThrowawayHome: r.seen.filter((p) => p.startsWith('$home/')).length,
+});
 
 function search(nub, pkg, version, root, keep) {
   const cell = (name, opts) => {
@@ -315,7 +359,7 @@ function search(nub, pkg, version, root, keep) {
   // One check, because the control IS the most permissive state. Failing here means no
   // grant can help — the package is broken for reasons confinement does not cause.
   if (control.rc !== 0 || !control.overrideOk) {
-    return { pkg, version, verdict: 'BROKEN-EVEN-WITH-EVERYTHING', cells, control: brief(control) };
+    return { pkg, version, verdict: 'BROKEN-EVEN-WITH-EVERYTHING', cells, control: baseCase(control) };
   }
   const sideEffectful = hasScript;
   const matches = (r) => r.rc === control.rc && (!sideEffectful || r.digest === control.digest);
@@ -363,8 +407,8 @@ function search(nub, pkg, version, root, keep) {
         // The paths the winning grant restores: present unjailed, absent at the no-grant
         // floor. Capped, with the true count kept, so one pathological package cannot make
         // the results file unreadable — a silent truncation would be worse than a number.
-        boughtCount: floor ? controlOnly(control, floor).length : null,
-        // HOW MANY bought paths land in the THROWAWAY home — a count, not a verdict.
+        pathsBlockedWithoutGrantCount: floor ? controlOnly(control, floor).length : null,
+        // HOW MANY blocked paths land in the THROWAWAY home — a count, not a verdict.
         //
         // The jail redirects `$HOME` to a per-package directory that is discarded, so a
         // package caching under `~/.cache/<vendor>` writes there: the install passes,
@@ -373,18 +417,20 @@ function search(nub, pkg, version, root, keep) {
         // with ZERO under the real `~/.cache/puppeteer`.
         //
         // A BOOLEAN WAS WRONG TWICE: first it tested a `jailhome/` prefix the whole-root
-        // scan stopped producing, then "every bought path is ephemeral" read False because
+        // scan stopped producing, then "every blocked path is ephemeral" read False because
         // a few bookkeeping paths sit elsewhere. A count cannot be quietly inert — 0 means
         // nothing landed there, and any other number is the promotion list's raw material.
-        ephemeralPaths: floor
-          ? controlOnly(control, floor).filter((p) => p.includes('/jail-home/')).length
+        // The derived `writePaths` entry: the minimal directories that must survive.
+        writePaths: floor ? homeWritePaths(controlOnly(control, floor)) : null,
+        pathsLandingInThrowawayHome: floor
+          ? controlOnly(control, floor).filter((p) => p.startsWith('$home/')).length
           : null,
-        bought: floor ? controlOnly(control, floor).slice(0, 40) : null,
-        control: brief(control),
+        pathsBlockedWithoutGrant: floor ? controlOnly(control, floor).slice(0, 40) : null,
+        control: baseCase(control),
       };
     }
   }
-  return { pkg, version, verdict: 'NO-STATE-PASSED', cells, control: brief(control) };
+  return { pkg, version, verdict: 'NO-STATE-PASSED', cells, control: baseCase(control) };
 }
 
 // ── cli ───────────────────────────────────────────────────────────────────────
