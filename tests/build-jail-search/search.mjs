@@ -209,7 +209,22 @@ function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg }
  *  single package rewrites exactly its own record and a batch is resumable — the catalog
  *  is COLLATED from these later, never edited in place by a run. */
 function runPath(dir, pkg, version) {
-  return path.join(dir, `${pkg.replace('/', '+')}@${version}.json`);
+  // PARTITIONED BY PLATFORM, THEN PACKAGE, THEN VERSION.
+  //
+  // The catalog is per-platform and is reconciled from runs on several machines, so the
+  // platform has to be a DIRECTORY rather than a field buried in each record's provenance —
+  // otherwise merging result sets means parsing every file just to group them, and "which
+  // platforms have we measured this package on" is not answerable with `ls`.
+  //
+  // Version is its own level for the same reason: version banding needs several versions of one
+  // package side by side, and a flat `pkg@version.json` scatters them through one large
+  // directory. Scoped names keep the existing '+' convention.
+  return path.join(
+    dir,
+    `${process.platform}-${process.arch}`,
+    pkg.replace('/', '+'),
+    `${version}.json`,
+  );
 }
 
 /** What produced this record. Without it a results directory is a pile of numbers with no
@@ -708,6 +723,7 @@ try {
     ? argv[argv.indexOf('--runs') + 1]
     : path.join(path.dirname(new URL(import.meta.url).pathname), 'results', 'runs');
   const out = runPath(runDir, pkg, version);
+  fs.mkdirSync(path.dirname(out), { recursive: true });
 
   // RESUMABLE BY DEFAULT. A batch re-run should cost only what it has not already measured;
   // `--force` re-measures one package after a harness or jail change.

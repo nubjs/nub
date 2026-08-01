@@ -7,6 +7,7 @@
 //
 // Usage:
 //   node collate.mjs [--runs <dir>] [--baseline <file>] [--out <file>] [--platform <p>]
+//                    [--only-platform <p>]   keep only records whose PROVENANCE names <p>
 //
 // `--baseline` names a JSON file carrying the `baseline` and `env` arrays. Those are NOT
 // measured — they are the floor every jailed script gets — so they are authored once and merged
@@ -20,6 +21,7 @@ const opt = (name, dflt) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] 
 const here = new URL('.', import.meta.url).pathname;
 
 const RUNS = opt('--runs', path.join(here, 'results', 'runs'));
+const PLATFORM_FILTER = opt('--only-platform', null);
 const BASELINE = opt('--baseline', path.join(here, 'baseline.json'));
 const OUT = opt('--out', path.join(here, 'results', 'catalog-v2.json'));
 const PLATFORM = opt('--platform', null);
@@ -27,9 +29,30 @@ const PLATFORM = opt('--platform', null);
 // ── read ──────────────────────────────────────────────────────────────────────
 
 const records = [];
-for (const f of fs.readdirSync(RUNS).filter((f) => f.endsWith('.json')).sort()) {
-  try { records.push({ file: f, ...JSON.parse(fs.readFileSync(path.join(RUNS, f), 'utf8')) }); }
-  catch (e) { console.error(`  SKIP ${f}: ${e.message}`); }
+/** Every record under `dir`, at any depth. Records are partitioned
+ *  `<platform>/<package>/<version>.json`, so this walks rather than lists — and it still
+ *  reads a FLAT directory, which keeps older result sets collatable. */
+function walk(dir) {
+  const out = [];
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) out.push(...walk(full));
+    else if (e.name.endsWith('.json')) out.push(full);
+  }
+  return out;
+}
+
+for (const full of walk(RUNS)) {
+  const f = path.relative(RUNS, full);
+  try {
+    const rec = { file: f, ...JSON.parse(fs.readFileSync(full, 'utf8')) };
+    // The platform is the top directory level, but the record's own provenance is the
+    // authority — a file moved between directories must not silently change platform.
+    if (PLATFORM_FILTER && rec.provenance?.platform !== PLATFORM_FILTER) continue;
+    records.push(rec);
+  } catch (e) { console.error(`  SKIP ${f}: ${e.message}`); }
 }
 
 // PROVENANCE IS A GATE, NOT A FOOTNOTE. A results directory silently mixes methodologies when
