@@ -848,7 +848,18 @@ fn swap_extract(base: &Path, target: &Path) -> SwapExtract {
 
     match fs::rename(&tmp, target) {
         Ok(()) => {
-            let _ = fs::remove_dir_all(&stale);
+            // Report a set-aside copy we could not remove rather than swallowing it.
+            // On Windows this fails whenever a live process still has the old addon
+            // mapped — deleting a mapped image is what the OS actually refuses, unlike
+            // the rename above — so the tree strands until `gc_stale` collects it.
+            // Discarding the error is what kept that invisible.
+            if let Err(error) = fs::remove_dir_all(&stale) {
+                eprintln!(
+                    "nub: could not remove the superseded runtime at {}: {error}; \
+                     it will be collected later",
+                    stale.display()
+                );
+            }
             SwapExtract::Published(target.to_path_buf())
         }
         Err(_) => {
