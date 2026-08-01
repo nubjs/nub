@@ -481,6 +481,15 @@ fn persist_declared_home_writes(spawn: &aube_util::LifecycleSandboxSpawn) {
             // cache that is present and correct. Measured: the real home was populated at
             // 09:10:50 by the install and the second copy appeared 16s later.
             if to.exists() {
+                // …but the SOURCE must still go, or the second copy is stranded in a home that
+                // persists across runs. Measured outside the harness on puppeteer: `nub install`
+                // then `nub approve-builds --all` left 350 files in the real cache and 351 in the
+                // throwaway — a complete duplicate of the download, and for a browser or a
+                // Cypress binary that is hundreds of megabytes per package, forever.
+                //
+                // Skipping the move is right; skipping the cleanup was not. Idempotent for
+                // correctness is not the same as idempotent for disk.
+                let _ = std::fs::remove_dir_all(&from);
                 continue;
             }
             if let Some(parent) = to.parent() {
