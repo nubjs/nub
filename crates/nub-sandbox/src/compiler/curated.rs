@@ -1722,6 +1722,66 @@ mod tests {
             let _ = std::fs::remove_dir_all(&tmp);
         }
 
+        /// THE SHAPE THAT ACTUALLY SHIPS: the package and its dependency both live in the
+        /// GLOBAL VIRTUAL STORE, outside the project. The project-local fixture above cannot
+        /// catch a containment clamp, and one shipped: `resolve_dependency_dir` requires the
+        /// resolved path to be inside the project, so `deps` compiled to NOTHING in every real
+        /// install while the project-local test stayed green. Emitting a rule and enforcing one
+        /// are different claims, and only this fixture can tell them apart here.
+        #[test]
+        fn write_deps_reaches_a_dependency_in_the_GLOBAL_store() {
+            let tmp = std::env::temp_dir().join(format!("nub-v2-gvs-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            let store = tmp.join("home/.cache/nub/pm/store");
+            let me = store.join("me@1.0.0-aaaa/node_modules/me");
+            let dep = store.join("declared@1.0.0-bbbb/node_modules/declared");
+            let project = tmp.join("proj");
+            for d in [&me, &dep, &project] {
+                std::fs::create_dir_all(d).expect("fixture");
+            }
+            std::fs::write(
+                me.join("package.json"),
+                br#"{"name":"me","dependencies":{"declared":"1.0.0"}}"#,
+            )
+            .expect("fixture");
+            // The edge Node actually walks: a sibling link inside the package's own entry.
+            let link = store.join("me@1.0.0-aaaa/node_modules/declared");
+            #[cfg(unix)]
+            symlink_dir(&dep, &link);
+            #[cfg(not(unix))]
+            let _ = &link;
+
+            let catalog = crate::catalog_v2::parse(
+                r#"{"packages":{"p":[{"write":{"deps":true},"notes":"global-store deps reach"}]}}"#,
+            )
+            .expect("parses");
+            let mut policy = SandboxPolicy::default();
+            let homes = Homes {
+                project: project.clone(),
+                cache: tmp.join("home/.cache"),
+                home: tmp.join("home"),
+                tmp: tmp.join("tmp"),
+            };
+            apply_v2_grant(&mut policy, &homes, &me, &catalog.packages["p"][0]);
+
+            let want = crate::matcher::path::canonicalize_including_nonexistent(&dep)
+                .to_string_lossy()
+                .to_string();
+            let got: Vec<String> = policy
+                .fs
+                .rules
+                .entries
+                .iter()
+                .map(|r| r.matcher.as_str().to_string())
+                .collect();
+            assert!(
+                got.iter().any(|g| g.starts_with(&want)),
+                "a declared dependency in the GLOBAL store must be reachable — this is the case \
+                 the project clamp silently dropped. wanted a rule under {want}, got {got:?}"
+            );
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
         /// `disk` is the ABSENCE of confinement, so it is correct for it to emit no rule —
         /// but then the only thing that can prove it fired is the outcome, which is exactly
         /// why the outcome is asserted rather than the rule set.
