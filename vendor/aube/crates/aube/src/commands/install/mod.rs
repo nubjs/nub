@@ -207,6 +207,51 @@ const TRUST_POLICY_VALIDATION_CACHE_DIR: &str = "trust-policy-v1";
 const TRUST_POLICY_VALIDATION_CACHE_TTL: std::time::Duration =
     std::time::Duration::from_secs(5 * 60);
 
+/// The resolver-to-fetch queue only buffers handoffs; the tarball semaphore
+/// remains the transfer-concurrency ceiling. Keep the queue deep enough to
+/// absorb normal resolver bursts, but bounded independently of the configured
+/// transfer limit and of the target pointer width.
+///
+/// The `u64` calculation saturates before clamping to this deliberately modest
+/// limit. The result is converted to `usize` only after that bound, which is
+/// strictly below [`tokio::sync::Semaphore::MAX_PERMITS`] on supported targets
+/// and therefore always valid as a Tokio mpsc capacity.
+const RESOLVER_STREAM_CAPACITY_FLOOR: usize = 1_024;
+const RESOLVER_STREAM_CAPACITY_MAX: usize = 16_384;
+const _: () = assert!(RESOLVER_STREAM_CAPACITY_MAX < tokio::sync::Semaphore::MAX_PERMITS);
+const RESOLVER_STREAM_CAPACITY_MULTIPLIER: u64 = 16;
+
+fn resolver_stream_capacity(network_concurrency: u64) -> usize {
+    network_concurrency
+        .saturating_mul(RESOLVER_STREAM_CAPACITY_MULTIPLIER)
+        .clamp(
+            RESOLVER_STREAM_CAPACITY_FLOOR as u64,
+            RESOLVER_STREAM_CAPACITY_MAX as u64,
+        ) as usize
+}
+
+#[cfg(test)]
+mod resolver_stream_capacity_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_the_existing_low_concurrency_buffer() {
+        assert_eq!(resolver_stream_capacity(1), RESOLVER_STREAM_CAPACITY_FLOOR);
+        assert_eq!(resolver_stream_capacity(64), RESOLVER_STREAM_CAPACITY_FLOOR);
+        assert_eq!(resolver_stream_capacity(65), 1_040);
+    }
+
+    #[test]
+    fn saturates_to_a_target_independent_valid_tokio_capacity() {
+        let capacity_for_32_bit_input = resolver_stream_capacity(u64::from(u32::MAX));
+        let capacity_for_64_bit_input = resolver_stream_capacity(u64::MAX);
+
+        assert_eq!(capacity_for_32_bit_input, RESOLVER_STREAM_CAPACITY_MAX);
+        assert_eq!(capacity_for_64_bit_input, RESOLVER_STREAM_CAPACITY_MAX);
+        assert!(capacity_for_64_bit_input < tokio::sync::Semaphore::MAX_PERMITS);
+    }
+}
+
 #[cfg(test)]
 mod reentrancy_tests {
     use super::*;
@@ -1743,7 +1788,9 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // backpressure on graphs into the tens of thousands of
             // packages; fetch parallelism is still gated by
             // `fetch_network_concurrency` downstream.
-            let stream_capacity = fetch_network_concurrency.saturating_mul(16).max(1024);
+            let stream_capacity = resolver_stream_capacity(
+                u64::try_from(fetch_network_concurrency).unwrap_or(u64::MAX),
+            );
             let (resolver, mut resolved_rx) =
                 aube_resolver::Resolver::with_stream_capacity(client, stream_capacity);
             let pnpmfile_paths = if opts.ignore_pnpmfile {

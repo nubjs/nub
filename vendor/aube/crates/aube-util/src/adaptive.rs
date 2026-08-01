@@ -334,6 +334,10 @@ impl AdaptiveLimit {
         loop {
             let waiter = self.cold.available.notified();
             tokio::pin!(waiter);
+            // Enroll before inspecting capacity. A concurrent growth which
+            // follows wakes this future; one which precedes it is observed by
+            // the state load below.
+            waiter.as_mut().enable();
             let s = self.hot.state.load(Ordering::Acquire);
             let (inflight, limit) = unpack(s);
             if inflight < limit {
@@ -431,6 +435,19 @@ impl AdaptiveLimit {
         self.cold.available.notify_one();
     }
 
+    fn wake_growth_waiters(&self) {
+        /*
+         * A single broadcast does work only for the waiters that actually
+         * exist; it is never proportional to the numerical capacity change.
+         * `acquire` creates and enables its `Notified` before loading state,
+         * while Tokio guarantees `notify_waiters` reaches futures created
+         * before the broadcast even if they have not yet been polled. Thus a
+         * growth cannot strand an acquirer racing between registration and
+         * its capacity check.
+         */
+        self.cold.available.notify_waiters();
+    }
+
     #[inline]
     fn ratchet_min(slot: &AtomicU64, sample: u64) {
         let mut current = slot.load(Ordering::Relaxed);
@@ -494,21 +511,7 @@ impl AdaptiveLimit {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    /*
-                     * Wake one waiter per new permit. Tokio
-                     * `Notify` stores `notify_one` calls as permits
-                     * when no waiter is registered, so even
-                     * acquirers that are mid `notified()` future
-                     * setup pick up the signal instead of dropping
-                     * it. `notify_waiters` would lose signals to
-                     * acquirers that had not polled yet, and was
-                     * the cause of slow start under utilizing the
-                     * new capacity in earlier versions.
-                     */
-                    let added = next_limit - limit;
-                    for _ in 0..added {
-                        self.cold.available.notify_one();
-                    }
+                    self.wake_growth_waiters();
                     return;
                 }
                 Err(observed) => s = observed,
@@ -535,10 +538,7 @@ impl AdaptiveLimit {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    let added = next_limit - limit;
-                    for _ in 0..added {
-                        self.cold.available.notify_one();
-                    }
+                    self.wake_growth_waiters();
                     return;
                 }
                 Err(observed) => s = observed,
@@ -669,6 +669,69 @@ mod tests {
         limit.scale_limit_grow(2, 1);
 
         assert_eq!(limit.current_limit(), max);
+    }
+
+    #[tokio::test]
+    async fn persisted_large_ceiling_slow_start_is_prompt_and_bounded() {
+        const CEILING: usize = 2_147_483_648;
+
+        let temp = tempfile::tempdir().unwrap();
+        let state = PersistentState::new(temp.path().join("adaptive-state.json"));
+        state.save_observed("packument:default", 64);
+        let limit =
+            AdaptiveLimit::from_persistent(&state, "packument:default", CEILING, 1, CEILING);
+        let expected_seed = (64 * PERSISTED_BLEND_NUM
+            + (CEILING as u64) * (PERSISTED_BLEND_DEN - PERSISTED_BLEND_NUM))
+            / PERSISTED_BLEND_DEN;
+        let initial = limit.current_limit();
+        assert_eq!(initial, expected_seed as usize);
+
+        // The two slow-start doublings traverse the 1.5 billion permit gap
+        // between the persisted blend and the configured ceiling.
+        let started = Instant::now();
+        let permit = limit.acquire().await;
+        permit.record_success_with_rtt(Duration::from_millis(50));
+        let after_first_growth = limit.current_limit();
+
+        let permit = limit.acquire().await;
+        permit.record_success_with_rtt(Duration::from_millis(50));
+        let after_second_growth = limit.current_limit();
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "slow-start growth from {initial} took too long"
+        );
+        assert!(
+            after_first_growth >= initial,
+            "first growth regressed from {initial} to {after_first_growth}"
+        );
+        assert!(
+            after_first_growth <= CEILING,
+            "first growth exceeded ceiling: {after_first_growth}"
+        );
+        assert!(
+            after_second_growth >= after_first_growth,
+            "second growth regressed from {after_first_growth} to {after_second_growth}"
+        );
+        assert!(
+            after_second_growth <= CEILING,
+            "second growth exceeded ceiling: {after_second_growth}"
+        );
+        assert_eq!(after_second_growth, CEILING);
+    }
+
+    #[tokio::test]
+    async fn growth_wakes_waiter_registered_before_capacity_check() {
+        let limit = AdaptiveLimit::new(1, 1, 2);
+        let waiter = limit.cold.available.notified();
+        tokio::pin!(waiter);
+        waiter.as_mut().enable();
+
+        limit.bump_limit_by(1);
+
+        tokio::time::timeout(Duration::from_secs(1), waiter.as_mut())
+            .await
+            .expect("growth must wake a waiter that raced with the capacity check");
     }
 
     #[tokio::test]
