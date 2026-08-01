@@ -734,10 +734,20 @@ pub fn compile_build_jail(
     // A v2 override REPLACES the curated path rather than layering onto it: both express the
     // same axis, so applying both would union two answers and leave the search that generates
     // v2 unable to observe its own cell.
+    //
+    // THE GATE IS WHETHER A v2 CATALOG IS IN FORCE, not whether this package has an entry in
+    // one. Those are different questions, and conflating them makes an EMPTY v2 catalog — how
+    // "this package gets no grant" is spelled — fall through to the compiled-in v1 table, so
+    // the package silently keeps whatever grant it shipped with. Measured with the per-package
+    // gate: `wordpos` wrote into a sibling store entry from a supposedly grant-free cell,
+    // because v1 was still granting it, and every cell of the search then passed at state 0.
     let mut applied_v2 = false;
     #[cfg(feature = "build-jail-catalog-override")]
-    if let Some(grants) = package_name.and_then(crate::catalog_override::v2_grants_for) {
+    if crate::catalog_override::v2_in_force() {
         applied_v2 = true;
+        let grants = package_name
+            .and_then(crate::catalog_override::v2_grants_for)
+            .unwrap_or(&[]);
         let here = crate::catalog_v2::Platform::current();
         // FIRST MATCH WINS, on platform AND version. No match is a REAL state — a macOS-only
         // grant evaluated on Linux — and it means the base profile, never a fall-through to

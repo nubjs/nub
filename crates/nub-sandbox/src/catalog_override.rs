@@ -225,6 +225,18 @@ pub(crate) fn v2_grants_for(package: &str) -> Option<&'static [crate::catalog_v2
     Some(active_v2()?.packages.get(package)?.as_slice())
 }
 
+/// Is a v2 catalog in force AT ALL, whatever it contains?
+///
+/// This is a DIFFERENT question from [`v2_grants_for`] and conflating them silently voided
+/// every search result: an EMPTY v2 catalog is how the search spells "this package gets no
+/// grant", and if that falls through to the compiled-in v1 table the package keeps whatever
+/// grant it shipped with. The cheapest cell in the walk then passes for a package that
+/// genuinely needs a grant, and the search reports `needs nothing` for everything.
+#[cfg(feature = "build-jail-catalog-override")]
+pub(crate) fn v2_in_force() -> bool {
+    active_v2().is_some()
+}
+
 /// Without the feature there is no loader, no parser, and no path that could produce one —
 /// [`decide`] refuses any set variable before reaching here.
 #[cfg(not(feature = "build-jail-catalog-override"))]
