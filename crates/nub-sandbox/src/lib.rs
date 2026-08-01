@@ -107,6 +107,15 @@ pub mod catalog_override;
 #[cfg(feature = "build-jail-catalog-override")]
 pub mod catalog_v2;
 pub mod compiler;
+
+/// The v2 grants for one package, for an embedder that must act on them AFTER a lifecycle
+/// script has run — today the `writePaths` move. Exposed here rather than making the override
+/// module public, so the seam stays one function wide.
+#[cfg(feature = "build-jail-catalog-override")]
+pub fn catalog_override_v2_grants(package: &str) -> Option<&'static [catalog_v2::Grant]> {
+    catalog_override::v2_grants_for(package)
+}
+
 pub mod conformance;
 pub mod matcher;
 pub mod policy;
@@ -152,6 +161,7 @@ pub mod host_probe {
 pub mod windows_admin {
     pub use crate::backend::windows_account::{SETUP_COMMAND, clean, setup, status, teardown};
 }
+pub use compiler::jail_private_home;
 pub use compiler::{
     CommandRunner, CompileCtx, CompileError, CompileWarning, DOWNLOAD_HOSTS,
     PACKAGE_NETWORK_ALLOWED, PROJECT_VIRTUAL_STORE_LEAF, ScopeCapabilities, build_jail_net_allowed,

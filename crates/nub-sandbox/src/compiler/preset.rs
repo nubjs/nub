@@ -224,6 +224,14 @@ const NUB_JAIL_HOME_ROOT_PATTERN: &str = "$cache/nub/jail-home";
 /// `None` — a cache root the engine never established, or anything but a real directory
 /// squatting the leaf — leaves the jail compiling exactly as before. That is the
 /// conservative direction: no grant, no redirect, today's behavior.
+/// The package's private `$HOME`, for a caller that must reach into it AFTER the scripts
+/// finish — the `writePaths` move. Exposed rather than recomputed in nub-cli, because two
+/// implementations of the same path is exactly how a mover ends up looking somewhere the
+/// jail never wrote.
+pub fn jail_private_home(homes: &Homes, package_dir: &Path) -> Option<PathBuf> {
+    private_home_dir(homes, package_dir)
+}
+
 fn private_home_dir(homes: &Homes, package_dir: &Path) -> Option<PathBuf> {
     // Gate on the engine's cache root already existing, so a policy compiled against a
     // synthetic `Homes` (every unit test) neither materializes a tree nor silently

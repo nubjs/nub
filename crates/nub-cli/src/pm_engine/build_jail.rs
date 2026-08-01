@@ -417,7 +417,9 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             _enrolled = child
                 .process_group_id()
                 .and_then(aube_scripts::unix_group::register_embedder_group);
-            child.wait()
+            let status = child.wait();
+            persist_declared_home_writes(&spawn);
+            status
         }
         // Windows owns spawn+wait inside its launch plan and refuses the asynchronous
         // `spawn` seam, so the uniform `status()` verb stays the entry point off unix.
@@ -427,6 +429,81 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         }
     }
 }
+
+/// Move the directories a package's catalog entry DECLARES out of its throwaway `$HOME` and
+/// into the user's real one, once its lifecycle scripts have finished.
+///
+/// WHY THIS EXISTS. The jail redirects `$HOME` to a per-package directory that is discarded, so
+/// a package caching under `~/.cache/<vendor>` installs cleanly and its artefact is thrown
+/// away — measured: puppeteer's browser was 355 of the 359 paths it wrote, with none under the
+/// real `~/.cache/puppeteer`. At run time `HOME` is the real home and the package finds nothing.
+///
+/// WHY A MOVE RATHER THAN GRANTING WRITE ON THE REAL HOME. Granting hands a dependency script a
+/// live handle on `$HOME` for the whole run. This never does: the script writes to the
+/// throwaway and nub relocates only what the catalog names. The AUTHORITY is the same — nub
+/// copies whatever landed there — which is why the field is called `writePaths` and not
+/// something softer. The mechanism is tighter; the trust is not.
+///
+/// FAILURES ARE NON-FATAL. A lifecycle script that already succeeded must not be turned into a
+/// failed install because a cache could not be relocated; the package degrades to the
+/// pre-existing behaviour, which is the artefact being discarded.
+#[cfg(unix)]
+fn persist_declared_home_writes(spawn: &aube_util::LifecycleSandboxSpawn) {
+    #[cfg(feature = "build-jail-catalog-override")]
+    {
+        let Some(name) = spawn.package_name.as_deref() else {
+            return;
+        };
+        let Some(grants) = nub_sandbox::catalog_override_v2_grants(name) else {
+            return;
+        };
+        let here = nub_sandbox::catalog_v2::Platform::current();
+        let Some(grant) = grants.iter().find(|g| g.matches_platform(here)) else {
+            return;
+        };
+        if grant.write_paths.is_empty() {
+            return;
+        }
+        let homes = sandbox_homes(&spawn.project_root);
+        let Some(private) = nub_sandbox::jail_private_home(&homes, &spawn.package_dir) else {
+            return;
+        };
+        for rel in &grant.write_paths {
+            let from = private.join(rel);
+            if !from.exists() {
+                continue;
+            }
+            let to = homes.home.join(rel);
+            // ALREADY THERE. A package's scripts run more than once per install (the approve
+            // window re-runs them), and a re-download lands in a FRESH private home while the
+            // first copy is already in place. `rename` onto a populated directory fails
+            // ENOTEMPTY, so treat an existing destination as done rather than warning about a
+            // cache that is present and correct. Measured: the real home was populated at
+            // 09:10:50 by the install and the second copy appeared 16s later.
+            if to.exists() {
+                continue;
+            }
+            if let Some(parent) = to.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            // Rename first: the throwaway home and the real cache are on one filesystem, so a
+            // 300 MB browser costs nothing. Fall back to nothing rather than a deep copy — a
+            // cross-device case wants deliberate handling, not a silent multi-hundred-MB copy
+            // inside an install.
+            if std::fs::rename(&from, &to).is_err() {
+                tracing::warn!(
+                    "build-jail: could not relocate {rel:?} out of the package's private home; \
+                     the artefact stays in the throwaway and the package may not find it later"
+                );
+            }
+        }
+    }
+    #[cfg(not(feature = "build-jail-catalog-override"))]
+    let _ = spawn;
+}
+
+#[cfg(not(unix))]
+fn persist_declared_home_writes(_spawn: &aube_util::LifecycleSandboxSpawn) {}
 
 /// The message a user sees when an install refuses because the build jail cannot be applied.
 ///
