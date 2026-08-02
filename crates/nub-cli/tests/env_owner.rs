@@ -63,10 +63,14 @@ fn install_stub_loader(root: &Path) {
         // snapshots process.env when it is imported and hands that snapshot to any
         // subprocess it spawns, so the scrub is only effective if it has already
         // happened by this point — which is exactly what these two capture.
+        // `load()` reports whether it is running for the FIRST time in this env.
+        // A second resolution overwrites the value with a marker, which is how the
+        // Worker test detects a re-resolve that would clobber inherited values.
         r#"process.env.SEEN_PATH = process.env.PATH ?? "";
            process.env.SEEN_NODE_OPTIONS = process.env.NODE_OPTIONS ?? "";
            export async function load() {
-             process.env.FROM_LOADER = "yes";
+             process.env.FROM_LOADER =
+               process.env.FROM_LOADER === undefined ? "yes" : "re-resolved";
              process.env.__VARLOCK_ENV = "{}";
            }
            export function patchGlobalConsole() {}"#,
@@ -219,6 +223,52 @@ fn the_loader_is_imported_with_a_scrubbed_environment_that_is_then_restored() {
         live_options.contains("env-owner"),
         "NODE_OPTIONS must be restored too, or a `node` the app spawns loses \
          env-owner handling entirely; saw {live_options:?}"
+    );
+}
+
+#[test]
+fn a_worker_inherits_the_environment_instead_of_re_resolving_it() {
+    // Regression, and it was silent. A Worker inherits NODE_OPTIONS and re-ran the
+    // adapter; `process.chdir` throws in a Worker, so the cwd hop was skipped and a
+    // Worker started from a workspace member resolved from a directory with no
+    // schema — producing an empty graph while __VARLOCK_ENV stayed set, so the
+    // verification pass saw a load and said nothing.
+    let dir = project(&[(".env.schema", "# ---\nA=1\n")]);
+    install_stub_loader(dir.path());
+    write(
+        dir.path(),
+        "worker.mjs",
+        r#"import { Worker, isMainThread, parentPort } from "node:worker_threads";
+           if (isMainThread) {
+             const w = new Worker(new URL(import.meta.url));
+             w.on("message", (m) => { console.log(JSON.stringify(m)); w.terminate(); });
+           } else {
+             parentPort.postMessage({ FROM_LOADER: process.env.FROM_LOADER ?? null });
+           }"#,
+    );
+
+    let output = Command::new(nub_binary())
+        .arg("worker.mjs")
+        .current_dir(dir.path())
+        .env("PATH", "")
+        .env_remove("NODE_OPTIONS")
+        .output()
+        .expect("spawn nub");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        output.status.success(),
+        "nub exited {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        output.status.code()
+    );
+    let seen: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|err| panic!("worker output was not JSON ({err}): {stdout}"));
+    assert_eq!(
+        seen["FROM_LOADER"].as_str(),
+        Some("yes"),
+        "the Worker must inherit the resolved value, not re-resolve it — \
+         \"re-resolved\" means the adapter ran again inside the Worker, which is \
+         where the cwd hop cannot work. stderr: {stderr}"
     );
 }
 
