@@ -108,6 +108,27 @@ pub struct Manifest {
     /// — the launcher falls back to `node_sha256` then.
     #[serde(default)]
     pub node_blake3: String,
+    /// Byte length of the DECOMPRESSED embedded Node — the WARM-START check, in
+    /// place of re-hashing the whole file.
+    ///
+    /// The hash was never establishing IDENTITY. The extraction lives at
+    /// `compile-node/<version>-<short_key(node_sha256)>`, so the content digest is
+    /// already in the PATH — Deno closed the equivalent PR unmerged with exactly
+    /// that reasoning, and there the proposed check was a free string compare where
+    /// nub was paying O(107 MB) on every launch. All the re-hash added was detecting
+    /// a change SINCE extraction, and against a same-uid attacker it adds nothing:
+    /// the extraction dir is already owner-only and non-group-writable, while that
+    /// same uid can simply rewrite the artifact binary itself.
+    ///
+    /// What a size check DOES catch is the failure actually observed in the field —
+    /// an OS or antivirus sweep truncating or clearing cached files, which is what
+    /// drove `vercel/pkg` to ship and then revert an always-copy warm path. macOS
+    /// `~/Library/Caches` is purgeable, so nub is exposed to the same class.
+    ///
+    /// Zero for `smol`, and zero in a payload written before this field existed —
+    /// the launcher falls back to the digest then, so old artifacts keep working.
+    #[serde(default)]
+    pub node_size: u64,
     /// Whether each app file's bytes are individually zstd-compressed.
     ///
     /// Per FILE, not per region: this module is a pure container (see the header —
@@ -762,6 +783,7 @@ mod tests {
             triple: "darwin-arm64".into(),
             node_sha256: "abc123".into(),
             node_blake3: String::new(),
+            node_size: 0,
             app_compressed: false,
             app_sha256: "def456".into(),
             minify: false,
@@ -785,6 +807,7 @@ mod tests {
             triple: "darwin-arm64".into(),
             node_sha256: "abc123".into(),
             node_blake3: String::new(),
+            node_size: 0,
             app_compressed: false,
             app_sha256: "def456".into(),
             minify: true,
@@ -819,6 +842,7 @@ mod tests {
             triple: "darwin-arm64".into(),
             node_sha256: String::new(),
             node_blake3: String::new(),
+            node_size: 0,
             app_compressed: false,
             app_sha256: "aa".into(),
             minify: false,

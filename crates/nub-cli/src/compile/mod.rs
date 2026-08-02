@@ -200,7 +200,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         .unwrap_or_else(|| PathBuf::from("."));
     let (pin, raw, source) = determine_target(opts.target.as_deref(), &pin_cwd)?;
 
-    let (node_version, node_blob, node_sha, node_b3, node_license_blob) = if opts.smol {
+    let (node_version, node) = if opts.smol {
         // Smol bakes the acceptance FLOOR the launcher enforces (`discovered >=
         // floor`) — and ONLY that. A range's upper bound is deliberately not
         // carried into the artifact, so the raw spec is echoed here for the
@@ -213,7 +213,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
             "Using Node.js {} (resolved from {source}; satisfied at runtime)",
             non_exact_spec(&pin, &raw).unwrap_or_else(|| floor.to_string())
         );
-        (floor, Vec::new(), String::new(), String::new(), Vec::new())
+        (floor, EmbeddedNode::default())
     } else {
         // Embed bakes ONE exact version — a range/major/alias collapses to the
         // newest satisfying release at compile time. (`build_node_blob` →
@@ -223,9 +223,8 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         let exact =
             version_management::resolve_pin_for_platform(&pin, os, arch, musl, &cache_root)?;
         external::check_node_support(&exact, &source, &shim_plan)?;
-        let (blob, sha, b3, node_license_blob) =
-            build_node_blob(&exact, &target, &cache_root, &source)?;
-        (exact, blob, sha, b3, node_license_blob)
+        let node = build_node_blob(&exact, &target, &cache_root, &source)?;
+        (exact, node)
     };
 
     // Compress AFTER `sha256_of_app` above: that hash is the extraction cache key
@@ -255,14 +254,15 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         node_version: node_version.to_string(),
         smol_exact_target: opts.smol && smol_requires_exact_target(&pin),
         triple: target.triple(),
-        node_sha256: node_sha,
-        node_blake3: node_b3,
+        node_sha256: node.sha256,
+        node_blake3: node.blake3,
+        node_size: node.size,
         app_compressed: true,
         app_sha256: app_sha,
         minify: opts.bundle.minify,
         install_message: Some(install_message(&opts)),
     };
-    let payload = encode_with_license(&manifest, &app_files, &node_blob, &node_license_blob);
+    let payload = encode_with_license(&manifest, &app_files, &node.blob, &node.license);
 
     // 5. Build and verify a staged artifact before replacing the requested
     // destination. A late signing/permission/static/native-probe failure must
@@ -808,12 +808,33 @@ struct StagedDetachedMap {
 /// and zstd-19 compress. Returns the compressed Node blob, the hash of the
 /// DECOMPRESSED (runnable) bytes, and the compressed aggregate root `LICENSE`
 /// from that exact official distribution.
+/// The embedded Node, compressed, alongside every field the manifest carries about
+/// it. A struct rather than a tuple because these five travel together and three of
+/// them are derived from the same decompressed bytes — `sha256` keys the extraction
+/// directory, `blake3` is the legacy warm-start digest, and `size` is what the
+/// launcher actually checks now.
+///
+/// `Default` is the `smol` shape: no embedded Node, so no blob, no digests, no size.
+#[derive(Default)]
+struct EmbeddedNode {
+    /// zstd-19 compressed Node binary.
+    blob: Vec<u8>,
+    /// SHA-256 of the DECOMPRESSED bytes — the extraction cache key.
+    sha256: String,
+    /// BLAKE3 of the same bytes, for artifacts that still verify by digest.
+    blake3: String,
+    /// Length of the same bytes — the launcher's warm-start check.
+    size: u64,
+    /// zstd-19 compressed Node LICENSE.
+    license: Vec<u8>,
+}
+
 fn build_node_blob(
     version: &NodeVersion,
     target: &TargetPlatform,
     cache_root: &Path,
     resolved_from: &str,
-) -> Result<(Vec<u8>, String, String, Vec<u8>)> {
+) -> Result<EmbeddedNode> {
     let (os, arch, musl) = dist_platform(target);
     // Provisioning prints the `Using Node.js <v> (resolved from <source>)` line +
     // downloads (verified against SHASUMS256.txt before it commits).
@@ -844,9 +865,14 @@ fn build_node_blob(
         bytes.len() as f64 / 1_000_000.0
     );
     let blob = zstd::encode_all(&bytes[..], 19).context("zstd-19 compressing Node")?;
-    let node_license_blob =
-        zstd::encode_all(&license[..], 19).context("zstd-19 compressing Node LICENSE")?;
-    Ok((blob, sha, b3, node_license_blob))
+    let license = zstd::encode_all(&license[..], 19).context("zstd-19 compressing Node LICENSE")?;
+    Ok(EmbeddedNode {
+        blob,
+        sha256: sha,
+        blake3: b3,
+        size: bytes.len() as u64,
+        license,
+    })
 }
 
 /// The store root a target's Node is provisioned into. A NON-host Node must not
@@ -1982,6 +2008,7 @@ mod tests {
             triple: "darwin-arm64".into(),
             node_sha256: "node".into(),
             node_blake3: String::new(),
+            node_size: 0,
             app_compressed: false,
             app_sha256: "app".into(),
             minify: false,
@@ -2000,6 +2027,7 @@ mod tests {
             shape: Shape::Smol,
             node_sha256: String::new(),
             node_blake3: String::new(),
+            node_size: 0,
             app_compressed: false,
             ..manifest
         };

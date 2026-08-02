@@ -500,6 +500,7 @@ mod tests {
             triple: "linux-x64".into(),
             node_sha256: String::new(),
             node_blake3: String::new(),
+            node_size: 0,
             app_compressed: false,
             app_sha256: "aa".into(),
             minify: true,

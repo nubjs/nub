@@ -736,11 +736,32 @@ fn regular_file_matches_bytes(path: &Path, expected: &[u8]) -> bool {
 ///
 /// A payload written before `node_blake3` existed carries an empty field and
 /// falls back to SHA-256.
+/// Is this extracted Node still the one we wrote?
+///
+/// Size, not a digest. The digest is already in the PATH — the tree lives at
+/// `compile-node/<version>-<short_key(node_sha256)>` — so re-hashing established no
+/// identity the directory name did not already assert. It only detected a change
+/// since extraction, and against a same-uid attacker it detected nothing worth
+/// having: `metadata_is_trusted_regular_file` has already established the file is
+/// owner-only and non-group-writable, and the same uid can rewrite the artifact
+/// binary itself far more cheaply than it can doctor this file.
+///
+/// The failure this DOES need to catch is real and observed: an OS or antivirus
+/// sweep truncating or clearing cached files. That is what drove `vercel/pkg` to
+/// ship an always-copy warm path and then revert it, and macOS `~/Library/Caches`
+/// is purgeable, so nub sits in the same blast radius. Truncation changes the size.
+///
+/// A payload written before `node_size` existed carries zero and falls back to the
+/// digest, so artifacts compiled by an older nub keep verifying exactly as before.
 fn regular_file_matches_digest(path: &Path, manifest: &Manifest) -> bool {
-    if !fs::symlink_metadata(path)
-        .is_ok_and(|metadata| metadata_is_trusted_regular_file(path, &metadata))
-    {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
         return false;
+    };
+    if !metadata_is_trusted_regular_file(path, &metadata) {
+        return false;
+    }
+    if manifest.node_size != 0 {
+        return metadata.len() == manifest.node_size;
     }
     if is_hex_digest(&manifest.node_blake3, 64) {
         return blake3_hex_of_file(path)
@@ -2552,6 +2573,7 @@ mod tests {
             triple: "darwin-arm64".to_string(),
             node_sha256: format!("{:x}", Sha256::digest(b"node")),
             node_blake3: String::new(),
+            node_size: 0,
             app_compressed: false,
             app_sha256: "app-cache-key".to_string(),
             minify: false,
@@ -3722,6 +3744,76 @@ mod tests {
 
         let found = best_node_in(&dir, &NodeVersion::new(22, 15, 0), false, "darwin-arm64");
         assert_eq!(found, Some((valid, NodeVersion::new(24, 14, 0))));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A truncated extraction is rejected, and an intact one accepted.
+    ///
+    /// This is the failure the size check exists for, and it is not hypothetical: an
+    /// OS or antivirus sweep clearing cached files is what made `vercel/pkg` ship an
+    /// always-copy warm path and then revert it, and macOS `~/Library/Caches` is
+    /// purgeable, so a compiled artifact sits in the same blast radius. The digest
+    /// that used to run here caught this too — for the cost of re-hashing ~107 MB on
+    /// every launch, which measured as 62% of the artifact's entire warm start.
+    ///
+    /// The intact half is the control: without it a check that rejected everything
+    /// would satisfy the truncation assertion and look correct.
+    #[cfg(unix)]
+    #[test]
+    fn a_truncated_extraction_is_rejected_and_an_intact_one_is_not() {
+        let base = fresh_cache_dir("node-size-check");
+        let node = base.join("node");
+        let bytes = b"#!/bin/sh\nprintf 'v26.5.0\\n'\n";
+        fs::write(&node, bytes).unwrap();
+
+        let mut manifest = test_view().manifest;
+        // Digests that can never match, so any fallback to hashing fails BOTH halves
+        // — the test cannot pass by silently taking the old path.
+        manifest.node_blake3 = "0".repeat(64);
+        manifest.node_sha256 = "0".repeat(64);
+        manifest.node_size = bytes.len() as u64;
+
+        assert!(
+            regular_file_matches_digest(&node, &manifest),
+            "an intact extraction whose length matches the manifest must be accepted"
+        );
+
+        fs::write(&node, &bytes[..bytes.len() - 1]).unwrap();
+        assert!(
+            !regular_file_matches_digest(&node, &manifest),
+            "a truncated extraction must be rejected — this is the field failure the \
+             size check replaced the per-launch digest to catch"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// An artifact compiled before `node_size` existed still verifies by digest.
+    ///
+    /// The field is `#[serde(default)]`, so an older payload decodes with zero — and
+    /// zero must mean "fall back to the digest", never "any length is fine". Without
+    /// this, the compatibility path could silently degrade to no check at all.
+    #[cfg(unix)]
+    #[test]
+    fn a_payload_predating_node_size_still_verifies_by_digest() {
+        let base = fresh_cache_dir("node-size-legacy");
+        let node = base.join("node");
+        let bytes = b"#!/bin/sh\nprintf 'v26.5.0\\n'\n";
+        fs::write(&node, bytes).unwrap();
+
+        let mut manifest = test_view().manifest;
+        manifest.node_size = 0;
+        manifest.node_blake3 = blake3::hash(bytes).to_hex().to_string();
+        assert!(
+            regular_file_matches_digest(&node, &manifest),
+            "a legacy payload's correct BLAKE3 must still be accepted"
+        );
+
+        manifest.node_blake3 = "0".repeat(64);
+        assert!(
+            !regular_file_matches_digest(&node, &manifest),
+            "a legacy payload with a WRONG digest must be rejected — a zero node_size \
+             means fall back to hashing, not skip the check"
+        );
         let _ = fs::remove_dir_all(&base);
     }
 
