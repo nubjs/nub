@@ -403,13 +403,26 @@ function runPath(dir, pkg, version) {
  *  floor, and the clamp and default do the rest. */
 /** The package's own `engines.node`, read from the registry — metadata only, no tarball. Null when
  *  absent or unreachable, which the resolver turns into the default. */
-function enginesFor(pkg, version) {
+/** `engines.node` AND the publish date in ONE registry round-trip — both feed the Node choice, and
+ *  fetching them separately doubled the per-package latency for no reason. */
+function enginesAndDate(pkg, version) {
   try {
-    const r = spawnSync('npm', ['view', `${pkg}@${version}`, 'engines.node'],
+    const r = spawnSync('npm', ['view', `${pkg}@${version}`, 'engines.node', 'time', '--json'],
       { encoding: 'utf8', timeout: 30_000 });
-    const out = (r.stdout || '').trim();
-    return r.status === 0 && out ? out : null;
-  } catch { return null; }
+    if (r.status !== 0) return { engines: null, published: null };
+    const j = JSON.parse(r.stdout || '{}');
+    // ⛔ `npm view` COLLAPSES its output when only ONE of the requested fields exists. Ask for two
+    // and a normal package returns `{"engines.node": ..., "time": {...}}` — but a package with NO
+    // `engines` returns the TIME MAP ITSELF at top level, with no `time` key to reach for.
+    // Handling only the wrapped shape yielded published=null for exactly the packages that need
+    // the date MOST (the ones with no engines to fall back on), so the date-aware pin was inert
+    // precisely where it mattered and they dropped to the Node 22 default. MEASURED on
+    // better-sqlite3@8.7.0 and @rspack/core@0.0.26. Detect both shapes via the version under test.
+    const engines = typeof j['engines.node'] === 'string' ? j['engines.node'] : null;
+    const time = j.time && typeof j.time === 'object' ? j.time
+      : (typeof j[version] === 'string' ? j : null);
+    return { engines, published: time?.[version] ?? null };
+  } catch { return { engines: null, published: null }; }
 }
 
 // ⛔ THE FLOOR IS NUB'S OWN SUPPORTED FLOOR (18), NOT THE OLDEST NODE INSTALLED.
@@ -439,17 +452,54 @@ const NODE_FLOOR = 10;
 const NODE_DEFAULT = '22';      // when `engines.node` is absent or unparseable
 const NODE_CEILING = 22;        // latest LTS — never measure on something newer than the ecosystem
 
-function resolveNodeMajor(enginesNode) {
-  if (!enginesNode || typeof enginesNode !== 'string') return NODE_DEFAULT;
-  // Take the smallest major any comparator mentions: `>=14 <21` floors at 14, `^18.0.0` at 18.
-  // Take the MAJOR of each version token, never every number that happens to precede a dot:
-  // `^20.0.0` contains "0." twice, and matching those made its floor 0 instead of 20.
-  const majors = [...enginesNode.matchAll(/(?:^|[\s|,>=<~^])v?(\d+)(?:\.\d+)*/g)]
-    .map((m) => Number(m[1]))
-    .filter((n) => Number.isFinite(n) && n >= 0);
-  if (!majors.length) return NODE_DEFAULT;
-  const floor = Math.min(...majors);
-  return String(Math.min(Math.max(floor, NODE_FLOOR), NODE_CEILING));
+/** The Node major that was CURRENT when a version was published — i.e. the one its author actually
+ *  built and tested against. Active-LTS boundaries, from nodejs/Release. */
+const LTS_AT = [
+  ['2011-01-01', 10], ['2018-10-30', 10], ['2019-10-22', 12], ['2020-10-27', 14],
+  ['2021-10-26', 16], ['2022-10-25', 18], ['2023-10-24', 20], ['2024-10-29', 22],
+];
+function ltsAt(published) {
+  const t = published ? Date.parse(published) : NaN;
+  if (!Number.isFinite(t)) return null;
+  let major = LTS_AT[0][1];
+  for (const [when, m] of LTS_AT) if (t >= Date.parse(when)) major = m;
+  return major;
+}
+
+/** Which Node to measure a package-version on.
+ *
+ *  ⛔ `engines` ALONE IS THE WRONG SIGNAL, and it fails in BOTH directions — MEASURED:
+ *
+ *    too OLD:  @tailwindcss/oxide@4.1.14, published 2025-10, declares `>= 10` -> pinned Node 10.
+ *              A 2025 Rust-toolchain package cannot run there and nobody has ever tested it there;
+ *              the floor is stale boilerplate. electron@31.7.7 (2025-01, `>= 12.20.55`) the same.
+ *    too NEW:  better-sqlite3@8.7.0 (2023-09) and @rspack/core@0.0.26 (2023-03) declare NO engines,
+ *              so they fell to the Node 22 default and their C++ met a V8 that had removed the API
+ *              they call — `no matching member function for call to 'SetAccessor'`. uuid@0.0.2 is
+ *              from 2011 and got Node 22.
+ *
+ *  So START from the Node that was CURRENT WHEN THE VERSION WAS PUBLISHED, then raise it to
+ *  whatever `engines` genuinely requires. A publish date cannot be stale boilerplate the way a
+ *  floor can, and it is present for every version. `engines` keeps exactly the authority it
+ *  deserves — a LOWER bound — and loses the authority it does not, which is to nominate an
+ *  ancient runtime for a modern release.
+ *
+ *  Both inputs may be missing: no date falls back to `engines`, and neither falls back to the
+ *  default. Everything is clamped to [NODE_FLOOR, NODE_CEILING]. */
+function resolveNodeMajor(enginesNode, published) {
+  let floor = null;
+  if (enginesNode && typeof enginesNode === 'string') {
+    // Smallest major any comparator mentions: `>=14 <21` floors at 14, `^18.0.0` at 18. Take the
+    // MAJOR of each version token, never every digit preceding a dot — `^20.0.0` contains "0."
+    // twice, and matching those once made its floor 0 instead of 20.
+    const majors = [...enginesNode.matchAll(/(?:^|[\s|,>=<~^])v?(\d+)(?:\.\d+)*/g)]
+      .map((m) => Number(m[1]))
+      .filter((n) => Number.isFinite(n) && n >= 0);
+    if (majors.length) floor = Math.min(...majors);
+  }
+  const dated = ltsAt(published);
+  const pick = dated === null ? (floor ?? Number(NODE_DEFAULT)) : Math.max(dated, floor ?? 0);
+  return String(Math.min(Math.max(pick, NODE_FLOOR), NODE_CEILING));
 }
 
 /** A Python that the node-gyp THIS Node will get can actually run, or null to leave the host's
@@ -530,7 +580,7 @@ function toolchain() {
 /** What produced this record. Without it a results directory is a pile of numbers with no
  *  way to tell which binary or host they came from — and this effort has already been
  *  burned by results whose provenance had to be reconstructed after the fact. */
-function provenance(nub, nodePin, enginesNode, nodeMajor) {
+function provenance(nub, nodePin, enginesNode, nodeMajor, publishedAt = null) {
   // THE MEASUREMENT NODE IS PART OF THE RESULT. A grant measured on a Node the package was never
   // built against is not the package's grant, so the record carries what was DECLARED, what was
   // CHOSEN, and what actually RAN — not just the last of the three.
@@ -558,6 +608,9 @@ function provenance(nub, nodePin, enginesNode, nodeMajor) {
     // rule CHOSE, what was actually PINNED, and what the host would have supplied unpinned.
     nodeSelection: {
       enginesNode: enginesNode ?? null,
+      // The date the Node choice was derived FROM. Without it a reader cannot tell whether a
+      // record was pinned by `engines` or by publish date, and those disagree constantly.
+      publishedAt: publishedAt ?? null,
       chosenMajor: nodeMajor ?? null,
       pinnedTo: nodePin?.name ?? null,
       hostNode: process.version,
@@ -959,8 +1012,8 @@ function search(nub, pkg, version, root, keep, runDir) {
   // Discovery is pinned too, so the whole probe — discovery, every cell, and both reference arms —
   // runs on ONE runtime. Recorded in provenance so a catalog entry carries the Node it was
   // measured under rather than inheriting whatever the host happened to have.
-  const enginesNode = enginesFor(pkg, version);
-  const nodeMajor = resolveNodeMajor(enginesNode);
+  const { engines: enginesNode, published: publishedAt } = enginesAndDate(pkg, version);
+  const nodeMajor = resolveNodeMajor(enginesNode, publishedAt);
   const nodePin = nodeBinFor(nodeMajor);
   const nodeBin = nodePin?.dir ?? null;
 
@@ -1039,7 +1092,7 @@ function search(nub, pkg, version, root, keep, runDir) {
       pkg, version, verdict: 'HARNESS-ERROR',
       why: 'the catalog override did not engage in the control — is the binary built with '
          + '`--features nub-cli/build-jail-catalog-override`, and did anything rebuild it mid-run?',
-      cells, control: baseCase(control), provenance: provenance(nub, nodePin, enginesNode, nodeMajor),
+      cells, control: baseCase(control), provenance: provenance(nub, nodePin, enginesNode, nodeMajor, publishedAt),
     };
   }
   // ⛔ A MALICIOUS-PACKAGE REFUSAL IS THE SCREEN WORKING, NOT A DEFECT AND NOT A GRANT GAP.
@@ -1058,7 +1111,7 @@ function search(nub, pkg, version, root, keep, runDir) {
       why: 'the OSV screen refused this package (MAL-* advisory). Working as designed — no grant '
          + 'applies, and it must not be recorded as a nub defect or enter the catalog.',
       cells, control: baseCase(control),
-      provenance: provenance(nub, nodePin, enginesNode, nodeMajor),
+      provenance: provenance(nub, nodePin, enginesNode, nodeMajor, publishedAt),
     };
   }
   if (control.rc !== 0 || controlB.rc !== 0) {
@@ -1177,7 +1230,7 @@ function search(nub, pkg, version, root, keep, runDir) {
       control: baseCase(control),
       controlLogTail: (control.log || '').split('\n').slice(-40).join('\n'),
       logDir: runDirFor(runDir, pkg, version),
-      provenance: provenance(nub, nodePin, enginesNode, nodeMajor),
+      provenance: provenance(nub, nodePin, enginesNode, nodeMajor, publishedAt),
     };
   }
   const sideEffectful = hasScript;
@@ -1234,7 +1287,7 @@ function search(nub, pkg, version, root, keep, runDir) {
         // THE MEASUREMENT NODE, on the success path too. This return had NO provenance at all, so
         // the caller's fallback filled it with nulls and every MINIMUM record claimed the Node pin
         // was off when it was on — a record that lies about its own measurement conditions.
-        provenance: provenance(nub, nodePin, enginesNode, nodeMajor),
+        provenance: provenance(nub, nodePin, enginesNode, nodeMajor, publishedAt),
         // RECORDED ON THE SUCCESS PATH TOO, not just on failure: these are the records that
         // BECOME catalog entries, and the collator generates `default` from whichever measured
         // version is `latest`. Without the dist-tag here it falls back to highest-measured,
