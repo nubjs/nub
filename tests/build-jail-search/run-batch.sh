@@ -190,6 +190,61 @@ for spec in "$@"; do
   fi
 done
 
+# ⛔ RE-VERIFY EVERY NUB-DEFECT VERDICT SERIALLY, ONCE THE BATCH HAS DRAINED.
+#
+# `BROKEN-EVEN-WITH-EVERYTHING` is the harness accusing NUB of a defect — the single most
+# trust-destroying thing it can emit, and the one output nobody should have to re-derive by hand.
+# It must never rest on a measurement taken while N shards were hammering the box.
+#
+# MEASURED: `@pdftron/pdfnet-node@7.1.1` was recorded BROKEN-EVEN-WITH-EVERYTHING, and the same
+# package at the same widest grant on the same box installs rc=0 once the box is quiet. Its sweep
+# failure was `npm ERR! rimraf: missing path` + `Callback called more than once` — npm 6 racing on
+# its own _cacache. Old-Node pins are the exposed set, because publish-date pinning hands a 2020
+# package npm 6.
+#
+# The double control and the confirmation retry did NOT catch it: both attempts ran inside the same
+# busy window, so they agreed with each other and were both wrong. Only re-measuring AFTER the batch
+# drains changes the condition that caused it — which is why this loop lives here, at the end,
+# rather than as another retry inside the cell.
+if [ "$RECORDED" -gt 0 ]; then
+  _defects="$(node -e '
+    const fs = require("fs"), path = require("path");
+    const root = process.argv[1];
+    const out = [];
+    (function walk(d) {
+      let ents; try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+      for (const e of ents) {
+        const f = path.join(d, e.name);
+        if (e.isDirectory()) walk(f);
+        else if (e.name === "results.json") {
+          try {
+            const r = JSON.parse(fs.readFileSync(f, "utf8"));
+            if (r.verdict === "BROKEN-EVEN-WITH-EVERYTHING") out.push(`${r.pkg}@${r.version}`);
+          } catch {}
+        }
+      }
+    })(root);
+    console.log(out.join(" "));
+  ' "$here/results/runs/$PLAT" 2>/dev/null)"
+  if [ -n "$_defects" ]; then
+    echo "" >&2
+    echo "re-verifying $(printf '%s\n' $_defects | wc -l | tr -d ' ') nub-defect verdict(s) SERIALLY on a quiet box …" >&2
+    for spec in $_defects; do
+      pkg="${spec%@*}"; ver="${spec##*@}"
+      d="$here/results/runs/$PLAT/$(printf '%s' "$pkg" | tr '/' '+')/$ver"
+      timeout 2400 node "$here/search.mjs" "$spec" --nub "$NUB" --force \
+        2>"$d/harness-stderr-reverify.log" >/dev/null || true
+      v="$(node -e 'try{console.log(require(process.argv[1]).verdict)}catch{console.log("?")}' \
+           "$d/results.json" 2>/dev/null)"
+      if [ "$v" = "BROKEN-EVEN-WITH-EVERYTHING" ]; then
+        echo "  ✗ $spec — CONFIRMED under serial re-verify: a real nub defect" >&2
+      else
+        echo "  ↺ $spec — was a LOAD-INDUCED FALSE defect; now $v" >&2
+      fi
+    done
+  fi
+fi
+
 # COVERAGE IS THE HEADLINE. A sweep that measured half its worklist is not a sweep, and the number
 # that says so belongs at the end where it cannot be missed.
 echo "" >&2
