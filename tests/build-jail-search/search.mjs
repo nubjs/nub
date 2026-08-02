@@ -1402,7 +1402,25 @@ function search(nub, pkg, version, root, keep, runDir) {
         pathsLandingInThrowawayHome: floor
           ? controlOnly(controlU, floor).filter((p) => p.startsWith('$home/')).length
           : null,
-        pathsBlockedWithoutGrant: floor ? controlOnly(controlU, floor).slice(0, 40) : null,
+        // ⛔ A TRUNCATED EVIDENCE ARRAY IS WORSE THAN NONE. This was `.slice(0, 40)` beside a
+        // count that read 529 — so every prefix conclusion was drawn from a 7.5% sample, and one
+        // was drawn WRONG: all 40 visible paths were `$home/.cache/node-gyp`, which made a
+        // baseline write entry look obvious. Adding it changed the grant NOT AT ALL.
+        //
+        // The question a reader actually asks is "which SCOPE is missing", and that is answered by
+        // a histogram over the FULL set, not by the first N paths. Keep a bigger raw sample too,
+        // but the histogram is the thing to reason from.
+        pathsBlockedWithoutGrant: floor ? controlOnly(controlU, floor).slice(0, 200) : null,
+        pathsBlockedByPrefix: floor ? (() => {
+          const all = controlOnly(controlU, floor);
+          const h = {};
+          for (const raw of all) {
+            // Bucket to the first three segments: enough to name the scope
+            // (`$home/.cache/node-gyp`, `$proj/node_modules/.store`) without exploding per-file.
+            h[raw.split('/').slice(0, 3).join('/')] = (h[raw.split('/').slice(0, 3).join('/')] ?? 0) + 1;
+          }
+          return Object.fromEntries(Object.entries(h).sort((a, b) => b[1] - a[1]));
+        })() : null,
         control: baseCase(controlU),
         // Two identical control runs, reconciled. `unstablePathCount` 0 means the package is
         // deterministic and the verdict rests on a clean comparison; non-zero means these
