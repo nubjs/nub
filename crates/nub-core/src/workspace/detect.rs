@@ -37,6 +37,8 @@ pub struct Project {
 /// can rewrite `package.json` mid-command (`nub install`/`add`/`pm use`) and an
 /// install can create or remove a `pnpm-lock.yaml`/`pnpm-workspace.yaml`; any
 /// such change flips a stamp, so the next lookup misses and the walk re-runs.
+/// A same-length rewrite landing inside the walk's own clock tick flips no stamp
+/// at all, which is what [`Entry::cached_at`] exists to catch.
 ///
 /// The stamp captures `package.json` *content* only at the resolved project (and
 /// workspace) root — not the *presence* of a `package.json` newly appearing at a
@@ -62,6 +64,9 @@ pub fn detect_project(cwd: &Path) -> Option<Project> {
         return Some((*hit).clone());
     }
 
+    // Sampled before the walk reads anything, so a manifest written during or
+    // after it is never trusted on an unchanged stamp — see `Entry::cached_at`.
+    let cached_at = SystemTime::now();
     let (project, walked_dirs) = detect_project_walk(cwd)?;
     // Validate the cached value against the FULL input surface the walk read: the
     // project-root manifest, the workspace-root manifest when distinct, plus the
@@ -69,7 +74,7 @@ pub fn detect_project(cwd: &Path) -> Option<Project> {
     // to any of them invalidates the entry on the next lookup.
     let stamps = freshness_stamps(&project, &walked_dirs);
     let value = Arc::new(project);
-    cache().insert(key, stamps, Arc::clone(&value));
+    cache().insert(key, stamps, cached_at, Arc::clone(&value));
     Some((*value).clone())
 }
 
@@ -220,6 +225,17 @@ struct Entry {
     /// rewrite, or a pnpm-named file appearing/disappearing at a consulted dir)
     /// misses.
     stamp: FreshnessStamp,
+    /// The instant sampled before the walk ran, closing the same racy window
+    /// [`crate::config_cache::Entry::cached_at`] documents: a manifest rewritten
+    /// within one clock tick of the walk can report an unchanged `(mtime, size)`,
+    /// so an entry is trusted only while every stamped manifest is strictly
+    /// older than this. The `pnpm_presence` half needs no such guard — presence
+    /// is exact and carries no timestamp.
+    ///
+    /// This memo caches the parsed manifest the walk read, so without the guard
+    /// a stale `Project` would flow into `pm::resolve::root_manifest` even when
+    /// the manifest cache itself missed.
+    cached_at: SystemTime,
     project: Arc<Project>,
 }
 
@@ -250,11 +266,10 @@ impl ProjectCache {
     fn lookup_fresh(&self, key: &Path) -> Option<Arc<Project>> {
         let guard = self.map().read().expect("ProjectCache lock poisoned");
         let entry = guard.get(key)?;
-        let manifests_fresh = entry
-            .stamp
-            .manifests
-            .iter()
-            .all(|(path, stamp)| stamp_of(path).as_ref() == Some(stamp));
+        let manifests_fresh = entry.stamp.manifests.iter().all(|(path, stamp)| {
+            let (mtime, _size) = stamp;
+            stamp_of(path).as_ref() == Some(stamp) && *mtime < entry.cached_at
+        });
         let pnpm_fresh = entry
             .stamp
             .pnpm_presence
@@ -263,11 +278,24 @@ impl ProjectCache {
         (manifests_fresh && pnpm_fresh).then(|| Arc::clone(&entry.project))
     }
 
-    fn insert(&self, key: PathBuf, stamp: FreshnessStamp, project: Arc<Project>) {
+    fn insert(
+        &self,
+        key: PathBuf,
+        stamp: FreshnessStamp,
+        cached_at: SystemTime,
+        project: Arc<Project>,
+    ) {
         self.map()
             .write()
             .expect("ProjectCache lock poisoned")
-            .insert(key, Entry { stamp, project });
+            .insert(
+                key,
+                Entry {
+                    stamp,
+                    cached_at,
+                    project,
+                },
+            );
     }
 }
 
@@ -292,7 +320,33 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("package.json"), r#"{"name":"root"}"#).unwrap();
         std::fs::write(dir.join("pnpm-workspace.yaml"), "packages:\n  - 'pkgs/*'\n").unwrap();
+        // A manifest is only cacheable once the clock has passed its mtime (see
+        // `Entry::cached_at`), which every real on-disk manifest already is. The
+        // memo tests below count walks, so the fixture has to start settled or
+        // every lookup would be a racy-distrusted miss.
+        settle(&dir.join("package.json"));
         dir
+    }
+
+    fn set_mtime(path: &Path, mtime: SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+    }
+
+    /// Spin until the clock has passed `path`'s mtime. Costs at most one tick.
+    fn settle(path: &Path) {
+        let mtime = mtime_of(path);
+        for _ in 0..1_000_000 {
+            if SystemTime::now() > mtime {
+                return;
+            }
+            std::hint::spin_loop();
+        }
+        panic!("clock did not advance past the file's mtime");
     }
 
     // pnpm-workspace.yaml brand hard gate (AGENTS.md): `detect_project` may treat
@@ -384,6 +438,45 @@ mod tests {
         assert_eq!(c.root, d.root);
         assert_eq!(a.workspace_root, d.workspace_root);
         assert_eq!(a.manifest, d.manifest);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The memo caches the PARSED manifest, so a stale `Project` reaches
+    /// `pm::resolve::root_manifest` even when the manifest cache itself misses —
+    /// which is how a `pnpm@10.0.0` → `pnpm@11.0.0` rewrite (32 bytes either
+    /// way) served the pre-write pin and flaked `pnpm_v11_surface` on Windows.
+    /// A manifest the clock has not yet passed must therefore never be cached.
+    /// Pinning the mtime models the coarse-clock case deterministically; see
+    /// `config_cache`'s counterpart test for why racing it does not reproduce.
+    #[test]
+    fn manifest_rewritten_inside_its_mtime_tick_is_never_served_stale() {
+        let dir = fixture("memo-racy");
+        std::fs::remove_file(dir.join("pnpm-workspace.yaml")).unwrap();
+        let cwd = std::fs::canonicalize(&dir).unwrap();
+        let pkg = cwd.join("package.json");
+        let unpassed = SystemTime::now() + std::time::Duration::from_millis(50);
+
+        std::fs::write(&pkg, r#"{"packageManager":"pnpm@10.0.0"}"#).unwrap();
+        set_mtime(&pkg, unpassed);
+        let first = detect_project(&cwd).expect("root detected");
+        assert_eq!(first.manifest.get("packageManager").unwrap(), "pnpm@10.0.0");
+
+        // Same byte length, and the stamp is pinned identical — neither half of
+        // `(mtime, size)` can tell the two versions apart.
+        std::fs::write(&pkg, r#"{"packageManager":"pnpm@11.0.0"}"#).unwrap();
+        set_mtime(&pkg, unpassed);
+        assert_eq!(
+            mtime_of(&pkg),
+            unpassed,
+            "the two versions must be indistinguishable by stamp for this to test anything"
+        );
+
+        let second = detect_project(&cwd).expect("root detected");
+        assert_eq!(
+            second.manifest.get("packageManager").unwrap(),
+            "pnpm@11.0.0",
+            "a manifest rewrite sharing the cached mtime must not serve the stale pin"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

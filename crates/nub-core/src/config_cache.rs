@@ -15,6 +15,18 @@
 //! call-ordering analysis: a cache validated on mtime can never serve a value
 //! older than the file on disk.
 //!
+//! That argument only closes once the RACY window is handled: mtime resolution
+//! is the platform clock's, not the filesystem's, and on Windows that clock
+//! ticks coarsely enough that a rewrite microseconds after the cached read can
+//! report the very same mtime. `size` catches such a rewrite only when the
+//! length also changed — a same-length edit (`pnpm@10.0.0` → `pnpm@11.0.0`, a
+//! patch bump inside a `packageManager` pin) is invisible to both fields. So
+//! entries also carry the instant they were cached and are trusted only once
+//! the file's mtime is strictly OLDER than that instant. This is git's
+//! "racily clean" rule: a stamp taken in the same tick as the observation
+//! cannot prove the file did not change afterwards, so it is never trusted on
+//! its own. See [`Entry::cached_at`].
+//!
 //! Cache MISS semantics match an uncached read exactly: a missing/unreadable
 //! file, or a file whose mtime is unavailable, is never cached (the closure
 //! re-runs every time), so behavior is byte-for-byte identical to the
@@ -37,11 +49,9 @@ pub struct MtimeCache<V> {
 /// The cheap two-field freshness signal compared on every lookup. Both fields
 /// come from one `stat`. `size` is belt-and-suspenders alongside `mtime`: a
 /// rewrite that lands within the same mtime tick but changes the file length
-/// (common on coarse-resolution filesystems, and in tests that rewrite-then-
-/// reread the same path) still invalidates. A same-mtime, same-size content
-/// edit is not distinguished — that case does not arise in nub's one-command-
-/// per-process flow (the only mutator runs after all config reads), and the
-/// cache is per-process, so there is no cross-run staleness to chase.
+/// still invalidates on length alone. A same-mtime, same-size content edit is
+/// not distinguished by these two fields at all — [`Entry::cached_at`] is what
+/// covers that case.
 #[derive(PartialEq, Eq, Clone, Copy)]
 struct Stamp {
     mtime: SystemTime,
@@ -52,6 +62,22 @@ struct Entry<V> {
     /// The freshness stamp observed when this value was cached. A later lookup
     /// serves the value only if the file still reports this exact stamp.
     stamp: Stamp,
+    /// The instant sampled just BEFORE the value was read, and the reason a
+    /// same-mtime same-size rewrite cannot be served stale: an entry is trusted
+    /// only while `stamp.mtime < cached_at`, i.e. the file was already at least
+    /// one clock tick old when it was read. A file written during or after that
+    /// read reports `mtime >= cached_at` and is re-read on every lookup — the
+    /// coarse-clock case can no longer masquerade as unchanged.
+    ///
+    /// Sampled before rather than after the read so the read-then-stat window is
+    /// covered too: a write landing mid-read also lands at-or-after this instant.
+    ///
+    /// Cost is confined to exactly the files this protects. Config already on
+    /// disk when the process started — every real `.npmrc` / `package.json` /
+    /// `.yarnrc.yml`, and the whole reason the cache exists — has an mtime well
+    /// below `cached_at` and still hits. Only a file nub itself just wrote, or
+    /// one written within the tick before it read, goes uncached.
+    cached_at: SystemTime,
     value: Arc<V>,
 }
 
@@ -94,13 +120,13 @@ impl<V> MtimeCache<V> {
         {
             return Some(hit);
         }
+        // Sampled before the read so a write landing mid-read is also caught —
+        // see `Entry::cached_at`.
+        let cached_at = SystemTime::now();
         let value = Arc::new(read()?);
         // Only cache when we can observe a stamp to validate against. The common
         // case (the file exists, so `read` succeeded) has one; re-stat to pin
-        // the value to the version we just read. A read-then-mutate race within
-        // the same command is impossible (the only mutator is the engine call
-        // that runs after all config reads), but the post-read re-stat keeps the
-        // cached stamp honest regardless.
+        // the value to the version we just read.
         if let Some(stamp) = current_stamp(path) {
             self.map()
                 .write()
@@ -109,6 +135,7 @@ impl<V> MtimeCache<V> {
                     path.to_path_buf(),
                     Entry {
                         stamp,
+                        cached_at,
                         value: Arc::clone(&value),
                     },
                 );
@@ -119,7 +146,7 @@ impl<V> MtimeCache<V> {
     fn lookup_fresh(&self, path: &Path, stamp: Stamp) -> Option<Arc<V>> {
         let guard = self.map().read().expect("MtimeCache lock poisoned");
         let entry = guard.get(path)?;
-        (entry.stamp == stamp).then(|| Arc::clone(&entry.value))
+        (entry.stamp == stamp && stamp.mtime < entry.cached_at).then(|| Arc::clone(&entry.value))
     }
 }
 
@@ -174,11 +201,36 @@ mod tests {
         panic!("filesystem mtime did not advance after repeated writes");
     }
 
+    fn set_mtime(path: &Path, mtime: SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+    }
+
+    /// Spin until the clock has passed `path`'s mtime, so a subsequent
+    /// `get_or_read` caches an entry that is trusted rather than racy-distrusted
+    /// (see `Entry::cached_at`). Costs at most one clock tick.
+    fn settle(path: &Path) {
+        let mtime = mtime_of(path);
+        for _ in 0..1_000_000 {
+            if SystemTime::now() > mtime {
+                return;
+            }
+            std::hint::spin_loop();
+        }
+        panic!("clock did not advance past the file's mtime");
+    }
+
     #[test]
     fn second_read_of_unchanged_file_is_a_cache_hit() {
         let dir = tmpdir("hit");
         let path = dir.join("f.txt");
         std::fs::write(&path, "v1").unwrap();
+        // Only a file that predates the read is cacheable at all.
+        settle(&path);
 
         let cache: MtimeCache<String> = MtimeCache::new();
         let reads = AtomicUsize::new(0);
@@ -224,29 +276,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A rewrite that lands within the SAME mtime tick but changes the file
-    /// length must still invalidate — the `size` half of the stamp. This is the
-    /// rapid rewrite-then-reread pattern some config tests use, and without the
-    /// size field it served a stale value on coarse-mtime filesystems. The loop
-    /// hammers the rewrite to make a same-tick collision likely; the assertion
-    /// must hold whether or not the tick actually collided.
+    /// A file still inside its own mtime tick when it is read must never be
+    /// cached, because a rewrite moments later can report a byte-identical
+    /// `(mtime, size)` and would otherwise be served stale. That is exactly the
+    /// `pnpm@10.0.0` → `pnpm@11.0.0` manifest rewrite (32 bytes either way) that
+    /// flaked on Windows CI, where two writes separated only by a read collide
+    /// on mtime the majority of the time.
+    ///
+    /// Reproducing it needs the collision forced rather than raced: on an
+    /// ns-resolution filesystem the two writes essentially never share an mtime.
+    /// Pinning both stamps to an instant the reader's clock has not yet passed
+    /// models what a coarse clock hands out — the write lands at or after the
+    /// reader's own `now()`, since both quantize to the same tick — and makes
+    /// the case deterministic on every platform.
     #[test]
-    fn same_mtime_different_size_invalidates() {
-        let dir = tmpdir("size");
+    fn rewrite_inside_the_cached_mtime_tick_is_never_served_stale() {
+        let dir = tmpdir("racy");
         let path = dir.join("f.txt");
 
         let cache: MtimeCache<String> = MtimeCache::new();
         let read = || std::fs::read_to_string(&path).ok();
 
-        for _ in 0..200 {
-            std::fs::write(&path, "longer-contents").unwrap();
-            let long = cache.get_or_read(&path, read).unwrap();
-            assert_eq!(&*long, "longer-contents");
-            // Different length — a same-mtime-tick collision here must NOT serve
-            // the stale "longer-contents".
-            std::fs::write(&path, "short").unwrap();
-            let short = cache.get_or_read(&path, read).unwrap();
-            assert_eq!(&*short, "short", "size change must invalidate the cache");
+        for (first, second) in [
+            ("pnpm@10.0.0", "pnpm@11.0.0"), // same length — the flake's shape
+            ("longer-contents", "short"),   // length also changes
+        ] {
+            let unpassed = SystemTime::now() + std::time::Duration::from_millis(50);
+
+            std::fs::write(&path, first).unwrap();
+            set_mtime(&path, unpassed);
+            assert_eq!(&*cache.get_or_read(&path, read).unwrap(), first);
+
+            std::fs::write(&path, second).unwrap();
+            set_mtime(&path, unpassed);
+            assert_eq!(
+                mtime_of(&path),
+                unpassed,
+                "the two versions must be indistinguishable by stamp for this to test anything"
+            );
+
+            assert_eq!(
+                &*cache.get_or_read(&path, read).unwrap(),
+                second,
+                "a rewrite sharing the cached mtime must not serve {first:?}"
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
