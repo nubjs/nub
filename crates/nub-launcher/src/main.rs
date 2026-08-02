@@ -1543,10 +1543,11 @@ fn ensure_app(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
         }
         write_file(&dest, file.bytes)?;
         if file.executable {
-            // A second sync: `write_synced` has already flushed, and the mode is
-            // metadata the publish rename must not outrun.
+            // Mode only. `seal_cache_dir`'s sweep covers this file's data AND its
+            // metadata before the publish rename, so syncing here would put the
+            // write-time fsync back on exactly the payload this change exists for:
+            // a native island or an `--include`d tree, where the executables are.
             set_app_file_executable(&dest)?;
-            sync_file(&dest)?;
         }
     }
     publish_cache_dir(&tmp, &app_dir, |dir| app_cache_is_ready(view, dir))?;
