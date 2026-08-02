@@ -1424,6 +1424,40 @@ function search(nub, pkg, version, root, keep, runDir) {
     //
     // npm SUCCEEDING where nub fails is the opposite finding — a nub defect, the most valuable
     // thing this harness can surface, and never a grant gap.
+    // ⛔ ASK NUB-WITHOUT-THE-JAIL **FIRST**, AND SHORT-CIRCUIT. If the package fails identically
+    // with confinement off, the verdict is BROKEN-WITHOUT-JAIL-TOO no matter what npm and pnpm say
+    // — the oracles compare nub against other PMs, which cannot separate "nub's PM is wrong" from
+    // "nub's jail is wrong", and this cell can. Running them anyway costs two full installs to
+    // learn nothing that changes the answer.
+    //
+    // MEASURED: this is not a rare path. 35 of 35 re-measured defect verdicts across Linux and
+    // macOS came back BROKEN-WITHOUT-JAIL-TOO, and on Windows `pre-push@0.1.4` +
+    // `spawn-sync@1.0.15` fail with 2 lifecycle failures BOTH jailed and unjailed. Old packages
+    // that simply cannot run on the measuring host are the DOMINANT failure mode, and each one was
+    // paying for two oracle installs before reaching a verdict that was already determined.
+    //
+    // Ordering note: this sits AFTER the confirmation retry deliberately, so a control that only
+    // failed under load is re-tried before we conclude anything at all.
+    const jailOffFirst = cell('jail-off-control', {
+      catalogFile: write(STATES[STATES.length - 1]), label: 'control (jail OFF)', jailOff: true,
+    });
+    if (jailOffFirst.rc !== 0) {
+      return {
+        pkg, version,
+        verdict: 'BROKEN-WITHOUT-JAIL-TOO',
+        why: 'fails IDENTICALLY with the jail off, so confinement is not implicated. A nub PM/linker '
+           + 'or packaging problem, or a package that cannot run on this host at all. Oracles were '
+           + 'SKIPPED: they could not change this verdict.',
+        declaresInstallScript: hasScript,
+        jailOffControl: {
+          rc: jailOffFirst.rc, digest: jailOffFirst.digest, files: jailOffFirst.files,
+          note: 'ran BEFORE the oracles and short-circuited them',
+        },
+        cells, control: baseCase(control),
+        provenance: provenance(nub, nodePin, enginesNode, nodeMajor, publishedAt),
+      };
+    }
+
     const ref = npmReference(root, pkg, version, nodeBin);
     const ours = failureSignature(control.log);
 
@@ -1494,25 +1528,16 @@ function search(nub, pkg, version, root, keep, runDir) {
     // no grant can fix and that the jail is innocent of. Three `@pulumi/*` records carried this
     // same signature and all read as jail failures.
     //
-    // One extra cell, only on the already-failing path, so it costs nothing on the 99% that pass.
-    const jailOffCell = cell('jail-off-control', {
-      catalogFile: write(STATES[STATES.length - 1]), label: 'control (jail OFF)', jailOff: true,
-    });
-    const failsWithoutJail = jailOffCell.rc !== 0;
-
+    // The jail-off control already ran ABOVE and PASSED — anything reaching here installs fine
+    // unjailed, so the jail IS implicated and the oracles decide between "nub alone is wrong"
+    // (a defect) and "everyone fails here" (the environment). Re-running the cell would be a
+    // second identical install for an answer already in hand.
     return {
       pkg, version,
-      // A package that fails the same way UNJAILED is never a jail defect, whatever the oracles
-      // say — the oracles compare nub against npm/pnpm, which cannot separate "nub's PM is wrong"
-      // from "nub's jail is wrong". This cell is the only thing that can.
-      verdict: matched ? 'BROKEN-IN-ENVIRONMENT'
-        : failsWithoutJail ? 'BROKEN-WITHOUT-JAIL-TOO' : 'BROKEN-EVEN-WITH-EVERYTHING',
+      verdict: matched ? 'BROKEN-IN-ENVIRONMENT' : 'BROKEN-EVEN-WITH-EVERYTHING',
       jailOffControl: {
-        rc: jailOffCell.rc, digest: jailOffCell.digest, files: jailOffCell.files,
-        note: failsWithoutJail
-          ? 'FAILS WITH THE JAIL OFF — not a jail defect. A nub PM/linker or packaging bug; route '
-            + 'to bug intake, and do NOT count it against the jail.'
-          : 'succeeds with the jail off, so the jail is implicated',
+        rc: jailOffFirst.rc, digest: jailOffFirst.digest, files: jailOffFirst.files,
+        note: 'succeeds with the jail off, so the jail IS implicated (checked before the oracles)',
       },
       grant: null,
       // Carried on the FAILURE path too, not just on MINIMUM. It was missing here, so the
