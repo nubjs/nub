@@ -214,6 +214,12 @@ fn the_loader_is_imported_with_a_scrubbed_environment_that_is_then_restored() {
          must get the shim back, so a `node` the app spawns stays augmented; \
          saw {live_path:?}"
     );
+    let live_options = run.var("LIVE_NODE_OPTIONS").unwrap_or_default();
+    assert!(
+        live_options.contains("env-owner"),
+        "NODE_OPTIONS must be restored too, or a `node` the app spawns loses \
+         env-owner handling entirely; saw {live_options:?}"
+    );
 }
 
 #[test]

@@ -188,6 +188,15 @@ pub(crate) fn detect(project_root: &Path, workspace_root: Option<&Path>) -> Opti
 /// Follows the bin through symlinks and walks up to the directory holding a
 /// `package.json` named after the loader. `None` for a standalone binary, which
 /// has no package to find.
+///
+/// POSIX-shaped by construction: a global npm install there symlinks the bin into
+/// `<prefix>/lib/node_modules/<pkg>/`, so the package is an ANCESTOR of the
+/// resolved bin. On Windows npm writes a generated `.cmd` shim whose package is a
+/// SIBLING (`<prefix>\node_modules\<pkg>`) rather than an ancestor, so this walk
+/// does not find it and a Windows global install stays on the CLI path. Covering
+/// that means a sibling probe, which cannot be verified from this host — see the
+/// `ci-adhoc-test` skill — so it is left as a known limitation the docs state
+/// rather than shipped untested.
 fn loader_package_from_cli(bin: &Path) -> Option<PathBuf> {
     let real = std::fs::canonicalize(bin).ok()?;
     let mut dir = real.parent();
@@ -209,7 +218,16 @@ fn loader_package_from_cli(bin: &Path) -> Option<PathBuf> {
             // Without either, promotion produced a hard exit 1 on a setup where the
             // CLI path worked fine — a strict regression, measured.
             let is_loader = json.get("name").and_then(|v| v.as_str()) == Some(LOADER_PACKAGE);
-            let is_importable = json.get("exports").is_some() || json.get("main").is_some();
+            // `exports` is sufficient anywhere: Node's self-reference resolution
+            // works from a package directory even outside a `node_modules` tree.
+            // `main` alone is NOT — resolving a bare specifier then falls back to
+            // walking `node_modules`, so a `main`-only package outside one still
+            // throws, which is precisely the hard exit this gate exists to prevent.
+            let is_importable = json.get("exports").is_some()
+                || (json.get("main").is_some()
+                    && current
+                        .parent()
+                        .is_some_and(|parent| parent.ends_with("node_modules")));
             return (is_loader && is_importable).then(|| current.to_path_buf());
         }
         dir = current.parent();
@@ -586,6 +604,40 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[cfg(unix)]
+    #[test]
+    fn a_main_only_package_outside_node_modules_stays_on_the_cli_path() {
+        // `exports` self-references from anywhere; `main` does not. Resolving a bare
+        // specifier against a `main`-only package outside a `node_modules` tree falls
+        // back to walking `node_modules`, finds nothing, and throws — the same hard
+        // exit the entry gate exists to prevent. So `main` counts only in a layout
+        // where that walk can succeed.
+        let dir = project(&[
+            (".env.schema", "# ---\nA=1\n"),
+            (
+                "opt/varlock/package.json",
+                r#"{"name":"varlock","version":"1.0.0","main":"./index.js"}"#,
+            ),
+            ("opt/varlock/bin/cli.js", "#!/bin/sh\n"),
+        ]);
+        let bin_dir = dir.path().join("opt/bin");
+        std::fs::create_dir_all(&bin_dir).expect("mkdir");
+        std::os::unix::fs::symlink(
+            dir.path().join("opt/varlock/bin/cli.js"),
+            bin_dir.join("varlock"),
+        )
+        .expect("symlink");
+
+        let owner = with_path(&bin_dir, || detect(dir.path(), None)).expect("schema present");
+        assert!(
+            matches!(owner.kind(), OwnerKind::Cli(_)),
+            "a main-only package outside node_modules cannot be imported as a bare \
+             specifier, so it must not be promoted, got {:?}",
+            owner.kind()
+        );
+    }
+
     /// `PATH` is process-global, so every test that reads or writes it takes this
     /// lock rather than racing a sibling.
     fn path_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -594,6 +646,7 @@ mod tests {
     }
 
     /// Run `f` with `PATH` set to exactly `dir`.
+    #[cfg(unix)]
     fn with_path<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
         let _guard = path_lock();
         let saved = std::env::var_os("PATH");
