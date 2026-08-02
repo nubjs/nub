@@ -1639,8 +1639,38 @@ function pinBinary(p) {
   }
 }
 
+/** ⛔ A GIT-BASH PATH IS NOT SPAWNABLE BY WINDOWS NODE. `run-batch.sh` resolves the binary with
+ *  `cd $(dirname) && pwd`, which under Git Bash yields `/c/Users/…` — and `spawnSync` on win32
+ *  hands that straight to CreateProcess, which fails **ENOENT**. MEASURED, varying only the path
+ *  spelling: `/c/Users/nub.NUB-WIN/…/nub.exe` → ENOENT, `C:\Users\nub.NUB-WIN\…\nub.exe` →
+ *  status 0, `v0.6.0`. */
+const fromGitBash = (p) => {
+  const m = /^\/([A-Za-z])\/(.*)$/.exec(p ?? '');
+  return m ? `${m[1].toUpperCase()}:\\${m[2].split('/').join('\\')}` : p;
+};
+
 const nubArg = argv.includes('--nub') ? argv[argv.indexOf('--nub') + 1] : 'nub';
-const nub = pinBinary(nubArg);
+const nub = pinBinary(process.platform === 'win32' ? fromGitBash(nubArg) : nubArg);
+
+// ⛔ PROVE THE BINARY LAUNCHES BEFORE MEASURING ANYTHING WITH IT.
+//
+// Without this the failure surfaced as `HARNESS-ERROR: the catalog override did not engage — is the
+// binary built with --features nub-cli/build-jail-catalog-override?`. That message sent me to
+// inspect cargo features on a binary whose features were CORRECT; the real fault was that nub never
+// ran at all, and every per-cell log was 0 bytes. A diagnostic that names the wrong subsystem is
+// worse than none, because it is followed.
+{
+  const probe = spawnSync(nub, ['--version'], { encoding: 'utf8', timeout: 60_000 });
+  if (probe.error || probe.status !== 0) {
+    console.error(`REFUSING TO RUN: cannot execute the nub binary at ${nub}`);
+    console.error(`  ${probe.error ? `${probe.error.code}: ${probe.error.message}` : `exit ${probe.status}`}`);
+    if (process.platform === 'win32' && /^\/[A-Za-z]\//.test(nubArg)) {
+      console.error('  It looks like a Git Bash path. Windows Node spawns native paths only —');
+      console.error(`  pass ${fromGitBash(nubArg)} instead.`);
+    }
+    process.exit(2);
+  }
+}
 const keep = argv.includes('--keep');
 
 // Never /tmp: a /tmp/package.json on this box is found by walking up.
