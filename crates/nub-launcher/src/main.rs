@@ -1541,7 +1541,7 @@ fn ensure_app(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
         if let Some(parent) = dest.parent() {
             create_staging_subdirs(&tmp, parent)?;
         }
-        write_synced(&dest, file.bytes)?;
+        write_file(&dest, file.bytes)?;
         if file.executable {
             // A second sync: `write_synced` has already flushed, and the mode is
             // metadata the publish rename must not outrun.
@@ -1581,16 +1581,16 @@ fn print_embedded_node_license(view: &PayloadView<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Write one extracted file and make its contents durable before publishing the
-/// directory that contains it. `sync_all` (rather than `sync_data`) also covers
-/// metadata such as the executable bit set on the embedded Node afterward.
-fn write_synced(dest: &Path, data: &[u8]) -> Result<()> {
+/// Write one extracted file. Durability is `seal_cache_dir`'s job, not this one's:
+/// fsyncing here forces a flush while the write is still hot, which serializes
+/// every file against the disk and dominates a many-file payload — a `--include`d
+/// directory or a native island. The end-of-tree sweep gives the same guarantee
+/// for practically nothing, because the OS has already flushed by then.
+fn write_file(dest: &Path, data: &[u8]) -> Result<()> {
     let mut file =
         create_private_file(dest).with_context(|| format!("creating {}", dest.display()))?;
     file.write_all(data)
-        .with_context(|| format!("writing {}", dest.display()))?;
-    file.sync_all()
-        .with_context(|| format!("flushing {} to disk", dest.display()))
+        .with_context(|| format!("writing {}", dest.display()))
 }
 
 fn sync_file(path: &Path) -> Result<()> {
@@ -1682,15 +1682,12 @@ fn create_private_file(path: &Path) -> std::io::Result<fs::File> {
     Ok(file)
 }
 
-/// Write the completion marker LAST, then sync every staged DIRECTORY before the
-/// tree becomes visible at its final cache key.
-///
-/// Only directories: every writer into this tree has already fsynced its own file
-/// — `write_synced` for app files, `decompress_to_file` for the Node blob, the
-/// extra `sync_file` after an executable's mode change, and the marker above. A
-/// second pass over the files re-opened and re-fsynced every one of them, which
-/// costs an fsync per file for no durability the first one did not already give.
-/// The directory entries still need flushing, and nothing else creates them.
+/// Write the completion marker LAST, then sync every staged file and directory
+/// before the tree becomes visible at its final cache key. This is the durability
+/// barrier, and it is where the syncing belongs: by the time it runs the OS has
+/// already flushed the data, so each fsync finds nothing dirty and the whole sweep
+/// costs about as much as no fsync at all. Syncing at WRITE time instead forces a
+/// flush while the write is hot and serializes every file against the disk.
 fn seal_cache_dir(tmp: &Path) -> Result<()> {
     let marker = tmp.join(CACHE_COMPLETE_MARKER);
     create_private_file(&marker)
@@ -1708,6 +1705,8 @@ fn sync_cache_tree(dir: &Path) -> Result<()> {
             .with_context(|| format!("reading {}", path.display()))?;
         if ty.is_dir() {
             sync_cache_tree(&path)?;
+        } else if ty.is_file() {
+            sync_file(&path)?;
         }
     }
     sync_directory(dir)
@@ -2466,7 +2465,7 @@ mod tests {
         let dir = node_cache_dir(base, &view.manifest);
         create_staging_subdirs(base, &dir).unwrap();
         let node = dir.join(node_exe_name());
-        write_synced(&node, b"node").unwrap();
+        write_file(&node, b"node").unwrap();
         set_executable(&node).unwrap();
         seal_cache_dir(&dir).unwrap();
         dir
@@ -2478,7 +2477,7 @@ mod tests {
         for file in &view.app_files {
             let path = dir.join(&file.name);
             create_staging_subdirs(&dir, path.parent().unwrap()).unwrap();
-            write_synced(&path, file.bytes).unwrap();
+            write_file(&path, file.bytes).unwrap();
             if file.executable {
                 set_app_file_executable(&path).unwrap();
             }
@@ -2580,7 +2579,7 @@ mod tests {
         fs::set_permissions(&existing, fs::Permissions::from_mode(0o777)).unwrap();
         create_staging_subdirs(&stage, &existing).unwrap();
         create_staging_subdirs(&stage, &nested).unwrap();
-        write_synced(&payload, b"app").unwrap();
+        write_file(&payload, b"app").unwrap();
         seal_cache_dir(&stage).unwrap();
 
         let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
@@ -2859,7 +2858,7 @@ mod tests {
         let dir = node_cache_dir(&base, &view.manifest);
         create_staging_subdirs(&base, &dir).unwrap();
         let node = dir.join(node_exe_name());
-        write_synced(&node, b"node").unwrap();
+        write_file(&node, b"node").unwrap();
         set_executable(&node).unwrap();
         assert!(
             !embedded_node_cache_is_ready(&view.manifest, &dir),
@@ -2877,7 +2876,7 @@ mod tests {
 
         fs::write(&node, b"node").unwrap();
         set_executable(&node).unwrap();
-        write_synced(&dir.join("unexpected"), b"resolution input").unwrap();
+        write_file(&dir.join("unexpected"), b"resolution input").unwrap();
         assert!(
             !embedded_node_cache_is_ready(&view.manifest, &dir),
             "the embedded-Node tree is exact, not merely marker plus executable"
@@ -2939,9 +2938,9 @@ mod tests {
             !app_cache_is_ready(&view, &app_dir),
             "every payload file must still exist under its exact name"
         );
-        write_synced(&nested, br#"{"ok":true}"#).unwrap();
+        write_file(&nested, br#"{"ok":true}"#).unwrap();
 
-        write_synced(&app_dir.join("package.json"), br#"{"type":"commonjs"}"#).unwrap();
+        write_file(&app_dir.join("package.json"), br#"{"type":"commonjs"}"#).unwrap();
         assert!(
             !app_cache_is_ready(&view, &app_dir),
             "an unexpected package.json can change Node module interpretation"
@@ -3020,7 +3019,7 @@ mod tests {
             b"attacker-controlled JavaScript",
         )
         .unwrap();
-        write_synced(&app_dir.join("package.json"), br#"{"type":"commonjs"}"#).unwrap();
+        write_file(&app_dir.join("package.json"), br#"{"type":"commonjs"}"#).unwrap();
 
         assert_eq!(ensure_app(&view, &base).unwrap(), app_dir);
         assert_eq!(
@@ -3095,7 +3094,7 @@ mod tests {
         set_executable(&node).unwrap();
         let official = node_in_version_dir(&base.join("node").join(&view.manifest.node_version));
         create_staging_subdirs(&base, official.parent().unwrap()).unwrap();
-        write_synced(&official, b"official node").unwrap();
+        write_file(&official, b"official node").unwrap();
         set_executable(&official).unwrap();
 
         let notice = FirstRun::new(None);
@@ -3142,7 +3141,7 @@ mod tests {
         let view = test_view();
         let official = node_in_version_dir(&base.join("node").join(&view.manifest.node_version));
         create_staging_subdirs(&base, official.parent().unwrap()).unwrap();
-        write_synced(&official, b"official node").unwrap();
+        write_file(&official, b"official node").unwrap();
         set_executable(&official).unwrap();
         materialize_test_app(&view, &base);
 
@@ -3234,7 +3233,7 @@ mod tests {
         let base = fresh_cache_dir("transactional-repair");
         let dest = base.join("dest");
         create_staging_dir(&dest).unwrap();
-        write_synced(&dest.join("partially-extracted"), b"old").unwrap();
+        write_file(&dest.join("partially-extracted"), b"old").unwrap();
 
         let stale = match move_incomplete_cache_path_aside_locked(&dest, |_| false).unwrap() {
             ExistingCachePath::Moved(stale) => stale,
@@ -3254,9 +3253,9 @@ mod tests {
         let tmp = base.join("tmp");
         let dest = base.join("dest");
         create_staging_dir(&tmp).unwrap();
-        write_synced(&tmp.join("node"), b"complete").unwrap();
+        write_file(&tmp.join("node"), b"complete").unwrap();
         create_staging_dir(&dest).unwrap();
-        write_synced(&dest.join("node"), b"interrupted").unwrap();
+        write_file(&dest.join("node"), b"interrupted").unwrap();
 
         publish_cache_dir(&tmp, &dest, |dir| {
             marked_test_artifact_is_ready(dir, &dir.join("node"))
@@ -3273,9 +3272,9 @@ mod tests {
         let tmp = base.join("tmp");
         let dest = base.join("dest");
         create_staging_dir(&tmp).unwrap();
-        write_synced(&tmp.join("node"), b"candidate").unwrap();
+        write_file(&tmp.join("node"), b"candidate").unwrap();
         create_staging_dir(&dest).unwrap();
-        write_synced(&dest.join("node"), b"winner").unwrap();
+        write_file(&dest.join("node"), b"winner").unwrap();
         seal_cache_dir(&dest).unwrap();
 
         publish_cache_dir(&tmp, &dest, |dir| {
@@ -3297,12 +3296,12 @@ mod tests {
         let base = fresh_cache_dir("concurrent-publication");
         let dest = base.join("dest");
         create_staging_dir(&dest).unwrap();
-        write_synced(&dest.join("node"), b"interrupted").unwrap();
+        write_file(&dest.join("node"), b"interrupted").unwrap();
 
         let make_tmp = |name: &str, contents: &[u8]| {
             let tmp = base.join(name);
             create_staging_dir(&tmp).unwrap();
-            write_synced(&tmp.join("node"), contents).unwrap();
+            write_file(&tmp.join("node"), contents).unwrap();
             tmp
         };
         let first = make_tmp("first", b"first complete");
@@ -3384,7 +3383,7 @@ mod tests {
         create_staging_dir(&staged).unwrap();
         let staged_node = node_in_version_dir(&staged);
         create_staging_subdirs(&staged, staged_node.parent().unwrap()).unwrap();
-        write_synced(&staged_node, b"node").unwrap();
+        write_file(&staged_node, b"node").unwrap();
         set_executable(&staged_node).unwrap();
         let dest = store.join("22.15.0");
 
@@ -3439,7 +3438,7 @@ mod tests {
         let base = fresh_cache_dir("windows-shared-publication-parent");
         let tmp = base.join("tmp");
         create_staging_dir(&tmp).unwrap();
-        write_synced(&tmp.join("node"), b"candidate").unwrap();
+        write_file(&tmp.join("node"), b"candidate").unwrap();
         let parent = base.join("shared-parent");
         cache::create_shared_test_directory(&parent).unwrap();
         let dest = parent.join("dest");
@@ -3466,7 +3465,7 @@ mod tests {
         let base = fresh_cache_dir("windows-shared-publication-lock");
         let tmp = base.join("tmp");
         create_staging_dir(&tmp).unwrap();
-        write_synced(&tmp.join("node"), b"candidate").unwrap();
+        write_file(&tmp.join("node"), b"candidate").unwrap();
         let dest = base.join("dest");
         write_everyone_writable_test_file(&base.join("dest.nub-publish.lock"), b"");
 
