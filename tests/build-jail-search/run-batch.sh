@@ -165,6 +165,35 @@ if [ "${NUB_PROBE_SKIP_CANARY:-0}" != "1" ]; then
     echo "  puppeteer@25.4.0 control: ${_files} files (expected >5000), materialized=${_mat} (expected true)" >&2
     echo "  A fixture in this state makes EVERY package measure as needing nothing." >&2
     echo "  Suspect: a change to makeFixture, or an invalid entry in baseline.json." >&2
+    # ⛔ WHERE DID THE FILES GO? The count walks the FIXTURE ROOT and does not traverse symlinks or
+    # junctions, so it only sees what physically lives under that root. If nub's store resolves
+    # somewhere the redirected HOME does not cover — which is the live question on Windows, where
+    # the cache root is %LOCALAPPDATA% rather than $HOME/.cache — the tree is real and the count is
+    # still small. Printing both locations turns "the fixture is broken" into a decidable question
+    # instead of a guess.
+    echo "  --- where the bytes actually are ---" >&2
+    node -e '
+      const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
+      const json = process.argv[1];
+      let rec = null; try { rec = JSON.parse(fs.readFileSync(json, "utf8")); } catch {}
+      console.error(`  platform: ${process.platform}  homedir: ${os.homedir()}`);
+      for (const k of ["LOCALAPPDATA", "APPDATA", "XDG_CACHE_HOME", "NUB_CACHE_DIR"]) {
+        if (process.env[k]) console.error(`  env ${k}=${process.env[k]}`);
+      }
+      const guess = [
+        path.join(os.homedir(), ".cache", "nub"),
+        process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "nub"),
+      ].filter(Boolean);
+      for (const g of guess) {
+        let n = 0; (function w(d, depth) {
+          if (depth > 6) return;
+          let e; try { e = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+          for (const x of e) { if (x.isDirectory()) w(path.join(d, x.name), depth + 1); else n++; }
+        })(g, 0);
+        console.error(`  ${fs.existsSync(g) ? "EXISTS" : "absent"}  ${g}  (${n} files, depth<=6)`);
+      }
+      if (rec?.control) console.error(`  recorded control fileCount=${rec.control.fileCount} materialized=${rec.control.materialized}`);
+    ' "$_canjson" 2>&1 >/dev/null || true
     rm -rf "$_can" "$_can.err"; exit 2
   fi
   echo "fixture canary OK: ${_files} files, materialized=${_mat}" >&2
