@@ -84,11 +84,18 @@ for (const [k, n] of tally(by((r) => (r.verdict === 'MINIMUM' ? r.state : null))
 
 // FREQUENCY, not presence: one package writing a path is that package's business; forty packages
 // writing the same path is the environment, and the fix is a baseline entry rather than N grants.
-const wp = {};
-for (const r of records) for (const e of r.writePaths ?? []) wp[e] = (wp[e] ?? 0) + 1;
-if (Object.keys(wp).length) {
-  console.log('\nwritePaths by frequency (>=3 across unrelated packages ⇒ consider the baseline):');
-  for (const [k, n] of tally(wp)) console.log(`  ${String(n).padStart(3)}  ${k}`);
+// COUNT DISTINCT PACKAGES, NOT RECORDS. Counting records makes ONE package measured at many
+// versions look like ecosystem-wide leakage: `.cache/prisma` appeared to hit the baseline
+// threshold at 4, and all four were @prisma/engines at different versions — a genuine per-package
+// need, not environment noise. The signal we want is "unrelated packages write here".
+const wpPkgs = {};
+for (const r of records) for (const e of r.writePaths ?? []) (wpPkgs[e] ??= new Set()).add(r.pkg);
+if (Object.keys(wpPkgs).length) {
+  console.log('\nwritePaths by DISTINCT PACKAGES (>=3 unrelated ⇒ consider the baseline):');
+  for (const [k, s] of Object.entries(wpPkgs).sort((a, b) => b[1].size - a[1].size)) {
+    const names = [...s].slice(0, 3).join(', ');
+    console.log(`  ${String(s.size).padStart(3)}  ${k}${s.size < 3 ? `   (${names})` : ''}`);
+  }
 }
 
 const conclusive = records.filter((r) => r.declaresInstallScript && r.projectAxisConclusive === false);
