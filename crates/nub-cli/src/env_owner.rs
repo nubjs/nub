@@ -488,10 +488,18 @@ mod tests {
     #[test]
     fn bin_without_package_falls_back_to_the_cli_path() {
         // A Homebrew/curl install ships an executable and no importable module.
-        let dir = project(&[
-            (".env.schema", "# ---\nA=1\n"),
-            ("node_modules/.bin/varlock", "#!/bin/sh\n"),
-        ]);
+        //
+        // The filename is per-platform on purpose. `find_loader_cli` probes
+        // `varlock.exe` then `varlock.cmd` on Windows and a bare `varlock`
+        // elsewhere, so a fixture hard-coding one spelling tests the lookup only
+        // where that spelling happens to be the right one — which is how this
+        // passed locally and failed on the Windows leg.
+        let bin = if cfg!(windows) {
+            "node_modules/.bin/varlock.cmd"
+        } else {
+            "node_modules/.bin/varlock"
+        };
+        let dir = project(&[(".env.schema", "# ---\nA=1\n"), (bin, "#!/bin/sh\n")]);
         let owner = detect(dir.path(), None).expect("schema present");
         assert!(
             matches!(owner.kind(), OwnerKind::Cli(_)),
