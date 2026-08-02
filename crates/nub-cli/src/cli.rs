@@ -3277,7 +3277,8 @@ fn runtime_child_env(
 /// The markers are internal `__NUB_*` plumbing, not user knobs, and are
 /// deliberately loader-agnostic: the verification pass asks "did anything load
 /// the environment?", so replacing the loader keeps it working unchanged.
-/// The markers a child needs to act on an env owner.
+/// The markers a child needs to act on an env owner. Internal `__NUB_*`
+/// plumbing, not user knobs, and deliberately loader-agnostic.
 ///
 /// EVERY launch path that injects the adapter must also stamp these. The adapter
 /// keys on the root marker and silently no-ops without it — and by then detection
@@ -3309,18 +3310,64 @@ pub(crate) fn env_owner_markers(owner: &crate::env_owner::EnvOwner) -> Vec<(Stri
     markers
 }
 
-/// Stamp the markers onto a child command, for the launch paths that build a
+/// Everything a child needs on a launch path that does NOT run
+/// [`runtime_child_env`] — the markers, plus, for a CLI-only owner, the resolved
+/// values that only a subprocess can produce.
+///
+/// The distinction matters. `runtime_child_env` resolves a CLI owner itself, so
+/// the file-run path needs markers alone. Watch, exec and the lifecycle overlay
+/// never call it, so stamping markers there without resolving told the child an
+/// owner was in charge while nothing would ever load anything: the environment
+/// came back empty AND the verification pass reported "varlock never loaded the
+/// environment — check that it is installed" to a user who had installed it.
+/// Measured on `nub watch`.
+///
+/// Resolution happens once per command here, not once per script.
+pub(crate) fn env_owner_child_env(owner: &crate::env_owner::EnvOwner) -> Vec<(String, String)> {
+    let mut pairs = env_owner_markers(owner);
+    if pairs.is_empty() {
+        return pairs;
+    }
+    if let crate::env_owner::OwnerKind::Cli(bin) = owner.kind()
+        && !crate::env_owner::already_resolved_by_parent(owner)
+    {
+        match crate::env_owner::load_via_cli(bin, owner.root()) {
+            Ok(values) => {
+                pairs.extend(values);
+                pairs.push((
+                    crate::env_owner::OWNER_LOADED_ENV.to_string(),
+                    "1".to_string(),
+                ));
+            }
+            // The loader printed its own diagnostic. Drop the ownership claim
+            // rather than telling the child a load happened that did not.
+            Err(_) => return Vec::new(),
+        }
+    }
+    pairs
+}
+
+/// Stamp that env onto a child command, for the launch paths that build a
 /// `Command` directly rather than a map.
 fn stamp_env_owner_markers(
     cmd: &mut std::process::Command,
     env_owner: Option<&crate::env_owner::EnvOwner>,
 ) {
     let Some(owner) = env_owner else { return };
-    for (key, value) in env_owner_markers(owner) {
+    for (key, value) in env_owner_child_env(owner) {
         cmd.env(key, value);
     }
 }
 
+/// Publish the env-owner markers into a child env map, and warn once where a
+/// schema is present but unusable.
+///
+/// This is the only one of the three marker writers that emits the `Missing` and
+/// CLI-redaction warnings, deliberately: it runs on the paths that also call
+/// [`runtime_child_env`], so it is where a user is told what nub did about their
+/// schema. The markers themselves are internal `__NUB_*` plumbing, not user
+/// knobs, and are loader-agnostic — the verification pass asks whether ANYTHING
+/// loaded the environment, so replacing the loader keeps it working unchanged.
 fn apply_env_owner_env(
     env_owner: Option<&crate::env_owner::EnvOwner>,
     env_vars: &mut HashMap<String, String>,

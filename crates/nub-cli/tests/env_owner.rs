@@ -398,6 +398,62 @@ fn every_launch_path_that_injects_the_adapter_also_stamps_its_markers() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_cli_owner_is_resolved_on_paths_that_do_not_run_the_child_env_builder() {
+    // Regression: watch, exec and the lifecycle overlay stamped the ownership
+    // markers without resolving anything, because only `runtime_child_env`
+    // resolves a CLI owner. The child was told an owner was in charge while
+    // nothing would ever load — so the environment came back empty AND the
+    // verification pass told a user who HAD installed the loader to install it.
+    let dir = project(&[(".env.schema", "# ---\nA=1\n")]);
+    install_stub_cli(dir.path(), "tools");
+    write(
+        dir.path(),
+        "watched.mjs",
+        r#"console.log(JSON.stringify({ FROM_LOADER: process.env.FROM_LOADER ?? null }));
+           process.exit(0);"#,
+    );
+
+    let mut child = Command::new(nub_binary())
+        .args(["watch", "watched.mjs"])
+        .current_dir(dir.path())
+        .env("PATH", dir.path().join("tools"))
+        .env_remove("NODE_OPTIONS")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn nub watch");
+
+    let mut stdout = child.stdout.take().expect("stdout");
+    let seen = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = String::new();
+        let mut chunk = [0u8; 512];
+        while let Ok(n) = stdout.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
+            if buf.contains("FROM_LOADER") {
+                break;
+            }
+        }
+        buf
+    })
+    .join()
+    .expect("reader thread");
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        seen.contains(r#""FROM_LOADER":"yes""#),
+        "a CLI-only owner must be resolved on the watch path too, not merely \
+         announced — a null here is the shape where nub suppressed its own \
+         cascade and then loaded nothing. Saw: {seen}"
+    );
+}
+
 #[test]
 fn silent_suppresses_the_verification_warning() {
     // The warning is on by default because it reports a run with no environment
@@ -476,8 +532,7 @@ fn install_stub_cli(root: &Path, dir: &str) -> PathBuf {
     std::fs::create_dir_all(bin.parent().expect("parent")).expect("mkdir");
     std::fs::write(
         &bin,
-        "#!/bin/sh\nprintf '%s' '{\"config\":{\"FROM_LOADER\":{\"value\":\"yes\",\
-         \"isSensitive\":false}}}'\n",
+        "#!/bin/sh\nprintf '%s' '{\"config\":{\"FROM_LOADER\":{\"value\":\"yes\",\"isSensitive\":false}}}'\n",
     )
     .expect("write stub");
     use std::os::unix::fs::PermissionsExt;
