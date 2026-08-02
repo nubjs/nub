@@ -24,7 +24,12 @@
 
 const owner = process.env.__NUB_ENV_OWNER;
 
-if (owner) {
+// `--silent` means silent. This warning is important enough to be on by default —
+// it reports a run with NO environment at all — but a user who asked for quiet
+// output should not get it on stderr anyway.
+const quiet = process.env.__NUB_ENV_OWNER_QUIET === "1";
+
+if (owner && !quiet) {
   const loaded =
     // nub resolved the graph itself, out of process, via the loader CLI.
     process.env.__NUB_ENV_OWNER_LOADED === "1" ||

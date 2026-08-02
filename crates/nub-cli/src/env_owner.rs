@@ -58,6 +58,11 @@ pub(crate) const OWNER_LOADED_ENV: &str = "__NUB_ENV_OWNER_LOADED";
 /// discover the schema from [`OWNER_ROOT_ENV`].
 pub(crate) const OWNER_RESOLVE_ENV: &str = "__NUB_ENV_OWNER_RESOLVE_FROM";
 
+/// Set under `--silent` so the child's verification pass stays quiet. That warning
+/// is on by default because it reports a run with no environment at all, but a
+/// user who asked for silence should not get it on stderr regardless.
+pub(crate) const OWNER_QUIET_ENV: &str = "__NUB_ENV_OWNER_QUIET";
+
 /// An external loader owning env for this project.
 ///
 /// `root` and `resolve_from` are deliberately separate. `root` is where the
@@ -406,8 +411,14 @@ fn strip_node_shim_from_path(path: Option<std::ffi::OsString>) -> Option<std::ff
 /// subprocess for an answer it already has. It is also a second line of defense
 /// against re-entry: even if a shim slipped back onto `PATH`, the nested nub
 /// declines to resolve again.
-pub(crate) fn already_resolved_by_parent() -> bool {
-    std::env::var_os(OWNER_LOADED_ENV).is_some()
+pub(crate) fn already_resolved_by_parent(owner: &EnvOwner) -> bool {
+    if std::env::var_os(OWNER_LOADED_ENV).is_none() {
+        return false;
+    }
+    // Scope the marker to THIS project. It is inherited by every descendant, so an
+    // unscoped check would let a nested run in a DIFFERENT project — one with its
+    // own schema — skip resolving and silently inherit the outer project's values.
+    std::env::var_os(OWNER_ROOT_ENV).is_some_and(|root| Path::new(&root) == owner.root())
 }
 
 /// Extract `KEY=value` pairs from the loader's `json-full` graph.
@@ -604,7 +615,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[cfg(unix)]
     #[test]
     fn a_main_only_package_outside_node_modules_stays_on_the_cli_path() {

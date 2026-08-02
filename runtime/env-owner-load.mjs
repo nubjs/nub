@@ -11,6 +11,7 @@
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
+import { isMainThread } from "node:worker_threads";
 
 // Two DIFFERENT directories, and conflating them breaks monorepos:
 //   root        — where .env.schema lives, i.e. what the loader must discover from
@@ -20,7 +21,15 @@ import path from "node:path";
 // workspace root, so resolving from `root` would miss the package entirely.
 const root = process.env.__NUB_ENV_OWNER_ROOT;
 const resolveFrom = process.env.__NUB_ENV_OWNER_RESOLVE_FROM || root;
-if (root) {
+
+// A Worker inherits a COPY of process.env, so the values are already there and
+// re-resolving buys nothing. It also cannot succeed: `process.chdir` throws in a
+// Worker, so the cwd hop is skipped, and a worker started from a workspace member
+// then resolves from a directory with no schema — yielding an EMPTY graph that
+// overwrites nothing but reports nothing either, since __VARLOCK_ENV is set and
+// the verification pass sees a load. Silent wrong answer. Skipping is both
+// cheaper and correct.
+if (root && isMainThread) {
   // Close BOTH routes back into nub before the loader is even imported.
   //
   // The loader normally reuses an already-populated __VARLOCK_ENV and never

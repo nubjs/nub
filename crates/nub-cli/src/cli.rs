@@ -3229,7 +3229,7 @@ fn runtime_child_env(
                     let OwnerKind::Cli(bin) = owner.kind() else {
                         unreachable!("guarded by the arm above")
                     };
-                    if crate::env_owner::already_resolved_by_parent() {
+                    if crate::env_owner::already_resolved_by_parent(owner) {
                         // A parent nub resolved this project and the values are
                         // already in our environment, which the child inherits.
                         // Re-running the loader would cost a subprocess per nested
@@ -3296,6 +3296,12 @@ fn apply_env_owner_env(
         crate::env_owner::OWNER_RESOLVE_ENV.to_string(),
         owner.resolve_from().display().to_string(),
     );
+    if SILENT.load(Ordering::Relaxed) {
+        env_vars.insert(
+            crate::env_owner::OWNER_QUIET_ENV.to_string(),
+            "1".to_string(),
+        );
+    }
     if matches!(owner.kind(), crate::env_owner::OwnerKind::Cli(_)) {
         // NOTE: the "already loaded" marker is deliberately NOT set here. This
         // function runs on launch paths that never resolve anything — `nub run`
