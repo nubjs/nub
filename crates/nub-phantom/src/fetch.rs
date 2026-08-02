@@ -86,10 +86,24 @@ pub fn client() -> Client {
         .expect("reqwest client build")
 }
 
-/// Fetch `name`'s latest version and extract its tarball. Errors are returned as
-/// strings (a scan logs and skips rather than aborting the batch).
-pub fn fetch(client: &Client, name: &str) -> Result<Extracted, String> {
-    let meta_url = format!("{REGISTRY}/{name}/latest");
+/// Fetch a package and extract its tarball. Errors are returned as strings (a scan logs and
+/// skips rather than aborting the batch).
+///
+/// `spec` is `name` or `name@version`. THE VERSION MATTERS AND `latest` IS NOT ENOUGH: the
+/// phantom-dependency dataset exists to describe packages whose published code requires something
+/// they never declared, and those are routinely FIXED in a later release. `any-observable` is the
+/// worked example — 0.3.0 requires `rxjs` undeclared, 0.6.0 declares it properly, so analyzing
+/// only `latest` reports the package as clean while the version people actually install is broken.
+/// A scoped name keeps its leading `@`, so the version is split on the LAST `@`.
+pub fn fetch(client: &Client, spec: &str) -> Result<Extracted, String> {
+    let (name, requested) = match spec.rfind('@') {
+        Some(i) if i > 0 => (&spec[..i], Some(&spec[i + 1..])),
+        _ => (spec, None),
+    };
+    let meta_url = match requested {
+        Some(v) => format!("{REGISTRY}/{name}/{v}"),
+        None => format!("{REGISTRY}/{name}/latest"),
+    };
     let meta: serde_json::Value = get_with_retry(client, &meta_url)
         .map_err(|e| format!("metadata: {e}"))?
         .json()

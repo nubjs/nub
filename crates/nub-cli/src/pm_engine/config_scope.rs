@@ -354,6 +354,24 @@ pub(crate) fn scope_overrides(
 /// to the engine via `EngineContext::embedder_package_extensions`. The config
 /// cascade (`.npmrc` / `pnpm-workspace.yaml` / `.yarnrc.yml`) is layered on top
 /// by the engine and is unaffected — only the top-level manifest read leaks.
+/// The vendored compat dataset, parsed once. A malformed or missing file yields an EMPTY map
+/// rather than a panic: a shipped shim that fails to load should cost the packages it covers, not
+/// every install.
+fn vendored_package_extensions() -> BTreeMap<String, serde_json::Value> {
+    static RAW: &str = include_str!("../../data/package-extensions.json");
+    static PARSED: std::sync::OnceLock<BTreeMap<String, serde_json::Value>> =
+        std::sync::OnceLock::new();
+    PARSED
+        .get_or_init(|| {
+            serde_json::from_str::<serde_json::Value>(RAW)
+                .ok()
+                .and_then(|v| v.get("extensions").and_then(|e| e.as_object()).cloned())
+                .map(|o| o.into_iter().collect())
+                .unwrap_or_default()
+        })
+        .clone()
+}
+
 pub(crate) fn scope_package_extensions(
     role: Role,
     manifest: &PackageJson,
@@ -366,7 +384,19 @@ pub(crate) fn scope_package_extensions(
         .and_then(|p| p.get("packageExtensions"))
         .and_then(object);
 
-    let mut effective: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    // ⛔ THE VENDORED COMPAT SET SEEDS THE MAP, and the manifest layers OVER it.
+    //
+    // These are packages whose PUBLISHED code requires something they never declared. Under a
+    // hoisted layout npm makes that work by accident; under an isolated store the require walks
+    // out of the project and fails. pnpm and yarn both ship this dataset, which is why pnpm
+    // installs cypress@4.12.1 on the same isolated layout where nub did not.
+    //
+    // It cannot be generated: the motivating case is `require(implementation)` in
+    // any-observable@0.3.0, where the name is a runtime value no static analyser can resolve.
+    //
+    // Seeded FIRST so a project's own `packageExtensions` entry for the same selector wins — a
+    // user must always be able to override a shipped shim.
+    let mut effective: BTreeMap<String, serde_json::Value> = vendored_package_extensions();
     let keep = match role {
         // nub identity: the top-level home is nub's neutral surface.
         Role::Nub => top_level.as_ref(),

@@ -88,24 +88,36 @@ fn install_runs_lifecycle_scripts_under_runtime_augmentation() {
     let node_options = aug["no"].as_str().unwrap_or_default();
     let first_path = aug["p0"].as_str().unwrap_or_default();
 
-    // Slash-normalize so the compat-tier file:// URL (forward slashes) matches the
-    // filesystem path on Windows too.
-    let norm = |s: &str| s.replace('\\', "/");
-    // `mjs` is always the full `preload.mjs` path (never empty); `cjs` is only
-    // matched when non-empty so a degenerate `contains("")` can't pass vacuously.
-    let carries_preload = (!cjs.is_empty() && node_options.contains(&cjs))
-        || norm(node_options).contains(&norm(&mjs));
+    // ⛔ A DEPENDENCY'S LIFECYCLE SCRIPT MUST NOT BE AUGMENTED.
+    //
+    // This test previously asserted the OPPOSITE — that NODE_OPTIONS carried nub's preload and
+    // that the node-shim dir fronted PATH so a bare `node` re-entered nub. That was the shipped
+    // behaviour and it was wrong on two counts: a published install script is not the user's code
+    // and gains nothing from TypeScript or loader hooks, and the re-entry cost a second process
+    // per invocation which `NODE_COMPAT=1` then had to undo.
+    //
+    // MEASURED before the change, from inside a postinstall: `command -v node` returned
+    // `$TMPDIR/nub-node-shim-<pid>-<nonce>/node` while `process.execPath` showed the real binary —
+    // which is why the shim went unnoticed for so long. execPath names what nub eventually
+    // exec'd, not what the script invoked.
     assert!(
-        carries_preload,
-        "the postinstall's NODE_OPTIONS must carry nub's preload injection \
-         (`--require={cjs}` on the fast tier, or `--import=file://{mjs}` on the compat tier) — \
-         augmentation did not reach the lifecycle script.\nNODE_OPTIONS = {node_options:?}"
+        node_options.is_empty(),
+        "a dependency's lifecycle script must run with NO nub augmentation, but NODE_OPTIONS \
+         carried {node_options:?}. The preload and loader hooks are for the user's own code."
     );
 
+    // PATH must front the PROVISIONED NODE'S OWN DIRECTORY, not the shim. That keeps the property
+    // the shim existed for — a bare `node` resolves to the project's Node rather than the ambient
+    // one — without the re-entry.
     assert!(
-        first_path.contains("nub-node-shim-"),
-        "the FIRST PATH entry in the lifecycle script must be nub's node-shim dir so a bare \
-         `node` in a build script re-enters nub augmented; got {first_path:?}"
+        !first_path.contains("nub-node-shim-"),
+        "nub's node-shim must NOT be on a lifecycle script's PATH: a bare `node` would re-enter \
+         nub only to exec the same binary again. Got {first_path:?}"
+    );
+    assert!(
+        std::path::Path::new(first_path).join(NODE_EXE).exists(),
+        "the FIRST PATH entry must be the provisioned Node's own directory so a bare `node` still \
+         resolves to the project's Node; got {first_path:?}"
     );
 }
 
@@ -152,6 +164,9 @@ fn install_runs_lifecycle_scripts_under_a_posix_shell() {
 
 /// A nub-identity project with the given root `postinstall`, an empty lock, no
 /// dependencies, and a dead-port registry (offline).
+/// The node binary's filename on this platform — the marker that identifies a real Node bin dir.
+const NODE_EXE: &str = if cfg!(windows) { "node.exe" } else { "node" };
+
 fn fixture(postinstall: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
