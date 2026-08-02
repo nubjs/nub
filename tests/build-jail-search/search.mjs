@@ -196,6 +196,24 @@ function makeFixture(dir, pkg, version, { jailOff }) {
   fs.writeFileSync(path.join(proj, 'tsconfig.json'),
     JSON.stringify({ compilerOptions: { target: 'ES2022', module: 'ESNext', strict: true } }, null, 2));
 
+  // AN npm LOCKFILE, because install scripts read one and nub does not write one.
+  //
+  // MEASURED on union@0.6.0 (7.1M downloads/wk): its postinstall runs `npx npm-force-resolutions`,
+  // which opens `./package-lock.json` and dies with ENOENT. nub writes nub.lock, so the file the
+  // script expects is simply absent — and that is a property of the FIXTURE, not a capability the
+  // jail withheld, so no grant of any width would have fixed it. Without this the package reads as
+  // broken-at-the-widest-grant, which is the verdict reserved for a nub defect.
+  //
+  // Minimal and lockfileVersion 3: enough for a script that reads or rewrites it to find a
+  // well-formed document, without pretending to describe the tree nub actually installed.
+  fs.writeFileSync(path.join(proj, 'package-lock.json'), `${JSON.stringify({
+    name: 'nub-build-jail-fixture',
+    version: '1.0.0',
+    lockfileVersion: 3,
+    requires: true,
+    packages: { '': { name: 'nub-build-jail-fixture', version: '1.0.0' } },
+  }, null, 2)}\n`);
+
   return { proj, home: path.join(dir, 'home') };
 }
 

@@ -11,7 +11,18 @@
     "has to be re-derived for every tool that does the same thing; a baseline entry stops the write",
     "or permits it for everyone. Two tool-specific filters have already been retired this way."
   ],
-  "baseline": [],
+  "baseline": [
+    {
+      "path": "$home/.npm/_logs",
+      "write": true,
+      "notes": "npm's debug log directory. BELT AND BRACES alongside npm_config_logs_max=0 below: the env var stops npm creating it, this makes the write harmless if anything ignores the var — an older npm, a vendored copy, or a script invoking npm through a wrapper that resets config. Granting it is safe by construction: the jail points $HOME at a per-package throwaway, so this permits a write into a directory that is discarded unless a writePaths entry names it."
+    },
+    {
+      "path": "$home/.npm/_update-notifier-last-checked",
+      "write": true,
+      "notes": "npm's update-check timestamp, same reasoning as _logs above. MEASURED: this single file was one of only two paths unrs-resolver was denied, and it cost that package a whole read.project scope until the env var suppressed it. Granting it costs nothing and removes a way for npm's housekeeping to show up as a package's capability."
+    }
+  ],
   "env": [
     {
       "name": "PYTHONDONTWRITEBYTECODE",
