@@ -82,9 +82,19 @@ const platforms = new Set(records.map((r) => r.provenance?.platform).filter(Bool
 const byPackage = new Map();
 const excluded = {
   noVerdict: [], broken: [], harnessError: [], noStatePassed: [], refusedMalicious: [],
+  brokenWithoutJailToo: [],
 };
 
 for (const r of records) {
+  // ⛔ ITS OWN BUCKET. A package that fails IDENTICALLY with the jail off is not evidence about the
+  // jail at all — it is a nub PM/linker or packaging bug. Counting it under `broken` inflates the
+  // jail's apparent failure rate, which is the number that decides whether the jail can ship.
+  // MEASURED: three @pulumi/* records were `node-pre-gyp: not found` from a missing `.bin` shim,
+  // reproducing with the jail disabled.
+  if (r.verdict === 'BROKEN-WITHOUT-JAIL-TOO') {
+    excluded.brokenWithoutJailToo.push(`${r.pkg}@${r.version}`);
+    continue;
+  }
   if (r.verdict === 'BROKEN-EVEN-WITH-EVERYTHING') { excluded.broken.push(`${r.pkg}@${r.version}`); continue; }
   if (r.verdict === 'HARNESS-ERROR') { excluded.harnessError.push(`${r.pkg}@${r.version}`); continue; }
   if (r.verdict === 'NO-STATE-PASSED') { excluded.noStatePassed.push(`${r.pkg}@${r.version}`); continue; }

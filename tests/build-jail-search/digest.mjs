@@ -60,6 +60,7 @@ function digestFor(dir) {
   const meaning = {
     MINIMUM: 'measured — `state` is the minimal grant that reproduces the control',
     'BROKEN-IN-ENVIRONMENT': 'a reference PM fails too — grant nothing, and suspect this host',
+    'BROKEN-WITHOUT-JAIL-TOO': 'fails IDENTICALLY with the jail OFF -- a nub PM/linker or packaging bug, NOT a jail defect. No grant can fix it; route to bug intake and do not count it against the jail.',
     'BROKEN-EVEN-WITH-EVERYTHING': 'a reference PM SUCCEEDS where nub fails — a nub defect, never a grant gap',
     'REFUSED-MALICIOUS': 'the OSV screen refused a MAL-* package — WORKING AS DESIGNED. No grant applies, '
       + 'it never enters the catalog, and it is not a failure of the jail',

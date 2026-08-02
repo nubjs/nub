@@ -1385,9 +1385,37 @@ function search(nub, pkg, version, root, keep, runDir) {
     const recent = standing.ageDays !== null && standing.ageDays < 730;
     const popular = standing.weeklyDownloads !== null && standing.weeklyDownloads > 100_000;
     const needsInvestigation = matched && recent && popular;
+
+    // ⛔ ASK NUB-WITHOUT-THE-JAIL BEFORE BLAMING THE JAIL. `BROKEN-EVEN-WITH-EVERYTHING` reads as
+    // "the jail broke this", and it is the verdict that decides whether the build jail is
+    // releasable — so it must not absorb defects that have nothing to do with confinement.
+    //
+    // MEASURED on `@pulumi/kubernetes@0.21.1`: fails `sh: 1: node-pre-gyp: not found` in the
+    // transitive `grpc@1.21.1`, IDENTICALLY with the jail off (rc=1 both ways), while plain npm
+    // succeeds rc=0. nub never creates grpc's `.bin/node-pre-gyp` shim — a PM/linker defect that
+    // no grant can fix and that the jail is innocent of. Three `@pulumi/*` records carried this
+    // same signature and all read as jail failures.
+    //
+    // One extra cell, only on the already-failing path, so it costs nothing on the 99% that pass.
+    const jailOffCell = cell('jail-off-control', {
+      catalogFile: write(STATES[STATES.length - 1]), label: 'control (jail OFF)', jailOff: true,
+    });
+    const failsWithoutJail = jailOffCell.rc !== 0;
+
     return {
       pkg, version,
-      verdict: matched ? 'BROKEN-IN-ENVIRONMENT' : 'BROKEN-EVEN-WITH-EVERYTHING',
+      // A package that fails the same way UNJAILED is never a jail defect, whatever the oracles
+      // say — the oracles compare nub against npm/pnpm, which cannot separate "nub's PM is wrong"
+      // from "nub's jail is wrong". This cell is the only thing that can.
+      verdict: matched ? 'BROKEN-IN-ENVIRONMENT'
+        : failsWithoutJail ? 'BROKEN-WITHOUT-JAIL-TOO' : 'BROKEN-EVEN-WITH-EVERYTHING',
+      jailOffControl: {
+        rc: jailOffCell.rc, digest: jailOffCell.digest, files: jailOffCell.files,
+        note: failsWithoutJail
+          ? 'FAILS WITH THE JAIL OFF — not a jail defect. A nub PM/linker or packaging bug; route '
+            + 'to bug intake, and do NOT count it against the jail.'
+          : 'succeeds with the jail off, so the jail is implicated',
+      },
       grant: null,
       // Carried on the FAILURE path too, not just on MINIMUM. It was missing here, so the
       // watcher's placement warning — which keys on `declaresInstallScript && !projectAxis` —
