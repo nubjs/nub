@@ -293,8 +293,32 @@ function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg, 
       fs.writeFileSync(path.join(logDir, `${(label || 'cell').replace(/[^a-z0-9]+/gi, '-')}.log`), log);
     } catch {}
   }
+  // ⛔ GROUND TRUTH FOR "DOES THIS RUN A SCRIPT" IS THE INSTALLED MANIFEST, NOT THE PACKUMENT.
+  //
+  // MEASURED on fsevents@2.3.3 (35.9M downloads/wk): the packument's version record carries
+  // `"install": "node-gyp rebuild"`; the published TARBALL's package.json does NOT. The tarball is
+  // what nub materializes and what the script runner reads, so the packument is simply wrong about
+  // what will execute. Asking npm made this harness disagree with nub's own
+  // `declares_install_script` (which reads the manifest out of the CAS), and the disagreement
+  // surfaced as a spurious "declares a script but was not materialized" for a package that
+  // declares none. Read it from the tree that was just installed and the two cannot drift.
+  const declaresScript = (() => {
+    for (const rel of [
+      [proj, 'node_modules', ...(pkg ?? '').split('/'), 'package.json'],
+      [proj, 'node_modules', '.store', `${(pkg ?? '').replace('/', '+')}@*`, 'node_modules',
+        ...(pkg ?? '').split('/'), 'package.json'],
+    ]) {
+      try {
+        const s = JSON.parse(fs.readFileSync(path.join(...rel), 'utf8')).scripts ?? {};
+        return ['preinstall', 'install', 'postinstall'].some((k) => k in s);
+      } catch {}
+    }
+    return null;   // could not read it — the CALLER decides, rather than a false reading as "no"
+  })();
+
   return {
     label, rc, log, seen,
+    declaresScript,
     digest: digestOf(seen),
     files: seen.length,
     overrideOk: !catalogFile || (log.includes(BANNER_OK) && !log.includes(BANNER_BAD)),
@@ -396,10 +420,14 @@ function provenance(nub) {
  *  model exists to avoid). Learned by one cheap `--ignore-scripts` install. */
 function discoverTree(nub, dir, pkg, version) {
   const fx = makeFixture(dir, pkg, version, { jailOff: true });
-  runCell(nub, fx, { label: 'discover', ignoreScripts: true, pkg });
+  // The discovery arm installs with `--ignore-scripts`, so the tree is on disk and its manifests
+  // are readable — which makes this the cheapest honest place to answer "does it declare a
+  // script", without a second install and without asking the packument.
+  const disc = runCell(nub, fx, { label: 'discover', ignoreScripts: true, pkg });
+  const declaresScript = disc.declaresScript;
   const store = path.join(fx.proj, 'node_modules', '.store');
   let entries = [];
-  try { entries = fs.readdirSync(store); } catch { return { names: [], specs: [] }; }
+  try { entries = fs.readdirSync(store); } catch { return { names: [], specs: [], declaresScript }; }
   // `.store` names entries `<name>@<version>`; scoped packages use `+` for the separator.
   // Returns BOTH the bare names (the catalog is keyed by name) and name@version specs (the
   // malicious-package screen needs the exact version that is about to execute).
@@ -412,7 +440,7 @@ function discoverTree(nub, dir, pkg, version) {
     // Strip the store's content hash: `pkg@1.2.3-93d5bfce` -> `1.2.3`.
     if (at > 0) specs.add(`${name}@${e.slice(at + 1).replace(/-[0-9a-f]{8,}$/, '')}`);
   }
-  return { names: [...names], specs: [...specs] };
+  return { names: [...names], specs: [...specs], declaresScript };
 }
 
 
@@ -676,20 +704,16 @@ function search(nub, pkg, version, root, keep, runDir) {
   // build toolchain (node-gyp, the tar family), so the scripts-on arm installs strictly more
   // packages and the diff reported ~845 phantom "side effects" for a script that wrote three
   // files. The two shapes are not comparable; a manifest field is a fact.
-  const hasScript = (() => {
-    try {
-      const out = execFileSync('npm', ['view', `${pkg}@${version}`, 'scripts', '--json'], { encoding: 'utf8' });
-      const s = JSON.parse(out || '{}') || {};
-      return ['preinstall', 'install', 'postinstall'].some((k) => k in s);
-    } catch {
-      return true;   // unknown: assume it does, so the oracle stays strict
-    }
-  })();
-
   // CONTROL — scripts on, jail off. EVERY cell runs the identical two steps, so full path
   // sets are directly comparable and no baseline subtraction is needed.
   const tree = discoverTree(nub, path.join(root, 'discover'), pkg, version);
   const others = tree.names;
+
+  // Read from the INSTALLED tree, never the packument, because the two disagree and only the
+  // tarball's manifest describes what will run. Unreadable falls back to `true`, keeping the
+  // oracle STRICT: assuming a script exists costs a stricter comparison, while assuming none
+  // costs a package silently measured as needing nothing.
+  const hasScript = tree.declaresScript ?? true;
 
   // ⛔ SCREEN BEFORE ANY SCRIPT RUNS. Everything above this line used --ignore-scripts;
   // everything below EXECUTES third-party code on this machine.
