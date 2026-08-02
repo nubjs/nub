@@ -105,6 +105,29 @@ function catalogFor(pkg, state, others = []) {
 /** Sorted relative paths under `root`. The fixture's own `.git` is excluded at the
  *  top level only — git's index and logs churn on every run and are not a side
  *  effect of the script, but `.git/hooks` underneath it very much is. */
+/** ⛔ `HOME` DOES NOT REDIRECT ANYTHING ON WINDOWS. Every cell depends on a throwaway home for
+ *  isolation — that is what makes one package's measurement independent of the last. But nub
+ *  resolves its cache through `dirs_next::home_dir()` (`crates/nub-core/src/node/discovery.rs`,
+ *  `cache_dir`), and on Windows that reads **`USERPROFILE`**, not `HOME`. npm follows the same
+ *  convention.
+ *
+ *  So on Windows the store landed in the RUNNER'S REAL PROFILE, outside the fixture: the canary
+ *  counted 113 files against macOS's 6,222 with `materialized: true` — the tree was real, it was
+ *  just somewhere the walk could not see. The quieter half is worse than the miscount: cells were
+ *  sharing state, so nothing was isolated.
+ *
+ *  `LOCALAPPDATA`/`APPDATA` go too: `cache_dir` falls back to `%LOCALAPPDATA%` when the profile
+ *  looks like a system directory, and npm keeps its cache under `%APPDATA%\npm-cache`. */
+function homeEnv(home) {
+  if (process.platform !== 'win32') return { HOME: home };
+  return {
+    HOME: home,
+    USERPROFILE: home,
+    LOCALAPPDATA: path.join(home, 'AppData', 'Local'),
+    APPDATA: path.join(home, 'AppData', 'Roaming'),
+  };
+}
+
 function paths(root, prefix = '') {
   const out = [];
   let entries;
@@ -159,6 +182,13 @@ function makeFixture(dir, pkg, version, { jailOff }) {
   const proj = path.join(dir, 'proj');
   fs.mkdirSync(proj, { recursive: true });
   fs.mkdirSync(path.join(dir, 'home'), { recursive: true });
+  // The Windows redirect (see homeEnv) points LOCALAPPDATA/APPDATA inside this home, so the
+  // directories have to exist — a tool that finds its cache root missing may fall back to the real
+  // profile rather than create it, which would silently restore the leak this exists to close.
+  if (process.platform === 'win32') {
+    fs.mkdirSync(path.join(dir, 'home', 'AppData', 'Local'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'home', 'AppData', 'Roaming'), { recursive: true });
+  }
   // Config keys a real consumer would carry. Same reason as the fixture files below: a script
   // that bails for a missing key measures as "needs nothing", which is the verdict that ships a
   // broken grant. `simple-git-hooks` reads its own key and exits silently without one.
@@ -273,7 +303,7 @@ function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg, 
   //
   // Scrubbed rather than forced to a value: we want the DEVELOPER-MACHINE path, which is the one
   // that runs more code, and a wider measured grant is the safe direction.
-  const env = { ...process.env, HOME: home, DATABASE_URL: 'postgresql://user:pass@localhost:5432/db' };
+  const env = { ...process.env, ...homeEnv(home), DATABASE_URL: 'postgresql://user:pass@localhost:5432/db' };
   // PYTHON IS PINNED ONLY FOR OLD NODE — see gypPython(). The general no-pin rule still holds and
   // its reasoning is unchanged: node-gyp 12 declares `semverRange = '>=3.6.0'`, which 3.14
   // satisfies, and the failure once blamed on Python was really `pkg-config pixman-1` exiting 127,
@@ -1024,7 +1054,7 @@ function referenceArm(tool, dir, pkg, version, nodeBin) {
     ? ['install', '--no-audit', '--no-fund', '--dangerously-allow-all-scripts', '--foreground-scripts']
     : ['install', '--no-frozen-lockfile', '--reporter=ndjson'];
   // SAME Node as the nub arm — otherwise this compares two runtimes, not two package managers.
-  const refEnv = { ...process.env, HOME: fx.home };
+  const refEnv = { ...process.env, ...homeEnv(fx.home) };
   if (nodeBin) refEnv.PATH = `${nodeBin}:${refEnv.PATH ?? ''}`;
   // The SAME Python pin the nub arm gets — npm and pnpm bundle their own node-gyp, but on an old
   // Node theirs is old too, so they hit the identical distutils wall. Pinning one arm and not the
