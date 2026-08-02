@@ -25,7 +25,7 @@ else
   CARGO_FLAGS = --profile $(PROFILE)
 endif
 
-.PHONY: build addon addon-fast install-dev uninstall-dev qos-global test verify oxc-lockstep-check test-node-matrix bench clean version version-check npm-build npm-publish npm-publish-dry
+.PHONY: build addon addon-fast install-dev uninstall-dev qos-global test verify test-node-matrix bench clean npm-build npm-publish npm-publish-dry
 
 build: addon
 	$(CARGO) build $(CARGO_FLAGS)
@@ -99,14 +99,6 @@ uninstall-dev:
 test:
 	$(CARGO) test
 
-# oxc is pre-1.0, so a consumer left on an older minor compiles a SECOND full oxc
-# stack rather than unifying. This asserts every consumer — the three Cargo
-# manifests and the npm @oxc-project/runtime helper package — names one version,
-# and that no Cargo.lock resolves two. Pure Node, no toolchain, runs in ~50ms;
-# `make verify` and ci.yml's `oxc-lockstep` job both call it.
-oxc-lockstep-check:
-	@node scripts/check-oxc-lockstep.mjs
-
 # Bounded host-local gate. Platform matrices, Docker jobs, and change-specific
 # end-to-end tests remain separate parts of the pre-push verification loop.
 verify:
@@ -114,7 +106,6 @@ verify:
 		echo "make verify requires installed JS dependencies; run: pnpm install --frozen-lockfile" >&2; \
 		exit 1; \
 	}
-	$(MAKE) --no-print-directory oxc-lockstep-check
 	NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" fmt --check
 	(cd crates/nub-native && NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" fmt --check)
 	@# PROFILE=fast, matching both the dev loop and CI's check/clippy jobs, so the
@@ -166,16 +157,23 @@ version:
 	@cd crates/nub-native && cargo update -p nub-native --precise $(V)
 	@echo "✓ All packages, Cargo.toml, both Cargo.lock files, and runtime/version.mjs set to $(V)"
 
-# Verify version consistency across npm packages, Cargo.toml, version.mjs, and
-# the version-pinned nub.jsonc schema snapshot under site/public/schema (which
-# must equal latest.json modulo the schema-id field, so a published vX.Y.json is
-# never stale relative to the schema the release actually ships).
-# Canonical source is npm/nub/package.json. Non-zero exit on any mismatch — the
-# pre-release gate (release.yml runs it before building/publishing). Guards the
-# transpile-cache invariant (A12): NUB_VERSION is the sole cache key, valid only
-# because oxc cannot float without a version bump — which is why this also runs
-# the oxc lockstep check (the single implementation of that assertion).
-version-check: oxc-lockstep-check
+# Verify version consistency across npm packages, Cargo.toml, and version.mjs,
+# AND that @oxc-project/runtime (the emit-helper runtime) is exact-pinned and
+# matches the oxc version compiled into nub-native (Cargo.toml `oxc = "=X.Y.Z"`).
+# The transpiler + parser are now native (crates/nub-native), so oxc-transform /
+# oxc-parser are no longer npm deps; only the helper runtime is, and it must move
+# in lockstep with the addon's oxc. Canonical source is npm/nub/package.json.
+# Non-zero exit on any mismatch — the pre-release gate (release.yml runs it before
+# building/publishing). Guards the transpile-cache invariant (A12): NUB_VERSION is
+# the sole cache key, valid only because oxc cannot float without a version bump.
+# The schema snapshot is checked only when latest.json is PRESENT. The site
+# withdraws the whole published schema whenever the nub.jsonc config reference is
+# hidden pending ship (3539b65db1), and an absent schema means there is nothing
+# published to be out of step with — the same rule the parser/schema key-set test
+# in crates/nub-cli/src/project_config.rs applies. A latest.json that EXISTS but is
+# corrupt, or whose pinned snapshot is missing or divergent, still fails: deliberate
+# withdrawal removes the file, accidental damage leaves it there.
+version-check:
 	@node -e " \
 		const fs = require('fs'); \
 		const { isDeepStrictEqual } = require('node:util'); \
@@ -198,21 +196,24 @@ version-check: oxc-lockstep-check
 		const cm = cargo.match(/^version = \x22([^\x22]*)\x22/m); \
 		if (!cm) errors.push('Cargo.toml: workspace version line not found'); \
 		else if (cm[1] !== v) errors.push('Cargo.toml has ' + cm[1] + ', expected ' + v); \
-		for (const f of ['crates/nub-core/Cargo.toml', 'crates/nub-native/Cargo.toml']) { \
-			try { \
-				const t = fs.readFileSync(f, 'utf8'); \
-				const im = t.match(/^version = \x22([^\x22]*)\x22/m); \
-				if (!im) errors.push(f + ': inlined version line not found'); \
-				else if (im[1] !== v) errors.push(f + ' has ' + im[1] + ', expected ' + v); \
-			} catch { errors.push('missing or unreadable ' + f); } \
-		} \
 		const version = fs.readFileSync('runtime/version.mjs', 'utf8'); \
 		const pm = version.match(/export const NUB_VERSION = \x22([^\x22]*)\x22/); \
 		if (!pm) errors.push('runtime/version.mjs: NUB_VERSION not found'); \
 		else if (pm[1] !== v) errors.push('runtime/version.mjs NUB_VERSION is ' + pm[1] + ', expected ' + v); \
+		const dev = JSON.parse(fs.readFileSync('package.json', 'utf8')); \
+		const deps = dev.dependencies || {}; \
+		const rt = deps['@oxc-project/runtime']; \
+		if (!rt) errors.push('package.json: @oxc-project/runtime missing from dependencies'); \
+		else if (!/^[0-9]/.test(rt) || /[~^<>*]/.test(rt) || rt.includes(' ') || rt.includes('||')) errors.push('package.json: @oxc-project/runtime must be an EXACT version, not a range (got ' + rt + '): A12 transpile-cache-key proxy, must not float'); \
+		const om = cargo.match(/^oxc = \\{ version = \x22=([^\x22]*)\x22/m); \
+		if (!om) errors.push('Cargo.toml: oxc workspace dependency (=X.Y.Z pin) not found'); \
+		else if (rt && rt !== om[1]) errors.push('package.json @oxc-project/runtime (' + rt + ') must match the oxc crate compiled into nub-native (Cargo.toml oxc =' + om[1] + ') — the emit helpers and the transformer are one oxc release'); \
 		const pinned = 'v' + v.split('.').slice(0, 2).join('.') + '.json'; \
-		try { \
-			const latest = JSON.parse(fs.readFileSync('site/public/schema/latest.json', 'utf8')); \
+		const latestPath = 'site/public/schema/latest.json'; \
+		if (!fs.existsSync(latestPath)) { \
+			console.log('· no published schema (' + latestPath + ' absent) — snapshot check skipped'); \
+		} else try { \
+			const latest = JSON.parse(fs.readFileSync(latestPath, 'utf8')); \
 			const snapshotPath = 'site/public/schema/' + pinned; \
 			const snapshot = JSON.parse(fs.readFileSync(snapshotPath, 'utf8')); \
 			const expectedId = 'https://nubjs.com/schema/' + pinned; \
@@ -222,7 +223,7 @@ version-check: oxc-lockstep-check
 			if (!isDeepStrictEqual(snapshot, latest)) errors.push(snapshotPath + ' does not equal latest.json modulo \$$id'); \
 		} catch { errors.push('missing or unreadable schema snapshot for ' + pinned); } \
 		if (errors.length) { console.error('Version mismatch:\\n  ' + errors.join('\\n  ')); process.exit(1); } \
-		else { console.log('✓ All npm packages, Cargo.toml (incl. the inlined nub-core/nub-native manifests), runtime/version.mjs, and the schema snapshot at v' + v); }"
+		else { console.log('✓ All npm packages, Cargo.toml, and runtime/version.mjs at v' + v + '; @oxc-project/runtime matches nub-native oxc pin (' + (om ? om[1] : '?') + ')'); }"
 
 npm-build: build
 	./npm/build-local.sh

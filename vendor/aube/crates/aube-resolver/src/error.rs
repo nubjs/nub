@@ -83,6 +83,18 @@ pub struct NoMatchDetails {
 #[derive(Debug)]
 pub struct AgeGateDetails {
     pub name: String,
+    /// The identity `minimumReleaseAgeExclude` actually matches on —
+    /// `ResolveTask::registry_name()`, i.e. the real name for an
+    /// `npm:`-aliased dep and `name` for everything else.
+    ///
+    /// Kept separate from `name` because the two differ exactly where it
+    /// matters: for `"foo": "npm:real-pkg@^1"` the human reads `foo`, but an
+    /// exclude entry naming `foo` matches nothing (the exempt closure in
+    /// `resolve::driver` binds the registry name). Printing `name` in an
+    /// exclude remedy hands the user an entry clap accepts and the matcher
+    /// then silently ignores, so the remedies below use THIS field and the
+    /// prose keeps `name`.
+    pub registry_name: String,
     pub range: String,
     pub minutes: u64,
     pub importer: String,
@@ -103,6 +115,8 @@ pub struct AgeGateDetails {
 #[derive(Debug)]
 pub struct UndatedDetails {
     pub name: String,
+    /// The exclude-matching identity — see [`AgeGateDetails::registry_name`].
+    pub registry_name: String,
     pub range: String,
     pub importer: String,
     pub ancestors: Vec<(String, String)>,
@@ -315,6 +329,7 @@ pub(crate) fn build_age_gate(
     let (dated, _) = satisfying_versions(task, packument);
     AgeGateDetails {
         name: task.name.clone(),
+        registry_name: task.registry_name().to_string(),
         range: task.range.clone(),
         minutes,
         importer: task.importer.clone(),
@@ -330,6 +345,7 @@ pub(crate) fn build_release_age_missing_time(
     let (_, undated) = satisfying_versions(task, packument);
     UndatedDetails {
         name: task.name.clone(),
+        registry_name: task.registry_name().to_string(),
         range: task.range.clone(),
         importer: task.importer.clone(),
         ancestors: task.ancestors.to_vec(),
@@ -386,8 +402,31 @@ fn format_age_gate_help(d: &AgeGateDetails) -> String {
                 .join(", ")
         ));
     }
-    s.push_str("to bypass: loosen `minimumReleaseAge` in .npmrc, set `minimumReleaseAgeStrict=false` to fall back to the lowest satisfying version, or add `");
-    s.push_str(&d.name);
+    // Lead with the one-shot flags — this error most often interrupts a single
+    // command (a dlx of a just-published tool), where editing config to get
+    // through it once is the wrong shape of remedy. The persistent config
+    // remedies follow for the case where the exemption should stick.
+    //
+    // Every remedy named here must be one nub actually accepts, and every one is
+    // about the WINDOW, never its strictness: under nub the gate is enforced, so
+    // the way out is a shorter window or an exemption, not a window that is
+    // quietly ignored. (`minimumReleaseAgeStrict=false` is deliberately absent
+    // for that reason — it remains a settable key, but recommending it would
+    // point users at a posture nub does not stand behind.)
+    // Offer SHORTENING first and `0` as its limit: the flag takes a duration,
+    // so pointing every blocked user straight at "switch the gate off" is a
+    // heavier remedy than the situation usually needs.
+    s.push_str(
+        "to bypass for this run: `--minimum-release-age=<duration>` to shorten the window \
+         (`0` turns it off), or `--minimum-release-age-exclude=",
+    );
+    // The exclude remedies print `registry_name`, NOT `name` — see the field
+    // docs. For an `npm:`-aliased dep they differ, and an entry naming the alias
+    // is silently ignored by the matcher.
+    s.push_str(&d.registry_name);
+    s.push_str("` to exempt just this package\n");
+    s.push_str("to bypass persistently: shorten `minimumReleaseAge` in .npmrc (`0` turns it off), or add `");
+    s.push_str(&d.registry_name);
     s.push_str("` to `minimumReleaseAgeExclude`");
     s
 }
@@ -419,10 +458,14 @@ fn format_undated_help(d: &UndatedDetails) -> String {
         "to proceed: unset `registry-supports-time-field` if it is on (it suppresses the \
          full-packument fetch that carries `time`), check the registry config in .npmrc, add `",
     );
-    s.push_str(&d.name);
+    // `registry_name`, not `name`: an exclude entry naming an `npm:` alias
+    // matches nothing. (Shortening is NOT offered here — unlike the ordinary
+    // age gate, no window admits an undated version, so only an exemption or
+    // turning the window off can help.)
+    s.push_str(&d.registry_name);
     s.push_str(
         "` to `minimumReleaseAgeExclude`, or set `minimumReleaseAge=0` to turn the window off \
-         for this project",
+         for this project (`--minimum-release-age=0` for this run alone)",
     );
     s
 }

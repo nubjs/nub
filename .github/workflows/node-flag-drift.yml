@@ -18,6 +18,7 @@ on:
       - scripts/node-flag-inventory.mjs
       - scripts/check-node-flag-drift.mjs
       - scripts/node-flag-inventory.snapshot.json
+      - scripts/node-flag-drift-acknowledged.json
       - crates/nub-core/src/node/feature_matrix.rs
       - .github/workflows/node-flag-drift.yml
   push:
@@ -26,6 +27,7 @@ on:
       - scripts/node-flag-inventory.mjs
       - scripts/check-node-flag-drift.mjs
       - scripts/node-flag-inventory.snapshot.json
+      - scripts/node-flag-drift-acknowledged.json
       - crates/nub-core/src/node/feature_matrix.rs
       - .github/workflows/node-flag-drift.yml
   schedule:
@@ -83,10 +85,25 @@ jobs:
         run: |
           set -euo pipefail
           base="https://nodejs.org/download/${{ matrix.channel }}"
-          # index.json is newest-first; [0].version is the latest build on the channel.
-          ver=$(curl -fsSL "$base/index.json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const a=JSON.parse(s);process.stdout.write(a.length?a[0].version:"")})')
+          snap=$(node -e 'process.stdout.write(require("./scripts/node-flag-inventory.snapshot.json").nodeVersion)')
+          curl -fsSL "$base/index.json" -o "$RUNNER_TEMP/index.json"
+          # Two ways the newest channel entry is the wrong build to diff, both of which must skip
+          # rather than fail: it is routinely a partial publish carrying no binaries yet
+          # (files: ["headers","src"], so the tarball URL 404s), and a channel can trail the
+          # snapshot's own release entirely — an older build reports every flag added since as a
+          # bogus REMOVED. index.json is newest-first; take the first entry that clears both.
+          ver=$(node -e '
+            const idx = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+            const triple = (v) => v.replace(/^v/, "").split("-")[0].split(".").map(Number);
+            const [sa, sb, sc] = triple(process.argv[2]);
+            const ahead = ([a, b, c]) => a > sa || (a === sa && (b > sb || (b === sb && c > sc)));
+            const hit = idx.find(
+              (e) => Array.isArray(e.files) && e.files.includes("linux-x64") && ahead(triple(e.version)),
+            );
+            process.stdout.write(hit ? hit.version : "");
+          ' "$RUNNER_TEMP/index.json" "$snap")
           if [ -z "$ver" ]; then
-            echo "no $ver build published on the ${{ matrix.channel }} channel right now — skipping"
+            echo "no ${{ matrix.channel }} build newer than the snapshot ($snap) has a linux-x64 tarball — skipping"
             echo "present=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi

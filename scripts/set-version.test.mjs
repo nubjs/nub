@@ -33,7 +33,7 @@ function write(root, file, content) {
   writeFileSync(join(root, file), content);
 }
 
-function fixture({ latest = false } = {}) {
+function fixture({ latest = false, corruptLatest = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "nub-set-version-"));
   for (const file of PACKAGE_FILES) write(root, file, JSON.stringify({ version: "0.0.0" }) + "\n");
   write(root, "Cargo.toml", '[workspace.package]\nversion = "0.0.0"\n');
@@ -46,6 +46,7 @@ function fixture({ latest = false } = {}) {
   if (latest) {
     write(root, "site/public/schema/latest.json", JSON.stringify({ $id: "https://nubjs.com/schema/latest.json", title: "Nub config" }) + "\n");
   }
+  if (corruptLatest) write(root, "site/public/schema/latest.json", "{ not json\n");
   return root;
 }
 
@@ -70,15 +71,32 @@ test("stamps a pinned schema snapshot from latest", () => {
   }
 });
 
-test("missing latest schema leaves every version surface unchanged", () => {
+// The site withdraws the published schema whenever the nub.jsonc config
+// reference is hidden pending ship (3539b65db1), so an absent latest.json is a
+// normal state and must not block a release bump. A latest.json that EXISTS but
+// cannot be parsed still aborts before anything is stamped — the next test.
+test("absent latest schema still stamps every version surface, writing no snapshot", () => {
   const root = fixture();
+  try {
+    const result = run(root);
+    assert.equal(result.status, 0, result.stderr);
+    for (const file of VERSION_SURFACES) {
+      assert.match(readFileSync(join(root, file), "utf8"), new RegExp(VERSION), file);
+    }
+    assert.equal(existsSync(join(root, "site/public/schema/v7.8.json")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("unreadable latest schema leaves every version surface unchanged", () => {
+  const root = fixture({ corruptLatest: true });
   try {
     const before = new Map(VERSION_SURFACES.map((file) => [file, readFileSync(join(root, file), "utf8")]));
     const result = run(root);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /ERROR: cannot prepare schema snapshot:/);
     for (const [file, content] of before) assert.equal(readFileSync(join(root, file), "utf8"), content, file);
-    assert.equal(existsSync(join(root, "site/public/schema")), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -395,6 +395,48 @@ jobs:
           fi
           echo "primer $out is $bytes bytes"
           echo "path=vendor/aube/$out" >> "$GITHUB_OUTPUT"
+      # The typosquat corpus, which is a SEPARATE artifact from the primer and is
+      # required by build.rs whenever AUBE_REQUIRE_PRIMER=1 (which the build job
+      # sets) — without it every build job dies in write_popular_names_blob with
+      # "popular package names are required". It has to be its own step because
+      # the smart-blob path above never runs generate-primer.mjs at all, so
+      # hanging --popular-names-out off the public fallback (as upstream aube
+      # does, .github/workflows/release.yml there) would leave the smart path
+      # short. `--top 1` is the cheapest way to reach the script's popular-names
+      # branch — one packument — and its primer output is discarded outside data/
+      # so it can never be mistaken for the real blob.
+      #
+      # This file is what makes the corpus DOWNLOAD-RANKED rather than the
+      # alphabetical metadata-primer fallback, which is the condition
+      # aube_resolver::popular_package_names_are_ranked() reports and the
+      # similar-name gate refuses to run without.
+      - name: Generate typosquat popularity corpus
+        shell: bash
+        run: |
+          cd vendor/aube
+          attempt=0
+          until node scripts/generate-primer.mjs \
+                  --top 1 \
+                  --out "$RUNNER_TEMP/primer-discard.json" \
+                  --popular-names-out crates/aube-resolver/data/popular-top100000-v1.json; do
+            attempt=$((attempt + 1))
+            if [ "$attempt" -ge 3 ]; then
+              echo "::error::generate-primer.mjs failed to produce the popularity corpus after $attempt attempts"
+              exit 1
+            fi
+            echo "--- popularity-corpus attempt $attempt failed; retrying in 30s ---"
+            sleep 30
+          done
+          bytes=$(wc -c < crates/aube-resolver/data/popular-top100000-v1.json)
+          echo "popularity corpus is $bytes bytes"
+      # Upload whichever source won, plus the popularity corpus. Exactly ONE
+      # primer-* file exists in data/ at this point (smart .rkyv.zst XOR public
+      # .rkyv.json), both named for the build-expected TOP/CAP/schema; the glob
+      # captures it. The downstream build job downloads this artifact into the same
+      # data/ dir, so build.rs picks both files up directly. `if-no-files-found:
+      # error` keeps the empty-primer guard: a missing file here (both sources
+      # failed) fails the release loud rather than shipping an empty primer.
+
       # Verify the exact two-file artifact contract before upload. `if-no-files-found`
       # only rejects an empty glob set, so it cannot prove the popular-name file is
       # present when a metadata primer exists.
@@ -573,6 +615,10 @@ jobs:
       # the real primer instead of the empty fallback. With AUBE_REQUIRE_PRIMER=1
       # (workflow env), a missing artifact here fails the build loud rather than
       # silently shipping an empty primer (the 0.0.37 bug).
+      #
+      # The same artifact carries `popular-top100000-v1.json`, the download-ranked
+      # typosquat corpus. build.rs treats it as mandatory under the require guard,
+      # so it is not optional decoration: without it every build job here fails.
       - name: Download metadata primer
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
