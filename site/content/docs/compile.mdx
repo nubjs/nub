@@ -427,7 +427,13 @@ Pass your own text to replace the default:
 nub compile app.ts --install-message "Preparing the toolchain, one moment"
 ```
 
-There is no spelling that turns the message off. Setup takes a few seconds, and the alternative is an app that appears to hang on first launch.
+Pass an empty string for a silent first run:
+
+```bash
+nub compile app.ts --install-message ""
+```
+
+Setup takes a few seconds, so the default is on: without it an app appears to hang on first launch.
 
 The box lives on the alternate screen, so when setup finishes it disappears and the app's own output starts on a clean terminal. It renders to stderr, and only on an interactive terminal — piped output and log files see nothing at all. A terminal too small for the box, or one that can't be sized, degrades to a single line. Later runs hit the warm cache and show nothing.
 

@@ -58,9 +58,11 @@ pub struct CompileOptions {
     pub include: Vec<String>,
     /// `--exclude`: paths pruned from what `--include` selected.
     pub exclude: Vec<String>,
-    /// Custom first-run line; `None` takes [`DEFAULT_INSTALL_MESSAGE`]. The flag
-    /// only customizes the text — there is no spelling that suppresses it, since
-    /// the alternative is a multi-second silent hang while Node is unpacked.
+    /// Custom first-run line; `None` takes [`DEFAULT_INSTALL_MESSAGE`]. An EMPTY
+    /// string suppresses the notice — the launcher's `plan()` reads an empty
+    /// message as silent — so a publisher who wants a quiet first run has a
+    /// spelling. The default stays on because the alternative is a multi-second
+    /// silent hang while Node is unpacked.
     pub install_message: Option<String>,
     /// `--define-file KEY=PATH`. Folded into [`BundleOptions::define`] before the
     /// bundle runs, so there is one substitution mechanism rather than two that

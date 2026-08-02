@@ -616,8 +616,12 @@ mod tests {
     }
 
     /// The contract the non-TTY case depends on: a pipe, a log, or a CI job sees
-    /// NOTHING — no line, no escape byte — and `--no-install-message` is silent
-    /// even on a terminal.
+    /// NOTHING — no line, no escape byte.
+    ///
+    /// The empty case is the publisher-facing one: `--install-message ""` is how
+    /// an author asks for a silent first run. There is no `--no-install-message`
+    /// flag; the empty string IS the spelling, so it is pinned here rather than
+    /// left to be re-derived from `sanitize` returning something falsy.
     #[test]
     fn silent_off_a_terminal_and_when_disabled() {
         assert_eq!(
@@ -629,6 +633,13 @@ mod tests {
             plan(Some("   "), &caps(true, Some((120, 40)))),
             Plan::Silent
         );
+        assert_eq!(plan(Some(""), &caps(true, Some((120, 40)))), Plan::Silent);
+        // Control: the same terminal draws a box for a non-empty message, so the
+        // four assertions above cannot pass by everything being Silent.
+        assert!(matches!(
+            plan(Some("Setting up app"), &caps(true, Some((120, 40)))),
+            Plan::Boxed(_)
+        ));
     }
 
     /// A terminal we cannot place a box in degrades to the one plain line rather
