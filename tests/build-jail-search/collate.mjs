@@ -80,12 +80,20 @@ const platforms = new Set(records.map((r) => r.provenance?.platform).filter(Bool
 // ── group by package ──────────────────────────────────────────────────────────
 
 const byPackage = new Map();
-const excluded = { noVerdict: [], broken: [], harnessError: [], noStatePassed: [] };
+const excluded = {
+  noVerdict: [], broken: [], harnessError: [], noStatePassed: [], refusedMalicious: [],
+};
 
 for (const r of records) {
   if (r.verdict === 'BROKEN-EVEN-WITH-EVERYTHING') { excluded.broken.push(`${r.pkg}@${r.version}`); continue; }
   if (r.verdict === 'HARNESS-ERROR') { excluded.harnessError.push(`${r.pkg}@${r.version}`); continue; }
   if (r.verdict === 'NO-STATE-PASSED') { excluded.noStatePassed.push(`${r.pkg}@${r.version}`); continue; }
+  // Its OWN bucket, not `noVerdict`. The OSV screen refusing a MAL-* package is a deliberate
+  // answer and the screen working as designed — reporting it as "no verdict" invites someone to
+  // go re-investigate a package that is refused on purpose. It is excluded from the catalog
+  // either way (a refused package never installs, so no grant is meaningful), but the REPORT
+  // should say which of those two things happened.
+  if (r.verdict === 'REFUSED-MALICIOUS') { excluded.refusedMalicious.push(`${r.pkg}@${r.version}`); continue; }
   if (r.verdict !== 'MINIMUM') { excluded.noVerdict.push(`${r.pkg}@${r.version}`); continue; }
   if (!byPackage.has(r.pkg)) byPackage.set(r.pkg, []);
   byPackage.get(r.pkg).push(r);
