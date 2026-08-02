@@ -264,6 +264,7 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
     cmd.arg(&entry);
     cmd.args(&user_args);
     configure_compiled_process_identity(&mut cmd, launcher_path);
+    configure_compiled_compile_cache(&mut cmd, &app_dir);
     if neutralize_localstorage {
         // The compile preamble consumes this internal signal before application
         // code runs, removing Node 22.4–24's throwing localStorage getter. A
@@ -330,6 +331,22 @@ fn compiled_bootstrap_require_arg(bootstrap: &Path) -> std::ffi::OsString {
     let mut arg = std::ffi::OsString::from("--require=");
     arg.push(bootstrap);
     arg
+}
+
+/// Point Node's compile cache at the extraction directory, unless the user chose
+/// their own.
+///
+/// `nub run` already gets one (`spawn.rs`'s `<cache>/nub/v8-compile-cache`); a
+/// compiled artifact got none, so it re-compiled the same bundle on every launch.
+/// The extraction directory is the right home because it is content-addressed: a
+/// rebuilt artifact lands on a different key and cannot read a stale cache, so
+/// there is nothing to invalidate. Respect an inherited value — a user pointing
+/// this somewhere deliberately, or disabling it with `0`, outranks our default.
+fn configure_compiled_compile_cache(cmd: &mut Command, app_dir: &Path) {
+    if std::env::var_os("NODE_COMPILE_CACHE").is_some() {
+        return;
+    }
+    cmd.env("NODE_COMPILE_CACHE", app_dir.join(".v8-compile-cache"));
 }
 
 fn configure_compiled_process_identity(cmd: &mut Command, launcher_path: &Path) {
