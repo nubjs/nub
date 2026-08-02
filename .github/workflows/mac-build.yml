@@ -86,6 +86,23 @@ jobs:
           node-version: 26
       - run: npm install --no-audit --no-fund --loglevel=error
 
+      # The typosquat corpus is a SEPARATE artifact from the primer, and build.rs
+      # treats it as mandatory under AUBE_REQUIRE_PRIMER=1 (set on the build below).
+      # Having node is not enough: build.rs regenerates the primer by shelling out
+      # to generate-primer.mjs WITHOUT --popular-names-out, so nothing else on this
+      # runner ever writes the corpus and the build dies in write_popular_names_blob
+      # with "popular package names are required". `--top 1` is the cheapest way to
+      # reach the script's popular-names branch; the primer output is discarded
+      # outside data/ so build.rs still regenerates the real one itself.
+      - name: Generate typosquat popularity corpus
+        run: |
+          set -euo pipefail
+          cd vendor/aube
+          node scripts/generate-primer.mjs \
+            --top 1 \
+            --out "$RUNNER_TEMP/primer-discard.json" \
+            --popular-names-out crates/aube-resolver/data/popular-top100000-v1.json
+
       # Belt and braces against the silent-primer path above.
       - name: Build the CLI
         env:

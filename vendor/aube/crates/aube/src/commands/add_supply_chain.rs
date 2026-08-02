@@ -14,7 +14,10 @@
 //!
 //! 2. **Popular-name similarity** — namespace-aware edit-distance
 //!    comparison against the top 100,000 npm packages catches names
-//!    designed to look like an established dependency.
+//!    designed to look like an established dependency. A name the
+//!    corpus itself lists is cleared outright, and the gate is skipped
+//!    on a build whose corpus is not the real download-ranked one (see
+//!    `find_similar_package_name` and `similar_name_gate`).
 //!
 //! 3. **Weekly-downloads floor** — interactive confirm prompt below
 //!    the threshold, hard refusal in non-interactive contexts unless
@@ -817,6 +820,15 @@ struct PackageNameSuggestion {
 }
 
 async fn similar_name_gate(names: &[String], prompt: &LowDownloadPrompt) -> miette::Result<()> {
+    // The gate reads ABSENCE from the corpus as "nobody installs this", which
+    // only holds for the real 100,000-name list. Builds without it fall back to
+    // the metadata-primer names — alphabetical, and 100 entries in dev or 2000 in
+    // release — where absence means nothing and the reported "top-100,000
+    // popularity rank #N" is an alphabetical position. Refusing an install on
+    // that is worse than not checking.
+    if !aube_resolver::popular_package_names_are_ranked() {
+        return Ok(());
+    }
     let corpus = aube_resolver::popular_package_names();
     for name in names {
         let Some(suggestion) = find_similar_package_name(name, corpus) else {
@@ -840,11 +852,32 @@ async fn similar_name_gate(names: &[String], prompt: &LowDownloadPrompt) -> miet
     Ok(())
 }
 
+/// Find the most plausible package the requested name is a typo OF.
+///
+/// A package among the 100,000 most-downloaded on npm is not a typosquat, so a
+/// request that appears in the corpus at all is cleared outright rather than
+/// compared against the rest of it.
+///
+/// The blunt form of that rule is what the precision requires. Comparing every
+/// name against the whole corpus refuses essentially everything worth installing
+/// and points users AT the squatter as it goes — `react` rejected in favour of
+/// `preact`, `lodash` of `loadash`, `debug` of `dbug`. Restricting candidates to
+/// names that OUTRANK the request fixes those but still refuses **847 of the top
+/// 10,000** (measured): `ws` for `ms`, `qs` for `ms`, `micromatch` for
+/// `picomatch`, `safer-buffer` for `safe-buffer` — all legitimate, and this gate
+/// hard-fails a non-interactive install. Clearing corpus members outright takes
+/// that to **0 of the top 10,000** while `lodahs`, `raect`, `axois`, `expresss`
+/// are all still caught, because a squat that nobody installs cannot rank.
+///
+/// What it gives up is a squat popular enough to be in the corpus itself
+/// (`expres`, #58196). That one has real download volume, which is the OSV
+/// advisory check's and the downloads floor's territory rather than a
+/// spelling heuristic's.
 fn find_similar_package_name(name: &str, corpus: &str) -> Option<PackageNameSuggestion> {
     let mut best: Option<PackageNameSuggestion> = None;
     for (index, candidate) in corpus.lines().enumerate() {
         if name == candidate {
-            continue;
+            return None;
         }
         let Some((requested_part, candidate_part)) = comparable_name_parts(name, candidate) else {
             continue;
@@ -1413,6 +1446,41 @@ mod tests {
             Some(PackageNameSuggestion {
                 name: "foobars".to_string(),
                 rank: 1,
+                distance: 1,
+            })
+        );
+    }
+
+    // A request that is itself in the corpus is a package hundreds of thousands
+    // of people install on purpose, whichever lookalikes surround it. Clearing it
+    // outright is what takes the false-positive count across the top 10,000 from
+    // 847 to 0 — `ms` sits one edit from both `ws` and `qs`, and all three ship.
+    #[test]
+    fn similar_name_clears_any_request_the_corpus_lists() {
+        assert_eq!(find_similar_package_name("ms", "ws\nqs\nms\n"), None);
+        assert_eq!(find_similar_package_name("qs", "ms\nws\nqs\n"), None);
+    }
+
+    // The exemption is decided by the whole corpus, not by the part scanned
+    // before the match — a lookalike appearing EARLIER must not win the race and
+    // refuse a request that the corpus goes on to list.
+    #[test]
+    fn similar_name_clears_a_listed_request_found_after_its_lookalike() {
+        assert_eq!(
+            find_similar_package_name("picomatch", "micromatch\npicomatch\n"),
+            None
+        );
+    }
+
+    // The case the gate exists for: a name the corpus does not list at all, one
+    // edit from a name it does.
+    #[test]
+    fn similar_name_flags_a_request_the_corpus_does_not_list() {
+        assert_eq!(
+            find_similar_package_name("expresss", "react\nlodash\nexpress\n"),
+            Some(PackageNameSuggestion {
+                name: "express".to_string(),
+                rank: 3,
                 distance: 1,
             })
         );
