@@ -81,21 +81,13 @@ fn tool_root() -> miette::Result<PathBuf> {
     Ok(cache.join("tools").join("node-gyp"))
 }
 
-/// Returns `Some(bin_dir)` containing a freshly-bootstrapped `node-gyp`
-/// when the ambient `PATH` doesn't already provide one, or `None` when
-/// the user already has a copy on `PATH` — in which case we don't
-/// touch their setup.
+/// Install (or reuse) the pinned node-gyp under the tool dir and return its
+/// `.bin`. Reached only through the lazy shims — nothing bootstraps eagerly,
+/// so an install whose builds never invoke node-gyp never pays for this.
 ///
 /// `project_dir` is the outer install's project root; its `.npmrc`
 /// (if any) is propagated to the tool dir so the bootstrap inherits
 /// the same registry/auth configuration.
-pub async fn ensure(project_dir: &Path) -> miette::Result<Option<PathBuf>> {
-    if node_gyp_on_path() {
-        return Ok(None);
-    }
-    ensure_cached(project_dir).await.map(Some)
-}
-
 pub async fn ensure_cached(project_dir: &Path) -> miette::Result<PathBuf> {
     let root = tool_root()?;
     let tool_dir = root.join(BUCKET);
@@ -188,9 +180,21 @@ pub async fn print_bootstrapped_binary(project_dir: &Path) -> miette::Result<()>
 }
 
 fn write_lazy_shims(shim_dir: &Path) -> miette::Result<()> {
+    // `AUBE_NODE_GYP_PROJECT_DIR` is optional (cwd fallback, matching the
+    // `.js` shim below), so it must be expanded defensively — under
+    // `set -u` a bare `$AUBE_NODE_GYP_PROJECT_DIR` aborts with "unbound
+    // variable" on any path that doesn't set it. `AUBE_NODE_GYP_EXE` is
+    // the one hard requirement, and it gets an explicit message rather
+    // than an exec of the empty string. There is deliberately no fallback
+    // to a bare `node-gyp`: this file *is* the `node-gyp` on PATH, so
+    // resolving that name again would re-exec the shim forever.
     let sh = r#"#!/usr/bin/env sh
 set -eu
-real="$("$AUBE_NODE_GYP_EXE" __node-gyp-bootstrap "$AUBE_NODE_GYP_PROJECT_DIR")"
+if [ -z "${AUBE_NODE_GYP_EXE:-}" ]; then
+  echo "node-gyp shim invoked outside a lifecycle script (AUBE_NODE_GYP_EXE unset)" >&2
+  exit 1
+fi
+real="$("$AUBE_NODE_GYP_EXE" __node-gyp-bootstrap "${AUBE_NODE_GYP_PROJECT_DIR:-$PWD}")"
 exec "$real" "$@"
 "#;
     let sh_path = shim_dir.join("node-gyp");
@@ -243,7 +247,13 @@ process.exit(result.status === null ? 1 : result.status);
 
     #[cfg(windows)]
     {
+        // `setlocal` keeps the cwd fallback from leaking into the caller's
+        // environment; an undefined `%VAR%` expands to the literal text in
+        // cmd, so without it the bootstrap would receive
+        // `%AUBE_NODE_GYP_PROJECT_DIR%` as a path.
         let cmd = r#"@echo off
+setlocal
+if not defined AUBE_NODE_GYP_PROJECT_DIR set "AUBE_NODE_GYP_PROJECT_DIR=%CD%"
 for /f "usebackq delims=" %%i in (`"%AUBE_NODE_GYP_EXE%" __node-gyp-bootstrap "%AUBE_NODE_GYP_PROJECT_DIR%"`) do set "AUBE_REAL_NODE_GYP=%%i"
 if not defined AUBE_REAL_NODE_GYP exit /b 1
 "%AUBE_REAL_NODE_GYP%" %*

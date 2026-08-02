@@ -85,6 +85,14 @@ pub struct ScriptSettings {
     /// first use) the real node-gyp and forwards argv. `None` leaves
     /// `npm_config_node_gyp` unset.
     pub node_gyp_js: Option<PathBuf>,
+    /// Project root the lazy node-gyp shim bootstraps against, exported as
+    /// `AUBE_NODE_GYP_PROJECT_DIR`. The bootstrap copies this dir's
+    /// `.npmrc` into its tool dir, so a private registry / auth token
+    /// configured at project scope reaches it. Travels with
+    /// [`Self::node_gyp_js`] — a dep lifecycle script runs with its own
+    /// package dir as cwd, so without this the shim's cwd fallback would
+    /// resolve the bootstrap against a dep dir that has no `.npmrc`.
+    pub node_gyp_project_dir: Option<PathBuf>,
     /// The resolved default registry URL, exported as
     /// `npm_config_registry` (npm/pnpm parity) so dependency lifecycle
     /// scripts (and `aube run` scripts) see the same registry aube
@@ -693,12 +701,16 @@ fn apply_script_settings_env(cmd: &mut tokio::process::Command, settings: &Scrip
     // `__node-gyp-bootstrap`, never an inherited/user-set value (which
     // could be stale or wrong). `aube run` stamps the same value at its
     // own spawn site; keeping both unconditional holds the two paths in
-    // lockstep. `AUBE_NODE_GYP_PROJECT_DIR` is optional — the shim falls
-    // back to the script's cwd.
+    // lockstep. `AUBE_NODE_GYP_PROJECT_DIR` pins the dir whose `.npmrc`
+    // the bootstrap inherits; the shim falls back to its own cwd when it
+    // is absent, which for a dep hook would be the dep's package dir.
     if let Some(node_gyp_js) = settings.node_gyp_js.as_deref() {
         cmd.env("npm_config_node_gyp", node_gyp_js);
         if let Some(exe) = aube_exe.as_deref() {
             cmd.env("AUBE_NODE_GYP_EXE", exe);
+        }
+        if let Some(project_dir) = settings.node_gyp_project_dir.as_deref() {
+            cmd.env("AUBE_NODE_GYP_PROJECT_DIR", project_dir);
         }
     }
     if let Some(node_options) = settings.node_options.as_deref() {

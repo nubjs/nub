@@ -583,14 +583,20 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         );
     }
 
-    // Bootstrap node-gyp once before the fan-out when the ambient
-    // `PATH` doesn't already provide one. At least one job is about
-    // to run a lifecycle script, and we can't cheaply predict which
-    // ones will end up shelling out to `node-gyp` (explicit,
-    // implicit via binding.gyp, or transitive via node-gyp-build).
-    // If the user already has node-gyp (system install, nvm, a test
-    // shim), `ensure` returns `None` and we leave their copy alone.
-    let node_gyp_bin_dir = std::sync::Arc::new(node_gyp_bootstrap::ensure(project_dir).await?);
+    // Hand the fan-out a *lazy* shim rather than bootstrapping node-gyp
+    // up front. We can't cheaply predict which jobs will shell out to
+    // node-gyp (explicit, implicit via binding.gyp, or transitive via
+    // node-gyp-build) — but bootstrapping eagerly made every approved
+    // build pay for the fetch, and turned an unreachable registry into a
+    // failed install even with a warm store and nothing in the graph
+    // that wants node-gyp. The shim defers the fetch to first actual
+    // invocation; `ensure_cached` still takes the tool dir's own project
+    // lock and re-checks under it, so a parallel fan-out converges on
+    // one bootstrap. `None` means node-gyp already resolves (project
+    // `.bin`, system install, nvm, a test shim) — leave that copy alone.
+    let project_bin_dir = project_dir.join(modules_dir_name).join(".bin");
+    let node_gyp_bin_dir =
+        std::sync::Arc::new(node_gyp_bootstrap::lazy_shim_bin_dir(&project_bin_dir)?);
 
     // Pass 2 (parallel, bounded): fan out across `child_concurrency`
     // concurrent workers. Inside one job the three hooks
