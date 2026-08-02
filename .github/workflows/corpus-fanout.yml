@@ -1,0 +1,98 @@
+name: corpus fanout
+run-name: fanout ${{ inputs.runner }} shards ${{ inputs.shard_from }}..${{ inputs.shard_to }} of ${{ inputs.shard_count }}
+
+# Drive MANY shards of the build-jail capability probe at once, by calling corpus-probe.yml in a
+# matrix. It duplicates none of the probe's steps — a copy-pasted probe job would drift from the
+# real one silently, and this harness has already been bitten by two paths meant to be identical.
+#
+# WHY THIS EXISTS: a Windows shard of 15 packages measured at ~35+ minutes, so the full 2,250-entry
+# corpus is ~150 shards. That is not dispatchable one `gh workflow run` at a time, and a single job
+# would blow the 6h ceiling long before finishing.
+#
+# BUILD ONCE, FAN OUT AFTER. Every shard takes `reuse_binary_from`, so the ~25-minute Rust build
+# happens in ONE earlier run and never again — builds do not parallelise usefully, installs do.
+# Dispatch a single-shard corpus-probe first to produce that artifact, then pass its run id here.
+#
+# MANUAL DISPATCH ONLY. This is real network installs times N runners.
+#
+#   gh workflow run corpus-fanout.yml -f runner=windows-latest \
+#     -f shard_from=0 -f shard_to=29 -f shard_count=150 -f reuse_binary_from=<run-id>
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "runner OS"
+        type: choice
+        options: ["ubuntu-latest", "windows-latest", "macos-latest"]
+        default: "windows-latest"
+      base_branch:
+        description: "branch to check out"
+        required: true
+        default: "sandbox/integration"
+      worklist:
+        description: "worklist file under tests/build-jail-search/"
+        required: false
+        default: "worklist-macos-final.txt"
+      shard_from:
+        description: "first shard index (inclusive)"
+        required: true
+        default: "0"
+      shard_to:
+        description: "last shard index (inclusive) — keep the span within the concurrency limit"
+        required: true
+        default: "9"
+      shard_count:
+        description: "total shards the worklist is split into"
+        required: true
+        default: "150"
+      reuse_binary_from:
+        description: "run-id whose nub binary every shard reuses — STRONGLY recommended"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  # The matrix has to come from somewhere: GitHub cannot expand a numeric range in `strategy`, so
+  # the span is turned into a JSON array here and consumed by `fromJson` below.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.range.outputs.shards }}
+    steps:
+      - id: range
+        run: |
+          FROM=${{ inputs.shard_from }}
+          TO=${{ inputs.shard_to }}
+          if [ "$FROM" -gt "$TO" ]; then
+            echo "shard_from ($FROM) is greater than shard_to ($TO)" >&2
+            exit 1
+          fi
+          # A span wider than the account's concurrency limit does not fail — it QUEUES, which looks
+          # like a hang. Refuse something obviously unreasonable rather than let it look broken.
+          if [ $((TO - FROM + 1)) -gt 60 ]; then
+            echo "span $((TO - FROM + 1)) is too wide; dispatch it in batches (<=60)" >&2
+            exit 1
+          fi
+          echo "shards=$(seq "$FROM" "$TO" | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
+          echo "planned shards $FROM..$TO of ${{ inputs.shard_count }}" >&2
+
+  shard:
+    needs: plan
+    strategy:
+      # ⛔ NEVER fail-fast. One package that breaks a shard must not cancel the other 29 — their
+      # records are independent measurements and are exactly what we are here to collect.
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.plan.outputs.shards) }}
+    uses: ./.github/workflows/corpus-probe.yml
+    with:
+      runner: ${{ inputs.runner }}
+      base_branch: ${{ inputs.base_branch }}
+      worklist: ${{ inputs.worklist }}
+      shard_index: ${{ matrix.shard }}
+      shard_count: ${{ inputs.shard_count }}
+      reuse_binary_from: ${{ inputs.reuse_binary_from }}

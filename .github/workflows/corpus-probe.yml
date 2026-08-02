@@ -49,6 +49,22 @@ on:
         required: false
         default: ""
 
+  # ⛔ CALLABLE, so the fan-out does not have to DUPLICATE these steps. A full corpus is ~150 shards
+  # at this size, which is not dispatchable one at a time, and a copy-pasted probe job would drift
+  # from this one silently — the harness has already been bitten once by two paths that were meant
+  # to be identical. `corpus-fanout.yml` drives this in a matrix.
+  #
+  # `workflow_call` cannot express `type: choice`, so `runner` is a plain string here. Everything
+  # else mirrors the dispatch inputs exactly.
+  workflow_call:
+    inputs:
+      runner: { type: string, required: true }
+      base_branch: { type: string, required: true }
+      worklist: { type: string, required: false, default: "worklist-macos-final.txt" }
+      shard_index: { type: string, required: true }
+      shard_count: { type: string, required: true }
+      reuse_binary_from: { type: string, required: false, default: "" }
+
 permissions:
   contents: read
   actions: read     # download-artifact with run-id reads another run's artifacts
