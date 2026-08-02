@@ -22,6 +22,11 @@
       "name": "npm_config_logs_max",
       "value": "0",
       "notes": "npm writes a timestamped debug log to $HOME/.npm/_logs on failure, and nothing about it belongs to the package being measured. MEASURED in the top-100 sweep: '.npm/_logs' derived as a writePaths entry for FOUR unrelated packages, which would ship four per-package grants for a diagnostic byproduct of the installer. The same directory already caused one wrong diagnosis: its timestamped FILENAME varied between control runs and read as nondeterminism, which is what motivated the double-control union. Setting logs-max to 0 stops npm creating the file at all \u2014 the same shape as PYTHONDONTWRITEBYTECODE above, and preferred over a harness filter for the same reason: it fixes the cause once for every tool rather than hiding the effect per tool. VERIFIED: a failing install writes 1 log file by default and 0 with this set."
+    },
+    {
+      "name": "npm_config_update_notifier",
+      "value": "false",
+      "notes": "npm stamps $HOME/.npm/_update-notifier-last-checked when it checks for a newer npm. It is npm's own housekeeping and has nothing to do with the package under test, but a lifecycle script that shells out to npm causes it, and the write then has to be BOUGHT with a grant. MEASURED: it is one of only two paths unrs-resolver was denied \u2014 the other being the native binary it legitimately writes into a dependency's store entry \u2014 so the package's grant was partly paying for npm's update check. Third entry of the same shape as the two above: stop the write at its cause rather than filtering the effect per package. VERIFIED: the file is created by default and absent with this set."
     }
   ],
   "_sharedHomeRoots_comment": [
