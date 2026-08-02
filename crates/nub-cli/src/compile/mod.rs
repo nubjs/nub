@@ -228,6 +228,26 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         (exact, blob, sha, b3, node_license_blob)
     };
 
+    // Compress AFTER `sha256_of_app` above: that hash is the extraction cache key
+    // and must stay over the semantic content, not over whatever this zstd version
+    // happens to emit. Per file rather than per region because `nub_core::compile`
+    // is a pure container that does no compression of its own — the same split the
+    // Node blob already uses, and it lets the launcher decode only the files it
+    // actually extracts. Level 19 matches the Node blob; the app region is small
+    // enough that the time is not noticeable next to the ~107 MB one.
+    let app_files: Vec<_> = app_files
+        .into_iter()
+        .map(|file| {
+            let bytes = zstd::encode_all(&file.bytes[..], 19)
+                .with_context(|| format!("zstd-compressing {}", file.name))?;
+            Ok::<_, anyhow::Error>(nub_core::compile::AppFile {
+                name: file.name,
+                bytes,
+                executable: file.executable,
+            })
+        })
+        .collect::<Result<_>>()?;
+
     // 4. Manifest + payload.
     let manifest = Manifest {
         shape,
@@ -237,6 +257,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         triple: target.triple(),
         node_sha256: node_sha,
         node_blake3: node_b3,
+        app_compressed: true,
         app_sha256: app_sha,
         minify: opts.bundle.minify,
         install_message: Some(install_message(&opts)),
@@ -1961,6 +1982,7 @@ mod tests {
             triple: "darwin-arm64".into(),
             node_sha256: "node".into(),
             node_blake3: String::new(),
+            app_compressed: false,
             app_sha256: "app".into(),
             minify: false,
             install_message: None,
@@ -1978,6 +2000,7 @@ mod tests {
             shape: Shape::Smol,
             node_sha256: String::new(),
             node_blake3: String::new(),
+            app_compressed: false,
             ..manifest
         };
         let smol = nub_core::compile::encode_with_license(&smol, &app, &[], &[]);

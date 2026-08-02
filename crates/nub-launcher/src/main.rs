@@ -24,6 +24,7 @@
 mod cache;
 mod ui;
 
+use std::borrow::Cow;
 use std::fs;
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -31,7 +32,7 @@ use std::process::{Command, ExitStatus};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
-use nub_core::compile::{self, Manifest, PayloadView, Shape, is_safe_relative_name};
+use nub_core::compile::{self, AppFile, Manifest, PayloadView, Shape, is_safe_relative_name};
 use nub_core::node::{discovery, flags, spawn, version::NodeVersion};
 use nub_core::version_management::extract_verified_node_archive;
 use ui::FirstRun;
@@ -549,7 +550,16 @@ fn app_cache_is_ready(view: &PayloadView<'_>, cache_dir: &Path) -> bool {
             return false;
         }
         if expected
-            .insert(PathBuf::from(&file.name), (file.bytes, file.executable))
+            .insert(
+                PathBuf::from(&file.name),
+                (
+                    match app_bytes(&view.manifest, file) {
+                        Ok(bytes) => bytes,
+                        Err(_) => return false,
+                    },
+                    file.executable,
+                ),
+            )
             .is_some()
         {
             return false;
@@ -565,7 +575,7 @@ fn app_cache_is_ready(view: &PayloadView<'_>, cache_dir: &Path) -> bool {
 fn app_cache_tree_matches(
     root: &Path,
     dir: &Path,
-    expected: &mut std::collections::BTreeMap<PathBuf, (&[u8], bool)>,
+    expected: &mut std::collections::BTreeMap<PathBuf, (Cow<'_, [u8]>, bool)>,
 ) -> bool {
     let Ok(entries) = fs::read_dir(dir) else {
         return false;
@@ -597,7 +607,7 @@ fn app_cache_tree_matches(
             let Some((bytes, executable)) = expected.remove(relative) else {
                 return false;
             };
-            if !regular_file_matches_bytes(&path, bytes)
+            if !regular_file_matches_bytes(&path, &bytes)
                 || (executable && !file_metadata_is_executable(&metadata))
             {
                 return false;
@@ -1584,7 +1594,7 @@ fn ensure_app(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
         if let Some(parent) = dest.parent() {
             create_staging_subdirs(&tmp, parent)?;
         }
-        write_file(&dest, file.bytes)?;
+        write_file(&dest, &app_bytes(&view.manifest, file)?)?;
         if file.executable {
             // Mode only. `seal_cache_dir`'s sweep covers this file's data AND its
             // metadata before the publish rename, so syncing here would put the
@@ -1630,6 +1640,18 @@ fn print_embedded_node_license(view: &PayloadView<'_>) -> Result<()> {
 /// every file against the disk and dominates a many-file payload — a `--include`d
 /// directory or a native island. The end-of-tree sweep gives the same guarantee
 /// for practically nothing, because the OS has already flushed by then.
+/// A payload file's real bytes, decompressing only if the payload stores them
+/// compressed. Borrowed on the uncompressed path, so an older payload stays
+/// zero-copy out of the mapped image.
+fn app_bytes<'a>(manifest: &Manifest, file: &AppFile<&'a [u8]>) -> Result<Cow<'a, [u8]>> {
+    if !manifest.app_compressed {
+        return Ok(Cow::Borrowed(file.bytes));
+    }
+    zstd::decode_all(file.bytes)
+        .map(Cow::Owned)
+        .with_context(|| format!("decompressing {} from the payload", file.name))
+}
+
 fn write_file(dest: &Path, data: &[u8]) -> Result<()> {
     let mut file =
         create_private_file(dest).with_context(|| format!("creating {}", dest.display()))?;
@@ -2526,6 +2548,7 @@ mod tests {
             triple: "darwin-arm64".to_string(),
             node_sha256: format!("{:x}", Sha256::digest(b"node")),
             node_blake3: String::new(),
+            app_compressed: false,
             app_sha256: "app-cache-key".to_string(),
             minify: false,
             install_message: None,
