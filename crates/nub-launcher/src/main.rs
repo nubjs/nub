@@ -83,11 +83,47 @@ fn main() {
     std::process::exit(run());
 }
 
+/// Startup phase timing, emitted to stderr only when `__NUB_LAUNCHER_TIMING` is set.
+///
+/// A compiled artifact's warm start is the product's headline number and it is
+/// assembled from a dozen small steps across two processes, so "which step" is not
+/// answerable by reading the code — every attempt to attribute it by reasoning has
+/// been wrong. This makes the split observable in the shipped binary at the cost of
+/// one env lookup per phase on a path that is already doing filesystem work.
+static LAUNCH_T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+static TIMING_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn timing_enabled() -> bool {
+    *TIMING_ON.get_or_init(|| std::env::var_os("__NUB_LAUNCHER_TIMING").is_some())
+}
+
+fn phase(name: &str) {
+    if !timing_enabled() {
+        return;
+    }
+    let t0 = LAUNCH_T0.get_or_init(std::time::Instant::now);
+    eprintln!(
+        "[nub-timing] {:>8.2} ms  {name}",
+        t0.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
+/// `phase` for a message that costs something to build. The closure is not called
+/// when timing is off, so the `format!` never allocates on a normal launch — which
+/// matters because these sit inside the per-file cache comparison.
+fn phase_with(f: impl FnOnce() -> String) {
+    if timing_enabled() {
+        phase(&f());
+    }
+}
+
 fn run() -> i32 {
     // nub-core's signal-forwarding spawn plants a macOS SIGKILL-backstop watcher by
     // re-invoking `current_exe <pgid> <fd>` under the private pdeath-watch mode —
     // which, for a compiled binary, IS this launcher. Dispatch that mode to the
     // watcher entry instead of decoding the payload and re-launching the app.
+    LAUNCH_T0.get_or_init(std::time::Instant::now);
+    phase("process entry");
     let args: Vec<String> = std::env::args().collect();
     match internal_mode(&args, std::env::var(INTERNAL_MODE_ENV).ok().as_deref()) {
         #[cfg(unix)]
@@ -118,6 +154,7 @@ fn run() -> i32 {
         }
     };
 
+    phase("section found");
     let view = match compile::decode(section) {
         Ok(v) => v,
         Err(e) => {
@@ -125,6 +162,7 @@ fn run() -> i32 {
             return 70;
         }
     };
+    phase("payload decoded");
 
     let launcher_path =
         match std::env::current_exe().context("resolving the compiled executable path") {
@@ -135,6 +173,7 @@ fn run() -> i32 {
             }
         };
 
+    phase("current_exe resolved");
     match launch(&view, &launcher_path) {
         Ok(status) => exit_code(status),
         Err(e) => {
@@ -172,8 +211,10 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
             verify_warm_cache(view, dir).map(CacheWarm::Managed)
         }
     })?;
+    phase("cache::resolve (incl. warm verify)");
     let base = resolved.path;
     cleanup_launcher_orphans(&base, &view.manifest);
+    phase("orphan cleanup");
     let notice = FirstRun::new(view.manifest.install_message.as_deref());
 
     let ((node_path, version, origin), app_dir) = match (external_smol, resolved.warm) {
@@ -186,6 +227,7 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
             ensure_app(view, &base)?,
         ),
         (None, Some(CacheWarm::Managed(warm))) => {
+            phase("ARM: warm managed (fast path)");
             let version = view
                 .manifest
                 .node_version
@@ -193,10 +235,14 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
                 .unwrap_or_else(|_| NodeVersion::new(22, 15, 0));
             ((warm.node_path, version, NodeOrigin::Managed), warm.app_dir)
         }
-        (None, None) => (
-            acquire_node(view, &base, &notice, None)?,
-            ensure_app(view, &base)?,
-        ),
+        (None, None) => {
+            phase("ARM: COLD — acquire_node + ensure_app");
+            let n = acquire_node(view, &base, &notice, None)?;
+            phase("  acquire_node done");
+            let a = ensure_app(view, &base)?;
+            phase("  ensure_app done");
+            (n, a)
+        }
         // The warm callback ties its variant to `external_smol`; retaining this
         // arm makes a future callback refactor fail closed rather than executing
         // a cache Node from a data-only cache.
@@ -206,7 +252,9 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
     // principal. Repeat the read-only gate after extraction and immediately
     // before handing its paths to Command so deployment-time ACL/mode changes
     // cannot turn a validated cache into a cross-principal execution handoff.
+    phase("node + app resolved");
     cache::revalidate(&base).context("revalidating the executable cache namespace")?;
+    phase("cache revalidated");
     // Hand the terminal back BEFORE anything the app might print — the box lives
     // on the alternate screen, so this restores the user's scrollback intact.
     notice.finish();
@@ -273,7 +321,7 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
     cmd.arg(&entry);
     cmd.args(&user_args);
     configure_compiled_process_identity(&mut cmd, launcher_path);
-    configure_compiled_compile_cache(&mut cmd, &app_dir);
+    configure_compiled_compile_cache(&mut cmd, &base, &view.manifest);
     if neutralize_localstorage {
         // The compile preamble consumes this internal signal before application
         // code runs, removing Node 22.4–24's throwing localStorage getter. A
@@ -288,8 +336,11 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
     // Own process group + terminating/diagnostic-signal forwarding + TTY
     // foreground handoff + macOS SIGKILL backstop — the same faithful spawn
     // `nub run`'s file path uses. NODE_OPTIONS is inherited untouched (honored).
-    spawn::status_forwarding_signals(&mut cmd)
-        .map_err(|error| node_spawn_error(&node_path, &base, error))
+    phase("about to spawn node");
+    let status = spawn::status_forwarding_signals(&mut cmd)
+        .map_err(|error| node_spawn_error(&node_path, &base, error));
+    phase("node exited");
+    status
 }
 
 fn node_spawn_error(node_path: &Path, base: &Path, error: std::io::Error) -> anyhow::Error {
@@ -342,20 +393,36 @@ fn compiled_bootstrap_require_arg(bootstrap: &Path) -> std::ffi::OsString {
     arg
 }
 
-/// Point Node's compile cache at the extraction directory, unless the user chose
-/// their own.
+/// Point Node's compile cache at a directory BESIDE the app extraction, never
+/// inside it, unless the user chose their own.
 ///
 /// `nub run` already gets one (`spawn.rs`'s `<cache>/nub/v8-compile-cache`); a
 /// compiled artifact got none, so it re-compiled the same bundle on every launch.
-/// The extraction directory is the right home because it is content-addressed: a
-/// rebuilt artifact lands on a different key and cannot read a stale cache, so
-/// there is nothing to invalidate. Respect an inherited value — a user pointing
+/// It must live OUTSIDE the extracted tree. `app_cache_is_ready` requires that
+/// directory to hold exactly the payload's files and nothing else, so a compile
+/// cache written inside it makes the tree mismatch on every launch — and the app
+/// is then re-extracted every time, forever, because the fix-up re-creates the
+/// very directory that breaks the check. Measured at ~25 ms per launch on a
+/// one-file fixture before this was moved out, and the cache itself never
+/// survived, so the feature cost time instead of saving it.
+///
+/// Keyed by `app_sha256` for the same reason the extraction is: a rebuilt artifact
+/// lands on a different key and cannot read a stale cache, so there is nothing to
+/// invalidate. Respect an inherited value — a user pointing
 /// this somewhere deliberately, or disabling it with `0`, outranks our default.
-fn configure_compiled_compile_cache(cmd: &mut Command, app_dir: &Path) {
+fn configure_compiled_compile_cache(cmd: &mut Command, base: &Path, manifest: &Manifest) {
     if std::env::var_os("NODE_COMPILE_CACHE").is_some() {
         return;
     }
-    cmd.env("NODE_COMPILE_CACHE", app_dir.join(".v8-compile-cache"));
+    cmd.env("NODE_COMPILE_CACHE", compile_cache_dir(base, manifest));
+}
+
+/// Where Node's compile cache lives: beside the app extraction, never inside it.
+/// Keyed by `app_sha256` exactly as the extraction is, so a rebuilt artifact lands
+/// on a fresh key and can never read a stale cache.
+fn compile_cache_dir(base: &Path, manifest: &Manifest) -> PathBuf {
+    base.join("compile-v8")
+        .join(short_key(&manifest.app_sha256))
 }
 
 fn configure_compiled_process_identity(cmd: &mut Command, launcher_path: &Path) {
@@ -475,12 +542,22 @@ fn verify_warm_cache(view: &PayloadView<'_>, dir: &Path) -> Option<VerifiedWarmC
 
     let node_dir = node_cache_dir(dir, m);
     let node_path = if embedded_node_cache_is_ready(m, &node_dir) {
+        phase("  warm: node cache READY");
         node_dir.join(node_exe_name())
     } else if path_entry_exists(&node_dir) {
+        phase("  warm: FAIL — node dir exists but is not ready");
         return None;
     } else {
-        official_node_for_manifest(dir, m)?
+        phase("  warm: node dir absent, trying official store");
+        match official_node_for_manifest(dir, m) {
+            Some(p) => p,
+            None => {
+                phase("  warm: FAIL — no official node either");
+                return None;
+            }
+        }
     };
+    phase("  warm: VERIFIED");
     Some(VerifiedWarmCache { node_path, app_dir })
 }
 
@@ -540,7 +617,12 @@ fn embedded_node_cache_is_ready(manifest: &Manifest, cache_dir: &Path) -> bool {
 /// plus the empty marker: no changed bytes, symlinks, special files, empty extra
 /// directories, or package/module-resolution inputs absent from the payload.
 fn app_cache_is_ready(view: &PayloadView<'_>, cache_dir: &Path) -> bool {
-    if !cache_artifact_directory_is_trusted(cache_dir) || !completion_marker_is_ready(cache_dir) {
+    if !cache_artifact_directory_is_trusted(cache_dir) {
+        phase("  app_cache: NOT READY (directory not trusted)");
+        return false;
+    }
+    if !completion_marker_is_ready(cache_dir) {
+        phase("  app_cache: NOT READY (completion marker)");
         return false;
     }
 
@@ -566,10 +648,19 @@ fn app_cache_is_ready(view: &PayloadView<'_>, cache_dir: &Path) -> bool {
         }
     }
     if !expected.contains_key(Path::new(&view.manifest.entry)) {
+        phase("  app_cache: NOT READY (entry missing from payload)");
         return false;
     }
-
-    app_cache_tree_matches(cache_dir, cache_dir, &mut expected) && expected.is_empty()
+    phase("  app_cache: expected map built");
+    let matched = app_cache_tree_matches(cache_dir, cache_dir, &mut expected);
+    if !matched {
+        phase("  app_cache: NOT READY (tree mismatch)");
+    } else if !expected.is_empty() {
+        phase("  app_cache: NOT READY (files missing on disk)");
+    } else {
+        phase("  app_cache: READY");
+    }
+    matched && expected.is_empty()
 }
 
 fn app_cache_tree_matches(
@@ -592,6 +683,7 @@ fn app_cache_tree_matches(
 
         if metadata_is_trusted_real_directory(&path, &metadata) {
             if !expected.keys().any(|name| name.starts_with(relative)) {
+                phase_with(|| format!("    MISMATCH: unexpected directory {relative:?}"));
                 return false;
             }
             if !app_cache_tree_matches(root, &path, expected) {
@@ -605,15 +697,26 @@ fn app_cache_tree_matches(
                 continue;
             }
             let Some((bytes, executable)) = expected.remove(relative) else {
+                phase_with(|| format!("    MISMATCH: unexpected file on disk {relative:?}"));
                 return false;
             };
-            if !regular_file_matches_bytes(&path, &bytes)
-                || (executable && !file_metadata_is_executable(&metadata))
-            {
+            if !regular_file_matches_bytes(&path, &bytes) {
+                phase_with(|| {
+                    format!(
+                        "    MISMATCH: bytes differ for {relative:?} (disk {} vs expected {})",
+                        metadata.len(),
+                        bytes.len()
+                    )
+                });
+                return false;
+            }
+            if executable && !file_metadata_is_executable(&metadata) {
+                phase_with(|| format!("    MISMATCH: exec bit for {relative:?}"));
                 return false;
             }
         } else {
             // Includes symlinks, junction-like reparse entries, sockets, and FIFOs.
+            phase_with(|| format!("    MISMATCH: not a trusted regular file/dir {relative:?}"));
             return false;
         }
     }
@@ -3813,6 +3916,54 @@ mod tests {
             !regular_file_matches_digest(&node, &manifest),
             "a legacy payload with a WRONG digest must be rejected — a zero node_size \
              means fall back to hashing, not skip the check"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A compile cache written by Node must not invalidate the app extraction.
+    ///
+    /// `app_cache_is_ready` requires the extraction directory to hold EXACTLY the
+    /// payload's files, so anything Node writes inside it makes the tree mismatch —
+    /// and the app is then re-extracted on every launch, forever, because the
+    /// re-extraction re-creates the directory that breaks the check. That is not
+    /// hypothetical: pointing `NODE_COMPILE_CACHE` at `app_dir/.v8-compile-cache`
+    /// did exactly this and cost 32.6 ms per launch, measured, while the cache
+    /// itself never survived. The feature spent time instead of saving it.
+    #[cfg(unix)]
+    #[test]
+    fn a_node_written_compile_cache_does_not_invalidate_the_app_extraction() {
+        let base = fresh_cache_dir("compile-cache-outside-app");
+        let view = test_view();
+        let app_dir = app_cache_dir(&base, &view.manifest);
+        fs::create_dir_all(&app_dir).unwrap();
+        for file in &view.app_files {
+            let dest = app_dir.join(&file.name);
+            fs::create_dir_all(dest.parent().unwrap()).unwrap();
+            fs::write(&dest, file.bytes).unwrap();
+        }
+        // The marker is an EMPTY regular file — `completion_marker_is_ready`
+        // requires len == 0, so any content here would fail the control below.
+        fs::write(app_dir.join(CACHE_COMPLETE_MARKER), b"").unwrap();
+        assert!(
+            app_cache_is_ready(&view, &app_dir),
+            "control: a freshly written extraction must be ready, or the assertion \
+             below would pass for the wrong reason"
+        );
+
+        // Exactly what Node does with NODE_COMPILE_CACHE pointed at a directory.
+        let cache = compile_cache_dir(&base, &view.manifest);
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("12345.blob"), b"v8 code cache").unwrap();
+
+        assert!(
+            app_cache_is_ready(&view, &app_dir),
+            "the compile cache must live OUTSIDE the extraction: a warm launch that \
+             re-extracts the app can never converge, because re-extracting re-creates \
+             the directory whose presence broke the check"
+        );
+        assert!(
+            !cache.starts_with(&app_dir),
+            "the compile cache directory must not be inside the app extraction"
         );
         let _ = fs::remove_dir_all(&base);
     }
