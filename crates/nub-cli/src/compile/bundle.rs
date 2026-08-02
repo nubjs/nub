@@ -129,6 +129,10 @@ pub struct BundleOptions {
     /// self-contained artifact — running from a cache dir with no `node_modules`
     /// in sight — needs the file carried along.
     pub native_target: Option<nub_core::compile::TargetPlatform>,
+    /// The exact Node this artifact targets, as (major, minor, patch) — the input to
+    /// [`strip_native_polyfills`]. `None` for `--smol`, whose runtime is not known
+    /// until launch, so every polyfill ships.
+    pub target_node: Option<(u64, u64, u64)>,
 }
 
 /// One emitted file: a chunk, or a source map that travels with it.
@@ -337,7 +341,7 @@ fn bundle_inner(
         &loader_plan,
         Arc::clone(&collected),
     ));
-    let prelude = Arc::new(CompilePreamble::new(entry_abs)?);
+    let prelude = Arc::new(CompilePreamble::new(entry_abs, opts.target_node)?);
     let new_urls = Arc::new(NewUrlAssets {
         collected: Arc::clone(&collected),
         files: Arc::clone(&files_plugin),
@@ -1145,12 +1149,84 @@ struct CompilePreamble {
     root_support_files: Vec<(String, Vec<u8>)>,
 }
 
+/// Polyfills the compile preamble installs, and the first Node version that ships
+/// each one natively.
+///
+/// `nub compile` bakes an exact target Node, so a polyfill for a global that target
+/// already has is dead weight the program still pays to parse and construct. On a
+/// hello-world bundle that was ~195 KB of 206 KB and ~18 ms of every launch, almost
+/// all of it Temporal.
+///
+/// Each version here is one this repo has actually RUN and probed, not one read off
+/// a changelog — and deliberately the first version confirmed native rather than the
+/// first version that plausibly shipped it. Erring high ships a redundant polyfill;
+/// erring low ships a binary that references a global its runtime does not have. The
+/// two failures are not comparable, so the table stays conservative.
+///
+/// Probed: 18.19 and 20.19 have none of these. 22.x has `navigator` only. 24.1 adds
+/// `URLPattern` and `Float16Array`. 24.9 adds `navigator.locks`. 26.0 adds `Temporal`.
+/// `Worker` is native on no supported version, so it has no entry and is never
+/// stripped.
+const POLYFILL_NATIVE_FROM: &[(&str, (u64, u64, u64))] = &[
+    ("navigator", (22, 0, 0)),
+    ("urlpattern", (24, 1, 0)),
+    ("float16", (24, 1, 0)),
+    ("navigatorlocks", (24, 9, 0)),
+    ("temporal", (26, 0, 0)),
+];
+
+/// Remove `// #region nub:polyfill:<name>` blocks whose global the target Node has
+/// natively.
+///
+/// Stripping the SOURCE rather than dead-code-eliminating later is what keeps the
+/// dependency out of the module graph entirely — a static `import` has side effects,
+/// so no amount of tree-shaking drops `@js-temporal/polyfill` once it is imported.
+/// Every region is written to be independently removable and to leave valid syntax,
+/// and the preamble's own comment says so, because that invariant lives across two
+/// files.
+///
+/// `None` (a `--smol` artifact whose runtime is unknown until launch) strips nothing.
+fn strip_native_polyfills(source: &str, target: Option<(u64, u64, u64)>) -> String {
+    let Some(target) = target else {
+        return source.to_string();
+    };
+    let native: Vec<&str> = POLYFILL_NATIVE_FROM
+        .iter()
+        .filter(|(_, from)| target >= *from)
+        .map(|(name, _)| *name)
+        .collect();
+    if native.is_empty() {
+        return source.to_string();
+    }
+    let mut out = String::with_capacity(source.len());
+    let mut skipping = false;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if let Some(name) = trimmed.strip_prefix("// #region nub:polyfill:") {
+            if native.contains(&name) {
+                skipping = true;
+                continue;
+            }
+        }
+        if skipping {
+            if trimmed == "// #endregion" {
+                skipping = false;
+            }
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 impl CompilePreamble {
-    fn new(entry: &Path) -> Result<Self> {
+    fn new(entry: &Path, target_node: Option<(u64, u64, u64)>) -> Result<Self> {
         let runtime_dir = compile_runtime_dir()?;
         let prelude = runtime_dir.join("compile-preamble.mjs");
         let source = std::fs::read_to_string(&prelude)
             .with_context(|| format!("reading the compile prelude at {}", prelude.display()))?;
+        let source = strip_native_polyfills(&source, target_node);
         let worker_blob = runtime_dir.join("worker-blob-url.cjs");
         let worker_blob_bytes = std::fs::read(&worker_blob).with_context(|| {
             format!(
@@ -4090,6 +4166,7 @@ mod tests {
             tsconfig: None,
             loaders: Vec::new(),
             native_target: None,
+            target_node: None,
         }
     }
 
@@ -6863,6 +6940,71 @@ const pkg = require("./package.json");
             root.entry
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The polyfill gate keeps what the target lacks and drops what it has.
+    ///
+    /// Both halves matter and neither is sufficient alone: dropping too much ships a
+    /// binary referencing a global its runtime does not have, and dropping nothing
+    /// is the 195 KB / 18 ms regression this exists to prevent. The unknown-version
+    /// case (`--smol`) must keep everything.
+    #[test]
+    fn native_polyfills_are_stripped_only_for_targets_that_have_them() {
+        let src = "\
+before
+// #region nub:polyfill:temporal
+import { Temporal } from \"@js-temporal/polyfill\";
+// #endregion
+// #region nub:polyfill:urlpattern
+import { URLPattern } from \"urlpattern-polyfill/urlpattern\";
+// #endregion
+after
+";
+        // Node 26 has both.
+        let n26 = strip_native_polyfills(src, Some((26, 0, 0)));
+        assert!(
+            !n26.contains("js-temporal"),
+            "Temporal is native on 26 and must be stripped"
+        );
+        assert!(
+            !n26.contains("urlpattern"),
+            "URLPattern is native on 26 and must be stripped"
+        );
+
+        // Node 24.1 has URLPattern but NOT Temporal — the case a major-only gate
+        // would get wrong in the dangerous direction.
+        let n24 = strip_native_polyfills(src, Some((24, 1, 0)));
+        assert!(
+            n24.contains("js-temporal"),
+            "Temporal is NOT native until 26 and must be kept"
+        );
+        assert!(
+            !n24.contains("urlpattern"),
+            "URLPattern is native on 24.1 and must be stripped"
+        );
+
+        // The support floor has neither.
+        let n18 = strip_native_polyfills(src, Some((18, 19, 0)));
+        assert!(
+            n18.contains("js-temporal") && n18.contains("urlpattern"),
+            "a floor-version target must keep every polyfill"
+        );
+
+        // `--smol`: the runtime is unknown until launch, so nothing may be dropped.
+        let smol = strip_native_polyfills(src, None);
+        assert_eq!(
+            smol, src,
+            "an unknown target must be left exactly as written"
+        );
+
+        // Surrounding code always survives — otherwise the assertions above could
+        // pass by the stripper eating the whole file.
+        for out in [&n26, &n24, &n18] {
+            assert!(
+                out.contains("before") && out.contains("after"),
+                "the stripper must only remove its own regions"
+            );
+        }
     }
 
     #[test]

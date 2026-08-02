@@ -122,6 +122,31 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     let cwd = std::env::current_dir().context("resolving the current directory")?;
     let layout = assets::plan(entry_dir, &cwd, &opts.include, &opts.exclude)?;
 
+    // The exact target Node must be known BEFORE bundling: it decides which
+    // polyfills the preamble carries, and a static import cannot be tree-shaken
+    // away after the fact. Resolved once here and reused by step 3.
+    let shape = if opts.smol { Shape::Smol } else { Shape::Embed };
+    let cache_root = discovery::cache_dir()
+        .context("no writable cache dir for compile-time Node provisioning")?;
+    let pin_cwd = entry_abs
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let (pin, raw, source) = determine_target(opts.target.as_deref(), &pin_cwd)?;
+    let (os, arch, musl) = dist_platform(&target);
+    // Smol gates on the FLOOR, the oldest runtime it will accept, so a polyfill is
+    // dropped only when every Node the artifact can run on already has the global.
+    let gate_version = if opts.smol {
+        version_management::resolve_pin_floor_for_platform(&pin, os, arch, musl, &cache_root)?
+    } else {
+        version_management::resolve_pin_for_platform(&pin, os, arch, musl, &cache_root)?
+    };
+    opts.bundle.target_node = Some((
+        gate_version.0.major,
+        gate_version.0.minor,
+        gate_version.0.patch,
+    ));
+
     // 2. Bundle (Rolldown, in-process). The target's platform/arch are baked in
     //    as defines UNDER the user's, so a cross-compiled `process.platform`
     //    branch dead-code-eliminates for the machine the artifact will run on,
@@ -191,23 +216,12 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // 3. Resolve the Node version through nub run's SAME pin chain (so compile
     //    can't drift from run); --target overrides it. The pin context is the
     //    entry's project dir (walk up from there).
-    let shape = if opts.smol { Shape::Smol } else { Shape::Embed };
-    let cache_root = discovery::cache_dir()
-        .context("no writable cache dir for compile-time Node provisioning")?;
-    let pin_cwd = entry_abs
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let (pin, raw, source) = determine_target(opts.target.as_deref(), &pin_cwd)?;
-
     let (node_version, node) = if opts.smol {
         // Smol bakes the acceptance FLOOR the launcher enforces (`discovered >=
         // floor`) — and ONLY that. A range's upper bound is deliberately not
         // carried into the artifact, so the raw spec is echoed here for the
         // compiling user and goes no further.
-        let (os, arch, musl) = dist_platform(&target);
-        let floor =
-            version_management::resolve_pin_floor_for_platform(&pin, os, arch, musl, &cache_root)?;
+        let floor = gate_version;
         external::check_node_support(&floor, &source, &shim_plan)?;
         eprintln!(
             "Using Node.js {} (resolved from {source}; satisfied at runtime)",
@@ -1994,6 +2008,7 @@ mod tests {
                 tsconfig: None,
                 loaders: Vec::new(),
                 native_target: None,
+                target_node: None,
             },
         }
     }

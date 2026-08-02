@@ -994,8 +994,8 @@ pub enum Command {
         #[arg(long = "no-minify")]
         no_minify: bool,
 
-        /// Where the source map goes: `linked` (default), `inline`, `external`,
-        /// or `none`. Written `--sourcemap=<MODE>`; bare `--sourcemap` is inline.
+        /// Where the source map goes: `none` (default), `linked`, `inline`, or
+        /// `external`. Written `--sourcemap=<MODE>`; bare `--sourcemap` is inline.
         #[arg(
             long,
             value_name = "MODE",
@@ -2799,14 +2799,20 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             bundle: crate::compile::BundleOptions {
                 minify: !no_minify,
                 keep_names: !no_keep_names,
-                // `linked`, not `inline`. An inline map is base64 inside the chunk,
-                // so it is bytes Node must read and parse at load time — measured at
-                // 81% of a hello-world bundle (1.04 MB of 1.29 MB) and 7 ms of warm
-                // start. A linked map still SHIPS inside the artifact and Node reads
-                // it lazily, only when it renders a stack trace. Verified identical:
-                // a throwing fixture reports `throw.ts:2` with the original TypeScript
-                // source line under both modes.
-                sourcemap: match sourcemap.unwrap_or(SourcemapArg::Linked) {
+                // Off by default: a compiled artifact is something you SHIP, and a
+                // map is source. Inline was the old default and cost 81% of the
+                // bundle's bytes (1.04 MB of 1.29 MB on a hello world); `linked`
+                // removed the load-time parse but still shipped 780 KB of map into
+                // every binary. Neither belongs in a distributed executable unless
+                // the publisher asks for it.
+                //
+                // The tradeoff, stated plainly because it is real: with no map an
+                // uncaught error in a compiled TypeScript program points into
+                // minified JS. `--sourcemap=linked` restores exact original-source
+                // traces (verified: a throwing fixture reports `throw.ts:2` with the
+                // TypeScript source line) at ~0 startup cost, so it is the setting to
+                // reach for when debugging a shipped binary matters.
+                sourcemap: match sourcemap.unwrap_or(SourcemapArg::None) {
                     SourcemapArg::Linked => crate::compile::SourcemapMode::Linked,
                     SourcemapArg::Inline => crate::compile::SourcemapMode::Inline,
                     SourcemapArg::External => crate::compile::SourcemapMode::External,
@@ -2824,6 +2830,9 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 tsconfig: tsconfig.map(PathBuf::from),
                 loaders: loader,
                 native_target: None,
+                // Filled in by `compile()` once the pin chain resolves the exact
+                // target Node; the CLI layer does not know it yet.
+                target_node: None,
             },
         }),
         Some(Command::Init {

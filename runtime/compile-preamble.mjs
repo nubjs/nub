@@ -53,19 +53,40 @@ if (typeof compiledExecPath === "string" && compiledExecPath.length !== 0) {
   });
 }
 
+// Each polyfill below sits in a `nub:polyfill:<name>` region. When `nub compile`
+// probes the Node it is embedding and finds the global already native, it strips
+// the matching regions from this source before bundling — so the polyfill is never
+// pulled into the graph at all. Measured on Node 26, where Temporal, URLPattern,
+// Float16Array and navigator are all native: ~195 KB of the 206 KB bundle was dead
+// weight, and constructing it cost ~18 ms on every launch.
+//
+// Keep an import and its use in regions of the SAME name, and keep every region
+// independently removable — stripping one must leave valid syntax behind.
+// #region nub:polyfill:urlpattern
 import { URLPattern } from "urlpattern-polyfill/urlpattern";
+// #endregion
+// #region nub:polyfill:float16
 import * as float16 from "@petamoriken/float16";
+// #endregion
+// #region nub:polyfill:temporal
 import { Temporal, toTemporalInstant } from "@js-temporal/polyfill";
+// #endregion
 import { installSyncPolyfills } from "./polyfills.cjs";
 import {
   installCompiledChildProcess,
+  // #region nub:polyfill:temporal
   installTemporalGlobal,
+  // #endregion
 } from "./preload-common.cjs";
+// #region nub:polyfill:navigator
 import {
   installNavigatorShim,
   setBootstrapCreateRequire as setNavigatorCreateRequire,
 } from "./navigator-shim.mjs";
+// #endregion
+// #region nub:polyfill:navigatorlocks
 import { installNavigatorLocks } from "./navigator-locks.mjs";
+// #endregion
 import {
   installWorkerPolyfill,
   setBootstrapCreateRequire as setWorkerCreateRequire,
@@ -75,7 +96,9 @@ import {
 export function installCompilePreamble() {
   // Node 18/20 lack process.getBuiltinModule, so keep builtin lookup tied to the
   // early fixed-root bootstrap rather than the bundle or an installed runtime path.
+  // #region nub:polyfill:navigator
   setNavigatorCreateRequire(bootstrap.createRequire);
+  // #endregion
   setWorkerCreateRequire(bootstrap.createRequire);
   setCompiledBootstrapRequireArg(bootstrap.requireArg);
 
@@ -86,13 +109,23 @@ export function installCompilePreamble() {
   }
 
   installSyncPolyfills({
+    // #region nub:polyfill:urlpattern
     urlpattern: { URLPattern },
+    // #endregion
+    // #region nub:polyfill:float16
     float16,
+    // #endregion
   });
+  // #region nub:polyfill:navigator
   installNavigatorShim();
+  // #endregion
+  // #region nub:polyfill:navigatorlocks
   installNavigatorLocks();
+  // #endregion
   installWorkerPolyfill();
+  // #region nub:polyfill:temporal
   installTemporalGlobal({ Temporal, toTemporalInstant });
+  // #endregion
 }
 
 installCompilePreamble();
