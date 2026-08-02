@@ -61,15 +61,11 @@ fn install_runs_lifecycle_scripts_under_runtime_augmentation() {
         )
     });
 
-    // The concrete tokens nub injects for OUR preload — fast tier `--require=<cjs>`
-    // (raw path) or compat tier `--import=file://<mjs>` (slash-form URL). Matching
-    // one of these (not a bare "preload." substring) ties the assertion to nub's
-    // own runtime file, not a coincidental user preload.
-    let mjs = preload.clone();
-    let cjs = preload
-        .strip_suffix(".mjs")
-        .map(|stem| format!("{stem}.cjs"))
-        .unwrap_or_default();
+    // `preload` is resolved above only as the PRECONDITION — a build that cannot
+    // locate it augments nothing, so the assertions below would hold vacuously
+    // (#528). Its concrete `--require`/`--import` tokens are no longer matched:
+    // a dependency's lifecycle script must carry NO augmentation at all.
+    let _ = &preload;
 
     let dir = fixture(POSTINSTALL_PROBE);
     let (stdout, stderr, code) = run(&nub, &dir, &["install"]);

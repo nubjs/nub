@@ -430,9 +430,11 @@ function enginesFor(pkg, version) {
 // four packages were recorded as BROKEN-EVEN-WITH-EVERYTHING — the verdict reserved for a nub
 // defect — purely for being pinned to Node 4, 8 or 10.
 //
-// 18 is nub's declared support floor (crates/nub-core/src/node/version.rs). Anything below it is
-// not a configuration nub claims to serve, so a grant measured there describes nothing shippable.
-const NODE_FLOOR = 18;
+// 10, NOT 18. Raising it to nub's own support floor was tried and reverted: it "breaks a lot more
+// shit" by measuring old packages on a Node they never targeted, and the failures that motivated it
+// were nub injecting a node-gyp too new for the ambient Node -- fixed at the source in
+// node_gyp_bootstrap::bucket_for, so the floor no longer has to absorb it.
+const NODE_FLOOR = 10;
 const NODE_DEFAULT = '22';      // when `engines.node` is absent or unparseable
 const NODE_CEILING = 22;        // latest LTS — never measure on something newer than the ecosystem
 

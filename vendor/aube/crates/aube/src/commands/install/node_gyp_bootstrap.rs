@@ -43,11 +43,73 @@ use miette::{IntoDiagnostic, WrapErr, miette};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-/// Major-version pin. Bumping the bucket invalidates the cache and
-/// triggers a re-bootstrap on the next install.
-const BUCKET: &str = "v12";
-/// Semver range passed to `aube install`. Keep aligned with `BUCKET`.
-const SPEC: &str = "^12.0.0";
+/// The node-gyp to bootstrap for a given Node major, MEASURED by real addon
+/// builds — never read off `engines.node` alone, which is a declaration and
+/// disagrees with reality in both directions.
+///
+/// A FIXED pin cannot be correct, because the constraint has TWO axes that
+/// pull opposite ways:
+///
+///   - node-gyp must be OLD enough to RUN on the ambient Node. node-gyp 12
+///     calls `String.replaceAll` (Node 15+) and 9 calls `Object.fromEntries`
+///     (Node 12+), so each release silently loses the Nodes beneath it.
+///   - node-gyp must be NEW enough for the ambient PYTHON. Python 3.12
+///     removed `distutils`, which the gyp vendored in node-gyp <=9 imports,
+///     so the older releases die on any modern interpreter.
+///
+/// Measured (real `node-gyp rebuild` of a minimal addon, macOS arm64):
+///
+/// ```text
+///           node 8   10   12   14   16   18   20   22   24   26  | py3.12+
+///   gyp 5       ok   ok   ok   ok   ok   ok    -    -    -    -  |   no
+///   gyp 8        -   ok   ok   ok   ok   ok   ok   ok   ok   ok  |   no
+///   gyp 9        -    -   ok   ok   ok   ok   ok   ok   ok   ok  |   no
+///   gyp 10       -    -    -   ok   ok   ok   ok   ok   ok   ok  |  yes
+///   gyp 12       -    -    -    -    -   ok   ok   ok   ok   ok  |  yes
+/// ```
+///
+/// This was `^12.0.0` unconditionally, which made EVERY native addon fail
+/// below Node 18 — and a confined lifecycle script always takes our copy, so
+/// the package's own correct `engines` could not save it. Selecting the newest
+/// release that still runs on the ambient Node recovers Node 10..17.
+///
+/// Where the axes genuinely conflict (Node <=13 on Python 3.12+) no release
+/// satisfies both and there is nothing to choose: we take the newest that fits
+/// the Node, so the failure is a legible Python error rather than a confusing
+/// `replaceAll` TypeError.
+fn bucket_for(node_major: u64) -> (&'static str, &'static str) {
+    match node_major {
+        0..=9 => ("v5", "^5.0.0"),
+        10..=11 => ("v8", "^8.0.0"),
+        12..=13 => ("v9", "^9.0.0"),
+        14..=17 => ("v10", "^10.0.0"),
+        _ => ("v12", "^12.0.0"),
+    }
+}
+
+/// The Node major the lifecycle scripts will run under, asked of the `node`
+/// THEY will resolve rather than of the host process — under an embedder those
+/// are different binaries, and a decision made from the wrong one is exactly
+/// the class of bug this function exists to avoid.
+///
+/// `None` when no `node` is reachable, in which case the caller keeps the
+/// modern default: a machine with no Node has no addon to build.
+fn ambient_node_major() -> Option<u64> {
+    let out = std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .trim_start_matches('v')
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
+}
 /// The bootstrapped package's name — also the tool dir's require root
 /// (`node_modules/<PKG>`), which is what [`tool_tree_usable`] probes.
 const PKG: &str = "node-gyp";
@@ -170,7 +232,9 @@ pub async fn ensure(project_dir: &Path, reach: ScriptReach) -> miette::Result<Op
 
 pub async fn ensure_cached(project_dir: &Path) -> miette::Result<PathBuf> {
     let root = tool_root()?;
-    let tool_dir = root.join(BUCKET);
+    // Modern default when no `node` answers: nothing to build there anyway.
+    let (bucket, spec) = bucket_for(ambient_node_major().unwrap_or(u64::MAX));
+    let tool_dir = root.join(bucket);
     let bin_dir = tool_dir.join("node_modules").join(".bin");
     if tool_tree_usable(&tool_dir, &bin_dir) {
         return Ok(bin_dir);
@@ -178,7 +242,7 @@ pub async fn ensure_cached(project_dir: &Path) -> miette::Result<PathBuf> {
     let tool_dir_blocking = tool_dir.clone();
     let project_npmrc = project_dir.join(".npmrc");
     tokio::task::spawn_blocking(move || {
-        write_bootstrap_project(&tool_dir_blocking, &project_npmrc)
+        write_bootstrap_project(&tool_dir_blocking, &project_npmrc, spec)
     })
     .await
     .into_diagnostic()
@@ -194,7 +258,7 @@ pub async fn ensure_cached(project_dir: &Path) -> miette::Result<PathBuf> {
         return Ok(bin_dir);
     }
 
-    tracing::info!("bootstrapping node-gyp {SPEC} into {}", tool_dir.display());
+    tracing::info!("bootstrapping node-gyp {spec} into {}", tool_dir.display());
     let mut opts = super::InstallOptions::with_mode(super::FrozenMode::Prefer);
     // Equivalent of the `install --ignore-scripts --silent` this used to shell
     // out for. node-gyp's own dependency tree needs no build scripts, and
@@ -205,7 +269,7 @@ pub async fn ensure_cached(project_dir: &Path) -> miette::Result<PathBuf> {
         .await
         .wrap_err_with(|| {
             format!(
-                "failed to bootstrap node-gyp {SPEC} into {} — \
+                "failed to bootstrap node-gyp {spec} into {} — \
                  pre-populate it or run `{}` once while online",
                 tool_dir.display(),
                 aube_util::cmd("install")
@@ -291,8 +355,11 @@ const PROG_TOKEN: &str = "__PROG__";
 /// before anything runs it.
 fn render_shim(template: &str) -> String {
     let var = aube_util::env::internal_env_name;
+    // Same bucket the bootstrap will populate — resolved here rather than fixed,
+    // so the shim points at the tree that actually gets installed for this Node.
+    let (bucket, _) = bucket_for(ambient_node_major().unwrap_or(u64::MAX));
     template
-        .replace(BUCKET_TOKEN, BUCKET)
+        .replace(BUCKET_TOKEN, bucket)
         .replace(EXE_VAR_TOKEN, &var("NODE_GYP_EXE"))
         .replace(PROJECT_DIR_VAR_TOKEN, &var("NODE_GYP_PROJECT_DIR"))
         .replace(SHIM_DEPTH_VAR_TOKEN, &var("NODE_GYP_SHIM_DEPTH"))
@@ -438,12 +505,16 @@ if not defined __REAL_NODE_GYP_VAR__ exit /b 1
 /// install runs against. Writes are atomic and idempotent, so racing
 /// processes converge on the same content; serialization is the caller's
 /// project lock on `tool_dir`.
-fn write_bootstrap_project(tool_dir: &Path, project_npmrc: &Path) -> miette::Result<()> {
+fn write_bootstrap_project(
+    tool_dir: &Path,
+    project_npmrc: &Path,
+    spec: &str,
+) -> miette::Result<()> {
     std::fs::create_dir_all(tool_dir).into_diagnostic()?;
     // The scratch manifest lands in the embedder's own cache tree, so even its
     // `name` follows the active brand rather than hardcoding the engine's.
     let manifest = format!(
-        r#"{{"name":"{tool}-tool-node-gyp","private":true,"dependencies":{{"node-gyp":"{SPEC}"}}}}"#,
+        r#"{{"name":"{tool}-tool-node-gyp","private":true,"dependencies":{{"node-gyp":"{spec}"}}}}"#,
         tool = aube_util::prog()
     );
     aube_util::fs_atomic::atomic_write(&tool_dir.join("package.json"), manifest.as_bytes())
@@ -700,7 +771,9 @@ mod tests {
     #[cfg(unix)]
     fn staged_bootstrapped_tree(tmp: &std::path::Path, tally: &std::path::Path) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
-        let modules = tmp.join(BUCKET).join("node_modules");
+        let modules = tmp
+            .join(bucket_for(ambient_node_major().unwrap_or(u64::MAX)).0)
+            .join("node_modules");
         std::fs::create_dir_all(modules.join(".bin")).expect("bin dir");
         std::fs::create_dir_all(modules.join(PKG)).expect("pkg dir");
         std::fs::write(modules.join(PKG).join("package.json"), b"{}").expect("pkg json");
