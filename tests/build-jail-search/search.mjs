@@ -883,15 +883,35 @@ function screenForMalicious(specs) {
     const version = at > 0 ? sp.slice(at + 1) : undefined;
     return version ? { package: { name, ecosystem: 'npm' }, version } : { package: { name, ecosystem: 'npm' } };
   });
-  const body = JSON.stringify({ queries });
-  const r = spawnSync('curl', ['-sS', '--max-time', '60', '-X', 'POST',
-    'https://api.osv.dev/v1/querybatch', '-H', 'Content-Type: application/json', '-d', body],
-    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-  if (r.status !== 0) throw new Error(`OSV screen FAILED (curl ${r.status}): ${(r.stderr || '').slice(0, 200)}`);
-  let parsed;
-  try { parsed = JSON.parse(r.stdout); } catch (e) { throw new Error(`OSV screen FAILED to parse: ${e.message}`); }
-  const results = parsed.results ?? [];
-  if (results.length !== specs.length) throw new Error(`OSV screen returned ${results.length} results for ${specs.length} queries`);
+  // ⛔ CHUNK THE BATCH. `querybatch` caps a request at ~1000 queries, so a single POST for a large
+  // tree comes back short and the length check below (correctly) refuses — MEASURED on
+  // `netlify-cli@3.9.0`: `OSV screen returned 0 results for 1284 queries`, which failed closed into
+  // a HARNESS-CRASH, so the biggest dependency trees in the corpus were exactly the ones that could
+  // never be screened OR measured. Failing closed was right; being unable to screen at all was not.
+  //
+  // The body also goes over STDIN rather than argv: a 1284-entry JSON body is hundreds of KB and
+  // argv has its own ceiling, which would have been the next failure after chunking.
+  const CHUNK = 500;
+  const results = [];
+  for (let i = 0; i < queries.length; i += CHUNK) {
+    const slice = queries.slice(i, i + CHUNK);
+    const r = spawnSync('curl', ['-sS', '--max-time', '60', '-X', 'POST',
+      'https://api.osv.dev/v1/querybatch', '-H', 'Content-Type: application/json',
+      '--data-binary', '@-'],
+      { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, input: JSON.stringify({ queries: slice }) });
+    if (r.status !== 0) {
+      throw new Error(`OSV screen FAILED (curl ${r.status}) on chunk ${i / CHUNK}: ${(r.stderr || '').slice(0, 200)}`);
+    }
+    let parsed;
+    try { parsed = JSON.parse(r.stdout); } catch (e) { throw new Error(`OSV screen FAILED to parse: ${e.message}`); }
+    const got = parsed.results ?? [];
+    // Per-chunk length check, so a short chunk cannot be masked by a full one.
+    if (got.length !== slice.length) {
+      throw new Error(`OSV screen returned ${got.length} results for ${slice.length} queries `
+        + `(chunk ${i / CHUNK} of ${Math.ceil(queries.length / CHUNK)})`);
+    }
+    results.push(...got);
+  }
   const flagged = [];
   results.forEach((res, i) => {
     for (const v of res.vulns ?? []) if ((v.id ?? '').startsWith('MAL-')) flagged.push({ spec: specs[i], id: v.id });
