@@ -712,6 +712,28 @@ function nodeBinFor(major) {
   return best;
 }
 
+/** The arch of the PINNED node, asked of that binary rather than assumed from the host. They differ
+ *  under Rosetta, which is precisely the case that produced a false defect (`workerd` hunting
+ *  `@cloudflare/workerd-darwin-64` from an "arm64" Node 16 that was really x64). */
+function pinnedNodeArch(nodeBin) {
+  if (!nodeBin) return null;
+  const exe = path.join(nodeBin, process.platform === 'win32' ? 'node.exe' : 'node');
+  if (!fs.existsSync(exe)) return null;
+  const r = spawnSync(exe, ['-p', 'process.arch'], { encoding: 'utf8', timeout: 30_000 });
+  return r.status === 0 ? (r.stdout || '').trim() || null : null;
+}
+
+/** glibc vs musl — a `-musl` package cannot load on a glibc host and vice versa, and neither is a
+ *  nub defect. `ldd --version` names itself on both; absent (macOS/Windows) the question is moot. */
+function detectLibc() {
+  if (process.platform !== 'linux') return null;
+  const r = spawnSync('ldd', ['--version'], { encoding: 'utf8', timeout: 10_000 });
+  const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+  if (/musl/i.test(out)) return 'musl';
+  if (/GNU libc|GLIBC/i.test(out)) return 'glibc';
+  return null;
+}
+
 function toolchain() {
   // `which`, not `command -v` through a shell: passing args with `shell: true` is deprecated
   // (DEP0190, args are concatenated rather than escaped) and would print a warning on every run.
@@ -783,6 +805,19 @@ function provenance(nub, nodePin, enginesNode, nodeMajor, publishedAt = null) {
       chosenMajor: nodeMajor ?? null,
       pinnedTo: nodePin?.name ?? null,
       hostNode: process.version,
+      // ⛔ ARCH AND LIBC ARE PART OF THE RESULT, and a mismatch is never a nub defect (#96).
+      //
+      // A package can be architecturally incapable of installing here. MEASURED:
+      // `@napi-rs/simple-git-linux-x64-musl@0.1.8` cannot load on a glibc box, and `workerd` looked
+      // for `@cloudflare/workerd-darwin-64` because the "arm64" Node 16 on that Mac was an x64
+      // build under Rosetta. Node publishes NO darwin-arm64 below v16.0.0, so on Apple Silicon
+      // every major <=15 is unavoidably mismatched.
+      //
+      // The PINNED Node's arch is what the build actually saw; `process.arch` is the harness's own
+      // and can differ from it, which is exactly the Rosetta case above.
+      hostArch: process.arch,
+      pinnedArch: pinnedNodeArch(nodePin?.dir ?? null),
+      libc: detectLibc(),
     },
     // THE PYTHON IS PART OF THE RESULT TOO, for the same reason. `toolchain.python` reports what
     // the HOST resolves; when this is non-null the build actually ran against something else, and
