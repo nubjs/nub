@@ -523,7 +523,12 @@ function resolveNodeMajor(enginesNode, published) {
  *  does today, and provenance records the Python that was actually used. */
 function gypPython(nodeBin) {
   const m = nodeBin && /\/v(\d+)\./.exec(nodeBin);
-  if (!m || Number(m[1]) > 13) return null;          // node-gyp >=10 handles any modern Python
+  // <=15, NOT <=13. bucket_for maps Node 14..17 to node-gyp 10, and node-gyp 10 DOES handle
+  // Python 3.12+ on Node 16+ — but MEASURED on Node 14 it does not: cbor-extract@0.1.0 died at
+  // `gyp ERR! configure error` with `node@14.18.3 | darwin | x64` and Python 3.14.6, while the
+  // same package on the same Node built fine under Python 3.9 and 3.11. Node 16 is the first
+  // major where gyp 10 and a modern Python agree, so the pin has to cover 14 and 15 too.
+  if (!m || Number(m[1]) > 15) return null;
   for (const name of ['python3.11', 'python3.10', 'python3.9']) {
     const r = spawnSync('command', ['-v', name], { shell: true, encoding: 'utf8' });
     const p = (r.stdout ?? '').trim();

@@ -81,8 +81,13 @@ fn bucket_for(node_major: u64) -> (&'static str, &'static str) {
     match node_major {
         0..=9 => ("v5", "^5.0.0"),
         10..=11 => ("v8", "^8.0.0"),
-        12..=13 => ("v9", "^9.0.0"),
-        14..=17 => ("v10", "^10.0.0"),
+        // 14..15 take node-gyp 9, NOT 10. node-gyp 10 declares `^16.14.0 || >=18.0.0` and means
+        // it: on Node 14 it dies at `TypeError: Cannot read property 'pipeline' of undefined`
+        // (measured on cbor-extract@0.1.0). node-gyp 9 declares `^12.13 || ^14.13 || >=16`, which
+        // covers 14 and 15 properly. This is why the table above is measured rather than derived —
+        // 10 "runs" on 14 far enough to print its banner and then fails in the build.
+        12..=15 => ("v9", "^9.0.0"),
+        16..=17 => ("v10", "^10.0.0"),
         _ => ("v12", "^12.0.0"),
     }
 }
