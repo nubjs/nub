@@ -62,6 +62,44 @@ fi
 rm -rf "$_probe"
 NUB="$SNAP"
 
+# ⛔ FIXTURE CANARY — prove the fixture still installs a REAL TREE before spending hours on it.
+#
+# The override check above proves the binary and the catalog SHAPE are sound. It says nothing about
+# whether the fixture still causes a real install, and a fixture that quietly stops scripts doing
+# work makes the whole ecosystem look free — every package measures as needing nothing, every
+# verdict is MINIMUM, and coverage is 100%. Nothing fails.
+#
+# MEASURED, twice. A hand-written package-lock.json with an empty `packages` map took puppeteer's
+# control from 9,629 installed files to 32, and all eight packages in that run came back needing
+# NOTHING — including cypress and puppeteer, which cannot work without downloading a binary.
+# Separately, an invalid `$home/...` baseline entry made the jail fail to COMPILE, so no lifecycle
+# script spawned at all, with the same "everything is free" result.
+#
+# So the canary asserts the CONTROL'S SHAPE, not a verdict: a package whose answer we know must
+# still install a large tree and still be materialized. `is-odd` would not catch this — it needs
+# nothing legitimately. Skip with NUB_PROBE_SKIP_CANARY=1 when deliberately testing the fixture.
+if [ "${NUB_PROBE_SKIP_CANARY:-0}" != "1" ]; then
+  _can="${TMPDIR:-/tmp}/nub-canary-$$"; rm -rf "$_can"
+  _canjson="$_can/results/runs/$(node -p 'process.platform+"-"+process.arch')/puppeteer/25.4.0/results.json"
+  echo "fixture canary: installing puppeteer@25.4.0 …" >&2
+  if ! timeout 900 node "$here/search.mjs" puppeteer@25.4.0 --nub "$NUB" --force \
+        --runs "$_can/results/runs" > /dev/null 2>"$_can.err"; then
+    echo "REFUSING TO RUN: the fixture canary could not complete. See $_can.err" >&2
+    exit 2
+  fi
+  _files=$(node -e 'const f=process.argv[1];try{const d=require(f);console.log(d.control?.fileCount??0)}catch{console.log(0)}' "$_canjson")
+  _mat=$(node -e 'const f=process.argv[1];try{const d=require(f);console.log(String(d.control?.materialized))}catch{console.log("false")}' "$_canjson")
+  if [ "$_files" -lt 5000 ] || [ "$_mat" != "true" ]; then
+    echo "REFUSING TO RUN: THE FIXTURE IS NOT PRODUCING A REAL INSTALL." >&2
+    echo "  puppeteer@25.4.0 control: ${_files} files (expected >5000), materialized=${_mat} (expected true)" >&2
+    echo "  A fixture in this state makes EVERY package measure as needing nothing." >&2
+    echo "  Suspect: a change to makeFixture, or an invalid entry in baseline.json." >&2
+    rm -rf "$_can" "$_can.err"; exit 2
+  fi
+  echo "fixture canary OK: ${_files} files, materialized=${_mat}" >&2
+  rm -rf "$_can" "$_can.err"
+fi
+
 FORCE=""
 [ "${1:-}" = "--force" ] && { FORCE="--force"; shift; }
 
