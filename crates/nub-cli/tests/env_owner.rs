@@ -338,6 +338,66 @@ fn the_verification_pass_warns_when_nothing_loaded() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn every_launch_path_that_injects_the_adapter_also_stamps_its_markers() {
+    // Regression, and it was total and silent. `nub watch` injected the preload
+    // but stamped no markers, so the adapter — which keys on the root marker —
+    // no-opped. Detection had already stood nub's own cascade down, so the
+    // watched process got NO environment at all, and the verification pass was
+    // equally silent because its own marker was missing too.
+    //
+    // Watch is the reachable proof; the same omission applied to `nubx`/exec and
+    // lifecycle scripts, which are harder to drive from a test.
+    let dir = project(&[(".env.schema", "# ---\nA=1\n")]);
+    install_stub_loader(dir.path());
+    write(
+        dir.path(),
+        "watched.mjs",
+        r#"console.log(JSON.stringify({ FROM_LOADER: process.env.FROM_LOADER ?? null }));
+           process.exit(0);"#,
+    );
+
+    let mut child = Command::new(nub_binary())
+        .args(["watch", "watched.mjs"])
+        .current_dir(dir.path())
+        .env("PATH", "")
+        .env_remove("NODE_OPTIONS")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn nub watch");
+
+    // `nub watch` never exits on its own, so read the first run's output and kill.
+    let mut stdout = child.stdout.take().expect("stdout");
+    let seen = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = String::new();
+        let mut chunk = [0u8; 512];
+        while let Ok(n) = stdout.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
+            if buf.contains("FROM_LOADER") {
+                break;
+            }
+        }
+        buf
+    })
+    .join()
+    .expect("reader thread");
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        seen.contains(r#""FROM_LOADER":"yes""#),
+        "the watched process must get the loader's environment — a null here means \
+         the adapter was injected without its markers and silently did nothing, \
+         while nub's own cascade was already suppressed. Saw: {seen}"
+    );
+}
+
 #[test]
 fn silent_suppresses_the_verification_warning() {
     // The warning is on by default because it reports a run with no environment
@@ -372,6 +432,16 @@ fn silent_suppresses_the_verification_warning() {
         .output()
         .expect("spawn nub");
     let quiet_stderr = String::from_utf8_lossy(&quiet.stderr);
+    // Assert the run SUCCEEDED before reading anything into its silence. A
+    // negative assertion alone passes on any failure of the invocation — a
+    // rejected flag position, a spawn error, an early exit — so it would prove
+    // nothing about suppression.
+    assert!(
+        quiet.status.success(),
+        "the --silent run must succeed, or its silence means nothing; \
+         exited {:?}, stderr: {quiet_stderr}",
+        quiet.status.code()
+    );
     assert!(
         !quiet_stderr.contains("never loaded the environment"),
         "--silent must suppress the verification warning; stderr was: {quiet_stderr}"

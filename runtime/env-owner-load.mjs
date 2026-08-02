@@ -39,13 +39,28 @@ const resolveFrom = process.env.__NUB_ENV_OWNER_RESOLVE_FROM || root;
 // the guards from the inherited __VARLOCK_ENV, resolves nothing, and spawns
 // nothing (verified: 0 subprocesses, secret redacted).
 if (root && !isMainThread) {
+  // That entry does slightly more than install guards: it re-applies every
+  // schema key to process.env from the blob first, because the redaction map is
+  // built there. So a Worker constructed with an `env` override loses that
+  // override for any schema-declared key — which does not happen under
+  // `varlock run`, since the child there carries no loader at all.
   try {
     const req = createRequire(pathToFileURL(`${resolveFrom}/package.json`));
     await import(pathToFileURL(req.resolve("varlock/init-server")).href);
-  } catch {
-    // A loader without that entry, or an unreadable one, leaves the Worker with
-    // inherited values and no guards — the state it would have had anyway. Not
-    // worth killing a Worker over.
+  } catch (err) {
+    // A loader that simply has no such entry leaves the Worker with inherited
+    // values and no guards — the state it would have had anyway, and not worth
+    // killing a Worker over. ANY OTHER failure is different: it means the guards
+    // did not install, so the Worker is printing @sensitive values in the clear,
+    // which is the exact outcome this branch exists to prevent. Say so rather
+    // than swallowing it. Warn instead of rethrowing: a redaction failure should
+    // not take the Worker down with it.
+    if (err?.code !== "MODULE_NOT_FOUND" && err?.code !== "ERR_MODULE_NOT_FOUND") {
+      console.warn(
+        `nub: could not install varlock's protections in this worker (${err?.message ?? err}).\n` +
+          "      Sensitive values may print unredacted here.",
+      );
+    }
   }
 } else if (root) {
   // Close BOTH routes back into nub before the loader is even imported.

@@ -3277,6 +3277,50 @@ fn runtime_child_env(
 /// The markers are internal `__NUB_*` plumbing, not user knobs, and are
 /// deliberately loader-agnostic: the verification pass asks "did anything load
 /// the environment?", so replacing the loader keeps it working unchanged.
+/// The markers a child needs to act on an env owner.
+///
+/// EVERY launch path that injects the adapter must also stamp these. The adapter
+/// keys on the root marker and silently no-ops without it — and by then detection
+/// has already suppressed nub's own cascade, so the child gets NO environment at
+/// all, with the verification pass equally silent because its own marker is
+/// missing too. Measured on `nub watch`, which injected the preload and stamped
+/// nothing: every variable came back null with no diagnostic anywhere.
+pub(crate) fn env_owner_markers(owner: &crate::env_owner::EnvOwner) -> Vec<(String, String)> {
+    let Some(marker) = owner.marker() else {
+        return Vec::new();
+    };
+    let mut markers = vec![
+        (crate::env_owner::OWNER_ENV.to_string(), marker.to_string()),
+        (
+            crate::env_owner::OWNER_ROOT_ENV.to_string(),
+            owner.root().display().to_string(),
+        ),
+        (
+            crate::env_owner::OWNER_RESOLVE_ENV.to_string(),
+            owner.resolve_from().display().to_string(),
+        ),
+    ];
+    if SILENT.load(Ordering::Relaxed) {
+        markers.push((
+            crate::env_owner::OWNER_QUIET_ENV.to_string(),
+            "1".to_string(),
+        ));
+    }
+    markers
+}
+
+/// Stamp the markers onto a child command, for the launch paths that build a
+/// `Command` directly rather than a map.
+fn stamp_env_owner_markers(
+    cmd: &mut std::process::Command,
+    env_owner: Option<&crate::env_owner::EnvOwner>,
+) {
+    let Some(owner) = env_owner else { return };
+    for (key, value) in env_owner_markers(owner) {
+        cmd.env(key, value);
+    }
+}
+
 fn apply_env_owner_env(
     env_owner: Option<&crate::env_owner::EnvOwner>,
     env_vars: &mut HashMap<String, String>,
@@ -3286,22 +3330,7 @@ fn apply_env_owner_env(
         warn_once(&warning);
         return;
     }
-    let Some(marker) = owner.marker() else { return };
-    env_vars.insert(crate::env_owner::OWNER_ENV.to_string(), marker.to_string());
-    env_vars.insert(
-        crate::env_owner::OWNER_ROOT_ENV.to_string(),
-        owner.root().display().to_string(),
-    );
-    env_vars.insert(
-        crate::env_owner::OWNER_RESOLVE_ENV.to_string(),
-        owner.resolve_from().display().to_string(),
-    );
-    if SILENT.load(Ordering::Relaxed) {
-        env_vars.insert(
-            crate::env_owner::OWNER_QUIET_ENV.to_string(),
-            "1".to_string(),
-        );
-    }
+    env_vars.extend(env_owner_markers(owner));
     if matches!(owner.kind(), crate::env_owner::OwnerKind::Cli(_)) {
         // NOTE: the "already loaded" marker is deliberately NOT set here. This
         // function runs on launch paths that never resolve anything — `nub run`
@@ -5674,6 +5703,9 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
     cmd.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
+    // Stamp the env-owner markers wherever the adapter is injected — without them
+    // it no-ops and the child gets no environment at all.
+    stamp_env_owner_markers(&mut cmd, env_owner.as_ref());
     let mut launcher_owned_env_keys = vec![crate::project_config::RUNTIME_CONFIG_ENV.to_string()];
     if nub_preload_token.is_some() {
         // Watch assembles NODE_OPTIONS directly instead of using AugmentationEnv,
@@ -6177,6 +6209,9 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
         cmd.env(k, v);
     });
     cmd.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
+    // Stamp the env-owner markers wherever the adapter is injected — without them
+    // it no-ops and the child gets no environment at all.
+    stamp_env_owner_markers(cmd, env_owner.as_ref());
     if let Some((k, val)) = force_async_tier {
         cmd.env(k, val);
     }

@@ -1634,6 +1634,7 @@ fn augmentation_to_lifecycle_overlay(
     aug: &nub_core::node::spawn::AugmentationEnv,
     node_execpath: &str,
     runtime_json: Option<&str>,
+    env_owner_markers: Vec<(String, String)>,
 ) -> (Vec<(std::ffi::OsString, std::ffi::OsString)>, Vec<PathBuf>) {
     use std::ffi::OsString;
     let mut overlay: Vec<(OsString, OsString)> = Vec::new();
@@ -1674,6 +1675,12 @@ fn augmentation_to_lifecycle_overlay(
             OsString::from(crate::project_config::RUNTIME_CONFIG_ENV),
             OsString::from(runtime_json),
         ));
+    }
+    // The env-owner markers travel with the adapter this path injects. Without
+    // them the adapter no-ops and a lifecycle script's `node` gets no environment
+    // at all, since detection has already stood nub's own cascade down.
+    for (key, value) in env_owner_markers {
+        overlay.push((OsString::from(key), OsString::from(value)));
     }
     // localStorage-neutralize signal for dependency build scripts' node children
     // (webstorage flag-needed band, no user --localstorage-file); preload reads + deletes.
@@ -1781,8 +1788,15 @@ fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
             None => aug.node_options = Some(configured),
         }
     }
-    let (env_overlay, path_prepends) =
-        augmentation_to_lifecycle_overlay(&aug, node.path.as_str(), Some(&runtime_json));
+    let (env_overlay, path_prepends) = augmentation_to_lifecycle_overlay(
+        &aug,
+        node.path.as_str(),
+        Some(&runtime_json),
+        env_owner
+            .as_ref()
+            .map(crate::cli::env_owner_markers)
+            .unwrap_or_default(),
+    );
     // The shim dir + provisioned node for the engine's runtime spawn helpers —
     // the boundary the transient bin-exec paths (dlx / create / `nubx <tool>`)
     // read but the lifecycle overlay above never reaches. `runtime_switching`
@@ -4615,8 +4629,12 @@ mod tests {
             neutralize_localstorage: true,
         };
         let runtime_json = r#"{"nodeCompat":false}"#;
-        let (overlay, prepends) =
-            augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node", Some(runtime_json));
+        let (overlay, prepends) = augmentation_to_lifecycle_overlay(
+            &aug,
+            "/pinned/bin/node",
+            Some(runtime_json),
+            Vec::new(),
+        );
 
         let find = |k: &str| {
             overlay
@@ -4678,7 +4696,8 @@ mod tests {
             node_path: None,
             neutralize_localstorage: false,
         };
-        let (overlay, prepends) = augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node", None);
+        let (overlay, prepends) =
+            augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node", None, Vec::new());
         assert!(prepends.is_empty());
         assert!(
             !overlay
