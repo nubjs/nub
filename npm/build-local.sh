@@ -34,13 +34,14 @@ cp -RL "$REPO_ROOT/node_modules/@petamoriken/float16" "$REPO_ROOT/runtime/node_m
 # 2. Build the release binary with the runtime embedded.
 cargo build --release -p nub-cli --features embed-runtime
 
-# 3. Copy ONLY the binary — under BOTH names (nub, nubx). The verb is the binary's
-#    own argv[0] basename, so nubx must be a real second copy. No runtime/ sidecar.
+# 3. Copy ONLY the binary, under ONE name. No runtime/ sidecar, and no second `nubx`
+#    copy: the launcher passes the verb in `__NUB_ARGV0` (npm/nub/bin/launch.js), so
+#    nubx no longer needs a separately-named file. Halves the package.
 rm -rf "$PKG_DIR/runtime"
 mkdir -p "$PKG_DIR/bin"
+rm -f "$PKG_DIR/bin/nubx"
 cp "$REPO_ROOT/target/release/nub" "$PKG_DIR/bin/nub"
-cp "$REPO_ROOT/target/release/nub" "$PKG_DIR/bin/nubx"
-chmod +x "$PKG_DIR/bin/nub" "$PKG_DIR/bin/nubx"
+chmod +x "$PKG_DIR/bin/nub"
 
 echo ""
 echo "✓ Platform package ready: $PKG_DIR ($(du -sh "$PKG_DIR" | cut -f1))"

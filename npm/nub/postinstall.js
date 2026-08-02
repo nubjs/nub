@@ -24,8 +24,8 @@ function platformPkg() {
 // npm normalizes file modes on extract: a file referenced by a package's `bin`
 // field lands 0o755, everything else 0o644. The platform packages
 // (`@nubjs/nub-<platform>`) deliberately declare NO `bin` field — they're carriers
-// selected by npm's os/cpu filters — so their `bin/nub` / `bin/nubx` extract 0o644
-// (no +x). Something must add it back.
+// selected by npm's os/cpu filters — so their `bin/nub` extracts 0o644 (no +x).
+// Something must add it back.
 //
 // `bin/launch.js` also chmods at runtime, but that runs as the END user and chmod
 // only succeeds for the file's OWNER. The canonical container/CI pattern installs
@@ -46,7 +46,10 @@ function chmodExecutable(pkg) {
     try {
       binPath = require.resolve(`${pkg}/bin/${verb}${ext}`);
     } catch {
-      continue; // an older platform package may not ship bin/nubx.
+      // `nubx` is expected to miss: current platform packages ship only `bin/nub`
+      // and the verb rides in `__NUB_ARGV0`. Still probed so a newer launcher paired
+      // with an older platform package chmods that package's `bin/nubx` too.
+      continue;
     }
     try {
       // Preserve read/write bits, add execute for user/group/other (umask-free —
