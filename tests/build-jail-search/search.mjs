@@ -1734,9 +1734,23 @@ try {
 
   // RESUMABLE BY DEFAULT. A batch re-run should cost only what it has not already measured;
   // `--force` re-measures one package after a harness or jail change.
-  if (!argv.includes('--force') && fs.existsSync(out)) {
-    const prior = JSON.parse(fs.readFileSync(out, 'utf8'));
-    console.log(JSON.stringify({ ...prior, skipped: 'already measured; pass --force to redo' }));
+  //
+  // ⛔ A `HARNESS-*` RECORD IS NOT A MEASUREMENT, so it must not satisfy the resume check. This was
+  // `fs.existsSync(out)` alone, which counted a crash or a timeout as "done" — so the packages that
+  // BROKE the harness were exactly the ones a later fix could never reach, and a resumed sweep
+  // skipped straight past them looking complete. MEASURED: `netlify-cli@3.9.0` recorded
+  // HARNESS-CRASH from the unchunked OSV screen; with the screen fixed, a plain resume would still
+  // never re-run it.
+  //
+  // A `BROKEN-*` verdict is the OPPOSITE case and DOES count: "this package genuinely fails here" is
+  // real data about the package, not an instrument failure.
+  let priorRecord = null;
+  if (fs.existsSync(out)) {
+    try { priorRecord = JSON.parse(fs.readFileSync(out, 'utf8')); } catch { priorRecord = null; }
+  }
+  const priorIsMeasurement = priorRecord && !String(priorRecord.verdict ?? '').startsWith('HARNESS-');
+  if (!argv.includes('--force') && priorIsMeasurement) {
+    console.log(JSON.stringify({ ...priorRecord, skipped: 'already measured; pass --force to redo' }));
   } else {
     const record = search(nub, pkg, version, root, keep, runDir);
     // ⛔ DO NOT CLOBBER. `search()` sets provenance with the resolved Node selection in scope; this
