@@ -130,8 +130,32 @@ function paths(root, prefix = '') {
 
 const digestOf = (list) => createHash('sha256').update(list.slice().sort().join('\n')).digest('hex').slice(0, 16);
 
+/** ⛔ REMOVING A node_modules TREE ON WINDOWS FAILS WITH EPERM, ROUTINELY. A lifecycle script's
+ *  child can still hold a handle for a moment after exit, and an indexer or AV scanner opens files
+ *  behind you — so the delete races them. `maxRetries`/`retryDelay` exist in Node for exactly this
+ *  and are no-ops on POSIX.
+ *
+ *  MEASURED on nub-win: a run that MEASURED PUPPETEER SUCCESSFULLY still exited 1, because the final
+ *  cleanup threw `EPERM, Permission denied: \\?\C:\Users\…\.cache\nub-search-msMlUt`. run-batch.sh
+ *  reads a non-zero exit as "no measurement", so a completed record was thrown away by its own
+ *  tidy-up.
+ *
+ *  `mustSucceed` splits the two cases, which need OPPOSITE handling:
+ *   - the fixture PRE-clean must still throw. A stale tree left in place is the silent-void-every-
+ *     measurement hazard: the install then looks like it needed nothing (#82).
+ *   - post-measurement cleanup must NEVER lose a result. Warn, leak the directory, and carry on —
+ *     run-batch.sh's startup sweep collects it later. */
+function rmTree(p, { mustSucceed = false } = {}) {
+  try {
+    fs.rmSync(p, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  } catch (e) {
+    if (mustSucceed) throw e;
+    console.error(`warning: could not remove ${p} (${e.code}); leaving it for the startup sweep`);
+  }
+}
+
 function makeFixture(dir, pkg, version, { jailOff }) {
-  fs.rmSync(dir, { recursive: true, force: true });
+  rmTree(dir, { mustSucceed: true });
   const proj = path.join(dir, 'proj');
   fs.mkdirSync(proj, { recursive: true });
   fs.mkdirSync(path.join(dir, 'home'), { recursive: true });
@@ -1109,7 +1133,7 @@ function search(nub, pkg, version, root, keep, runDir) {
     const dir = path.join(root, name);
     const fx = makeFixture(dir, pkg, version, { jailOff: !!opts.jailOff });
     const r = runCell(nub, fx, { ...opts, pkg, logDir, nodeBin });
-    if (!keep) fs.rmSync(dir, { recursive: true, force: true });
+    if (!keep) rmTree(dir);
     return r;
   };
   const write = (state) => {
@@ -1705,5 +1729,5 @@ try {
     console.log(JSON.stringify(record));
   }
 } finally {
-  if (!keep) fs.rmSync(root, { recursive: true, force: true });
+  if (!keep) rmTree(root);
 }
