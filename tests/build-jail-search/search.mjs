@@ -1626,7 +1626,13 @@ function pinBinary(p) {
     const sha = createHash('sha256').update(bytes).digest('hex').slice(0, 16);
     const dir = path.join(os.homedir(), '.cache', 'nub', 'probe-bin');
     fs.mkdirSync(dir, { recursive: true });
-    const pinned = path.join(dir, sha);
+    // ⛔ KEEP THE EXTENSION. Windows decides executability from the SUFFIX, so a content-addressed
+    // copy named by bare hash cannot be spawned at all — `ENOENT` even though the file is there,
+    // 1.17 GB and mode 0755. MEASURED on nub-win: the pinned copy at
+    // `…\probe-bin\4888d4dfd3e599ae` was ENOENT while the same bytes at `…\debug\nub.exe` ran.
+    // Everything downstream (the sha cache key, provenance) is unchanged — only the name gains
+    // `.exe`, and on POSIX `path.extname` is empty so the name is byte-identical to before.
+    const pinned = path.join(dir, sha + path.extname(p));
     if (!fs.existsSync(pinned)) {
       // Write-then-rename so a concurrent probe never sees a half-copied binary.
       const tmp = `${pinned}.partial-${process.pid}`;
