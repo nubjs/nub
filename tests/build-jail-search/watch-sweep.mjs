@@ -40,16 +40,33 @@ if (!records.length) { console.log('no records yet'); process.exit(0); }
 const by = (f) => records.reduce((m, r) => (m[f(r) ?? '?'] = (m[f(r) ?? '?'] ?? 0) + 1, m), {});
 const tally = (o) => Object.entries(o).sort((a, b) => b[1] - a[1]);
 
+// ⛔ COVERAGE FIRST, ALWAYS. Pass a worklist as argv[4] and this reports what was NOT measured.
+// A sweep that silently dropped half its worklist once read as a finished corpus, and the
+// surviving half was a biased sample — the heavy native builds are exactly the ones that fail.
+const worklist = process.argv[4];
+if (worklist) {
+  const want = fs.readFileSync(worklist, 'utf8').split('\n').map((s) => s.trim()).filter((s) => s && !s.startsWith('#'));
+  const have = new Set(records.map((r) => `${r.pkg}@${r.version}`));
+  const measured = records.filter((r) => r.verdict === 'MINIMUM').map((r) => `${r.pkg}@${r.version}`);
+  const miss = want.filter((w) => !have.has(w));
+  console.log(`COVERAGE           ${measured.length}/${want.length} of the worklist MEASURED`);
+  if (miss.length) {
+    console.log(`  ⛔ ${miss.length} have NO RECORD AT ALL: ${miss.slice(0, 8).join(', ')}${miss.length > 8 ? ' …' : ''}`);
+    console.log('  Any conclusion drawn from the rest is a BIASED SAMPLE, not the corpus.');
+  }
+}
+
 console.log(`records            ${records.length}`);
 for (const [k, n] of tally(by((r) => r.verdict))) console.log(`  ${k.padEnd(28)} ${n}`);
 
 const bad = records.filter((r) => r.verdict !== 'MINIMUM');
 if (bad.length) {
   console.log(`\n⚠ ${bad.length} NON-MINIMUM — check the FIRST one, not the count:`);
-  for (const r of bad.slice(0, 5)) {
+  for (const r of bad.slice(0, 6)) {
     console.log(`  ${r.pkg}@${r.version}  ${r.verdict}`);
-    if (r.why) console.log(`     ${r.why.slice(0, 130)}`);
-    if (r.failureSignature) console.log(`     sig: ${r.failureSignature.slice(0, 130)}`);
+    if (r.why) console.log(`     ${r.why.slice(0, 150)}`);
+    if (r.failureSignature) console.log(`     sig: ${r.failureSignature.slice(0, 150)}`);
+    if (r.stderrTail) console.log(`     stderr: ${r.stderrTail.trim().split('\n').slice(-2).join(' | ').slice(0, 150)}`);
   }
 }
 

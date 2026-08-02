@@ -70,7 +70,52 @@ if [ "${1:-}" = "--file" ]; then
   set -- $(grep -vE '^\s*(#|$)' "$2")
 fi
 
+# ⛔ A FAILED RUN MUST BE AS LEGIBLE AS A SUCCESSFUL ONE, AND MUST LAND ON DISK.
+#
+# This loop used to send stderr to /dev/null and emit a bare
+# `{"verdict":"HARNESS-TIMEOUT-OR-CRASH"}` to stdout. MEASURED consequence: 54 of 100 packages in
+# one sweep failed, the reason for every one was discarded, nothing was written under results/,
+# and the surviving 46 read as a completed sweep. A biased sample -- the heavy native builds are
+# exactly the ones that fail -- was reported as the corpus.
+#
+# Three things this now guarantees:
+#   1. stderr is KEPT, per package, next to that package's other logs.
+#   2. TIMEOUT and CRASH are distinguished (`timeout` exits 124), because they need opposite fixes.
+#   3. The failure is written as a results.json, so it is visible to the collator and the watcher
+#      instead of living only in a stdout stream a restart loses.
+ATTEMPTED=0; RECORDED=0; FAILED=0
+PLAT="$(node -p 'process.platform + "-" + process.arch')"
 for spec in "$@"; do
-  timeout 2400 node "$here/search.mjs" "$spec" --nub "$NUB" $FORCE 2>/dev/null \
-    || echo "{\"pkg\":\"$spec\",\"verdict\":\"HARNESS-TIMEOUT-OR-CRASH\"}"
+  ATTEMPTED=$((ATTEMPTED + 1))
+  pkg="${spec%@*}"; ver="${spec##*@}"
+  d="$here/results/runs/$PLAT/$(printf '%s' "$pkg" | tr '/' '+')/$ver"
+  mkdir -p "$d"
+  if timeout 2400 node "$here/search.mjs" "$spec" --nub "$NUB" $FORCE 2>"$d/harness-stderr.log"; then
+    RECORDED=$((RECORDED + 1))
+    [ -s "$d/harness-stderr.log" ] || rm -f "$d/harness-stderr.log"
+  else
+    rc=$?
+    FAILED=$((FAILED + 1))
+    if [ "$rc" -eq 124 ]; then verdict="HARNESS-TIMEOUT"; why="exceeded the 2400s per-package cap"
+    else verdict="HARNESS-CRASH"; why="search.mjs exited $rc — see harness-stderr.log"; fi
+    # THE FIRST REAL ERROR LINE, NOT THE TAIL. A node stack trace ENDS with the version banner, so
+    # tailing a crash log reports "Node.js v26.5.0" and hides the message that says what broke.
+    # Same trap that cost five wrong diagnoses on one package: read the first error, not the last.
+    tail="$(grep -m1 -E '^[A-Za-z]*(Error|Exception)[:( ]|^error[: ]' "$d/harness-stderr.log" 2>/dev/null || true)"
+    [ -n "$tail" ] || tail="$(head -c 400 "$d/harness-stderr.log" 2>/dev/null | tr -d '\000')"
+    node -e '
+      const [f,pkg,ver,verdict,why,rc,tail] = process.argv.slice(1);
+      require("fs").writeFileSync(f, JSON.stringify(
+        { pkg, version: ver, verdict, why, exitCode: Number(rc), stderrTail: tail }, null, 2));
+    ' "$d/results.json" "$pkg" "$ver" "$verdict" "$why" "$rc" "$tail"
+    echo "{\"pkg\":\"$pkg\",\"version\":\"$ver\",\"verdict\":\"$verdict\",\"exitCode\":$rc}"
+    echo "  ✗ $spec — $verdict ($why)" >&2
+    tail -3 "$d/harness-stderr.log" 2>/dev/null | sed 's/^/      /' >&2
+  fi
 done
+
+# COVERAGE IS THE HEADLINE. A sweep that measured half its worklist is not a sweep, and the number
+# that says so belongs at the end where it cannot be missed.
+echo "" >&2
+echo "attempted $ATTEMPTED   recorded $RECORDED   FAILED $FAILED" >&2
+[ "$FAILED" -eq 0 ] || echo "⛔ $FAILED of $ATTEMPTED PRODUCED NO MEASUREMENT — the recorded set is a BIASED SAMPLE, not the corpus" >&2
