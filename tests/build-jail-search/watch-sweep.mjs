@@ -47,9 +47,15 @@ const worklist = process.argv[4];
 if (worklist) {
   const want = fs.readFileSync(worklist, 'utf8').split('\n').map((s) => s.trim()).filter((s) => s && !s.startsWith('#'));
   const have = new Set(records.map((r) => `${r.pkg}@${r.version}`));
-  const measured = records.filter((r) => r.verdict === 'MINIMUM').map((r) => `${r.pkg}@${r.version}`);
+  // Count only records that are IN the worklist. Counting every MINIMUM record on disk inflates
+  // coverage with packages from earlier runs, which is the same class of error as reporting a
+  // sweep's survivors as its result.
+  const wantSet = new Set(want);
+  const measured = records.filter((r) => r.verdict === 'MINIMUM' && wantSet.has(`${r.pkg}@${r.version}`));
   const miss = want.filter((w) => !have.has(w));
-  console.log(`COVERAGE           ${measured.length}/${want.length} of the worklist MEASURED`);
+  const other = records.filter((r) => !wantSet.has(`${r.pkg}@${r.version}`)).length;
+  console.log(`COVERAGE           ${measured.length}/${want.length} of the worklist MEASURED`
+    + (other ? `   (+${other} record(s) on disk from other runs, not counted)` : ''));
   if (miss.length) {
     console.log(`  ⛔ ${miss.length} have NO RECORD AT ALL: ${miss.slice(0, 8).join(', ')}${miss.length > 8 ? ' …' : ''}`);
     console.log('  Any conclusion drawn from the rest is a BIASED SAMPLE, not the corpus.');
