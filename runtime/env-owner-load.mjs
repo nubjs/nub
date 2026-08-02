@@ -40,9 +40,22 @@ if (root) {
       if (hop) process.chdir(cwd);
     }
 
-    // Secret redaction is separate from loading and only possible in-process,
-    // which is why the CLI fallback cannot offer it.
+    // Install exactly the protections the loader installs for itself — its own
+    // `auto-load` entry calls these three, in this order, and each is internally
+    // gated on the schema's own settings (`@redactLogs`, `@preventLeaks`), so a
+    // project that turned one off still gets what it asked for. nub adds no
+    // redaction of its own and makes no judgement about which of these to run.
+    //
+    // Optional-called: an older or newer loader may not export all three, and a
+    // missing protection should not abort the run.
+    //
+    // This covers only THIS process. Stream-level redaction — raw
+    // `process.stdout.write`, and anything a subprocess prints — is what
+    // `varlock run --` adds by piping the child's stdio, and is out of scope
+    // here by design.
     loader.patchGlobalConsole?.();
+    loader.patchGlobalServerResponse?.();
+    loader.patchGlobalResponse?.();
   } catch (err) {
     // A validation failure is the loader's own diagnostic and has already been
     // printed; let it terminate the run. Anything else is a nub-side wiring
