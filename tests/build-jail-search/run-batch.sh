@@ -26,8 +26,24 @@ case "$NUB" in /*) ;; *) NUB="$(cd "$(dirname "$NUB")" && pwd)/$(basename "$NUB"
 # Copying is the fix that does not depend on remembering. The batch reads a file nothing else
 # writes, so a rebuild mid-run cannot reach it.
 SNAP="${TMPDIR:-/tmp}/nub-batch-$$"
+# ⛔ KEEP THE `.exe`, AND HAND NODE A NATIVE PATH. Two separate Windows requirements:
+#
+#   1. Windows decides executability from the SUFFIX, so a snapshot without `.exe` cannot be
+#      spawned at all — ENOENT on a file that is plainly there.
+#   2. This is a Git Bash path (`/tmp/nub-batch-1830`), and Windows node hands it to CreateProcess
+#      verbatim. search.mjs converts a `/c/...` spelling, but `/tmp` has no drive letter to convert,
+#      so that guard does not fire here. `cygpath -w` is the only thing that knows the mapping.
+#
+# MEASURED on a windows-latest runner: the fixture canary refused in under a second, with the job
+# still GREEN because the probe step is continue-on-error — a green wrapper over a failed step.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*) SNAP="${SNAP}.exe" ;;
+esac
 cp "$NUB" "$SNAP" && chmod +x "$SNAP"
 trap 'rm -f "$SNAP"' EXIT
+# The path handed to node, native where that differs from the shell's own spelling.
+SNAP_NATIVE="$SNAP"
+if command -v cygpath >/dev/null 2>&1; then SNAP_NATIVE="$(cygpath -w "$SNAP")"; fi
 # PORTABLE HASH. macOS has `shasum`; Git Bash on Windows has neither it nor `sha256sum` by
 # default, and the failure is SILENT -- `$(shasum ...)` expands to empty, so the banner prints
 # "batch binary:   (snapshot of ...)" and the anti-clobber identity check has nothing to compare.
@@ -98,7 +114,10 @@ if ! grep -q "build-jail catalog OVERRIDDEN from" "$_ovlog"; then
   rm -rf "$_probe"; exit 2
 fi
 rm -rf "$_probe"
-NUB="$SNAP"
+# The NATIVE spelling from here on: everything below hands this to `node`, which on Windows cannot
+# spawn the shell's `/tmp/...` form. Bash-side uses above (`cp`, the hash, the override probe) keep
+# using $SNAP, since those are the shell's own.
+NUB="$SNAP_NATIVE"
 
 # ⛔ FIXTURE CANARY — prove the fixture still installs a REAL TREE before spending hours on it.
 #
@@ -122,7 +141,17 @@ if [ "${NUB_PROBE_SKIP_CANARY:-0}" != "1" ]; then
   echo "fixture canary: installing puppeteer@25.4.0 …" >&2
   if ! timeout 900 node "$here/search.mjs" puppeteer@25.4.0 --nub "$NUB" --force \
         --runs "$_can/results/runs" > /dev/null 2>"$_can.err"; then
-    echo "REFUSING TO RUN: the fixture canary could not complete. See $_can.err" >&2
+    # ⛔ PRINT THE REASON, do not point at a file. On a CI runner that path is never uploaded and
+    # the workspace is destroyed with the job, so "see $_can.err" is a dead end — MEASURED on a
+    # windows-latest run where the canary refused in under a second and the only evidence died
+    # with the runner. Worse, the probe step is `continue-on-error`, so the JOB stayed green over
+    # a step that had already failed.
+    echo "REFUSING TO RUN: the fixture canary could not complete." >&2
+    echo "  --- first error from the canary ---" >&2
+    grep -m5 -E '^[A-Za-z]*(Error|Exception)[:( ]|^error[: ]|REFUSING|ENOENT|EPERM|EINVAL' \
+      "$_can.err" 2>/dev/null | sed 's/^/  /' >&2 || true
+    echo "  --- first 20 lines ---" >&2
+    head -20 "$_can.err" 2>/dev/null | sed 's/^/  /' >&2
     exit 2
   fi
   _files=$(node -e 'const f=process.argv[1];try{const d=require(f);console.log(d.control?.fileCount??0)}catch{console.log(0)}' "$_canjson")
