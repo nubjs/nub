@@ -1665,8 +1665,15 @@ fn create_private_file(path: &Path) -> std::io::Result<fs::File> {
     Ok(file)
 }
 
-/// Write the completion marker LAST, then sync every staged file and directory
-/// before the containing tree becomes visible at its final cache key.
+/// Write the completion marker LAST, then sync every staged DIRECTORY before the
+/// tree becomes visible at its final cache key.
+///
+/// Only directories: every writer into this tree has already fsynced its own file
+/// — `write_synced` for app files, `decompress_to_file` for the Node blob, the
+/// extra `sync_file` after an executable's mode change, and the marker above. A
+/// second pass over the files re-opened and re-fsynced every one of them, which
+/// costs an fsync per file for no durability the first one did not already give.
+/// The directory entries still need flushing, and nothing else creates them.
 fn seal_cache_dir(tmp: &Path) -> Result<()> {
     let marker = tmp.join(CACHE_COMPLETE_MARKER);
     create_private_file(&marker)
@@ -1684,8 +1691,6 @@ fn sync_cache_tree(dir: &Path) -> Result<()> {
             .with_context(|| format!("reading {}", path.display()))?;
         if ty.is_dir() {
             sync_cache_tree(&path)?;
-        } else if ty.is_file() {
-            sync_file(&path)?;
         }
     }
     sync_directory(dir)
