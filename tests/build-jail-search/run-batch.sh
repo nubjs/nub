@@ -28,7 +28,24 @@ case "$NUB" in /*) ;; *) NUB="$(cd "$(dirname "$NUB")" && pwd)/$(basename "$NUB"
 SNAP="${TMPDIR:-/tmp}/nub-batch-$$"
 cp "$NUB" "$SNAP" && chmod +x "$SNAP"
 trap 'rm -f "$SNAP"' EXIT
-echo "batch binary: $(shasum -a256 "$SNAP" | cut -c1-16)  (snapshot of $NUB)" >&2
+# PORTABLE HASH. macOS has `shasum`; Git Bash on Windows has neither it nor `sha256sum` by
+# default, and the failure is SILENT -- `$(shasum ...)` expands to empty, so the banner prints
+# "batch binary:   (snapshot of ...)" and the anti-clobber identity check has nothing to compare.
+# MEASURED on a windows-latest runner: `./run-batch.sh: line 31: shasum: command not found`.
+_hash() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a256 "$1" | cut -c1-16
+  elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -c1-16
+  elif command -v certutil >/dev/null 2>&1; then certutil -hashfile "$1" SHA256 2>/dev/null | sed -n 2p | tr -d " \r" | cut -c1-16
+  else echo "NO-HASH-TOOL"; fi
+}
+_snaphash="$(_hash "$SNAP")"
+[ -n "$_snaphash" ] && [ "$_snaphash" != "NO-HASH-TOOL" ] || {
+  echo "REFUSING TO RUN: no SHA-256 tool (shasum/sha256sum/certutil) on PATH." >&2
+  echo "  The binary-identity check would be inert, and a mid-run rebuild could silently" >&2
+  echo "  invalidate every measurement after it. Install one, or run in a shell that has one." >&2
+  exit 2
+}
+echo "batch binary: $_snaphash  (snapshot of $NUB)" >&2
 
 here="$(cd "$(dirname "$0")" && pwd)"
 
