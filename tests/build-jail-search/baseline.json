@@ -11,18 +11,22 @@
     "has to be re-derived for every tool that does the same thing; a baseline entry stops the write",
     "or permits it for everyone. Two tool-specific filters have already been retired this way."
   ],
-  "baseline": [
-    {
-      "path": "$home/.npm/_logs",
-      "write": true,
-      "notes": "npm's debug log directory. BELT AND BRACES alongside npm_config_logs_max=0 below: the env var stops npm creating it, this makes the write harmless if anything ignores the var — an older npm, a vendored copy, or a script invoking npm through a wrapper that resets config. Granting it is safe by construction: the jail points $HOME at a per-package throwaway, so this permits a write into a directory that is discarded unless a writePaths entry names it."
-    },
-    {
-      "path": "$home/.npm/_update-notifier-last-checked",
-      "write": true,
-      "notes": "npm's update-check timestamp, same reasoning as _logs above. MEASURED: this single file was one of only two paths unrs-resolver was denied, and it cost that package a whole read.project scope until the env var suppressed it. Granting it costs nothing and removes a way for npm's housekeeping to show up as a package's capability."
-    }
+  "_baseline_comment": [
+    "⛔ `$home` IS NOT A BASELINE PATH SENTINEL. Baseline paths use the COMPILER's vocabulary,",
+    "where the closed set is `$cache` and `$tmp` (matcher/path.rs FS_SENTINEL_NAMES) plus `~/`.",
+    "`$home` is the HARNESS's tokenization vocabulary for writePaths — a different grammar for a",
+    "different purpose, and conflating them is easy because both describe the home directory.",
+    "",
+    "MEASURED cost of getting this wrong: two `$home/...` entries were added here and the jail",
+    "then FAILED TO COMPILE for every package, so no lifecycle script spawned at all. nub said so",
+    "precisely — 'unrecognized `$home` filesystem sentinel — the built-in names are `$cache` and",
+    "`$tmp`' — but the symptom surfaced as `failed to spawn`, which reads like a nub defect.",
+    "",
+    "They were then REMOVED rather than corrected, because they bought nothing: the two npm",
+    "writes they were meant to make harmless are already SUPPRESSED by the env entries below,",
+    "verified by measurement. Add an entry here only when a write actually needs permitting."
   ],
+  "baseline": [],
   "env": [
     {
       "name": "PYTHONDONTWRITEBYTECODE",

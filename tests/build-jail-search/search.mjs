@@ -196,23 +196,23 @@ function makeFixture(dir, pkg, version, { jailOff }) {
   fs.writeFileSync(path.join(proj, 'tsconfig.json'),
     JSON.stringify({ compilerOptions: { target: 'ES2022', module: 'ESNext', strict: true } }, null, 2));
 
-  // AN npm LOCKFILE, because install scripts read one and nub does not write one.
+  // ⛔ DO NOT PUT A package-lock.json IN THIS FIXTURE. It was tried and REVERTED the same day.
   //
-  // MEASURED on union@0.6.0 (7.1M downloads/wk): its postinstall runs `npx npm-force-resolutions`,
-  // which opens `./package-lock.json` and dies with ENOENT. nub writes nub.lock, so the file the
-  // script expects is simply absent — and that is a property of the FIXTURE, not a capability the
-  // jail withheld, so no grant of any width would have fixed it. Without this the package reads as
-  // broken-at-the-widest-grant, which is the verdict reserved for a nub defect.
+  // The motivation was real: union@0.6.0's postinstall runs `npx npm-force-resolutions`, which
+  // opens `./package-lock.json` and dies with ENOENT because nub writes nub.lock.
   //
-  // Minimal and lockfileVersion 3: enough for a script that reads or rewrites it to find a
-  // well-formed document, without pretending to describe the tree nub actually installed.
-  fs.writeFileSync(path.join(proj, 'package-lock.json'), `${JSON.stringify({
-    name: 'nub-build-jail-fixture',
-    version: '1.0.0',
-    lockfileVersion: 3,
-    requires: true,
-    packages: { '': { name: 'nub-build-jail-fixture', version: '1.0.0' } },
-  }, null, 2)}\n`);
+  // But a package-lock.json makes nub detect npm as the INCUMBENT PACKAGE MANAGER
+  // (`pm_engine/mod.rs`, "package-lock.json" -> "npm"), which changes project identity, config
+  // scope and layout. MEASURED consequence: puppeteer's control went from 9,629 installed files
+  // and materialized=True to 32 files and materialized=False, and ALL EIGHT packages in a
+  // re-measure — including puppeteer and cypress, which cannot work without downloading a
+  // binary — came back needing NOTHING. A fixture that silently stops the scripts from doing
+  // anything makes every package look free.
+  //
+  // The union case does not need this: with the npm-oracle fixed to key on whether npm ALSO
+  // failed, it classifies correctly as BROKEN-IN-ENVIRONMENT. A package that genuinely needs an
+  // npm lockfile is a nub compat question about what file nub leaves in the project, not
+  // something to paper over in the measuring fixture.
 
   return { proj, home: path.join(dir, 'home') };
 }
@@ -820,7 +820,25 @@ function search(nub, pkg, version, root, keep, runDir) {
     // thing this harness can surface, and never a grant gap.
     const ref = npmReference(root, pkg, version);
     const ours = failureSignature(control.log);
-    const matched = ref.rc !== 0 && !!ours && !!ref.signature && ours === ref.signature;
+
+    // ⛔ THE VERDICT TURNS ON WHETHER NPM SUCCEEDED, NOT ON WHETHER THE TWO MESSAGES MATCH.
+    //
+    // `BROKEN-EVEN-WITH-EVERYTHING` claims "npm succeeds where nub fails => a nub defect". It used
+    // to be emitted whenever the two failure SIGNATURES differed — including when npm had failed
+    // too. That manufactures false nub defects, the most expensive noise this harness can produce.
+    //
+    // MEASURED on union@0.6.0 (7.1M downloads/wk): nub's first error is the inner cause
+    // ("ENOENT ... open './package-lock.json'"), npm's is its own wrapper ("npm error code 1"),
+    // because npm buries the child's stderr and reports its own exit. Comparing those is comparing
+    // two different LAYERS of one failure, so they will differ routinely even when the cause is
+    // identical.
+    //
+    // So: npm ALSO failing is decisive on its own — the environment, not nub. The signature
+    // comparison survives only as a QUALITY signal on that conclusion, feeding
+    // `needsInvestigation` rather than the verdict.
+    const npmAlsoFailed = ref.rc !== 0;
+    const signaturesMatched = npmAlsoFailed && !!ours && !!ref.signature && ours === ref.signature;
+    const matched = npmAlsoFailed;
 
     // ⛔ A RECENT, POPULAR PACKAGE FAILING UNDER NPM INDICTS OUR ENVIRONMENT, NOT THE PACKAGE.
     //
