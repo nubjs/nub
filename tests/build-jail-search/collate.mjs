@@ -82,7 +82,7 @@ const platforms = new Set(records.map((r) => r.provenance?.platform).filter(Bool
 const byPackage = new Map();
 const excluded = {
   noVerdict: [], broken: [], harnessError: [], noStatePassed: [], refusedMalicious: [],
-  brokenWithoutJailToo: [],
+  brokenWithoutJailToo: [], brokenInEnvironment: [],
 };
 
 for (const r of records) {
@@ -96,7 +96,22 @@ for (const r of records) {
     continue;
   }
   if (r.verdict === 'BROKEN-EVEN-WITH-EVERYTHING') { excluded.broken.push(`${r.pkg}@${r.version}`); continue; }
-  if (r.verdict === 'HARNESS-ERROR') { excluded.harnessError.push(`${r.pkg}@${r.version}`); continue; }
+  // ⛔ EVERY `HARNESS-*`, not just `HARNESS-ERROR`. This matched the one spelling, so `HARNESS-CRASH`
+  // and `HARNESS-TIMEOUT` — the two the batch driver actually emits — fell through to `noVerdict`.
+  // Instrument failures hidden in a generic bucket are the ones most worth surfacing: they mean a
+  // package produced NO measurement, so coverage is overstated by exactly that count.
+  if (String(r.verdict ?? '').startsWith('HARNESS-')) {
+    excluded.harnessError.push(`${r.pkg}@${r.version} [${r.verdict}]`);
+    continue;
+  }
+  // Its OWN bucket for the same reason REFUSED-MALICIOUS has one: this is a DELIBERATE, verified
+  // answer — the package fails here and a reference PM fails identically — so reporting it as "no
+  // verdict" invites re-investigating packages that are already correctly classified. MEASURED: 51
+  // records sat in `noVerdict` on one box and most were this.
+  if (r.verdict === 'BROKEN-IN-ENVIRONMENT') {
+    excluded.brokenInEnvironment.push(`${r.pkg}@${r.version}`);
+    continue;
+  }
   if (r.verdict === 'NO-STATE-PASSED') { excluded.noStatePassed.push(`${r.pkg}@${r.version}`); continue; }
   // Its OWN bucket, not `noVerdict`. The OSV screen refusing a MAL-* package is a deliberate
   // answer and the screen working as designed — reporting it as "no verdict" invites someone to
