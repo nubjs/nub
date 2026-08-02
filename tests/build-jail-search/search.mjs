@@ -268,7 +268,27 @@ function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg, 
   // reference arms take the same prefix, or the oracle compares two RUNTIMES rather than two
   // package managers. Null when the chosen major is not installed, in which case the run stays on
   // the host's Node and provenance records what actually ran.
-  if (nodeBin) env.PATH = `${nodeBin}:${env.PATH ?? ''}`;
+  if (nodeBin) {
+    env.PATH = `${nodeBin}:${env.PATH ?? ''}`;
+    // ⛔ PATH ALONE DOES NOT PIN THE JAILED SCRIPT. nub re-resolves its own interpreter inside the
+    // jail, so a PATH prefix pins the harness's spawn and is then discarded for the confined child.
+    //
+    // MEASURED on Linux: a record asserting `pinnedTo: v14.21.3` while its build log said
+    // `gyp ERR! node -v v22.15.0` and compiled against `.cache/node-gyp/22.15.0/include`. A 2020
+    // addon against Node 22 headers dies on V8 API drift, no grant fixes a C++ error, and the walk
+    // escalates until `write.disk + network` lets node-gyp fetch a PREBUILT and skip the compile —
+    // so the recorded grant measured WHICH CODE PATH the package took, not what it needs.
+    //
+    // `NODE_EXECUTABLE` is the key nub's discovery honours BEFORE any pin file, which is exactly
+    // what stops the in-jail re-resolution (build_jail.rs, `pinned_interpreter`). `npm_node_execpath`
+    // is what npm/node-gyp follow and what the headers are derived from — a split between them is
+    // its own silent wrong answer, so set both, as nub itself does.
+    const nodeExe = path.join(nodeBin, process.platform === 'win32' ? 'node.exe' : 'node');
+    if (fs.existsSync(nodeExe)) {
+      env.NODE_EXECUTABLE = nodeExe;
+      env.npm_node_execpath = nodeExe;
+    }
+  }
   let log = '';
   let rc = 0;
   const steps = ignoreScripts ? [['install', '--ignore-scripts']] : [['install'], ['approve-builds', '--all']];
@@ -900,6 +920,13 @@ function referenceArm(tool, dir, pkg, version, nodeBin) {
   // other would make the oracle a comparison of interpreters rather than of package managers.
   const refPy = gypPython(nodeBin);
   if (refPy) refEnv.npm_config_python = refPy;
+  // Same interpreter pin the nub arm gets. npm and pnpm follow `npm_node_execpath` for node-gyp's
+  // header derivation, so without it the oracle builds against a different Node than nub did and
+  // the comparison is between two runtimes rather than two package managers.
+  if (nodeBin) {
+    const refExe = path.join(nodeBin, process.platform === 'win32' ? 'node.exe' : 'node');
+    if (fs.existsSync(refExe)) refEnv.npm_node_execpath = refExe;
+  }
   const r = spawnSync(tool, args, {
     cwd: fx.proj, env: refEnv, encoding: 'utf8', timeout: 900_000,
   });
