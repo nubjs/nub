@@ -170,6 +170,49 @@ fi
 FORCE=""
 [ "${1:-}" = "--force" ] && { FORCE="--force"; shift; }
 
+# ⛔ RE-MEASURE ONLY WHAT A HARNESS CHANGE INVALIDATED. The collator refuses to ship a catalog whose
+# records span several harness revisions — correctly, since a record means something different under
+# a changed instrument. But the two existing options are both wrong for that: a plain resume SKIPS
+# the stale records (they are valid measurements), and `--force` re-runs the whole corpus.
+#
+# MEASURED: 358 records across 3 revisions (305 / 47 / 6-unknown) after one afternoon of fixes. That
+# is 53 to redo, not 358.
+#
+# `--stale-harness` lists exactly the mismatching records, deletes them so the resume check re-runs
+# them naturally, and leaves everything measured under the current revision alone.
+if [ "${1:-}" = "--stale-harness" ]; then
+  shift
+  _cur="$(node -e '
+    const { createHash } = require("node:crypto"), fs = require("node:fs"), path = require("node:path");
+    const here = process.argv[1], h = createHash("sha256");
+    for (const f of ["search.mjs", "states.mjs"]) h.update(fs.readFileSync(path.join(here, f)));
+    console.log(h.digest("hex").slice(0, 16));
+  ' "$here")"
+  echo "current harness revision: $_cur" >&2
+  _n="$(node -e '
+    const fs = require("node:fs"), path = require("node:path");
+    const [root, cur] = process.argv.slice(1);
+    let n = 0;
+    (function walk(d) {
+      let ents; try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+      for (const e of ents) {
+        const f = path.join(d, e.name);
+        if (e.isDirectory()) { walk(f); continue; }
+        if (e.name !== "results.json") continue;
+        let r; try { r = JSON.parse(fs.readFileSync(f, "utf8")); } catch { continue; }
+        // An UNKNOWN revision counts as stale: a record that cannot name its instrument cannot be
+        // trusted to have been taken under this one.
+        if ((r.provenance?.harnessSha256 ?? null) !== cur) {
+          fs.rmSync(path.dirname(f), { recursive: true, force: true });
+          n++;
+        }
+      }
+    })(root, cur);
+    console.log(n);
+  ' "$here/results/runs" "$_cur")"
+  echo "purged $_n record(s) measured under an older harness — they will be re-run below" >&2
+fi
+
 if [ "${1:-}" = "--file" ]; then
   [ -r "${2:-}" ] || { echo "cannot read worklist ${2:-}"; exit 2; }
   set -- $(grep -vE '^\s*(#|$)' "$2")
