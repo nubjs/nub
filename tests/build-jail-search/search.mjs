@@ -1048,7 +1048,7 @@ function search(nub, pkg, version, root, keep, runDir) {
   // package gets everything" is the most permissive state that exists — so it doubles as the
   // control and the top-of-ladder check, and the two can no longer disagree about the regime
   // they run under. A failure here means the package is broken for reasons no grant fixes.
-  const control = cell('control', { catalogFile: write(STATES[STATES.length - 1]), label: 'control (tested pkg: everything)' });
+  let control = cell('control', { catalogFile: write(STATES[STATES.length - 1]), label: 'control (tested pkg: everything)' });
   // RUN THE CONTROL TWICE. A single control cannot tell "this cell lacks a capability" from
   // "this package does not write the same paths twice". `unrs-resolver@1.12.2` failed all 55
   // states on three consecutive runs for the second reason — one npm debug log whose FILENAME
@@ -1058,7 +1058,7 @@ function search(nub, pkg, version, root, keep, runDir) {
   // paths, so a cell that failed to write an unstable path still passes and the search records
   // too NARROW a minimum: the exact failure this effort exists to avoid. The union is what
   // `writePaths` is derived from, so a directory seen in only one run is still promoted.
-  const controlB = cell('controlB', { catalogFile: write(STATES[STATES.length - 1]), label: 'control (repeat)' });
+  let controlB = cell('controlB', { catalogFile: write(STATES[STATES.length - 1]), label: 'control (repeat)' });
   const inB = new Set(controlB.seen);
   const stableSeen = control.seen.filter((x) => inB.has(x));
   const unionSeen = [...new Set([...control.seen, ...controlB.seen])];
@@ -1118,6 +1118,41 @@ function search(nub, pkg, version, root, keep, runDir) {
       cells, control: baseCase(control),
       provenance: provenance(nub, nodePin, enginesNode, nodeMajor, publishedAt),
     };
+  }
+  // ⛔ CONFIRM A CONTROL FAILURE BEFORE IT CAN BECOME AN ACCUSATION.
+  //
+  // A failing control is the gateway to BROKEN-EVEN-WITH-EVERYTHING, the verdict that says "nub has
+  // a defect" — the most consequential thing this harness emits. It must not rest on one
+  // observation, because a lifecycle script that runs its OWN installer competes with every other
+  // package being measured concurrently, and loses.
+  //
+  // MEASURED on this corpus, running 3 shards: six packages were recorded
+  // BROKEN-EVEN-WITH-EVERYTHING and ALL SIX passed when re-run alone —
+  // `classify-broken.sh` gave `off=0 on=0 npm=0` for docxtemplater@0.3.0, docxtemplater@0.5.2 and
+  // react-native-purchases@0.5.1. Their logs show `npm ERR! Callback called more than once` and
+  // `npm ERR! rimraf: missing path`, i.e. an old npm losing a race, not nub failing. At 1.6% of
+  // records that would have been ~36 false accusations across the full 2,250.
+  //
+  // So: re-run BOTH controls once. If the retry succeeds, the first result was contention and the
+  // retry is authoritative. This is NOT the banned retry-wrapper — that ban is about masking flakes
+  // in OUR tests. Here we measure third-party installs that genuinely fail transiently on the
+  // network, and the point is to avoid writing a transient down as a permanent fact about nub.
+  if (control.rc !== 0 || controlB.rc !== 0) {
+    const retryA = cell('control-retry', {
+      catalogFile: write(STATES[STATES.length - 1]), label: 'control (confirm)',
+    });
+    const retryB = cell('controlB-retry', {
+      catalogFile: write(STATES[STATES.length - 1]), label: 'control (confirm repeat)',
+    });
+    if (retryA.rc === 0 && retryB.rc === 0) {
+      control = retryA;
+      controlB = retryB;
+      cells.push(
+        { index: null, state: 'CONTROL (confirm — first attempt failed under load)', cost: null,
+          pass: true, rc: retryA.rc, digest: retryA.digest, files: retryA.files,
+          overrideEngaged: null, materialized: retryA.materialized },
+      );
+    }
   }
   if (control.rc !== 0 || controlB.rc !== 0) {
     // ⛔ ASK NPM BEFORE BLAMING THE JAIL. npm is the REFERENCE — nub's job is to match it — so a
