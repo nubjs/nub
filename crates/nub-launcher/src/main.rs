@@ -45,6 +45,14 @@ const COMPILED_EXEC_PATH_ENV: &str = "__NUB_COMPILED_EXEC_PATH";
 /// Interrupted staging trees are never current after this age. The bounded
 /// cleanup is deliberately limited to the launcher's own temp prefixes.
 const ORPHAN_STAGE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long a PUBLISHED extraction survives without being the tree this artifact
+/// resolves to. Nothing else reclaims these: an app tree is ~the bundle and a Node
+/// tree is ~107 MB, and a machine that compiles repeatedly accumulates one per
+/// distinct payload forever. Eviction is never incorrect — the trees are content
+/// keyed and re-extract on demand — so the cost of being wrong is one slow start,
+/// which is why this is safe to do automatically. 30 days is long enough that an
+/// artifact used even monthly keeps its tree.
+const UNUSED_CACHE_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 #[derive(Debug, PartialEq, Eq)]
 enum InternalMode {
@@ -164,7 +172,7 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
         }
     })?;
     let base = resolved.path;
-    cleanup_launcher_orphans(&base);
+    cleanup_launcher_orphans(&base, &view.manifest);
     let notice = FirstRun::new(view.manifest.install_message.as_deref());
 
     let ((node_path, version, origin), app_dir) = match (external_smol, resolved.warm) {
@@ -2037,8 +2045,8 @@ fn remove_moved_cache_path(path: &Path) {
 /// Reclaim this launcher's abandoned work even when the requested artifacts are
 /// already warm. Cold-only cleanup misses the common crash race where another
 /// process publishes the winner and every later process takes the warm return.
-fn cleanup_launcher_orphans(base: &Path) {
-    cleanup_orphan_entries(base, None, |name| {
+fn cleanup_launcher_orphans(base: &Path, manifest: &Manifest) {
+    cleanup_orphan_entries(base, None, ORPHAN_STAGE_MAX_AGE, |name| {
         launcher_stage_name(name, ".compile-app.") || launcher_stage_name(name, ".compile-node.")
     });
     for parent in [
@@ -2046,11 +2054,48 @@ fn cleanup_launcher_orphans(base: &Path) {
         base.join("compile-node"),
         base.join("node"),
     ] {
-        cleanup_orphan_entries(&parent, None, launcher_stale_name);
+        cleanup_orphan_entries(&parent, None, ORPHAN_STAGE_MAX_AGE, launcher_stale_name);
     }
-    cleanup_orphan_entries(&base.join("node"), None, |name| {
+    cleanup_orphan_entries(&base.join("node"), None, ORPHAN_STAGE_MAX_AGE, |name| {
         launcher_stage_name(name, ".smol.")
     });
+
+    // Published trees this run does not use. `current` is what keeps a
+    // continuously-used artifact alive: its own tree is skipped by path, so only
+    // trees belonging to payloads that have not run here in 30 days are removed.
+    let app_dir = app_cache_dir(base, manifest);
+    cleanup_orphan_entries(
+        &base.join("compile-app"),
+        Some(&app_dir),
+        UNUSED_CACHE_MAX_AGE,
+        published_app_key,
+    );
+    let node_dir = node_cache_dir(base, manifest);
+    cleanup_orphan_entries(
+        &base.join("compile-node"),
+        Some(&node_dir),
+        UNUSED_CACHE_MAX_AGE,
+        published_node_key,
+    );
+}
+
+/// A published app extraction: the short hex key of `app_sha256`, nothing else.
+/// Matching the SHAPE rather than "anything not staging" keeps the sweep from
+/// ever removing a directory it does not recognise.
+fn published_app_key(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// A published Node extraction: `<version>-<short hex key>`.
+fn published_node_key(name: &str) -> bool {
+    name.rsplit_once('-').is_some_and(|(version, key)| {
+        !version.is_empty()
+            && version
+                .bytes()
+                .all(|b| b.is_ascii_digit() || b == b'.' || b == b'-')
+            && !key.is_empty()
+            && key.bytes().all(|b| b.is_ascii_hexdigit())
+    })
 }
 
 fn launcher_stage_name(name: &str, prefix: &str) -> bool {
@@ -2112,7 +2157,7 @@ fn launcher_stale_name(name: &str) -> bool {
 /// recent/current/arbitrary entries are never removed. This is intentionally not
 /// a general cache janitor.
 fn cleanup_orphan_staging(parent: &Path, current: &Path, prefix: &str) {
-    cleanup_orphan_entries(parent, Some(current), |name| {
+    cleanup_orphan_entries(parent, Some(current), ORPHAN_STAGE_MAX_AGE, |name| {
         launcher_stage_name(name, prefix)
     });
 }
@@ -2120,6 +2165,7 @@ fn cleanup_orphan_staging(parent: &Path, current: &Path, prefix: &str) {
 fn cleanup_orphan_entries(
     parent: &Path,
     current: Option<&Path>,
+    max_age: Duration,
     matches_name: impl Fn(&str) -> bool,
 ) {
     if cache::revalidate(parent).is_err() {
@@ -2149,7 +2195,7 @@ fn cleanup_orphan_entries(
             .modified()
             .ok()
             .and_then(|modified| now.duration_since(modified).ok())
-            .is_some_and(|age| age > ORPHAN_STAGE_MAX_AGE);
+            .is_some_and(|age| age > max_age);
         if stale {
             let _ = fs::remove_dir_all(&path);
         }
@@ -2656,6 +2702,11 @@ mod tests {
 
     #[cfg(unix)]
     fn age_stage_for_cleanup(path: &Path) {
+        age_past(path, ORPHAN_STAGE_MAX_AGE);
+    }
+
+    #[cfg(unix)]
+    fn age_past(path: &Path, ttl: Duration) {
         use std::os::unix::ffi::OsStrExt;
 
         let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
@@ -2663,7 +2714,7 @@ mod tests {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs()
-            .saturating_sub(ORPHAN_STAGE_MAX_AGE.as_secs() + 1) as libc::time_t;
+            .saturating_sub(ttl.as_secs() + 1) as libc::time_t;
         let times = [
             libc::timeval {
                 tv_sec: old,
@@ -3211,6 +3262,68 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    /// A published extraction from a payload that no longer runs here is reclaimed,
+    /// and the tree THIS artifact resolves to is not — even when it is just as old.
+    ///
+    /// That second half is the whole safety property: published trees are keyed by
+    /// content, so their mtime is creation time and never advances, and an artifact
+    /// used daily for a year looks exactly as old as one abandoned on day one. Only
+    /// the `current` exclusion tells them apart.
+    #[cfg(unix)]
+    #[test]
+    fn an_unused_published_extraction_is_reclaimed_but_the_live_one_is_not() {
+        let base = fresh_cache_dir("unused-cache-eviction");
+        // A REALISTIC key: `test_view`'s default is the literal `app-cache-key`,
+        // which is not hex, so the sweep would never consider it a candidate and
+        // the "live tree survives" assertion below would pass without the
+        // exclusion doing any work. Verified by breaking the exclusion on purpose.
+        let mut view = test_view();
+        view.manifest.app_sha256 = "0f1e2d3c4b5a69788796a5b4c3d2e1f0".to_string();
+        let view = view;
+        materialize_test_node(&view, &base);
+        materialize_test_app(&view, &base);
+        assert!(verify_warm_cache(&view, &base).is_some());
+
+        let app = app_cache_dir(&base, &view.manifest);
+        let node = node_cache_dir(&base, &view.manifest);
+
+        // Another payload's trees, in the shapes the sweep recognises.
+        let other_app = app.parent().unwrap().join("00112233445566778899aabb");
+        create_staging_dir(&other_app).unwrap();
+        let other_node = node.parent().unwrap().join("22.1.0-ffeeddccbbaa9988");
+        create_staging_dir(&other_node).unwrap();
+        // A name the sweep must not claim: neither key shape.
+        let unrelated = app.parent().unwrap().join("not-a-content-key");
+        create_staging_dir(&unrelated).unwrap();
+
+        for path in [&app, &node, &other_app, &other_node, &unrelated] {
+            age_past(path, UNUSED_CACHE_MAX_AGE);
+        }
+
+        cleanup_launcher_orphans(&base, &view.manifest);
+
+        assert!(
+            !other_app.exists(),
+            "an unused published app extraction should be reclaimed"
+        );
+        assert!(
+            !other_node.exists(),
+            "an unused published Node extraction should be reclaimed"
+        );
+        assert!(
+            app.exists() && node.exists(),
+            "the trees this artifact resolves to must survive at any age"
+        );
+        assert!(
+            unrelated.exists(),
+            "a directory that is not a content key is not ours to remove"
+        );
+        assert!(
+            verify_warm_cache(&view, &base).is_some(),
+            "the cache must still verify warm after a sweep"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn warm_launch_reclaims_owned_stage_and_moved_stale_orphans() {
@@ -3248,7 +3361,7 @@ mod tests {
         // Process A left the old paths, process B already published the complete
         // artifacts above, and process C reaches this unconditionally after warm
         // cache resolution.
-        cleanup_launcher_orphans(&base);
+        cleanup_launcher_orphans(&base, &view.manifest);
 
         assert!(!stage.exists(), "old app stage survived a warm launch");
         assert!(!app_stale.exists(), "old app swap survived a warm launch");
