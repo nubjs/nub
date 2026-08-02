@@ -411,26 +411,28 @@ function enginesFor(pkg, version) {
   } catch { return null; }
 }
 
-// ⛔ THE FLOOR IS WHATEVER IS ACTUALLY INSTALLED — not a hardcoded number.
+// ⛔ THE FLOOR IS NUB'S OWN SUPPORTED FLOOR (18), NOT THE OLDEST NODE INSTALLED.
 //
-// nub's 18.19 floor governs its RUNTIME augmentation and does not bind here, which three
-// measurements establish:
-//   - a lifecycle script receives the REAL node binary — `process.execPath` is `.../bin/node`,
-//     `argv0` is `node` — so there is no shim and no nub-spawns-node double spawn;
-//   - it runs with `NODE_COMPAT=1`, augmentation off by construction;
-//   - `nub install` itself completes on node 4, 6, 8, 10, 14, 16 and 18 (all exit 0).
+// This was briefly set to the oldest installed major (4), on the reasoning that `nub install`
+// completes there — which it does. But install completing is not a BUILD completing, and that
+// reasoning was wrong for the case the corpus is full of:
 //
-// A hardcoded floor was tried at 10 and was simply WRONG: v4, v6 and v8 were installed all along,
-// so a package declaring `>=6` measured on 10 for no reason. Deriving the floor from the installed
-// set is self-adjusting and cannot drift from reality the way a constant does.
-const NODE_FLOOR = (() => {
-  try {
-    const root = path.join(os.homedir(), '.nvm', 'versions', 'node');
-    const majors = fs.readdirSync(root)
-      .map((n) => /^v(\d+)\./.exec(n)?.[1]).filter(Boolean).map(Number);
-    return majors.length ? Math.min(...majors) : 10;
-  } catch { return 10; }
-})();
+//   nub injects its own node-gyp at a HARDCODED version, independent of the ambient Node
+//   (aube .../install/node_gyp_bootstrap.rs: `const SPEC: &str = "^12.0.0"`, zero references to
+//   the node version). node-gyp 12 declares `engines.node ^20.17.0 || >=22.9.0` and genuinely
+//   needs >= 15 to parse. So under nub, ANY native addon fails on Node < 15 regardless of the
+//   package's own age — proven with a minimal 4-line addon, not just with fsevents:
+//       node 14.18.3   npm BUILT   nub FAIL (`replaceAll is not a function`)
+//       node 16.13.2   npm BUILT   nub BUILT
+//   npm never hits this because its bundled node-gyp is contemporaneous with its Node.
+//
+// Measuring below that produces verdicts about a configuration nub does not support, and it did:
+// four packages were recorded as BROKEN-EVEN-WITH-EVERYTHING — the verdict reserved for a nub
+// defect — purely for being pinned to Node 4, 8 or 10.
+//
+// 18 is nub's declared support floor (crates/nub-core/src/node/version.rs). Anything below it is
+// not a configuration nub claims to serve, so a grant measured there describes nothing shippable.
+const NODE_FLOOR = 18;
 const NODE_DEFAULT = '22';      // when `engines.node` is absent or unparseable
 const NODE_CEILING = 22;        // latest LTS — never measure on something newer than the ecosystem
 
