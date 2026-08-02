@@ -17,6 +17,10 @@
 //     change Windows got a correctly-named `nubx.exe` and needed no verb plumbing.
 //
 // Usage: node tests/verb-dispatch/probe.mjs <path-to-built-nub-binary>
+//
+// Reproduce the CI condition locally with `CI=true node tests/verb-dispatch/probe.mjs …`.
+// nub gates registry fetches on CI, so a bare local run does NOT exercise the same paths —
+// a probe bug here passed on macOS and failed on the runner for exactly that reason.
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -150,8 +154,15 @@ fs.writeFileSync(script, 'console.log("CHILD:" + String(process.env.__NUB_ARGV0)
 // (it does on Windows; on macOS it only warns). We are asserting what the CHILD SAW,
 // not nub's exit status — so use spawnSync, which does not throw, and read the output
 // either way. An execFileSync here failed the Windows leg on the warning alone.
+// Deliberately `nub`, not `nubx`. The property under test is that the variable is
+// REMOVED from the environment at startup, which capture_argv0_override does for any
+// non-empty value — so the value is irrelevant to the assertion. Setting `nubx` here
+// instead puts the PARENT in exec mode, which treats the script path as a tool to fetch
+// and refuses under CI ("refusing to download … in CI"), failing the Windows leg for a
+// reason that has nothing to do with env hygiene. It passed on macOS only because CI
+// was unset there.
 const res = spawnSync(path.join(hostPkg, "bin", `nub${exe}`), [script], {
-  encoding: "utf8", env: { ...process.env, __NUB_ARGV0: "nubx" },
+  encoding: "utf8", env: { ...process.env, __NUB_ARGV0: "nub" },
 });
 const seen = `${res.stdout ?? ""}${res.stderr ?? ""}`;
 if (seen.includes("CHILD:undefined")) ok("__NUB_ARGV0 erased before any child sees it");
