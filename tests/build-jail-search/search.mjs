@@ -438,15 +438,41 @@ function runPath(dir, pkg, version) {
  *  Spelling the `.cmd` explicitly is preferred over `shell: true`: passing args with a shell is
  *  DEP0190 (args are concatenated rather than escaped), which is exactly why `toolchain()` below
  *  already avoids it. A package spec like `@scope/pkg@1.0.0` must not be re-parsed by cmd.exe. */
-const WIN_CMD_TOOLS = new Set(['npm', 'npx', 'pnpm', 'yarn', 'node-gyp']);
-const exe = (name) =>
-  process.platform === 'win32' && WIN_CMD_TOOLS.has(name) ? `${name}.cmd` : name;
+/*  Spelling the `.cmd` is NOT enough, measured: `spawnSync('npm.cmd', …)` returns **EINVAL** on
+ *  win32. Node has refused to CreateProcess a batch file directly since the CVE-2024-27980 fix, so
+ *  the only ways through are a shell (DEP0190 — args are concatenated rather than escaped, which
+ *  would let cmd.exe re-parse a spec like `@scope/pkg@1.0.0`) or bypassing the shim entirely.
+ *
+ *  We bypass it: npm and npx ship as ordinary JS beside the node binary, so running
+ *  `node <npm-cli.js> …` needs no shell and keeps the args array intact. MEASURED on nub-win:
+ *  `npm.cmd` EINVAL, `shell:true` works but warns, `node npm-cli.js view @babel/core@7.28.0 …`
+ *  returns status 0 and 10,229 bytes with the scoped spec unmangled. */
+const WIN_SHIMS = new Set(['npm', 'npx', 'pnpm', 'yarn', 'node-gyp']);
+const npmJs = (tool) => {
+  const cli = path.join(path.dirname(process.execPath), 'node_modules', tool,
+    'bin', `${tool}-cli.js`);
+  return fs.existsSync(cli) ? cli : null;
+};
+/** Resolve a tool to an argv PREFIX: `[command, ...leadingArgs]`. Non-Windows and anything already
+ *  a real executable pass straight through, so every caller is `const [c, ...pre] = tool(name)`. */
+const toolArgv = (name) => {
+  if (process.platform !== 'win32') return [name];
+  if (name === 'npm' || name === 'npx') {
+    const cli = npmJs(name);
+    if (cli) return [process.execPath, cli];
+  }
+  // Anything else that is a .cmd shim (pnpm, yarn) has no bundled-JS equivalent to reach for. Leave
+  // the bare name: it fails loudly with EINVAL rather than silently mismeasuring, and the oracle
+  // already excludes an arm that could not run.
+  return [name];
+};
 
 /** `engines.node` AND the publish date in ONE registry round-trip — both feed the Node choice, and
  *  fetching them separately doubled the per-package latency for no reason. */
 function enginesAndDate(pkg, version) {
   try {
-    const r = spawnSync(exe('npm'), ['view', `${pkg}@${version}`, 'engines.node', 'time', '--json'],
+    const [c, ...pre] = toolArgv('npm');
+    const r = spawnSync(c, [...pre, 'view', `${pkg}@${version}`, 'engines.node', 'time', '--json'],
       { encoding: 'utf8', timeout: 30_000 });
     if (r.status !== 0) return { engines: null, published: null };
     const j = JSON.parse(r.stdout || '{}');
@@ -631,13 +657,16 @@ function toolchain() {
   // and this block is the provenance a reader uses to tell which python/node a build actually used.
   const which = (c) => {
     const r = process.platform === 'win32'
-      ? spawnSync('where', [exe(c)], { encoding: 'utf8' })
+      // `where` looks up the SHIM on disk, so it wants the .cmd spelling — unlike spawn, which
+      // cannot execute one. The two Windows spellings are genuinely different questions.
+      ? spawnSync('where', [WIN_SHIMS.has(c) ? `${c}.cmd` : c], { encoding: 'utf8' })
       : spawnSync('which', [c], { encoding: 'utf8' });
     const out = (r.stdout || '').trim();
     return r.status === 0 && out ? out.split(/\r?\n/)[0].trim() || null : null;
   };
   const ver = (c, a) => {
-    const r = spawnSync(exe(c), a, { encoding: 'utf8' });
+    const [vc, ...vpre] = toolArgv(c);
+    const r = spawnSync(vc, [...vpre, ...a], { encoding: 'utf8' });
     return r.status === 0 ? ((r.stdout || r.stderr || '').split('\n')[0] || '').trim() : null;
   };
   return {
@@ -886,7 +915,8 @@ function packageStanding(pkg, version) {
     if (r.status !== 0) return null;
     try { return JSON.parse(r.stdout); } catch { return null; }
   };
-  const time = j(exe('npm'), ['view', `${pkg}@${version}`, 'time', '--json']);
+  const [npmC, ...npmPre] = toolArgv('npm');
+  const time = j(npmC, [...npmPre, 'view', `${pkg}@${version}`, 'time', '--json']);
   const published = time && typeof time === 'object' ? time[version] ?? null : null;
   const dl = j('curl', ['-sS', '--max-time', '20',
     `https://api.npmjs.org/downloads/point/last-week/${encodeURIComponent(pkg)}`]);
@@ -964,7 +994,8 @@ function referenceArm(tool, dir, pkg, version, nodeBin) {
     const refExe = path.join(nodeBin, process.platform === 'win32' ? 'node.exe' : 'node');
     if (fs.existsSync(refExe)) refEnv.npm_node_execpath = refExe;
   }
-  const r = spawnSync(exe(tool), args, {
+  const [toolC, ...toolPre] = toolArgv(tool);
+  const r = spawnSync(toolC, [...toolPre, ...args], {
     cwd: fx.proj, env: refEnv, encoding: 'utf8', timeout: 900_000,
   });
   const log = (r.stdout || '') + (r.stderr || '');
