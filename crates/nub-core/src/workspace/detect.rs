@@ -37,8 +37,8 @@ pub struct Project {
 /// can rewrite `package.json` mid-command (`nub install`/`add`/`pm use`) and an
 /// install can create or remove a `pnpm-lock.yaml`/`pnpm-workspace.yaml`; any
 /// such change flips a stamp, so the next lookup misses and the walk re-runs.
-/// A same-length rewrite landing inside the walk's own clock tick flips no stamp
-/// at all, which is what [`Entry::cached_at`] exists to catch.
+/// A same-length rewrite landing inside the manifest's own mtime quantum flips no
+/// stamp at all, which is what [`Entry::cached_at`] exists to catch.
 ///
 /// The stamp captures `package.json` *content* only at the resolved project (and
 /// workspace) root — not the *presence* of a `package.json` newly appearing at a
@@ -225,12 +225,12 @@ struct Entry {
     /// rewrite, or a pnpm-named file appearing/disappearing at a consulted dir)
     /// misses.
     stamp: FreshnessStamp,
-    /// The instant sampled before the walk ran, closing the same racy window
-    /// [`crate::config_cache::Entry::cached_at`] documents: a manifest rewritten
-    /// within one clock tick of the walk can report an unchanged `(mtime, size)`,
-    /// so an entry is trusted only while every stamped manifest is strictly
-    /// older than this. The `pnpm_presence` half needs no such guard — presence
-    /// is exact and carries no timestamp.
+    /// The instant sampled before the walk ran, closing the same racy window the
+    /// `config_cache` module doc explains: a manifest rewritten within one mtime
+    /// quantum of the walk reports an unchanged `(mtime, size)`, so an entry is
+    /// trusted only once every stamped manifest clears the granularity slop (see
+    /// [`crate::config_cache::mtime_quantum_closed`]). The `pnpm_presence` half
+    /// needs no such guard — presence is exact and carries no timestamp.
     ///
     /// This memo caches the parsed manifest the walk read, so without the guard
     /// a stale `Project` would flow into `pm::resolve::root_manifest` even when
@@ -268,7 +268,8 @@ impl ProjectCache {
         let entry = guard.get(key)?;
         let manifests_fresh = entry.stamp.manifests.iter().all(|(path, stamp)| {
             let (mtime, _size) = stamp;
-            stamp_of(path).as_ref() == Some(stamp) && *mtime < entry.cached_at
+            stamp_of(path).as_ref() == Some(stamp)
+                && crate::config_cache::mtime_quantum_closed(*mtime, entry.cached_at)
         });
         let pnpm_fresh = entry
             .stamp
@@ -320,11 +321,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("package.json"), r#"{"name":"root"}"#).unwrap();
         std::fs::write(dir.join("pnpm-workspace.yaml"), "packages:\n  - 'pkgs/*'\n").unwrap();
-        // A manifest is only cacheable once the clock has passed its mtime (see
-        // `Entry::cached_at`), which every real on-disk manifest already is. The
-        // memo tests below count walks, so the fixture has to start settled or
+        // A manifest is only cacheable once its mtime quantum has closed (see
+        // `Entry::cached_at`), which every real on-disk manifest already satisfies.
+        // The memo tests below count walks, so the fixture has to start aged or
         // every lookup would be a racy-distrusted miss.
-        settle(&dir.join("package.json"));
+        age(&dir.join("package.json"), 60);
         dir
     }
 
@@ -337,16 +338,14 @@ mod tests {
             .unwrap();
     }
 
-    /// Spin until the clock has passed `path`'s mtime. Costs at most one tick.
-    fn settle(path: &Path) {
-        let mtime = mtime_of(path);
-        for _ in 0..1_000_000 {
-            if SystemTime::now() > mtime {
-                return;
-            }
-            std::hint::spin_loop();
-        }
-        panic!("clock did not advance past the file's mtime");
+    /// Backdate `path` by `secs`, clear of the granularity slop, so it is
+    /// cacheable. Callers aging one path twice pass different offsets so the two
+    /// mtimes differ by construction.
+    fn age(path: &Path, secs: u64) {
+        set_mtime(
+            path,
+            SystemTime::now() - std::time::Duration::from_secs(secs),
+        );
     }
 
     // pnpm-workspace.yaml brand hard gate (AGENTS.md): `detect_project` may treat
@@ -380,21 +379,6 @@ mod tests {
 
     fn mtime_of(path: &Path) -> SystemTime {
         std::fs::metadata(path).unwrap().modified().unwrap()
-    }
-
-    /// Rewrite `path` with `contents`, busy-rewriting until the reported mtime
-    /// advances past `prev` so the test forces a real mtime change regardless of
-    /// the filesystem's granularity, without a fixed sleep or a `filetime`
-    /// dev-dep (matching `config_cache`'s test convention). Bounded so a stuck
-    /// filesystem fails loudly rather than hanging.
-    fn write_until_mtime_advances(path: &Path, contents: &str, prev: SystemTime) {
-        for _ in 0..10_000 {
-            std::fs::write(path, contents).unwrap();
-            if mtime_of(path) > prev {
-                return;
-            }
-        }
-        panic!("filesystem mtime did not advance after repeated writes");
     }
 
     /// How many uncached walks have run for exactly `cwd` so far. Scoping the
@@ -445,29 +429,30 @@ mod tests {
     /// `pm::resolve::root_manifest` even when the manifest cache itself misses —
     /// which is how a `pnpm@10.0.0` → `pnpm@11.0.0` rewrite (32 bytes either
     /// way) served the pre-write pin and flaked `pnpm_v11_surface` on Windows.
-    /// A manifest the clock has not yet passed must therefore never be cached.
-    /// Pinning the mtime models the coarse-clock case deterministically; see
-    /// `config_cache`'s counterpart test for why racing it does not reproduce.
+    /// A manifest still inside its own mtime quantum must therefore never be
+    /// cached. Both versions are pinned to `now()` — where a real coarse-clock
+    /// write lands — which reproduces the collision on every platform; see
+    /// `config_cache`'s counterpart test for why racing it does not.
     #[test]
-    fn manifest_rewritten_inside_its_mtime_tick_is_never_served_stale() {
+    fn manifest_rewritten_inside_its_mtime_quantum_is_never_served_stale() {
         let dir = fixture("memo-racy");
         std::fs::remove_file(dir.join("pnpm-workspace.yaml")).unwrap();
         let cwd = std::fs::canonicalize(&dir).unwrap();
         let pkg = cwd.join("package.json");
-        let unpassed = SystemTime::now() + std::time::Duration::from_millis(50);
+        let collided = SystemTime::now();
 
         std::fs::write(&pkg, r#"{"packageManager":"pnpm@10.0.0"}"#).unwrap();
-        set_mtime(&pkg, unpassed);
+        set_mtime(&pkg, collided);
         let first = detect_project(&cwd).expect("root detected");
         assert_eq!(first.manifest.get("packageManager").unwrap(), "pnpm@10.0.0");
 
         // Same byte length, and the stamp is pinned identical — neither half of
         // `(mtime, size)` can tell the two versions apart.
         std::fs::write(&pkg, r#"{"packageManager":"pnpm@11.0.0"}"#).unwrap();
-        set_mtime(&pkg, unpassed);
+        set_mtime(&pkg, collided);
         assert_eq!(
             mtime_of(&pkg),
-            unpassed,
+            collided,
             "the two versions must be indistinguishable by stamp for this to test anything"
         );
 
@@ -494,12 +479,13 @@ mod tests {
             1,
             "the first detect is a cache miss → one walk"
         );
-        let cached_mtime = mtime_of(&pkg);
-
         // The in-process PM engine rewriting package.json mid-command bumps the
         // mtime; the next lookup must miss and the walk must re-run with the new
-        // content — the same protection ROOT_MANIFEST_CACHE gets.
-        write_until_mtime_advances(&pkg, r#"{"name":"renamed"}"#, cached_mtime);
+        // content — the same protection ROOT_MANIFEST_CACHE gets. Aged to a
+        // different offset than the fixture's, so the miss is attributable to the
+        // changed mtime rather than to the granularity slop.
+        std::fs::write(&pkg, r#"{"name":"renamed"}"#).unwrap();
+        age(&pkg, 30);
         let second = detect_project(&cwd).expect("root detected");
 
         assert_eq!(
