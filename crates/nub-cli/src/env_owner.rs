@@ -194,14 +194,23 @@ fn loader_package_from_cli(bin: &Path) -> Option<PathBuf> {
     while let Some(current) = dir {
         let manifest = current.join("package.json");
         if manifest.is_file() {
-            // Confirm this is the LOADER's own manifest. Walking out of a bin
-            // directory can pass an unrelated `package.json`, and treating that as
-            // the loader would hand the adapter a root it cannot import from.
-            let name = std::fs::read_to_string(&manifest)
+            let json = std::fs::read_to_string(&manifest)
                 .ok()
-                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-                .and_then(|json| json.get("name")?.as_str().map(str::to_string));
-            return (name.as_deref() == Some(LOADER_PACKAGE)).then(|| current.to_path_buf());
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())?;
+            // Two conditions, and BOTH matter.
+            //
+            // The name confirms this is the loader's own manifest rather than an
+            // unrelated `package.json` passed on the way out of a bin directory.
+            //
+            // The entry declaration confirms the adapter can actually IMPORT it.
+            // Promoting on the manifest alone decides in-process on weaker evidence
+            // than the import needs: the adapter resolves the loader as a bare
+            // specifier, which relies on `exports` (self-reference) or `main`.
+            // Without either, promotion produced a hard exit 1 on a setup where the
+            // CLI path worked fine — a strict regression, measured.
+            let is_loader = json.get("name").and_then(|v| v.as_str()) == Some(LOADER_PACKAGE);
+            let is_importable = json.get("exports").is_some() || json.get("main").is_some();
+            return (is_loader && is_importable).then(|| current.to_path_buf());
         }
         dir = current.parent();
     }
@@ -504,6 +513,99 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_global_install_is_promoted_to_the_in_process_path() {
+        // A global `npm i -g` bin is a symlink into the package. Following it is
+        // what lets those users have redaction at all, so it must select
+        // `InProcess` and point `resolve_from` at the package, not the project.
+        let dir = project(&[
+            (".env.schema", "# ---\nA=1\n"),
+            (
+                "global/lib/node_modules/varlock/package.json",
+                r#"{"name":"varlock","version":"1.0.0","exports":{".":"./index.js"}}"#,
+            ),
+            (
+                "global/lib/node_modules/varlock/bin/cli.js",
+                "#!/usr/bin/env node\n",
+            ),
+        ]);
+        let bin_dir = dir.path().join("global/bin");
+        std::fs::create_dir_all(&bin_dir).expect("mkdir");
+        std::os::unix::fs::symlink(
+            dir.path()
+                .join("global/lib/node_modules/varlock/bin/cli.js"),
+            bin_dir.join("varlock"),
+        )
+        .expect("symlink");
+
+        let owner = with_path(&bin_dir, || detect(dir.path(), None)).expect("schema present");
+        assert!(
+            matches!(owner.kind(), OwnerKind::InProcess),
+            "a global install is importable and must not be demoted to the CLI \
+             path, got {:?}",
+            owner.kind()
+        );
+        assert!(
+            owner.resolve_from().ends_with("node_modules/varlock"),
+            "resolve_from must be the loader's package dir so the adapter can \
+             import it; got {}",
+            owner.resolve_from().display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bin_whose_package_declares_no_entry_stays_on_the_cli_path() {
+        // Regression: promoting on the manifest alone decided in-process on weaker
+        // evidence than the import needs. The adapter resolves a bare specifier,
+        // which requires `exports` or `main`; without either it hard-exited 1 on a
+        // setup where the CLI path worked.
+        let dir = project(&[
+            (".env.schema", "# ---\nA=1\n"),
+            (
+                "opt/varlock/package.json",
+                r#"{"name":"varlock","version":"9.9.9"}"#,
+            ),
+            ("opt/varlock/bin/cli.js", "#!/bin/sh\n"),
+        ]);
+        let bin_dir = dir.path().join("opt/bin");
+        std::fs::create_dir_all(&bin_dir).expect("mkdir");
+        std::os::unix::fs::symlink(
+            dir.path().join("opt/varlock/bin/cli.js"),
+            bin_dir.join("varlock"),
+        )
+        .expect("symlink");
+
+        let owner = with_path(&bin_dir, || detect(dir.path(), None)).expect("schema present");
+        assert!(
+            matches!(owner.kind(), OwnerKind::Cli(_)),
+            "a package with no importable entry must stay on the CLI path rather \
+             than promote into an import that cannot succeed, got {:?}",
+            owner.kind()
+        );
+    }
+
+    /// `PATH` is process-global, so every test that reads or writes it takes this
+    /// lock rather than racing a sibling.
+    fn path_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|err| err.into_inner())
+    }
+
+    /// Run `f` with `PATH` set to exactly `dir`.
+    fn with_path<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+        let _guard = path_lock();
+        let saved = std::env::var_os("PATH");
+        unsafe { std::env::set_var("PATH", dir) };
+        let out = f();
+        match saved {
+            Some(value) => unsafe { std::env::set_var("PATH", value) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+        out
+    }
+
     #[test]
     fn schema_without_any_loader_reports_missing() {
         let dir = project(&[(".env.schema", "# ---\nA=1\n")]);
@@ -519,9 +621,7 @@ mod tests {
     /// `PATH` is process-wide, so this serializes rather than racing a sibling
     /// test that also reads it.
     fn temp_env_path_cleared<T>(f: impl FnOnce() -> T) -> T {
-        use std::sync::Mutex;
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = path_lock();
         let saved = std::env::var_os("PATH");
         unsafe { std::env::remove_var("PATH") };
         let out = f();

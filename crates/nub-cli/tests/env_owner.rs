@@ -20,6 +20,10 @@ fn project(files: &[(&str, &str)]) -> tempfile::TempDir {
         FROM_DOTENV: process.env.FROM_DOTENV ?? null,
         FROM_LOADER: process.env.FROM_LOADER ?? null,
         FROM_AUTO_LOAD: process.env.FROM_AUTO_LOAD ?? null,
+        SEEN_PATH: process.env.SEEN_PATH ?? null,
+        SEEN_NODE_OPTIONS: process.env.SEEN_NODE_OPTIONS ?? null,
+        LIVE_PATH: process.env.PATH ?? null,
+        LIVE_NODE_OPTIONS: process.env.NODE_OPTIONS ?? null,
     }));"#;
     write(dir.path(), "probe.mjs", probe);
     write(
@@ -55,7 +59,13 @@ fn install_stub_loader(root: &Path) {
     write(
         root,
         "node_modules/varlock/index.js",
-        r#"export async function load() {
+        // Records what the environment looked like AT LOAD TIME. The real loader
+        // snapshots process.env when it is imported and hands that snapshot to any
+        // subprocess it spawns, so the scrub is only effective if it has already
+        // happened by this point — which is exactly what these two capture.
+        r#"process.env.SEEN_PATH = process.env.PATH ?? "";
+           process.env.SEEN_NODE_OPTIONS = process.env.NODE_OPTIONS ?? "";
+           export async function load() {
              process.env.FROM_LOADER = "yes";
              process.env.__VARLOCK_ENV = "{}";
            }
@@ -153,6 +163,56 @@ fn a_schema_plus_loader_makes_nub_stand_down() {
          at the graph — that entry is what installs the protections and applies \
          schema settings nub does not model. stderr: {}",
         run.stderr
+    );
+}
+
+#[test]
+fn the_loader_is_imported_with_a_scrubbed_environment_that_is_then_restored() {
+    // The loader snapshots process.env when it is imported and hands THAT to any
+    // subprocess it spawns. If nub's shim is still on PATH there, the loader's CLI
+    // resolves `node` back to nub and recurses without bound — which is exactly
+    // what `_VARLOCK_FILTER` triggered, since it disables the reuse fast-path.
+    // So the scrub has to be in place by import time, not merely before a spawn.
+    let dir = project(&[(".env.schema", "# ---\nA=1\n")]);
+    install_stub_loader(dir.path());
+
+    let shim = dir.path().join("nub-node-shim-test");
+    std::fs::create_dir_all(&shim).expect("mkdir");
+    let mut command = Command::new(nub_binary());
+    command
+        .arg("probe.mjs")
+        .current_dir(dir.path())
+        .env("PATH", &shim)
+        .env("NODE_OPTIONS", "");
+    let output = command.output().expect("spawn nub");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        output.status.success(),
+        "nub exited {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        output.status.code()
+    );
+    let run = Run { stdout, stderr };
+
+    let seen_path = run.var("SEEN_PATH").unwrap_or_default();
+    assert!(
+        !seen_path.contains("nub-node-shim-"),
+        "the loader must not see nub's shim on PATH at import time, or its own \
+         CLI would resolve `node` back to nub; saw {seen_path:?}"
+    );
+    let seen_options = run.var("SEEN_NODE_OPTIONS").unwrap_or_default();
+    assert!(
+        !seen_options.contains("env-owner"),
+        "the loader must not see nub's env-owner preload tokens, or a subprocess \
+         would re-run the adapter; saw {seen_options:?}"
+    );
+
+    let live_path = run.var("LIVE_PATH").unwrap_or_default();
+    assert!(
+        live_path.contains("nub-node-shim-"),
+        "the scrub exists only to make the loader's subprocess safe — user code \
+         must get the shim back, so a `node` the app spawns stays augmented; \
+         saw {live_path:?}"
     );
 }
 
