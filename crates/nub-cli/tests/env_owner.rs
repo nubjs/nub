@@ -54,7 +54,7 @@ fn install_stub_loader(root: &Path) {
         root,
         "node_modules/varlock/package.json",
         r#"{"name":"varlock","version":"0.0.0","type":"module",
-            "exports":{".":"./index.js","./auto-load":"./auto-load.js"}}"#,
+            "exports":{".":"./index.js","./auto-load":"./auto-load.js","./init-server":"./init-server.js"}}"#,
     );
     write(
         root,
@@ -81,6 +81,13 @@ fn install_stub_loader(root: &Path) {
         r#"// The real entry reuses an already-populated blob and installs its guards;
            // the stub records that nub handed off to it at all.
            process.env.FROM_AUTO_LOAD = "yes";"#,
+    );
+    write(
+        root,
+        "node_modules/varlock/init-server.js",
+        // The blob-consuming entry a Worker takes: installs guards from an
+        // inherited __VARLOCK_ENV without resolving or spawning anything.
+        r#"process.env.FROM_INIT_SERVER = "yes";"#,
     );
 }
 
@@ -243,7 +250,10 @@ fn a_worker_inherits_the_environment_instead_of_re_resolving_it() {
              const w = new Worker(new URL(import.meta.url));
              w.on("message", (m) => { console.log(JSON.stringify(m)); w.terminate(); });
            } else {
-             parentPort.postMessage({ FROM_LOADER: process.env.FROM_LOADER ?? null });
+             parentPort.postMessage({
+               FROM_LOADER: process.env.FROM_LOADER ?? null,
+               FROM_INIT_SERVER: process.env.FROM_INIT_SERVER ?? null,
+             });
            }"#,
     );
 
@@ -269,6 +279,13 @@ fn a_worker_inherits_the_environment_instead_of_re_resolving_it() {
         "the Worker must inherit the resolved value, not re-resolve it — \
          \"re-resolved\" means the adapter ran again inside the Worker, which is \
          where the cwd hop cannot work. stderr: {stderr}"
+    );
+    assert_eq!(
+        seen["FROM_INIT_SERVER"].as_str(),
+        Some("yes"),
+        "the Worker must still install the loader's guards from the inherited \
+         blob — skipping the module wholesale leaves @sensitive values printing \
+         in the clear there, which `varlock run` does not do. stderr: {stderr}"
     );
 }
 
@@ -318,6 +335,46 @@ fn the_verification_pass_warns_when_nothing_loaded() {
         "a loader that ran but applied nothing must produce a warning, \
          not silence; stderr was: {}",
         run.stderr
+    );
+}
+
+#[test]
+fn silent_suppresses_the_verification_warning() {
+    // The warning is on by default because it reports a run with no environment
+    // at all, but `--silent` has to mean silent.
+    let dir = project(&[(".env.schema", "# ---\nA=1\n")]);
+    write(
+        dir.path(),
+        "node_modules/varlock/package.json",
+        r#"{"name":"varlock","version":"0.0.0","type":"module",
+            "exports":{".":"./index.js","./auto-load":"./auto-load.js"}}"#,
+    );
+    write(
+        dir.path(),
+        "node_modules/varlock/index.js",
+        "export async function load() {}\nexport function patchGlobalConsole() {}",
+    );
+    write(dir.path(), "node_modules/varlock/auto-load.js", "");
+
+    let noisy = run(dir.path());
+    assert!(
+        noisy.stderr.contains("never loaded the environment"),
+        "control: the warning must fire without --silent, or this test proves \
+         nothing; stderr was: {}",
+        noisy.stderr
+    );
+
+    let quiet = Command::new(nub_binary())
+        .args(["--silent", "probe.mjs"])
+        .current_dir(dir.path())
+        .env("PATH", "")
+        .env_remove("NODE_OPTIONS")
+        .output()
+        .expect("spawn nub");
+    let quiet_stderr = String::from_utf8_lossy(&quiet.stderr);
+    assert!(
+        !quiet_stderr.contains("never loaded the environment"),
+        "--silent must suppress the verification warning; stderr was: {quiet_stderr}"
     );
 }
 

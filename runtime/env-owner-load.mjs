@@ -22,14 +22,32 @@ import { isMainThread } from "node:worker_threads";
 const root = process.env.__NUB_ENV_OWNER_ROOT;
 const resolveFrom = process.env.__NUB_ENV_OWNER_RESOLVE_FROM || root;
 
-// A Worker inherits a COPY of process.env, so the values are already there and
-// re-resolving buys nothing. It also cannot succeed: `process.chdir` throws in a
-// Worker, so the cwd hop is skipped, and a worker started from a workspace member
-// then resolves from a directory with no schema — yielding an EMPTY graph that
-// overwrites nothing but reports nothing either, since __VARLOCK_ENV is set and
-// the verification pass sees a load. Silent wrong answer. Skipping is both
-// cheaper and correct.
-if (root && isMainThread) {
+// A Worker needs the PROTECTIONS but not the resolution, and the two have to be
+// separated because it cannot do the second.
+//
+// It inherits a copy of process.env, so the values are already present. It also
+// cannot re-resolve correctly: `process.chdir` throws in a Worker, so the cwd hop
+// is skipped, and a Worker started from a workspace member then resolves from a
+// directory with no schema — an EMPTY graph that reports nothing, because
+// __VARLOCK_ENV is still set and the verification pass sees a load.
+//
+// But skipping the module wholesale is not right either: the guards live in this
+// process, so a Worker would print `@sensitive` values in the clear. Measured
+// against `varlock run`, which redacts them in a Worker.
+//
+// So a Worker takes the loader's blob-consuming server entry instead — it installs
+// the guards from the inherited __VARLOCK_ENV, resolves nothing, and spawns
+// nothing (verified: 0 subprocesses, secret redacted).
+if (root && !isMainThread) {
+  try {
+    const req = createRequire(pathToFileURL(`${resolveFrom}/package.json`));
+    await import(pathToFileURL(req.resolve("varlock/init-server")).href);
+  } catch {
+    // A loader without that entry, or an unreadable one, leaves the Worker with
+    // inherited values and no guards — the state it would have had anyway. Not
+    // worth killing a Worker over.
+  }
+} else if (root) {
   // Close BOTH routes back into nub before the loader is even imported.
   //
   // The loader normally reuses an already-populated __VARLOCK_ENV and never

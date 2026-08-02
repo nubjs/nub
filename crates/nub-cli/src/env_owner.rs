@@ -695,6 +695,52 @@ mod tests {
     }
 
     #[test]
+    fn the_resolved_marker_only_applies_to_the_project_that_set_it() {
+        // The marker is inherited by every descendant, so an unscoped check would
+        // let a nested run in a DIFFERENT project — with its own schema — skip
+        // resolving and silently serve the outer project's values.
+        let dir = project(&[
+            (".env.schema", "# ---\nA=1\n"),
+            (
+                "node_modules/varlock/package.json",
+                r#"{"name":"varlock","exports":{}}"#,
+            ),
+        ]);
+        let owner = detect(dir.path(), None).expect("schema present");
+
+        let _guard = path_lock();
+        let saved_loaded = std::env::var_os(OWNER_LOADED_ENV);
+        let saved_root = std::env::var_os(OWNER_ROOT_ENV);
+        unsafe {
+            std::env::set_var(OWNER_LOADED_ENV, "1");
+            std::env::set_var(OWNER_ROOT_ENV, "/some/other/project");
+        }
+        let foreign = already_resolved_by_parent(&owner);
+        unsafe { std::env::set_var(OWNER_ROOT_ENV, owner.root()) };
+        let same = already_resolved_by_parent(&owner);
+        unsafe {
+            match saved_loaded {
+                Some(v) => std::env::set_var(OWNER_LOADED_ENV, v),
+                None => std::env::remove_var(OWNER_LOADED_ENV),
+            }
+            match saved_root {
+                Some(v) => std::env::set_var(OWNER_ROOT_ENV, v),
+                None => std::env::remove_var(OWNER_ROOT_ENV),
+            }
+        }
+
+        assert!(
+            !foreign,
+            "a marker set by a DIFFERENT project must not suppress this project's \
+             own resolution"
+        );
+        assert!(
+            same,
+            "a marker set by this same project must suppress a redundant re-resolve"
+        );
+    }
+
+    #[test]
     fn graph_values_coerce_to_child_env_strings() {
         let resolved = parse_graph(
             r#"{"config":{
