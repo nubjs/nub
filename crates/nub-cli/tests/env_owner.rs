@@ -71,14 +71,26 @@ impl Run {
 }
 
 fn run(dir: &Path) -> Run {
-    let output = Command::new(nub_binary())
+    run_with_path(dir, None)
+}
+
+/// `PATH` is load-bearing for detection: `find_loader_cli` falls back to it, so a
+/// developer machine with varlock installed would turn a `Missing` fixture into a
+/// `Cli` one and fail. Every run therefore gets a CONTROLLED `PATH` — empty by
+/// default, or exactly the directory a test wants probed.
+fn run_with_path(dir: &Path, path: Option<&Path>) -> Run {
+    let mut command = Command::new(nub_binary());
+    command
         .arg("probe.mjs")
         .current_dir(dir)
         .env_remove("APP_ENV")
         .env_remove("NODE_ENV")
-        .env_remove("NODE_OPTIONS")
-        .output()
-        .expect("spawn nub");
+        .env_remove("NODE_OPTIONS");
+    match path {
+        Some(dir) => command.env("PATH", dir),
+        None => command.env("PATH", ""),
+    };
+    let output = command.output().expect("spawn nub");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(
@@ -188,6 +200,116 @@ fn an_explicit_env_file_setting_overrides_the_stand_down() {
          stderr: {}",
         run.stderr
     );
+}
+
+/// An executable loader stub with NO package directory, so detection lands on the
+/// CLI path. Emits a fixed `json-full` payload, which is all nub parses.
+#[cfg(unix)]
+fn install_stub_cli(root: &Path, dir: &str) -> PathBuf {
+    let bin = root.join(dir).join("varlock");
+    std::fs::create_dir_all(bin.parent().expect("parent")).expect("mkdir");
+    std::fs::write(
+        &bin,
+        "#!/bin/sh\nprintf '%s' '{\"config\":{\"FROM_LOADER\":{\"value\":\"yes\",\
+         \"isSensitive\":false}}}'\n",
+    )
+    .expect("write stub");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    bin
+}
+
+#[cfg(unix)]
+#[test]
+fn a_cli_only_loader_resolves_the_graph_and_suppresses_env_files() {
+    // The whole CLI branch had no end-to-end coverage: every other fixture writes
+    // a package directory and therefore lands on the in-process path.
+    let dir = project(&[
+        (".env", "FROM_DOTENV=leaked\n"),
+        (".env.schema", "# ---\nA=1\n"),
+    ]);
+    install_stub_cli(dir.path(), "node_modules/.bin");
+    let run = run(dir.path());
+    assert_eq!(
+        run.var("FROM_LOADER").as_deref(),
+        Some("yes"),
+        "nub must inject the values the loader CLI reported. stderr: {}",
+        run.stderr
+    );
+    assert_eq!(
+        run.var("FROM_DOTENV"),
+        None,
+        "the CLI path must still suppress nub's own .env cascade. stderr: {}",
+        run.stderr
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_cli_only_loader_is_found_on_path_not_just_in_node_modules() {
+    // A Homebrew or curl install lands on PATH with no node_modules entry at all.
+    let dir = project(&[(".env.schema", "# ---\nA=1\n")]);
+    let bin = install_stub_cli(dir.path(), "tools");
+    let run = run_with_path(dir.path(), Some(bin.parent().expect("parent")));
+    assert_eq!(
+        run.var("FROM_LOADER").as_deref(),
+        Some("yes"),
+        "a standalone loader on PATH must be found and used. stderr: {}",
+        run.stderr
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_node_shebang_loader_cli_does_not_re_enter_nub() {
+    // Regression: nub's PATH shim made a `#!/usr/bin/env node` loader resolve
+    // `node` back to nub, which re-detected the same owner and ran the loader
+    // again — unbounded, and before the stub's own body ever executed. The stub
+    // records every invocation so a regression fails loudly instead of hanging.
+    let dir = project(&[(".env.schema", "# ---\nA=1\n")]);
+    let calls = dir.path().join("calls.log");
+    let bin = dir.path().join("node_modules/.bin/varlock");
+    std::fs::create_dir_all(bin.parent().expect("parent")).expect("mkdir");
+    std::fs::write(
+        &bin,
+        format!(
+            "#!/usr/bin/env node\n\
+             const fs = require('node:fs');\n\
+             fs.appendFileSync({calls:?}, 'x');\n\
+             if (fs.readFileSync({calls:?}, 'utf8').length > 3) process.exit(9);\n\
+             process.stdout.write(JSON.stringify({{config:{{FROM_LOADER:{{value:'yes'}}}}}}));\n",
+            calls = calls.to_str().expect("utf8 path")
+        ),
+    )
+    .expect("write stub");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    // A real `node` must be reachable for the shebang; that is the point.
+    let node_dir = which_node_dir();
+    let run = run_with_path(dir.path(), Some(&node_dir));
+    assert_eq!(
+        run.var("FROM_LOADER").as_deref(),
+        Some("yes"),
+        "the node-shebang loader must run and be parsed. stderr: {}",
+        run.stderr
+    );
+    let invocations = std::fs::read_to_string(&calls).unwrap_or_default().len();
+    assert_eq!(
+        invocations, 1,
+        "the loader CLI must be invoked exactly once; {invocations} invocations means \
+         nub re-entered itself through the node shim"
+    );
+}
+
+#[cfg(unix)]
+fn which_node_dir() -> PathBuf {
+    let out = Command::new("sh")
+        .args(["-c", "command -v node"])
+        .output()
+        .expect("locate node");
+    let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    path.parent().expect("node has a parent dir").to_path_buf()
 }
 
 #[test]

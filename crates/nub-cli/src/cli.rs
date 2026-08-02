@@ -3229,7 +3229,23 @@ fn runtime_child_env(
                     let OwnerKind::Cli(bin) = owner.kind() else {
                         unreachable!("guarded by the arm above")
                     };
-                    crate::env_owner::load_via_cli(bin, owner.root())?
+                    if crate::env_owner::already_resolved_by_parent() {
+                        // A parent nub resolved this project and the values are
+                        // already in our environment, which the child inherits.
+                        // Re-running the loader would cost a subprocess per nested
+                        // `node` for an answer we hold.
+                        HashMap::new()
+                    } else {
+                        let mut values = crate::env_owner::load_via_cli(bin, owner.root())?;
+                        // Stamp the marker HERE — where a resolution actually
+                        // happened — so it can never claim a load that did not
+                        // occur, and so descendants can skip re-resolving.
+                        values.insert(
+                            crate::env_owner::OWNER_LOADED_ENV.to_string(),
+                            "1".to_string(),
+                        );
+                        values
+                    }
                 }
                 _ => project_root
                     .map(nub_core::workspace::env::load_env_files)
@@ -3281,12 +3297,13 @@ fn apply_env_owner_env(
         owner.resolve_from().display().to_string(),
     );
     if matches!(owner.kind(), crate::env_owner::OwnerKind::Cli(_)) {
-        // nub already resolved the graph out of process, so the verification
-        // pass must not warn about a load it cannot observe in-process.
-        env_vars.insert(
-            crate::env_owner::OWNER_LOADED_ENV.to_string(),
-            "1".to_string(),
-        );
+        // NOTE: the "already loaded" marker is deliberately NOT set here. This
+        // function runs on launch paths that never resolve anything — `nub run`
+        // keeps env node-scoped, so the inner `node` resolves for itself — and
+        // stamping it here would assert a load that did not happen, silencing the
+        // verification pass on exactly the runs it exists to catch. It is stamped
+        // in `runtime_child_env`, where the resolution actually occurs.
+        //
         // Redaction is installed by importing the loader into THIS process, which
         // a CLI-only install cannot do. Say so rather than letting secrets print
         // in the clear from a setup the user believed was protected.

@@ -156,7 +156,8 @@ pub(crate) fn detect(project_root: &Path, workspace_root: Option<&Path>) -> Opti
     // whether the layout hoisted it to the workspace root or kept it beside the
     // member. The schema root above is a separate question and must not be reused
     // here — see OWNER_RESOLVE_ENV.
-    let kind = if loader_package_dir(project_root).is_some() {
+    let kind = if loader_package_dir(project_root, workspace_root.or(Some(project_root))).is_some()
+    {
         OwnerKind::InProcess
     } else {
         match find_loader_cli(project_root) {
@@ -177,12 +178,19 @@ pub(crate) fn detect(project_root: &Path, workspace_root: Option<&Path>) -> Opti
 /// only decides *which strategy* to use, and the adapter re-resolves properly
 /// with `createRequire` from the project root before importing. A false negative
 /// costs the slower CLI path, never a wrong answer.
-fn loader_package_dir(project_root: &Path) -> Option<PathBuf> {
+fn loader_package_dir(project_root: &Path, stop_after: Option<&Path>) -> Option<PathBuf> {
     let mut dir = Some(project_root);
     while let Some(current) = dir {
         let candidate = current.join("node_modules").join(LOADER_PACKAGE);
         if candidate.join("package.json").is_file() {
             return Some(candidate);
+        }
+        // Stop at the outermost directory that belongs to this project. Walking on
+        // to the filesystem root would let a stray `~/node_modules/varlock` — or
+        // anything above the checkout — decide that an unrelated project has a
+        // loader, turning on the stand-down for a project that never opted in.
+        if stop_after.is_some_and(|boundary| current == boundary) {
+            break;
         }
         dir = current.parent();
     }
@@ -192,18 +200,31 @@ fn loader_package_dir(project_root: &Path) -> Option<PathBuf> {
 /// A loader CLI binary: the project's `node_modules/.bin` first, then `PATH`
 /// (a Homebrew or curl install lands there).
 fn find_loader_cli(project_root: &Path) -> Option<PathBuf> {
-    let exe = if cfg!(windows) {
-        format!("{LOADER_PACKAGE}.cmd")
+    // Windows needs BOTH spellings, for two different installs. `node_modules/.bin`
+    // holds npm's generated `.cmd` shim — but an npm install is already caught by
+    // `loader_package_dir` above and takes the in-process path, so `.cmd` alone
+    // would leave this branch unable to find the only install it exists for: the
+    // standalone one, which ships `varlock.exe` (varlock's `install.sh` names the
+    // Windows zip's binary `varlock.exe`). Probe `.exe` first, then `.cmd`.
+    let names: Vec<String> = if cfg!(windows) {
+        vec![
+            format!("{LOADER_PACKAGE}.exe"),
+            format!("{LOADER_PACKAGE}.cmd"),
+        ]
     } else {
-        LOADER_PACKAGE.to_string()
+        vec![LOADER_PACKAGE.to_string()]
     };
-    let local = project_root.join("node_modules").join(".bin").join(&exe);
-    if local.is_file() {
+    let bin_dir = project_root.join("node_modules").join(".bin");
+    if let Some(local) = names
+        .iter()
+        .map(|name| bin_dir.join(name))
+        .find(|candidate| candidate.is_file())
+    {
         return Some(local);
     }
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
-        .map(|dir| dir.join(&exe))
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
         .find(|candidate| candidate.is_file())
 }
 
@@ -267,11 +288,22 @@ pub(crate) fn preload_tokens(
 /// - `--path` pins discovery to the project root, because the loader searches
 ///   only its current directory and nub may be running from a workspace member.
 pub(crate) fn load_via_cli(bin: &Path, root: &Path) -> Result<HashMap<String, String>> {
-    let output = std::process::Command::new(bin)
+    let mut command = std::process::Command::new(bin);
+    command
         .args(["load", "--format", "json-full", "--compact", "--path"])
         .arg(root)
         .current_dir(root)
-        .env_remove("NODE_OPTIONS")
+        .env_remove("NODE_OPTIONS");
+    // Removing NODE_OPTIONS is not enough on its own: PATH is a SECOND channel
+    // back into nub. A globally npm-installed loader is a `#!/usr/bin/env node`
+    // script, so with nub's shim still on PATH its shebang resolves `node` to nub,
+    // which re-detects this same owner and runs the loader again — forever, and
+    // before the script's own body ever executes. Measured: 8+ levels deep in one
+    // `nub run` before the timeout. The loader must reach a REAL node.
+    if let Some(path) = strip_node_shim_from_path(std::env::var_os("PATH")) {
+        command.env("PATH", path);
+    }
+    let output = command
         .output()
         .with_context(|| format!("running {}", bin.display()))?;
 
@@ -286,6 +318,33 @@ pub(crate) fn load_via_cli(bin: &Path, root: &Path) -> Result<HashMap<String, St
     }
 
     parse_graph(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Drop nub's `node`-shim directories from a `PATH` value, so a spawned tool with
+/// a `#!/usr/bin/env node` shebang reaches the real Node rather than re-entering
+/// nub. Returns `None` when there was no `PATH` to rewrite.
+fn strip_node_shim_from_path(path: Option<std::ffi::OsString>) -> Option<std::ffi::OsString> {
+    let path = path?;
+    let kept: Vec<PathBuf> = std::env::split_paths(&path)
+        .filter(|entry| {
+            !entry
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(nub_core::node::spawn::PATH_SHIM_PREFIX))
+        })
+        .collect();
+    std::env::join_paths(kept).ok()
+}
+
+/// Whether a parent nub already resolved this project's environment and injected
+/// the values, which every descendant inherits.
+///
+/// Without this, each nested `node` in an owned project pays another full loader
+/// subprocess for an answer it already has. It is also a second line of defense
+/// against re-entry: even if a shim slipped back onto `PATH`, the nested nub
+/// declines to resolve again.
+pub(crate) fn already_resolved_by_parent() -> bool {
+    std::env::var_os(OWNER_LOADED_ENV).is_some()
 }
 
 /// Extract `KEY=value` pairs from the loader's `json-full` graph.

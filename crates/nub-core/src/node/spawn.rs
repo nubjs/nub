@@ -1348,7 +1348,11 @@ impl Drop for CompileCacheSentinelGuard {
     }
 }
 
-const PATH_SHIM_PREFIX: &str = "nub-node-shim-";
+/// Public so a caller spawning a `#!/usr/bin/env node` tool can REMOVE the shim
+/// from that child's `PATH`. Leaving it in makes the tool's shebang resolve
+/// `node` back to nub, which re-enters and can spawn the same tool again without
+/// bound — see `env_owner::strip_node_shim_from_path`.
+pub const PATH_SHIM_PREFIX: &str = "nub-node-shim-";
 const PATH_SHIM_CREATE_RETRIES: usize = 16;
 
 static PATH_SHIM_MANAGER: PathShimManager = PathShimManager::new();
