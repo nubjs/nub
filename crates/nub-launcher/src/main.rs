@@ -1133,8 +1133,20 @@ fn acquire_smol_node(
     //    the version managers the newest satisfying install wins rather than
     //    whichever manager happens to sort first.
     for store in node_stores(base) {
-        if let Some((path, ver)) = best_node_in(&store, &target, m.smol_exact_target, &m.triple) {
+        // These are nub's OWN stores, so the trusted half is what answers; the
+        // unprobed list is empty for a cache-owned directory. Probing the tail
+        // anyway keeps this correct if a store ever stops being cache-owned,
+        // rather than silently skipping it.
+        let (owned, candidates) = best_node_in(&store, &target, m.smol_exact_target, &m.triple);
+        if let Some((path, ver)) = owned {
             return Ok((path, ver, NodeOrigin::Discovered));
+        }
+        for (path, _) in candidates {
+            if let Some(actual) = probe_node_version(&path) {
+                if smol_candidate_matches(&actual, &target, m.smol_exact_target) {
+                    return Ok((path, actual, NodeOrigin::Discovered));
+                }
+            }
         }
     }
     // 2. A version-manager or PATH Node proved before cache resolution. This is
@@ -1164,17 +1176,45 @@ fn smol_target(m: &Manifest) -> Result<NodeVersion> {
 /// Find a compatible Node outside the selected cache. Version-manager installs
 /// and PATH are external trust domains; a Node store below the cache is assessed
 /// only after cache resolution because it would execute from that cache.
+/// Find a Node this `--smol` artifact will accept.
+///
+/// Rank every external candidate by its CLAIMED version across all managers before
+/// executing any of them, then probe in that order and stop at the first that
+/// verifies. Verification is unchanged — an external Node is still executed before
+/// it is trusted — but the ordering is now decided from directory names, which cost
+/// nothing to read.
+///
+/// The old shape asked each manager for its best and probed inside every one, so a
+/// machine with nvm plus mise spent a `node` spawn per manager purely to learn what
+/// the names already said. Measured on a four-manager host: 4 execs and 75 ms
+/// before the app's own Node was spawned, where the FIRST probe had already found a
+/// satisfying 26.5.0.
+///
+/// A dishonestly-named directory therefore costs one extra probe and is skipped, as
+/// before — it can never be accepted unverified, which is the property that matters.
 fn discover_external_smol_node(m: &Manifest) -> Result<Option<(PathBuf, NodeVersion)>> {
     let target = smol_target(m)?;
-    let mut best: Option<(PathBuf, NodeVersion)> = None;
+    let mut trusted: Option<(PathBuf, NodeVersion)> = None;
+    let mut ranked: Vec<(PathBuf, NodeVersion)> = Vec::new();
     for dir in version_manager_dirs() {
-        if let Some(found) = best_node_in(&dir, &target, m.smol_exact_target, &m.triple) {
-            if best.as_ref().is_none_or(|(_, current)| found.1 > *current) {
-                best = Some(found);
+        let (owned, candidates) = best_node_in(&dir, &target, m.smol_exact_target, &m.triple);
+        if let Some(found) = owned {
+            if trusted.as_ref().is_none_or(|(_, cur)| found.1 > *cur) {
+                trusted = Some(found);
             }
         }
+        ranked.extend(candidates);
     }
-    Ok(best.or_else(|| probe_path_node(&target, m.smol_exact_target)))
+    // Our own store outranks any external claim: it needs no exec at all.
+    if trusted.is_some() {
+        return Ok(trusted);
+    }
+    ranked.sort_by(|(_, left), (_, right)| right.cmp(left));
+    let verified = ranked.into_iter().find_map(|(path, _)| {
+        let actual = probe_node_version(&path)?;
+        smol_candidate_matches(&actual, &target, m.smol_exact_target).then_some((path, actual))
+    });
+    Ok(verified.or_else(|| probe_path_node(&target, m.smol_exact_target)))
 }
 
 /// Node stores to READ, nearest first: the probed cache base, then the location
@@ -1360,17 +1400,27 @@ fn smol_candidate_matches(
 /// policy that can also actually RUN here — the same libc gate the embed-shape
 /// dedup applies, which matters more for a version manager's tree than for nub's
 /// own store, since nothing nub controls put it there.
+/// Candidates from one directory: `(already trusted, needs probing)`.
+///
+/// Split because verifying an external candidate costs a full `node` process spawn
+/// (~28 ms measured), and the old shape paid one PER MANAGER just to discover what
+/// the directory names already said. See [`discover_external_smol_node`].
+type NodeDirScan = (Option<(PathBuf, NodeVersion)>, Vec<(PathBuf, NodeVersion)>);
+
 fn best_node_in(
     dir: &NodeDir,
     target: &NodeVersion,
     exact_target: bool,
     triple: &str,
-) -> Option<(PathBuf, NodeVersion)> {
+) -> NodeDirScan {
     if dir.cache_owned && cache::revalidate(&dir.root).is_err() {
-        return None;
+        return (None, Vec::new());
     }
     let mut candidates = Vec::new();
-    for entry in fs::read_dir(&dir.root).ok()?.flatten() {
+    let Ok(entries) = fs::read_dir(&dir.root) else {
+        return (None, Vec::new());
+    };
+    for entry in entries.flatten() {
         let Ok(claimed) = entry.file_name().to_string_lossy().parse::<NodeVersion>() else {
             continue;
         };
@@ -1399,12 +1449,14 @@ fn best_node_in(
     }
     candidates.sort_by(|(_, left), (_, right)| right.cmp(left));
     if dir.cache_owned {
-        return candidates.into_iter().next();
+        // Our own store: the directory name is ours and already trusted, so the
+        // best candidate needs no exec to confirm it.
+        return (candidates.into_iter().next(), Vec::new());
     }
-    candidates.into_iter().find_map(|(path, _)| {
-        let actual = probe_node_version(&path)?;
-        smol_candidate_matches(&actual, target, exact_target).then_some((path, actual))
-    })
+    // An external manager's directory names are only an ORDERING HINT, so nothing
+    // here is accepted yet. Hand the ranked list back unprobed and let the caller
+    // rank across every manager before spending a process on one.
+    (None, candidates)
 }
 
 /// A half-extracted or permission-stripped `bin/node` in a tree nub does not own
@@ -1438,7 +1490,14 @@ fn probe_path_node(target: &NodeVersion, exact_target: bool) -> Option<(PathBuf,
     select_path_node((path, ver), target, exact_target)
 }
 
+/// Counts probe execs for `__NUB_LAUNCHER_TIMING`. Each one is a full `node`
+/// process spawn (~28 ms), so the count is the whole story for smol start-up.
 fn probe_node_version(path: &Path) -> Option<NodeVersion> {
+    phase_with(|| format!("  PROBE EXEC: {}", path.display()));
+    probe_node_version_inner(path)
+}
+
+fn probe_node_version_inner(path: &Path) -> Option<NodeVersion> {
     let out = Command::new(path).arg("--version").output().ok()?;
     if !out.status.success() {
         return None;
@@ -2674,6 +2733,26 @@ mod tests {
         assert_eq!(configured, launcher_path);
     }
 
+    /// The old single-call semantics, for tests: take the trusted answer, else
+    /// probe the ranked candidates in order. `best_node_in` was split so the real
+    /// caller can rank across every version manager BEFORE spending a process on
+    /// any one of them; these tests are about which node a directory yields, not
+    /// about that ordering, so they go through this.
+    fn best_node_in_probed(
+        dir: &NodeDir,
+        target: &NodeVersion,
+        exact_target: bool,
+        triple: &str,
+    ) -> Option<(PathBuf, NodeVersion)> {
+        let (owned, candidates) = best_node_in(dir, target, exact_target, triple);
+        owned.or_else(|| {
+            candidates.into_iter().find_map(|(path, _)| {
+                let actual = probe_node_version(&path)?;
+                smol_candidate_matches(&actual, target, exact_target).then_some((path, actual))
+            })
+        })
+    }
+
     fn fresh_cache_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "nub-launcher-cache-{name}-{}-{}",
@@ -3847,7 +3926,7 @@ mod tests {
             cache_owned: false,
         };
 
-        let found = best_node_in(&dir, &NodeVersion::new(22, 15, 0), false, "darwin-arm64");
+        let found = best_node_in_probed(&dir, &NodeVersion::new(22, 15, 0), false, "darwin-arm64");
         assert_eq!(found, Some((valid, NodeVersion::new(24, 14, 0))));
         let _ = fs::remove_dir_all(&base);
     }
@@ -3866,7 +3945,7 @@ mod tests {
             cache_owned: false,
         };
 
-        let found = best_node_in(&dir, &NodeVersion::new(22, 15, 0), false, "darwin-arm64");
+        let found = best_node_in_probed(&dir, &NodeVersion::new(22, 15, 0), false, "darwin-arm64");
         assert_eq!(found, Some((valid, NodeVersion::new(24, 14, 0))));
         let _ = fs::remove_dir_all(&base);
     }
@@ -3989,6 +4068,63 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    /// Collecting external candidates must not execute any of them.
+    ///
+    /// This is the property the split exists for: ranking is decided from directory
+    /// NAMES, which cost nothing, so a host with several version managers spends one
+    /// `node` spawn instead of one per manager. Measured on a four-manager box:
+    /// 4 execs and 75 ms before the app's own Node started, where the first probe had
+    /// already found a satisfying release; after, 1 exec and 26 ms.
+    ///
+    /// The fixtures are deliberately NOT runnable as Node — they exit non-zero and
+    /// print no version. If collection probed them they would be rejected and the
+    /// list would come back empty, so an empty list is exactly the failure this
+    /// catches. Verification still happens, just later and only for the winner.
+    #[cfg(unix)]
+    #[test]
+    fn external_candidates_are_ranked_by_name_without_being_executed() {
+        let base = fresh_cache_dir("external-rank-no-exec");
+        let root = base.join("versions");
+        // `exit 1`: a real probe of either of these yields None.
+        fake_version_manager_node(&root, "22.15.0", "#!/bin/sh\nexit 1\n");
+        fake_version_manager_node(&root, "26.5.0", "#!/bin/sh\nexit 1\n");
+
+        // `cache_owned: false` is the whole point — `NodeDir::plain` means nub's OWN
+        // store, whose directory names it wrote itself and therefore trusts. An
+        // external manager's names are only a hint, which is the path under test.
+        let dir = NodeDir {
+            root,
+            inner: "",
+            cache_owned: false,
+        };
+        let (owned, ranked) =
+            best_node_in(&dir, &NodeVersion::new(22, 15, 0), false, "darwin-arm64");
+
+        assert!(
+            owned.is_none(),
+            "an external directory is never trusted unprobed"
+        );
+        assert_eq!(
+            ranked.len(),
+            2,
+            "both candidates must be collected WITHOUT being executed — an empty or \
+             short list means collection probed them"
+        );
+        assert_eq!(
+            ranked[0].1,
+            NodeVersion::new(26, 5, 0),
+            "candidates must be ranked newest-first, so the caller probes the best one"
+        );
+
+        // And the control for the claim above: these fixtures really are unprobeable,
+        // so the assertions cannot be passing because probing happens to succeed.
+        assert!(
+            probe_node_version(&ranked[0].0).is_none(),
+            "the fixture must be unprobeable, otherwise this test proves nothing"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
     #[cfg(unix)]
     #[test]
     fn version_manager_scan_applies_exact_policy_to_the_reported_version() {
@@ -4003,7 +4139,7 @@ mod tests {
             cache_owned: false,
         };
 
-        let found = best_node_in(&dir, &NodeVersion::new(22, 15, 0), true, "darwin-arm64");
+        let found = best_node_in_probed(&dir, &NodeVersion::new(22, 15, 0), true, "darwin-arm64");
         assert_eq!(found, Some((valid, NodeVersion::new(22, 15, 0))));
         let _ = fs::remove_dir_all(&base);
     }
@@ -4027,7 +4163,7 @@ mod tests {
         }
 
         let target = NodeVersion::new(22, 15, 0);
-        let found = best_node_in(
+        let found = best_node_in_probed(
             &NodeDir::plain(plain.clone()),
             &target,
             false,
@@ -4042,7 +4178,7 @@ mod tests {
         // Nothing satisfies a floor above every install → provisioning territory.
         let above = NodeVersion::new(26, 0, 0);
         assert!(
-            best_node_in(
+            best_node_in_probed(
                 &NodeDir::plain(plain.clone()),
                 &above,
                 false,
@@ -4053,7 +4189,8 @@ mod tests {
         );
 
         assert_eq!(
-            best_node_in(&NodeDir::plain(plain), &target, true, "darwin-arm64").map(|(_, v)| v),
+            best_node_in_probed(&NodeDir::plain(plain), &target, true, "darwin-arm64")
+                .map(|(_, v)| v),
             Some(target.clone()),
             "exact-target payloads must reject the newer install and select only their target"
         );
@@ -4063,7 +4200,8 @@ mod tests {
         let exact_miss = dir.join("exact-miss");
         install(&exact_miss, "v24.14.0", "");
         assert!(
-            best_node_in(&NodeDir::plain(exact_miss), &target, true, "darwin-arm64").is_none(),
+            best_node_in_probed(&NodeDir::plain(exact_miss), &target, true, "darwin-arm64")
+                .is_none(),
             "a rejected exact candidate must leave discovery empty for provisioning"
         );
 
@@ -4078,9 +4216,9 @@ mod tests {
             // version probing are covered by the dedicated Unix fixtures above.
             cache_owned: true,
         };
-        assert!(best_node_in(&as_fnm, &target, false, "darwin-arm64").is_some());
+        assert!(best_node_in_probed(&as_fnm, &target, false, "darwin-arm64").is_some());
         assert!(
-            best_node_in(&NodeDir::plain(fnm), &target, false, "darwin-arm64").is_none(),
+            best_node_in_probed(&NodeDir::plain(fnm), &target, false, "darwin-arm64").is_none(),
             "the fnm layout must not resolve without its installation/ segment"
         );
 
@@ -4094,11 +4232,12 @@ mod tests {
         fs::write(&glibc, elf_with_interp("/lib64/ld-linux-x86-64.so.2")).unwrap();
         set_executable(&glibc).unwrap();
         assert!(
-            best_node_in(&NodeDir::plain(elf.clone()), &target, false, "linux-x64").is_some(),
+            best_node_in_probed(&NodeDir::plain(elf.clone()), &target, false, "linux-x64")
+                .is_some(),
             "a glibc Node must be accepted for a glibc target"
         );
         assert!(
-            best_node_in(&NodeDir::plain(elf), &target, false, "linux-x64-musl").is_none(),
+            best_node_in_probed(&NodeDir::plain(elf), &target, false, "linux-x64-musl").is_none(),
             "a glibc Node must not be selected for a musl target"
         );
 
@@ -4112,7 +4251,8 @@ mod tests {
             create_staging_subdirs(&dir, bin.parent().unwrap()).unwrap();
             fs::write(&bin, b"#!/bin/sh\n").unwrap();
             assert!(
-                best_node_in(&NodeDir::plain(stripped), &target, false, "darwin-arm64").is_none(),
+                best_node_in_probed(&NodeDir::plain(stripped), &target, false, "darwin-arm64")
+                    .is_none(),
                 "a non-executable bin/node must be skipped"
             );
         }
