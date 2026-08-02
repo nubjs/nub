@@ -29,7 +29,16 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+// ⛔ `new URL(…, import.meta.url).pathname` IS NOT A PATH ON WINDOWS. It yields `/D:/a/nub/…` with a
+// LEADING SLASH, so anything that resolves it against the drive produces `D:\D:\a\nub\…` — MEASURED
+// on a windows-latest runner, where all 15 packages died at
+// `ENOENT: mkdir 'D:\D:\a\nub\nub\tests\build-jail-search\results\runs\…'`. `fileURLToPath` is the
+// only correct conversion and is a no-op difference on POSIX.
+import { fileURLToPath } from 'node:url';
 import { STATES } from './states.mjs';
+
+/** The directory this script lives in, spelled natively on every platform. */
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 const OVERRIDE_ENV = 'NUB_BUILD_JAIL_CATALOG';
 const BANNER_OK = 'build-jail catalog OVERRIDDEN from';
@@ -755,7 +764,7 @@ function provenance(nub, nodePin, enginesNode, nodeMajor, publishedAt = null) {
   // two methodologies and nothing in the file says so.
   let harnessSha = null;
   try {
-    const here = new URL('.', import.meta.url).pathname;
+    const here = HERE;
     const h = createHash('sha256');
     for (const f of ['search.mjs', 'states.mjs']) h.update(fs.readFileSync(path.join(here, f)));
     harnessSha = h.digest('hex').slice(0, 16);
@@ -1810,7 +1819,7 @@ const root = fs.mkdtempSync(path.join(os.homedir(), '.cache', 'nub-search-'));
 try {
   const runDir = argv.includes('--runs')
     ? argv[argv.indexOf('--runs') + 1]
-    : path.join(path.dirname(new URL(import.meta.url).pathname), 'results', 'runs');
+    : path.join(HERE, 'results', 'runs');
   const out = runPath(runDir, pkg, version);
   fs.mkdirSync(path.dirname(out), { recursive: true });
 

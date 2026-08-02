@@ -15,10 +15,13 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const argv = process.argv.slice(2);
 const opt = (name, dflt) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : dflt);
-const here = new URL('.', import.meta.url).pathname;
+// `new URL(...).pathname` yields `/D:/...` on Windows, which resolves to `D:\D:\...`.
+// fileURLToPath is the only correct conversion; identical on POSIX.
+const here = path.dirname(fileURLToPath(import.meta.url));
 
 // Several --runs may be given: the catalog is reconciled from runs on different machines and
 // operating systems, so merging result sets is the normal case, not an edge one.
