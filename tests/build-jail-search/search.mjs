@@ -423,11 +423,30 @@ function runPath(dir, pkg, version) {
  *  floor, and the clamp and default do the rest. */
 /** The package's own `engines.node`, read from the registry — metadata only, no tarball. Null when
  *  absent or unreachable, which the resolver turns into the default. */
+/** ⛔ `npm`, `npx` and `pnpm` ARE `.cmd` SHIMS ON WINDOWS, and `spawnSync` will not find them.
+ *
+ *  Node resolves a bare command name against PATHEXT only when it goes through a shell. Without one
+ *  `spawnSync('npm', …)` returns **ENOENT** on win32 — MEASURED on nub-win: the same call is
+ *  `status: null, error: ENOENT` bare and `status: 0, 54120 bytes` with `shell: true`.
+ *
+ *  This silently disabled THREE things on Windows at once, and none of them announced itself:
+ *  `enginesAndDate` returned nulls, so every record recorded `publishedAt: null` / `pinnedTo: null`
+ *  and the date-aware Node pin was inert; `packageStanding` lost its metadata; and BOTH oracle arms
+ *  failed to launch, which removes the only check that distinguishes a nub defect from a package
+ *  that is simply broken. The record still looked well-formed.
+ *
+ *  Spelling the `.cmd` explicitly is preferred over `shell: true`: passing args with a shell is
+ *  DEP0190 (args are concatenated rather than escaped), which is exactly why `toolchain()` below
+ *  already avoids it. A package spec like `@scope/pkg@1.0.0` must not be re-parsed by cmd.exe. */
+const WIN_CMD_TOOLS = new Set(['npm', 'npx', 'pnpm', 'yarn', 'node-gyp']);
+const exe = (name) =>
+  process.platform === 'win32' && WIN_CMD_TOOLS.has(name) ? `${name}.cmd` : name;
+
 /** `engines.node` AND the publish date in ONE registry round-trip — both feed the Node choice, and
  *  fetching them separately doubled the per-package latency for no reason. */
 function enginesAndDate(pkg, version) {
   try {
-    const r = spawnSync('npm', ['view', `${pkg}@${version}`, 'engines.node', 'time', '--json'],
+    const r = spawnSync(exe('npm'), ['view', `${pkg}@${version}`, 'engines.node', 'time', '--json'],
       { encoding: 'utf8', timeout: 30_000 });
     if (r.status !== 0) return { engines: null, published: null };
     const j = JSON.parse(r.stdout || '{}');
@@ -542,7 +561,15 @@ function resolveNodeMajor(enginesNode, published) {
  *  nothing suitable is installed is correct rather than fatal: the run then fails the same way it
  *  does today, and provenance records the Python that was actually used. */
 function gypPython(nodeBin) {
-  const m = nodeBin && /\/v(\d+)\./.exec(nodeBin);
+  // ⛔ MATCH BOTH LAYOUTS. This was `/\/v(\d+)\./`, which only ever matches nvm
+  // (`~/.nvm/versions/node/v14.18.3/bin`). nub's own provisioning has NO `v` prefix
+  // (`<cache>/nub/node/14.21.3/bin`), and Windows separates with `\` — so once `nodeBinFor` began
+  // PREFERRING nub's nodes, this returned null for every one of them and the Python pin went
+  // silently inert. That pin is what took `fsevents@1.2.12` from BROKEN to MINIMUM, so losing it
+  // costs real records and nothing reports it. Read the major from the version DIRECTORY instead
+  // of the whole path, which is layout- and separator-independent.
+  const seg = nodeBin ? nodeBin.split(/[\\/]/).filter(Boolean).slice(-2, -1)[0] : null;
+  const m = seg && /^v?(\d+)\./.exec(seg);
   // <=15, NOT <=13. bucket_for maps Node 14..17 to node-gyp 10, and node-gyp 10 DOES handle
   // Python 3.12+ on Node 16+ — but MEASURED on Node 14 it does not: cbor-extract@0.1.0 died at
   // `gyp ERR! configure error` with `node@14.18.3 | darwin | x64` and Python 3.14.6, while the
@@ -550,8 +577,12 @@ function gypPython(nodeBin) {
   // major where gyp 10 and a modern Python agree, so the pin has to cover 14 and 15 too.
   if (!m || Number(m[1]) > 15) return null;
   for (const name of ['python3.11', 'python3.10', 'python3.9']) {
-    const r = spawnSync('command', ['-v', name], { shell: true, encoding: 'utf8' });
-    const p = (r.stdout ?? '').trim();
+    // `command -v` is a POSIX shell builtin that cmd.exe does not have, so the Windows arm needs
+    // `where` on the versioned .exe name uv/python.org actually install.
+    const r = process.platform === 'win32'
+      ? spawnSync('where', [`${name}.exe`], { encoding: 'utf8' })
+      : spawnSync('command', ['-v', name], { shell: true, encoding: 'utf8' });
+    const p = (r.stdout ?? '').trim().split(/\r?\n/)[0]?.trim();
     if (r.status === 0 && p) return p;
   }
   return null;
@@ -595,12 +626,18 @@ function nodeBinFor(major) {
 function toolchain() {
   // `which`, not `command -v` through a shell: passing args with `shell: true` is deprecated
   // (DEP0190, args are concatenated rather than escaped) and would print a warning on every run.
+  // `where` is the Windows equivalent and there is no `which`; it prints one match PER LINE, so the
+  // first line is the resolved one. Without this the whole toolchain block reads null on Windows —
+  // and this block is the provenance a reader uses to tell which python/node a build actually used.
   const which = (c) => {
-    const r = spawnSync('which', [c], { encoding: 'utf8' });
-    return r.status === 0 ? (r.stdout || '').trim() || null : null;
+    const r = process.platform === 'win32'
+      ? spawnSync('where', [exe(c)], { encoding: 'utf8' })
+      : spawnSync('which', [c], { encoding: 'utf8' });
+    const out = (r.stdout || '').trim();
+    return r.status === 0 && out ? out.split(/\r?\n/)[0].trim() || null : null;
   };
   const ver = (c, a) => {
-    const r = spawnSync(c, a, { encoding: 'utf8' });
+    const r = spawnSync(exe(c), a, { encoding: 'utf8' });
     return r.status === 0 ? ((r.stdout || r.stderr || '').split('\n')[0] || '').trim() : null;
   };
   return {
@@ -849,7 +886,7 @@ function packageStanding(pkg, version) {
     if (r.status !== 0) return null;
     try { return JSON.parse(r.stdout); } catch { return null; }
   };
-  const time = j('npm', ['view', `${pkg}@${version}`, 'time', '--json']);
+  const time = j(exe('npm'), ['view', `${pkg}@${version}`, 'time', '--json']);
   const published = time && typeof time === 'object' ? time[version] ?? null : null;
   const dl = j('curl', ['-sS', '--max-time', '20',
     `https://api.npmjs.org/downloads/point/last-week/${encodeURIComponent(pkg)}`]);
@@ -927,7 +964,7 @@ function referenceArm(tool, dir, pkg, version, nodeBin) {
     const refExe = path.join(nodeBin, process.platform === 'win32' ? 'node.exe' : 'node');
     if (fs.existsSync(refExe)) refEnv.npm_node_execpath = refExe;
   }
-  const r = spawnSync(tool, args, {
+  const r = spawnSync(exe(tool), args, {
     cwd: fx.proj, env: refEnv, encoding: 'utf8', timeout: 900_000,
   });
   const log = (r.stdout || '') + (r.stderr || '');

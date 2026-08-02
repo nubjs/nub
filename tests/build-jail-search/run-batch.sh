@@ -47,6 +47,27 @@ _snaphash="$(_hash "$SNAP")"
 }
 echo "batch binary: $_snaphash  (snapshot of $NUB)" >&2
 
+# ⛔ SWEEP LEAKED FIXTURE ROOTS BEFORE STARTING. search.mjs roots each package at
+# `~/.cache/nub-search-XXXX` (mkdtempSync) and removes it on NORMAL exit only — so every SIGKILL
+# strands one, and stop-fix-restart is the normal loop when triaging. Each root holds a full
+# installed dependency tree, so they are hundreds of MB apiece.
+#
+# MEASURED: 31 orphans totalling 18.9 GB on a disk already at 98%, and twice more on a fresh corpus
+# box in a single afternoon of resharding. A sweep that only runs at cleanup time cannot help,
+# because the failure mode IS the run that never reached cleanup.
+#
+# `-mmin +30` is what makes this safe to run while OTHER shards are live: a working shard writes
+# into its root continuously, so it can never be 30 minutes cold. Do not lower it — concurrent
+# shards are the normal case and deleting a live root destroys that package's measurement.
+_swept=0
+for _d in "$HOME"/.cache/nub-search-*; do
+  [ -d "$_d" ] || continue
+  if [ -z "$(find "$_d" -maxdepth 0 -mmin -30 2>/dev/null)" ]; then
+    rm -rf "$_d" && _swept=$((_swept + 1))
+  fi
+done
+[ "$_swept" -gt 0 ] && echo "swept $_swept leaked fixture root(s) untouched for >30min" >&2
+
 here="$(cd "$(dirname "$0")" && pwd)"
 
 # And PROVE the override engages before spending hours on it, rather than discovering per-cell.
