@@ -1521,28 +1521,37 @@ fn compose_lifecycle_ua(
 /// (node-gyp) compiled against the *ambient* Node instead of the project's
 /// provisioned one.
 ///
-/// `node_execpath` is the resolved/provisioned Node binary; it pins
-/// `npm_node_execpath` so node-gyp builds against the project's Node even when
-/// no shim is set up (re-entrant / broken install). The shim dir (when present)
-/// fronts PATH and backs `$NODE` so a bare `node` or `$NODE child.js` in a
-/// build script re-enters nub augmented — identical to `nub run`'s spawn env.
+/// ⛔ A DEPENDENCY'S BUILD SCRIPT GETS THE REAL NODE, NOT THE SHIM.
+///
+/// It used to get nub's PATH shim, so a bare `node` in a build script resolved to
+/// `$TMPDIR/nub-node-shim-<pid>-<nonce>/node`, re-entered nub, and nub then exec'd the real
+/// binary — two processes per invocation, with `NODE_COMPAT=1` set afterwards to undo the
+/// augmentation that re-entry had just applied. MEASURED from inside a postinstall:
+/// `command -v node` returned the shim path while `process.execPath` showed the real binary,
+/// which is exactly why the shim went unnoticed.
+///
+/// A dependency's install script is not the user's code and gains nothing from augmentation —
+/// no TypeScript, no loader hooks, no `import.meta.hot`. It wants the plain Node the package was
+/// published against. So the overlay now hands it that directly.
+///
+/// VERSION PINNING SURVIVES: the provisioned Node's own DIRECTORY fronts PATH in the shim's
+/// place, so a bare `node` still resolves to the project's Node rather than the ambient one —
+/// the property the shim was there to guarantee — without the re-entry.
+///
+/// The ABI fix is independent of both and unchanged: `npm_node_execpath` pins the provisioned
+/// binary so node-gyp compiles against the project's Node even on the no-shim path.
 fn augmentation_to_lifecycle_overlay(
     aug: &nub_core::node::spawn::AugmentationEnv,
     node_execpath: &str,
 ) -> (Vec<(std::ffi::OsString, std::ffi::OsString)>, Vec<PathBuf>) {
     use std::ffi::OsString;
     let mut overlay: Vec<(OsString, OsString)> = Vec::new();
-    // $NODE → the shim (→ nub) so userland `$NODE child.js` / `spawn(env.NODE)`
-    // in a build script stays augmented, exactly as build_script_command sets it.
-    if let Some(node_shim) = aug.node_shim_exe() {
-        overlay.push((OsString::from("NODE"), node_shim));
-    }
-    if let Some(opts) = &aug.node_options {
-        overlay.push((OsString::from("NODE_OPTIONS"), OsString::from(opts)));
-    }
-    if let Some(node_path) = &aug.node_path {
-        overlay.push((OsString::from("NODE_PATH"), node_path.clone()));
-    }
+    // $NODE → the REAL binary. A build script doing `spawn(env.NODE)` gets plain Node, not a
+    // shim that re-enters nub only to exec this same binary a moment later.
+    overlay.push((OsString::from("NODE"), OsString::from(node_execpath)));
+    // NODE_OPTIONS / NODE_PATH are nub's AUGMENTATION and are deliberately NOT passed to a
+    // dependency's build script. They carry the preload and the loader hooks, which is precisely
+    // what a published install script must not see.
     aug.apply_compat_restore_markers(|key, value| {
         overlay.push((OsString::from(key), value.to_os_string()));
     });
@@ -1560,10 +1569,11 @@ fn augmentation_to_lifecycle_overlay(
         OsString::from(node_execpath),
     ));
 
-    let prepends = aug
-        .shim_dir
-        .as_deref()
-        .map(|d| vec![PathBuf::from(d)])
+    // The provisioned Node's DIRECTORY, not the shim dir: a bare `node` still resolves to the
+    // project's Node rather than the ambient one, with no re-entry into nub.
+    let prepends = std::path::Path::new(node_execpath)
+        .parent()
+        .map(|d| vec![d.to_path_buf()])
         .unwrap_or_default();
     (overlay, prepends)
 }
