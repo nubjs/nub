@@ -19,6 +19,7 @@ fn project(files: &[(&str, &str)]) -> tempfile::TempDir {
     let probe = r#"console.log(JSON.stringify({
         FROM_DOTENV: process.env.FROM_DOTENV ?? null,
         FROM_LOADER: process.env.FROM_LOADER ?? null,
+        FROM_AUTO_LOAD: process.env.FROM_AUTO_LOAD ?? null,
     }));"#;
     write(dir.path(), "probe.mjs", probe);
     write(
@@ -41,10 +42,15 @@ fn write(root: &Path, path: &str, contents: &str) {
 /// A minimal stand-in for the loader package: sets a value and the sentinel the
 /// verification pass looks for, exactly as a real loader would.
 fn install_stub_loader(root: &Path) {
+    // Mirrors the real package's shape: a root export that resolves the graph, and
+    // a separate `auto-load` entry that applies the protections. nub primes the
+    // first and hands off to the second, so a stub missing either would not
+    // exercise the adapter.
     write(
         root,
         "node_modules/varlock/package.json",
-        r#"{"name":"varlock","version":"0.0.0","type":"module","exports":{".":"./index.js"}}"#,
+        r#"{"name":"varlock","version":"0.0.0","type":"module",
+            "exports":{".":"./index.js","./auto-load":"./auto-load.js"}}"#,
     );
     write(
         root,
@@ -54,6 +60,13 @@ fn install_stub_loader(root: &Path) {
              process.env.__VARLOCK_ENV = "{}";
            }
            export function patchGlobalConsole() {}"#,
+    );
+    write(
+        root,
+        "node_modules/varlock/auto-load.js",
+        r#"// The real entry reuses an already-populated blob and installs its guards;
+           // the stub records that nub handed off to it at all.
+           process.env.FROM_AUTO_LOAD = "yes";"#,
     );
 }
 
@@ -133,6 +146,14 @@ fn a_schema_plus_loader_makes_nub_stand_down() {
         "the loader adapter must run and populate the environment. stderr: {}",
         run.stderr
     );
+    assert_eq!(
+        run.var("FROM_AUTO_LOAD").as_deref(),
+        Some("yes"),
+        "nub must hand off to the loader's own unified entry rather than stopping \
+         at the graph — that entry is what installs the protections and applies \
+         schema settings nub does not model. stderr: {}",
+        run.stderr
+    );
 }
 
 #[test]
@@ -166,13 +187,15 @@ fn the_verification_pass_warns_when_nothing_loaded() {
     write(
         dir.path(),
         "node_modules/varlock/package.json",
-        r#"{"name":"varlock","version":"0.0.0","type":"module","exports":{".":"./index.js"}}"#,
+        r#"{"name":"varlock","version":"0.0.0","type":"module",
+            "exports":{".":"./index.js","./auto-load":"./auto-load.js"}}"#,
     );
     write(
         dir.path(),
         "node_modules/varlock/index.js",
         "export async function load() {}\nexport function patchGlobalConsole() {}",
     );
+    write(dir.path(), "node_modules/varlock/auto-load.js", "");
     let run = run(dir.path());
     assert!(
         run.stderr.contains("never loaded the environment"),

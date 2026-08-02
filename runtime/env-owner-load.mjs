@@ -10,6 +10,7 @@
 
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
+import path from "node:path";
 
 // Two DIFFERENT directories, and conflating them breaks monorepos:
 //   root        — where .env.schema lives, i.e. what the loader must discover from
@@ -20,12 +21,49 @@ import { pathToFileURL } from "node:url";
 const root = process.env.__NUB_ENV_OWNER_ROOT;
 const resolveFrom = process.env.__NUB_ENV_OWNER_RESOLVE_FROM || root;
 if (root) {
+  // Close BOTH routes back into nub before the loader is even imported.
+  //
+  // The loader normally reuses an already-populated __VARLOCK_ENV and never
+  // spawns anything — but that fast path is conditional, and a user-facing knob
+  // turns it off: with `_VARLOCK_FILTER` set, reuse is disabled and it shells out
+  // to its CLI. That CLI is a `#!/usr/bin/env node` script, so with nub's shim on
+  // PATH its shebang resolves `node` to nub, which re-detects this project and
+  // runs the loader again, forever. Measured before this scrub: `_VARLOCK_FILTER=…`
+  // hung with a recursive process chain.
+  //
+  // Rather than depend on the fast path holding, make the spawn HARMLESS: strip
+  // nub's shim from PATH so any child reaches a real node, and drop this module's
+  // own preload tokens so a child cannot re-run it. Both are consumed at startup,
+  // so mutating them now affects only children, never this process.
+  //
+  // This must happen BEFORE importing the loader: it snapshots process.env at
+  // module-load time (`originalProcessEnv`, captured by the first instance to
+  // load) and hands THAT snapshot to its subprocess, so a later mutation is
+  // invisible to it.
+  const savedPath = process.env.PATH;
+  const savedNodeOptions = process.env.NODE_OPTIONS;
+  const drop = (value, matches) =>
+    (value || "")
+      .split(/\s+/)
+      .filter((token) => token && !matches(token))
+      .join(" ");
+  if (savedPath !== undefined) {
+    process.env.PATH = savedPath
+      .split(path.delimiter)
+      .filter((entry) => !path.basename(entry).startsWith("nub-node-shim-"))
+      .join(path.delimiter);
+  }
+  if (savedNodeOptions !== undefined) {
+    process.env.NODE_OPTIONS = drop(savedNodeOptions, (t) => t.includes("env-owner"));
+  }
+
   try {
     // Resolve the loader from the USER'S PROJECT, not from here. This module
     // lives in nub's install dir, outside the project's node_modules, so a bare
     // `import "varlock"` resolves against nub and fails with ERR_MODULE_NOT_FOUND.
     const req = createRequire(pathToFileURL(`${resolveFrom}/package.json`));
     const loader = await import(pathToFileURL(req.resolve("varlock")).href);
+    const autoLoad = pathToFileURL(req.resolve("varlock/auto-load")).href;
 
     // The loader discovers its schema from the CURRENT DIRECTORY only, with no
     // ancestor walk, so a workspace member would otherwise miss a root schema.
@@ -51,47 +89,30 @@ if (root) {
       }
     }
     try {
+    // BOTH steps run inside the cwd hop, and that is load-bearing.
+    //
+    // `load()` resolves the graph. The second import hands off to the loader's OWN
+    // unified entry, which installs the console / ServerResponse / Response guards,
+    // applies `@encryptInjectedEnv`, and strips `@internal` keys — all gated on the
+    // schema's settings. Calling those pieces individually meant nub deciding which
+    // of them count, and it silently dropped the two it did not know about.
+    //
+    // nub cannot simply preload that entry on its own, because it resolves its
+    // graph through a CLI SUBPROCESS whose `#!/usr/bin/env node` shebang re-enters
+    // nub and recurses without bound (measured: 541 spawns from one plain-node
+    // run). But it has a reuse fast-path: with `__VARLOCK_ENV` already populated it
+    // skips the CLI entirely, which is exactly what the in-process `load()` above
+    // sets up.
+    //
+    // That reuse check is evaluated against the CURRENT DIRECTORY. Restoring cwd
+    // before this import made it reject the blob it had just been handed, re-resolve
+    // from the workspace member — where there is no schema — and clobber the
+    // correct values with an empty graph. Measured as a silent `null` on every
+    // variable, with no error anywhere.
       await loader.load();
+      await import(autoLoad);
     } finally {
       if (hopped) process.chdir(cwd);
-    }
-
-    // Install exactly the protections the loader installs for itself — its own
-    // `auto-load` entry calls these three, in this order, and each is internally
-    // gated on the schema's own settings (`@redactLogs`, `@preventLeaks`), so a
-    // project that turned one off still gets what it asked for. nub adds no
-    // redaction of its own and makes no judgement about which of these to run.
-    //
-    // Optional-called: an older or newer loader may not export all three, and a
-    // missing protection should not abort the run.
-    //
-    // This covers only THIS process. Stream-level redaction — raw
-    // `process.stdout.write`, and anything a subprocess prints — is what
-    // `varlock run --` adds by piping the child's stdio, and is out of scope
-    // here by design.
-    loader.patchGlobalConsole?.();
-    loader.patchGlobalServerResponse?.();
-    loader.patchGlobalResponse?.();
-
-    // `load()` always writes the serialized graph to __VARLOCK_ENV in PLAINTEXT.
-    // The loader's own `auto-load` entry encrypts it when the schema asks for it,
-    // but that entry reaches its graph through a CLI subprocess whose shebang
-    // re-enters nub, so nub cannot use it. Rather than reimplement the loader's
-    // encryption — which would be nub building exactly the thing it defers on —
-    // say plainly that this one setting is not honoured here, since the blob is
-    // inherited by every child process.
-    try {
-      const settings = JSON.parse(process.env.__VARLOCK_ENV || "{}").settings;
-      if (settings?.encryptInjectedEnv) {
-        console.warn(
-          "nub: this schema sets @encryptInjectedEnv, which nub does not apply — " +
-            "__VARLOCK_ENV is passed to child processes unencrypted.\n" +
-            "      Use `varlock run -- nub …` if you need the encrypted blob.",
-        );
-      }
-    } catch {
-      // A blob we cannot parse is not worth failing a run over; the loader owns
-      // its own format and has already validated it.
     }
   } catch (err) {
     // A validation failure is the loader's own diagnostic and has already been
@@ -109,5 +130,11 @@ if (root) {
       process.exit(1);
     }
     throw err;
+  } finally {
+    // Restore both for the USER's code. The scrub exists only to make the
+    // loader's own subprocess safe; a `node` the application spawns afterwards
+    // should still get nub's shim and preloads like any other child.
+    if (savedPath !== undefined) process.env.PATH = savedPath;
+    if (savedNodeOptions !== undefined) process.env.NODE_OPTIONS = savedNodeOptions;
   }
 }

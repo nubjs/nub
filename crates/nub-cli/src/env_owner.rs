@@ -156,20 +156,56 @@ pub(crate) fn detect(project_root: &Path, workspace_root: Option<&Path>) -> Opti
     // whether the layout hoisted it to the workspace root or kept it beside the
     // member. The schema root above is a separate question and must not be reused
     // here — see OWNER_RESOLVE_ENV.
-    let kind = if loader_package_dir(project_root, workspace_root.or(Some(project_root))).is_some()
-    {
-        OwnerKind::InProcess
-    } else {
-        match find_loader_cli(project_root) {
-            Some(bin) => OwnerKind::Cli(bin),
-            None => OwnerKind::Missing,
-        }
+    if loader_package_dir(project_root, workspace_root.or(Some(project_root))).is_some() {
+        return Some(EnvOwner {
+            root,
+            resolve_from: project_root.to_path_buf(),
+            kind: OwnerKind::InProcess,
+        });
+    }
+    let (resolve_from, kind) = match find_loader_cli(project_root) {
+        Some(bin) => match loader_package_from_cli(&bin) {
+            // A global `npm i -g` install IS an importable package — its bin is a
+            // symlink into `<prefix>/lib/node_modules/<pkg>/`. Following it moves
+            // those users onto the in-process path, which gets them secret
+            // redaction and drops a subprocess; the CLI path can offer neither.
+            Some(package_root) => (package_root, OwnerKind::InProcess),
+            // A Homebrew or curl install is a standalone executable with no module
+            // behind it, so running it is the only option.
+            None => (project_root.to_path_buf(), OwnerKind::Cli(bin)),
+        },
+        None => (project_root.to_path_buf(), OwnerKind::Missing),
     };
     Some(EnvOwner {
         root,
-        resolve_from: project_root.to_path_buf(),
+        resolve_from,
         kind,
     })
+}
+
+/// The importable package behind a loader CLI, if there is one.
+///
+/// Follows the bin through symlinks and walks up to the directory holding a
+/// `package.json` named after the loader. `None` for a standalone binary, which
+/// has no package to find.
+fn loader_package_from_cli(bin: &Path) -> Option<PathBuf> {
+    let real = std::fs::canonicalize(bin).ok()?;
+    let mut dir = real.parent();
+    while let Some(current) = dir {
+        let manifest = current.join("package.json");
+        if manifest.is_file() {
+            // Confirm this is the LOADER's own manifest. Walking out of a bin
+            // directory can pass an unrelated `package.json`, and treating that as
+            // the loader would hand the adapter a root it cannot import from.
+            let name = std::fs::read_to_string(&manifest)
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .and_then(|json| json.get("name")?.as_str().map(str::to_string));
+            return (name.as_deref() == Some(LOADER_PACKAGE)).then(|| current.to_path_buf());
+        }
+        dir = current.parent();
+    }
+    None
 }
 
 /// The loader package's directory inside the project, if it is importable.
