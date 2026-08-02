@@ -758,6 +758,13 @@ function packageStanding(pkg, version) {
  *  puppeteer@24.40.0: npm and pnpm both exit 0 while leaving the SAME broken extraction nub
  *  reports as a failure — a valid 96MB zip, 17 entries, 2 extracted, no executable. Judged by rc
  *  that reads as a nub defect; judged by artifact all three agree and it is environmental. */
+/** Every npm era's way of announcing a lifecycle script. Kept beside the arm that uses it so a
+ *  new npm output format is one entry, not a rediscovered defect. */
+const NPM_RAN_SCRIPT = [
+  /^\s*>\s+\S+@\S+\s+(pre|post)?install\b/m,      // npm 2..10
+  /\binfo run\b[^\n]*\b(pre|post)?install\b/m,      // npm 11+
+];
+
 function referenceArm(tool, dir, pkg, version, nodeBin) {
   const d = path.join(dir, `${tool}ref`);
   const fx = makeFixture(d, pkg, version, { jailOff: true });
@@ -803,9 +810,20 @@ function referenceArm(tool, dir, pkg, version, nodeBin) {
     ...(tool === 'pnpm' ? { lifecycle } : {}),
     // DID A SCRIPT ACTUALLY RUN? A count, not a boolean guess — an arm that ran none is not
     // evidence of anything, and this is what makes that visible in the record.
+    // ⛔ DID A SCRIPT ACTUALLY RUN? An arm that ran none is not evidence, and this is what makes
+    // that visible. It must recognise EVERY npm era, because the Node pin selects the bundled npm
+    // and that ranges from npm 2 to npm 11:
+    //
+    //   npm 2..10  "> pkg@1.0.0 postinstall /path/to/node_modules/pkg"
+    //   npm 11+    "info run pkg@1.0.0 postinstall node_modules/pkg node install.mjs"
+    //
+    // MEASURED cost of knowing only the npm 11 form: on every old-Node pin `ranScripts` came back
+    // falsely FALSE, the arm was dropped from the verdict vote, the vote came up empty, and the
+    // result defaulted to BROKEN-IN-ENVIRONMENT. Four packages were written off on that basis
+    // while their oracle had in fact run the script and succeeded.
     ranScripts: tool === 'pnpm'
       ? lifecycle.length > 0
-      : (log.match(/^\S*\s*info run .* (pre|post)?install\b/gm) || []).length > 0,
+      : NPM_RAN_SCRIPT.some((re) => re.test(log)),
   };
 }
 
