@@ -757,19 +757,23 @@ fn is_hex_digest(value: &str, len: usize) -> bool {
     value.len() == len && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+/// Hash a file with BLAKE3, memory-mapped and across all cores.
+///
+/// `update_mmap_rayon` rather than a read loop because this is the single most
+/// expensive thing a warm launch does: ~107 MB, every time. BLAKE3 hashes a Merkle
+/// tree, so distinct chunks are independent and the work genuinely parallelises —
+/// the property SHA-256's serial chaining denies, and the reason a faster algorithm
+/// alone left most of the machine idle here. The mmap also removes the per-block
+/// copy into a userspace buffer.
+///
+/// blake3 falls back to a plain read internally when a file is too small to be
+/// worth mapping, or when mmap is unavailable, so this stays correct on every path.
 fn blake3_hex_of_file(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut hasher = blake3::Hasher::new();
-    let mut buf = vec![0u8; 1 << 20];
-    loop {
-        let read = file
-            .read(&mut buf)
-            .with_context(|| format!("reading {}", path.display()))?;
-        if read == 0 {
-            return Ok(hasher.finalize().to_hex().to_string());
-        }
-        hasher.update(&buf[..read]);
-    }
+    hasher
+        .update_mmap_rayon(path)
+        .with_context(|| format!("hashing {}", path.display()))?;
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 /// Where this payload's embedded Node extracts to, keyed by content so two
