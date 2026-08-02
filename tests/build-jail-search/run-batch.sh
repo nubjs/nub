@@ -139,7 +139,11 @@ if [ "${NUB_PROBE_SKIP_CANARY:-0}" != "1" ]; then
   _can="${TMPDIR:-/tmp}/nub-canary-$$"; rm -rf "$_can"
   _canjson="$_can/results/runs/$(node -p 'process.platform+"-"+process.arch')/puppeteer/25.4.0/results.json"
   echo "fixture canary: installing puppeteer@25.4.0 …" >&2
-  if ! timeout 900 node "$here/search.mjs" puppeteer@25.4.0 --nub "$NUB" --force \
+  # `--control-only`: the canary asks whether the FIXTURE still installs a real tree, which the
+  # control alone answers. Running the full 54-state walk here was ~50x the work and timed out at
+  # 900s on a windows-latest runner, blocking every Windows shard behind a check that never
+  # finished — and `timeout` killed it before it could write a reason.
+  if ! timeout 900 node "$here/search.mjs" puppeteer@25.4.0 --nub "$NUB" --force --control-only \
         --runs "$_can/results/runs" > /dev/null 2>"$_can.err"; then
     # ⛔ PRINT THE REASON, do not point at a file. On a CI runner that path is never uploaded and
     # the workspace is destroyed with the job, so "see $_can.err" is a dead end — MEASURED on a

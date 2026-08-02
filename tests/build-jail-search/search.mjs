@@ -1273,6 +1273,30 @@ function search(nub, pkg, version, root, keep, runDir) {
       provenance: provenance(nub, nodePin, enginesNode, nodeMajor, publishedAt),
     };
   }
+  // ⛔ CONTROL-ONLY MODE — what the FIXTURE CANARY actually needs, and only that.
+  //
+  // The canary asks one question: does the fixture still install a REAL TREE? That is answered
+  // entirely by the control's `fileCount` and `materialized`. It was answering it by running the
+  // FULL 54-state walk, which is ~50x the work.
+  //
+  // MEASURED on a windows-latest runner: the canary ran 21:06:58 -> 21:21:59 and died on its own
+  // 900s cap, having proved nothing — and because `timeout` killed it, the stderr it would have
+  // written was EMPTY, so the refusal had no reason attached either. Every Windows shard was
+  // blocked behind a check that could not finish.
+  //
+  // Returns the same record shape so the canary's `control.fileCount` / `control.materialized`
+  // reads are unchanged, and the verdict names itself so this can never be mistaken for a
+  // measurement or land in the catalog.
+  if (argv.includes('--control-only')) {
+    return {
+      pkg, version,
+      verdict: 'CONTROL-ONLY',
+      why: 'ran the widest-grant control and stopped — fixture health check, not a measurement.',
+      cells, control: baseCase(control),
+      provenance: provenance(nub, nodePin, enginesNode, nodeMajor, publishedAt),
+    };
+  }
+
   // ⛔ CONFIRM A CONTROL FAILURE BEFORE IT CAN BECOME AN ACCUSATION.
   //
   // A failing control is the gateway to BROKEN-EVEN-WITH-EVERYTHING, the verdict that says "nub has
