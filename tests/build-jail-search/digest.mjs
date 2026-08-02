@@ -61,6 +61,8 @@ function digestFor(dir) {
     MINIMUM: 'measured — `state` is the minimal grant that reproduces the control',
     'BROKEN-IN-ENVIRONMENT': 'a reference PM fails too — grant nothing, and suspect this host',
     'BROKEN-EVEN-WITH-EVERYTHING': 'a reference PM SUCCEEDS where nub fails — a nub defect, never a grant gap',
+    'REFUSED-MALICIOUS': 'the OSV screen refused a MAL-* package — WORKING AS DESIGNED. No grant applies, '
+      + 'it never enters the catalog, and it is not a failure of the jail',
     'HARNESS-ERROR': 'the catalog override did not engage — wrong binary, or a catalog shape the parser rejects',
     'HARNESS-CRASH': 'the probe itself died — read harness-stderr.log; never a package fact',
     'HARNESS-TIMEOUT': 'the probe exceeded its cap; never a package fact',

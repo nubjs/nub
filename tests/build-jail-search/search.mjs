@@ -250,12 +250,13 @@ function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg, 
   // Scrubbed rather than forced to a value: we want the DEVELOPER-MACHINE path, which is the one
   // that runs more code, and a wider measured grant is the safe direction.
   const env = { ...process.env, HOME: home, DATABASE_URL: 'postgresql://user:pass@localhost:5432/db' };
-  // NO PYTHON PIN. A pin was added here on the theory that gyp rejects Python 3.14 — REFUTED:
-  // node-gyp 12.4.0 declares `semverRange = '>=3.6.0'` in `lib/find-python.js`, which 3.14
-  // satisfies, and `canvas@2.11.2` compiled cleanly under it once `pkg-config` was reachable.
-  // The real failure was `pkg-config pixman-1` exiting 127 — a missing SYSTEM library, nothing
-  // to do with Python. Left unpinned so the harness inherits whatever the host resolves, which
-  // is what a user gets.
+  // PYTHON IS PINNED ONLY FOR OLD NODE — see gypPython(). The general no-pin rule still holds and
+  // its reasoning is unchanged: node-gyp 12 declares `semverRange = '>=3.6.0'`, which 3.14
+  // satisfies, and the failure once blamed on Python was really `pkg-config pixman-1` exiting 127,
+  // a missing SYSTEM library. Unpinned is the DEVELOPER-MACHINE path, which runs more code and
+  // yields the wider, safer grant.
+  const py = gypPython(nodeBin);
+  if (py) env.npm_config_python = py;
 
   for (const k of ['CI', 'CONTINUOUS_INTEGRATION', 'BUILD_NUMBER', 'RUN_ID', 'GITHUB_ACTIONS',
                    'GITLAB_CI', 'CIRCLECI', 'TRAVIS', 'JENKINS_URL', 'TEAMCITY_VERSION',
@@ -451,6 +452,36 @@ function resolveNodeMajor(enginesNode) {
   return String(Math.min(Math.max(floor, NODE_FLOOR), NODE_CEILING));
 }
 
+/** A Python that the node-gyp THIS Node will get can actually run, or null to leave the host's
+ *  own resolution alone.
+ *
+ *  nub selects node-gyp by ambient Node major (`node_gyp_bootstrap::bucket_for`), so an old Node
+ *  gets an old node-gyp — and the gyp vendored in node-gyp <=9 opens with
+ *  `from distutils.version import StrictVersion`, a module REMOVED in Python 3.12. On a host whose
+ *  `python3` is newer (this one is 3.14.6 via pyenv) every native compile on Node <=13 therefore
+ *  dies in `gyp configure`, which the harness scored as BROKEN-EVEN-WITH-EVERYTHING — the verdict
+ *  reserved for a nub defect — for what is purely a host mismatch.
+ *
+ *  MEASURED, real `node-gyp rebuild` of a minimal addon:
+ *
+ *      node-gyp 5 / 8 / 9   ->  Python <=3.11 only
+ *      node-gyp 10 / 12     ->  any Python >=3.6, 3.12+ included
+ *
+ *  So this pins ONLY for the old-node case and only when a suitable interpreter exists. Modern Node
+ *  keeps the deliberate no-pin behaviour, which is the developer-machine path. Returning null when
+ *  nothing suitable is installed is correct rather than fatal: the run then fails the same way it
+ *  does today, and provenance records the Python that was actually used. */
+function gypPython(nodeBin) {
+  const m = nodeBin && /\/v(\d+)\./.exec(nodeBin);
+  if (!m || Number(m[1]) > 13) return null;          // node-gyp >=10 handles any modern Python
+  for (const name of ['python3.11', 'python3.10', 'python3.9']) {
+    const r = spawnSync('command', ['-v', name], { shell: true, encoding: 'utf8' });
+    const p = (r.stdout ?? '').trim();
+    if (r.status === 0 && p) return p;
+  }
+  return null;
+}
+
 /** The PATH prefix that pins a probe to `major`, or null when no such Node is installed. nub
  *  resolves its Node from PATH (verified), so this is all the pinning that is needed — and the
  *  REFERENCE ARMS must use the same one, or the oracle compares two runtimes rather than two
@@ -531,6 +562,10 @@ function provenance(nub, nodePin, enginesNode, nodeMajor) {
       pinnedTo: nodePin?.name ?? null,
       hostNode: process.version,
     },
+    // THE PYTHON IS PART OF THE RESULT TOO, for the same reason. `toolchain.python` reports what
+    // the HOST resolves; when this is non-null the build actually ran against something else, and
+    // a record showing only the host value would misstate its own conditions.
+    pythonPinned: gypPython(nodePin?.dir ?? null),
     node: process.version,
     toolchain: toolchain(),
     at: new Date().toISOString(),
@@ -787,6 +822,11 @@ function referenceArm(tool, dir, pkg, version, nodeBin) {
   // SAME Node as the nub arm — otherwise this compares two runtimes, not two package managers.
   const refEnv = { ...process.env, HOME: fx.home };
   if (nodeBin) refEnv.PATH = `${nodeBin}:${refEnv.PATH ?? ''}`;
+  // The SAME Python pin the nub arm gets — npm and pnpm bundle their own node-gyp, but on an old
+  // Node theirs is old too, so they hit the identical distutils wall. Pinning one arm and not the
+  // other would make the oracle a comparison of interpreters rather than of package managers.
+  const refPy = gypPython(nodeBin);
+  if (refPy) refEnv.npm_config_python = refPy;
   const r = spawnSync(tool, args, {
     cwd: fx.proj, env: refEnv, encoding: 'utf8', timeout: 900_000,
   });
@@ -1000,6 +1040,25 @@ function search(nub, pkg, version, root, keep, runDir) {
       why: 'the catalog override did not engage in the control — is the binary built with '
          + '`--features nub-cli/build-jail-catalog-override`, and did anything rebuild it mid-run?',
       cells, control: baseCase(control), provenance: provenance(nub, nodePin, enginesNode, nodeMajor),
+    };
+  }
+  // ⛔ A MALICIOUS-PACKAGE REFUSAL IS THE SCREEN WORKING, NOT A DEFECT AND NOT A GRANT GAP.
+  //
+  // The OSV screen refuses to install anything carrying a `MAL-*` advisory, whole-tree and
+  // fail-closed. That refusal fails the control, and the control-failure path below would then
+  // hand it to the oracle and score it BROKEN-EVEN-WITH-EVERYTHING — the verdict reserved for a
+  // nub defect. MEASURED on `fsevents@1.2.4`, which is refused and was recorded as a defect.
+  //
+  // It is its own outcome: no grant is applicable (the package never installs by design), it must
+  // never enter the catalog, and it must never be counted as a failure of the jail.
+  const refusal = /ERR_NUB_MALICIOUS_PACKAGE|refusing to install malicious package/;
+  if (refusal.test(control.log ?? '') || refusal.test(controlB.log ?? '')) {
+    return {
+      pkg, version, verdict: 'REFUSED-MALICIOUS',
+      why: 'the OSV screen refused this package (MAL-* advisory). Working as designed — no grant '
+         + 'applies, and it must not be recorded as a nub defect or enter the catalog.',
+      cells, control: baseCase(control),
+      provenance: provenance(nub, nodePin, enginesNode, nodeMajor),
     };
   }
   if (control.rc !== 0 || controlB.rc !== 0) {

@@ -65,7 +65,16 @@ if (worklist) {
 console.log(`records            ${records.length}`);
 for (const [k, n] of tally(by((r) => r.verdict))) console.log(`  ${k.padEnd(28)} ${n}`);
 
-const bad = records.filter((r) => r.verdict !== 'MINIMUM');
+// REFUSED-MALICIOUS is a SUCCESS of the OSV screen, not a failure — listing it beside real
+// breakage inflates the failure count and invites re-investigating a package that is refused by
+// design. Counted separately, never in the "check the first one" bin.
+const refused = records.filter((r) => r.verdict === 'REFUSED-MALICIOUS');
+if (refused.length) {
+  console.log(`\nOSV-refused (working as designed, NOT failures): ${refused.length}`);
+  for (const r of refused.slice(0, 5)) console.log(`  ${r.pkg}@${r.version}`);
+}
+
+const bad = records.filter((r) => r.verdict !== 'MINIMUM' && r.verdict !== 'REFUSED-MALICIOUS');
 if (bad.length) {
   console.log(`\n⚠ ${bad.length} NON-MINIMUM — check the FIRST one, not the count:`);
   for (const r of bad.slice(0, 6)) {
