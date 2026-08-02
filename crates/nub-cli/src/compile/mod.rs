@@ -906,10 +906,20 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
     argv.push(tmp.as_os_str());
     let mut ok = run_ok(&strip, &argv);
     if ok && needs_resign {
+        // `-i node` is load-bearing, not cosmetic. Without it `codesign` derives the
+        // CodeDirectory identifier from the file's BASENAME, and this file is staged
+        // as `nub-compile-node-<pid>` — so the same Node signed by two compiles gets
+        // two identifiers, two signatures, and two `node_sha256` values. That keys a
+        // different `compile-node/<version>-<hash>` extraction dir every time, so a
+        // compile-and-run loop leaves a fresh ~107 MB tree behind on each pass and
+        // nothing collects them. It also makes a byte-identical rebuild impossible.
+        // `node` is what the official distribution signs with.
         ok = run_ok(
             "codesign",
             &[
                 "--force".as_ref(),
+                "-i".as_ref(),
+                "node".as_ref(),
                 "-s".as_ref(),
                 "-".as_ref(),
                 tmp.as_os_str(),
