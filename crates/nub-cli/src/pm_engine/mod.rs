@@ -1744,7 +1744,13 @@ fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
     };
     let node = discovered.unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
     let runtime = crate::project_config::runtime_config()?;
-    let runtime_node_options = crate::cli::runtime_node_options(&runtime, &node)?;
+    // Lifecycle scripts spawn `node` like any other launcher, so they must resolve
+    // env through the same owner rather than falling back to nub's own cascade.
+    let env_owner = nub_core::workspace::detect::detect_project(cwd).and_then(|project| {
+        crate::env_owner::detect(&project.root, project.workspace_root.as_deref())
+    });
+    let runtime_node_options =
+        crate::cli::runtime_node_options(&runtime, &node, env_owner.as_ref())?;
     let runtime_json = crate::cli::runtime_config_json(&runtime)?;
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let Some(mut aug) = nub_core::node::spawn::compute_augmentation_env(

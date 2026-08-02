@@ -3047,6 +3047,7 @@ fn is_node_option_token(value: &str) -> bool {
 pub(crate) fn runtime_node_options(
     runtime: &crate::project_config::RuntimeConfig,
     node: &nub_core::node::discovery::ResolvedNode,
+    env_owner: Option<&crate::env_owner::EnvOwner>,
 ) -> Result<Vec<String>> {
     let accepted = nub_core::node::discovery::accepted_env_flags(node.path.as_std_path());
     let mut options = Vec::new();
@@ -3075,6 +3076,19 @@ pub(crate) fn runtime_node_options(
             .iter()
             .map(|injection| injection.node_options_token()),
     );
+
+    // Env-owner modules go AFTER the user's own preloads, so the verification
+    // pass is the last preload to run and still precedes user code. See
+    // `crate::env_owner::preload_tokens` for why that ordering is the design.
+    if let Some(owner) = env_owner
+        && let Ok(nub_binary) = nub_core::node::spawn::current_nub_binary()
+    {
+        options.extend(crate::env_owner::preload_tokens(
+            owner,
+            &nub_binary,
+            &node.version,
+        ));
+    }
 
     if let Some(tsconfig) = runtime.tsconfig.as_deref()
         && !Path::new(tsconfig).is_file()
@@ -3189,19 +3203,38 @@ fn runtime_child_env(
     runtime: &crate::project_config::RuntimeConfig,
     project_root: Option<&Path>,
     compat_mode: bool,
+    env_owner: Option<&crate::env_owner::EnvOwner>,
 ) -> Result<HashMap<String, String>> {
+    use crate::env_owner::OwnerKind;
     use crate::project_config::RuntimeEnvFile;
 
     if no_env_file() {
         return Ok(HashMap::new());
     }
+    // An external loader owning env displaces nub's DEFAULT discovery only. An
+    // explicit `envFile` in nub.jsonc, like an explicit `--env-file`, is a
+    // deliberate instruction and still wins.
+    let owner = env_owner.filter(|owner| owner.suppresses_env_files());
     let base = if compat_mode {
         HashMap::new()
     } else {
         match &runtime.env_file {
-            RuntimeEnvFile::Default if !env_file_flag_present() => project_root
-                .map(nub_core::workspace::env::load_env_files)
-                .unwrap_or_default(),
+            RuntimeEnvFile::Default if !env_file_flag_present() => match owner {
+                // The loader package is importable, so the child's preload
+                // adapter loads it in-process; nub contributes no values here.
+                Some(owner) if matches!(owner.kind(), OwnerKind::InProcess) => HashMap::new(),
+                // Only a CLI binary exists (a Homebrew/curl install ships no
+                // importable module), so nub resolves the graph itself.
+                Some(owner) if matches!(owner.kind(), OwnerKind::Cli(_)) => {
+                    let OwnerKind::Cli(bin) = owner.kind() else {
+                        unreachable!("guarded by the arm above")
+                    };
+                    crate::env_owner::load_via_cli(bin, owner.root())?
+                }
+                _ => project_root
+                    .map(nub_core::workspace::env::load_env_files)
+                    .unwrap_or_default(),
+            },
             RuntimeEnvFile::Sources(paths) => load_runtime_env_sources(paths)?,
             RuntimeEnvFile::Default | RuntimeEnvFile::Disabled => HashMap::new(),
         }
@@ -3220,6 +3253,68 @@ fn runtime_child_env(
     let mut result = base;
     overlay_env_file_vars(&mut result);
     Ok(result)
+}
+
+/// Publish the env-owner markers the child's preload modules read, and warn once
+/// when a schema is present but no loader is installed.
+///
+/// The markers are internal `__NUB_*` plumbing, not user knobs, and are
+/// deliberately loader-agnostic: the verification pass asks "did anything load
+/// the environment?", so replacing the loader keeps it working unchanged.
+fn apply_env_owner_env(
+    env_owner: Option<&crate::env_owner::EnvOwner>,
+    env_vars: &mut HashMap<String, String>,
+) {
+    let Some(owner) = env_owner else { return };
+    if let Some(warning) = owner.missing_loader_warning() {
+        warn_once(&warning);
+        return;
+    }
+    let Some(marker) = owner.marker() else { return };
+    env_vars.insert(crate::env_owner::OWNER_ENV.to_string(), marker.to_string());
+    env_vars.insert(
+        crate::env_owner::OWNER_ROOT_ENV.to_string(),
+        owner.root().display().to_string(),
+    );
+    env_vars.insert(
+        crate::env_owner::OWNER_RESOLVE_ENV.to_string(),
+        owner.resolve_from().display().to_string(),
+    );
+    if matches!(owner.kind(), crate::env_owner::OwnerKind::Cli(_)) {
+        // nub already resolved the graph out of process, so the verification
+        // pass must not warn about a load it cannot observe in-process.
+        env_vars.insert(
+            crate::env_owner::OWNER_LOADED_ENV.to_string(),
+            "1".to_string(),
+        );
+        // Redaction is installed by importing the loader into THIS process, which
+        // a CLI-only install cannot do. Say so rather than letting secrets print
+        // in the clear from a setup the user believed was protected.
+        warn_once(
+            "nub: varlock is installed as a standalone CLI, so secret redaction is \
+             unavailable.\n      Install it as a project dependency for redaction: nub add varlock",
+        );
+    }
+}
+
+/// Emit a startup notice at most once per process. Several launchers can resolve
+/// the same project in one run, and a repeated warning reads as a loop.
+///
+/// Gated on `--silent`, NOT on `SHOW_WARNINGS`: that flag is the `--verbose`
+/// opt-in and defaults off, so gating here would hide the notice from nearly
+/// everyone. These notices exist to explain why an environment the user expected
+/// was not applied — invisible by default is the one thing they must not be.
+fn warn_once(message: &str) {
+    static WARNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    if SILENT.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut seen = WARNED.lock().unwrap_or_else(|err| err.into_inner());
+    if seen.iter().any(|prior| prior == message) {
+        return;
+    }
+    seen.push(message.to_string());
+    eprintln!("{message}");
 }
 
 fn run_file(args: &[String]) -> Result<i32> {
@@ -3275,11 +3370,21 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     // which suppresses everything. `merge_child_env` applies the gate. --env-file
     // vars apply even in compat mode (explicit user flag); --no-env-file wins.
     let project = nub_core::workspace::detect::detect_project(cwd);
-    let mut env_vars = runtime_child_env(
-        &runtime,
-        project.as_ref().map(|project| project.root.as_path()),
-        compat_mode,
-    )?;
+    let project_root = project.as_ref().map(|project| project.root.as_path());
+    // A `.env.schema` means an external loader owns env for this project, so nub
+    // stands down from its own cascade rather than resolving a file set the
+    // loader would resolve differently. Detection is a `stat` and runs before any
+    // loading, so nothing has to be undone. Compat mode is vanilla Node: no
+    // augmentation, hence no adapter to load with, hence no detection.
+    let env_owner = (!compat_mode)
+        .then(|| {
+            project.as_ref().and_then(|project| {
+                crate::env_owner::detect(&project.root, project.workspace_root.as_deref())
+            })
+        })
+        .flatten();
+    let mut env_vars = runtime_child_env(&runtime, project_root, compat_mode, env_owner.as_ref())?;
+    apply_env_owner_env(env_owner.as_ref(), &mut env_vars);
 
     // Bin-exec parity with `nub run`: when this spawn is nub LAUNCHING a resolved
     // node bin (a `nubx`/`nub exec` scaffolder — `exec_ua`), set the same role-
@@ -3311,7 +3416,7 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     let (runtime_node_options, runtime_v8_flags) = if compat_mode {
         (Vec::new(), Vec::new())
     } else {
-        let options = runtime_node_options(&runtime, &node)?;
+        let options = runtime_node_options(&runtime, &node, env_owner.as_ref())?;
         let v8_flags = runtime_v8_flags(&runtime)?;
         env_vars.insert(
             crate::project_config::RUNTIME_CONFIG_ENV.to_string(),
@@ -4359,10 +4464,19 @@ fn build_script_command(
     let cwd = std::env::current_dir().unwrap_or_else(|_| project.root.clone());
     let node = nub_core::node::discovery::discover_node(&cwd)
         .unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
+    // Values stay node-scoped per the note above — each inner `node` resolves the
+    // environment at its own startup. What must flow from here is the env-owner
+    // MARKERS and preload tokens, so that inner node (and any node a script
+    // spawns) loads through the same owner instead of falling back to nub's
+    // cascade.
+    let env_owner = (!compat_mode)
+        .then(|| crate::env_owner::detect(&project.root, project.workspace_root.as_deref()))
+        .flatten();
+    apply_env_owner_env(env_owner.as_ref(), &mut env_vars);
     let runtime_node_options = if compat_mode {
         Vec::new()
     } else {
-        runtime_node_options(&runtime, &node)?
+        runtime_node_options(&runtime, &node, env_owner.as_ref())?
     };
     let runtime_json = if compat_mode {
         None
@@ -5303,11 +5417,25 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     {
         return Ok(code);
     }
+    // Same stand-down as the run path: with an external owner, watch must not
+    // hand Node the `.env*` cascade as `--env-file` args either, or the watched
+    // process would re-acquire exactly the file set the owner displaces.
+    let env_owner = (!compat_mode)
+        .then(|| {
+            project
+                .as_ref()
+                .and_then(|p| crate::env_owner::detect(&p.root, p.workspace_root.as_deref()))
+        })
+        .flatten();
+    let env_owner_suppresses = env_owner
+        .as_ref()
+        .is_some_and(crate::env_owner::EnvOwner::suppresses_env_files);
     let config_env_sources = matches!(&runtime.env_file, RuntimeEnvFile::Sources(_));
     let env_file_paths = if no_env_file || compat_mode {
         Vec::new()
     } else {
         match &runtime.env_file {
+            RuntimeEnvFile::Default if !env_file_present && env_owner_suppresses => Vec::new(),
             RuntimeEnvFile::Default if !env_file_present => project
                 .as_ref()
                 .map(|p| nub_core::workspace::env::discover_env_files(&p.root))
@@ -5363,7 +5491,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         let status = nub_core::node::spawn::status_forwarding_signals(&mut cmd)?;
         return Ok(nub_core::node::spawn::exit_code_from_status(&status));
     }
-    let runtime_node_options = runtime_node_options(&runtime, &node)?;
+    let runtime_node_options = runtime_node_options(&runtime, &node, env_owner.as_ref())?;
     let runtime_v8_flags = runtime_v8_flags(&runtime)?;
     let runtime_json = runtime_config_json(&runtime)?;
 
@@ -5968,7 +6096,13 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
     };
     let node = nub_core::node::discovery::discover_node(cwd)
         .unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
-    let runtime_node_options = runtime_node_options(&runtime, &node)?;
+    // A `node` this tool spawns must resolve env through the same owner as a
+    // direct `nub <file>` run, so the owner's preload tokens ride along with the
+    // rest of the augmentation env.
+    let env_owner = nub_core::workspace::detect::detect_project(cwd).and_then(|project| {
+        crate::env_owner::detect(&project.root, project.workspace_root.as_deref())
+    });
+    let runtime_node_options = runtime_node_options(&runtime, &node, env_owner.as_ref())?;
     let runtime_json = runtime_config_json(&runtime)?;
     // Force-async-tier decision for a foreign async loader (`nubx tsx …`) on a
     // broken-compose Node — captured now, before `node.version` is moved into
