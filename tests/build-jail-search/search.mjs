@@ -542,11 +542,24 @@ function gypPython(nodeBin) {
  *  REFERENCE ARMS must use the same one, or the oracle compares two runtimes rather than two
  *  package managers. */
 function nodeBinFor(major) {
-  const root = path.join(os.homedir(), '.nvm', 'versions', 'node');
+  // ⛔ PREFER NUB'S OWN PROVISIONED NODES over nvm. `nub node install <major>` is the mechanism a
+  // real user gets, so measuring against it is dogfooding rather than measuring a parallel
+  // installation nobody else has — and it removes nvm as a prerequisite for running the corpus at
+  // all, which is what made the first Linux run silently record `pinnedTo: null` on every package
+  // (chosenMajor was correct, so nothing looked wrong; a 2018 package was measured on Node 22).
+  //
+  // Layouts differ: nub is `<cache>/nub/node/22.23.1/bin`, nvm is `~/.nvm/versions/node/v22.23.1/bin`.
+  // nvm stays as a fallback so an existing dev box keeps working.
+  const xdgCache = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
+  const roots = [
+    { dir: path.join(xdgCache, 'nub', 'node'), re: /^(\d+)\.(\d+)\.(\d+)$/ },
+    { dir: path.join(os.homedir(), '.nvm', 'versions', 'node'), re: /^v(\d+)\.(\d+)\.(\d+)$/ },
+  ];
   let best = null;
+  for (const { dir: root, re } of roots) {
   try {
     for (const name of fs.readdirSync(root)) {
-      const m = /^v(\d+)\.(\d+)\.(\d+)$/.exec(name);
+      const m = re.exec(name);
       if (!m || m[1] !== String(major)) continue;
       const v = [Number(m[2]), Number(m[3])];
       if (!best || v[0] > best.v[0] || (v[0] === best.v[0] && v[1] > best.v[1])) {
@@ -554,6 +567,8 @@ function nodeBinFor(major) {
       }
     }
   } catch {}
+    if (best) break;          // nub's copy wins outright; do not mix roots for one major
+  }
   return best;
 }
 
