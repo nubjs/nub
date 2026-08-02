@@ -1,0 +1,179 @@
+name: corpus probe
+run-name: probe ${{ inputs.runner }} shard ${{ inputs.shard_index }}/${{ inputs.shard_count }}
+
+# Run one shard of the build-jail capability probe on a real runner and hand the results back as
+# an artifact. NO agent — this is the mechanical version, and it is deliberately the one to reach
+# for first.
+#
+# THE POINT RIGHT NOW is not coverage. It is whether the probe RUNS AT ALL on Linux and Windows,
+# which has never been tested: the harness, the fixture, the jail and the reference arms have only
+# ever executed on a Mac. The first failures will be structural (does it build, does run-batch.sh
+# survive Windows bash, do the path assumptions hold) and those are faster to debug from a job log
+# than through an agent.
+#
+# MANUAL DISPATCH ONLY. A shard is real network installs and real runner minutes; it must never
+# fire on push or PR.
+#
+#   gh workflow run corpus-probe.yml -f runner=ubuntu-latest \
+#     -f base_branch=sandbox/integration -f shard_index=0 -f shard_count=150
+#
+#   gh run view <id> --log            # everything the probe printed
+#   gh run download <id>              # the records + logs it produced
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "runner OS"
+        type: choice
+        options: ["ubuntu-latest", "windows-latest", "macos-latest"]
+        default: "ubuntu-latest"
+      base_branch:
+        description: "branch to check out"
+        required: true
+        default: "sandbox/integration"
+      worklist:
+        description: "worklist file under tests/build-jail-search/"
+        required: false
+        default: "worklist-macos-final.txt"
+      shard_index:
+        description: "0-based shard index"
+        required: true
+        default: "0"
+      shard_count:
+        description: "how many shards to split the worklist into (bigger = smaller shard)"
+        required: true
+        default: "150"
+      reuse_binary_from:
+        description: "run-id of an earlier probe to take the nub binary from (skips the Rust build)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: read     # download-artifact with run-id reads another run's artifacts
+
+jobs:
+  probe:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 240
+    env:
+      # MEASURED (build-jail-corpus-3os.yml): Windows gives the main thread a 1 MB stack against
+      # Linux's 8 MB, and the unoptimized build overflows it inside `nub install` with
+      # STATUS_STACK_OVERFLOW before any lifecycle script runs. Without this the whole Windows shard
+      # measures a debug-build frame-size artifact instead of the jail.
+      RUSTFLAGS: ${{ inputs.runner == 'windows-latest' && '-C link-arg=/STACK:8388608' || '' }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          ref: ${{ inputs.base_branch }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "24"
+
+      - name: Environment
+        # Print what actually decided the measurement. On the dev Mac a pyenv Python, an
+        # x64-under-Rosetta Node and a PATH-dependent python3 each silently produced a wrong
+        # verdict; a record that cannot say what it ran under cannot be trusted.
+        shell: bash
+        run: |
+          echo "os=${{ inputs.runner }}  arch=$(node -p 'process.arch')  platform=$(node -p 'process.platform')"
+          echo "node=$(node --version)  npm=$(npm --version)"
+          python3 --version 2>&1 || python --version 2>&1 || echo "no python"
+          echo "shell=$SHELL"; bash --version | head -1
+          df -h . | tail -1
+
+      # ── THE ITERATION LOOP ──────────────────────────────────────────────────────────────────
+      # A cold Rust build on a fresh runner is 10-15 minutes, and MOST debugging here is on the
+      # harness (search.mjs, run-batch.sh — JavaScript), not on nub. Rebuilding for a JS fix makes
+      # every iteration ~8x slower than it needs to be.
+      #
+      # So the binary is an ARTIFACT. The first run for a given commit builds and uploads it;
+      # every subsequent run passes `reuse_binary_from: <that run id>` and skips Rust entirely,
+      # taking a debug cycle from ~15 min to ~2. Rebuild only when nub itself changes.
+      - name: Reuse a prebuilt nub
+        if: inputs.reuse_binary_from != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: nub-${{ inputs.runner }}
+          path: target/debug
+          run-id: ${{ inputs.reuse_binary_from }}
+          github-token: ${{ github.token }}
+
+      - name: Build nub with the catalog override
+        if: inputs.reuse_binary_from == ''
+        # ⛔ WITHOUT THIS FEATURE THE PROBE MEASURES NOTHING. Every cell hands nub a synthesized
+        # catalog through NUB_BUILD_JAIL_CATALOG; a binary built without the feature refuses the
+        # override and every cell records a control failure that looks like a package fact.
+        run: cargo build -p nub-cli --features nub-cli/build-jail-catalog-override
+
+      - name: Make the reused binary executable
+        if: inputs.reuse_binary_from != ''
+        shell: bash
+        # Artifact download does not preserve the executable bit.
+        run: chmod +x target/debug/nub target/debug/nub.exe 2>/dev/null || true
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        if: inputs.reuse_binary_from == ''
+        with:
+          name: nub-${{ inputs.runner }}
+          path: |
+            target/debug/nub
+            target/debug/nub.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Take this shard
+        shell: bash
+        env:
+          SHARDS: ${{ inputs.shard_count }}
+          SHARD: ${{ inputs.shard_index }}
+          WORKLIST: ${{ inputs.worklist }}
+        run: |
+          cd tests/build-jail-search
+          node -e '
+            const fs = require("node:fs");
+            const all = fs.readFileSync(process.env.WORKLIST, "utf8")
+              .split("\n").map(s => s.trim()).filter(Boolean);
+            const n = Number(process.env.SHARDS), i = Number(process.env.SHARD);
+            // Round-robin, not contiguous: a contiguous slice hands one shard all of esbuild.
+            const mine = all.filter((_, k) => k % n === i);
+            fs.writeFileSync("shard.txt", mine.join("\n") + "\n");
+            console.log(`shard ${i}/${n}: ${mine.length} of ${all.length} entries`);
+            console.log(mine.join("\n"));
+          '
+
+      - name: Probe
+        shell: bash
+        # Never fail the JOB on a probe failure — a shard that measured 12 of 15 packages is still
+        # evidence, and the records are the deliverable. The verdicts, not the exit code, say what
+        # happened.
+        continue-on-error: true
+        run: |
+          cd tests/build-jail-search
+          NUB="$GITHUB_WORKSPACE/target/debug/nub"
+          [ "${{ inputs.runner }}" = "windows-latest" ] && NUB="$GITHUB_WORKSPACE/target/debug/nub.exe"
+          ls -la "$NUB"
+          ./run-batch.sh "$NUB" --file shard.txt
+
+      - name: Summarise
+        if: always()
+        shell: bash
+        run: |
+          cd tests/build-jail-search
+          node watch-sweep.mjs results/runs 0 shard.txt || true
+          node digest.mjs --all --runs results/runs || true
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        if: always()
+        with:
+          name: probe-${{ inputs.runner }}-shard${{ inputs.shard_index }}
+          # Records AND per-cell logs — the logs are what make a failure diagnosable after the fact,
+          # and a shard's worth is only a few MB.
+          path: tests/build-jail-search/results/runs
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,0 +1,206 @@
+name: build-jail corpus (agent)
+run-name: corpus ${{ inputs.runner }} shard ${{ inputs.shard_index }}/${{ inputs.shard_count }}
+
+# Run one SHARD of the build-jail corpus sweep on a real runner, driven by an AGENT that can debug
+# what it finds in situ and open a PR with the fixes.
+#
+# WHY AN AGENT AND NOT A PLAIN SCRIPT. A mechanical sweep can only ship logs back. Every failure
+# worth having costs a differential — re-run under a different Node, check whether the build was
+# silently skipped, compare against npm on the same fixture — and that has to happen ON THE MACHINE
+# WHERE IT FAILED. Windows and Linux failures cannot be reproduced on the maintainer's Mac at all,
+# which is precisely why they have gone unmeasured.
+#
+# WHY CI. Three things a dev box cannot give: an ephemeral VM to execute third-party install
+# scripts in; a machine with no pyenv/Rosetta/Spotlight history silently deciding the answer; and
+# Linux + Windows at all.
+#
+# MANUAL DISPATCH ONLY, on purpose. A sweep shard is hours of runner time and real API spend. It
+# must never fire on push or PR. Trigger with:
+#
+#   gh workflow run build-jail-corpus-agent.yml \
+#     -f runner=ubuntu-latest -f base_branch=sandbox/integration \
+#     -f shard_index=0 -f shard_count=16
+#
+# Fan out by dispatching the same workflow once per (runner, shard_index). Each opens its own PR
+# against base_branch, so shards never collide in git.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "runner OS to sweep on"
+        type: choice
+        options: ["ubuntu-latest", "windows-latest", "macos-latest"]
+        default: "ubuntu-latest"
+      base_branch:
+        description: "branch to cut from and open the PR against"
+        required: true
+        default: "sandbox/integration"
+      worklist:
+        description: "worklist file under tests/build-jail-search/"
+        required: false
+        default: "worklist-macos-final.txt"
+      shard_index:
+        description: "0-based index of this shard"
+        required: true
+        default: "0"
+      shard_count:
+        description: "total shards the worklist is split into"
+        required: true
+        default: "16"
+      extra:
+        description: "extra instructions appended to the agent prompt (optional)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    runs-on: ${{ inputs.runner }}
+    # Under the 360-minute hard cap so a wedged shard fails legibly rather than being killed
+    # mid-write. A shard of 16 over ~2,250 entries is ~140 runs; budget generously because a
+    # native build on a cold runner is slow and the agent also debugs.
+    timeout-minutes: 350
+    permissions:
+      id-token: write
+      contents: write          # the agent pushes its branch
+      pull-requests: write     # ...and opens the PR
+    env:
+      # MEASURED (see build-jail-corpus-3os.yml, the mechanical predecessor of this workflow):
+      # Windows gives the main thread a 1 MB stack against Linux's 8 MB, and the unoptimized build
+      # overflows it inside `nub install` (0xC00000FD, STATUS_STACK_OVERFLOW) BEFORE any lifecycle
+      # script runs. Without this the whole Windows shard measures a debug-build frame-size
+      # artifact rather than the jail — and every verdict would be a lie.
+      RUSTFLAGS: ${{ inputs.runner == 'windows-latest' && '-C link-arg=/STACK:8388608' || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          ref: ${{ inputs.base_branch }}
+          fetch-depth: 0       # the agent branches and pushes; a shallow clone cannot
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "24"
+
+      - name: Run agent
+        uses: pullfrog/pullfrog@v0 # zizmor: ignore[unpinned-uses] matches the vendored pullfrog.yml template, which tracks the major tag
+        with:
+          # ⛔ TIMEOUT IS LOAD-BEARING. The action defaults to 1h; a corpus shard is hours of real
+          # network installs, so the default would kill every run mid-sweep and the records would
+          # look like a partial corpus rather than a truncated one.
+          timeout: "5h"
+          # Feature branches only — blocks pushes to the default branch, branch deletion and tags.
+          # The agent needs to push its own branch and nothing else.
+          push: restricted
+          model: anthropic/claude-opus
+          # This is diagnosis work, not mechanical harvest: the whole point is that it debugs what
+          # it finds rather than shipping logs back.
+          effort: high
+          prompt: |
+            You are measuring one shard of nub's build-jail capability corpus on ${{ inputs.runner }},
+            and fixing what you find. You are on a disposable CI runner: nothing here is precious,
+            and you should be aggressive about investigating.
+
+            ⛔ FIRST, LOAD TWO SKILLS AND FOLLOW THEM:
+              - `corpus-sweep` (.claude/skills/corpus-sweep/SKILL.md) — how to run a sweep WITHOUT
+                fooling yourself. Read every line of its "before you believe any standalone
+                reproduction" table before you debug anything. Those five traps each cost hours.
+              - `catalog-probe` (.claude/skills/catalog-probe/SKILL.md) — this harness specifically.
+
+            ## Your shard
+
+            Split `tests/build-jail-search/${{ inputs.worklist }}` round-robin into
+            ${{ inputs.shard_count }} shards and take index ${{ inputs.shard_index }} — i.e. keep
+            line k where `k % ${{ inputs.shard_count }} == ${{ inputs.shard_index }}`. Round-robin,
+            NOT contiguous: a contiguous split hands one shard all of esbuild's history.
+
+            ## Steps
+
+            1. Branch: `git switch -c corpus/${{ inputs.runner }}-shard${{ inputs.shard_index }}`
+               off `${{ inputs.base_branch }}`.
+            2. Build WITH THE FEATURE FLAG — the probe cannot work without it, every cell hands nub
+               a synthesized catalog and a binary built without it refuses the override:
+                 `cargo build -p nub-cli --features nub-cli/build-jail-catalog-override`
+            3. Run your shard: `cd tests/build-jail-search && ./run-batch.sh <path-to-nub> --file <your-shard-file>`
+               It is RESUMABLE — if you stop to fix something, restarting costs only what is unmeasured.
+            4. TRIAGE every non-MINIMUM verdict. `node digest.mjs --all --runs results/runs` writes a
+               digest per record with the FIRST error per arm and absolute log paths. Read the FIRST
+               error, never the tail — these logs end in a stack trace and a summary, and the cause is
+               ~40 lines earlier.
+            5. FIX what is unambiguously a HARNESS or NUB bug, and verify each fix against the package
+               that exposed it. Do NOT rabbit-hole a single package: a package that resists is data
+               about the generator. Some failures are genuinely unfixable (a missing system library, a
+               package reading a file absent from its own tarball) — record those honestly and move on.
+            6. Write `CORPUS-REPORT.md` at the repo root. This file is how your findings reach the
+               orchestrator, so it must stand alone. In this order:
+                 - COVERAGE FIRST: how many of your shard's entries produced a record, and how many
+                   did not. Survivors of a partial sweep are a BIASED SAMPLE, not a result.
+                 - the verdict tally;
+                 - every fix you made, each with the package and the measurement that proves it
+                   (before -> after), so the orchestrator can re-verify rather than take your word;
+                 - every failure you could NOT explain, said plainly, with the log path. An honest
+                   "I could not reproduce this" is worth more than a guess.
+                 - anything you tried that turned out to be an invalid reproduction — those are the
+                   most valuable notes of all.
+            7. COMMIT and PUSH your branch. Do NOT open a pull request — the orchestrator reviews the
+               branch and integrates it. Report the exact branch name you pushed as the LAST LINE of
+               your output.
+
+               ⛔ `tests/build-jail-search/results/` IS GITIGNORED (.gitignore line 157) — that is
+               correct for local sweeps and would otherwise silently drop everything you measured.
+               Force-add the whole tree, LOGS INCLUDED, since the per-cell logs are what make a
+               failure diagnosable later:
+                 `git add -f tests/build-jail-search/results/runs`
+               Then add `CORPUS-REPORT.md` and any harness/nub fixes normally.
+
+               Budget: records run ~40 KB each with logs, so a shard is a few MB. That is fine. If
+               your shard somehow exceeds ~200 MB, drop the per-cell logs for MINIMUM records only
+               (they are the uninteresting ones) and say so in the report.
+
+            ## What matters most on THIS runner
+
+            ${{ inputs.runner == 'windows-latest' && 'Windows is the LEAST measured platform and the most likely to expose real defects — cmd.exe vs the bundled busybox sh, .cmd/.bat resolution, path separators, AppContainer. A Windows-only failure here is a genuinely new finding. Do not assume a failure is environmental just because it does not happen elsewhere; you are the only place it CAN happen.' || '' }}
+            ${{ inputs.runner == 'macos-latest' && 'macOS has been measured on a dev Mac whose pyenv Python, x64-under-Rosetta Node 16, and Spotlight indexing each silently decided verdicts. You are a CLEAN machine: where you disagree with an existing record, YOU are more likely to be right. Say so explicitly in the PR.' || '' }}
+            ${{ inputs.runner == 'ubuntu-latest' && 'Linux exercises Landlock + seccomp, which the macOS sweep never touches. A grant that differs from the macOS catalog is expected and interesting — the catalog takes the UNION across platforms, so a wider Linux grant is a finding, not a conflict.' || '' }}
+
+            ## Non-negotiables
+
+            - ⛔ NEVER run a package with a `MAL-*` OSV advisory. nub refuses them itself, but the
+              reference arms are npm and pnpm and NEITHER has an OSV screen — npm runs with
+              `--dangerously-allow-all-scripts`. If you see `ERR_NUB_MALICIOUS_PACKAGE`, that is the
+              screen WORKING: record it as REFUSED-MALICIOUS, exclude it from the catalog, and never
+              re-run it with a reference arm to "check".
+            - ⛔ OVER-GRANTING IS THE SAFE DIRECTION. Never narrow a grant to make something pass.
+              The failure mode this whole effort exists to avoid is PACKAGES BREAKING.
+            - ⛔ An install exiting 0 proves NOTHING about whether a script ran — nub's trust policy
+              silently skips builds (`WARN ignored build scripts`). `nub approve-builds --all` is
+              required. This single trap produced four wrong answers in one night.
+            - Never edit `search.mjs` / `run-batch.sh` while a batch is running; the driver is re-read
+              per package spawn. Stop, fix, restart.
+            - Report coverage honestly. Survivors of a partial sweep are a BIASED SAMPLE, not the
+              corpus — the heavy native builds are exactly the ones that fail.
+
+            ${{ inputs.extra }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # ⛔ THIS IS HOW THE AGENT'S REASONING GETS BACK OUT, and it is the whole log story.
+          #
+          # Read from the action's source rather than guessed: pullfrog already invokes Claude Code
+          # with `--verbose` (agents/claude.ts), and its own logger gates debug output on
+          # `LOG_LEVEL === "debug" || ACTIONS_STEP_DEBUG === "true"` (utils/log.ts:45, and the same
+          # gate in utils/activity.ts). Setting it here streams per-tool activity to stdout, which
+          # lands in the Actions job log.
+          #
+          # Retrieve it with:  gh run view <run-id> --log
+          #                    gh run view <run-id> --log-failed     # just the failing step
+          #
+          # No artifact-scraping step is needed. An earlier draft globbed ~/.claude/projects and
+          # the opencode dirs for session JSONL; that was guesswork about a runtime whose choice is
+          # not visible from the workflow, and the job log supersedes it.
+          LOG_LEVEL: debug
