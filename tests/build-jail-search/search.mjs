@@ -237,7 +237,7 @@ function isMaterialized(proj, pkgSpec) {
   try { return !fs.lstatSync(path.join(store, hit)).isSymbolicLink(); } catch { return false; }
 }
 
-function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg, logDir }) {
+function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg, logDir, nodeBin }) {
   // Environment a real project would carry. `DATABASE_URL` is the prisma family's precondition —
   // without it `prisma generate` bails and measures as "needs nothing". Kept generic and
   // non-secret for the same reason as the fixture files above.
@@ -263,6 +263,11 @@ function runCell(nub, { proj, home }, { catalogFile, label, ignoreScripts, pkg, 
     delete env[k];
   }
   if (catalogFile) env[OVERRIDE_ENV] = catalogFile;
+  // PIN THE NODE. nub resolves its Node from PATH, so prefixing is the whole mechanism — and the
+  // reference arms take the same prefix, or the oracle compares two RUNTIMES rather than two
+  // package managers. Null when the chosen major is not installed, in which case the run stays on
+  // the host's Node and provenance records what actually ran.
+  if (nodeBin) env.PATH = `${nodeBin}:${env.PATH ?? ''}`;
   let log = '';
   let rc = 0;
   const steps = ignoreScripts ? [['install', '--ignore-scripts']] : [['install'], ['approve-builds', '--all']];
@@ -377,6 +382,82 @@ function runPath(dir, pkg, version) {
  *  Every one of those five wrong answers dies instantly against a record that states
  *  `pkg-config: /opt/homebrew/bin/pkg-config` versus `pkg-config: null`. A native build is
  *  decided by ambient state, so the ambient state is part of the measurement. */
+/** ⛔ THE MEASUREMENT NODE DECIDES THE ANSWER, SO IT MUST BE CHOSEN, NOT INHERITED.
+ *
+ *  MEASURED: `@puppeteer/browsers` extracts 2 of 17 zip entries on node 26.5.0 and 17 of 17 on
+ *  node 22.7.0 — same host, same zip, and plain `unzip` handles it on either. Five packages in the
+ *  random-100 sweep were recorded as BROKEN-EVEN-WITH-EVERYTHING (the verdict reserved for a nub
+ *  defect) because of it. A Node the package was never built against manufactures failures that
+ *  are indistinguishable from real grant gaps.
+ *
+ *  THE RULE: take the FLOOR the package declares in `engines.node`, then CLAMP it.
+ *
+ *  The clamp is not tidiness — `engines` floors run to `>=6` and `>=0.10`, and nub itself does not
+ *  run below 18.19 (its compat tier starts there), so an unclamped floor would measure a runtime
+ *  nub cannot support. The upper clamp keeps us off a Node newer than the ecosystem, which is the
+ *  failure this exists to prevent.
+ *
+ *  MEASURED across 7 packages: every `engines.node` is a LOWER bound that Node 26 satisfies, and 2
+ *  of 7 declare none at all. So `engines` alone can never pick a working version — it selects a
+ *  floor, and the clamp and default do the rest. */
+/** The package's own `engines.node`, read from the registry — metadata only, no tarball. Null when
+ *  absent or unreachable, which the resolver turns into the default. */
+function enginesFor(pkg, version) {
+  try {
+    const r = spawnSync('npm', ['view', `${pkg}@${version}`, 'engines.node'],
+      { encoding: 'utf8', timeout: 30_000 });
+    const out = (r.stdout || '').trim();
+    return r.status === 0 && out ? out : null;
+  } catch { return null; }
+}
+
+// ⛔ THE FLOOR IS THE OLDEST NODE WE CAN OBTAIN, NOT NUB'S AUGMENTATION FLOOR.
+//
+// nub's 18.19 floor governs its RUNTIME augmentation (the preload, the loader hooks). It does not
+// bind here, and two measurements say so:
+//   - a lifecycle script receives the REAL node binary — `process.execPath` is `.../bin/node` and
+//     `argv0` is `node`, so there is no shim in the way and no nub-spawns-node double spawn;
+//   - it runs with `NODE_COMPAT=1`, i.e. augmentation off by construction.
+//   - and `nub install` itself completes with node 14, 16 or 18 on PATH (all exit 0).
+// So the probe may honour an `engines.node` floor far below 18, which is the point: a 2018 package
+// declaring `>=6` was built against a runtime nothing modern resembles.
+const NODE_FLOOR = 10;
+const NODE_DEFAULT = '22';      // when `engines.node` is absent or unparseable
+const NODE_CEILING = 22;        // latest LTS — never measure on something newer than the ecosystem
+
+function resolveNodeMajor(enginesNode) {
+  if (!enginesNode || typeof enginesNode !== 'string') return NODE_DEFAULT;
+  // Take the smallest major any comparator mentions: `>=14 <21` floors at 14, `^18.0.0` at 18.
+  // Take the MAJOR of each version token, never every number that happens to precede a dot:
+  // `^20.0.0` contains "0." twice, and matching those made its floor 0 instead of 20.
+  const majors = [...enginesNode.matchAll(/(?:^|[\s|,>=<~^])v?(\d+)(?:\.\d+)*/g)]
+    .map((m) => Number(m[1]))
+    .filter((n) => Number.isFinite(n) && n >= 0);
+  if (!majors.length) return NODE_DEFAULT;
+  const floor = Math.min(...majors);
+  return String(Math.min(Math.max(floor, NODE_FLOOR), NODE_CEILING));
+}
+
+/** The PATH prefix that pins a probe to `major`, or null when no such Node is installed. nub
+ *  resolves its Node from PATH (verified), so this is all the pinning that is needed — and the
+ *  REFERENCE ARMS must use the same one, or the oracle compares two runtimes rather than two
+ *  package managers. */
+function nodeBinFor(major) {
+  const root = path.join(os.homedir(), '.nvm', 'versions', 'node');
+  let best = null;
+  try {
+    for (const name of fs.readdirSync(root)) {
+      const m = /^v(\d+)\.(\d+)\.(\d+)$/.exec(name);
+      if (!m || m[1] !== String(major)) continue;
+      const v = [Number(m[2]), Number(m[3])];
+      if (!best || v[0] > best.v[0] || (v[0] === best.v[0] && v[1] > best.v[1])) {
+        best = { dir: path.join(root, name, 'bin'), v, name };
+      }
+    }
+  } catch {}
+  return best;
+}
+
 function toolchain() {
   // `which`, not `command -v` through a shell: passing args with `shell: true` is deprecated
   // (DEP0190, args are concatenated rather than escaped) and would print a warning on every run.
@@ -405,7 +486,10 @@ function toolchain() {
 /** What produced this record. Without it a results directory is a pile of numbers with no
  *  way to tell which binary or host they came from — and this effort has already been
  *  burned by results whose provenance had to be reconstructed after the fact. */
-function provenance(nub) {
+function provenance(nub, nodePin, enginesNode, nodeMajor) {
+  // THE MEASUREMENT NODE IS PART OF THE RESULT. A grant measured on a Node the package was never
+  // built against is not the package's grant, so the record carries what was DECLARED, what was
+  // CHOSEN, and what actually RAN — not just the last of the three.
   let sha = null;
   try { sha = createHash('sha256').update(fs.readFileSync(nub)).digest('hex'); } catch {}
   let nubVersion = null;
@@ -425,6 +509,15 @@ function provenance(nub) {
   return {
     nubPath: nub, nubSha256: sha, nubVersion, harnessSha256: harnessSha,
     platform: `${process.platform}-${process.arch}`,
+    // THE MEASUREMENT NODE IS PART OF THE RESULT. A grant measured on a Node the package was never
+    // built against is not that package's grant, so the record carries what was DECLARED, what the
+    // rule CHOSE, what was actually PINNED, and what the host would have supplied unpinned.
+    nodeSelection: {
+      enginesNode: enginesNode ?? null,
+      chosenMajor: nodeMajor ?? null,
+      pinnedTo: nodePin?.name ?? null,
+      hostNode: process.version,
+    },
     node: process.version,
     toolchain: toolchain(),
     at: new Date().toISOString(),
@@ -436,12 +529,12 @@ function provenance(nub) {
  *  background grant must name each one — the catalog is keyed by name and has no wildcard,
  *  deliberately (a wildcard would be `disk` for everything, which is the shape this whole
  *  model exists to avoid). Learned by one cheap `--ignore-scripts` install. */
-function discoverTree(nub, dir, pkg, version) {
+function discoverTree(nub, dir, pkg, version, nodeBin) {
   const fx = makeFixture(dir, pkg, version, { jailOff: true });
   // The discovery arm installs with `--ignore-scripts`, so the tree is on disk and its manifests
   // are readable — which makes this the cheapest honest place to answer "does it declare a
   // script", without a second install and without asking the packument.
-  const disc = runCell(nub, fx, { label: 'discover', ignoreScripts: true, pkg });
+  const disc = runCell(nub, fx, { label: 'discover', ignoreScripts: true, pkg, nodeBin });
   const declaresScript = disc.declaresScript;
   const store = path.join(fx.proj, 'node_modules', '.store');
   let entries = [];
@@ -656,7 +749,7 @@ function packageStanding(pkg, version) {
  *  puppeteer@24.40.0: npm and pnpm both exit 0 while leaving the SAME broken extraction nub
  *  reports as a failure — a valid 96MB zip, 17 entries, 2 extracted, no executable. Judged by rc
  *  that reads as a nub defect; judged by artifact all three agree and it is environmental. */
-function referenceArm(tool, dir, pkg, version) {
+function referenceArm(tool, dir, pkg, version, nodeBin) {
   const d = path.join(dir, `${tool}ref`);
   const fx = makeFixture(d, pkg, version, { jailOff: true });
   if (tool === 'pnpm') {
@@ -671,8 +764,11 @@ function referenceArm(tool, dir, pkg, version) {
   const args = tool === 'npm'
     ? ['install', '--no-audit', '--no-fund', '--dangerously-allow-all-scripts', '--foreground-scripts']
     : ['install', '--no-frozen-lockfile', '--reporter=ndjson'];
+  // SAME Node as the nub arm — otherwise this compares two runtimes, not two package managers.
+  const refEnv = { ...process.env, HOME: fx.home };
+  if (nodeBin) refEnv.PATH = `${nodeBin}:${refEnv.PATH ?? ''}`;
   const r = spawnSync(tool, args, {
-    cwd: fx.proj, env: { ...process.env, HOME: fx.home }, encoding: 'utf8', timeout: 900_000,
+    cwd: fx.proj, env: refEnv, encoding: 'utf8', timeout: 900_000,
   });
   const log = (r.stdout || '') + (r.stderr || '');
 
@@ -704,8 +800,8 @@ function referenceArm(tool, dir, pkg, version) {
   };
 }
 
-const npmReference = (dir, pkg, version) => referenceArm('npm', dir, pkg, version);
-const pnpmReference = (dir, pkg, version) => referenceArm('pnpm', dir, pkg, version);
+const npmReference = (dir, pkg, version, nodeBin) => referenceArm('npm', dir, pkg, version, nodeBin);
+const pnpmReference = (dir, pkg, version, nodeBin) => referenceArm('pnpm', dir, pkg, version, nodeBin);
 
 // ── the walk ──────────────────────────────────────────────────────────────────
 
@@ -773,7 +869,7 @@ function search(nub, pkg, version, root, keep, runDir) {
   const cell = (name, opts) => {
     const dir = path.join(root, name);
     const fx = makeFixture(dir, pkg, version, { jailOff: !!opts.jailOff });
-    const r = runCell(nub, fx, { ...opts, pkg, logDir });
+    const r = runCell(nub, fx, { ...opts, pkg, logDir, nodeBin });
     if (!keep) fs.rmSync(dir, { recursive: true, force: true });
     return r;
   };
@@ -788,9 +884,18 @@ function search(nub, pkg, version, root, keep, runDir) {
   // build toolchain (node-gyp, the tar family), so the scripts-on arm installs strictly more
   // packages and the diff reported ~845 phantom "side effects" for a script that wrote three
   // files. The two shapes are not comparable; a manifest field is a fact.
+  // RESOLVE THE MEASUREMENT NODE BEFORE ANYTHING INSTALLS, from the package's own `engines`.
+  // Discovery is pinned too, so the whole probe — discovery, every cell, and both reference arms —
+  // runs on ONE runtime. Recorded in provenance so a catalog entry carries the Node it was
+  // measured under rather than inheriting whatever the host happened to have.
+  const enginesNode = enginesFor(pkg, version);
+  const nodeMajor = resolveNodeMajor(enginesNode);
+  const nodePin = nodeBinFor(nodeMajor);
+  const nodeBin = nodePin?.dir ?? null;
+
   // CONTROL — scripts on, jail off. EVERY cell runs the identical two steps, so full path
   // sets are directly comparable and no baseline subtraction is needed.
-  const tree = discoverTree(nub, path.join(root, 'discover'), pkg, version);
+  const tree = discoverTree(nub, path.join(root, 'discover'), pkg, version, nodeBin);
   const others = tree.names;
 
   // Read from the INSTALLED tree, never the packument, because the two disagree and only the
@@ -805,7 +910,7 @@ function search(nub, pkg, version, root, keep, runDir) {
   if (flagged.length) {
     return {
       pkg, version, verdict: 'MALICIOUS-PACKAGE-DETECTED',
-      flagged, provenance: provenance(nub),
+      flagged, provenance: provenance(nub, null, null, null),
     };
   }
 
@@ -863,7 +968,7 @@ function search(nub, pkg, version, root, keep, runDir) {
       pkg, version, verdict: 'HARNESS-ERROR',
       why: 'the catalog override did not engage in the control — is the binary built with '
          + '`--features nub-cli/build-jail-catalog-override`, and did anything rebuild it mid-run?',
-      cells, control: baseCase(control), provenance: provenance(nub),
+      cells, control: baseCase(control), provenance: provenance(nub, nodePin, enginesNode, nodeMajor),
     };
   }
   if (control.rc !== 0 || controlB.rc !== 0) {
@@ -884,7 +989,7 @@ function search(nub, pkg, version, root, keep, runDir) {
     //
     // npm SUCCEEDING where nub fails is the opposite finding — a nub defect, the most valuable
     // thing this harness can surface, and never a grant gap.
-    const ref = npmReference(root, pkg, version);
+    const ref = npmReference(root, pkg, version, nodeBin);
     const ours = failureSignature(control.log);
 
     // ⛔ THE VERDICT TURNS ON WHETHER NPM SUCCEEDED, NOT ON WHETHER THE TWO MESSAGES MATCH.
@@ -913,7 +1018,7 @@ function search(nub, pkg, version, root, keep, runDir) {
     // An arm that RAN NO SCRIPTS is not evidence either way and is excluded from the vote —
     // otherwise "the PM skipped everything" counts as "the PM succeeded", which is exactly the
     // defect that produced every false nub-defect verdict in the first sweep.
-    const pnpmRef = pnpmReference(root, pkg, version);
+    const pnpmRef = pnpmReference(root, pkg, version, nodeBin);
     const arms = [
       { name: 'npm', ...ref },
       { name: 'pnpm', ...pnpmRef },
@@ -982,7 +1087,7 @@ function search(nub, pkg, version, root, keep, runDir) {
       control: baseCase(control),
       controlLogTail: (control.log || '').split('\n').slice(-40).join('\n'),
       logDir: runDirFor(runDir, pkg, version),
-      provenance: provenance(nub),
+      provenance: provenance(nub, nodePin, enginesNode, nodeMajor),
     };
   }
   const sideEffectful = hasScript;
@@ -1036,6 +1141,10 @@ function search(nub, pkg, version, root, keep, runDir) {
       return {
         pkg, version,
         verdict: 'MINIMUM',
+        // THE MEASUREMENT NODE, on the success path too. This return had NO provenance at all, so
+        // the caller's fallback filled it with nulls and every MINIMUM record claimed the Node pin
+        // was off when it was on — a record that lies about its own measurement conditions.
+        provenance: provenance(nub, nodePin, enginesNode, nodeMajor),
         // RECORDED ON THE SUCCESS PATH TOO, not just on failure: these are the records that
         // BECOME catalog entries, and the collator generates `default` from whichever measured
         // version is `latest`. Without the dist-tag here it falls back to highest-measured,
@@ -1239,7 +1348,11 @@ try {
     console.log(JSON.stringify({ ...prior, skipped: 'already measured; pass --force to redo' }));
   } else {
     const record = search(nub, pkg, version, root, keep, runDir);
-    record.provenance = provenance(nub);
+    // ⛔ DO NOT CLOBBER. `search()` sets provenance with the resolved Node selection in scope; this
+    // caller does not have those values, so an unconditional assignment silently replaced a
+    // populated `nodeSelection` with nulls — the record then claimed the pin was off when it was
+    // on. Fill in only for a path that returned without setting one.
+    record.provenance ??= provenance(nub, null, null, null);
     fs.mkdirSync(runDir, { recursive: true });
     fs.writeFileSync(out, JSON.stringify(record, null, 2));
     console.log(JSON.stringify(record));
