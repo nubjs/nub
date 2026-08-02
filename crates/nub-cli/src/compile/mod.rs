@@ -906,6 +906,27 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
     set_executable(&tmp)?;
     let _guard = FileGuard(tmp.clone());
 
+    // Capture the entitlements BEFORE stripping, because the stripper may destroy
+    // them and `--preserve-metadata` would then have nothing to read. Measured:
+    // Apple `strip -x` leaves the entitlement blob intact, `llvm-strip -x` removes
+    // it outright — and the stripper is whichever of the two is on PATH, so without
+    // this the artifact's posture depends on whether the BUILD MACHINE has LLVM
+    // installed. Same shape as the napi-export defect: a host-dependent artifact.
+    let entitlements = tmp.with_extension("entitlements.plist");
+    let captured = needs_resign
+        && run_ok(
+            "codesign",
+            &[
+                "-d".as_ref(),
+                "--entitlements".as_ref(),
+                entitlements.as_os_str(),
+                "--xml".as_ref(),
+                tmp.as_os_str(),
+            ],
+        )
+        && fs::metadata(&entitlements).is_ok_and(|m| m.len() > 0);
+    let _ent_guard = FileGuard(entitlements.clone());
+
     let mut argv: Vec<&std::ffi::OsStr> = strip_flags(format).iter().map(AsRef::as_ref).collect();
     argv.push(tmp.as_os_str());
     let mut ok = run_ok(&strip, &argv);
@@ -918,17 +939,33 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
         // compile-and-run loop leaves a fresh ~107 MB tree behind on each pass and
         // nothing collects them. It also makes a byte-identical rebuild impossible.
         // `node` is what the official distribution signs with.
-        ok = run_ok(
-            "codesign",
-            &[
-                "--force".as_ref(),
-                "-i".as_ref(),
-                "node".as_ref(),
-                "-s".as_ref(),
-                "-".as_ref(),
-                tmp.as_os_str(),
-            ],
-        );
+        //
+        // `--preserve-metadata=entitlements,flags` keeps what a bare re-sign throws
+        // away. Official Node ships six entitlements under the hardened runtime;
+        // signing without this yields `flags=0x2(adhoc)` and NONE of them. The two
+        // must move together: preserving the runtime flag without the entitlements
+        // would turn library validation back ON without
+        // `disable-library-validation`, and a third-party native addon would then
+        // fail to load. `get-task-allow` (debug attach) rides along — that is Node's
+        // own choice on the binary we are re-signing, and dropping it would be us
+        // silently changing the runtime's posture rather than preserving it.
+        let mut sign: Vec<&std::ffi::OsStr> =
+            vec!["--force".as_ref(), "-i".as_ref(), "node".as_ref()];
+        if captured {
+            // `--options runtime` restores the hardened-runtime flag the re-sign
+            // would otherwise drop. It must travel WITH the entitlements: the
+            // runtime enforces library validation, and only
+            // `disable-library-validation` (one of the six) lets a third-party
+            // native addon load under it.
+            sign.extend_from_slice(&[
+                "--entitlements".as_ref(),
+                entitlements.as_os_str(),
+                "--options".as_ref(),
+                "runtime".as_ref(),
+            ]);
+        }
+        sign.extend_from_slice(&["-s".as_ref(), "-".as_ref(), tmp.as_os_str()]);
+        ok = run_ok("codesign", &sign);
     }
 
     let stripped = if ok {
