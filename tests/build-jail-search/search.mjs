@@ -632,14 +632,80 @@ function packageStanding(pkg, version) {
   return { published, ageDays, weeklyDownloads: weekly, latestVersion };
 }
 
-function npmReference(dir, pkg, version) {
-  const d = path.join(dir, 'npmref');
+/** ⛔ A REFERENCE ARM THAT NEVER RAN THE SCRIPT MEASURES NOTHING.
+ *
+ *  BOTH mainstream PMs now refuse dependency install scripts by default, so the naive invocation
+ *  silently answers a different question than the one asked:
+ *
+ *    npm 11.17+  skips anything not covered by `allowScripts`. From npm's own source,
+ *                arborist/lib/arborist/rebuild.js: `if (key !== 'bin' && !scriptsAllowed) continue`
+ *                — never queued, not warned-and-run. `--allow-scripts <list>` is REJECTED in a
+ *                project-scoped install, so the boolean is the only flag form.
+ *    pnpm 10+    skips anything absent from `pnpm.onlyBuiltDependencies` ("Ignored build scripts").
+ *
+ *  MEASURED consequence of missing this: the arm returned rc 0 for every package because no
+ *  lifecycle script ever ran, and BROKEN-EVEN-WITH-EVERYTHING — the verdict that claims a nub
+ *  defect — rested entirely on it.
+ *
+ *  Both also BUFFER script output. npm needs `--foreground-scripts` or the script's own stderr
+ *  never appears, which is why signature comparison was matching nub's INNER error against npm's
+ *  OUTER wrapper. pnpm's `--reporter=ndjson` emits structured per-lifecycle records instead of
+ *  prose, so its outcome is read as data.
+ *
+ *  THE ARTIFACT IS RETURNED ALONGSIDE THE EXIT CODE, because rc is not sufficient. MEASURED on
+ *  puppeteer@24.40.0: npm and pnpm both exit 0 while leaving the SAME broken extraction nub
+ *  reports as a failure — a valid 96MB zip, 17 entries, 2 extracted, no executable. Judged by rc
+ *  that reads as a nub defect; judged by artifact all three agree and it is environmental. */
+function referenceArm(tool, dir, pkg, version) {
+  const d = path.join(dir, `${tool}ref`);
   const fx = makeFixture(d, pkg, version, { jailOff: true });
-  const r = spawnSync('npm', ['install', '--no-audit', '--no-fund'],
-    { cwd: fx.proj, env: { ...process.env, HOME: fx.home }, encoding: 'utf8' });
+  if (tool === 'pnpm') {
+    // pnpm's gate is a manifest field, so it must be written before the install runs.
+    try {
+      const mf = path.join(fx.proj, 'package.json');
+      const m = JSON.parse(fs.readFileSync(mf, 'utf8'));
+      m.pnpm = { ...(m.pnpm ?? {}), onlyBuiltDependencies: [pkg] };
+      fs.writeFileSync(mf, `${JSON.stringify(m, null, 2)}\n`);
+    } catch {}
+  }
+  const args = tool === 'npm'
+    ? ['install', '--no-audit', '--no-fund', '--dangerously-allow-all-scripts', '--foreground-scripts']
+    : ['install', '--no-frozen-lockfile', '--reporter=ndjson'];
+  const r = spawnSync(tool, args, {
+    cwd: fx.proj, env: { ...process.env, HOME: fx.home }, encoding: 'utf8', timeout: 900_000,
+  });
   const log = (r.stdout || '') + (r.stderr || '');
-  return { rc: r.status ?? 1, signature: failureSignature(log), log };
+
+  const lifecycle = [];
+  if (tool === 'pnpm') {
+    for (const line of log.split('\n')) {
+      if (!line.startsWith('{')) continue;
+      try {
+        const e = JSON.parse(line);
+        if (e.name === 'pnpm:lifecycle') lifecycle.push({ stage: e.stage, exitCode: e.exitCode ?? null, line: e.line ?? null });
+      } catch {}
+    }
+  }
+
+  // The artifact, via the SAME walk every cell uses. Not a judgement — a path set and a digest.
+  let files = null; let digest = null;
+  try { const seen = paths(d, ''); files = seen.length; digest = digestOf(seen); } catch {}
+
+  return {
+    rc: r.status ?? 1,
+    signature: failureSignature(log),
+    log, files, digest,
+    ...(tool === 'pnpm' ? { lifecycle } : {}),
+    // DID A SCRIPT ACTUALLY RUN? A count, not a boolean guess — an arm that ran none is not
+    // evidence of anything, and this is what makes that visible in the record.
+    ranScripts: tool === 'pnpm'
+      ? lifecycle.length > 0
+      : (log.match(/^\S*\s*info run .* (pre|post)?install\b/gm) || []).length > 0,
+  };
 }
+
+const npmReference = (dir, pkg, version) => referenceArm('npm', dir, pkg, version);
+const pnpmReference = (dir, pkg, version) => referenceArm('pnpm', dir, pkg, version);
 
 // ── the walk ──────────────────────────────────────────────────────────────────
 
@@ -833,12 +899,34 @@ function search(nub, pkg, version, root, keep, runDir) {
     // two different LAYERS of one failure, so they will differ routinely even when the cause is
     // identical.
     //
-    // So: npm ALSO failing is decisive on its own — the environment, not nub. The signature
-    // comparison survives only as a QUALITY signal on that conclusion, feeding
-    // `needsInvestigation` rather than the verdict.
-    const npmAlsoFailed = ref.rc !== 0;
-    const signaturesMatched = npmAlsoFailed && !!ours && !!ref.signature && ours === ref.signature;
-    const matched = npmAlsoFailed;
+    // So: a reference PM ALSO failing is decisive — the environment, not nub. The signature
+    // comparison survives only as a QUALITY signal, feeding `needsInvestigation`.
+    //
+    // ⛔ TWO ORACLES, AND A NUB DEFECT REQUIRES *BOTH* TO DISAGREE WITH NUB.
+    //
+    // One oracle cannot distinguish "nub is wrong" from "that PM is unusual". MEASURED on
+    // puppeteer@24.40.0: judged against npm alone it read as a nub defect; pnpm agreed with npm,
+    // and the ARTIFACTS of all three were identical (a valid 96MB zip, 17 entries, 2 extracted,
+    // no executable), so it is environmental. Two oracles is what turned a confident wrong answer
+    // into a correct one.
+    //
+    // An arm that RAN NO SCRIPTS is not evidence either way and is excluded from the vote —
+    // otherwise "the PM skipped everything" counts as "the PM succeeded", which is exactly the
+    // defect that produced every false nub-defect verdict in the first sweep.
+    const pnpmRef = pnpmReference(root, pkg, version);
+    const arms = [
+      { name: 'npm', ...ref },
+      { name: 'pnpm', ...pnpmRef },
+    ].filter((a) => a.ranScripts);
+
+    const anyArmFailed = arms.some((a) => a.rc !== 0);
+    // Every arm that ran scripts SUCCEEDED, and at least one did run => nub stands alone.
+    const allArmsSucceeded = arms.length > 0 && arms.every((a) => a.rc === 0);
+    const signaturesMatched = anyArmFailed && !!ours
+      && arms.some((a) => a.rc !== 0 && !!a.signature && a.signature === ours);
+    // BROKEN-IN-ENVIRONMENT unless every arm that actually ran scripts succeeded. When NO arm ran
+    // scripts we learned nothing, so default to the environment rather than accusing nub.
+    const matched = !allArmsSucceeded;
 
     // ⛔ A RECENT, POPULAR PACKAGE FAILING UNDER NPM INDICTS OUR ENVIRONMENT, NOT THE PACKAGE.
     //
@@ -859,9 +947,30 @@ function search(nub, pkg, version, root, keep, runDir) {
       pkg, version,
       verdict: matched ? 'BROKEN-IN-ENVIRONMENT' : 'BROKEN-EVEN-WITH-EVERYTHING',
       grant: null,
-      npmReference: { rc: ref.rc, signature: ref.signature },
+      // Carried on the FAILURE path too, not just on MINIMUM. It was missing here, so the
+      // watcher's placement warning — which keys on `declaresInstallScript && !projectAxis` —
+      // was silently false on exactly the records most likely to need it.
+      declaresInstallScript: hasScript,
+      // BOTH arms recorded in full, including whether each actually RAN any script and what its
+      // artifact looked like. `ranScripts: false` means that arm is not evidence — the record has
+      // to say so, or a later reader repeats the mistake that produced every false nub defect.
+      npmReference: {
+        rc: ref.rc, signature: ref.signature, ranScripts: ref.ranScripts, files: ref.files, digest: ref.digest,
+      },
+      pnpmReference: {
+        rc: pnpmRef.rc, signature: pnpmRef.signature, ranScripts: pnpmRef.ranScripts,
+        files: pnpmRef.files, digest: pnpmRef.digest, lifecycle: pnpmRef.lifecycle ?? [],
+      },
+      // The artifact comparison, mechanical: nub's control against each arm that ran scripts.
+      // Identical file counts across all three is the signature of an ENVIRONMENTAL failure that
+      // only nub bothers to report.
+      artifactComparison: {
+        nubControlFiles: control.fileCount ?? null,
+        npmFiles: ref.files, pnpmFiles: pnpmRef.files,
+        armsThatRanScripts: arms.map((a) => a.name),
+      },
       failureSignature: ours,
-      signaturesMatched: matched,
+      signaturesMatched,
       standing,
       needsInvestigation,
       investigationReason: needsInvestigation
