@@ -234,6 +234,26 @@ pub(crate) fn preflight(
         // escape is the internal differential pin, which deliberately routes to bubblewrap.
         Err(super::linux_landlock::LandlockUnavailable::PinnedToBubblewrap) => {}
         Err(super::linux_landlock::LandlockUnavailable::NotABuildJail) => {}
+        // ⛔ DO NOT BLAME THE KERNEL FOR A POLICY BUG. `LandlockUnavailable` covers two very
+        // different failures and this arm used to describe both as a missing kernel feature:
+        //
+        //   - the kernel genuinely lacks Landlock (pre-5.13, or a container that masks it), and
+        //   - `PolicyNotExpressible` — the kernel is fine and OUR policy will not compile.
+        //
+        // MEASURED: on a 6.17 kernel with Landlock ABI 4, an authored grant naming a path that
+        // did not exist produced `PolicyNotExpressible("filesystem mount source does not exist:
+        // node")` and this message told the user their kernel was too old. They would go check
+        // their kernel version, find it fine, and have nowhere else to look — while the real
+        // cause sat in the parenthetical they were being steered away from.
+        Err(reason @ super::linux_landlock::LandlockUnavailable::PolicyNotExpressible(_)) => {
+            return Err(Degradation {
+                lost: vec!["fs".to_string(), "net".to_string()],
+                reason: Some(format!(
+                    "the dependency build jail could not COMPILE its policy on this host — this \
+                     is a nub bug, not a missing kernel feature: {reason:?}"
+                )),
+            });
+        }
         Err(reason) => {
             return Err(Degradation {
                 lost: vec!["fs".to_string(), "net".to_string()],

@@ -195,10 +195,26 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // binary (`npm_node_execpath`), so BOTH must be readable/executable — grant each
         // (compile_build_jail dedups and adds each one's bin dir). On Windows both spellings
         // already name the staged copy, so this resolves to one directory.
+        // ⛔ ABSOLUTE, EXISTING PATHS ONLY. These become `FsOrigin::Authored` read grants, and
+        // an authored grant whose source is MISSING is a hard refusal in the Linux backend
+        // (`linux_grants.rs`: speculative absences are skipped, authored ones abort) — so one bad
+        // entry does not degrade the policy, it makes the whole jail UNCOMPILABLE.
+        //
+        // MEASURED on Linux before this filter: `PolicyNotExpressible("filesystem mount source
+        // does not exist: node")`, surfaced to the user as "requires Landlock (Linux 5.13+), which
+        // this kernel does not provide" ON A 6.17 KERNEL. Worse, the probe's search read that as a
+        // capability need and escalated until `write.disk` produced an expressible policy, so nine
+        // corpus packages recorded a FABRICATED `write.disk` grant.
+        //
+        // The bare name came from this list's own premise: before the node-shim removal, `NODE`
+        // named the PATH-prepended shim and a bare `node` resolved through it. With the shim gone
+        // `NODE` is the real execpath, and any bare spelling that survives is a relative path with
+        // nothing behind it.
         let interpreter: Vec<PathBuf> = ["npm_node_execpath", "NODE"]
             .iter()
             .filter_map(|k| ambient.get(*k))
             .map(PathBuf::from)
+            .filter(|p| p.is_absolute() && p.exists())
             .collect();
 
         // WINDOWS: deliver the `child_process` stdio shim. A piped spawn under the
