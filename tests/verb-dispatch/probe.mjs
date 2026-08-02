@@ -18,7 +18,7 @@
 //
 // Usage: node tests/verb-dispatch/probe.mjs <path-to-built-nub-binary>
 
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -146,12 +146,17 @@ if (!isWin) {
 console.log("== env hygiene ==");
 const script = path.join(root, "probe-env.js");
 fs.writeFileSync(script, 'console.log("CHILD:" + String(process.env.__NUB_ARGV0));\n');
-const child = execFileSync(path.join(hostPkg, "bin", `nub${exe}`), [script], {
+// A bare temp dir has no dependencies, so `nub <script>` warns and can exit non-zero
+// (it does on Windows; on macOS it only warns). We are asserting what the CHILD SAW,
+// not nub's exit status — so use spawnSync, which does not throw, and read the output
+// either way. An execFileSync here failed the Windows leg on the warning alone.
+const res = spawnSync(path.join(hostPkg, "bin", `nub${exe}`), [script], {
   encoding: "utf8", env: { ...process.env, __NUB_ARGV0: "nubx" },
-}).trim();
-child.includes("CHILD:undefined")
-  ? ok("__NUB_ARGV0 erased before any child sees it")
-  : no(`__NUB_ARGV0 leaked to child: ${child}`);
+});
+const seen = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+if (seen.includes("CHILD:undefined")) ok("__NUB_ARGV0 erased before any child sees it");
+else if (seen.includes("CHILD:nubx")) no("__NUB_ARGV0 LEAKED to child — erasure is not working");
+else no(`env-hygiene child never reported (exit=${res.status}): ${seen.replace(/\s+/g, " ").trim().slice(0, 160)}`);
 
 fs.rmSync(root, { recursive: true, force: true });
 console.log(`\nRESULT: ${pass} ok, ${failures.length} failed`);
