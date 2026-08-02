@@ -411,17 +411,26 @@ function enginesFor(pkg, version) {
   } catch { return null; }
 }
 
-// ⛔ THE FLOOR IS THE OLDEST NODE WE CAN OBTAIN, NOT NUB'S AUGMENTATION FLOOR.
+// ⛔ THE FLOOR IS WHATEVER IS ACTUALLY INSTALLED — not a hardcoded number.
 //
-// nub's 18.19 floor governs its RUNTIME augmentation (the preload, the loader hooks). It does not
-// bind here, and two measurements say so:
-//   - a lifecycle script receives the REAL node binary — `process.execPath` is `.../bin/node` and
-//     `argv0` is `node`, so there is no shim in the way and no nub-spawns-node double spawn;
-//   - it runs with `NODE_COMPAT=1`, i.e. augmentation off by construction.
-//   - and `nub install` itself completes with node 14, 16 or 18 on PATH (all exit 0).
-// So the probe may honour an `engines.node` floor far below 18, which is the point: a 2018 package
-// declaring `>=6` was built against a runtime nothing modern resembles.
-const NODE_FLOOR = 10;
+// nub's 18.19 floor governs its RUNTIME augmentation and does not bind here, which three
+// measurements establish:
+//   - a lifecycle script receives the REAL node binary — `process.execPath` is `.../bin/node`,
+//     `argv0` is `node` — so there is no shim and no nub-spawns-node double spawn;
+//   - it runs with `NODE_COMPAT=1`, augmentation off by construction;
+//   - `nub install` itself completes on node 4, 6, 8, 10, 14, 16 and 18 (all exit 0).
+//
+// A hardcoded floor was tried at 10 and was simply WRONG: v4, v6 and v8 were installed all along,
+// so a package declaring `>=6` measured on 10 for no reason. Deriving the floor from the installed
+// set is self-adjusting and cannot drift from reality the way a constant does.
+const NODE_FLOOR = (() => {
+  try {
+    const root = path.join(os.homedir(), '.nvm', 'versions', 'node');
+    const majors = fs.readdirSync(root)
+      .map((n) => /^v(\d+)\./.exec(n)?.[1]).filter(Boolean).map(Number);
+    return majors.length ? Math.min(...majors) : 10;
+  } catch { return 10; }
+})();
 const NODE_DEFAULT = '22';      // when `engines.node` is absent or unparseable
 const NODE_CEILING = 22;        // latest LTS — never measure on something newer than the ecosystem
 
