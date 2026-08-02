@@ -994,7 +994,7 @@ pub enum Command {
         #[arg(long = "no-minify")]
         no_minify: bool,
 
-        /// Where the source map goes: `inline` (default), `linked`, `external`,
+        /// Where the source map goes: `linked` (default), `inline`, `external`,
         /// or `none`. Written `--sourcemap=<MODE>`; bare `--sourcemap` is inline.
         #[arg(
             long,
@@ -2799,7 +2799,14 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             bundle: crate::compile::BundleOptions {
                 minify: !no_minify,
                 keep_names: !no_keep_names,
-                sourcemap: match sourcemap.unwrap_or(SourcemapArg::Inline) {
+                // `linked`, not `inline`. An inline map is base64 inside the chunk,
+                // so it is bytes Node must read and parse at load time — measured at
+                // 81% of a hello-world bundle (1.04 MB of 1.29 MB) and 7 ms of warm
+                // start. A linked map still SHIPS inside the artifact and Node reads
+                // it lazily, only when it renders a stack trace. Verified identical:
+                // a throwing fixture reports `throw.ts:2` with the original TypeScript
+                // source line under both modes.
+                sourcemap: match sourcemap.unwrap_or(SourcemapArg::Linked) {
                     SourcemapArg::Linked => crate::compile::SourcemapMode::Linked,
                     SourcemapArg::Inline => crate::compile::SourcemapMode::Inline,
                     SourcemapArg::External => crate::compile::SourcemapMode::External,

@@ -125,7 +125,7 @@ nub compile app.ts --no-keep-names
 
 ## `--sourcemap`
 
-A compiled binary runs bundled, minified code, so an unmapped stack trace points at a column in one long line. Nub emits an inline source map by default and the embedded Node consumes it, so traces name your original TypeScript:
+A compiled binary runs bundled, minified code, so an unmapped stack trace points at a column in one long line. Nub ships a source map alongside the bundle by default and the embedded Node consumes it, so traces name your original TypeScript:
 
 ```console
 $ ./app
@@ -139,10 +139,12 @@ Error: no such order
 Pick a different mode when the default doesn't fit:
 
 ```bash
-nub compile app.ts --sourcemap=linked     # a .map shipped inside the binary
+nub compile app.ts --sourcemap=inline     # the map embedded in the bundle itself
 nub compile app.ts --sourcemap=external   # a .map written beside the binary, not shipped
 nub compile app.ts --sourcemap=none       # no map at all
 ```
+
+`inline` embeds the map in the bundle, so the runtime reads and parses it on every launch. The default keeps the map in its own file, which Node reads only when it renders a stack trace — same traces, faster start.
 
 Use `external` to keep your source out of what you distribute while still holding a map to upload to an error tracker. Pair it with `--sourcemap-exclude-sources` to drop the original text from the map itself.
 

@@ -336,7 +336,28 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
     // Own process group + terminating/diagnostic-signal forwarding + TTY
     // foreground handoff + macOS SIGKILL backstop — the same faithful spawn
     // `nub run`'s file path uses. NODE_OPTIONS is inherited untouched (honored).
-    phase("about to spawn node");
+    phase_with(|| {
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let envs: Vec<String> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                format!(
+                    "{}={}",
+                    k.to_string_lossy(),
+                    v.map(|v| v.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "<removed>".into())
+                )
+            })
+            .collect();
+        format!(
+            "about to spawn node\n  argv: {}\n  env:  {}",
+            args.join(" "),
+            envs.join(" ")
+        )
+    });
     let status = spawn::status_forwarding_signals(&mut cmd)
         .map_err(|error| node_spawn_error(&node_path, &base, error));
     phase("node exited");
