@@ -130,12 +130,42 @@ impl EnvOwner {
     /// is installed. Warned rather than raised: the run is still correct (nub
     /// loaded `.env*` as usual), the user is just not getting schema validation.
     pub(crate) fn missing_loader_warning(&self) -> Option<String> {
-        matches!(self.kind, OwnerKind::Missing).then(|| {
+        // Only speak up when the file is recognizably `@env-spec`.
+        //
+        // `.env.schema` is not this format's name — `dotenv-extended` has used it
+        // as its default since 2016, nine years earlier, for an incompatible
+        // format (bare `NAME=` lines, values still in `.env`). Warning on the
+        // filename alone told those projects their schema "was not applied" when
+        // it was being applied perfectly well by another tool, and recommended
+        // installing something they had never asked for. The file is not ours to
+        // claim by name.
+        (matches!(self.kind, OwnerKind::Missing) && self.schema_looks_like_env_spec()).then(|| {
             format!(
-                "nub: found {SCHEMA_FILE} but {LOADER_PACKAGE} is not installed, so the schema \
-                 was not applied.\n      nub loaded .env files as usual. To use the schema: \
-                 nub add {LOADER_PACKAGE}"
+                "nub: found an @env-spec {SCHEMA_FILE} but {LOADER_PACKAGE} is not installed, so \
+                 the schema was not applied.\n      nub loaded .env files as usual. To use the \
+                 schema: nub add {LOADER_PACKAGE}"
             )
+        })
+    }
+
+    /// Whether the schema carries `@env-spec`'s own syntax: a `# ---` header
+    /// divider, or a `# @decorator` line.
+    ///
+    /// A deliberately shallow sniff, not a parse — nub never interprets the
+    /// schema, and this only decides whether a diagnostic is honest. A false
+    /// negative costs a missing hint; a false positive is what this exists to
+    /// prevent.
+    fn schema_looks_like_env_spec(&self) -> bool {
+        let Ok(text) = std::fs::read_to_string(self.root.join(SCHEMA_FILE)) else {
+            return false;
+        };
+        text.lines().take(200).any(|line| {
+            let line = line.trim_start();
+            let Some(rest) = line.strip_prefix('#') else {
+                return false;
+            };
+            let rest = rest.trim_start();
+            rest.starts_with("---") || rest.starts_with('@')
         })
     }
 }

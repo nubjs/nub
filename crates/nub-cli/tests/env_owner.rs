@@ -455,6 +455,50 @@ fn a_cli_owner_is_resolved_on_paths_that_do_not_run_the_child_env_builder() {
 }
 
 #[test]
+fn a_foreign_env_schema_is_left_alone_without_advertising_anything() {
+    // `.env.schema` is not @env-spec's name. dotenv-extended has defaulted to it
+    // since 2016 — nine years earlier — for an incompatible format: bare `NAME=`
+    // lines, with the values still in `.env`. Warning on the filename told those
+    // projects their schema "was not applied" while another tool was applying it
+    // perfectly well, and recommended installing something they never asked for.
+    let dir = project(&[
+        (".env", "FROM_DOTENV=yes\n"),
+        // No `# ---` divider and no `# @decorator`: not this format.
+        (".env.schema", "# Server\nNODE_ENV=\nPORT=\n"),
+    ]);
+    let run = run(dir.path());
+    assert_eq!(
+        run.var("FROM_DOTENV").as_deref(),
+        Some("yes"),
+        "a foreign schema must not disturb nub's own .env loading. stderr: {}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("varlock"),
+        "nub must not name another tool at a project that never asked for it; \
+         stderr was: {}",
+        run.stderr
+    );
+}
+
+#[test]
+fn an_env_spec_schema_without_the_loader_still_warns() {
+    // The control for the test above: a genuinely `@env-spec` schema — it has the
+    // header divider — still earns the hint, so the sniff has not simply muted it.
+    let dir = project(&[
+        (".env", "FROM_DOTENV=yes\n"),
+        (".env.schema", "# @defaultSensitive=false\n# ---\nA=1\n"),
+    ]);
+    let run = run(dir.path());
+    assert!(
+        run.stderr.contains("@env-spec"),
+        "an @env-spec schema with no loader installed must still say so; \
+         stderr was: {}",
+        run.stderr
+    );
+}
+
+#[test]
 fn silent_suppresses_the_verification_warning() {
     // The warning is on by default because it reports a run with no environment
     // at all, but `--silent` has to mean silent.
