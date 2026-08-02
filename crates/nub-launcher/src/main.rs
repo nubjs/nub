@@ -515,7 +515,7 @@ fn embedded_node_cache_is_ready(manifest: &Manifest, cache_dir: &Path) -> bool {
         } else if name.as_os_str() == expected_node {
             if saw_node
                 || !is_executable_file(&entry.path())
-                || !regular_file_matches_sha256(&entry.path(), &manifest.node_sha256)
+                || !regular_file_matches_digest(&entry.path(), manifest)
             {
                 return false;
             }
@@ -707,16 +707,51 @@ fn regular_file_matches_bytes(path: &Path, expected: &[u8]) -> bool {
     matches!(file.read(&mut extra), Ok(0))
 }
 
-fn regular_file_matches_sha256(path: &Path, expected: &str) -> bool {
-    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return false;
-    }
+/// Verify the extracted Node against the manifest, preferring BLAKE3.
+///
+/// This runs on EVERY warm start over ~107 MB, and software SHA-256 has no
+/// hardware path on aarch64 — measured on the real binary at 313 ms vs 65 ms for
+/// BLAKE3, 4.8x, which is the single largest component of warm start. BLAKE3 is
+/// collision- and preimage-resistant, so nothing about the integrity guarantee
+/// changes; this is the same trade `nub-core` already made for the R2 addon
+/// digest. `node_sha256` stays the cache KEY, so no extracted tree is orphaned.
+///
+/// A payload written before `node_blake3` existed carries an empty field and
+/// falls back to SHA-256.
+fn regular_file_matches_digest(path: &Path, manifest: &Manifest) -> bool {
     if !fs::symlink_metadata(path)
         .is_ok_and(|metadata| metadata_is_trusted_regular_file(path, &metadata))
     {
         return false;
     }
-    sha256_hex_of_file(path).is_ok_and(|actual| actual.eq_ignore_ascii_case(expected))
+    if is_hex_digest(&manifest.node_blake3, 64) {
+        return blake3_hex_of_file(path)
+            .is_ok_and(|actual| actual.eq_ignore_ascii_case(&manifest.node_blake3));
+    }
+    if is_hex_digest(&manifest.node_sha256, 64) {
+        return sha256_hex_of_file(path)
+            .is_ok_and(|actual| actual.eq_ignore_ascii_case(&manifest.node_sha256));
+    }
+    false
+}
+
+fn is_hex_digest(value: &str, len: usize) -> bool {
+    value.len() == len && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn blake3_hex_of_file(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let read = file
+            .read(&mut buf)
+            .with_context(|| format!("reading {}", path.display()))?;
+        if read == 0 {
+            return Ok(hasher.finalize().to_hex().to_string());
+        }
+        hasher.update(&buf[..read]);
+    }
 }
 
 /// Where this payload's embedded Node extracts to, keyed by content so two
@@ -2444,6 +2479,7 @@ mod tests {
             smol_exact_target: false,
             triple: "darwin-arm64".to_string(),
             node_sha256: format!("{:x}", Sha256::digest(b"node")),
+            node_blake3: String::new(),
             app_sha256: "app-cache-key".to_string(),
             minify: false,
             install_message: None,

@@ -200,7 +200,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         .unwrap_or_else(|| PathBuf::from("."));
     let (pin, raw, source) = determine_target(opts.target.as_deref(), &pin_cwd)?;
 
-    let (node_version, node_blob, node_sha, node_license_blob) = if opts.smol {
+    let (node_version, node_blob, node_sha, node_b3, node_license_blob) = if opts.smol {
         // Smol bakes the acceptance FLOOR the launcher enforces (`discovered >=
         // floor`) — and ONLY that. A range's upper bound is deliberately not
         // carried into the artifact, so the raw spec is echoed here for the
@@ -213,7 +213,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
             "Using Node.js {} (resolved from {source}; satisfied at runtime)",
             non_exact_spec(&pin, &raw).unwrap_or_else(|| floor.to_string())
         );
-        (floor, Vec::new(), String::new(), Vec::new())
+        (floor, Vec::new(), String::new(), String::new(), Vec::new())
     } else {
         // Embed bakes ONE exact version — a range/major/alias collapses to the
         // newest satisfying release at compile time. (`build_node_blob` →
@@ -223,9 +223,9 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         let exact =
             version_management::resolve_pin_for_platform(&pin, os, arch, musl, &cache_root)?;
         external::check_node_support(&exact, &source, &shim_plan)?;
-        let (blob, sha, node_license_blob) =
+        let (blob, sha, b3, node_license_blob) =
             build_node_blob(&exact, &target, &cache_root, &source)?;
-        (exact, blob, sha, node_license_blob)
+        (exact, blob, sha, b3, node_license_blob)
     };
 
     // 4. Manifest + payload.
@@ -236,6 +236,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         smol_exact_target: opts.smol && smol_requires_exact_target(&pin),
         triple: target.triple(),
         node_sha256: node_sha,
+        node_blake3: node_b3,
         app_sha256: app_sha,
         minify: opts.bundle.minify,
         install_message: Some(install_message(&opts)),
@@ -791,7 +792,7 @@ fn build_node_blob(
     target: &TargetPlatform,
     cache_root: &Path,
     resolved_from: &str,
-) -> Result<(Vec<u8>, String, Vec<u8>)> {
+) -> Result<(Vec<u8>, String, String, Vec<u8>)> {
     let (os, arch, musl) = dist_platform(target);
     // Provisioning prints the `Using Node.js <v> (resolved from <source>)` line +
     // downloads (verified against SHASUMS256.txt before it commits).
@@ -814,6 +815,9 @@ fn build_node_blob(
 
     let bytes = prepare_node_bytes(&node_bin, target)?;
     let sha = crate::cli::sha256_hex(&bytes);
+    // The launcher verifies with this on every warm start; `sha` stays the cache
+    // key. Both are over the same decompressed bytes.
+    let b3 = blake3::hash(&bytes).to_hex().to_string();
     eprintln!(
         "Compressing Node ({:.0} MB) with zstd-19 …",
         bytes.len() as f64 / 1_000_000.0
@@ -821,7 +825,7 @@ fn build_node_blob(
     let blob = zstd::encode_all(&bytes[..], 19).context("zstd-19 compressing Node")?;
     let node_license_blob =
         zstd::encode_all(&license[..], 19).context("zstd-19 compressing Node LICENSE")?;
-    Ok((blob, sha, node_license_blob))
+    Ok((blob, sha, b3, node_license_blob))
 }
 
 /// The store root a target's Node is provisioned into. A NON-host Node must not
@@ -1919,6 +1923,7 @@ mod tests {
             smol_exact_target: false,
             triple: "darwin-arm64".into(),
             node_sha256: "node".into(),
+            node_blake3: String::new(),
             app_sha256: "app".into(),
             minify: false,
             install_message: None,
@@ -1935,6 +1940,7 @@ mod tests {
         let smol = Manifest {
             shape: Shape::Smol,
             node_sha256: String::new(),
+            node_blake3: String::new(),
             ..manifest
         };
         let smol = nub_core::compile::encode_with_license(&smol, &app, &[], &[]);

@@ -45,6 +45,9 @@ dirs-next = "2"
 # SHASUMS256.txt before it is committed into the shared store (fat-LTO drops it
 # from the embed-shape path, which never provisions).
 sha2 = "0.10"
+# The warm-start digest for the extracted Node. sha2 stays for the cache KEY and
+# for archive checks; this is the hot path — see `regular_file_matches_digest`.
+blake3 = "1"
 
 # Own workspace root: excluded from the nub root workspace so this profile
 # (size-first) governs the shipped launcher independently.

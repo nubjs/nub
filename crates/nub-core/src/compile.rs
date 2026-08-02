@@ -98,6 +98,16 @@ pub struct Manifest {
     /// cached official Node. Empty for `smol`.
     #[serde(default)]
     pub node_sha256: String,
+    /// BLAKE3 (hex) of the DECOMPRESSED embedded Node, used for the WARM-START
+    /// verify. `node_sha256` remains the cache KEY — changing that would orphan
+    /// every extracted tree — but the launcher re-hashes ~107 MB on every warm
+    /// launch, and software SHA-256 has no hardware path on aarch64: measured
+    /// 313 ms vs 65 ms for BLAKE3 on the real binary, 4.8x. Same reasoning, and
+    /// the same crate, as the R2 addon digest in this crate's Cargo.toml.
+    /// Empty for `smol`, and empty in a payload written before this field existed
+    /// — the launcher falls back to `node_sha256` then.
+    #[serde(default)]
+    pub node_blake3: String,
     /// Content hash (hex) of the app payload region — the app-extraction cache key.
     #[serde(default)]
     pub app_sha256: String,
@@ -738,6 +748,7 @@ mod tests {
             smol_exact_target: false,
             triple: "darwin-arm64".into(),
             node_sha256: "abc123".into(),
+            node_blake3: String::new(),
             app_sha256: "def456".into(),
             minify: false,
             install_message: None,
@@ -759,6 +770,7 @@ mod tests {
             smol_exact_target: false,
             triple: "darwin-arm64".into(),
             node_sha256: "abc123".into(),
+            node_blake3: String::new(),
             app_sha256: "def456".into(),
             minify: true,
             install_message: Some("Setting up app".into()),
@@ -791,6 +803,7 @@ mod tests {
             smol_exact_target: true,
             triple: "darwin-arm64".into(),
             node_sha256: String::new(),
+            node_blake3: String::new(),
             app_sha256: "aa".into(),
             minify: false,
             install_message: None,

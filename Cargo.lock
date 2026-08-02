@@ -3026,6 +3026,7 @@ dependencies = [
  "aube-util",
  "aube-workspace",
  "base64",
+ "blake3",
  "clap",
  "clx 2.1.0",
  "console",
