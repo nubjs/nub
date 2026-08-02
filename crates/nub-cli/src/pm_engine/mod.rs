@@ -1679,6 +1679,19 @@ fn augmentation_to_lifecycle_overlay(
     // The env-owner markers travel with the adapter this path injects. Without
     // them the adapter no-ops and a lifecycle script's `node` gets no environment
     // at all, since detection has already stood nub's own cascade down.
+    //
+    // DECIDED (2026-08-02, maintainer): dependency build scripts DO see the
+    // schema-resolved environment. This is deliberate, not incidental — do not
+    // "fix" it by dropping the markers here.
+    //
+    // The reasoning is consistency rather than appetite for exposure. nub's own
+    // `.env` cascade already reaches these scripts through the PATH shim, whose
+    // `node` re-enters nub and resolves for itself. Withholding the schema here
+    // would mean a project's env behaved one way for its own code and another
+    // for a dependency's build, differing only by which loader answered — a
+    // distinction nothing else in nub draws. The trade accepted with it: a
+    // validation error in the app's own schema surfaces while some unrelated
+    // dependency is building.
     for (key, value) in env_owner_markers {
         overlay.push((OsString::from(key), OsString::from(value)));
     }
