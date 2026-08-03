@@ -36,7 +36,10 @@ use npmrc::{parse_npmrc, parse_npmrc_untrusted, substitute_env};
 #[cfg(test)]
 use token::sanitize_token_helper;
 #[cfg(test)]
-use url::{is_public_npmjs_url, normalize_registry_url, package_scope, registry_uri_key};
+use url::{
+    is_public_npmjs_url, normalize_npmrc_uri_key, normalize_registry_url, package_scope,
+    registry_uri_key,
+};
 #[cfg(test)]
 use yarnrc::{
     load_yarnrc_entries_split_with_home, translate_classic_yarnrc_content,

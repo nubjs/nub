@@ -1,30 +1,63 @@
-/**
- * Redact bearer credentials from a URL before it lands in error
- * messages, trace logs, or diagnostic output.
- *
- * Three credential shapes are scrubbed:
- *   - `user:password@host` userinfo (Artifactory, Nexus, JFrog,
- *     GitHub Packages, scoped npm registries with embedded auth).
- *   - Sensitive query parameters (`token`, `auth`, `api_key`,
- *     `apikey`, `access_token`) — values are replaced with `***`.
- *   - Returns the input unchanged when no credential pattern is
- *     present.
- */
+/// Return a URL safe for diagnostic output.
+///
+/// URLs are transport identity, not a safe diagnostic payload: userinfo and
+/// every query or fragment component can carry bearer credentials, signatures,
+/// or opaque capability data. Keep only the authority and path so callers can
+/// identify the endpoint without leaking its request credentials. A malformed
+/// authority-like value with userinfo is not safe to show at all.
 pub fn redact_url(url: &str) -> String {
-    let after_userinfo = redact_userinfo(url);
-    redact_query_tokens(&after_userinfo)
+    let locator_end = url.find(['?', '#']).unwrap_or(url.len());
+    let locator = &url[..locator_end];
+    if has_unparseable_authority_userinfo(locator) {
+        return "<invalid registry URL>".to_string();
+    }
+    redact_userinfo(locator)
 }
 
-/// Redact credentials and omit query/fragment components for diagnostic URLs.
+/// Alias for [`redact_url`] at user-facing diagnostic call sites.
 ///
-/// Registry URLs may carry read credentials as query parameters or userinfo.
-/// A diagnostic does not need either component to identify the endpoint, so
-/// remove them rather than merely masking individual query values.
+/// Keeping a single policy prevents signed remote-tarball URLs from being
+/// rendered less safely by one diagnostic path than another.
 pub fn display_url(url: &str) -> String {
-    // The locator ends before a query or fragment. Split the original string
-    // first: an `@` inside either suffix is data, never URL userinfo.
-    let locator_end = url.find(['?', '#']).unwrap_or(url.len());
-    redact_userinfo(&url[..locator_end])
+    redact_url(url)
+}
+
+/// Whether an otherwise scheme-less value has userinfo-shaped authority data.
+/// Registry URLs require an authority marker (`://` or `//`). A value such as
+/// `user:password@host/path` is invalid but contains credentials; emitting it
+/// verbatim would leak them. Recognized package-source protocols deliberately
+/// remain displayable, because their `@` characters are package syntax rather
+/// than URL userinfo.
+fn has_unparseable_authority_userinfo(locator: &str) -> bool {
+    if locator.contains("://") || locator.starts_with("//") || is_package_source(locator) {
+        return false;
+    }
+
+    let authority_end = locator.find('/').unwrap_or(locator.len());
+    let authority = &locator[..authority_end];
+    let Some((userinfo, host)) = authority.rsplit_once('@') else {
+        return false;
+    };
+    !userinfo.is_empty() && !host.is_empty() && userinfo.contains(':')
+}
+
+fn is_package_source(specifier: &str) -> bool {
+    [
+        "npm:",
+        "file:",
+        "link:",
+        "portal:",
+        "workspace:",
+        "catalog:",
+        "patch:",
+        "exec:",
+        "git:",
+        "github:",
+        "gitlab:",
+        "bitbucket:",
+    ]
+    .iter()
+    .any(|prefix| specifier.starts_with(prefix))
 }
 
 /**
@@ -42,57 +75,11 @@ fn redact_userinfo(url: &str) -> String {
         return url.to_string();
     };
     let tail = &url[after..];
-    let Some(at) = tail.find('@') else {
-        return url.to_string();
-    };
     let authority_end = tail.find(['/', '?', '#']).unwrap_or(tail.len());
-    if at >= authority_end {
+    let Some(at) = tail[..authority_end].rfind('@') else {
         return url.to_string();
-    }
+    };
     format!("{}***@{}", &url[..after], &tail[at + 1..])
-}
-
-/**
- * Replace the value of any well-known credential query parameter with
- * `***`. Matching is case-insensitive on the parameter name.
- */
-fn redact_query_tokens(url: &str) -> String {
-    let Some(qpos) = url.find('?') else {
-        return url.to_string();
-    };
-    let (head, query_full) = url.split_at(qpos);
-    let query = &query_full[1..];
-    // Keep the optional fragment intact.
-    let (query_only, fragment) = match query.find('#') {
-        Some(h) => (&query[..h], &query[h..]),
-        None => (query, ""),
-    };
-    const SENSITIVE: &[&str] = &["token", "auth", "api_key", "apikey", "access_token"];
-    let mut out = String::with_capacity(url.len());
-    out.push_str(head);
-    out.push('?');
-    let mut first = true;
-    for pair in query_only.split('&') {
-        if !first {
-            out.push('&');
-        }
-        first = false;
-        if let Some(eq) = pair.find('=') {
-            let (k, v) = pair.split_at(eq);
-            let lower = k.to_ascii_lowercase();
-            if SENSITIVE.iter().any(|s| lower == *s) {
-                out.push_str(k);
-                out.push_str("=***");
-                let _ = v;
-            } else {
-                out.push_str(pair);
-            }
-        } else {
-            out.push_str(pair);
-        }
-    }
-    out.push_str(fragment);
-    out
 }
 
 #[cfg(test)]
@@ -112,6 +99,50 @@ mod tests {
         let input = format!("https://user:hunter2{}host.example.com/x", '\u{40}');
         let expected = format!("https://***{}host.example.com/x", '\u{40}');
         assert_eq!(redact_url(&input), expected);
+    }
+
+    #[test]
+    fn redacts_all_multi_at_userinfo_before_the_authority() {
+        let input =
+            "https://user:pass@password-tail@registry.example:4873/npm?signature=signed#fragment";
+        let display = display_url(input);
+
+        assert_eq!(display, "https://***@registry.example:4873/npm");
+        for leaked in [
+            "user",
+            "pass",
+            "password-tail",
+            "signature",
+            "signed",
+            "fragment",
+        ] {
+            assert!(
+                !display.contains(leaked),
+                "display URL leaked {leaked:?}: {display}"
+            );
+        }
+    }
+
+    #[test]
+    fn replaces_scheme_less_userinfo_shaped_registry_with_constant() {
+        let input = "user:pass@password-tail@registry.example/npm?token=opaque@token#fragment";
+        let display = display_url(input);
+
+        assert_eq!(display, "<invalid registry URL>");
+        for leaked in ["user", "pass", "password-tail", "token", "fragment", "@"] {
+            assert!(
+                !display.contains(leaked),
+                "display URL leaked {leaked:?}: {display}"
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_non_url_package_aliases() {
+        assert_eq!(
+            display_url("npm:@scope/package@1.2.3"),
+            "npm:@scope/package@1.2.3"
+        );
     }
 
     #[test]
@@ -135,66 +166,30 @@ mod tests {
     }
 
     #[test]
-    fn redacts_query_token() {
+    fn strips_query_and_fragment_from_diagnostic_urls() {
         assert_eq!(
-            redact_url("https://reg.example.com/x?token=abc123&v=1"),
-            "https://reg.example.com/x?token=***&v=1"
+            redact_url("https://reg.example.com/x?token=abc123&v=1#section"),
+            "https://reg.example.com/x"
+        );
+        assert_eq!(
+            redact_url("https://reg.example.com/x?signature=signed-url-secret"),
+            "https://reg.example.com/x"
+        );
+        assert_eq!(
+            redact_url("https://reg.example.com/x#opaque-fragment"),
+            "https://reg.example.com/x"
         );
     }
 
     #[test]
-    fn redacts_query_auth_case_insensitive() {
+    fn strips_suffixes_before_redacting_authority_userinfo() {
         assert_eq!(
-            redact_url("https://reg.example.com/x?Auth=secret"),
-            "https://reg.example.com/x?Auth=***"
-        );
-    }
-
-    #[test]
-    fn redacts_query_apikey_alias() {
-        assert_eq!(
-            redact_url("https://reg.example.com/x?apikey=abc&api_key=def"),
-            "https://reg.example.com/x?apikey=***&api_key=***"
-        );
-    }
-
-    #[test]
-    fn preserves_fragment_when_redacting_query() {
-        assert_eq!(
-            redact_url("https://reg.example.com/x?token=abc#section"),
-            "https://reg.example.com/x?token=***#section"
-        );
-    }
-
-    #[test]
-    fn passthrough_when_query_has_no_sensitive_keys() {
-        assert_eq!(
-            redact_url("https://reg.example.com/x?foo=1&bar=2"),
-            "https://reg.example.com/x?foo=1&bar=2"
-        );
-    }
-
-    #[test]
-    fn display_url_omits_query_fragment_and_userinfo_credentials() {
-        let input = format!(
-            "https://registry-user:registry-pass{}registry.example.com/npm?token=transport-secret#fragment",
-            '\u{40}'
-        );
-        assert_eq!(
-            display_url(&input),
-            format!("https://***{}registry.example.com/npm", '\u{40}')
-        );
-    }
-
-    #[test]
-    fn generic_redactor_only_treats_at_signs_in_authorities_as_userinfo() {
-        assert_eq!(
-            redact_url("https://registry.example?token=prefix@query-secret"),
-            "https://registry.example?token=***"
+            redact_url("https://registry.example?signature=prefix@query-secret"),
+            "https://registry.example"
         );
         assert_eq!(
             redact_url("ftp://registry.example/npm#fragment@fragment-secret"),
-            "ftp://registry.example/npm#fragment@fragment-secret"
+            "ftp://registry.example/npm"
         );
     }
 

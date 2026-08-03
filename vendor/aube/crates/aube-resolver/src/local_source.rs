@@ -142,7 +142,7 @@ pub(crate) fn read_local_manifest(
 ) -> Result<(String, String, BTreeMap<String, String>), Error> {
     let Some(local_path) = local.path() else {
         return Err(Error::Registry(
-            local.specifier(),
+            aube_util::url::display_url(&local.specifier()),
             "read_local_manifest called on non-path source".to_string(),
         ));
     };
@@ -160,7 +160,7 @@ pub(crate) fn read_local_manifest(
         }
         LocalSource::Exec(_) | LocalSource::Git(_) | LocalSource::RemoteTarball(_) => {
             return Err(Error::Registry(
-                local.specifier(),
+                aube_util::url::display_url(&local.specifier()),
                 "read_local_manifest: generated or remote source handled separately".to_string(),
             ));
         }
@@ -598,7 +598,7 @@ pub(crate) async fn resolve_git_source(
                 // helper / ssh keys for private access.
                 tracing::debug!(
                     name,
-                    url = %aube_util::url::redact_url(url_to_fetch),
+                    url = %aube_util::url::display_url(url_to_fetch),
                     "codeload fetch failed, falling back to git clone: {e}",
                 );
             }
@@ -659,11 +659,11 @@ pub(crate) async fn resolve_remote_tarball(
         .map_err(|e| {
             Error::Registry(
                 name.to_string(),
-                format!("fetch {}: {e}", aube_util::url::redact_url(&tarball.url)),
+                format!("fetch {}: {e}", aube_util::url::display_url(&tarball.url)),
             )
         })?;
     let name_owned = name.to_string();
-    let url = aube_util::url::redact_url(&tarball.url);
+    let url = aube_util::url::display_url(&tarball.url);
     let (integrity, version, deps) = tokio::task::spawn_blocking(move || -> Result<_, Error> {
         let integrity = aube_store::sha512_integrity(&bytes);
 

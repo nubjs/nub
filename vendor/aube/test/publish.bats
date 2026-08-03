@@ -71,14 +71,26 @@ EOF
 @test "aube publish missing-auth diagnostics omit registry userinfo and query credentials" {
 	_write_publishable_pkg
 
-	run aube publish --registry='https://publish-user:publish-password@r.example.com/npm?token=prefix@publish-query#publish-fragment'
+	run aube publish --registry='https://publish-user:publish-password@password-tail@r.example.com/npm?signature=publish-signature#publish-fragment'
 	assert_failure
-	assert_output --partial 'aube login --registry https://***@r.example.com/npm'
-	refute_output --partial 'publish-user'
-	refute_output --partial 'publish-password'
-	refute_output --partial 'publish-query'
-	refute_output --partial '?token='
-	refute_output --partial '#publish-fragment'
+	assert_output --partial 'aube login --registry https://r.example.com/npm/'
+	for secret in publish-user publish-password password-tail '?signature=' publish-signature '#publish-fragment' publish-fragment; do
+		refute_output --partial "$secret"
+	done
+}
+
+@test "aube publish refusal hides registry credentials" {
+	_write_publishable_pkg
+	echo '//127.0.0.1:1/npm/:_authToken=fake' >.npmrc
+
+	run aube publish --no-git-checks \
+		--registry='http://publish-user:publish-password@password-tail@127.0.0.1:1/npm?signature=publish-signature#publish-fragment'
+	assert_failure
+	assert_output --partial "failed to PUT"
+	assert_output --partial "connection failed"
+	for secret in publish-user publish-password password-tail '?signature=' publish-signature '#publish-fragment' publish-fragment; do
+		refute_output --partial "$secret"
+	done
 }
 
 @test "aube publish uses npm trusted publishing OIDC when no auth token is configured" {

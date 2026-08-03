@@ -72,14 +72,42 @@ _write_unpublishable_pkg() {
 @test "aube unpublish missing-auth diagnostics omit registry userinfo and query credentials" {
 	_write_unpublishable_pkg
 
-	run aube unpublish --registry='https://unpublish-user:unpublish-password@r.example.com/npm?token=prefix@unpublish-query#unpublish-fragment'
+	run aube unpublish --registry='https://unpublish-user:unpublish-password@password-tail@r.example.com/npm?signature=unpublish-signature#unpublish-fragment'
 	assert_failure
-	assert_output --partial 'aube login --registry https://***@r.example.com/npm'
-	refute_output --partial 'unpublish-user'
-	refute_output --partial 'unpublish-password'
-	refute_output --partial 'unpublish-query'
-	refute_output --partial '?token='
-	refute_output --partial '#unpublish-fragment'
+	assert_output --partial 'aube login --registry https://r.example.com/npm/'
+	for secret in unpublish-user unpublish-password password-tail '?signature=' unpublish-signature '#unpublish-fragment' unpublish-fragment; do
+		refute_output --partial "$secret"
+	done
+}
+
+@test "aube unpublish refusal hides registry credentials" {
+	_write_unpublishable_pkg
+	echo '//127.0.0.1:1/npm/:_authToken=fake' >.npmrc
+
+	run aube unpublish \
+		--registry='http://unpublish-user:unpublish-password@password-tail@127.0.0.1:1/npm?signature=unpublish-signature#unpublish-fragment'
+	assert_failure
+	assert_output --partial "failed to GET"
+	assert_output --partial "connection failed"
+	for secret in unpublish-user unpublish-password password-tail '?signature=' unpublish-signature '#unpublish-fragment' unpublish-fragment; do
+		refute_output --partial "$secret"
+	done
+}
+
+@test "aube unpublish rescoped registry GET hides credentialed source URL" {
+	_write_unpublishable_pkg
+	cat >.npmrc <<'EOF'
+registry=http://rescope-user:rescope-password@password-tail@127.0.0.1:1/npm?token=opaque@query#rescope-fragment
+_authToken=rescoped-token
+EOF
+
+	run aube unpublish
+	assert_failure
+	assert_output --partial "failed to GET"
+	assert_output --partial "connection failed"
+	for secret in rescope-user rescope-password password-tail '?token=' opaque query '#rescope-fragment' rescope-fragment; do
+		refute_output --partial "$secret"
+	done
 }
 
 @test "aube unpublish errors when ./package.json has no name" {

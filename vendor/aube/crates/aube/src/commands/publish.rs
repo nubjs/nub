@@ -33,6 +33,7 @@ use crate::commands::pack::{
 };
 use crate::commands::{encode_package_name, ensure_registry_auth_for_package};
 use aube_manifest::PackageJson;
+use aube_registry::SafeReqwestDiagnostic;
 use aube_registry::client::RegistryClient;
 use aube_registry::config::{NpmConfig, normalize_registry_url_pub};
 use base64::Engine;
@@ -698,9 +699,10 @@ async fn npm_oidc_id_token(
         .await
     {
         Ok(resp) => resp,
-        Err(e) => {
+        Err(error) => {
+            let error = SafeReqwestDiagnostic::from(error);
             tracing::debug!(
-                error = %e,
+                %error,
                 "GitHub Actions OIDC token request failed; falling back to configured registry auth"
             );
             return Ok(None);
@@ -741,6 +743,7 @@ async fn exchange_npm_oidc_token(
         .bearer_auth(id_token)
         .send()
         .await
+        .map_err(SafeReqwestDiagnostic::from)
         .into_diagnostic()
         .wrap_err_with(|| {
             format!(
@@ -758,6 +761,7 @@ async fn exchange_npm_oidc_token(
     let body = resp
         .json::<NpmOidcExchangeResponse>()
         .await
+        .map_err(SafeReqwestDiagnostic::from)
         .into_diagnostic()
         .wrap_err("failed to parse npm OIDC token exchange response")?;
     Ok(body.token.filter(|token| !token.trim().is_empty()))
@@ -793,6 +797,7 @@ async fn send_publish_put(
     let resp = req
         .send()
         .await
+        .map_err(SafeReqwestDiagnostic::from)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to PUT {}", aube_util::url::display_url(url)))?;
     let status = resp.status();

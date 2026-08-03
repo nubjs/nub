@@ -160,16 +160,35 @@ pub(crate) fn load_workspace_catalogs(cwd: &std::path::Path) -> miette::Result<C
 /// enterprise host).
 const BUILTIN_GH_REGISTRY: &str = "https://npm.pkg.github.com/";
 
-/// A `namedRegistries` alias URL is accepted only when it's an absolute
-/// http(s) URL — mirrors pnpm's `new URL(url)` + `http:`/`https:` protocol
-/// check, catching the common typo of a bare host (`npm.work.example.com`).
-/// The scheme-prefix form is dependency-free and sufficient: a truly
-/// malformed-but-schemed URL surfaces later at fetch time.
+/// A `namedRegistries` alias must be an absolute credential-free HTTP(S) base
+/// URL. Auth belongs in `.npmrc`; query and fragment components are request
+/// capabilities rather than stable registry identity.
 fn is_valid_named_registry_url(url: &str) -> bool {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"));
-    matches!(rest, Some(authority) if !authority.is_empty())
+    let url = url.trim();
+    let Some(rest) = strip_http_scheme(url) else {
+        return false;
+    };
+    if rest.is_empty() || matches!(rest.as_bytes().first(), Some(b'/' | b'?' | b'#')) {
+        return false;
+    }
+
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    matches!(parsed.scheme(), "http" | "https")
+        && parsed.host_str().is_some_and(|host| !host.is_empty())
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+}
+
+fn strip_http_scheme(url: &str) -> Option<&str> {
+    ["https://", "http://"].iter().find_map(|prefix| {
+        url.get(..prefix.len())?
+            .eq_ignore_ascii_case(prefix)
+            .then(|| &url[prefix.len()..])
+    })
 }
 
 /// Insert one `alias → url` entry, validating the URL. pnpm hard-errors on an
@@ -349,6 +368,26 @@ mod tests {
     }
     use super::*;
 
+    #[test]
+    fn named_registry_requires_safe_absolute_http_authority() {
+        for (url, valid) in [
+            ("https://registry.example/npm", true),
+            ("HTTPS://registry.example/npm", true),
+            ("https://?token=opaque", false),
+            ("http:///npm", false),
+            ("https://user:password@registry.example/npm", false),
+            ("https://registry.example/npm?token=opaque", false),
+            ("https://registry.example/npm#fragment", false),
+            ("registry.example/npm", false),
+        ] {
+            assert_eq!(
+                is_valid_named_registry_url(url),
+                valid,
+                "unexpected validity for {url:?}"
+            );
+        }
+    }
+
     /// `.yarnrc.yml`'s default + named catalogs (yarn 4.10+) are discovered,
     /// keyed identically to the pnpm dialect (`default` for the unnamed
     /// catalog), so the resolver resolves `catalog:` / `catalog:<name>` deps
@@ -503,6 +542,51 @@ mod tests {
             "named-query",
             "named-fragment",
             "?token=",
+            "#",
+        ] {
+            assert!(
+                !warning.contains(secret),
+                "named registry warning leaked {secret:?}: {warning}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_scheme_less_named_registry_warning_uses_constant_locator() {
+        use tracing_subscriber::prelude::*;
+
+        let warnings = WarningMessages::default();
+        let subscriber = tracing_subscriber::registry().with(warnings.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let mut registries = std::collections::BTreeMap::new();
+        merge_named_registry(
+            &mut registries,
+            "private".to_string(),
+            "named-user:named-password@password-tail@registry.example/npm?token=opaque@query#fragment"
+                .to_string(),
+        );
+
+        assert!(registries.is_empty());
+        let warnings = warnings
+            .0
+            .lock()
+            .expect("warning collector must not poison");
+        assert_eq!(warnings.len(), 1);
+        let warning = &warnings[0];
+        assert!(
+            warning.contains("<invalid registry URL>"),
+            "unexpected warning: {warning}"
+        );
+        for secret in [
+            "named-user",
+            "named-password",
+            "password-tail",
+            "token",
+            "opaque",
+            "query",
+            "fragment",
+            "@",
+            "?",
             "#",
         ] {
             assert!(

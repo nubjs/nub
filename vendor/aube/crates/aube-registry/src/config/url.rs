@@ -9,57 +9,95 @@ pub(super) fn package_scope(name: &str) -> Option<&str> {
     }
 }
 
-/// Convert a registry URL to the URI key used in .npmrc for auth lookup.
-/// "https://registry.example.com/" -> "//registry.example.com/"
+/// Convert a registry URL to the URI key used in `.npmrc` for auth lookup.
+/// `https://registry.example.com/` becomes `//registry.example.com/`.
 ///
-/// Strips *only the scheme's own default port* (`:443` for https, `:80`
-/// for http) so `https://host:443/x/` collapses to the same key as
-/// `https://host/x/`, matching npm's nerf-dart behavior. The unusual
-/// case of `https://host:80/` (https on the http default port) is
-/// deliberately *not* collapsed — that's a different server.
+/// The key is a credential-free nerf-dart: userinfo, queries, and fragments
+/// are never part of it. The path is always slash-terminated. Only the
+/// scheme's own default port (`:443` for https, `:80` for http) is stripped,
+/// so `https://host:80/` remains distinct from `https://host/`.
 pub(super) fn registry_uri_key(url: &str) -> String {
-    let (rest, default_port) = if let Some(rest) = url.strip_prefix("https:") {
-        (rest, ":443")
-    } else if let Some(rest) = url.strip_prefix("http:") {
-        (rest, ":80")
+    let url = url.trim();
+    let (scheme, rest) = split_registry_url(url).unwrap_or(("", url));
+    let (authority, path) = normalized_authority_and_path(rest);
+    let authority = if scheme.eq_ignore_ascii_case("https:") {
+        strip_authority_port_suffix(authority, ":443")
+    } else if scheme.eq_ignore_ascii_case("http:") {
+        strip_authority_port_suffix(authority, ":80")
     } else {
-        return url.to_string();
+        authority
     };
-    strip_authority_port_suffix(rest, default_port)
+    normalized_uri_key(authority, path)
 }
 
 /// Normalize an `//host[:port]/path...` key from `.npmrc` so it matches
 /// what `registry_uri_key` produces on the lookup side.
 ///
-/// Ingest can't know the scheme the user intended (`.npmrc` keys are
-/// scheme-less), so we strip both `:443` and `:80` — in practice
-/// nobody writes either explicitly unless they meant the default for
-/// the corresponding scheme. The lookup side is stricter: it only
-/// strips the matching default, so an `//host:80/x/` key will still
-/// not authenticate an `https://host:80/x/` request, and vice versa.
+/// Ingest cannot know the scheme the user intended (`.npmrc` keys are
+/// scheme-less), so it strips both `:443` and `:80`. It also removes malformed
+/// userinfo, queries, and fragments before the key can enter the auth map.
 pub(super) fn normalize_npmrc_uri_key(key: &str) -> String {
-    let stripped = strip_authority_port_suffix(key, ":443");
-    if stripped != key {
-        return stripped;
-    }
-    strip_authority_port_suffix(key, ":80")
+    let Some(rest) = key.strip_prefix("//") else {
+        return key.to_string();
+    };
+    let (authority, path) = normalized_authority_and_path(rest);
+    let authority = strip_authority_port_suffix(authority, ":443");
+    let authority = strip_authority_port_suffix(authority, ":80");
+    normalized_uri_key(authority, path)
 }
 
-/// Strip a trailing `:N` from the authority of an `//host[:N]/path...`
-/// key. Returns the key unchanged when the prefix isn't `//` or the
-/// authority doesn't end with the requested port suffix.
-fn strip_authority_port_suffix(key: &str, port_suffix: &str) -> String {
-    let Some(after) = key.strip_prefix("//") else {
-        return key.to_string();
+/// Split an absolute or scheme-relative registry URL into its scheme prefix
+/// (including `:`) and the text following `//`.
+fn split_registry_url(url: &str) -> Option<(&str, &str)> {
+    if let Some(rest) = url.strip_prefix("//") {
+        return Some(("", rest));
+    }
+    let scheme_end = url.find("://")?;
+    Some((&url[..=scheme_end], &url[scheme_end + 3..]))
+}
+
+/// Extract a credential-free authority and query/fragment-free path.
+///
+/// The authority ends at the first `/`, `?`, or `#`. Splitting userinfo at
+/// the final `@` keeps only the host/port even when malformed raw userinfo
+/// contains multiple `@` characters.
+fn normalized_authority_and_path(rest: &str) -> (&str, &str) {
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host_and_port)| host_and_port);
+    let suffix = &rest[authority_end..];
+    let path_end = suffix.find(['?', '#']).unwrap_or(suffix.len());
+    let path = if suffix.starts_with('/') {
+        &suffix[..path_end]
+    } else {
+        ""
     };
-    let (authority, path) = match after.find('/') {
-        Some(idx) => (&after[..idx], &after[idx..]),
-        None => (after, ""),
-    };
-    let Some(authority) = authority.strip_suffix(port_suffix) else {
-        return key.to_string();
-    };
-    format!("//{authority}{path}")
+    (authority, path)
+}
+
+/// Remove one matching default-port suffix from an already-parsed authority.
+fn strip_authority_port_suffix<'a>(authority: &'a str, port_suffix: &str) -> &'a str {
+    authority.strip_suffix(port_suffix).unwrap_or(authority)
+}
+
+/// Build a credential-free `.npmrc` URI key with a slash-terminated path.
+fn normalized_uri_key(authority: &str, path: &str) -> String {
+    let needs_trailing_slash = path.is_empty() || !path.ends_with('/');
+    let mut key =
+        String::with_capacity(2 + authority.len() + path.len() + usize::from(needs_trailing_slash));
+    key.push_str("//");
+    key.push_str(authority);
+    if path.is_empty() {
+        key.push('/');
+    } else {
+        key.push_str(path);
+        if needs_trailing_slash {
+            key.push('/');
+        }
+    }
+    key
 }
 
 /// Look up `key` in `map`, falling back to longest-prefix matching by
@@ -160,12 +198,30 @@ fn strip_prefix_ignore_ascii_case<'a>(s: &'a str, prefix: &str) -> Option<&'a st
     head.eq_ignore_ascii_case(prefix).then_some(tail)
 }
 
-/// Ensure registry URL has a trailing slash.
+/// Normalize a registry URL into a credential-free, slash-terminated base.
+///
+/// Userinfo, queries, and fragments are configuration-only noise: retaining
+/// them would produce malformed `.npmrc` auth keys downstream.
 pub(super) fn normalize_registry_url(url: &str) -> String {
     let url = url.trim();
-    if url.ends_with('/') {
-        url.to_string()
-    } else {
-        format!("{url}/")
+    let (scheme, rest) = split_registry_url(url).unwrap_or(("", url));
+    let (authority, path) = normalized_authority_and_path(rest);
+    let needs_trailing_slash = path.is_empty() || !path.ends_with('/');
+    let mut normalized = String::with_capacity(
+        scheme.len() + authority.len() + path.len() + usize::from(needs_trailing_slash) + 2,
+    );
+    normalized.push_str(scheme);
+    if !scheme.is_empty() {
+        normalized.push_str("//");
     }
+    normalized.push_str(authority);
+    if path.is_empty() {
+        normalized.push('/');
+    } else {
+        normalized.push_str(path);
+        if needs_trailing_slash {
+            normalized.push('/');
+        }
+    }
+    normalized
 }

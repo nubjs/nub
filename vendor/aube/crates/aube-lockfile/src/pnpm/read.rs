@@ -743,7 +743,8 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
             return Err(Error::parse(
                 path,
                 format!(
-                    "lockfile entry {dep_path:?} has a remote tarball resolution without integrity"
+                    "lockfile entry {:?} has a remote tarball resolution without integrity",
+                    aube_util::url::display_url(&dep_path)
                 ),
             ));
         }

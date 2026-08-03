@@ -611,30 +611,28 @@ impl NpmConfig {
         explicit_uri_field_exists: bool,
         apply: impl FnOnce(&mut AuthConfig),
     ) {
+        let registry_display = aube_util::url::display_url(registry);
+        let registry_uri_key = registry_uri_key(registry);
         if explicit_uri_field_exists {
             tracing::warn!(
                 code = aube_codes::warnings::WARN_AUBE_UNSCOPED_AUTH_RESCOPED,
                 "ignoring unscoped {suffix} from {source:?}: URI-scoped `{}:{suffix}` is already configured",
-                registry_uri_key(registry)
+                registry_uri_key
             );
             return;
         }
         if matches!(source, NpmrcSource::Env | NpmrcSource::PnpmAuth) {
             tracing::warn!(
                 code = aube_codes::warnings::WARN_AUBE_UNSCOPED_AUTH_RESCOPED,
-                "unscoped {suffix} from {source:?} was pinned to {registry}"
+                "unscoped {suffix} from {source:?} was pinned to {registry_display}"
             );
         } else {
             tracing::warn!(
                 code = aube_codes::warnings::WARN_AUBE_UNSCOPED_AUTH_RESCOPED,
-                "unscoped {suffix} from {source:?} was pinned to {registry}; write `{}:{suffix}=...` instead",
-                registry_uri_key(registry)
+                "unscoped {suffix} from {source:?} was pinned to {registry_display}; write `{registry_uri_key}:{suffix}=...` instead"
             );
         }
-        let entry = self
-            .auth_by_uri
-            .entry(registry_uri_key(registry))
-            .or_default();
+        let entry = self.auth_by_uri.entry(registry_uri_key).or_default();
         apply(entry);
     }
 }

@@ -15,8 +15,9 @@
 //! scope's packages to the right registry without further config.
 
 use crate::commands::npmrc::{NpmrcEdit, registry_host_key, resolve_registry, user_npmrc_path};
+use aube_registry::SafeReqwestDiagnostic;
 use clap::Args;
-use miette::{IntoDiagnostic, miette};
+use miette::{Context, IntoDiagnostic, miette};
 use std::io::{BufRead, IsTerminal};
 use std::time::{Duration, Instant};
 
@@ -149,8 +150,9 @@ async fn web_login(registry: &str) -> miette::Result<String> {
     let client = aube_util::http::with_webpki_root_fallback(reqwest::Client::builder())
         .user_agent(aube_util::embedder().user_agent)
         .build()
+        .map_err(SafeReqwestDiagnostic::from)
         .into_diagnostic()
-        .map_err(|e| miette!("failed to build http client: {e}"))?;
+        .wrap_err("failed to build http client")?;
 
     let hostname = std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
@@ -161,8 +163,9 @@ async fn web_login(registry: &str) -> miette::Result<String> {
         .json(&serde_json::json!({ "hostname": hostname }))
         .send()
         .await
+        .map_err(SafeReqwestDiagnostic::from)
         .into_diagnostic()
-        .map_err(|e| miette!("failed to POST {display_login_endpoint}: {e}"))?;
+        .wrap_err_with(|| format!("failed to POST {display_login_endpoint}"))?;
 
     if !resp.status().is_success() {
         return Err(miette!(
@@ -174,8 +177,9 @@ async fn web_login(registry: &str) -> miette::Result<String> {
     let body: serde_json::Value = resp
         .json()
         .await
+        .map_err(SafeReqwestDiagnostic::from)
         .into_diagnostic()
-        .map_err(|e| miette!("failed to parse /-/v1/login response: {e}"))?;
+        .wrap_err("failed to parse /-/v1/login response")?;
 
     let login_url = body
         .get("loginUrl")
@@ -207,6 +211,7 @@ async fn web_login(registry: &str) -> miette::Result<String> {
 async fn poll_done(client: &reqwest::Client, done_url: &str) -> miette::Result<String> {
     let deadline = Instant::now() + Duration::from_secs(300);
     let mut delay = Duration::from_millis(500);
+    let display_done_url = aube_util::url::display_url(done_url);
 
     loop {
         if Instant::now() >= deadline {
@@ -216,8 +221,9 @@ async fn poll_done(client: &reqwest::Client, done_url: &str) -> miette::Result<S
             .get(done_url)
             .send()
             .await
+            .map_err(SafeReqwestDiagnostic::from)
             .into_diagnostic()
-            .map_err(|e| miette!("failed to GET {done_url}: {e}"))?;
+            .wrap_err_with(|| format!("failed to GET {display_done_url}"))?;
 
         match resp.status().as_u16() {
             202 => {
@@ -265,8 +271,9 @@ async fn read_token_response(mut resp: reqwest::Response) -> miette::Result<serd
     while let Some(chunk) = resp
         .chunk()
         .await
+        .map_err(SafeReqwestDiagnostic::from)
         .into_diagnostic()
-        .map_err(|e| miette!("failed to read doneUrl response: {e}"))?
+        .wrap_err("failed to read doneUrl response")?
     {
         if body.len().saturating_add(chunk.len()) > MAX_TOKEN_RESPONSE_BYTES {
             return Err(miette::miette!(

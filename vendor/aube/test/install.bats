@@ -8,6 +8,7 @@ setup() {
 teardown() {
 	_stop_concurrency_registry
 	_stop_stream_recovery_registry
+	_stop_direct_tarball_reset_server
 	_common_teardown
 }
 
@@ -17,6 +18,34 @@ _stop_stream_recovery_registry() {
 		wait "$STREAM_RECOVERY_REGISTRY_PID" 2>/dev/null || true
 		unset STREAM_RECOVERY_REGISTRY_PID
 	fi
+}
+
+_stop_direct_tarball_reset_server() {
+	if [ -n "${DIRECT_TARBALL_RESET_PID:-}" ]; then
+		kill "$DIRECT_TARBALL_RESET_PID" 2>/dev/null || true
+		wait "$DIRECT_TARBALL_RESET_PID" 2>/dev/null || true
+		unset DIRECT_TARBALL_RESET_PID
+	fi
+}
+
+_start_direct_tarball_reset_server() {
+	cat >direct-tarball-reset-server.mjs <<'NODE'
+import fs from 'node:fs';
+import http from 'node:http';
+
+const server = http.createServer((req) => req.socket.destroy());
+server.listen(0, '127.0.0.1', () => {
+  fs.writeFileSync('direct-tarball-reset-port', String(server.address().port));
+});
+NODE
+	node direct-tarball-reset-server.mjs &
+	DIRECT_TARBALL_RESET_PID=$!
+	for _ in $(seq 1 20); do
+		[ -f direct-tarball-reset-port ] && break
+		sleep 0.1
+	done
+	assert_file_exists direct-tarball-reset-port
+	DIRECT_TARBALL_RESET_PORT="$(cat direct-tarball-reset-port)"
 }
 
 _start_stream_recovery_registry() {
@@ -1681,6 +1710,32 @@ JSON
 
 	requests="$(curl --fail --silent "$STREAM_RECOVERY_REGISTRY/metrics" | node -e 'process.stdin.on("data", d => console.log(JSON.parse(d).tarballRequests))')"
 	assert_equal "$requests" "2"
+}
+
+@test "aube install redacts a signed direct tarball URL from reset-port diagnostics" {
+	_start_direct_tarball_reset_server
+	DIRECT_TARBALL_RESET_PORT="$DIRECT_TARBALL_RESET_PORT" node - <<'NODE'
+const fs = require('node:fs');
+const port = process.env.DIRECT_TARBALL_RESET_PORT;
+fs.writeFileSync('package.json', JSON.stringify({
+  name: 'direct-tarball-reset-fixture',
+  version: '1.0.0',
+  dependencies: {
+    'direct-pkg': `http://127.0.0.1:${port}/direct-pkg.tgz?signature=direct-url-signature#direct-url-fragment`,
+  },
+}));
+NODE
+	cat >.npmrc <<'EOF'
+fetch-retries=0
+EOF
+
+
+	run aube -v install --no-frozen-lockfile
+	assert_failure
+	assert_output --partial "remote tarball http://127.0.0.1:$DIRECT_TARBALL_RESET_PORT/"
+	for secret in '?signature=' direct-url-signature '#direct-url-fragment' direct-url-fragment; do
+		refute_output --partial "$secret"
+	done
 }
 
 @test "aube install does not retry an oversized streamed tarball body" {

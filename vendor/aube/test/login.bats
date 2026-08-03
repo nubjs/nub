@@ -61,7 +61,7 @@ teardown() {
 @test "aube login hides configured registry userinfo query and fragment in output" {
 	AUBE_AUTH_TOKEN=login-token run aube login --registry='https://login-user:login-password@r.example.com/npm?token=prefix@login-query#login-fragment'
 	assert_success
-	assert_output --partial 'Logged in to https://***@r.example.com/npm'
+	assert_output --partial 'Logged in to https://r.example.com/npm/'
 	for secret in login-user login-password login-query login-fragment '?token=' '#'; do
 		refute_output --partial "$secret"
 	done
@@ -122,6 +122,17 @@ teardown() {
 	assert_output --partial "Logged in to http://127.0.0.1:$MOCK_WEB_LOGIN_PORT/"
 	assert_file_contains "$HOME/.npmrc" \
 		"//127.0.0.1:$MOCK_WEB_LOGIN_PORT/:_authToken=mock-web-token"
+}
+
+@test "aube login --auth-type=web refusal hides registry credentials" {
+	run aube login --auth-type=web \
+		--registry='http://login-user:login-password@password-tail@127.0.0.1:1/npm?signature=login-signature#login-fragment'
+	assert_failure
+	assert_output --partial "failed to POST"
+	assert_output --partial "connection failed"
+	for secret in login-user login-password password-tail '?signature=' login-signature '#login-fragment' login-fragment; do
+		refute_output --partial "$secret"
+	done
 }
 
 @test "aube login --auth-type=web caps the token response body" {

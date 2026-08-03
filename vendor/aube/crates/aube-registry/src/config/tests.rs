@@ -1576,6 +1576,52 @@ fn test_registry_uri_key() {
 }
 
 #[test]
+fn registry_uri_key_normalizes_authorities_and_paths() {
+    for (raw, expected) in [
+        ("https://registry.example.com", "//registry.example.com/"),
+        (
+            "https://registry.example.com/artifactory/npm",
+            "//registry.example.com/artifactory/npm/",
+        ),
+        (
+            "https://registry.example.com?access_token=transient",
+            "//registry.example.com/",
+        ),
+        (
+            "https://registry.example.com/artifactory#fragment",
+            "//registry.example.com/artifactory/",
+        ),
+        (
+            "https://user:password@registry.example.com/artifactory",
+            "//registry.example.com/artifactory/",
+        ),
+        (
+            "https://first@second@registry.example.com/artifactory",
+            "//registry.example.com/artifactory/",
+        ),
+        (
+            "user:pass@password-tail@registry.example.com/npm?token=opaque@query#fragment",
+            "//registry.example.com/npm/",
+        ),
+    ] {
+        let key = registry_uri_key(raw);
+        assert_eq!(key, expected, "registry URI key for {raw:?}");
+        assert!(
+            !key.contains('@'),
+            "registry URI key must not retain raw userinfo: {key:?}"
+        );
+    }
+}
+
+#[test]
+fn npmrc_uri_key_normalization_discards_malformed_userinfo_and_suffixes() {
+    assert_eq!(
+        normalize_npmrc_uri_key("//first@second@registry.example.com/artifactory?token=x#fragment",),
+        "//registry.example.com/artifactory/"
+    );
+}
+
+#[test]
 fn test_registry_uri_key_strips_default_port() {
     // https default port collapses
     assert_eq!(
@@ -1704,9 +1750,94 @@ fn npmrc_key_with_default_port_is_normalized_on_ingest() {
 }
 
 #[test]
-fn test_normalize_registry_url() {
-    assert_eq!(normalize_registry_url("https://r.com"), "https://r.com/");
-    assert_eq!(normalize_registry_url("https://r.com/"), "https://r.com/");
+fn normalize_registry_url_normalizes_authorities_and_paths() {
+    for (raw, expected) in [
+        (
+            "https://registry.example.com",
+            "https://registry.example.com/",
+        ),
+        (
+            "https://registry.example.com/artifactory/npm",
+            "https://registry.example.com/artifactory/npm/",
+        ),
+        (
+            "https://registry.example.com?access_token=transient",
+            "https://registry.example.com/",
+        ),
+        (
+            "https://registry.example.com/artifactory#fragment",
+            "https://registry.example.com/artifactory/",
+        ),
+        (
+            "https://user:password@registry.example.com/artifactory",
+            "https://registry.example.com/artifactory/",
+        ),
+        (
+            "https://first@second@registry.example.com/artifactory",
+            "https://registry.example.com/artifactory/",
+        ),
+        (
+            "user:pass@password-tail@registry.example.com/npm?token=opaque@query#fragment",
+            "registry.example.com/npm/",
+        ),
+    ] {
+        let normalized = normalize_registry_url(raw);
+        assert_eq!(normalized, expected, "normalized registry URL for {raw:?}");
+        assert!(
+            !normalized.contains('@'),
+            "normalized registry URL must not retain raw userinfo: {normalized:?}"
+        );
+    }
+}
+
+#[test]
+fn credential_free_normalized_registry_round_trips_to_auth_lookup() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".npmrc"),
+        "registry=https://first@second@registry.example.com/artifactory/npm?access_token=transient#fragment\n\
+             _authToken=path-token\n",
+    )
+    .unwrap();
+
+    let config = NpmConfig::load_isolated(dir.path());
+
+    assert_eq!(
+        config.registry,
+        "https://registry.example.com/artifactory/npm/"
+    );
+    assert_eq!(config.auth_token_for(&config.registry), Some("path-token"));
+}
+
+#[test]
+fn rescoping_scheme_less_credentialed_registry_uses_safe_key() {
+    let mut config = NpmConfig::default();
+    config.apply_tagged(vec![
+        (
+            NpmrcSource::Project,
+            "registry".to_string(),
+            "user:pass@password-tail@registry.example.com/npm?token=opaque@query#fragment"
+                .to_string(),
+        ),
+        (
+            NpmrcSource::Project,
+            "_authToken".to_string(),
+            "rescoped-token".to_string(),
+        ),
+    ]);
+
+    assert_eq!(config.registry, "registry.example.com/npm/");
+    assert_eq!(
+        config.auth_token_for(&config.registry),
+        Some("rescoped-token"),
+    );
+    assert!(
+        !config.registry.contains('@')
+            && !config.registry.contains('?')
+            && !config.registry.contains('#'),
+        "normalized registry retained credentials: {:?}",
+        config.registry,
+    );
 }
 
 #[test]

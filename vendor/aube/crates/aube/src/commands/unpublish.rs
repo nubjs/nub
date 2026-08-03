@@ -27,6 +27,7 @@
 
 use crate::commands::{encode_package_name, ensure_registry_auth_for_package, split_name_spec};
 use aube_manifest::PackageJson;
+use aube_registry::SafeReqwestDiagnostic;
 use aube_registry::client::RegistryClient;
 use aube_registry::config::{NpmConfig, normalize_registry_url_pub};
 use clap::Args;
@@ -185,6 +186,7 @@ async fn unpublish_package(
     let resp = req
         .send()
         .await
+        .map_err(SafeReqwestDiagnostic::from)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to DELETE {}", aube_util::url::display_url(&url)))?;
     let status = resp.status();
@@ -226,6 +228,7 @@ async fn unpublish_version(
     let resp = req
         .send()
         .await
+        .map_err(SafeReqwestDiagnostic::from)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to PUT {}", aube_util::url::display_url(&put_url)))?;
     if !resp.status().is_success() {
@@ -257,6 +260,7 @@ async fn unpublish_version(
     let put_body_bytes = resp
         .bytes()
         .await
+        .map_err(SafeReqwestDiagnostic::from)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to read PUT response for {name}"))?;
     let new_rev = match serde_json::from_slice::<Value>(&put_body_bytes)
@@ -280,10 +284,12 @@ async fn unpublish_version(
     if let Some(otp) = otp {
         req = req.header("npm-otp", otp);
     }
-    let resp =
-        req.send().await.into_diagnostic().wrap_err_with(|| {
-            format!("failed to DELETE {}", aube_util::url::display_url(&del_url))
-        })?;
+    let resp = req
+        .send()
+        .await
+        .map_err(SafeReqwestDiagnostic::from)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to DELETE {}", aube_util::url::display_url(&del_url)))?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(());
     }
@@ -315,6 +321,7 @@ async fn fetch_packument(
         .authed_request_for_package(reqwest::Method::GET, &url, registry_url, name)
         .send()
         .await
+        .map_err(SafeReqwestDiagnostic::from)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to GET {}", aube_util::url::display_url(&url)))?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -327,6 +334,7 @@ async fn fetch_packument(
     }
     resp.json::<Value>()
         .await
+        .map_err(SafeReqwestDiagnostic::from)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to parse packument for {name}"))
 }

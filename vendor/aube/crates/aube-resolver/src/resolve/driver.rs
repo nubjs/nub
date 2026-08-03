@@ -1776,7 +1776,7 @@ impl<'a> ResolveDriver<'a> {
         {
             return Err(Error::BlockedExoticSubdep(Box::new(ExoticSubdepDetails {
                 name: task.name.clone(),
-                spec: task.range.clone(),
+                spec: aube_util::url::display_url(&task.range),
                 parent: task
                     .parent
                     .clone()
@@ -1822,7 +1822,10 @@ impl<'a> ResolveDriver<'a> {
         let Some(raw_local) = LocalSource::parse(&task.range, &importer_root) else {
             return Err(Error::Registry(
                 task.name.clone(),
-                format!("unparseable local specifier: {}", task.range),
+                format!(
+                    "unparseable local specifier: {}",
+                    aube_util::url::display_url(&task.range)
+                ),
             ));
         };
         // Git and remote-tarball specifiers don't reference a path,
@@ -1846,7 +1849,7 @@ impl<'a> ResolveDriver<'a> {
                 task.name.clone(),
                 format!(
                     "transitive local specifier {} cannot be resolved without the parent package source root",
-                    task.range
+                    aube_util::url::display_url(&task.range)
                 ),
             ));
         }
@@ -1860,7 +1863,10 @@ impl<'a> ResolveDriver<'a> {
                     .map_err(|e| {
                         Error::Registry(
                             task.name.clone(),
-                            format!("git resolve {}: {e}", task.range),
+                            format!(
+                                "git resolve {}: {e}",
+                                aube_util::url::display_url(&task.range)
+                            ),
                         )
                     })?;
             let integrity = integrity.or_else(|| {
@@ -1875,7 +1881,10 @@ impl<'a> ResolveDriver<'a> {
                     .map_err(|e| {
                         Error::Registry(
                             task.name.clone(),
-                            format!("remote tarball {}: {e}", task.range),
+                            format!(
+                                "remote tarball {}: {e}",
+                                aube_util::url::display_url(&task.range)
+                            ),
                         )
                     })?;
             let integrity = match &resolved_local {

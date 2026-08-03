@@ -211,7 +211,7 @@ pub(super) async fn import_local_source(
                     Err(e) => {
                         tracing::debug!(
                             %spec,
-                            url = %aube_util::url::redact_url(url_to_fetch),
+                            url = %aube_util::url::display_url(url_to_fetch),
                             "codeload fetch failed, falling back to git clone: {e}",
                         );
                     }
@@ -347,29 +347,32 @@ pub(super) async fn import_local_source(
             let client = client.ok_or_else(|| {
                 miette!(
                     "internal: import_local_source called without a registry client for {}{chain}",
-                    local.specifier()
+                    aube_util::url::display_url(&t.url)
                 )
             })?;
             let bytes = client.fetch_tarball_bytes(&t.url).await.map_err(|e| {
                 miette!(
                     "failed to fetch {}: {e}{chain}",
-                    aube_util::url::redact_url(&t.url)
+                    aube_util::url::display_url(&t.url)
                 )
             })?;
             if t.integrity.is_empty() {
                 tracing::warn!(
                     code = aube_codes::warnings::WARN_AUBE_MISSING_INTEGRITY,
-                    url = %aube_util::url::redact_url(&t.url),
+                    url = %aube_util::url::display_url(&t.url),
                     "remote tarball lockfile entry has no integrity field; importing fetched bytes without verification (run `{} --no-frozen-lockfile` to refresh the lockfile)",
                     aube_util::cmd("install"),
                 );
             } else {
                 aube_store::verify_integrity(&bytes, &t.integrity)
-                    .map_err(|e| miette!("{}: {e}{chain}", aube_util::url::redact_url(&t.url)))?;
+                    .map_err(|e| miette!("{}: {e}{chain}", aube_util::url::display_url(&t.url)))?;
             }
-            let index = store
-                .import_tarball(&bytes)
-                .map_err(|e| miette!("failed to import {}: {e}{chain}", local.specifier()))?;
+            let index = store.import_tarball(&bytes).map_err(|e| {
+                miette!(
+                    "failed to import {}: {e}{chain}",
+                    aube_util::url::display_url(&t.url)
+                )
+            })?;
             Ok(Some(index))
         }
     }
@@ -872,7 +875,7 @@ where
                                 "{}@{}: lockfile pins tarball {} on a host that differs from its configured registry but records no integrity hash; refusing to fetch an unverifiable tarball (run `{} --no-frozen-lockfile` to refresh the lockfile)",
                                 registry_name,
                                 version,
-                                aube_util::url::redact_url(lockfile_url),
+                                aube_util::url::display_url(lockfile_url),
                                 aube_util::cmd("install"),
                             ));
                         }
@@ -1125,7 +1128,7 @@ async fn verify_lockfile_tarball_url(
             "{}@{}: registry metadata did not include this version while lockfile pinned {}",
             registry_name,
             version,
-            aube_util::url::redact_url(lockfile_url)
+            aube_util::url::display_url(lockfile_url)
         ));
     };
     let Some(expected_url) = meta.dist.as_ref().map(|dist| dist.tarball.as_str()) else {
@@ -1134,7 +1137,7 @@ async fn verify_lockfile_tarball_url(
             "{}@{}: registry metadata did not include dist.tarball while lockfile pinned {}",
             registry_name,
             version,
-            aube_util::url::redact_url(lockfile_url)
+            aube_util::url::display_url(lockfile_url)
         ));
     };
     if !lockfile_tarball_url_matches_metadata(lockfile_url, expected_url) {
@@ -1143,8 +1146,8 @@ async fn verify_lockfile_tarball_url(
             "{}@{}: lockfile tarball URL {} does not match registry metadata {}",
             registry_name,
             version,
-            aube_util::url::redact_url(lockfile_url),
-            aube_util::url::redact_url(expected_url)
+            aube_util::url::display_url(lockfile_url),
+            aube_util::url::display_url(expected_url)
         ));
     }
     Ok(())
