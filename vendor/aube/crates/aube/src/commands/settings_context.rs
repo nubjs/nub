@@ -905,7 +905,7 @@ mod registry_diagnostic_tests {
             registry_display_url(
                 "https://user:password@registry.example.com/npm?token=secret#fragment"
             ),
-            "https://***@registry.example.com/npm"
+            "https://registry.example.com/npm"
         );
     }
 }

@@ -1697,7 +1697,7 @@ mod tests {
 
         assert_eq!(
             dry_run_outcome_line(&outcome),
-            "+ @scope/pkg@1.0.0 (dry run, would PUT to https://***@registry.example/@scope%2Fpkg)"
+            "+ @scope/pkg@1.0.0 (dry run, would PUT to https://registry.example/@scope%2Fpkg)"
         );
     }
 }

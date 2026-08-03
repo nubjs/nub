@@ -1245,6 +1245,8 @@ mod tests {
         // Workspace/git/local-only invocations end up with an empty
         // registry-name list. The function must be a no-op in that
         // case (no network, no error) so those code paths stay free.
+        let registry_client = crate::commands::make_client(std::path::Path::new("."))
+            .expect("empty-gate fixture registry must be valid");
         assert!(
             run_gates(
                 &[],
@@ -1255,7 +1257,7 @@ mod tests {
                     allow: false,
                     prompt: LowDownloadPrompt::Terminal,
                     minimum_package_age_minutes: 43_200,
-                    registry_client: &crate::commands::make_client(std::path::Path::new(".")),
+                    registry_client: &registry_client,
                     full_packument_cache: std::path::Path::new("."),
                 },
                 &[],

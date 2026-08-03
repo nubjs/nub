@@ -2166,8 +2166,9 @@ mod tests {
 
     fn bind(project: &Path, sha512: &str) {
         let pkg = no_integrity_pkg();
-        let url =
-            crate::commands::make_client(project).tarball_url(pkg.registry_name(), &pkg.version);
+        let url = crate::commands::make_client(project)
+            .expect("no-integrity fixture registry must be valid")
+            .tarball_url(pkg.registry_name(), &pkg.version);
         super::write_no_integrity_bindings(
             &super::no_integrity_dir(project),
             &BTreeMap::from([(url, sha512.to_string())]),

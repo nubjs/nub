@@ -1137,14 +1137,16 @@ mod tests {
         }))
         .unwrap();
         let cache_dir = crate::commands::packument_cache_dir_for_cwd(project.path());
-        crate::commands::make_client(project.path())?.seed_packument_cache(
+        crate::commands::make_client(project.path())
+            .expect("offline cache fixture registry must be valid")
+            .seed_packument_cache(
             "cached-only",
             &cache_dir,
             &packument,
             None,
             None,
-            true,
-        );
+                true,
+            );
 
         update_manifest_for_add(
             project.path(),
@@ -1195,14 +1197,16 @@ mod tests {
         }))
         .unwrap();
         let full_cache_dir = crate::commands::packument_full_cache_dir_for_cwd(project.path());
-        crate::commands::make_client(project.path())?.seed_full_packument_cache(
+        crate::commands::make_client(project.path())
+            .expect("offline full-cache fixture registry must be valid")
+            .seed_full_packument_cache(
             "full-cached-only",
             &full_cache_dir,
             &packument,
             None,
             None,
-            true,
-        );
+                true,
+            );
 
         update_manifest_for_add(
             project.path(),
