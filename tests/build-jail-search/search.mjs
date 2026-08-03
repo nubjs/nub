@@ -1452,6 +1452,39 @@ function search(nub, pkg, version, root, keep, runDir) {
       );
     }
   }
+  // ⛔ npm 6 RACES ON ITS OWN _cacache, AND THE JAIL GETS THE BLAME. An old package pins an old
+  // Node, an old Node bundles npm 6, and npm 6 corrupts its own cache under concurrency — surfacing
+  // as `rimraf: missing path` and `Callback called more than once`. It has nothing to do with
+  // confinement, but it lands on the CONTROL, and a failing control is what every defect verdict is
+  // built on.
+  //
+  // The double control and the confirmation retry CANNOT catch it: both attempts run inside the same
+  // busy window, so they agree with each other and are both wrong. That is what makes this worth a
+  // signature check rather than more retries.
+  //
+  // MEASURED: re-measuring 19 macOS records produced 7 `BROKEN-EVEN-WITH-EVERYTHING` verdicts — the
+  // verdict that ACCUSES THE JAIL — and 7 of 7 carried this signature, every one an ancient version
+  // (`victory-bar@0.1.0`, `docxtemplater@0.3.0`, `console-stream@0.1.0`). I read the first two as
+  // real jail defects before reading the per-cell log. They were not.
+  //
+  // Recorded as HARNESS-FLAKE rather than retried in-loop: the cure is a SERIAL re-run on a quiet
+  // box, which `run-batch.sh` already does once the batch drains. Retrying here would spend two more
+  // installs inside the same contended window that caused it.
+  const NPM6_RACE = /rimraf: missing path|Callback called more than once/;
+  if ((control.rc !== 0 || controlB.rc !== 0)
+      && (NPM6_RACE.test(control.log ?? '') || NPM6_RACE.test(controlB.log ?? ''))) {
+    return {
+      pkg, version,
+      verdict: 'HARNESS-FLAKE',
+      why: "the control failed with npm 6's _cacache race (`rimraf: missing path` / `Callback "
+         + 'called more than once`) — contention on this host, not a statement about the jail. '
+         + 'Re-run SERIALLY on a quiet box for a real measurement.',
+      declaresInstallScript: hasScript,
+      cells, control: baseCase(control),
+      provenance: provenance(nub, nodePin, enginesNode, nodeMajor, publishedAt),
+    };
+  }
+
   if (control.rc !== 0 || controlB.rc !== 0) {
     // ⛔ ASK NPM BEFORE BLAMING THE JAIL. npm is the REFERENCE — nub's job is to match it — so a
     // package failing IDENTICALLY under npm is broken in this ENVIRONMENT, not under-granted.
