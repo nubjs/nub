@@ -78,6 +78,20 @@ No rule that reads declarations can reach these, so Nub carries a list. Every pr
 
 The list matches exact names. A prefix or substring match would quietly unbundle `pino-http` and `keyv-redis`, which are ordinary packages, and that failure is silent: the package loses its tree-shaking and nothing breaks.
 
+### Data files reached through `__dirname`
+
+The same blind spot has one more shape. A package that reads a data file next to its own source declares nothing unusual, so it is bundled — and inside a bundle `__dirname` is the payload root rather than the package directory, so the read fails:
+
+```
+Error: ENOENT: no such file or directory, open '.../compile-app/64119dd9/table.txt'
+```
+
+Bun has the same limitation, and fails less usefully: its `__dirname` still points at the build machine's `node_modules`, so the artifact works where it was built and fails everywhere else.
+
+`--unbundled` is the remedy — the package ships in its installed layout with its data files beside it, and `__dirname` points where its author expected.
+
+Detecting this would mean scanning package sources for an `fs` call reaching `__dirname`, which is the kind of analysis the manifest rules exist to avoid. Measured against a 83-package tree, six packages mention `__dirname` at all and exactly one reaches the filesystem with it — and that one, `pino`, is already on the list above.
+
 ## When Nub gets it wrong
 
 Two flags override the decision, because no detector reaches every package:
