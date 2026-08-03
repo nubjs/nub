@@ -203,6 +203,40 @@ fi
 FORCE=""
 [ "${1:-}" = "--force" ] && { FORCE="--force"; shift; }
 
+# ⛔ RE-MEASURE ONLY THE VERDICTS A JAIL-OFF CHANGE INVALIDATED — the harness HASH is too blunt for
+# this. `--stale-harness` keys on a sha of search.mjs+states.mjs, so ANY edit invalidates every
+# record, a comment reword included. MEASURED right after the jail-off fix: all 794 macOS records
+# sat on stale revisions, so `--stale-harness` would have discarded hundreds of perfectly good
+# MINIMUM measurements to re-check a switch those records never touch.
+#
+# The precise scope is by VERDICT CLASS, not by instrument revision. Only two verdicts are derived
+# from the jail-off cell:
+#   BROKEN-WITHOUT-JAIL-TOO      — "fails with the jail off too", read straight off that cell
+#   BROKEN-EVEN-WITH-EVERYTHING  — reached only by RULING OUT the jail-off cell
+# A MINIMUM never runs it, so a MINIMUM is unaffected by any jail-off bug, at any revision.
+#
+# Use after changing anything about how confinement is turned off.
+if [ "${1:-}" = "--stale-jailoff" ]; then
+  shift
+  node -e '
+    const fs = require("node:fs"), path = require("node:path");
+    const runs = process.argv[1];
+    const out = [];
+    (function walk(d) { let e; try { e = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+      for (const x of e) { const f = path.join(d, x.name);
+        if (x.isDirectory()) walk(f); else if (x.name === "results.json") out.push(f); } })(runs);
+    const DERIVED = new Set(["BROKEN-WITHOUT-JAIL-TOO", "BROKEN-EVEN-WITH-EVERYTHING"]);
+    let purged = 0, kept = 0;
+    for (const f of out) {
+      let r; try { r = JSON.parse(fs.readFileSync(f, "utf8")); } catch { continue; }
+      if (!DERIVED.has(r.verdict)) { kept++; continue; }
+      fs.rmSync(path.dirname(f), { recursive: true, force: true });
+      purged++;
+    }
+    console.error(`purged ${purged} jail-off-derived record(s); kept ${kept} unaffected`);
+  ' "$here/results/runs" >&2
+fi
+
 # ⛔ RE-MEASURE ONLY WHAT A HARNESS CHANGE INVALIDATED. The collator refuses to ship a catalog whose
 # records span several harness revisions — correctly, since a record means something different under
 # a changed instrument. But the two existing options are both wrong for that: a plain resume SKIPS
