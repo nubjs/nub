@@ -78,19 +78,28 @@ No rule that reads declarations can reach these, so Nub carries a list. Every pr
 
 The list matches exact names. A prefix or substring match would quietly unbundle `pino-http` and `keyv-redis`, which are ordinary packages, and that failure is silent: the package loses its tree-shaking and nothing breaks.
 
-### Data files reached through `__dirname`
+### Files a package reads beside its own source
 
-The same blind spot has one more shape. A package that reads a data file next to its own source declares nothing unusual, so it is bundled — and inside a bundle `__dirname` is the payload root rather than the package directory, so the read fails:
+A package that ships a data file next to its source — a lookup table, a WebAssembly module, a font — declares nothing unusual, so it is bundled. Whether that works depends on how it names the file, not on what the file is:
+
+| in the package's source | outcome |
+| --- | --- |
+| `new URL('./table.txt', import.meta.url)` | the file is emitted into the payload and the reference rewritten |
+| `path.join(__dirname, 'table.txt')` | bundled, and `__dirname` is now the payload root — the read fails |
+
+The first form is a static reference the bundler resolves; the second is a path computed at run time, the same thing that defeats detection for native addons. Verified with the identical text file in both forms, and a WebAssembly module through the first.
+
+The failure is at run time, on a clean build:
 
 ```
 Error: ENOENT: no such file or directory, open '.../compile-app/64119dd9/table.txt'
 ```
 
-Bun has the same limitation, and fails less usefully: its `__dirname` still points at the build machine's `node_modules`, so the artifact works where it was built and fails everywhere else.
+Bun has the same limitation and fails less usefully: its `__dirname` still points at the build machine's `node_modules`, so the artifact works where it was built and fails everywhere else.
 
-`--unbundled` is the remedy — the package ships in its installed layout with its data files beside it, and `__dirname` points where its author expected.
+`--unbundled` is the remedy — the package ships in its installed layout with its files beside it, and `__dirname` points where its author expected.
 
-Detecting this would mean scanning package sources for an `fs` call reaching `__dirname`, which is the kind of analysis the manifest rules exist to avoid. Measured against a 83-package tree, six packages mention `__dirname` at all and exactly one reaches the filesystem with it — and that one, `pino`, is already on the list above.
+Detecting the second form would mean scanning package sources for an `fs` call reaching `__dirname`, the kind of analysis the manifest rules exist to avoid. Measured against an 83-package tree, six packages mention `__dirname` at all and exactly one reaches the filesystem with it — `pino`, already on the list above.
 
 ## When Nub gets it wrong
 
