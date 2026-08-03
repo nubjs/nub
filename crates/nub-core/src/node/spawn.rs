@@ -694,6 +694,26 @@ pub struct SpawnConfig<'a> {
     pub show_warnings: bool,
     /// Path to the Nub binary itself (for the PATH shim).
     pub nub_binary: &'a Path,
+    /// An external loader that owns the environment for this project, as
+    /// `(cli, schema_dir)`.
+    ///
+    /// When set, nub does not spawn Node directly — it spawns
+    /// `<loader> run --path <schema_dir> -- <node> <args…>`, so the loader
+    /// resolves, validates and injects the environment, and pipes the child's
+    /// output through its own redaction. nub contributes no environment of its
+    /// own on this path.
+    ///
+    /// `--path` is not an optimization. nub already walked up to find the schema
+    /// before deciding the loader owns this project, and the loader would
+    /// otherwise infer its entry point from cwd — which is a different directory
+    /// for a workspace member, or for a run from a subdirectory. Standing down on
+    /// the strength of a schema and then not saying where it is leaves the child
+    /// erroring about a file nub demonstrably found.
+    ///
+    /// The node command is otherwise unchanged: nub's flags and `NODE_OPTIONS`
+    /// augmentation ride through untouched, so transpilation and the preload
+    /// chain behave exactly as they do on a direct spawn.
+    pub env_owner: Option<(&'a Path, &'a Path)>,
     /// Parsed .env vars to inject into the child environment.
     pub env_vars: &'a std::collections::HashMap<String, String>,
     /// Yarn PnP `.pnp.cjs` path (from `nub_core::pnp::detect`), injected via
@@ -724,7 +744,27 @@ pub struct SpawnResult {
 /// In compat mode, spawns Node with only the user's args — no flag
 /// injection, no preloads, no PATH shim.
 pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
-    let mut cmd = Command::new(config.node.path.as_str());
+    // With an external env owner, the loader goes in FRONT of Node rather than
+    // inside it: `<loader> run --path <dir> -- <node> …`. That is its full-capability
+    // mode — it owns resolution and pipes the child's streams through its own
+    // redaction, which an in-process integration cannot do for raw
+    // `process.stdout.write` or for anything a subprocess prints.
+    //
+    // nub stays the parent and the node command is unchanged, so every flag and
+    // the whole `NODE_OPTIONS` augmentation chain reach Node exactly as on a
+    // direct spawn.
+    let mut cmd = match config.env_owner {
+        Some((loader, schema_dir)) => {
+            let mut cmd = Command::new(loader);
+            cmd.arg("run")
+                .arg("--path")
+                .arg(schema_dir)
+                .arg("--")
+                .arg(config.node.path.as_str());
+            cmd
+        }
+        None => Command::new(config.node.path.as_str()),
+    };
     // Process-identity fidelity: set argv0 to "node" so the spawned process
     // reports `process.title` and `process.argv0` as "node" — matching what
     // plain `node` reports when invoked by PATH name — instead of the full
@@ -747,8 +787,11 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // Windows — there is nothing to fix there, and nothing the spawner could do
     // to force "node". (See crates/nub-cli/tests/process_identity.rs, which
     // asserts the Unix "node" invariant and the Windows path-passthrough one.)
+    // Only meaningful on a direct spawn. Behind an env-owner loader the process
+    // nub launches IS the loader, and Node is its child — so argv0 here would
+    // rename the loader, and Node's own identity is the loader's to set.
     #[cfg(unix)]
-    {
+    if config.env_owner.is_none() {
         use std::os::unix::process::CommandExt;
         cmd.arg0("node");
     }

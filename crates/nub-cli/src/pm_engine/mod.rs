@@ -1634,7 +1634,6 @@ fn augmentation_to_lifecycle_overlay(
     aug: &nub_core::node::spawn::AugmentationEnv,
     node_execpath: &str,
     runtime_json: Option<&str>,
-    env_owner_markers: Vec<(String, String)>,
 ) -> (Vec<(std::ffi::OsString, std::ffi::OsString)>, Vec<PathBuf>) {
     use std::ffi::OsString;
     let mut overlay: Vec<(OsString, OsString)> = Vec::new();
@@ -1675,25 +1674,6 @@ fn augmentation_to_lifecycle_overlay(
             OsString::from(crate::project_config::RUNTIME_CONFIG_ENV),
             OsString::from(runtime_json),
         ));
-    }
-    // The env-owner markers travel with the adapter this path injects. Without
-    // them the adapter no-ops and a lifecycle script's `node` gets no environment
-    // at all, since detection has already stood nub's own cascade down.
-    //
-    // DECIDED (2026-08-02, maintainer): dependency build scripts DO see the
-    // schema-resolved environment. This is deliberate, not incidental — do not
-    // "fix" it by dropping the markers here.
-    //
-    // The reasoning is consistency rather than appetite for exposure. nub's own
-    // `.env` cascade already reaches these scripts through the PATH shim, whose
-    // `node` re-enters nub and resolves for itself. Withholding the schema here
-    // would mean a project's env behaved one way for its own code and another
-    // for a dependency's build, differing only by which loader answered — a
-    // distinction nothing else in nub draws. The trade accepted with it: a
-    // validation error in the app's own schema surfaces while some unrelated
-    // dependency is building.
-    for (key, value) in env_owner_markers {
-        overlay.push((OsString::from(key), OsString::from(value)));
     }
     // localStorage-neutralize signal for dependency build scripts' node children
     // (webstorage flag-needed band, no user --localstorage-file); preload reads + deletes.
@@ -1764,13 +1744,7 @@ fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
     };
     let node = discovered.unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
     let runtime = crate::project_config::runtime_config()?;
-    // Lifecycle scripts spawn `node` like any other launcher, so they must resolve
-    // env through the same owner rather than falling back to nub's own cascade.
-    let env_owner = nub_core::workspace::detect::detect_project(cwd).and_then(|project| {
-        crate::env_owner::detect(&project.root, project.workspace_root.as_deref())
-    });
-    let runtime_node_options =
-        crate::cli::runtime_node_options(&runtime, &node, env_owner.as_ref())?;
+    let runtime_node_options = crate::cli::runtime_node_options(&runtime, &node)?;
     let runtime_json = crate::cli::runtime_config_json(&runtime)?;
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let Some(mut aug) = nub_core::node::spawn::compute_augmentation_env(
@@ -1801,15 +1775,12 @@ fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
             None => aug.node_options = Some(configured),
         }
     }
-    let (env_overlay, path_prepends) = augmentation_to_lifecycle_overlay(
-        &aug,
-        node.path.as_str(),
-        Some(&runtime_json),
-        env_owner
-            .as_ref()
-            .map(crate::cli::env_owner_markers)
-            .unwrap_or_default(),
-    );
+    // Lifecycle scripts need nothing env-owner-specific here. A script's `node`
+    // resolves through nub's PATH shim and re-enters nub, which detects the owner
+    // and puts the loader in front of that Node itself — so the environment
+    // arrives by the same route as every other nub-launched process.
+    let (env_overlay, path_prepends) =
+        augmentation_to_lifecycle_overlay(&aug, node.path.as_str(), Some(&runtime_json));
     // The shim dir + provisioned node for the engine's runtime spawn helpers —
     // the boundary the transient bin-exec paths (dlx / create / `nubx <tool>`)
     // read but the lifecycle overlay above never reaches. `runtime_switching`
@@ -4642,12 +4613,8 @@ mod tests {
             neutralize_localstorage: true,
         };
         let runtime_json = r#"{"nodeCompat":false}"#;
-        let (overlay, prepends) = augmentation_to_lifecycle_overlay(
-            &aug,
-            "/pinned/bin/node",
-            Some(runtime_json),
-            Vec::new(),
-        );
+        let (overlay, prepends) =
+            augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node", Some(runtime_json));
 
         let find = |k: &str| {
             overlay
@@ -4709,8 +4676,7 @@ mod tests {
             node_path: None,
             neutralize_localstorage: false,
         };
-        let (overlay, prepends) =
-            augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node", None, Vec::new());
+        let (overlay, prepends) = augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node", None);
         assert!(prepends.is_empty());
         assert!(
             !overlay
