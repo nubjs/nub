@@ -56,36 +56,25 @@ const BASELINE = (() => {
   try { return JSON.parse(fs.readFileSync(new URL('./baseline.json', import.meta.url), 'utf8')); }
   catch { return { baseline: [], env: [] }; }
 })();
-/** ⛔ A `network: true` CAPABILITY IS NOT WHAT GRANTS EGRESS — `packageNetwork.full` IS.
+/** ⛔ THIS EMITS v2, AND v2's EGRESS IS THE PER-PACKAGE `network: true` CAPABILITY. Do not add a v1
+ *  `packageNetwork.full` table here — I did, and it was a workaround over a nub bug.
  *
- *  The two are separate halves of the schema and only ONE is read by the thing that decides egress.
- *  `parse_package_network` (`crates/nub-sandbox/src/catalog.rs`) builds the allow table from
- *  `networkHosts[].fetchedBy` and `packageNetwork.full[]`, and from NOTHING else — a per-package
- *  `network: true` never reaches it. The shipped catalog agrees: 210 `packageNetwork.full` entries
- *  and ZERO packages carrying a network capability.
+ *  The story, because the wrong version of it is easy to re-derive: Windows denied egress at EVERY
+ *  grant including the widest (`@apollo/rover@0.29.1` logged `blocked network access to
+ *  rover.apollo.dev`), packages needing network failing 67-87% against 0-5% for those that do not.
+ *  Reading `parse_package_network` — which builds its table from `networkHosts[].fetchedBy` and
+ *  `packageNetwork.full[]` only — made it look like this file emitted a shape nothing read. It does
+ *  not. There are TWO parsers: `catalog_v2::parse` takes `packages[<name>].default.network`, which
+ *  is what this file writes and what `catalog_override` tries FIRST; `catalog::parse` is v1.
  *
- *  MEASURED consequence, and why it hid for hundreds of records: macOS and Linux deny egress
- *  IN-KERNEL (Seatbelt / Landlock+seccomp) straight off the per-package caps, so the capability
- *  alone works there. Windows has no per-process network filter, so it uses the userland JS net
- *  gate, which is driven by that table — the grant was invisible and every request denied. Windows
- *  packages needing network were accused at 67-87% against 0-5% for those that do not, and
- *  `@apollo/rover@0.29.1` at the WIDEST grant downloaded on macOS while Windows logged
- *  `blocked network access to rover.apollo.dev`.
+ *  The real defect was in nub: `catalog_override::package_network_allowed()` consulted only the v1
+ *  catalog, so a v2 override yielded `None` and the net gate fell back to the compiled-in table,
+ *  which cannot name the package under test. Fixed in `e3cdc0e7f9`, pinned by
+ *  `crates/nub-sandbox/tests/generated_catalog_round_trip.rs`.
  *
- *  Derived here rather than at each call site because every catalog this file emits flows through
- *  `withFloor`, so one derivation cannot drift from a second spelling of the same intent. */
-const withFloor = (cat) => {
-  const full = Object.entries(cat.packages ?? {})
-    .filter(([, entry]) => entry?.default?.network === true)
-    .map(([name]) => ({ package: name }))
-    .sort((a, b) => (a.package < b.package ? -1 : a.package > b.package ? 1 : 0));
-  return {
-    ...cat,
-    ...(full.length ? { packageNetwork: { full } } : {}),
-    baseline: BASELINE.baseline ?? [],
-    env: BASELINE.env ?? [],
-  };
-};
+ *  macOS and Linux never showed it because they deny egress IN-KERNEL off the v2 capability and
+ *  never reach that function — Windows' userland net gate is its only consumer. */
+const withFloor = (cat) => ({ ...cat, baseline: BASELINE.baseline ?? [], env: BASELINE.env ?? [] });
 
 function catalogFor(pkg, state, others = []) {
   // EVERY OTHER PACKAGE IN THE TREE IS HELD AT FULL GRANT, in every arm including the

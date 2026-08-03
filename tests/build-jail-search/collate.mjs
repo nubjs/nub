@@ -420,36 +420,14 @@ const baseline = fs.existsSync(BASELINE)
   ? JSON.parse(fs.readFileSync(BASELINE, 'utf8'))
   : { baseline: [], env: [] };
 
-// ⛔ EGRESS IS GRANTED BY `packageNetwork.full`, NOT BY A PACKAGE'S `network` CAPABILITY.
-//
-// Emitting only `packages[].default.network` produces a catalog that grants network to NOBODY:
-// `parse_package_network` (`crates/nub-sandbox/src/catalog.rs`) builds the allow table from
-// `networkHosts[].fetchedBy` and `packageNetwork.full[]` and from nothing else. The SHIPPED catalog
-// is the proof of shape — 210 `packageNetwork.full` entries against ZERO packages carrying a
-// network capability.
-//
-// MEASURED, and the reason it went unseen for the whole corpus: macOS and Linux deny egress
-// IN-KERNEL (Seatbelt / Landlock+seccomp) off the per-package caps, so the capability alone works
-// there. Windows has no per-process network filter and uses the userland JS net gate, which reads
-// only that table — so on Windows the grant was invisible and 67-87% of packages needing network
-// were recorded as jail failures.
-//
-// Derived here rather than authored so it cannot drift from the measurements it summarises: a
-// package appears iff some band of its entry actually measured a network need. A version RANGE is
-// deliberately not emitted — the table's matcher is name-scoped, and a package that needed egress
-// at any measured version needs it at the entry level.
-const networkFull = Object.entries(packages)
-  .filter(([, entry]) =>
-    Object.values(entry ?? {}).some((band) => band && typeof band === 'object' && band.network === true))
-  .map(([name]) => ({ package: name }))
-  .sort((a, b) => (a.package < b.package ? -1 : a.package > b.package ? 1 : 0));
-
-const catalog = {
-  packages,
-  ...(networkFull.length ? { packageNetwork: { full: networkFull } } : {}),
-  baseline: baseline.baseline ?? [],
-  env: baseline.env ?? [],
-};
+// ⛔ THIS IS A v2 CATALOG: egress is the per-package `network: true` capability, and there is no
+// `packageNetwork.full` table here. A v1 table was added at one point to make Windows grant egress;
+// it worked, but it papered over a nub bug rather than fixing it — `package_network_allowed()`
+// consulted only the v1 catalog, so a v2 override yielded nothing and the net gate fell back to the
+// compiled-in table. Fixed in `e3cdc0e7f9` and pinned by
+// `crates/nub-sandbox/tests/generated_catalog_round_trip.rs`, which asserts THIS output shape
+// reaches the lookup the jail uses.
+const catalog = { packages, baseline: baseline.baseline ?? [], env: baseline.env ?? [] };
 fs.mkdirSync(path.dirname(OUT), { recursive: true });
 fs.writeFileSync(OUT, `${JSON.stringify(catalog, null, 2)}\n`);
 
