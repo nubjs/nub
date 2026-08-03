@@ -191,6 +191,18 @@ The artifact costs 11.8 ms more than bundling the program and running it on an i
 
 That overhead is close to fixed, so hello-world is the worst case for it. The 122-package application starts in about 88 ms, where the extra work is the application's own modules rather than anything the launcher adds. Read the table as a floor the artifact pays once, not as a proportional cost.
 
+### Build time
+
+Compressing the embedded Node dominates a build — around twenty seconds for a ~113 MB Node at the
+compression level used. The input does not change for a given Node version and target, so the
+compressed bytes are cached under the hash already computed for them. The first build pays the
+compression; later ones do not, and produce a byte-identical artifact.
+
+Lowering the compression level is the obvious alternative and is not taken. It would compress
+several times faster for about a tenth more artifact, and decompression is level-independent so
+it would cost nothing at run time — but artifact size is what this design is best at, and caching
+wins the build time without spending any of it.
+
 ### The first run is the expensive one
 
 Those figures are warm — the cache is already populated. The first run of an **embed** artifact also decompresses its Node and writes it to disk, and then executes that freshly written file for the first time. On Linux the whole first run costs a few hundred milliseconds; on macOS it is closer to a second, because the system validates a newly written executable before running it. `--smol` carries no Node, so its first run is close to its warm one.
