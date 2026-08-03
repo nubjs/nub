@@ -21,6 +21,10 @@ pub(super) async fn run(
     // walks up) mutate the real root lockfile and then silently skip
     // the restore under `--no-save`.
     let (root, matched) = crate::commands::select_workspace_packages(&cwd, filter, "add")?;
+    // Selection defines every manifest that this invocation could mutate.
+    // Validate all of their effective routes before a build-policy write,
+    // manifest update, or install fanout can leave partial workspace state.
+    super::preflight_selected_workspace_configs(&root, &matched)?;
     let lock = crate::commands::take_project_lock(&root)?;
 
     // CLI build review flags write against the workspace root (where

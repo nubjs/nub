@@ -467,6 +467,10 @@ pub async fn run(
     // `--global`/`-g` path returned earlier; `--workspace` already
     // redirected to a known root above.
     let initial_cwd = crate::dirs::cwd()?;
+    // Validate every source route before `add` creates its bootstrap manifest
+    // or writes any build policy / dependency state. `--workspace` changed the
+    // logical cwd above, so this validates the explicitly selected root.
+    super::load_npm_config(&initial_cwd)?;
     if crate::dirs::find_project_root(&initial_cwd).is_none() {
         std::fs::write(initial_cwd.join("package.json"), "{}\n")
             .into_diagnostic()
@@ -643,6 +647,23 @@ pub async fn run(
     pipeline_result?;
     if let Some(first) = restore_errors.into_iter().next() {
         return Err(first);
+    }
+    Ok(())
+}
+
+/// Validate the config roots used by shared workspace work and each selected
+/// package before any add-side mutation or install fanout begins.
+pub(super) fn preflight_selected_workspace_configs(
+    workspace_root: &std::path::Path,
+    matched: &[aube_workspace::selector::SelectedPackage],
+) -> miette::Result<()> {
+    super::load_npm_config(workspace_root)?;
+
+    for pkg in matched {
+        let project_root = crate::dirs::project_root_or_cwd_from(&pkg.dir);
+        if project_root != workspace_root {
+            super::load_npm_config(&project_root)?;
+        }
     }
     Ok(())
 }

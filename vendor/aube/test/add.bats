@@ -278,6 +278,76 @@ EOF
 	assert_failure
 }
 
+@test "aube add rejects invalid registry before bootstrap or build-policy writes" {
+	# An empty workspace config makes --allow-build target the policy file; a
+	# routing failure must precede both that write and package.json bootstrap.
+	printf 'packages: []\n' >pnpm-workspace.yaml
+	printf '%s\n' '@blocked:registry=ftp://add-route.invalid/' >.npmrc
+
+	run aube add --allow-build=is-odd is-odd
+	assert_failure
+	assert_output --partial 'ERR_AUBE_INVALID_REGISTRY_URL'
+	assert_file_not_exists package.json
+	assert_file_not_exists aube-lock.yaml
+	run grep -F 'allowBuilds' pnpm-workspace.yaml
+	assert_failure
+}
+
+@test "aube add --filter preflights every selected registry before workspace mutation" {
+	cat >pnpm-workspace.yaml <<-'YAML'
+		packages:
+		  - packages/*
+	YAML
+	cat >package.json <<-'JSON'
+		{ "name": "add-preflight-root", "version": "1.0.0", "private": true }
+	JSON
+	mkdir -p packages/a packages/b
+	cat >packages/a/package.json <<-'JSON'
+		{ "name": "preflight-a", "version": "1.0.0", "private": true }
+	JSON
+	cat >packages/b/package.json <<-'JSON'
+		{ "name": "preflight-b", "version": "1.0.0", "private": true }
+	JSON
+	printf '%s\n' '@blocked:registry=ftp://workspace-route.invalid/' >packages/b/.npmrc
+
+	run aube add --filter=preflight-* --allow-build=is-odd is-odd
+	assert_failure
+	assert_output --partial 'ERR_AUBE_INVALID_REGISTRY_URL'
+	run grep -F 'allowBuilds' pnpm-workspace.yaml
+	assert_failure
+	run grep -F '"is-odd"' packages/a/package.json
+	assert_failure
+	run grep -F '"is-odd"' packages/b/package.json
+	assert_failure
+	assert_file_not_exists aube-lock.yaml
+}
+
+@test "aube add --workspace validates redirected root before mutation" {
+	cat >pnpm-workspace.yaml <<-'YAML'
+		packages:
+		  - packages/*
+	YAML
+	cat >package.json <<-'JSON'
+		{ "name": "add-workspace-preflight-root", "version": "1.0.0", "private": true }
+	JSON
+	mkdir -p packages/app
+	cat >packages/app/package.json <<-'JSON'
+		{ "name": "add-workspace-preflight-app", "version": "1.0.0", "private": true }
+	JSON
+	printf '%s\n' '@blocked:registry=ftp://workspace-root-route.invalid/' >.npmrc
+
+	cd packages/app
+	run aube add --workspace --allow-build=is-odd is-odd
+	assert_failure
+	assert_output --partial 'ERR_AUBE_INVALID_REGISTRY_URL'
+	cd ../..
+	run grep -F 'allowBuilds' pnpm-workspace.yaml
+	assert_failure
+	run grep -F '"is-odd"' package.json
+	assert_failure
+	assert_file_not_exists aube-lock.yaml
+}
+
 @test "aube add in a workspace member does not flip the global-virtual-store mode (issue #71)" {
 	# Regression for the spurious WARN_AUBE_GVS_MODE_CHANGED reinstall loop:
 	# a root install materializes per-project (hoist=true default), but the
