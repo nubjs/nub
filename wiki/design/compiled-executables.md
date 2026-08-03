@@ -164,6 +164,8 @@ ok
 
 `sharp` is the demanding case. Its addon lives in one package and the shared library it links against lives in another, so it only works if both are present at the paths they were installed to — which is what shipping packages in place provides.
 
+Two harnesses under `tests/compile-corpus/` do this continuously. One varies **which package** is compiled, across pure JavaScript, node-gyp, node-pre-gyp and napi-rs packages. The other varies **the shape of the tree** it sits in — a nested duplicate version, a scoped package, a symlinked workspace member, an isolated install, a peer dependency, and a package that reads a data file. The second axis is the one that finds path defects, because it inspects the payload rather than only running the artifact: a tree shape can produce a collision that no ordinary package would, and the binary still exits 0 printing the right answer.
+
 ## Startup
 
 Compare a compiled artifact against running the same bundle on an installed Node, rather than against an empty script: an empty script measures Node's floor and charges Nub for work the application would pay under any bundler.
@@ -178,5 +180,7 @@ Measured on a hello-world program, warm, taking the minimum of forty runs and su
 | the compiled artifact | 41.6 ms |
 
 The artifact costs 11.8 ms more than bundling the program and running it on an installed Node, of which 6.6 ms is the launcher and the second process it starts. Node's own startup accounts for most of the remainder and is not something Nub can reduce: the artifact runs stock Node.
+
+That overhead is close to fixed, so hello-world is the worst case for it. The 122-package application starts in about 88 ms, where the extra work is the application's own modules rather than anything the launcher adds. Read the table as a floor the artifact pays once, not as a proportional cost.
 
 V8 startup snapshots do not help. An empty snapshot measured slower than no snapshot, because Node already applies its own built-in snapshot and the extra blob is another large file to read.
