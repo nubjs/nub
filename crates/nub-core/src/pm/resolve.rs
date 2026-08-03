@@ -425,7 +425,17 @@ pub struct PmIdentity {
 /// [`resolve_pin`] would warn about and ignore.
 pub fn declared_pm_raw(cwd: &Path) -> Option<(String, Option<String>)> {
     let manifest = root_manifest(cwd)?;
-    let (name, version) = raw_pin_name_version(&manifest)?;
+    declared_pm_raw_from_manifest(&manifest)
+}
+
+/// The raw `(name, version)` declared by exactly `manifest`, normalized the
+/// same way as [`declared_pm_raw`] but without walking to a workspace root.
+/// Recursive script execution uses this for a member's independent lifecycle
+/// identity.
+pub fn declared_pm_raw_from_manifest(
+    manifest: &serde_json::Value,
+) -> Option<(String, Option<String>)> {
+    let (name, version) = raw_pin_name_version(manifest)?;
     let version = version.map(|v| {
         v.split_once('+')
             .map_or(v.as_str(), |(bare, _)| bare)

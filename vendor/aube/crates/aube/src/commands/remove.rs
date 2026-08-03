@@ -69,6 +69,7 @@ pub async fn run(
 
     let cwd = crate::dirs::project_root()?;
     let lock = super::take_install_project_lock(&cwd)?;
+    preflight_direct_remove_configs(&cwd, lock.project_dir())?;
     let manifest_path = cwd.join("package.json");
 
     let mut manifest = super::load_manifest(&manifest_path)?;
@@ -234,6 +235,22 @@ fn preflight_selected_workspace_configs(
         if project_root != workspace_root {
             super::load_npm_config(&project_root)?;
         }
+    }
+    Ok(())
+}
+
+/// Validate the manifest-owning project and the effective chained-install root
+/// before this direct remove can rewrite a manifest or sidecar. A member remove
+/// writes its own `package.json`, but its following install owns the workspace
+/// root's lockfile and virtual store; either root's malformed registry config
+/// must fail atomically before user-authored state changes.
+fn preflight_direct_remove_configs(
+    mutation_root: &std::path::Path,
+    install_root: &std::path::Path,
+) -> miette::Result<()> {
+    super::load_npm_config(mutation_root)?;
+    if install_root != mutation_root {
+        super::load_npm_config(install_root)?;
     }
     Ok(())
 }

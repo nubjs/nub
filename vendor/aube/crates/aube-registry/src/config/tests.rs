@@ -330,7 +330,7 @@ npmRegistries:
 }
 
 #[test]
-fn yarnrc_protocol_relative_registry_auth_is_canonical_and_blocks_scope_widening() {
+fn yarnrc_protocol_relative_registry_auth_preserves_selector_identity() {
     let entries = translate_yarnrc_content(
         r#"
 npmRegistries:
@@ -344,16 +344,93 @@ npmScopes:
     );
 
     assert!(entries.contains(&(
-        "//registry.example.test/:_authToken".to_string(),
+        "//registry.example.test:443/:_authToken".to_string(),
         "registry-token".to_string(),
+    )));
+    assert!(entries.contains(&(
+        "//registry.example.test/:_authToken".to_string(),
+        "scope-token".to_string(),
     )));
     assert!(entries.contains(&(
         "@app:registry".to_string(),
         "https://registry.example.test/".to_string(),
     )));
+}
+
+#[test]
+fn yarnrc_protocol_relative_registry_auth_preserves_path_and_port() {
+    let entries = translate_yarnrc_content(
+        r#"
+npmRegistries:
+  "//REGISTRY.example.test:80/artifactory/npm":
+    npmAuthToken: port-token
+  "//registry.example.test:443/private":
+    npmAuthToken: tls-token
+"#,
+    );
+
+    assert!(entries.contains(&(
+        "//registry.example.test:80/artifactory/npm/:_authToken".to_string(),
+        "port-token".to_string(),
+    )));
+    assert!(entries.contains(&(
+        "//registry.example.test:443/private/:_authToken".to_string(),
+        "tls-token".to_string(),
+    )));
     assert!(
-        !entries.iter().any(|(_, value)| value == "scope-token"),
-        "a protocol-relative npmRegistries entry owns the host credential; scope auth must not widen"
+        !entries.iter().any(|(key, _)| key == "registry"),
+        "protocol-relative credential keys must never become request routes"
+    );
+}
+
+#[test]
+fn yarnrc_registry_selectors_distinguish_same_host_paths_and_default_ports() {
+    let entries = translate_yarnrc_content(
+        r#"
+npmRegistries:
+  "//registry.example.test:80/private":
+    npmAuthToken: port-80-token
+  "//registry.example.test:443/private":
+    npmAuthToken: port-443-token
+  "//registry.example.test/occupied":
+    npmAuthToken: occupied-token
+npmScopes:
+  barePath:
+    npmRegistryServer: "https://registry.example.test/private"
+    npmAuthToken: bare-path-token
+  port80:
+    npmRegistryServer: "https://registry.example.test:80/private"
+    npmAuthToken: port-80-scope-token
+  port443:
+    npmRegistryServer: "https://registry.example.test:443/private"
+    npmAuthToken: port-443-scope-token
+  openPath:
+    npmRegistryServer: "https://registry.example.test/open"
+    npmAuthToken: open-path-token
+"#,
+    );
+
+    assert!(entries.contains(&(
+        "//registry.example.test:80/private/:_authToken".to_string(),
+        "port-80-token".to_string(),
+    )));
+    assert!(entries.contains(&(
+        "//registry.example.test:443/private/:_authToken".to_string(),
+        "port-443-token".to_string(),
+    )));
+    assert!(entries.contains(&(
+        "//registry.example.test/private/:_authToken".to_string(),
+        "bare-path-token".to_string(),
+    )));
+    assert!(entries.contains(&(
+        "//registry.example.test/open/:_authToken".to_string(),
+        "open-path-token".to_string(),
+    )));
+    assert!(
+        !entries.iter().any(|(_, value)| {
+            value == "port-80-scope-token" || value == "port-443-scope-token"
+        }),
+        "only an exact Yarn selector owns scope credentials; paths and explicit ports do not collide"
     );
 }
 
@@ -2157,9 +2234,9 @@ fn scoped_auth_token_resolves_for_full_tarball_url_under_path_registry() {
 }
 
 #[test]
-fn npmrc_key_with_default_port_is_normalized_on_ingest() {
-    // User wrote `:443` explicitly in `.npmrc`. Lookups that don't
-    // carry the port must still resolve.
+fn npmrc_key_with_default_port_remains_a_distinct_selector() {
+    // `.npmrc` selector keys are protocol-less. Folding `:443` into a bare
+    // authority would widen this credential to a distinct selector route.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join(".npmrc"),
@@ -2168,10 +2245,7 @@ fn npmrc_key_with_default_port_is_normalized_on_ingest() {
     .unwrap();
 
     let config = NpmConfig::load_isolated(dir.path());
-    assert_eq!(
-        config.auth_token_for("https://registry.example.com/"),
-        Some("via-443"),
-    );
+    assert_eq!(config.auth_token_for("https://registry.example.com/"), None,);
 }
 
 #[test]

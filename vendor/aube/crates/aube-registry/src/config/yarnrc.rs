@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use super::url::{normalize_registry_url, registry_uri_key};
+use super::url::{normalize_npmrc_uri_key, normalize_registry_url, registry_uri_key};
 
 #[derive(Default)]
 pub(super) struct SplitYarnrcEntries {
@@ -452,19 +452,21 @@ struct YarnNetworkSettings {
 impl YarnRc {
     fn into_entries(self) -> Vec<(String, String)> {
         let mut out = Vec::new();
-        let default_registry = self.npm_registry_server.as_ref().map(|registry| {
-            let registry = registry_route_value(registry);
-            normalize_registry_url(&registry).unwrap_or_else(|| registry.trim().to_string())
+        let default_registry_source = self.npm_registry_server.as_ref().map(registry_route_value);
+        let default_registry = default_registry_source.as_deref().map(|registry| {
+            normalize_registry_url(registry).unwrap_or_else(|| registry.trim().to_string())
         });
-        let default_credential_uri_key = default_registry.as_deref().and_then(registry_uri_key);
+        let default_credential_selector_key = default_registry_source
+            .as_deref()
+            .and_then(yarn_registry_selector_key);
         // `npmRegistries` keys are credential selectors, not request routes.
-        // Yarn's canonical spelling is protocol-relative (`//host`), which
-        // must therefore reach credential collision accounting without being
-        // admitted as an HTTP registry base.
+        // Keep their Yarn-normalized identity separate from npmrc's transport
+        // nerf-dart normalization: Yarn matches the exact path and explicit
+        // port after removing only the request scheme.
         let registry_configs = self
             .npm_registries
             .keys()
-            .filter_map(|registry| yarn_registry_credential_uri_key(registry))
+            .filter_map(|registry| yarn_registry_selector_key(registry))
             .collect::<BTreeSet<_>>();
         let scope_registry_counts = scope_registry_counts(&self.npm_scopes);
 
@@ -515,40 +517,50 @@ impl YarnRc {
             };
             // A present malformed value must remain an explicit failed route,
             // not collapse to `None` and inherit the default registry.
-            let explicit_registry = config.npm_registry_server.as_ref().map(|registry| {
-                let registry = registry_route_value(registry);
-                normalize_registry_url(&registry).unwrap_or_else(|| registry.trim().to_string())
+            let explicit_registry_source = config
+                .npm_registry_server
+                .as_ref()
+                .map(registry_route_value);
+            let explicit_registry = explicit_registry_source.as_deref().map(|registry| {
+                normalize_registry_url(registry).unwrap_or_else(|| registry.trim().to_string())
             });
+            let explicit_credential_selector_key = explicit_registry_source
+                .as_deref()
+                .and_then(yarn_registry_selector_key);
             let registry = explicit_registry
                 .clone()
                 .or_else(|| default_registry.clone());
             if let Some(registry) = &registry {
                 push_routing(&mut out, format!("{scope}:registry"), registry.clone());
             }
-            let scope_auth_is_representable = explicit_registry
-                .as_deref()
-                .and_then(registry_uri_key)
-                .is_some_and(|uri_key| {
-                    Some(&uri_key) != default_credential_uri_key.as_ref()
-                        && !registry_configs.contains(&uri_key)
-                        && scope_registry_counts.get(&uri_key).copied().unwrap_or(0) == 1
+            let scope_auth_is_representable = explicit_credential_selector_key
+                .as_ref()
+                .is_some_and(|selector_key| {
+                    Some(selector_key) != default_credential_selector_key.as_ref()
+                        && !registry_configs.contains(selector_key)
+                        && scope_registry_counts
+                            .get(selector_key)
+                            .copied()
+                            .unwrap_or(0)
+                            == 1
                 });
             // Yarn auth can be package-scope-specific. The existing registry
             // model cannot represent that, so only translate scope auth when
             // the scope owns a unique custom registry. Otherwise translating it
             // would widen the credential to every package fetched from the same
             // registry.
-            if scope_auth_is_representable {
-                push_auth(
+            if scope_auth_is_representable
+                && let Some(uri) = explicit_credential_selector_key
+                    .as_deref()
+                    .and_then(yarn_registry_credential_uri_key)
+            {
+                push_auth_for_uri(
                     &mut out,
-                    registry.as_deref(),
+                    &uri,
                     config.npm_auth_token.as_deref(),
                     config.npm_auth_ident.as_deref(),
                 );
-                if config.npm_always_auth == Some(true)
-                    && let Some(registry) = &registry
-                    && let Some(uri) = registry_uri_key(registry)
-                {
+                if config.npm_always_auth == Some(true) {
                     push(&mut out, format!("{uri}:always-auth"), "true");
                 }
             }
@@ -790,27 +802,44 @@ fn push(out: &mut Vec<(String, String)>, key: impl Into<String>, value: impl Int
         out.push((key.into(), value));
     }
 }
-
-/// Convert a Yarn `npmRegistries` key to a credential nerf-dart key.
+/// Convert a Yarn `npmRegistries` key to an npmrc credential nerf-dart key.
 ///
-/// Berry documents protocol-relative authority keys such as `//registry.example`.
-/// They are intentionally accepted only as *credential selectors*: the synthetic
-/// HTTPS URL exists solely to reuse the established canonicalization (host case,
-/// default port, trailing slash), and never becomes a request-routing base.
+/// `npmRegistries` is credential-only; its key is never a routing base. Its
+/// protocol-relative selector is normalized through the shared scheme-agnostic
+/// npmrc key boundary, which retains an explicit port and path.
 fn yarn_registry_credential_uri_key(registry: &str) -> Option<String> {
-    if let Some(registry) = normalize_registry_url(registry) {
-        return registry_uri_key(&registry);
-    }
+    yarn_registry_selector_key(registry)
+}
 
-    let authority = registry.trim().strip_prefix("//")?;
-    let authority = authority.strip_suffix('/').unwrap_or(authority);
-    if authority.is_empty()
-        || authority.contains(['/', '?', '#', '@'])
-        || authority.contains(char::is_whitespace)
+/// Normalize a Yarn `npmRegistries` selector without turning it into a route.
+///
+/// Protocol-relative selectors are the documented form. Absolute HTTP(S)
+/// values are accepted only to compare `npmRegistryServer` routes to their
+/// protocol-relative credential selectors. The returned key uses the shared
+/// credential canonicalization, so host spelling is normalized while explicit
+/// ports and path segments remain distinct.
+fn yarn_registry_selector_key(registry: &str) -> Option<String> {
+    let registry = registry.trim();
+    let selector = if registry.starts_with("//") {
+        registry
+    } else {
+        let parsed = reqwest::Url::parse(registry).ok()?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            return None;
+        }
+        &registry[registry.find(':')? + 1..]
+    };
+
+    let rest = selector.strip_prefix("//")?;
+    if rest.is_empty()
+        || rest.starts_with('/')
+        || rest.contains(['?', '#', '@'])
+        || rest.contains(char::is_whitespace)
     {
         return None;
     }
-    registry_uri_key(&format!("https://{authority}/"))
+
+    Some(normalize_npmrc_uri_key(selector))
 }
 
 fn push_auth(
@@ -857,14 +886,13 @@ fn yarn_auth_ident_to_npm_auth(ident: &str) -> String {
 fn scope_registry_counts(scopes: &BTreeMap<String, YarnScope>) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
     for scope in scopes.values() {
-        if let Some(uri_key) = scope
+        if let Some(selector_key) = scope
             .npm_registry_server
             .as_ref()
             .map(registry_route_value)
-            .and_then(|registry| normalize_registry_url(&registry))
-            .and_then(|registry| registry_uri_key(&registry))
+            .and_then(|registry| yarn_registry_selector_key(&registry))
         {
-            *counts.entry(uri_key).or_insert(0) += 1;
+            *counts.entry(selector_key).or_insert(0) += 1;
         }
     }
     counts

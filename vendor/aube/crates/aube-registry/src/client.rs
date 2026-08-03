@@ -107,8 +107,15 @@ impl LazyHttpClient {
     /// Initialize the client on Tokio's blocking pool, then borrow its cached
     /// result. Request paths must use this instead of [`Self::get`]: a factory
     /// may synchronously read `cafile` or `NODE_EXTRA_CA_CERTS` before building
-    /// the TLS client.
+    /// the TLS client. A completed result needs neither blocking work nor task
+    /// scheduling, so return it directly.
     pub(super) async fn get_async(&self) -> Result<&reqwest::Client, crate::Error> {
+        if let Some(result) = self.state.result.get() {
+            return result
+                .as_ref()
+                .map_err(|error| crate::Error::HttpClientInitialization(Arc::clone(error)));
+        }
+
         let state = Arc::clone(&self.state);
         let initialization =
             tokio::task::spawn_blocking(move || Self::get_from_state(&state).map(|_| ()))
@@ -201,6 +208,29 @@ pub struct RegistryClient {
 #[cfg(test)]
 mod lazy_http_client_tests {
     use super::LazyHttpClient;
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    #[test]
+    fn get_async_returns_a_ready_cached_client_without_dispatch() {
+        let client = LazyHttpClient::ready(reqwest::Client::new());
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut context = Context::from_waker(&waker);
+        let future = client.get_async();
+        tokio::pin!(future);
+
+        assert!(matches!(
+            future.as_mut().poll(&mut context),
+            Poll::Ready(Ok(_))
+        ));
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn get_async_keeps_the_runtime_worker_progressing_while_factory_blocks() {

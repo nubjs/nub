@@ -876,6 +876,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_routed_unauthenticated_request_avoids_package_scoped_tls_identity() {
+        let mut config = NpmConfig {
+            registry: "https://registry.example.com/".to_string(),
+            ..Default::default()
+        };
+        config.auth_by_uri.insert(
+            "//registry.example.com/".to_string(),
+            AuthConfig {
+                auth_token: Some("ambient-token".to_string()),
+                ..Default::default()
+            },
+        );
+        let mut scoped = AuthConfig::default();
+        scoped.tls.cafile = Some(std::path::PathBuf::from("registry-scope-ca.pem"));
+        config
+            .scoped_auth_by_uri
+            .entry("//registry.example.com/".to_string())
+            .or_default()
+            .insert("@registry-scope".to_string(), scoped);
+        let client = RegistryClient::from_config(config);
+
+        let default_client = client
+            .http_for_async("https://actions.example.test/oidc")
+            .await
+            .expect("provider client") as *const _;
+        let scoped_client = client
+            .http_for_package_async("https://registry.example.com/", "@registry-scope/pkg")
+            .await
+            .expect("package-scoped registry client") as *const _;
+        assert_ne!(
+            default_client, scoped_client,
+            "the provider must not select the package-scoped registry TLS client"
+        );
+
+        let request = client
+            .request_async(
+                reqwest::Method::GET,
+                "https://actions.example.test/oidc",
+                "https://actions.example.test/oidc",
+            )
+            .await
+            .expect("unauthenticated provider request")
+            .build()
+            .expect("request build");
+        assert!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .is_none(),
+            "an OIDC provider request must not carry ambient registry auth"
+        );
+    }
+
+    #[tokio::test]
     async fn tarball_request_uses_scoped_auth_for_path_registry() {
         let mut config = NpmConfig::default();
         let registry_auth = AuthConfig {

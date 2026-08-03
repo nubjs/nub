@@ -631,6 +631,7 @@ pub(crate) fn engine_session(dir: Option<&Path>) -> Result<EngineSession> {
         IdentityStrictness::Strict,
         VirtualStoreLocality::Default,
         ProjectInstallConfig::Apply,
+        ProjectRootScope::ResolvedInstall,
     )
 }
 
@@ -653,6 +654,7 @@ pub(crate) fn engine_session_ci(dir: Option<&Path>) -> Result<EngineSession> {
         IdentityStrictness::Strict,
         VirtualStoreLocality::ProjectLocal,
         ProjectInstallConfig::Apply,
+        ProjectRootScope::ResolvedInstall,
     )
 }
 
@@ -674,6 +676,7 @@ pub(crate) fn engine_session_transient(dir: Option<&Path>) -> Result<EngineSessi
         IdentityStrictness::Lenient,
         VirtualStoreLocality::Default,
         ProjectInstallConfig::Ignore,
+        ProjectRootScope::Invocation,
     )
 }
 
@@ -695,6 +698,7 @@ pub(crate) fn engine_session_quiet(dir: Option<&Path>) -> Result<EngineSession> 
         IdentityStrictness::Strict,
         VirtualStoreLocality::Default,
         ProjectInstallConfig::Apply,
+        ProjectRootScope::Invocation,
     )
 }
 
@@ -720,6 +724,7 @@ pub(crate) fn engine_session_global(dir: Option<&Path>) -> Result<EngineSession>
         IdentityStrictness::Lenient,
         VirtualStoreLocality::Default,
         ProjectInstallConfig::Ignore,
+        ProjectRootScope::Invocation,
     )
 }
 
@@ -769,12 +774,22 @@ enum ProjectInstallConfig {
     Ignore,
 }
 
+/// Which project root supplies policy and the process snapshot. Install and CI
+/// own a workspace-level tree, so a member invocation must not leak its PM
+/// policy into that root-owned operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectRootScope {
+    Invocation,
+    ResolvedInstall,
+}
+
 fn engine_session_inner(
     dir: Option<&Path>,
     noise: ConfigScopeNoise,
     strictness: IdentityStrictness,
     store_locality: VirtualStoreLocality,
     project_install_config: ProjectInstallConfig,
+    root_scope: ProjectRootScope,
 ) -> Result<EngineSession> {
     // Register the embedder profile BEFORE initializing diagnostics: the diag
     // recorder reads its toggles through the active profile's `diag_env_prefix`
@@ -808,6 +823,16 @@ fn engine_session_inner(
     // `Too many open files (os error 24)`.
     resource_limits::raise_nofile_limit();
     apply_dir(dir)?;
+    if root_scope == ProjectRootScope::ResolvedInstall {
+        let cwd = std::env::current_dir()?;
+        if let Ok(root) = aube::embed::resolve_install_root(&cwd)
+            && root != cwd
+        {
+            std::env::set_current_dir(&root).with_context(|| {
+                format!("failed to enter resolved install root {}", root.display())
+            })?;
+        }
+    }
     // Install-family `-C/--dir` is verb-local, so this is the first point at
     // which its final effective cwd is known. Initialize exactly one project
     // snapshot here; the ordinary CLI routes have already initialized theirs,
@@ -816,15 +841,6 @@ fn engine_session_inner(
     engine_brand_preflight()?;
     let cwd = std::env::current_dir()?;
     let detected = resolve_identity_walk_up(&cwd, strictness)?;
-    // Role-first lifecycle UA (two-mode model, the maintainer 2026-06-10): in compat
-    // mode nub plays the incumbent PM's role completely, so the UA dep
-    // postinstalls sniff leads with that PM's token (`pnpm/<ver> nub/<ver>
-    // node/v<ver> …`, nub always second); under nub identity or in a fresh
-    // project the first token is nub's. Lifecycle-only — the registry UA and
-    // stream-time tool naming stay on the `nub/<ver>` product identity set in
-    // [`engine_brand_preflight`] (telemetry never lies).
-    let lifecycle_ua = lifecycle_ua_product(detected.as_ref(), &cwd);
-    aube_util::update_engine_context(|c| c.lifecycle_user_agent_product = Some(lifecycle_ua));
     // Config-scoping policy (CP-3): mirror the active PM's graph-shaping
     // config (pins/catalogs), never silently. Computed AFTER identity
     // resolves (it needs the role) and BEFORE the embedder defaults / engine
@@ -885,6 +901,14 @@ fn engine_session_inner(
     // compiled against ambient Node instead of the project's. Default-empty
     // overlay when augmentation can't engage ⇒ behavior preserved.
     apply_lifecycle_augmentation(&cwd)?;
+    // The lifecycle user agent must describe the Node process build scripts
+    // will actually run under. `apply_lifecycle_augmentation` has already
+    // resolved and recorded that version; never manufacture `node/v?`.
+    let node_version = aube_util::engine_context()
+        .runtime_node_version
+        .ok_or_else(|| anyhow::anyhow!("failed to resolve Node version for lifecycle scripts"))?;
+    let lifecycle_ua = lifecycle_ua_product(detected.as_ref(), &cwd, &node_version);
+    aube_util::update_engine_context(|c| c.lifecycle_user_agent_product = Some(lifecycle_ua));
     Ok(EngineSession {
         detected,
         runtime: build_runtime()?,
@@ -1539,14 +1563,15 @@ pub(crate) const PROJECT_VIRTUAL_STORE_LEAF: &str = ".store";
 /// the pinned version when declared, else the engine's parity version for
 /// pnpm and `?` (pnpm's own convention for an unknown version) for the roles
 /// whose real tool nub does not embed.
-fn lifecycle_ua_product(detected: Option<&DetectedLockfile>, cwd: &Path) -> String {
-    let node_version = nub_core::node::discovery::discover_node(cwd)
-        .map(|n| n.version.to_string())
-        .unwrap_or_else(|_| "?".to_string());
+fn lifecycle_ua_product(
+    detected: Option<&DetectedLockfile>,
+    cwd: &Path,
+    node_version: &str,
+) -> String {
     compose_lifecycle_ua(
         nub_core::pm::resolve::declared_pm_raw(cwd),
         detected.map(|d| d.kind),
-        &node_version,
+        node_version,
     )
 }
 
@@ -1569,6 +1594,26 @@ pub(crate) fn run_lifecycle_ua_product(cwd: &Path, node_version: &str) -> String
     compose_lifecycle_ua(
         nub_core::pm::resolve::declared_pm_raw(cwd),
         detected.map(|d| d.kind),
+        node_version,
+    )
+}
+
+/// Compose a recursive workspace member's lifecycle UA from that member's own
+/// manifest. [`run_lifecycle_ua_product`] intentionally resolves the workspace
+/// root for ordinary direct runs; applying it to a member would falsely stamp
+/// every worker with the invoking root's package-manager declaration.
+fn member_lifecycle_ua_product(cwd: &Path, node_version: &str) -> String {
+    let declared = std::fs::read(cwd.join("package.json"))
+        .ok()
+        .and_then(|content| serde_json::from_slice::<serde_json::Value>(&content).ok())
+        .as_ref()
+        .and_then(nub_core::pm::resolve::declared_pm_raw_from_manifest);
+    let detected = resolve_identity_walk_up(cwd, IdentityStrictness::Lenient)
+        .ok()
+        .flatten();
+    compose_lifecycle_ua(
+        declared,
+        detected.map(|detected| detected.kind),
         node_version,
     )
 }
@@ -2203,11 +2248,21 @@ pub(crate) fn snapshot_member_execution_inputs(cwd: &Path) -> Result<MemberExecu
             .map_err(|_| anyhow::anyhow!("invalid configured registry URL"))?;
         let registry = aube_registry::config::normalize_registry_url_pub(config.registry_for(""))
             .ok_or_else(|| anyhow::anyhow!("invalid configured registry URL"))?;
-        let engine_context = aube_util::engine_context();
-        let lifecycle_ua_product = engine_context
-            .lifecycle_user_agent_product
-            .clone()
-            .unwrap_or_else(|| run_lifecycle_ua_product(cwd, "?"));
+        let mut engine_context = aube_util::engine_context();
+        let node_version = match engine_context.runtime_node_version.clone() {
+            Some(version) => version,
+            None => nub_core::node::discovery::discover_node(cwd)
+                .map_err(|error| {
+                    anyhow::anyhow!("failed to resolve Node version for lifecycle scripts: {error}")
+                })?
+                .version
+                .to_string(),
+        };
+        engine_context.runtime_node_version = Some(node_version.clone());
+        // Do not borrow the session-wide product: recursive workers can belong
+        // to a different PM. The Node version is the command-construction
+        // snapshot, while the PM identity comes from this member's manifest.
+        let lifecycle_ua_product = member_lifecycle_ua_product(cwd, &node_version);
         Ok(MemberExecutionInputs {
             config,
             _engine_context: engine_context,

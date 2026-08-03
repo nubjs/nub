@@ -128,7 +128,7 @@ fn mixed_pm_registry_workspace(tag: &str, include_invalid_member: bool) -> PathB
     );
     write(
         &root.join("packages/yarn/package.json"),
-        r#"{"name":"yarn-member","version":"1.0.0","packageManager":"yarn@4.2.2","scripts":{"route":"printf '%s' \"$npm_config_registry\" > ../../yarn-registry"}}"#,
+        r#"{"name":"yarn-member","version":"1.0.0","packageManager":"yarn@4.2.2","scripts":{"route":"printf '%s' \"$npm_config_registry\" > ../../yarn-registry; printf '%s' \"$npm_config_user_agent\" > ../../yarn-ua"}}"#,
     );
     write(
         &root.join("packages/yarn/.yarnrc.yml"),
@@ -136,7 +136,7 @@ fn mixed_pm_registry_workspace(tag: &str, include_invalid_member: bool) -> PathB
     );
     write(
         &root.join("packages/bun/package.json"),
-        r#"{"name":"bun-member","version":"1.0.0","packageManager":"bun@1.1.0","scripts":{"route":"printf '%s' \"$npm_config_registry\" > ../../bun-registry"}}"#,
+        r#"{"name":"bun-member","version":"1.0.0","packageManager":"bun@1.1.0","scripts":{"route":"printf '%s' \"$npm_config_registry\" > ../../bun-registry; printf '%s' \"$npm_config_user_agent\" > ../../bun-ua"}}"#,
     );
     write(
         &root.join("packages/bun/bunfig.toml"),
@@ -205,6 +205,53 @@ fn recursive_parallel_run_uses_each_members_pm_registry_snapshot() {
         "https://bun.member.example/",
         "the Bun member command must receive its preflighted route without URL userinfo"
     );
+}
+
+#[test]
+fn recursive_mixed_pm_run_uses_each_members_lifecycle_user_agent() {
+    let root = mixed_pm_registry_workspace("member-lifecycle-ua", false);
+    let (stdout, stderr, code) = run_nub(&root, &["run", "-r", "--parallel", "route"]);
+    let combined = format!("{stdout}{stderr}");
+
+    assert_eq!(code, 0, "member scripts must run\n{combined}");
+    let node_version = Command::new("node")
+        .arg("--version")
+        .output()
+        .expect("resolve test Node version");
+    assert!(node_version.status.success(), "Node must be executable");
+    let node_version = String::from_utf8(node_version.stdout)
+        .expect("Node version is UTF-8")
+        .trim()
+        .trim_start_matches('v')
+        .to_owned();
+    for (member, expected_pm) in [("yarn", "yarn/4.2.2"), ("bun", "bun/1.1.0")] {
+        let ua = std::fs::read_to_string(root.join(format!("{member}-ua"))).unwrap();
+        assert!(
+            ua.starts_with(expected_pm),
+            "{member} member must retain its PM identity: {ua}"
+        );
+        assert!(
+            ua.contains(&format!("node/v{node_version}")),
+            "{member} member must retain the resolved Node version: {ua}"
+        );
+    }
+}
+
+#[test]
+fn direct_run_uses_declared_lifecycle_user_agent() {
+    let root = tmp_workspace("direct-lifecycle-ua");
+    write(
+        &root.join("package.json"),
+        r#"{"name":"direct-ua","version":"1.0.0","packageManager":"yarn@4.2.2","scripts":{"route":"printf '%s' \"$npm_config_user_agent\" > user-agent"}}"#,
+    );
+    let (stdout, stderr, code) = run_nub(&root, &["run", "route"]);
+    assert_eq!(code, 0, "direct script must run\n{stdout}{stderr}");
+    let ua = std::fs::read_to_string(root.join("user-agent")).unwrap();
+    assert!(
+        ua.starts_with("yarn/4.2.2 nub/"),
+        "direct script must advertise declared PM: {ua}"
+    );
+    assert!(ua.contains(" node/v"), "direct UA must include Node: {ua}");
 }
 
 #[test]

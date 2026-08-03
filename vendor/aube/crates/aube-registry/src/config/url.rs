@@ -13,9 +13,9 @@ pub(super) fn package_scope(name: &str) -> Option<&str> {
 /// `https://registry.example.com/` becomes `//registry.example.com/`.
 ///
 /// The key is a credential-free nerf-dart: userinfo, queries, and fragments
-/// are never part of it. The path is always slash-terminated. Only the
-/// scheme's own default port (`:443` for https, `:80` for http) is stripped,
-/// so `https://host:80/` remains distinct from `https://host/`.
+/// are never part of it. The path is always slash-terminated. An explicitly
+/// configured port remains part of the key: without a scheme, normalizing it
+/// away would conflate distinct Yarn and npm credential selectors.
 
 /// Parse a registry base accepted for HTTP request routing.
 ///
@@ -63,12 +63,7 @@ fn registry_uri_key_from_routable_url(url: &reqwest::Url) -> Option<String> {
         authority.push(':');
         authority.push_str(&port.to_string());
     }
-    let authority = if url.scheme().eq_ignore_ascii_case("https") {
-        strip_authority_port_suffix(&authority, ":443")
-    } else {
-        strip_authority_port_suffix(&authority, ":80")
-    };
-    Some(normalized_uri_key(authority, url.path()))
+    Some(normalized_uri_key(&authority, url.path()))
 }
 
 /// Convert a valid registry URL to its credential-free nerf-dart key.
@@ -79,19 +74,17 @@ pub(super) fn registry_uri_key(url: &str) -> Option<String> {
     registry_uri_key_from_routable_url(&parse_routable_registry_url(url)?)
 }
 
-/// Normalize an `//host[:port]/path...` key from `.npmrc` so it matches
-/// what `registry_uri_key` produces on the lookup side.
+/// Normalize an `//host[:port]/path...` key from `.npmrc` for auth lookup.
 ///
-/// Ingest cannot know the scheme the user intended (`.npmrc` keys are
-/// scheme-less), so it strips both `:443` and `:80`. It also removes malformed
-/// userinfo, queries, and fragments before the key can enter the auth map.
+/// Ingest is scheme-agnostic: it cannot safely infer whether `:80` or `:443`
+/// is default for the configured endpoint, so explicit ports remain part of
+/// the credential selector. It removes malformed userinfo, queries, and
+/// fragments before the key can enter the auth map.
 pub(super) fn normalize_npmrc_uri_key(key: &str) -> String {
     let Some(rest) = key.strip_prefix("//") else {
         return key.to_string();
     };
     let (authority, path) = normalized_authority_and_path(rest);
-    let authority = strip_authority_port_suffix(authority, ":443");
-    let authority = strip_authority_port_suffix(authority, ":80");
     let mut key = normalized_uri_key(authority, path);
     lowercase_uri_key_host(&mut key);
     key
@@ -143,11 +136,6 @@ fn normalized_authority_and_path(rest: &str) -> (&str, &str) {
         ""
     };
     (authority, path)
-}
-
-/// Remove one matching default-port suffix from an already-parsed authority.
-fn strip_authority_port_suffix<'a>(authority: &'a str, port_suffix: &str) -> &'a str {
-    authority.strip_suffix(port_suffix).unwrap_or(authority)
 }
 
 /// Build a credential-free `.npmrc` URI key with a slash-terminated path.

@@ -335,3 +335,32 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
         .success()
         .stdout(predicates::str::contains("No ignored builds"));
 }
+
+#[test]
+fn remove_rejects_invalid_install_root_config_before_mutating_member_manifest() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_manifest(r#"{"private":true,"workspaces":["packages/*"]}"#);
+    sbx.write_file(
+        "packages/app/package.json",
+        r#"{"name":"app","version":"1.0.0","dependencies":{"left-pad":"1.3.0"}}"#,
+    );
+    sbx.write_file(".npmrc", "registry=https:/malformed-root\n");
+
+    let member = sbx.project.join("packages/app");
+    let manifest = member.join("package.json");
+    let before = fs::read_to_string(&manifest).unwrap();
+
+    sbx.cmd()
+        .current_dir(&member)
+        .args(["remove", "left-pad"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("invalid configured registry URL"));
+
+    assert_eq!(
+        fs::read_to_string(&manifest).unwrap(),
+        before,
+        "a member manifest must survive a malformed config at the chained-install root"
+    );
+}

@@ -487,6 +487,62 @@ fn install_dir_initializes_one_project_snapshot_from_final_cwd() {
     }
 }
 
+#[test]
+fn install_from_workspace_member_snapshots_the_resolved_install_root() {
+    let root = pm_tmpdir("member-install-root-snapshot");
+    let member = root.join("packages/member");
+    std::fs::create_dir_all(&member).unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"root","version":"1.0.0","packageManager":"pnpm@10.0.0","workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("nub.jsonc"), r#"{ "conditions": [] }"#).unwrap();
+    std::fs::write(
+        member.join("package.json"),
+        r#"{"name":"member","version":"1.0.0","packageManager":"yarn@4.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(member.join("nub.jsonc"), r#"{ "conditions": [] }"#).unwrap();
+    let log = root.join("snapshot.log");
+
+    let output = Command::new(nub_binary())
+        .args([
+            "install",
+            "--dir",
+            "packages/member",
+            "--lockfile-only",
+            "--offline",
+        ])
+        .current_dir(&root)
+        .env("XDG_DATA_HOME", pm_tmpdir("member-root-snapshot-data"))
+        .env("XDG_CACHE_HOME", pm_tmpdir("member-root-snapshot-cache"))
+        .env("__NUB_TEST_CONFIG_SNAPSHOT_LOG", &log)
+        .output()
+        .expect("run install from workspace member");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "workspace install should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let line = std::fs::read_to_string(&log)
+        .expect("snapshot log")
+        .trim()
+        .to_string();
+    let logged = line
+        .strip_prefix("cwd=")
+        .and_then(|rest| rest.strip_suffix(" project=loaded"))
+        .unwrap_or_else(|| panic!("unexpected snapshot log line: {line}"));
+    assert_eq!(
+        Path::new(logged)
+            .canonicalize()
+            .expect("logged root exists"),
+        root.canonicalize().expect("workspace root exists"),
+        "root-owned install must resolve policy from the install root, not the member"
+    );
+}
+
 /// The embedded Aube command must retain oversized direct YAML scalars long
 /// enough to issue its invalid-concurrency warning and choose the automatic
 /// default, rather than reviving the lower-precedence `.npmrc=1` cap.

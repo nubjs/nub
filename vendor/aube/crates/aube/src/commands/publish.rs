@@ -702,13 +702,16 @@ async fn trusted_publish_token(
     registry_url: &str,
     package_name: &str,
 ) -> miette::Result<Option<String>> {
-    let Some(id_token) = npm_oidc_id_token(registry_url).await? else {
+    let Some(id_token) = npm_oidc_id_token(client, registry_url).await? else {
         return Ok(None);
     };
     exchange_npm_oidc_token(client, registry_url, package_name, &id_token).await
 }
 
-async fn npm_oidc_id_token(registry_url: &str) -> miette::Result<Option<String>> {
+async fn npm_oidc_id_token(
+    client: &RegistryClient,
+    registry_url: &str,
+) -> miette::Result<Option<String>> {
     if let Ok(token) = std::env::var("NPM_ID_TOKEN")
         && !token.trim().is_empty()
     {
@@ -742,11 +745,25 @@ async fn npm_oidc_id_token(registry_url: &str) -> miette::Result<Option<String>>
         .wrap_err("invalid ACTIONS_ID_TOKEN_REQUEST_URL")?;
     url.query_pairs_mut().append_pair("audience", &audience);
 
-    let external_client = reqwest::Client::new();
-    let request = external_client
-        .get(url)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .bearer_auth(request_token);
+    // This is a CI-provider request, not a package request. Route it by the
+    // provider URL through the RegistryClient so global proxy/no-proxy/CA
+    // settings apply, while package-scoped registry TLS identity cannot bleed
+    // onto the provider endpoint. Do not attach ambient npm credentials.
+    let request = match client
+        .request_async(reqwest::Method::GET, url.as_str(), url.as_str())
+        .await
+    {
+        Ok(request) => request
+            .header(reqwest::header::ACCEPT, "application/json")
+            .bearer_auth(request_token),
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                "GitHub Actions OIDC client setup failed; falling back to configured registry auth"
+            );
+            return Ok(None);
+        }
+    };
     let resp = match request.send().await {
         Ok(resp) => resp,
         Err(error) => {
