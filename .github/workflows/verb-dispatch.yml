@@ -132,6 +132,17 @@ jobs:
           [ "${{ matrix.os }}" = "windows-latest" ] && BIN="target/release/nub.exe"
           node tests/verb-dispatch/win-e2e.mjs "$BIN" npm/nub /tmp/launch-old.js
 
+      # What each launcher mechanism is actually WORTH, measured before any of them is
+      # engineered. The headline question: npm's cmd-shim emits a DIRECT invocation in
+      # all three shims for a SHEBANG-LESS bin target (cmd-shim/lib/index.js:42), which
+      # would remove the ~58 ms Node boot Windows pays on every call today.
+      - name: Launcher latency variants
+        shell: bash
+        run: |
+          BIN="target/release/nub"
+          [ "${{ matrix.os }}" = "windows-latest" ] && BIN="target/release/nub.exe"
+          node tests/verb-dispatch/win-latency-variants.mjs "$BIN"
+
       # Keep the binary retrievable so a VM run can reuse it without another build.
       - name: Stage artifact
         shell: bash
