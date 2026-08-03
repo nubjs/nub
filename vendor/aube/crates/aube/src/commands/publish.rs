@@ -33,6 +33,7 @@ use crate::commands::pack::{
 };
 use crate::commands::{encode_package_name, ensure_registry_auth_for_package};
 use aube_manifest::PackageJson;
+use aube_registry::Error as RegistryError;
 use aube_registry::SafeReqwestDiagnostic;
 use aube_registry::client::RegistryClient;
 use aube_registry::config::{NpmConfig, normalize_registry_url_pub};
@@ -120,16 +121,27 @@ pub async fn run(
     args.network.install_overrides()?;
     let cwd = crate::dirs::project_root()?;
 
+    // Validate every configured registry route before invoking a git hook or
+    // touching the package. Publishing must not run user-controlled scripts
+    // or archive/provenance work when any source route is malformed.
+    let config = super::load_npm_config(&cwd)?;
+
     if !args.no_git_checks {
         enforce_git_checks(&cwd)?;
     }
 
     if !filter.is_empty() {
-        return run_recursive(&cwd, &args, &filter, args.network.registry.as_deref()).await;
+        return run_recursive(
+            &cwd,
+            &args,
+            &filter,
+            args.network.registry.as_deref(),
+            config,
+        )
+        .await;
     }
 
     // Single-package mode: config_root == pkg_dir == cwd.
-    let config = super::load_npm_config(&cwd)?;
     let policy = super::resolve_fetch_policy(&cwd);
     let client = RegistryClient::from_config_with_policy(config.clone(), policy);
     let outcome = publish_one(
@@ -243,6 +255,7 @@ async fn run_recursive(
     args: &PublishArgs,
     filter: &aube_workspace::selector::EffectiveFilter,
     registry_override: Option<&str>,
+    config: NpmConfig,
 ) -> miette::Result<()> {
     let workspace_pkgs = aube_workspace::find_workspace_packages(source_root)
         .map_err(|e| miette!("failed to discover workspace packages: {e}"))?;
@@ -270,12 +283,9 @@ async fn run_recursive(
         ));
     }
 
-    // Load `.npmrc` once from the workspace root, not from each package
-    // subdir. pnpm walks both, but in practice auth tokens and scoped
-    // registry overrides live in the root `.npmrc` (or ~/.npmrc) — a
-    // per-package load would silently miss them and every package in
-    // the fanout would 401/403 on read or "no auth token" on write.
-    let config = super::load_npm_config(source_root)?;
+    // `run` loaded and validated this config before the git pre-flight. Keep
+    // that exact instance for every package so fanout cannot defer a malformed
+    // source route until after discovery or any package side effect.
     let policy = super::resolve_fetch_policy(source_root);
     let client = RegistryClient::from_config_with_policy(config.clone(), policy);
 
@@ -375,6 +385,30 @@ async fn publish_one(
     fanout: bool,
     registry_override: Option<&str>,
 ) -> miette::Result<PublishOutcome> {
+    publish_one_with_version_check(
+        pkg_dir,
+        config,
+        client,
+        args,
+        fanout,
+        registry_override,
+        None,
+    )
+    .await
+}
+
+/// Execute a package publish after optionally receiving an HTTP preflight
+/// fixture. Production always passes `None`; direct tests use an injected
+/// client-factory result to prove it halts before package effects.
+async fn publish_one_with_version_check(
+    pkg_dir: &Path,
+    config: &NpmConfig,
+    client: &RegistryClient,
+    args: &PublishArgs,
+    fanout: bool,
+    registry_override: Option<&str>,
+    version_check: Option<Result<bool, RegistryError>>,
+) -> miette::Result<PublishOutcome> {
     // Read the manifest *first* so the name/version needed for the
     // existence check are available without touching the filesystem
     // for file collection or the CPU for gzip/SHA hashing. This is the
@@ -464,22 +498,35 @@ async fn publish_one(
     // opts out of both: it turns the skip into a PUT and suppresses
     // the single-package error, leaving the registry to decide whether
     // a republish is allowed (npm refuses, Verdaccio usually accepts).
-    if !args.force && version_on_registry(client, &registry_url, &name, &version).await {
-        if fanout {
-            return Ok(PublishOutcome {
-                name,
-                version,
-                registry_url,
-                archive: None,
-                status: PublishStatus::AlreadyPublished,
-            });
+    if args.force {
+        let client_preflight = match version_check {
+            Some(result) => result.map(|_| ()),
+            None => preflight_publish_client(client, &registry_url, &name),
+        };
+        client_preflight.map_err(miette::Report::new)?;
+    } else {
+        let version_on_registry = match version_check {
+            Some(result) => result,
+            None => version_on_registry(client, &registry_url, &name, &version).await,
         }
-        return Err(miette!(
-            "{}: {name}@{version} is already on {}\n\
-             help: pass --force to republish (the registry must allow it; npm's public registry does not)",
-            aube_util::cmd("publish"),
-            aube_util::url::display_url(&registry_url),
-        ));
+        .map_err(miette::Report::new)?;
+        if version_on_registry {
+            if fanout {
+                return Ok(PublishOutcome {
+                    name,
+                    version,
+                    registry_url,
+                    archive: None,
+                    status: PublishStatus::AlreadyPublished,
+                });
+            }
+            return Err(miette!(
+                "{}: {name}@{version} is already on {}\n\
+                 help: pass --force to republish (the registry must allow it; npm's public registry does not)",
+                aube_util::cmd("publish"),
+                aube_util::url::display_url(&registry_url),
+            ));
+        }
     }
 
     // Lifecycle hooks + tarball build only happen now that we know
@@ -911,34 +958,66 @@ async fn run_publish_lifecycle_post(
     Ok(())
 }
 
+/// Initialize the exact per-package HTTP/TLS client used for a forced publish
+/// without sending a network request. `--force` bypasses the duplicate GET,
+/// but it must not defer a client-factory failure until after lifecycle,
+/// archive, or provenance work.
+fn preflight_publish_client(
+    client: &RegistryClient,
+    registry_url: &str,
+    name: &str,
+) -> Result<(), RegistryError> {
+    let url = put_url(registry_url, name);
+    client
+        .authed_request_for_package(reqwest::Method::PUT, &url, registry_url, name)
+        .map(|_| ())
+}
+
 /// GET `{registry}/{name}` and check whether `versions[version]` is
-/// present. Any transport/parse failure returns `false` so we fall
-/// through to the PUT and let the registry itself reject duplicates —
-/// being *wrong* about "already published" is worse than a harmless
-/// extra PUT attempt. The GET is sent through the same registry client
-/// we'd use for the PUT so private registries (Verdaccio auth, GitHub
-/// Packages, Artifactory) can actually answer it.
+/// present. A failed HTTP/TLS client factory is a local prerequisite failure
+/// and propagates before publish can run lifecycle hooks or build an archive.
+/// Actual GET transport, status, and parse failures still return `false` so we
+/// fall through to the PUT and let the registry itself reject duplicates —
+/// being *wrong* about "already published" is worse than a harmless extra PUT
+/// attempt. The GET is sent through the same registry client we'd use for the
+/// PUT so private registries (Verdaccio auth, GitHub Packages, Artifactory)
+/// can actually answer it.
 async fn version_on_registry(
     client: &RegistryClient,
     registry_url: &str,
     name: &str,
     version: &str,
-) -> bool {
+) -> Result<bool, RegistryError> {
     let url = put_url(registry_url, name);
-    let Ok(request) = client.authed_request_for_package(reqwest::Method::GET, &url, registry_url, name)
-    else {
-        return false;
+    version_on_registry_request(
+        client.authed_request_for_package(reqwest::Method::GET, &url, registry_url, name),
+        version,
+    )
+    .await
+}
+
+/// Apply the duplicate-version fallback policy after the request builder has
+/// been obtained. Keeping this at the ingress seam makes client construction
+/// failures distinct from errors produced by an actual GET.
+async fn version_on_registry_request(
+    request: Result<reqwest::RequestBuilder, RegistryError>,
+    version: &str,
+) -> Result<bool, RegistryError> {
+    let request = match request {
+        Ok(request) => request,
+        Err(error @ RegistryError::HttpClientInitialization(_)) => return Err(error),
+        Err(_) => return Ok(false),
     };
     let Ok(resp) = request.send().await else {
-        return false;
+        return Ok(false);
     };
     if !resp.status().is_success() {
-        return false;
+        return Ok(false);
     }
     let Ok(doc) = resp.json::<serde_json::Value>().await else {
-        return false;
+        return Ok(false);
     };
-    doc.get("versions").and_then(|v| v.get(version)).is_some()
+    Ok(doc.get("versions").and_then(|v| v.get(version)).is_some())
 }
 
 fn emit_outcome(outcome: &PublishOutcome, as_json: bool) -> miette::Result<()> {
@@ -1246,6 +1325,78 @@ mod tests {
             put_url("https://registry.npmjs.org", "lodash"),
             "https://registry.npmjs.org/lodash"
         );
+    }
+
+    #[tokio::test]
+    async fn client_factory_failure_stops_publish_before_lifecycle_or_archive() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{
+                "name": "publish-factory-failure",
+                "version": "1.0.0",
+                "files": ["index.js"],
+                "scripts": {
+                    "prepublishOnly": "touch lifecycle-sentinel",
+                    "postpack": "touch archive-sentinel"
+                }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(temp.path().join("index.js"), "module.exports = 1\n").unwrap();
+
+        let client_factory_failure = || {
+            RegistryError::HttpClientInitialization(std::sync::Arc::new(RegistryError::Io(
+                std::io::Error::other("publish test client factory failure"),
+            )))
+        };
+        let error = version_on_registry_request(Err(client_factory_failure()), "1.0.0")
+            .await
+            .expect_err("client initialization must abort duplicate pre-flight");
+        assert!(matches!(error, RegistryError::HttpClientInitialization(_)));
+
+        let config = NpmConfig {
+            registry: "https://registry.example.test/".to_owned(),
+            ..Default::default()
+        };
+        let client = RegistryClient::from_config(config.clone());
+        let args = PublishArgs {
+            access: None,
+            dry_run: false,
+            force: true,
+            ignore_scripts: false,
+            json: false,
+            no_git_checks: true,
+            otp: None,
+            provenance: false,
+            tag: None,
+            network: Default::default(),
+        };
+        let error = match publish_one_with_version_check(
+            temp.path(),
+            &config,
+            &client,
+            &args,
+            false,
+            None,
+            Some(Err(client_factory_failure())),
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("client initialization must abort publish"),
+        };
+        let Some(RegistryError::HttpClientInitialization(source)) =
+            error.downcast_ref::<RegistryError>()
+        else {
+            panic!("expected client initialization failure");
+        };
+        assert!(source
+            .to_string()
+            .contains("publish test client factory failure"));
+        assert!(!temp.path().join("lifecycle-sentinel").exists());
+        // postpack runs only after build_archive_for_publish completes.
+        assert!(!temp.path().join("archive-sentinel").exists());
     }
 
     #[test]

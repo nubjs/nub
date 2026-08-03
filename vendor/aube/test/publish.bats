@@ -68,6 +68,66 @@ EOF
 	assert_output --partial "no auth token"
 }
 
+@test "aube publish rejects malformed config before git, lifecycle, or archive work" {
+	cat >package.json <<-'EOF'
+		{
+		  "name": "publish-registry-boundary",
+		  "version": "1.0.0",
+		  "files": ["index.js"],
+		  "scripts": {
+		    "prepublishOnly": "touch lifecycle-sentinel",
+		    "postpack": "touch archive-sentinel"
+		  }
+		}
+	EOF
+	echo 'module.exports = 1' >index.js
+	printf '%s\n' 'registry=ftp://publish-user:publish-password@publish.invalid/private?token=publish-token#publish-fragment' >.npmrc
+
+	# A normal publish checks git before lifecycle work. Make any such call
+	# observable so the invalid registry must stop even that pre-flight.
+	mkdir fake-bin
+	cat >fake-bin/git <<-'SH'
+		#!/usr/bin/env bash
+		touch git-sentinel
+	SH
+	chmod +x fake-bin/git
+	export PATH="$PWD/fake-bin:$PATH"
+
+	run aube publish
+	assert_failure
+	assert_output --partial 'ERR_AUBE_INVALID_REGISTRY_URL'
+	assert_file_not_exists git-sentinel
+	assert_file_not_exists lifecycle-sentinel
+	# postpack runs only after the in-memory archive is built, so it is the
+	# archive-completion sentinel for publish (which does not write a .tgz).
+	assert_file_not_exists archive-sentinel
+	for secret in publish-user publish-password publish-token publish-fragment '?token=' '#'; do
+		refute_output --partial "$secret"
+	done
+}
+
+@test "aube publish still runs lifecycle and archives after duplicate-check transport failure" {
+	cat >package.json <<-'EOF'
+		{
+		  "name": "publish-get-fallback",
+		  "version": "1.0.0",
+		  "files": ["index.js"],
+		  "scripts": {
+		    "prepublishOnly": "touch lifecycle-sentinel",
+		    "postpack": "touch archive-sentinel"
+		  }
+		}
+	EOF
+	echo 'module.exports = 1' >index.js
+	echo '//127.0.0.1:1/:_authToken=fake' >.npmrc
+
+	run aube publish --no-git-checks --registry=http://127.0.0.1:1/
+	assert_failure
+	assert_output --partial 'failed to PUT'
+	assert_file_exists lifecycle-sentinel
+	assert_file_exists archive-sentinel
+}
+
 @test "aube publish missing-auth diagnostics omit registry userinfo and query credentials" {
 	_write_publishable_pkg
 
