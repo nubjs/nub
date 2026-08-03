@@ -127,6 +127,15 @@ EOF
 	assert_output --partial "default:"
 }
 
+@test "aube cache list-registries rejects invalid default FTP configuration" {
+	printf '%s\n' 'registry=ftp://default.invalid/' >.npmrc
+
+	run aube cache list-registries
+	assert_failure
+	assert_output --partial 'invalid registry URL'
+	refute_output --partial 'default:'
+}
+
 @test "aube cache list-registries omits invalid scoped FTP configuration" {
 	cat >.npmrc <<-'EOF'
 		registry=https://cache-user:cache-password@cache-password-tail@registry.example/npm?token=prefix@cache-query#cache-fragment

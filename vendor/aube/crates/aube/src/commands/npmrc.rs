@@ -175,6 +175,7 @@ pub fn resolve_registry(flag: Option<&str>, scope: Option<&str>) -> miette::Resu
     }
     let cwd = crate::dirs::project_root_or_cwd().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let config = NpmConfig::load(&cwd);
+    config.validate_registry_urls().map_err(miette::Report::new)?;
     if let Some(scope) = scope
         && let Some(url) = config.scoped_registries.get(scope)
     {

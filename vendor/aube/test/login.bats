@@ -106,13 +106,13 @@ teardown() {
 
 	run aube login --auth-type=web
 	assert_failure
-	assert_output --partial "invalid registry URL"
+	assert_output --partial "ERR_AUBE_INVALID_REGISTRY_URL"
 	[ ! -e "$REQUEST_SENTINEL_HIT_FILE" ]
 	assert_file_contains "$HOME/.npmrc" '# keep'
 	assert_file_contains "$HOME/.npmrc" "registry=$REQUEST_SENTINEL_URL"
 }
 
-@test "aube login rejects a malformed scoped registry without request or token mutation" {
+@test "aube login rejects an unrelated malformed scoped registry without request or default-token mutation" {
 	mkdir project
 	cd project
 	printf '%s\n' \
@@ -121,9 +121,9 @@ teardown() {
 	_start_request_sentinel
 	printf '%s\n' '# keep' "registry=$REQUEST_SENTINEL_URL" >"$HOME/.npmrc"
 
-	run aube login --auth-type=web --scope=@blocked
+	run aube login --auth-type=web
 	assert_failure
-	assert_output --partial "invalid registry URL"
+	assert_output --partial "ERR_AUBE_INVALID_REGISTRY_URL"
 	[ ! -e "$REQUEST_SENTINEL_HIT_FILE" ]
 	assert_file_contains "$HOME/.npmrc" '# keep'
 	assert_file_contains "$HOME/.npmrc" "registry=$REQUEST_SENTINEL_URL"
@@ -330,6 +330,38 @@ teardown() {
 	run aube logout --registry=https://r.example.com/
 	assert_success
 	assert_output --partial "nothing to do"
+}
+
+@test "aube logout rejects a malformed default registry without request or token mutation" {
+	mkdir project
+	cd project
+	printf '%s\n' 'registry=ftp://default.invalid/' >.npmrc
+	_start_request_sentinel
+	printf '%s\n' '# keep' "registry=$REQUEST_SENTINEL_URL" '//default.example/:_authToken=must-not-remove' >"$HOME/.npmrc"
+
+	run aube logout
+	assert_failure
+	assert_output --partial "ERR_AUBE_INVALID_REGISTRY_URL"
+	[ ! -e "$REQUEST_SENTINEL_HIT_FILE" ]
+	assert_file_contains "$HOME/.npmrc" '# keep'
+	assert_file_contains "$HOME/.npmrc" '//default.example/:_authToken=must-not-remove'
+}
+
+@test "aube logout rejects an unrelated malformed scoped registry without request or default-token mutation" {
+	mkdir project
+	cd project
+	printf '%s\n' \
+		'registry=https://default.example/' \
+		'@blocked:registry=ftp://scope.invalid/' >.npmrc
+	_start_request_sentinel
+	printf '%s\n' '# keep' "registry=$REQUEST_SENTINEL_URL" '//default.example/:_authToken=must-not-remove' >"$HOME/.npmrc"
+
+	run aube logout
+	assert_failure
+	assert_output --partial "ERR_AUBE_INVALID_REGISTRY_URL"
+	[ ! -e "$REQUEST_SENTINEL_HIT_FILE" ]
+	assert_file_contains "$HOME/.npmrc" '# keep'
+	assert_file_contains "$HOME/.npmrc" '//default.example/:_authToken=must-not-remove'
 }
 
 @test "aube login and logout reject malformed registry without writing npmrc" {

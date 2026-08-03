@@ -337,6 +337,9 @@ fn highest_semver<'a, I: IntoIterator<Item = &'a str>>(versions: I) -> Option<St
 fn list_registries() -> miette::Result<()> {
     let cwd = crate::dirs::project_root_or_cwd()?;
     let config = aube_registry::config::NpmConfig::load(&cwd);
+    if aube_registry::config::normalize_registry_url_pub(&config.registry).is_none() {
+        return Err(miette!("invalid registry URL"));
+    }
     println!(
         "default: {}",
         super::settings_context::registry_display_url(&config.registry)

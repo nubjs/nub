@@ -30,6 +30,18 @@ teardown() {
 	assert_file_exists node_modules/is-odd/package.json
 }
 
+@test "aube ci rejects invalid registry before cleaning node_modules" {
+	_setup_basic_fixture
+	mkdir -p node_modules
+	touch node_modules/.must-survive
+	printf '%s\n' 'registry=ftp://default.invalid/' >.npmrc
+
+	run aube ci
+	assert_failure
+	assert_output --partial 'ERR_AUBE_INVALID_REGISTRY_URL'
+	assert_file_exists node_modules/.must-survive
+}
+
 @test "aube ci errors when no lockfile is present" {
 	echo '{"name":"no-lockfile","version":"1.0.0","dependencies":{"is-odd":"^3.0.1"}}' >package.json
 	run aube ci

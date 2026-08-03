@@ -814,6 +814,7 @@ fn prewarm_host_filter_inputs(
 
 pub async fn run(opts: InstallOptions) -> miette::Result<()> {
     let cwd = resolve_project_cwd(&opts)?;
+    super::load_npm_config(&cwd)?;
     let _lock = super::take_project_lock(&cwd)?;
     run_scoped(opts, cwd).await
 }
@@ -829,6 +830,7 @@ pub(crate) async fn run_with_project_lock(
     lock: &super::project_lock::ProjectLock,
 ) -> miette::Result<()> {
     let cwd = lock.project_dir().to_path_buf();
+    super::load_npm_config(&cwd)?;
     opts.project_dir = Some(cwd.clone());
     run_scoped(opts, cwd).await
 }

@@ -392,6 +392,24 @@ YAML
 	assert_output --partial "Already up to date"
 }
 
+@test "aube install rejects invalid registry before warm or force paths mutate state" {
+	_setup_basic_fixture
+	run aube install
+	assert_success
+	touch node_modules/.must-survive
+	printf '%s\n' 'registry=ftp://default.invalid/' >.npmrc
+
+	run aube install
+	assert_failure
+	assert_output --partial 'ERR_AUBE_INVALID_REGISTRY_URL'
+	assert_file_exists node_modules/.must-survive
+
+	run aube install --force
+	assert_failure
+	assert_output --partial 'ERR_AUBE_INVALID_REGISTRY_URL'
+	assert_file_exists node_modules/.must-survive
+}
+
 @test "aube install regenerates lockfile with merge conflict markers" {
 	_setup_basic_fixture
 	run aube install
