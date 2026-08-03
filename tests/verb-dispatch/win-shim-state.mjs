@@ -135,6 +135,13 @@ function timeIn(mk) {
 
 const states = [
   ["shipped (npm's shims, node hop)", () => { restore(); }],
+  // ADD-ONLY: drop nub.exe in and touch NOTHING npm generated. The precedent-safe shape —
+  // esbuild, bun and @pnpm/exe all modify only files inside their OWN package and never
+  // reach into the global bin dir. PATHEXT should let cmd.exe find the .exe first, while
+  // pwsh and Git Bash keep preferring the .ps1 / extensionless shim, so this is expected to
+  // help one shell and not the others. Worth its own row precisely because it is the option
+  // that needs no permission from npm.
+  ["+exe ONLY (npm's shims untouched)", () => { restore(); addExe(); }],
   ["+exe, shims REWRITTEN direct", () => { restore(); addExe(); rewriteShims(); }],
   ["+exe, shims DELETED", () => { restore(); addExe(); deleteShims(); }],
 ];
@@ -153,9 +160,11 @@ for (const [label, row] of Object.entries(table)) {
   console.log(`  ${label.padEnd(34)}${shellNames.map((n) =>
     `${row[n].med.toFixed(1)} (${row[n].iqr.toFixed(1)})${row[n].ok ? "" : " BROKEN"}`.padStart(18)).join("")}`);
 }
-console.log(`\n  PER-CALL cost of REWRITE vs DELETE (positive = rewrite is slower, every call):`);
+console.log(`\n  PER-CALL deltas vs the shipped baseline (negative = faster):`);
 for (const n of shellNames) {
-  const d = table["+exe, shims REWRITTEN direct"][n].med - table["+exe, shims DELETED"][n].med;
-  console.log(`    ${n.padEnd(12)} ${d >= 0 ? "+" : ""}${d.toFixed(1)} ms`);
+  const base = table["shipped (npm's shims, node hop)"][n].med;
+  const parts = ["+exe ONLY (npm's shims untouched)", "+exe, shims REWRITTEN direct", "+exe, shims DELETED"]
+    .map((s) => `${s.split(",")[0].replace("+exe", "").trim() || "add-only"}: ${(table[s][n].med - base).toFixed(1)}`);
+  console.log(`    ${n.padEnd(12)} ${parts.join("  |  ")}`);
 }
 try { fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch {}
