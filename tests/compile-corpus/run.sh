@@ -24,7 +24,8 @@ if [ ! -d node_modules ]; then
   # One tree, many entries: each fixture imports only what it needs, so detection
   # still sees exactly the packages that program reaches.
   npm i --no-audit --no-fund --silent \
-    express zod chalk date-fns better-sqlite3 bcrypt sharp pino keyv @parcel/watcher
+    express zod chalk date-fns better-sqlite3 bcrypt sharp pino keyv @parcel/watcher \
+    esbuild
 fi
 cp "$HERE"/fixtures/*.mjs "$WORK"/
 

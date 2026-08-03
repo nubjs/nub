@@ -23,7 +23,9 @@ each hides a different failure:
   catches it.
 
 The corpus covers pure JavaScript, classic node-gyp packages, a napi-rs wrapper whose addon
-lives in a sidecar package, and a package that requires a computed path into a sibling.
+lives in a sidecar package, a package that requires a computed path into a sibling, and one whose
+native payload is an executable it spawns rather than an addon it loads — that last one is the
+only fixture whose correctness depends on a file's executable bit surviving the payload.
 
 ## Reading the output
 
