@@ -48,6 +48,8 @@ A payload cannot reproduce that. It carries files, not symlinks — the launcher
 
 So a dependency is placed where its dependent can actually reach it. A flat install already satisfies that and its packages keep the exact paths they occupy on disk. Under an isolated install a dependency nests directly under the package that declared it, which resolves from wherever that package lands.
 
+Something two packages both depend on is placed once, not under each of them. That needs the walk to go breadth-first — a shallower placement is on more dependents' lookup paths, so putting it down first is what lets the deeper one be dropped — and it needs packages identified by their real directory, since a store reaches one package through several symlinks. For sharp this is 18 MB of libvips that no longer lands on disk twice.
+
 The distinction is easy to miss because a flat tree hides it: npm hoists transitive dependencies to the top level, which is exactly where a lookup through the symlink would search. A resolver reading the wrong path therefore works on every npm-installed fixture and ships a package with none of its dependencies from an isolated one — a binary that builds clean and fails at run time with `Cannot find module`.
 
 ## Telling the two apart
