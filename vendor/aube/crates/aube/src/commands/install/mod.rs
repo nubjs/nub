@@ -210,17 +210,18 @@ const TRUST_POLICY_VALIDATION_CACHE_TTL: std::time::Duration =
 /// absorb normal resolver bursts, but bounded independently of the configured
 /// transfer limit and of the target pointer width.
 ///
-/// The `u64` calculation saturates before clamping to this deliberately modest
-/// limit. The result is converted to `usize` only after that bound, which is
-/// strictly below [`tokio::sync::Semaphore::MAX_PERMITS`] on supported targets
-/// and therefore always valid as a Tokio mpsc capacity.
+/// The calculation widens `usize` concurrency to `u64`, then saturates and
+/// clamps before converting back to `usize`. The 16,384-handoff cap is sixteen
+/// normal 1,024-package buffers: enough headroom for a resolver lead, while
+/// bounding an unexpectedly large configured concurrency value.
 const RESOLVER_STREAM_CAPACITY_FLOOR: usize = 1_024;
 const RESOLVER_STREAM_CAPACITY_MAX: usize = 16_384;
 const _: () = assert!(RESOLVER_STREAM_CAPACITY_MAX < tokio::sync::Semaphore::MAX_PERMITS);
 const RESOLVER_STREAM_CAPACITY_MULTIPLIER: u64 = 16;
 
-fn resolver_stream_capacity(network_concurrency: u64) -> usize {
-    network_concurrency
+fn resolver_stream_capacity(network_concurrency: usize) -> usize {
+    let wide_network_concurrency = u64::try_from(network_concurrency).unwrap_or(u64::MAX);
+    wide_network_concurrency
         .saturating_mul(RESOLVER_STREAM_CAPACITY_MULTIPLIER)
         .clamp(
             RESOLVER_STREAM_CAPACITY_FLOOR as u64,
@@ -233,6 +234,17 @@ mod resolver_stream_capacity_tests {
     use super::*;
 
     #[test]
+    fn preserves_the_default_resolver_buffer() {
+        let default_concurrency = default_streaming_network_concurrency();
+
+        assert!((16..=64).contains(&default_concurrency));
+        assert_eq!(
+            resolver_stream_capacity(default_concurrency),
+            RESOLVER_STREAM_CAPACITY_FLOOR
+        );
+    }
+
+    #[test]
     fn preserves_the_existing_low_concurrency_buffer() {
         assert_eq!(resolver_stream_capacity(1), RESOLVER_STREAM_CAPACITY_FLOOR);
         assert_eq!(resolver_stream_capacity(64), RESOLVER_STREAM_CAPACITY_FLOOR);
@@ -240,13 +252,31 @@ mod resolver_stream_capacity_tests {
     }
 
     #[test]
-    fn saturates_to_a_target_independent_valid_tokio_capacity() {
-        let capacity_for_32_bit_input = resolver_stream_capacity(u64::from(u32::MAX));
-        let capacity_for_64_bit_input = resolver_stream_capacity(u64::MAX);
+    fn caps_large_representable_concurrency_values() {
+        assert_eq!(
+            resolver_stream_capacity(u32::MAX as usize),
+            RESOLVER_STREAM_CAPACITY_MAX
+        );
 
-        assert_eq!(capacity_for_32_bit_input, RESOLVER_STREAM_CAPACITY_MAX);
-        assert_eq!(capacity_for_64_bit_input, RESOLVER_STREAM_CAPACITY_MAX);
-        assert!(capacity_for_64_bit_input < tokio::sync::Semaphore::MAX_PERMITS);
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(
+            resolver_stream_capacity(u64::MAX as usize),
+            RESOLVER_STREAM_CAPACITY_MAX
+        );
+
+        assert!(RESOLVER_STREAM_CAPACITY_MAX < tokio::sync::Semaphore::MAX_PERMITS);
+    }
+
+    #[test]
+    fn applies_the_capped_capacity_to_resolver_handoffs() {
+        let capacity = resolver_stream_capacity(usize::MAX);
+        let client = std::sync::Arc::new(aube_registry::client::RegistryClient::new(
+            "http://127.0.0.1:0",
+        ));
+        let (_resolver, receiver) =
+            aube_resolver::Resolver::with_stream_capacity(client, capacity);
+
+        assert_eq!(receiver.max_capacity(), RESOLVER_STREAM_CAPACITY_MAX);
     }
 }
 
@@ -1786,9 +1816,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // backpressure on graphs into the tens of thousands of
             // packages; fetch parallelism is still gated by
             // `fetch_network_concurrency` downstream.
-            let stream_capacity = resolver_stream_capacity(
-                u64::try_from(fetch_network_concurrency).unwrap_or(u64::MAX),
-            );
+            let stream_capacity = resolver_stream_capacity(fetch_network_concurrency);
             let (resolver, mut resolved_rx) =
                 aube_resolver::Resolver::with_stream_capacity(client, stream_capacity);
             let pnpmfile_paths = if opts.ignore_pnpmfile {

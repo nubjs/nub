@@ -343,3 +343,48 @@ impl Resolver {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolved_package() -> ResolvedPackage {
+        ResolvedPackage {
+            dep_path: String::new(),
+            name: String::new(),
+            version: String::new(),
+            integrity: None,
+            tarball_url: None,
+            alias_of: None,
+            local_source: None,
+            os: Default::default(),
+            cpu: Default::default(),
+            libc: Default::default(),
+            deprecated: None,
+            unpacked_size: None,
+            pending: 0,
+        }
+    }
+
+    #[test]
+    fn stream_capacity_applies_bounded_backpressure() {
+        let client = Arc::new(RegistryClient::new("http://127.0.0.1:0"));
+        let (resolver, mut receiver) = Resolver::with_stream_capacity(client, 2);
+        let Some(sender) = resolver.resolved_tx else {
+            panic!("streaming resolver must retain its sender");
+        };
+
+        assert_eq!(receiver.max_capacity(), 2);
+        assert_eq!(receiver.capacity(), 2);
+        sender.try_send(resolved_package()).unwrap();
+        sender.try_send(resolved_package()).unwrap();
+        assert_eq!(receiver.capacity(), 0);
+        assert!(matches!(
+            sender.try_send(resolved_package()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        ));
+
+        receiver.try_recv().unwrap();
+        assert!(sender.try_send(resolved_package()).is_ok());
+    }
+}
