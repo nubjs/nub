@@ -1113,7 +1113,73 @@ fn acquire_embedded_node(
     publish_cache_dir(&tmp, &node_cache, |dir| {
         embedded_node_cache_is_ready(m, dir)
     })?;
+    explain_if_node_cannot_start(&node_bin)?;
     Ok(node_bin)
+}
+
+/// Turn a dynamic-linker failure into something the reader can act on.
+///
+/// The artifact carries its own Node, so nothing about it needs installing —
+/// except that Node itself links a handful of system libraries, and a minimal
+/// container image can lack one. On Linux the usual absentee is `libatomic`, and
+/// what the user sees without this is the linker's own line, which names a
+/// filename and says nothing about nub, the binary they ran, or the fix.
+///
+/// Only on the COLD path, where the ~107 MB decompression above already dominates,
+/// so the extra process is not measurable. It cannot be done on the warm path at
+/// all: the launcher execs Node with inherited stdio, so the child's failure text
+/// goes straight to the terminal and is never seen here.
+fn explain_if_node_cannot_start(node_bin: &Path) -> Result<()> {
+    let Ok(out) = Command::new(node_bin).arg("--version").output() else {
+        // Could not run it at all — the caller's own spawn will produce a better
+        // error than a guess from here.
+        return Ok(());
+    };
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let Some(missing) = missing_shared_library(&stderr) else {
+        return Ok(());
+    };
+    bail!(
+        "the embedded Node cannot start: it needs {missing}, which is not installed.\n\
+         \x20 This binary carries its own Node, but Node links a few system libraries,\n\
+         \x20 and this machine is missing one.\n\
+         \x20 Debian or Ubuntu:  apt-get install {}\n\
+         \x20 Alpine:            apk add {}",
+        debian_package_for(&missing),
+        alpine_package_for(&missing)
+    )
+}
+
+/// The library named in a dynamic-linker failure, if that is what this is.
+fn missing_shared_library(stderr: &str) -> Option<String> {
+    let line = stderr
+        .lines()
+        .find(|l| l.contains("error while loading shared libraries"))?;
+    // `node: error while loading shared libraries: libatomic.so.1: cannot open …`
+    let after = line.split("shared libraries:").nth(1)?;
+    let name = after.split(':').next()?.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Debian's package for a shared object. Falls back to the library's own name,
+/// which is wrong as a package name but still the most useful thing to search.
+fn debian_package_for(lib: &str) -> String {
+    match lib.split('.').next() {
+        Some("libatomic") => "libatomic1".to_string(),
+        Some("libstdc++") => "libstdc++6".to_string(),
+        _ => lib.to_string(),
+    }
+}
+
+fn alpine_package_for(lib: &str) -> String {
+    match lib.split('.').next() {
+        Some("libatomic") => "libatomic".to_string(),
+        Some("libstdc++") => "libstdc++".to_string(),
+        _ => lib.to_string(),
+    }
 }
 
 /// `smol` shape discovery + provisioning. Order: nub's own Node store → the known
@@ -4371,6 +4437,45 @@ mod tests {
     /// The dedup gate: a musl store Node is refused for a glibc payload (the VM
     /// bug), a glibc one for a musl payload, and either is reused for its matching
     /// libc; a non-Linux target has no libc split and always reuses.
+    /// A dynamic-linker failure is recognised and named; anything else is not.
+    ///
+    /// The negative half is what keeps this from hijacking unrelated failures. A
+    /// Node that exits non-zero for its own reasons — a bad flag, a syntax error —
+    /// must fall through untouched, or the launcher replaces a real diagnostic
+    /// with a confident guess about a library that is fine.
+    #[test]
+    fn a_missing_shared_library_is_named_and_other_failures_are_left_alone() {
+        let linker = "node: error while loading shared libraries: libatomic.so.1: \
+                      cannot open shared object file: No such file or directory";
+        assert_eq!(
+            missing_shared_library(linker).as_deref(),
+            Some("libatomic.so.1"),
+            "the library's name is what the reader needs to act on"
+        );
+        assert_eq!(debian_package_for("libatomic.so.1"), "libatomic1");
+        assert_eq!(alpine_package_for("libatomic.so.1"), "libatomic");
+
+        // An unmapped library still yields something searchable rather than
+        // nothing, so the message degrades instead of disappearing.
+        assert_eq!(debian_package_for("libfoo.so.9"), "libfoo.so.9");
+
+        for unrelated in [
+            "node: bad option: --nope",
+            "SyntaxError: Unexpected token",
+            "",
+            // The case that actually exercises the prefix check. The three above
+            // are also rejected by the parse that follows it, so on their own they
+            // pass whether or not the check exists — a control that cannot fail.
+            "note: for background on shared libraries: see the linker manual",
+        ] {
+            assert_eq!(
+                missing_shared_library(unrelated),
+                None,
+                "an ordinary failure must not be reported as a missing library: {unrelated:?}"
+            );
+        }
+    }
+
     #[test]
     fn store_node_gate_matches_only_compatible_libc() {
         let dir = std::env::temp_dir().join(format!("nub-libc-gate-{}", std::process::id()));
