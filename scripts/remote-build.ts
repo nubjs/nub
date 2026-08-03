@@ -435,14 +435,20 @@ mkdir -p runtime/addons
 export function jobScript(job: string, profile: string) {
   // Mirror .github/workflows/ci.yml EXACTLY. The root clippy does NOT cover nub-native —
   // it is its own workspace (panic=unwind cdylib), `exclude`d from the root — so a
-  // root-only run goes green on code CI then rejects. The brand lint is a cheap grep.
+  // root-only run goes green on code CI then rejects. The brand lints are cheap greps.
   if (job === "clippy") {
     // `--profile fast` is part of mirroring ci.yml (lines 220/226), not an optimisation:
     // omitting it drove a whole SECOND dependency build under `dev`, so the bake's warm
     // `--profile fast` artifacts were never reused and every remote clippy was fully cold.
+    //
+    // FOUR legs, not three: `check-path-literals.sh` (ci.yml:237) joined `check-env-reads.sh`
+    // and this mirror never picked it up, so a remote clippy could go green on a path-literal
+    // violation that CI then rejects — the same class of false green the nub-native leg exists
+    // to prevent. Keep this list in lockstep with ci.yml's clippy job.
     return `${PREPARE}cargo clippy --all-targets --all-features --profile fast -- -D warnings
 (cd crates/nub-native && cargo clippy --all-features --profile fast -- -D warnings)
-tests/brand-lint/check-env-reads.sh`;
+tests/brand-lint/check-env-reads.sh
+tests/brand-lint/check-path-literals.sh`;
   }
   // CI runs the WHOLE workspace, and builds the REAL addon first because the data-format
   // loader tests dlopen it — an 11-byte placeholder makes them fail on a malformed library

@@ -67,19 +67,24 @@ for (const job of ["clippy", "test"]) {
   });
 }
 
-// Verified against .github/workflows/ci.yml: the Clippy job runs THREE things. nub-native
+// Verified against .github/workflows/ci.yml: the Clippy job runs FOUR things. nub-native
 // is its own workspace (panic=unwind cdylib) `exclude`d from the root, so a root-only
 // clippy goes green on code that CI then rejects — the exact --all-targets-shaped gap
 // AGENTS.md warns about.
-// `--profile fast` is part of that parity, not an optimisation. This test previously
-// asserted the invocation WITHOUT it while claiming to be verified against ci.yml, so it
-// pinned the drift in place: the job built a second dependency graph under `dev` and could
-// not reuse the golden image's `fast` artifacts, making every remote clippy fully cold.
-test("jobScript(clippy) reproduces all three legs of the CI clippy gate", () => {
+//
+// This test has twice pinned drift in place rather than catching it, so it is worth stating
+// what it is FOR: every leg CI runs must appear here, or a remote gate reports green on code
+// CI rejects. It previously asserted the invocation WITHOUT `--profile fast` while claiming
+// to be verified against ci.yml, so the job built a second dependency graph under `dev` and
+// could not reuse the golden image's artifacts. And it asserted THREE legs after
+// `check-path-literals.sh` (ci.yml:237) had joined `check-env-reads.sh`, so that lint was
+// missing from every remote clippy run.
+test("jobScript(clippy) reproduces all four legs of the CI clippy gate", () => {
   const s = jobScript("clippy", "fast");
   assert.match(s, /cargo clippy --all-targets --all-features --profile fast -- -D warnings/);
   assert.match(s, /crates\/nub-native && cargo clippy --all-features --profile fast -- -D warnings/, "root clippy does NOT cover nub-native");
   assert.match(s, /tests\/brand-lint\/check-env-reads\.sh/);
+  assert.match(s, /tests\/brand-lint\/check-path-literals\.sh/, "ci.yml:237 runs a second brand lint");
 });
 
 // CI runs the WHOLE workspace (`cargo test`, not `-p nub-cli`) and builds the REAL addon

@@ -77,7 +77,7 @@ A build is never detached **locally** — a detached local build reparents to PI
 
 `--build-image` bakes a `nub-builder` image family with apt deps, rustup + the darwin target + clippy, pinned zig, cargo-zigbuild, Node, a warmed crate registry, and pre-compiled dependency artifacts in `$HOME/.cargo-shared-target`. **That path is load-bearing and must match the one every job exports** — the bake deletes `~/src` when it finishes, so a target dir inside it would be destroyed while the image advertised warm artifacts. Re-bake when the toolchain or dependency graph moves substantially.
 
-**Known gap: the image is registry-warm, not artifact-warm.** The bake's warm step currently stops after `cargo fetch` (exit 0, image published, no compile); the `bash -s` stdin-truncation fix resolved this for the JOB path but not the bake, and `set -euxo` tracing is on to name the last command executed. Consequence: builders cold-compile, so clippy takes ~250s rather than ~35s and a darwin build ~560s. Correctness is unaffected — every timing here is pessimistic, not wrong.
+**The image is artifact-warm for both jobs.** The bake runs every cargo invocation `jobScript` emits, verbatim — the root clippy, the `nub-native` clippy, `cargo test --workspace --no-run`, and `(cd crates/nub-native && cargo build)` — so a booted builder reuses those artifacts instead of recompiling the graph. Keep the bake's warm block in lockstep with `jobScript`: cargo fingerprints on the command shape, so a warm-up that differs by driver, profile, package scope, or feature set produces artifacts the job cannot use, and the image goes silently cold.
 
 ## What this does NOT give you
 
