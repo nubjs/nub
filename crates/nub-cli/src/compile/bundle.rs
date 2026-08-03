@@ -3975,7 +3975,9 @@ fn reject_unresolved(
     let mut any_indirect = false;
     let mut any_dynamic = false;
     let mut any_variable = false;
+    let mut any_native = false;
     for site in sites {
+        any_native |= specifier_names_native_addon(&site.snippet);
         match site.kind {
             SiteKind::Dynamic | SiteKind::Variable if allow_dynamic => continue,
             SiteKind::Dynamic => any_dynamic = true,
@@ -4009,11 +4011,27 @@ fn reject_unresolved(
     // The indirect-require fix is a different action from the dynamic-specifier
     // one — the specifier is already static; what is wrong is the module format
     // the resolver picked — so the hint is only shown when it applies.
-    let indirect_hint = if any_indirect {
+    let indirect_hint = if any_indirect && !any_native {
         "\n\x20\x20A require() whose `require` is a local binding (a UMD factory parameter or a\n\
          \x20\x20createRequire result) is an ordinary call the bundler cannot rewrite. Replace a\n\
          \x20\x20relative createRequire call with a static import. For a UMD dependency, depend on\n\
          \x20\x20the package's ESM build or alias the specifier to it with --alias."
+    } else {
+        ""
+    };
+    // Checked BEFORE the indirect hint is chosen, because a native addon reaches
+    // this code as an indirect require and would otherwise collect that hint —
+    // which tells the author to "depend on the package's ESM build". For a
+    // per-platform `.node` selected at run time there is no ESM build, and the
+    // code is in somebody else's package. Wrong advice is worse than none: it
+    // sends people to edit a dependency they do not own.
+    let native_hint = if any_native {
+        "\n\x20\x20A .node addon is a platform binary the bundler cannot inline, and packages\n\
+         \x20\x20pick one at run time from a list of per-platform variants — so the specifier\n\
+         \x20\x20above is not something you can make static in the package's own source.\n\
+         \x20\x20If the machine you ship to will have this package installed, --external\n\
+         \x20\x20<package> leaves it to be resolved there. A self-contained binary carrying\n\
+         \x20\x20its own copy of a native package is not supported yet."
     } else {
         ""
     };
@@ -4045,14 +4063,27 @@ fn reject_unresolved(
     bail!(
         "{} import{} could not be resolved at build time:\n{}\n\n\
          \x20\x20A compiled binary carries no node_modules, so an unresolved import fails at\n\
-         \x20\x20runtime on the machine you ship to.{}{}{}",
+         \x20\x20runtime on the machine you ship to.{}{}{}{}",
         lines.len(),
         if lines.len() == 1 { "" } else { "s" },
         lines.join("\n"),
+        native_hint,
         dynamic_hint,
         variable_hint,
         indirect_hint
     );
+}
+
+/// Whether an unresolved import names a native addon.
+///
+/// Matched on the snippet rather than a parsed specifier because that is what the
+/// diagnostic already carries, and the shape is unambiguous: a `.node` file is a
+/// platform binary, so any specifier ending in one is the native case regardless
+/// of how it was written.
+fn specifier_names_native_addon(snippet: &str) -> bool {
+    snippet
+        .split(['\'', '"', '`'])
+        .any(|part| part.ends_with(".node"))
 }
 
 /// Name every `import()` that `--allow-dynamic-import` let through.
@@ -7003,6 +7034,79 @@ after
             assert!(
                 out.contains("before") && out.contains("after"),
                 "the stripper must only remove its own regions"
+            );
+        }
+    }
+
+    /// A `.node` specifier is recognised however it was written, and an ordinary
+    /// one is not.
+    ///
+    /// The negative half is what matters. This predicate SUPPRESSES the
+    /// indirect-require hint, so a false positive would silently withhold correct
+    /// advice from someone with a genuine UMD problem — a worse failure than the
+    /// wrong-advice bug it exists to fix.
+    #[test]
+    fn only_a_dot_node_specifier_is_read_as_a_native_addon() {
+        for native in [
+            r#"require("@img/sharp-darwin-arm64/sharp.node")"#,
+            r#"require('./build/Release/better_sqlite3.node')"#,
+            "require(`./prebuilds/darwin-arm64/x.node`)",
+        ] {
+            assert!(
+                specifier_names_native_addon(native),
+                "must be read as a native addon: {native}"
+            );
+        }
+        for ordinary in [
+            r#"require("lodash")"#,
+            r#"require('./config.json')"#,
+            // The word appears, but not as the specifier's extension.
+            r#"require("node-fetch")"#,
+            r#"require("./node/index.js")"#,
+        ] {
+            assert!(
+                !specifier_names_native_addon(ordinary),
+                "must NOT be read as a native addon, or the indirect-require hint is \
+                 wrongly suppressed: {ordinary}"
+            );
+        }
+    }
+
+    /// A `.node` specifier is recognised, and an ordinary one is not.
+    ///
+    /// This gate decides which REMEDY an unresolved import gets, and the wrong
+    /// remedy is worse than none: without it a native addon collects the indirect
+    /// hint, which tells the author to "depend on the package's ESM build or alias
+    /// the specifier". For a per-platform `.node` picked at run time there is no
+    /// ESM build, and the code lives in somebody else's package — so that advice
+    /// sends people to edit a dependency they do not own.
+    ///
+    /// The negative cases are the real content. Firing on an ordinary specifier
+    /// would suppress the indirect hint for the UMD authors it was written for.
+    #[test]
+    fn native_addon_specifiers_are_told_apart_from_ordinary_ones() {
+        for native in [
+            r#"require("@img/sharp-darwin-arm64/sharp.node")"#,
+            r#"require('./build/Release/better_sqlite3.node')"#,
+            "require(`./prebuilds/darwin-arm64/node.napi.node`)",
+        ] {
+            assert!(
+                specifier_names_native_addon(native),
+                "must recognise a native addon: {native}"
+            );
+        }
+
+        for ordinary in [
+            r#"require("node:fs")"#,
+            r#"require('./worker.js')"#,
+            // The word appears, but not as the specifier's extension — this is the
+            // case a naive `contains(".node")` would get wrong.
+            r#"require("./my.node.helper.js")"#,
+            r#"require("nodemailer")"#,
+        ] {
+            assert!(
+                !specifier_names_native_addon(ordinary),
+                "must NOT claim an ordinary specifier is a native addon: {ordinary}"
             );
         }
     }
