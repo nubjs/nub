@@ -73,6 +73,7 @@ fn install_tree_root(package: &Path) -> Option<PathBuf> {
 fn copy_package_tree(
     dir: &Path,
     rel: &Path,
+    target: &TargetPlatform,
     files: &mut BTreeMap<String, (Vec<u8>, bool)>,
 ) -> Result<()> {
     let mut stack = vec![dir.to_path_buf()];
@@ -100,6 +101,20 @@ fn copy_package_tree(
             let name = rel.join(inner).to_string_lossy().replace('\\', "/");
             let bytes = std::fs::read(&path)
                 .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+            // A foreign-platform addon is SKIPPED, not an error. Packages routinely
+            // ship prebuilds for every platform they support — better-sqlite3 carries
+            // a Windows one — and only the matching build is ever loaded, so failing
+            // the compile because an irrelevant prebuild exists rejects perfectly
+            // good packages. Dropping them also keeps the artifact to the one
+            // platform it targets.
+            //
+            // The island path checks rather than skips because it is handed the ONE
+            // addon the bundler resolved, where this walks a whole tree.
+            if path.extension().is_some_and(|e| e == "node")
+                && check_target(&bytes, &path, target).is_err()
+            {
+                continue;
+            }
             files.entry(name).or_insert((bytes, is_executable(&path)));
         }
     }
@@ -225,7 +240,7 @@ impl NativeAddons {
             let Ok(rel) = dir.strip_prefix(anchor) else {
                 continue;
             };
-            copy_package_tree(&dir, rel, files)?;
+            copy_package_tree(&dir, rel, &self.target, files)?;
 
             let Ok(text) = std::fs::read_to_string(dir.join("package.json")) else {
                 continue;
@@ -1521,6 +1536,61 @@ mod tests {
 
     // The interop contract: a CJS consumer must receive the addon's own exports,
     // never a `{ default: … }` namespace.
+    /// Only the target platform's addon travels.
+    ///
+    /// Packages ship prebuilds for every platform they support — better-sqlite3
+    /// carries a Windows one — so the foreign builds must be DROPPED rather than
+    /// copied or treated as an error. Copying them makes a cross-compiled artifact
+    /// carry binaries it can never load; erroring on them rejects packages that are
+    /// perfectly fine, which is what a first attempt at this did: it failed
+    /// better-sqlite3 on its own host because a win32 prebuild sat in the tree.
+    ///
+    /// The same-platform half is the control: without it this passes for any
+    /// implementation that copies nothing.
+    #[test]
+    fn only_the_target_platforms_addon_is_materialised() {
+        let dir = std::env::temp_dir().join(format!(
+            "nub-xcompile-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A darwin-arm64 addon, as an installed tree on this host would hold.
+        std::fs::write(dir.join("addon.node"), macho(0x0100_000C)).unwrap();
+
+        let mut files = BTreeMap::new();
+        let native = copy_package_tree(
+            &dir,
+            Path::new("node_modules/pkg"),
+            &target("darwin-arm64"),
+            &mut files,
+        );
+        assert!(
+            native.is_ok() && files.contains_key("node_modules/pkg/addon.node"),
+            "control: the addon must be accepted for the platform it was built for"
+        );
+
+        let mut foreign_files = BTreeMap::new();
+        let foreign = copy_package_tree(
+            &dir,
+            Path::new("node_modules/pkg"),
+            &target("linux-x64"),
+            &mut foreign_files,
+        );
+        assert!(
+            foreign.is_ok(),
+            "a foreign prebuild is skipped, not an error"
+        );
+        assert!(
+            !foreign_files.contains_key("node_modules/pkg/addon.node"),
+            "a darwin addon must not travel into a linux artifact — the build host's \
+             tree is the wrong platform's, and copying it verbatim is how a \
+             cross-compile silently produces a binary that cannot load its own addon"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_emitted_module_is_commonjs_and_locates_itself_from_the_chunk() {
         let code = addon_module("watcher-a1b2c3d4.node");
