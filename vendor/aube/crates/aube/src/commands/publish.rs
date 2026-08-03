@@ -385,29 +385,29 @@ async fn publish_one(
     fanout: bool,
     registry_override: Option<&str>,
 ) -> miette::Result<PublishOutcome> {
-    publish_one_with_version_check(
+    publish_one_with_preflight(
         pkg_dir,
         config,
         client,
         args,
         fanout,
         registry_override,
-        None,
+        preflight_publish_clients,
     )
     .await
 }
 
-/// Execute a package publish after optionally receiving an HTTP preflight
-/// fixture. Production always passes `None`; direct tests use an injected
-/// client-factory result to prove it halts before package effects.
-async fn publish_one_with_version_check(
+/// Execute a package publish after choosing the HTTP/TLS route preflight.
+/// Production passes [`preflight_publish_clients`]; direct tests inject a
+/// terminal initialization error so they can prove it stops package effects.
+async fn publish_one_with_preflight(
     pkg_dir: &Path,
     config: &NpmConfig,
     client: &RegistryClient,
     args: &PublishArgs,
     fanout: bool,
     registry_override: Option<&str>,
-    version_check: Option<Result<bool, RegistryError>>,
+    preflight: fn(&RegistryClient, &str, &str) -> Result<(), RegistryError>,
 ) -> miette::Result<PublishOutcome> {
     // Read the manifest *first* so the name/version needed for the
     // existence check are available without touching the filesystem
@@ -498,18 +498,11 @@ async fn publish_one_with_version_check(
     // opts out of both: it turns the skip into a PUT and suppresses
     // the single-package error, leaving the registry to decide whether
     // a republish is allowed (npm refuses, Verdaccio usually accepts).
-    if args.force {
-        let client_preflight = match version_check {
-            Some(result) => result.map(|_| ()),
-            None => preflight_publish_client(client, &registry_url, &name),
-        };
-        client_preflight.map_err(miette::Report::new)?;
-    } else {
-        let version_on_registry = match version_check {
-            Some(result) => result,
-            None => version_on_registry(client, &registry_url, &name, &version).await,
-        }
-        .map_err(miette::Report::new)?;
+    if !args.force {
+        let version_on_registry =
+            version_on_registry(client, &registry_url, &name, &version)
+                .await
+                .map_err(miette::Report::new)?;
         if version_on_registry {
             if fanout {
                 return Ok(PublishOutcome {
@@ -528,6 +521,13 @@ async fn publish_one_with_version_check(
             ));
         }
     }
+
+    // Trusted Publishing sends its OIDC-derived PUT through the generic
+    // per-registry client, while configured package credentials/TLS use the
+    // package-routed client. Initialize both now: a TLS/client-factory error
+    // is a local precondition, never a fallback after scripts, archive work,
+    // or Sigstore provenance signing.
+    preflight(client, &registry_url, &name).map_err(miette::Report::new)?;
 
     // Lifecycle hooks + tarball build only happen now that we know
     // we're actually going to PUT. For a re-run of `-r publish` where
@@ -958,19 +958,19 @@ async fn run_publish_lifecycle_post(
     Ok(())
 }
 
-/// Initialize the exact per-package HTTP/TLS client used for a forced publish
-/// without sending a network request. `--force` bypasses the duplicate GET,
-/// but it must not defer a client-factory failure until after lifecycle,
-/// archive, or provenance work.
-fn preflight_publish_client(
+/// Initialize both HTTP/TLS routes a publish can use without sending a
+/// request. Trusted Publishing's OIDC-derived PUT uses the generic route;
+/// ordinary credential publishing uses the package-routed route, which may
+/// select scoped TLS material.
+fn preflight_publish_clients(
     client: &RegistryClient,
     registry_url: &str,
     name: &str,
 ) -> Result<(), RegistryError> {
     let url = put_url(registry_url, name);
-    client
-        .authed_request_for_package(reqwest::Method::PUT, &url, registry_url, name)
-        .map(|_| ())
+    let _ = client.request(reqwest::Method::PUT, &url, registry_url)?;
+    let _ = client.authed_request_for_package(reqwest::Method::PUT, &url, registry_url, name)?;
+    Ok(())
 }
 
 /// GET `{registry}/{name}` and check whether `versions[version]` is
@@ -1309,7 +1309,7 @@ fn archive_hashes(archive: &BuiltArchive) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aube_registry::config::registry_uri_key_pub;
+    use aube_registry::config::{AuthConfig, registry_uri_key_pub};
 
     #[test]
     fn put_url_encodes_scoped_slash() {
@@ -1327,13 +1327,53 @@ mod tests {
         );
     }
 
+    fn scoped_tls_publish_config() -> NpmConfig {
+        let registry = "https://registry.example.test/".to_owned();
+        let registry_key = registry_uri_key_pub(&registry).expect("valid registry key");
+        let mut config = NpmConfig {
+            registry,
+            ..Default::default()
+        };
+        let mut scoped_auth = AuthConfig::default();
+        // The missing file is intentionally harmless; it still causes the
+        // registry client to construct a distinct scoped TLS route.
+        scoped_auth.tls.cafile = Some(std::path::PathBuf::from("scoped-ca.pem"));
+        config
+            .scoped_auth_by_uri
+            .entry(registry_key)
+            .or_default()
+            .insert("@scope".to_owned(), scoped_auth);
+        config
+    }
+
+    #[test]
+    fn publish_preflight_initializes_generic_and_scoped_tls_clients() {
+        let config = scoped_tls_publish_config();
+        let client = RegistryClient::from_config(config.clone());
+
+        preflight_publish_clients(&client, &config.registry, "@scope/pkg")
+            .expect("generic and scoped publish routes initialize");
+    }
+
+    fn client_factory_failure(
+        _: &RegistryClient,
+        _: &str,
+        _: &str,
+    ) -> Result<(), RegistryError> {
+        Err(RegistryError::HttpClientInitialization(
+            std::sync::Arc::new(RegistryError::Io(std::io::Error::other(
+                "publish test client factory failure",
+            ))),
+        ))
+    }
+
     #[tokio::test]
-    async fn client_factory_failure_stops_publish_before_lifecycle_or_archive() {
+    async fn client_initialization_stops_lifecycle_archive_and_provenance() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
             temp.path().join("package.json"),
             r#"{
-                "name": "publish-factory-failure",
+                "name": "@scope/publish-factory-failure",
                 "version": "1.0.0",
                 "files": ["index.js"],
                 "scripts": {
@@ -1345,20 +1385,7 @@ mod tests {
         .unwrap();
         std::fs::write(temp.path().join("index.js"), "module.exports = 1\n").unwrap();
 
-        let client_factory_failure = || {
-            RegistryError::HttpClientInitialization(std::sync::Arc::new(RegistryError::Io(
-                std::io::Error::other("publish test client factory failure"),
-            )))
-        };
-        let error = version_on_registry_request(Err(client_factory_failure()), "1.0.0")
-            .await
-            .expect_err("client initialization must abort duplicate pre-flight");
-        assert!(matches!(error, RegistryError::HttpClientInitialization(_)));
-
-        let config = NpmConfig {
-            registry: "https://registry.example.test/".to_owned(),
-            ..Default::default()
-        };
+        let config = scoped_tls_publish_config();
         let client = RegistryClient::from_config(config.clone());
         let args = PublishArgs {
             access: None,
@@ -1368,23 +1395,25 @@ mod tests {
             json: false,
             no_git_checks: true,
             otp: None,
-            provenance: false,
+            // If preflight were not terminal, this would enter Sigstore
+            // provenance generation instead of preserving the factory error.
+            provenance: true,
             tag: None,
             network: Default::default(),
         };
-        let error = match publish_one_with_version_check(
+        let error = match publish_one_with_preflight(
             temp.path(),
             &config,
             &client,
             &args,
             false,
             None,
-            Some(Err(client_factory_failure())),
+            client_factory_failure,
         )
         .await
         {
             Err(error) => error,
-            Ok(_) => panic!("client initialization must abort publish"),
+            Ok(_) => panic!("client initialization must abort publish before effects"),
         };
         let Some(RegistryError::HttpClientInitialization(source)) =
             error.downcast_ref::<RegistryError>()
@@ -1394,9 +1423,14 @@ mod tests {
         assert!(source
             .to_string()
             .contains("publish test client factory failure"));
-        assert!(!temp.path().join("lifecycle-sentinel").exists());
-        // postpack runs only after build_archive_for_publish completes.
-        assert!(!temp.path().join("archive-sentinel").exists());
+        assert!(
+            !temp.path().join("lifecycle-sentinel").exists(),
+            "lifecycle sentinel must remain untouched"
+        );
+        assert!(
+            !temp.path().join("archive-sentinel").exists(),
+            "archive sentinel must remain untouched"
+        );
     }
 
     #[test]
