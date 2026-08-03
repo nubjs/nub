@@ -29,22 +29,6 @@ repository = "https://github.com/denoland/sui"
 name = "libsui"
 path = "lib.rs"
 
-[[bin]]
-name = "sui"
-path = "cli.rs"
-
-[[test]]
-name = "exec"
-path = "tests/exec.rs"
-
-[[test]]
-name = "integration_test"
-path = "tests/integration_test.rs"
-
-[[test]]
-name = "rtld_default"
-path = "tests/rtld_default.rs"
-
 [dependencies.image]
 version = "0.25"
 features = [
