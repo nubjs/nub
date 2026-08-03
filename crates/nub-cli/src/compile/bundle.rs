@@ -1095,7 +1095,8 @@ fn compile_code_splitting() -> CodeSplittingMode {
                 let commonjs_scope = id == PATH_GLOBALS_ID
                     || ctx
                         .get_module_info(id)
-                        .is_some_and(|module| is_node_commonjs_module(&module));
+                        .is_some_and(|module| is_node_commonjs_module(&module))
+                    || is_commonjs_only_data_module(id, ctx);
                 Box::pin(
                     async move { Ok(commonjs_scope.then(|| COMPILE_COMMONJS_CHUNK.to_string())) },
                 )
@@ -1104,6 +1105,49 @@ fn compile_code_splitting() -> CodeSplittingMode {
             ..Default::default()
         }]),
         ..Default::default()
+    })
+}
+
+/// Keep a JSON module in the CommonJS chunk when only CommonJS reaches it.
+///
+/// Without this the group splits a package across two chunks and the halves
+/// import each other. A `require("./data.json")` inside a dynamically imported
+/// CommonJS package is the shape that shows it: the package's own module is
+/// CommonJS so the group claims it, while the JSON stays in the dynamic import's
+/// chunk. That chunk then imports the wrapper it needs from `_nub_commonjs`, and
+/// `_nub_commonjs` imports the JSON wrapper back out of it.
+///
+/// The cycle is not survivable, because a dynamic import of a CommonJS module
+/// emits an EAGER `export default require_pkg()` at the top of its chunk. ESM
+/// evaluates one side of a cycle to completion while the other is still partway
+/// through its own body, so that call runs before `var require_pkg` has been
+/// assigned and throws `require_pkg is not a function`. Co-locating the JSON
+/// removes the edge that closes the cycle.
+///
+/// Only JSON qualifies, and deliberately so. Extending this to modules in
+/// general would move authored ESM — which a CommonJS module can `require()` on
+/// Node 22+ — into a chunk carrying a lexical `require`, exactly the binding
+/// `compile_code_splitting`'s group exists to keep away from ESM. A JSON module
+/// is data with no user code, so it cannot observe that binding.
+fn is_commonjs_only_data_module(id: &str, ctx: &rolldown_common::ChunkingContext) -> bool {
+    if Path::new(clean_url(id))
+        .extension()
+        .and_then(|ext| ext.to_str())
+        != Some("json")
+    {
+        return false;
+    }
+    let Some(module) = ctx.get_module_info(id) else {
+        return false;
+    };
+    // An entry, or a module something imports dynamically, is a chunk root in its
+    // own right; moving it would change what the graph loads and when.
+    if module.is_entry || !module.dynamic_importers.is_empty() || module.importers.is_empty() {
+        return false;
+    }
+    module.importers.iter().all(|importer| {
+        ctx.get_module_info(importer.as_str())
+            .is_some_and(|importer| is_node_commonjs_module(&importer))
     })
 }
 
@@ -5268,6 +5312,58 @@ mod tests {
         assert!(
             !entry_code.contains(COMPILE_COMMONJS_REQUIRE_MARKER),
             "the ESM facade must keep require unbound:\n{entry_code}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A dynamically imported CommonJS package emits an eager
+    /// `export default require_pkg()` at the top of its own chunk. If the JSON it
+    /// requires stays behind in that chunk while the package itself moves to
+    /// `_nub_commonjs`, the two chunks import each other and that eager call runs
+    /// against an unassigned wrapper — `require_pkg is not a function` at startup.
+    /// Both halves must land in the same chunk.
+    #[test]
+    fn a_dynamically_imported_commonjs_package_keeps_its_json_in_one_chunk() {
+        let dir = fixture_dir("commonjs-dynamic-json-chunk");
+        let pkg = dir.join("node_modules/cjsdyn");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{"name":"cjsdyn","main":"index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("index.js"),
+            "module.exports = { data: require('./data.json') };\n",
+        )
+        .unwrap();
+        std::fs::write(pkg.join("data.json"), r#"{"v":1}"#).unwrap();
+        let entry = dir.join("entry.mjs");
+        std::fs::write(
+            &entry,
+            "const m = await import('cjsdyn'); console.log(m.default.data.v);\n",
+        )
+        .unwrap();
+
+        let mut o = opts();
+        o.minify = false;
+        let res = bundle(&entry, &o).expect("a dynamic CommonJS import must compile");
+        let holder = res
+            .files
+            .iter()
+            .find(|file| String::from_utf8_lossy(&file.bytes).contains("require('./data.json')"))
+            .or_else(|| {
+                res.files
+                    .iter()
+                    .find(|file| String::from_utf8_lossy(&file.bytes).contains(r#""v": 1"#))
+            })
+            .expect("the JSON must be emitted somewhere");
+        let holder_code = String::from_utf8_lossy(&holder.bytes);
+        assert!(
+            !holder_code.contains(&format!("from \"./{COMPILE_COMMONJS_CHUNK}")),
+            "the chunk holding the package's JSON must not import back out of the CommonJS \
+             chunk — that edge is what closes the cycle:\n{}",
+            holder.name
         );
         let _ = std::fs::remove_dir_all(dir);
     }
