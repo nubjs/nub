@@ -107,6 +107,50 @@ fn install_tree_root(package: &Path) -> Option<PathBuf> {
 
 /// Copy one package directory into the payload at `rel`, skipping the nested
 /// `node_modules` each package is materialised through on its own account.
+/// Whether this tree holds an addon built against the target's own C library.
+///
+/// Gates the libc check, which would otherwise be a regression rather than a fix.
+/// Some packages ship ONE addon linked statically against musl precisely so it
+/// runs under both libcs; dropping it for a glibc target would fail a package
+/// that works today, and loudly, since a package left with no loadable addon
+/// fails the build.
+///
+/// So the check only ever DISAMBIGUATES: it runs when the tree already contains
+/// a build for the target's libc, which is exactly the case it exists for — two
+/// candidates where the loader would otherwise pick by directory order.
+fn has_libc_match(dir: &Path, target: &TargetPlatform) -> bool {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                if entry.file_name() != "node_modules" {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "node") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            if check_target(&bytes, &path, target).is_ok()
+                && elf_libc_is_musl(&bytes) == Some(target.musl)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn copy_package_tree(
     dir: &Path,
     rel: &Path,
@@ -120,6 +164,9 @@ fn copy_package_tree(
     // produces a binary that fails on the user's machine having said nothing here.
     let mut saw_addon = false;
     let mut kept_addon = false;
+    // Whether dropping foreign-libc addons is safe here, decided before the walk
+    // because a decision made per file cannot see what else the tree holds.
+    let disambiguate_libc = target.os == TargetOs::Linux && has_libc_match(dir, target);
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&current) else {
@@ -164,12 +211,8 @@ fn copy_package_tree(
                 // libc, so a glibc and a musl build of the same addon both reach
                 // here. Shipping both leaves the loader to pick, and on Alpine it
                 // picks the glibc one and fails.
-                if target.os == TargetOs::Linux {
-                    if let Some(is_musl) = elf_libc_is_musl(&bytes) {
-                        if is_musl != target.musl {
-                            continue;
-                        }
-                    }
+                if disambiguate_libc && elf_libc_is_musl(&bytes) != Some(target.musl) {
+                    continue;
                 }
                 kept_addon = true;
             }
@@ -1797,6 +1840,70 @@ mod tests {
             elf_libc_is_musl(neither),
             None,
             "an unclassifiable addon must not be claimed either way — it travels"
+        );
+    }
+
+    /// A lone addon travels even when its libc looks wrong for the target.
+    ///
+    /// The libc check must only DISAMBIGUATE. Some packages ship one addon linked
+    /// statically against musl so it runs under both libcs, and dropping it for a
+    /// glibc target would fail a package that works today — loudly, since a package
+    /// left with no loadable addon fails the build. So the check is gated on the
+    /// tree already holding a build for the target's own libc.
+    #[test]
+    fn the_libc_check_only_fires_when_there_is_a_real_choice() {
+        const AARCH64: u16 = 183;
+        let musl_target = target("linux-arm64-musl");
+        let gnu_target = target("linux-arm64");
+
+        let write = |dir: &Path, name: &str, marker: &[u8]| {
+            let mut bytes = elf(AARCH64);
+            bytes.extend_from_slice(marker);
+            std::fs::write(dir.join(name), bytes).expect("writing the fixture addon");
+        };
+
+        // Both libcs present — the case the check exists for.
+        let both = tempfile::tempdir().expect("a temp dir");
+        write(
+            both.path(),
+            "linux-arm64.node",
+            b"__cxa_finalize@GLIBC_2.17",
+        );
+        write(
+            both.path(),
+            "linuxmusl-arm64.node",
+            b"libc.musl-aarch64.so.1",
+        );
+        assert!(
+            has_libc_match(both.path(), &musl_target),
+            "a musl build is present, so the check may drop the glibc one"
+        );
+        assert!(
+            has_libc_match(both.path(), &gnu_target),
+            "and the reverse, for a glibc target"
+        );
+
+        // Only a musl build, targeting glibc: nothing to disambiguate, so the
+        // check stays off and the addon travels rather than failing the build.
+        let lone = tempfile::tempdir().expect("a temp dir");
+        write(lone.path(), "linux-arm64.node", b"libc.musl-aarch64.so.1");
+        assert!(
+            !has_libc_match(lone.path(), &gnu_target),
+            "a statically-linked musl addon is the only candidate — it must not be dropped"
+        );
+
+        // Neither marker: unclassifiable, so it cannot be the match that licenses
+        // dropping anything. Distinguishes `== Some(musl)` from `!= Some(!musl)`,
+        // which agree on every case above.
+        let unmarked = tempfile::tempdir().expect("a temp dir");
+        write(
+            unmarked.path(),
+            "linux-arm64.node",
+            b"no libc marker at all",
+        );
+        assert!(
+            !has_libc_match(unmarked.path(), &gnu_target),
+            "an addon we cannot classify must not license dropping its neighbours"
         );
     }
 
