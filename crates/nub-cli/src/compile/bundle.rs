@@ -4045,11 +4045,17 @@ fn reject_unresolved(
         ));
     }
     let diag_opts = DiagnosticOptions::default();
+    // An unresolved import whose importer is itself under node_modules is a
+    // different failure from one in the author's own source, and every hint below
+    // talks past it — see `optional_backend_hint`.
+    let mut any_in_dependency = false;
     for w in warnings {
         if !matches!(w.kind(), EventKind::UnresolvedImport) {
             continue;
         }
-        lines.push(format!("\x20\x20{}", w.to_message_with(&diag_opts)));
+        let message = w.to_message_with(&diag_opts);
+        any_in_dependency |= unresolved_importer_is_dependency(&message);
+        lines.push(format!("\x20\x20{message}"));
     }
     if lines.is_empty() {
         return Ok(());
@@ -4128,20 +4134,58 @@ fn reject_unresolved(
     } else {
         ""
     };
+    // Shown only when nothing installed / PnP already explains it, because those
+    // two produce unresolved dependency imports for a reason that has nothing to
+    // do with optional backends and their fix comes first.
+    //
+    // The case: a package supporting several interchangeable backends imports all
+    // of them and guards each at run time, so every backend the author did NOT
+    // install surfaces here. knex is the type specimen — ten database dialects,
+    // of which a project uses one. The other hints are wrong for it in the same
+    // way `native_hint` documents: they tell the author to edit a specifier that
+    // is in somebody else's package. --external is what actually works, and it is
+    // not obvious, because its own help says the package must be installed where
+    // the binary runs — true for its usual use, and beside the point here, where
+    // the package is meant to stay absent so the guard keeps taking the branch it
+    // already takes today.
+    let optional_backend_hint = if any_in_dependency && !uninstalled && !pnp {
+        "\n\n\x20\x20The imports above are inside a dependency, not your own source, so their\n\
+         \x20\x20specifiers are not yours to make static. A package that supports several\n\
+         \x20\x20interchangeable backends — a database driver, a queue, a transport — imports\n\
+         \x20\x20every one and guards each at run time, so the ones you did not install arrive\n\
+         \x20\x20here. Pass --external <package> for each to leave it out of the bundle; the\n\
+         \x20\x20dependency's own guard then finds it missing, exactly as it does today."
+    } else {
+        ""
+    };
     bail!(
         "{} import{} could not be resolved at build time:\n{}\n\n\
          \x20\x20A compiled binary carries no node_modules, so an unresolved import fails at\n\
-         \x20\x20runtime on the machine you ship to.{}{}{}{}{}{}",
+         \x20\x20runtime on the machine you ship to.{}{}{}{}{}{}{}",
         lines.len(),
         if lines.len() == 1 { "" } else { "s" },
         lines.join("\n"),
         uninstalled_hint,
         pnp_hint,
+        optional_backend_hint,
         native_hint,
         dynamic_hint,
         variable_hint,
         indirect_hint
     );
+}
+
+/// Whether an unresolved import's IMPORTER is itself a dependency, rather than
+/// the author's own source.
+///
+/// Read off the rendered message because `BuildDiagnostic` exposes no structured
+/// importer path — `to_message_with` is the only accessor it offers. Rolldown
+/// renders the importer as a path ("Could not resolve 'pg' in
+/// node_modules/knex/lib/dialects/postgres/index.js"), so the segment is what
+/// distinguishes an import the author can fix from one in a package they do not
+/// own. A false negative merely withholds a hint; the error itself is unchanged.
+fn unresolved_importer_is_dependency(message: &str) -> bool {
+    message.contains("node_modules")
 }
 
 /// Whether an unresolved import names a native addon.
@@ -6572,6 +6616,21 @@ const pkg = require("./package.json");
         assert!(
             !msg.contains("UMD"),
             "the indirect-require hint must not show for a dynamic-specifier site: {msg}"
+        );
+    }
+
+    /// Pins the message shape the optional-backend hint keys on. Rolldown renders
+    /// the importer as a path, so a dependency's own unresolved import is
+    /// distinguishable from the author's — the hint tells them to reach for
+    /// --external, which is wrong advice for code they can actually edit.
+    #[test]
+    fn tells_a_dependencys_unresolved_import_from_the_authors_own() {
+        assert!(unresolved_importer_is_dependency(
+            "Could not resolve 'pg' in node_modules/knex/lib/dialects/postgres/index.js"
+        ));
+        assert!(
+            !unresolved_importer_is_dependency("Could not resolve 'left-pad' in src/app.ts"),
+            "the author's own source must not collect the --external hint"
         );
     }
 
