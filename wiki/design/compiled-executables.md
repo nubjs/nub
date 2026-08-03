@@ -64,7 +64,32 @@ A reference to `__dirname` is deliberately **not** treated as a signal. Many pub
 
 ## What manifests cannot see
 
-Some packages are pure JavaScript and still cannot be bundled: one hands a worker thread a path built from `__dirname`, another requires a backend chosen at run time, another patches the module system. These carry no manifest signal, and a maintained list is the only thing that catches them.
+Some packages are pure JavaScript and still cannot be bundled. They declare nothing that sets them apart — the behaviour that defeats bundling only appears at run time:
+
+| package | what it does |
+| --- | --- |
+| `pino`, `thread-stream` | start a worker from a path built at run time |
+| `pino-pretty`, `pino-roll` | are named as a string and required inside that worker |
+| `keyv` | requires a storage backend chosen from a connection string |
+| `config` | requires a dependency it does not declare |
+| `import-in-the-middle`, `require-in-the-middle` | patch the module loader, which a bundle has already resolved past |
+
+No rule that reads declarations can reach these, so Nub carries a list. Every project that set out to avoid one still ships it — Next.js maintains 79 entries after years of investment in static analysis.
+
+The list matches exact names. A prefix or substring match would quietly unbundle `pino-http` and `keyv-redis`, which are ordinary packages, and that failure is silent: the package loses its tree-shaking and nothing breaks.
+
+## When Nub gets it wrong
+
+Two flags override the decision, because no detector reaches every package:
+
+```bash
+nub compile app.ts --unbundled some-package   # ship it, but do not bundle it
+nub compile app.ts --bundled some-package     # bundle it after all
+```
+
+`--unbundled` is for a package that loads a file by a path it builds at run time and is not yet recognised. `--bundled` is for the reverse — a package needlessly ejected, which costs startup and size while failing nothing.
+
+Neither is `--external`, which leaves a package out of the binary entirely to be resolved on the machine that runs it.
 
 ## Cross-compilation
 
