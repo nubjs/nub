@@ -163,8 +163,8 @@ for (const [label, row] of Object.entries(table)) {
 console.log(`\n  PER-CALL deltas vs the shipped baseline (negative = faster):`);
 for (const n of shellNames) {
   const base = table["shipped (npm's shims, node hop)"][n].med;
-  const parts = ["+exe ONLY (npm's shims untouched)", "+exe, shims REWRITTEN direct", "+exe, shims DELETED"]
-    .map((s) => `${s.split(",")[0].replace("+exe", "").trim() || "add-only"}: ${(table[s][n].med - base).toFixed(1)}`);
+  const parts = [["add-only", "+exe ONLY (npm's shims untouched)"], ["rewrite", "+exe, shims REWRITTEN direct"], ["delete", "+exe, shims DELETED"]]
+    .map(([short, key]) => `${short}: ${(table[key][n].med - base).toFixed(1)}`);
   console.log(`    ${n.padEnd(12)} ${parts.join("  |  ")}`);
 }
 try { fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch {}
