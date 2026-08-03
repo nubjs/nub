@@ -286,8 +286,22 @@ fn copy_package_tree(
                 }
                 continue;
             }
+            // `file_type` is lstat-based, so a SYMLINK is neither dir nor file
+            // and used to be dropped with no record — the package then shipped
+            // without a file it has on disk, and the artifact failed at run time
+            // on a read that works everywhere else. A payload cannot carry a
+            // link (the launcher treats one in an extracted tree as tampering),
+            // so the link becomes a regular file holding its target's bytes,
+            // which is what reading through it returns anyway.
+            //
+            // Only when it resolves to a FILE. A symlinked directory is left
+            // alone: following it would need cycle detection for a shape that
+            // does not occur inside a published package, and copying the tree
+            // twice under two names is worse than the status quo.
             if !kind.is_file() {
-                continue;
+                if !kind.is_symlink() || !path.is_file() {
+                    continue;
+                }
             }
             let Ok(inner) = path.strip_prefix(dir) else {
                 continue;

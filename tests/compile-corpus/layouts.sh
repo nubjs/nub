@@ -344,5 +344,39 @@ else
   else report dependency-cycle PASS "terminates, $n packages"; fi
 fi
 
+# ---------------------------------------------------------------- symlinked file
+# A package that ships a symlink to one of its own files.
+#
+# `file_type` is lstat-based, so a symlink is neither a directory nor a file and
+# was dropped with no record: the package shipped without a file it has on disk,
+# and the artifact failed at run time on a read that works everywhere else. A
+# payload cannot carry a link, so the link has to become a regular file holding
+# its target's bytes.
+d="$WORK/symlink"; rm -rf "$d"; mkdir -p "$d/node_modules/sympkg/real" "$d/node_modules/node-gyp-build"; (
+  cd "$d" && npm init -y >/dev/null 2>&1 && printf '%s\n' "$NODE_PIN" > .node-version
+  printf '{"name":"node-gyp-build","version":"1.0.0","main":"index.js"}\n' > node_modules/node-gyp-build/package.json
+  printf 'module.exports = () => ({});\n' > node_modules/node-gyp-build/index.js
+  printf '{"name":"sympkg","version":"1.0.0","main":"index.js","dependencies":{"node-gyp-build":"*"}}\n' > node_modules/sympkg/package.json
+  cat > node_modules/sympkg/index.js <<'EOF'
+const fs = require("fs"), p = require("path");
+module.exports = () => fs.readFileSync(p.join(__dirname, "data.txt"), "utf8").trim();
+EOF
+  printf 'SYM-OK\n' > node_modules/sympkg/real/data.txt
+  ln -s real/data.txt node_modules/sympkg/data.txt
+  cat > app.mjs <<'EOF'
+import s from "sympkg";
+console.log("ok:" + s());
+EOF
+) >/dev/null 2>&1
+if [ ! -L "$d/node_modules/sympkg/data.txt" ]; then
+  report symlinked-file FAIL "fixture did not create a symlink"
+elif "$NUB" compile "$d/app.mjs" --out "$d/bin" >"$d/log" 2>&1; then
+  out=$(run_detached "$d" "$d/bin")
+  app=$(payload_dir "$d")
+  if [ "$out" != "ok:SYM-OK" ]; then report symlinked-file FAIL "ran '$out', want ok:SYM-OK"
+  elif [ ! -f "$app/node_modules/sympkg/data.txt" ]; then report symlinked-file FAIL "the symlinked file did not ship"
+  else report symlinked-file PASS "symlink shipped as a real file"; fi
+else report symlinked-file FAIL "compile failed"; fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
