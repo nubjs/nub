@@ -268,14 +268,24 @@ process.exit(result.status === null ? 1 : result.status);
 
     #[cfg(windows)]
     {
-        // `setlocal` keeps the cwd fallback from leaking into the caller's
-        // environment; an undefined `%VAR%` expands to the literal text in
-        // cmd, so without it the bootstrap would receive
-        // `%AUBE_NODE_GYP_PROJECT_DIR%` as a path.
+        // Two cmd.exe rules bite here, and both were live bugs that never
+        // surfaced while the eager bootstrap kept a real node-gyp on PATH:
+        //
+        // 1. `for /f` runs its command through `cmd /c`, which STRIPS the outer
+        //    quote pair when the string both starts and ends with a quote. The
+        //    natural spelling therefore degrades to
+        //    `C:\...\nub.exe" __node-gyp-bootstrap "C:\...\proj` and dies with
+        //    "The filename, directory name, or volume label syntax is
+        //    incorrect" — measured on windows-latest, with and without spaces
+        //    in the path. Wrapping the whole command in one MORE quote pair
+        //    makes that strip leave exactly the intended string.
+        // 2. An undefined `%VAR%` expands to its own literal text, so without
+        //    the fallback the bootstrap receives `%AUBE_NODE_GYP_PROJECT_DIR%`
+        //    as a path. `setlocal` keeps that fallback out of the caller's env.
         let cmd = r#"@echo off
 setlocal
 if not defined AUBE_NODE_GYP_PROJECT_DIR set "AUBE_NODE_GYP_PROJECT_DIR=%CD%"
-for /f "usebackq delims=" %%i in (`"%AUBE_NODE_GYP_EXE%" __node-gyp-bootstrap "%AUBE_NODE_GYP_PROJECT_DIR%"`) do set "AUBE_REAL_NODE_GYP=%%i"
+for /f "usebackq delims=" %%i in (`""%AUBE_NODE_GYP_EXE%" __node-gyp-bootstrap "%AUBE_NODE_GYP_PROJECT_DIR%""`) do set "AUBE_REAL_NODE_GYP=%%i"
 if not defined AUBE_REAL_NODE_GYP exit /b 1
 "%AUBE_REAL_NODE_GYP%" %*
 "#;
