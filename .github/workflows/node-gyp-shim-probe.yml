@@ -1,0 +1,56 @@
+name: node-gyp shim probe
+
+# Branch-scoped ad-hoc probe — no PR required. The lazy node-gyp shims are
+# covered by nothing else on Windows: native-deps.yml is the only workflow that
+# touches node-gyp and it is ubuntu-only.
+on:
+  push:
+    branches: [probe/node-gyp-shim]
+    paths:
+      - "tests/node-gyp-shim/**"
+      - ".github/workflows/node-gyp-shim-probe.yml"
+      - "vendor/aube/crates/aube/src/commands/install/node_gyp_bootstrap.rs"
+      - "vendor/aube/crates/aube/src/commands/install/lifecycle.rs"
+      - "vendor/aube/crates/aube-scripts/src/lib.rs"
+  # Inert until this file reaches the default branch; kept for when it does.
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  probe:
+    name: node-gyp shim (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+
+      # `fast` rather than `debug`: same artifact universe as the dev loop and
+      # the lint gates, and a debug Windows binary is large enough that disk
+      # pressure becomes its own failure mode.
+      - name: Build nub
+        shell: bash
+        run: cargo build -p nub-cli --profile fast
+
+      - name: Run the probe
+        shell: bash
+        run: |
+          bin=target/fast/nub
+          [ "${{ runner.os }}" = "Windows" ] && bin=target/fast/nub.exe
+          node tests/node-gyp-shim/run.mjs "$PWD/$bin"
