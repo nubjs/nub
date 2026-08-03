@@ -487,6 +487,38 @@ from an absent one.** The rule this leaves behind: a verification tool must be e
 corpus data and against deliberately broken data, because a gate tested only on healthy fixtures
 demonstrates that it can say yes.
 
+## ⛔ "Zero packages broken by the jail" is not yet an earned claim
+
+The corpus currently holds 2,523 records and **zero** carrying `BROKEN-EVEN-WITH-EVERYTHING`, the
+verdict that means the jail is implicated. That number is not evidence yet, and the reason is worth
+stating precisely, because it is the single easiest way for this project to fool itself.
+
+`BROKEN-EVEN-WITH-EVERYTHING` is reached only by RULING OUT the jail-off cell — a package must fail
+jailed, succeed unjailed, and succeed under the reference package managers. The jail-off cell was
+**inert** until the harness fix that made it write `install.buildJail: false` instead of a
+`dependenciesMeta` key nub had already deleted. An inert off-switch does not error; it makes the cell
+run *with the jail on*, which makes it AGREE with the control, which routes the package to
+`BROKEN-WITHOUT-JAIL-TOO` instead.
+
+**So a zero here is the exact signature of the bug, and indistinguishable from a working jail** unless
+you check which harness measured each record.
+
+Splitting the corpus on the recorded harness revision:
+
+| | records | are the jail-off verdicts trustworthy? |
+| --- | --- | --- |
+| measured by the current harness | 80 — all `MINIMUM`, no failures of any kind | **yes**, the jail-off self-check proves the cell ran unjailed or records `HARNESS-ERROR` |
+| measured by an older harness | 2,443, including 123 `BROKEN-WITHOUT-JAIL-TOO` | **no** |
+
+The consequence is concrete: **each of those 123 may be a misclassified real jail defect.** They are
+not evidence of the jail's innocence; they are the bucket a jail defect would have been swept into.
+They need re-measuring under the current harness before any breakage claim rests on them, which is
+what verdict-scoped invalidation exists for — the failure verdicts are dropped and re-run while the
+measured minima, which no jail-off change can affect, are kept.
+
+What can honestly be said today: **in 80 packages measured with a provably-real jail-off control, the
+jail broke nothing.** That is a good early signal and it is not the release number.
+
 ## The measurement layer was never the problem
 
 Worth stating plainly, because the debugging effort has consistently pointed the wrong way. Across
