@@ -60,10 +60,19 @@ use super::native_layout::{DroppedEdge, IslandFile, Seed};
 /// machine's directory layout has nothing to do with the deploy machine's, and
 /// the app dir is content-hash-keyed, so the only base that is right on both is
 /// the chunk's own URL. `name` is already a nested, payload-relative island path.
-/// The directory containing the `node_modules` tree `package` is installed in.
+/// The project directory the whole `node_modules` tree hangs off.
+///
+/// The FIRST `node_modules` component, not the last. A nested install lives at
+/// `<proj>/node_modules/holder/node_modules/pkg`, and anchoring at the last one
+/// would make its payload path `node_modules/pkg` — identical to the top-level
+/// copy's. The two then collide, the first written wins, and the loser's version
+/// silently is not in the artifact: the binary either loads the wrong version or
+/// fails outright.
+///
+/// Matches `native_layout::install_anchor`, which has always taken the first.
 fn install_tree_root(package: &Path) -> Option<PathBuf> {
     let mut parts: Vec<&std::ffi::OsStr> = package.components().map(|c| c.as_os_str()).collect();
-    let index = parts.iter().rposition(|part| *part == "node_modules")?;
+    let index = parts.iter().position(|part| *part == "node_modules")?;
     parts.truncate(index);
     Some(parts.iter().collect())
 }
@@ -1674,6 +1683,47 @@ mod tests {
             "the matching addon travels and the foreign one does not"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A nested install keeps its nesting in the payload.
+    ///
+    /// The anchor has to be the FIRST `node_modules`. Taking the last one makes
+    /// `<proj>/node_modules/holder/node_modules/pkg` land at `node_modules/pkg` —
+    /// exactly where the top-level copy lands — and one silently replaces the
+    /// other in the payload.
+    ///
+    /// That failure is invisible from the outside, which is what makes it worth a
+    /// test rather than a fixture run. Compiling a real project with both copies
+    /// present produced a binary that exited 0 and printed the right answer with
+    /// only one version shipped, because the two happened to be compatible. A
+    /// genuinely different major would have loaded the wrong one just as quietly.
+    #[test]
+    fn a_nested_install_does_not_collide_with_the_top_level_one() {
+        let proj = Path::new("/p");
+        let top = Path::new("/p/node_modules/pkg");
+        let nested = Path::new("/p/node_modules/holder/node_modules/pkg");
+
+        assert_eq!(install_tree_root(top).as_deref(), Some(proj));
+        assert_eq!(
+            install_tree_root(nested).as_deref(),
+            Some(proj),
+            "both anchor at the project, so the nested one keeps its depth"
+        );
+
+        // What the payload names become, which is where the collision would land.
+        let rel_top = top.strip_prefix(install_tree_root(top).unwrap()).unwrap();
+        let rel_nested = nested
+            .strip_prefix(install_tree_root(nested).unwrap())
+            .unwrap();
+        assert_ne!(
+            rel_top, rel_nested,
+            "distinct installs must produce distinct payload paths, or one \
+             overwrites the other and the binary silently carries the wrong version"
+        );
+        assert_eq!(
+            rel_nested,
+            Path::new("node_modules/holder/node_modules/pkg")
+        );
     }
 
     #[test]
