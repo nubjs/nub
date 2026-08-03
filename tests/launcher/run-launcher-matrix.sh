@@ -133,23 +133,47 @@ run_foreign() {
   bash "$SCRIPT_DIR/make-fixture.sh" "$dest" symlink >/dev/null
   echo "== verify-before-clobber (foreign nub) =="
   mkdir -p "$dest/foreign"
-  printf '#!/bin/sh\necho foreign-untouched\n' > "$dest/foreign/nub"
-  chmod +x "$dest/foreign/nub"
-  local before; before=$(cat "$dest/foreign/nub")
-  # Run OUR launcher with the foreign nub FIRST on PATH. Our launcher must heal only
-  # an entry whose realpath leads to us; the foreign one must be left untouched.
-  PATH="$dest/foreign:$dest/bin:$nodedir:$PATH" \
-    "$dest/node_modules/@nubjs/nub/bin/nub" --version >/dev/null 2>&1
-  if [ "$before" = "$(cat "$dest/foreign/nub")" ]; then ok "foreign nub untouched"
-  else no "foreign nub CLOBBERED"; fi
+  local ourreal
+  ourreal=$("$nodedir/node" -e 'console.log(require("fs").realpathSync(process.argv[1]))' \
+    "$dest/node_modules/@nubjs/nub/bin/nub")
+
+  # Each case: a foreign `nub` that must survive byte-for-byte. healPathEntry renames
+  # over its match with no backup, so a false positive is unrecoverable loss in a file
+  # we do not own — and an unrelated `nub@1.0.0` really is on npm.
+  probe_foreign() {
+    local label="$1" body="$2" mode="$3"
+    printf '%b' "$body" > "$dest/foreign/nub"
+    chmod "$mode" "$dest/foreign/nub"
+    local before; before=$(cat "$dest/foreign/nub")
+    # Run OUR launcher with the foreign nub FIRST on PATH. Our launcher must heal only
+    # an entry whose realpath leads to us; the foreign one must be left untouched.
+    PATH="$dest/foreign:$dest/bin:$nodedir:$PATH" \
+      "$dest/node_modules/@nubjs/nub/bin/nub" --version >/dev/null 2>&1
+    if [ "$before" = "$(cat "$dest/foreign/nub")" ]; then ok "foreign untouched: $label"
+    else no "foreign CLOBBERED: $label"; fi
+  }
+
+  probe_foreign "plain shim" '#!/bin/sh\necho foreign-untouched\n' 0755
+  # A file that only MENTIONS our launcher is not a shim that dispatches to it. These
+  # pin the two ways a `# cmd-shim-target=` line could be over-trusted: no `exec` in
+  # the body at all, and a `\s`-class straddling the newline between `#` and the key.
+  probe_foreign "declares our target, never execs" \
+    "#!/bin/sh\necho foreign-untouched\n# cmd-shim-target=$ourreal\n" 0755
+  probe_foreign "bare # then newline then key" \
+    "#!/bin/sh\nexec echo foreign-untouched\n#\ncmd-shim-target=$ourreal\n" 0755
 }
 
 # Sweep the matrix. Concurrency + foreign run once per Node (style varies inside).
+#
+# `scan`/`decl`/`declrel` are parse-isolating styles, so they run through run_block
+# only. The concurrency scenario guards the polyglot WRITE race, which is identical
+# whichever route matched in leadsToUs — running it per parse style bought nothing
+# and cost 200 forks each.
 for nodedir in "${NODE_DIRS[@]}"; do
-  for style in symlink pnpm pnpm11 pnpm11rel; do
+  for style in symlink pnpm pnpm11 scan decl declrel; do
     run_block "$style" "$nodedir"
   done
-  for style in symlink pnpm pnpm11 pnpm11rel; do
+  for style in symlink pnpm pnpm11; do
     run_concurrency "$style" "$nodedir"
   done
   run_foreign "$nodedir"
