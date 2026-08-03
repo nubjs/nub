@@ -129,6 +129,14 @@ const THROTTLE_COOLDOWN_NS: u64 = 1_000_000_000;
  */
 const SLOW_START_SAMPLES: u64 = 32;
 
+/**
+ * A capacity increase wakes only this many queued acquirers. This starts
+ * work after a large growth without turning the growth path into work
+ * proportional to the new capacity or the wait queue; completions wake the
+ * remaining queue one at a time.
+ */
+const MAX_GROWTH_WAKEUPS: u32 = 64;
+
 #[inline(always)]
 fn pack(inflight: u32, limit: u32) -> u64 {
     ((limit as u64) << 32) | (inflight as u64)
@@ -220,6 +228,8 @@ struct ColdState {
     cusum_shrink_disabled: AtomicBool,
     #[cfg(test)]
     waiter_enrollments: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    growth_wakeups: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Debug)]
@@ -282,6 +292,8 @@ impl AdaptiveLimit {
                 cusum_shrink_disabled: AtomicBool::new(false),
                 #[cfg(test)]
                 waiter_enrollments: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(test)]
+                growth_wakeups: std::sync::atomic::AtomicUsize::new(0),
             },
         })
     }
@@ -310,6 +322,11 @@ impl AdaptiveLimit {
     #[cfg(test)]
     fn waiter_enrollments(&self) -> usize {
         self.cold.waiter_enrollments.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn growth_wakeups(&self) -> usize {
+        self.cold.growth_wakeups.load(Ordering::Relaxed)
     }
 
     /**
@@ -365,10 +382,9 @@ impl AdaptiveLimit {
             }
 
             // We saw saturation. Enroll before the second state observation:
-            // a release or one-slot growth after `enable` wakes us, while one
-            // before it is visible in the re-read below. Multiplicative growth
-            // uses `notify_waiters`, which also covers a future created before
-            // it is enabled.
+            // a release or bounded growth wake after `enable` wakes us, while
+            // one before it is visible in the re-read below. Further queued
+            // acquirers progress as the awakened work completes and releases.
             let waiter = self.cold.available.notified();
             tokio::pin!(waiter);
             waiter.as_mut().enable();
@@ -450,20 +466,16 @@ impl AdaptiveLimit {
 
     fn wake_growth_waiters(&self, added: u32) {
         debug_assert!(added > 0, "wake requested without added capacity");
-        if added == 1 {
-            // Additive recovery opens one slot, so wake precisely one queued
-            // acquirer. A broadcast here makes every other waiter contend,
-            // observe saturation, and re-enroll for no useful work.
-            self.cold.available.notify_one();
-            return;
-        }
 
-        // A multiplicative increase opens multiple slots. Wake the current
-        // queue once, not once per numerical permit. The saturated acquire
-        // path creates/enables its future before re-reading state; Tokio also
-        // guarantees `notify_waiters` reaches futures created before their
-        // first poll, so this broadcast cannot strand a racing acquirer.
-        self.cold.available.notify_waiters();
+        // Bound growth wakeups independently of both the numerical capacity
+        // delta and queue length. Each awakened acquisition eventually calls
+        // `release`, which wakes the next queued acquirer and preserves
+        // progress without a stampede.
+        for _ in 0..added.min(MAX_GROWTH_WAKEUPS) {
+            #[cfg(test)]
+            self.cold.growth_wakeups.fetch_add(1, Ordering::Relaxed);
+            self.cold.available.notify_one();
+        }
     }
 
     #[inline]
@@ -813,6 +825,85 @@ mod tests {
         }
         for task in tasks {
             assert!(task.await.unwrap_err().is_cancelled());
+        }
+        drop(hold);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn large_growth_wakes_a_bounded_batch_and_then_progresses() {
+        const QUEUED: usize = 256;
+        const LARGE_CAPACITY_DELTA: u32 = 1_000_000;
+
+        let limit = AdaptiveLimit::new(1, 1, LARGE_CAPACITY_DELTA as usize + 1);
+        let hold = limit.acquire().await;
+        let acquired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let release_gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut tasks = Vec::with_capacity(QUEUED);
+        for _ in 0..QUEUED {
+            let limit = Arc::clone(&limit);
+            let acquired = Arc::clone(&acquired);
+            let release_gate = Arc::clone(&release_gate);
+            tasks.push(tokio::spawn(async move {
+                let _permit = limit.acquire().await;
+                acquired.fetch_add(1, Ordering::Relaxed);
+                release_gate
+                    .acquire()
+                    .await
+                    .expect("test release gate must remain open")
+                    .forget();
+            }));
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while limit.waiter_enrollments() < QUEUED {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all queued acquirers must enroll");
+        assert_eq!(limit.waiter_enrollments(), QUEUED);
+
+        limit.bump_limit_by(LARGE_CAPACITY_DELTA);
+
+        assert_eq!(
+            limit.growth_wakeups(),
+            MAX_GROWTH_WAKEUPS as usize,
+            "large capacity growth must issue at most the named wake batch"
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while acquired.load(Ordering::Relaxed) < MAX_GROWTH_WAKEUPS as usize {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the bounded growth batch must start work");
+        assert_eq!(
+            acquired.load(Ordering::Relaxed),
+            MAX_GROWTH_WAKEUPS as usize,
+            "large growth must not stampede every queued acquirer"
+        );
+
+        release_gate.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while acquired.load(Ordering::Relaxed) < MAX_GROWTH_WAKEUPS as usize + 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a completed bounded-batch acquisition must advance the queue");
+        assert_eq!(
+            acquired.load(Ordering::Relaxed),
+            MAX_GROWTH_WAKEUPS as usize + 1,
+            "release after bounded growth must wake one further queued acquirer"
+        );
+
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            if let Err(error) = task.await {
+                assert!(error.is_cancelled());
+            }
         }
         drop(hold);
     }
