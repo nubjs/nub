@@ -60,6 +60,46 @@ teardown() {
 	done
 }
 
+@test "aube whoami validates ancestor npmrc before npmPath launches from a descendant" {
+	root="$PWD"
+	mkdir nested
+	printf '%s\n' '{"name":"fallback-root","version":"1.0.0"}' >package.json
+	fake_npm="$root/fallback-launcher"
+	cat >"$fake_npm" <<-SH
+		#!/usr/bin/env bash
+		touch "$root/fallback-launcher-hit"
+	SH
+	chmod +x "$fake_npm"
+	cat >.npmrc <<-EOF
+		npmPath=$fake_npm
+		registry=ftp://fallback.invalid/
+	EOF
+
+	cd nested
+	run aube whoami
+	assert_failure
+	assert_output --partial 'ERR_AUBE_INVALID_REGISTRY_URL'
+	assert_file_not_exists "$root/fallback-launcher-hit"
+}
+
+@test "aube whoami from a descendant launches npmPath from ancestor npmrc" {
+	root="$PWD"
+	mkdir nested
+	printf '%s\n' '{"name":"fallback-root","version":"1.0.0"}' >package.json
+	fake_npm="$root/fallback-launcher"
+	cat >"$fake_npm" <<-SH
+		#!/usr/bin/env bash
+		touch "$root/fallback-launcher-hit"
+	SH
+	chmod +x "$fake_npm"
+	printf 'npmPath=%s\n' "$fake_npm" >.npmrc
+
+	cd nested
+	run aube whoami
+	assert_success
+	assert_file_exists "$root/fallback-launcher-hit"
+}
+
 @test "aube token prints npm fallback and exits non-zero" {
 	run aube token list
 	assert_failure

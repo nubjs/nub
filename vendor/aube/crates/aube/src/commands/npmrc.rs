@@ -11,7 +11,7 @@
 //! enough for the auth use case, where the keys are fully qualified
 //! (`//host/:_authToken`, `@scope:registry`, `_authToken`).
 
-use aube_registry::config::{NpmConfig, normalize_registry_url_pub, registry_uri_key_pub};
+use aube_registry::config::{normalize_registry_url_pub, registry_uri_key_pub};
 use miette::{Context, IntoDiagnostic, miette};
 use std::path::{Path, PathBuf};
 
@@ -171,7 +171,7 @@ pub(crate) fn symlink_target_or_self(path: &Path) -> std::io::Result<PathBuf> {
 /// any future change (env-var support, `--prefix`, etc) without drifting.
 pub fn resolve_registry(flag: Option<&str>, scope: Option<&str>) -> miette::Result<String> {
     let cwd = crate::dirs::project_root_or_cwd().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let config = NpmConfig::load_validated(&cwd).map_err(miette::Report::new)?;
+    let config = super::load_npm_config(&cwd)?;
     if let Some(r) = flag {
         return normalize_registry_url_pub(r).ok_or_else(|| miette!("invalid registry URL"));
     }

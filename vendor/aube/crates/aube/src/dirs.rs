@@ -197,8 +197,17 @@ pub fn project_root() -> miette::Result<PathBuf> {
 /// but should still inherit project config when launched from a
 /// subdirectory, such as `fetch` and registry/config helpers.
 pub fn project_root_or_cwd() -> miette::Result<PathBuf> {
-    let initial_cwd = cwd()?;
-    Ok(find_project_root(&initial_cwd).unwrap_or(initial_cwd))
+    Ok(project_root_or_cwd_from(&cwd()?))
+}
+
+/// Resolve the nearest project root for `start`, falling back to `start` when
+/// no ancestor contains `package.json`.
+///
+/// Use this when planning per-project work without changing the process cwd.
+/// It is the parameterized form of [`project_root_or_cwd`], so config
+/// preflights and their later project-scoped actions share one root rule.
+pub fn project_root_or_cwd_from(start: &Path) -> PathBuf {
+    find_project_root(start).unwrap_or_else(|| start.to_path_buf())
 }
 
 /// Return the workspace root if one exists above the cwd, falling back
@@ -213,14 +222,22 @@ pub fn project_root_or_cwd() -> miette::Result<PathBuf> {
 /// the subpackage's own directory. Falls back to the project root for
 /// non-workspace trees (no workspace yaml and no `package.json#workspaces`).
 pub fn workspace_or_project_root() -> miette::Result<PathBuf> {
-    let initial_cwd = cwd()?;
-    if let Some(root) = find_workspace_root(&initial_cwd) {
+    workspace_or_project_root_from(&cwd()?)
+}
+
+/// Resolve the workspace root for `start`, falling back to its nearest project
+/// root. This is the root an install started from `start` will use.
+///
+/// Hosts that preflight before delegating to `install` must use this instead of
+/// inferring a root from lockfile placement or the process cwd.
+pub fn workspace_or_project_root_from(start: &Path) -> miette::Result<PathBuf> {
+    if let Some(root) = find_workspace_root(start) {
         return Ok(root);
     }
-    if let Some(root) = find_project_root(&initial_cwd) {
+    if let Some(root) = find_project_root(start) {
         return Ok(root);
     }
-    Err(no_root_error(&initial_cwd))
+    Err(no_root_error(start))
 }
 
 fn no_root_error(initial_cwd: &Path) -> miette::Report {

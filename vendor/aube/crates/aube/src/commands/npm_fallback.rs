@@ -22,7 +22,10 @@ pub struct FallbackArgs {
 
 pub fn run(name: &str, args: &FallbackArgs) -> miette::Result<i32> {
     args.network.install_overrides()?;
-    let cwd = crate::dirs::cwd()?;
+    // Match the project-scoped command root instead of reading a descendant's
+    // `.npmrc`: npmPath and registry validation must come from the same
+    // ancestor config a project command would use before a child can launch.
+    let cwd = crate::dirs::project_root_or_cwd()?;
     super::load_npm_config(&cwd)?;
     let files = crate::commands::FileSources::load(&cwd);
     let empty_ws = std::collections::BTreeMap::new();

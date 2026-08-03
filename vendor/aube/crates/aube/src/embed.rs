@@ -118,6 +118,14 @@ pub fn is_workspace_project_root(project_dir: &Path) -> bool {
     aube_workspace::is_workspace_project_root(project_dir)
 }
 
+/// Resolve the project or workspace root an install started at `start` will
+/// use. Hosts that preflight before calling [`install`] must use this exact
+/// resolver so validation targets the same file-backed project configuration
+/// and `node_modules` tree as the later install.
+pub fn resolve_install_root(start: &Path) -> Result<PathBuf> {
+    crate::dirs::workspace_or_project_root_from(start)
+}
+
 /// Discover packages declared by a Node workspace.
 ///
 /// Use [`WorkspaceBoundary::ConfinedToRoot`] when `project_dir` is a security

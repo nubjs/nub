@@ -1398,14 +1398,11 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
         return Err(err);
     }
 
-    // The project root for nub's clean and registry configuration purposes is
-    // where the lockfile lives (fall back to cwd for the no-lockfile case — the
-    // strict install below errors before linking). Approximation: assumes the
-    // default `node_modules` modulesDir name.
-    let root = match session.detected.as_ref() {
-        Some(d) => d.dir.clone(),
-        None => std::env::current_dir()?,
-    };
+    // Resolve through the engine's install-root seam rather than the identity
+    // walk: lockfile placement is only an identity signal, while install owns
+    // the workspace-first root where both its config and node_modules live.
+    let root = aube::embed::resolve_install_root(&session.cwd)
+        .map_err(|error| anyhow::anyhow!("failed to resolve install root: {error}"))?;
 
     // Validate the raw file-backed registry table before any invocation or
     // project state changes. `load_validated` checks the default and every

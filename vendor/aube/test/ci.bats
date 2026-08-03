@@ -41,6 +41,38 @@ teardown() {
 	assert_output --partial 'ERR_AUBE_INVALID_REGISTRY_URL'
 	assert_file_exists node_modules/.must-survive
 }
+@test "aube ci validates an ancestor npmrc before descendant cleanup or requests" {
+	_setup_basic_fixture
+	root="$PWD"
+	mkdir -p nested node_modules
+	touch node_modules/.must-survive
+	_start_request_sentinel
+	cat >.npmrc <<-EOF
+		registry=$REQUEST_SENTINEL_URL
+		@blocked:registry=ftp://invalid.example/
+	EOF
+
+	cd nested
+	run aube ci
+	assert_failure
+	assert_output --partial 'ERR_AUBE_INVALID_REGISTRY_URL'
+	assert_file_exists "$root/node_modules/.must-survive"
+	assert_file_not_exists "$REQUEST_SENTINEL_HIT_FILE"
+}
+
+@test "aube ci from a descendant uses ancestor npmrc and project root" {
+	_setup_basic_fixture
+	root="$PWD"
+	mkdir -p nested ci_modules
+	touch ci_modules/.stale-sentinel
+	printf '%s\n' 'modules-dir=ci_modules' >.npmrc
+
+	cd nested
+	run aube ci
+	assert_success
+	assert_file_not_exists "$root/ci_modules/.stale-sentinel"
+	assert_file_exists "$root/ci_modules/is-odd/package.json"
+}
 
 @test "aube ci errors when no lockfile is present" {
 	echo '{"name":"no-lockfile","version":"1.0.0","dependencies":{"is-odd":"^3.0.1"}}' >package.json

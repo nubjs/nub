@@ -134,6 +134,64 @@ fn ci_rejects_invalid_registry_routes_before_cleaning_node_modules() {
     }
 }
 
+/// A member can carry its own identity lockfile while install still targets an
+/// enclosing workspace. CI must validate the workspace config before touching
+/// that member's tree; deriving the preflight root from identity would clean it
+/// first and discover the malformed ancestor route only inside the engine.
+#[test]
+fn ci_validates_workspace_config_before_descendant_cleanup() {
+    let root = pm_tmpdir("ci-workspace-config-root");
+    let member = root.join("packages/app");
+    std::fs::create_dir_all(&member).unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"workspace-root","private":true,"workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        member.join("package.json"),
+        r#"{"name":"workspace-app","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        member.join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\nimporters:\n  .: {}\n",
+    )
+    .unwrap();
+    std::fs::write(root.join(".npmrc"), "registry=ftp://root.invalid/\n").unwrap();
+    let sentinel = member.join("node_modules/keep-me");
+    std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+    std::fs::write(&sentinel, "intact").unwrap();
+
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let output = Command::new(nub_binary())
+        .args(["ci"])
+        .current_dir(&member)
+        .env_clear()
+        .env("PATH", path)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", root.join("xdg-config"))
+        .env("XDG_DATA_HOME", root.join("xdg-data"))
+        .env("XDG_CACHE_HOME", root.join("xdg-cache"))
+        .env("NUB_SELF_SHIM", "0")
+        .output()
+        .expect("spawn nub ci from workspace member");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_ne!(output.status.code(), Some(0), "stderr={stderr}");
+    assert!(
+        stderr.contains("invalid registry URL"),
+        "workspace config preflight must explain the refusal: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&sentinel).unwrap(),
+        "intact",
+        "the malformed workspace config must fail before member node_modules cleanup"
+    );
+}
+
 /// Offline guard for the `#[ignore]` network tests: true when the registry
 /// answers a TCP connect within 3s.
 fn registry_reachable() -> bool {
