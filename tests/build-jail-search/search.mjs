@@ -1892,6 +1892,30 @@ const nub = pinBinary(process.platform === 'win32' ? fromGitBash(nubArg) : nubAr
     process.exit(2);
   }
 }
+
+// ⛔ THE FIXTURE NEEDS `git`, AND NOTHING SAYS SO UNTIL IT CRASHES. `makeFixture` builds a REAL
+// repository (see the comment there — husky and simple-git-hooks check HEAD, identity and
+// remote.origin.url, so a bare `git init` is not enough). That makes git a hard dependency of every
+// single measurement, declared nowhere.
+//
+// MEASURED on a fresh Windows box: all 12 packages of a shard "completed" in 1-5 seconds each with
+// no verdict, because every one died at `spawnSync git ENOENT` inside makeFixture. A CI runner ships
+// git so this never fires there, which is exactly why it stayed hidden — the failure only appears on
+// the clean machines that are hardest to debug on, and it presents as twelve mysterious fast
+// no-verdicts rather than as one missing tool.
+{
+  const probe = spawnSync('git', ['--version'], { encoding: 'utf8', timeout: 30_000 });
+  if (probe.error || probe.status !== 0) {
+    console.error('REFUSING TO RUN: `git` is not on PATH, and every fixture needs it.');
+    console.error('  The fixture is a real repository — lifecycle scripts from husky and');
+    console.error('  simple-git-hooks bail silently without HEAD, an identity, and a remote.');
+    console.error(process.platform === 'win32'
+      ? '  On Windows, MinGit is a plain zip and needs no installer or elevation:\n'
+        + '  https://github.com/git-for-windows/git/releases (MinGit-*-64-bit.zip)'
+      : '  Install git (e.g. `apt-get install -y git`) and re-run.');
+    process.exit(2);
+  }
+}
 const keep = argv.includes('--keep');
 
 // Never /tmp: a /tmp/package.json on this box is found by walking up.
