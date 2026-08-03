@@ -339,7 +339,7 @@ pub async fn run_transitive_osv_gate(
     if matches!(policy, AdvisoryCheck::Off) {
         return Ok(());
     }
-    let pairs = transitive_registry_pairs(cwd, graph);
+    let pairs = transitive_registry_pairs(cwd, graph)?;
     if pairs.is_empty() {
         return Ok(());
     }
@@ -396,7 +396,7 @@ pub async fn run_transitive_osv_gate_via_mirror(
     if matches!(policy, AdvisoryCheckOnInstall::Off) {
         return Ok(());
     }
-    let pairs = transitive_registry_pairs(cwd, graph);
+    let pairs = transitive_registry_pairs(cwd, graph)?;
     if pairs.is_empty() {
         return Ok(());
     }
@@ -508,7 +508,7 @@ pub async fn run_transitive_osv_gate_via_bloom(
     if matches!(policy, AdvisoryBloomCheck::Off) {
         return Ok(());
     }
-    let pkgs = transitive_registry_pairs(cwd, graph);
+    let pkgs = transitive_registry_pairs(cwd, graph)?;
     if pkgs.is_empty() {
         return Ok(());
     }
@@ -634,9 +634,9 @@ pub fn lockfile_has_new_picks(
     cwd: &std::path::Path,
     prior: Option<&aube_lockfile::LockfileGraph>,
     resolved: &aube_lockfile::LockfileGraph,
-) -> bool {
+) -> miette::Result<bool> {
     use std::collections::HashSet;
-    let npm_config = aube_registry::config::NpmConfig::load(cwd);
+    let npm_config = crate::commands::load_npm_config(cwd)?;
     // Both the prior-pairs set and the resolved walk filter by
     // `local_source.is_none()` + `is_public_npmjs`. Building the
     // prior set as empty when `prior` is `None` means a
@@ -655,12 +655,12 @@ pub fn lockfile_has_new_picks(
                 .collect()
         })
         .unwrap_or_default();
-    resolved
+    Ok(resolved
         .packages
         .values()
         .filter(|p| p.local_source.is_none())
         .filter(|p| npm_config.is_public_npmjs(p.registry_name()))
-        .any(|p| !prior_pairs.contains(&(p.registry_name(), p.version.as_str())))
+        .any(|p| !prior_pairs.contains(&(p.registry_name(), p.version.as_str()))))
 }
 
 /// Distinct public-npmjs `(registry_name, version)` pairs in
@@ -681,8 +681,8 @@ pub fn lockfile_has_new_picks(
 fn transitive_registry_pairs(
     cwd: &std::path::Path,
     graph: &aube_lockfile::LockfileGraph,
-) -> Vec<(String, String)> {
-    let npm_config = aube_registry::config::NpmConfig::load(cwd);
+) -> miette::Result<Vec<(String, String)>> {
+    let npm_config = crate::commands::load_npm_config(cwd)?;
     let mut pairs: Vec<(String, String)> = graph
         .packages
         .values()
@@ -692,7 +692,7 @@ fn transitive_registry_pairs(
         .collect();
     pairs.sort();
     pairs.dedup();
-    pairs
+    Ok(pairs)
 }
 
 /// Parse `allowedUnpopularPackages` entries into compiled
@@ -1618,7 +1618,7 @@ mod tests {
             ..Default::default()
         };
         let tmp = tempfile::tempdir().expect("tempdir");
-        let pairs = transitive_registry_pairs(tmp.path(), &graph);
+        let pairs = transitive_registry_pairs(tmp.path(), &graph).expect("valid test config");
         assert_eq!(pairs, vec![("lodash".to_string(), "4.17.21".to_string())],);
     }
 
@@ -1642,7 +1642,7 @@ mod tests {
             ..Default::default()
         };
         let tmp = tempfile::tempdir().expect("tempdir");
-        let pairs = transitive_registry_pairs(tmp.path(), &graph);
+        let pairs = transitive_registry_pairs(tmp.path(), &graph).expect("valid test config");
         assert_eq!(pairs, vec![("lodash".to_string(), "4.17.21".to_string())],);
     }
 
@@ -1667,7 +1667,7 @@ mod tests {
             ..Default::default()
         };
         let tmp = tempfile::tempdir().expect("tempdir");
-        let pairs = transitive_registry_pairs(tmp.path(), &graph);
+        let pairs = transitive_registry_pairs(tmp.path(), &graph).expect("valid test config");
         assert_eq!(
             pairs,
             vec![
@@ -1739,7 +1739,7 @@ mod tests {
             ..Default::default()
         };
         let tmp = tempfile::tempdir().expect("tempdir");
-        assert!(lockfile_has_new_picks(tmp.path(), None, &resolved));
+        assert!(lockfile_has_new_picks(tmp.path(), None, &resolved).expect("valid test config"));
     }
 
     #[test]
@@ -1761,7 +1761,7 @@ mod tests {
             ..Default::default()
         };
         let tmp = tempfile::tempdir().expect("tempdir");
-        assert!(!lockfile_has_new_picks(tmp.path(), None, &resolved));
+        assert!(!lockfile_has_new_picks(tmp.path(), None, &resolved).expect("valid test config"));
     }
 
     #[test]
@@ -1771,7 +1771,7 @@ mod tests {
         // nothing to check anyway.
         let resolved = aube_lockfile::LockfileGraph::default();
         let tmp = tempfile::tempdir().expect("tempdir");
-        assert!(!lockfile_has_new_picks(tmp.path(), None, &resolved));
+        assert!(!lockfile_has_new_picks(tmp.path(), None, &resolved).expect("valid test config"));
     }
 
     #[test]
@@ -1794,7 +1794,10 @@ mod tests {
             ..Default::default()
         };
         let tmp = tempfile::tempdir().expect("tempdir");
-        assert!(!lockfile_has_new_picks(tmp.path(), Some(&prior), &resolved));
+        assert!(
+            !lockfile_has_new_picks(tmp.path(), Some(&prior), &resolved)
+                .expect("valid test config")
+        );
     }
 
     #[test]
@@ -1822,7 +1825,9 @@ mod tests {
             ..Default::default()
         };
         let tmp = tempfile::tempdir().expect("tempdir");
-        assert!(lockfile_has_new_picks(tmp.path(), Some(&prior), &resolved));
+        assert!(
+            lockfile_has_new_picks(tmp.path(), Some(&prior), &resolved).expect("valid test config")
+        );
     }
 
     #[test]
@@ -1842,7 +1847,10 @@ mod tests {
         };
         let prior = aube_lockfile::LockfileGraph::default();
         let tmp = tempfile::tempdir().expect("tempdir");
-        assert!(!lockfile_has_new_picks(tmp.path(), Some(&prior), &resolved));
+        assert!(
+            !lockfile_has_new_picks(tmp.path(), Some(&prior), &resolved)
+                .expect("valid test config")
+        );
     }
 
     #[tokio::test]

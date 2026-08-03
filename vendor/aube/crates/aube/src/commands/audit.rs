@@ -421,7 +421,6 @@ fn build_client(
     if let Some(url) = registry_override {
         config.apply_registry_override(url).into_diagnostic()?;
     }
-    config.validate_registry_urls().into_diagnostic()?;
     super::settings_context::log_registry_config(&config);
     let policy = super::resolve_fetch_policy(cwd);
     Ok(RegistryClient::from_config_with_policy(config, policy))

@@ -112,8 +112,15 @@ fn malformed_scoped_registry_is_rejected_before_client_or_auth_write() {
     )
     .unwrap();
 
+    assert!(matches!(
+        NpmConfig::load_validated(dir.path()),
+        Err(crate::Error::InvalidRegistryUrl)
+    ));
     let config = NpmConfig::load_isolated(dir.path());
-    assert_eq!(config.registry_for("@blocked/pkg"), "ftp://registry.example.test/");
+    assert_eq!(
+        config.registry_for("@blocked/pkg"),
+        "ftp://registry.example.test/"
+    );
     assert!(config.scoped_registries.contains_key("@blocked"));
     assert!(config.auth_by_uri.is_empty());
     assert!(config.scoped_auth_by_uri.is_empty());
@@ -139,16 +146,81 @@ npmScopes:
         "@blocked:registry".to_string(),
         "ftp://registry.example.test/".to_string(),
     )));
-    assert!(!entries.iter().any(|(_, value)| value == "should-not-be-emitted"));
+    assert!(
+        !entries
+            .iter()
+            .any(|(_, value)| value == "should-not-be-emitted")
+    );
 
     let mut config = NpmConfig {
         registry: "https://registry.npmjs.org/".to_string(),
         ..Default::default()
     };
     config.apply(entries);
-    assert_eq!(config.registry_for("@blocked/pkg"), "ftp://registry.example.test/");
+    assert_eq!(
+        config.registry_for("@blocked/pkg"),
+        "ftp://registry.example.test/"
+    );
     assert!(config.auth_by_uri.is_empty());
     assert!(config.scoped_auth_by_uri.is_empty());
+    assert!(matches!(
+        config.validate_registry_urls(),
+        Err(crate::Error::InvalidRegistryUrl)
+    ));
+}
+
+#[test]
+fn empty_yarn_default_registry_is_preserved_and_rejected() {
+    let entries = translate_yarnrc_content(
+        r#"
+npmRegistryServer: ""
+npmAuthToken: ""
+npmAuthIdent: " "
+httpsCaFilePath: ""
+httpProxy: " "
+httpsProxy: ""
+"#,
+    );
+
+    assert_eq!(entries, vec![("registry".to_string(), String::new())]);
+
+    let mut config = NpmConfig::default();
+    config.apply(entries);
+    assert!(config.registry.is_empty());
+    assert!(matches!(
+        config.validate_registry_urls(),
+        Err(crate::Error::InvalidRegistryUrl)
+    ));
+}
+
+#[test]
+fn empty_yarn_scoped_registry_is_preserved_and_rejected() {
+    let entries = translate_yarnrc_content(
+        r#"
+npmRegistryServer: "https://default.example.test/"
+npmScopes:
+  blank:
+    npmRegistryServer: ""
+    npmAuthToken: ""
+    npmAuthIdent: " "
+"#,
+    );
+
+    assert_eq!(
+        entries,
+        vec![
+            (
+                "registry".to_string(),
+                "https://default.example.test/".to_string(),
+            ),
+            ("@blank:registry".to_string(), String::new()),
+        ]
+    );
+
+    let mut config = NpmConfig::default();
+    config.apply(entries);
+    assert_eq!(config.registry_for("@blank/package"), "");
+    assert!(config.scoped_registries.contains_key("@blank"));
     assert!(matches!(
         config.validate_registry_urls(),
         Err(crate::Error::InvalidRegistryUrl)

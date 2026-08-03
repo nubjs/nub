@@ -33,6 +33,8 @@ pub(super) async fn run_global(
     virtual_store: crate::cli_args::VirtualStoreArgs,
 ) -> miette::Result<()> {
     use crate::commands::global;
+    let config_dir = crate::dirs::project_root_or_cwd()?;
+    let npm_config = crate::commands::load_npm_config(&config_dir)?;
 
     let mut layout = global::GlobalLayout::resolve()?;
     let install_dir_raw = global::create_install_dir(&layout.pkg_dir)?;
@@ -81,6 +83,7 @@ pub(super) async fn run_global(
         options,
         &layout,
         &install_dir,
+        &npm_config,
         lockfile,
         network,
         virtual_store,
@@ -119,6 +122,7 @@ async fn run_global_inner(
     options: GlobalAddOptions,
     layout: &crate::commands::global::GlobalLayout,
     install_dir: &std::path::Path,
+    npm_config: &aube_registry::config::NpmConfig,
     lockfile: crate::cli_args::LockfileArgs,
     network: crate::cli_args::NetworkArgs,
     virtual_store: crate::cli_args::VirtualStoreArgs,
@@ -158,9 +162,8 @@ async fn run_global_inner(
         .wrap_err_with(|| format!("failed to chdir into {}", install_dir.display()))?;
     crate::dirs::set_cwd(install_dir)?;
 
-    // Build registry map before the inner `run` takes its own view of
-    // the config — we need it for the cache key hash.
-    let npm_config = aube_registry::config::NpmConfig::load(install_dir);
+    // The caller preflighted this source config before creating the global
+    // install directory; use that effective view for the cache key.
     let mut registries: BTreeMap<String, String> = BTreeMap::new();
     registries.insert("default".to_string(), npm_config.registry.clone());
     for (scope, url) in &npm_config.scoped_registries {

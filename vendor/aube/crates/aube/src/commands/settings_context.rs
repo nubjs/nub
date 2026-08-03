@@ -18,10 +18,8 @@ static GLOBAL_FROZEN: OnceLock<Option<install::FrozenOverride>> = OnceLock::new(
 static GLOBAL_VIRTUAL_STORE: OnceLock<install::GlobalVirtualStoreFlags> = OnceLock::new();
 static SKIP_AUTO_INSTALL_ON_PM_MISMATCH: AtomicBool = AtomicBool::new(false);
 
-/// Process-wide registry override from the top-level `--registry=<url>`
-/// flag. Applied in `make_client` (and any direct `NpmConfig::load`
-/// caller that funnels through `load_npm_config`) so a single flag
-/// covers every registry touch point in one invocation.
+/// Process-wide registry override from the top-level `--registry=<url>` flag.
+/// `load_npm_config` always preflights source routes before applying it.
 static REGISTRY_OVERRIDE: RwLock<Option<String>> = RwLock::new(None);
 
 /// Process-wide CLI flag bag for `--fetch-timeout` / `--fetch-retries` /
@@ -77,14 +75,15 @@ pub(crate) fn registry_override() -> Option<String> {
         .clone()
 }
 
-/// Load an `NpmConfig` for `dir`, apply the process-wide `--registry`
-/// override, and reject malformed routing before client construction.
+/// Load and preflight every source registry route for `dir`, then apply the
+/// process-wide `--registry` override to the validated default route.
 pub(crate) fn load_npm_config(dir: &std::path::Path) -> miette::Result<NpmConfig> {
-    let mut config = NpmConfig::load(dir);
+    let mut config = NpmConfig::load_validated(dir).map_err(miette::Report::new)?;
     if let Some(url) = registry_override() {
-        config.apply_registry_override(&url).map_err(miette::Report::new)?;
+        config
+            .apply_registry_override(&url)
+            .map_err(miette::Report::new)?;
     }
-    config.validate_registry_urls().map_err(miette::Report::new)?;
     Ok(config)
 }
 
@@ -366,9 +365,7 @@ pub(crate) fn make_client(
     let config = load_npm_config(cwd)?;
     log_registry_config(&config);
     let policy = resolve_fetch_policy(cwd);
-    Ok(aube_registry::client::RegistryClient::from_config_with_policy(
-        config, policy,
-    ))
+    Ok(aube_registry::client::RegistryClient::from_config_with_policy(config, policy))
 }
 
 /// Run the pnpmfile `preResolution` hook before the resolver walks

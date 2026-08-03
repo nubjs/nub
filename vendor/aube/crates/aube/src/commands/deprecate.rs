@@ -7,8 +7,7 @@
 //! document back. A blank message un-deprecates, so `aube undeprecate`
 //! is a thin wrapper that calls into here with `Some("")`.
 
-use crate::commands::{make_client, split_name_spec};
-use aube_registry::config::NpmConfig;
+use crate::commands::split_name_spec;
 use clap::Args;
 use miette::{Context, IntoDiagnostic, miette};
 use serde_json::Value;
@@ -65,26 +64,18 @@ pub async fn apply(
     registry_override: Option<&str>,
 ) -> miette::Result<()> {
     let cwd = crate::dirs::project_root_or_cwd().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let client = if let Some(url) = registry_override {
-        // `--registry` is an explicit "talk to this URL" — clear
-        // `scoped_registries` so scoped packages don't silently route back
-        // to whatever `.npmrc` has pinned for their scope, and normalize
-        // the URL so auth_token_for can match `//host/:_authToken` entries
-        // in `.npmrc` (which are stored with a trailing slash).
-        let policy = crate::commands::resolve_fetch_policy(&cwd);
-        let registry = aube_registry::config::normalize_registry_url_pub(url)
-            .ok_or_else(|| miette::miette!("invalid registry URL"))?;
-        aube_registry::client::RegistryClient::from_config_with_policy(
-            NpmConfig {
-                registry,
-                scoped_registries: Default::default(),
-                ..NpmConfig::load(&cwd)
-            },
-            policy,
-        )
-    } else {
-        make_client(&cwd)?
-    };
+    let mut config = super::load_npm_config(&cwd)?;
+    if let Some(url) = registry_override {
+        // An explicit registry replaces only the default after source routes
+        // have preflighted. Deprecate intentionally clears scopes so a scoped
+        // package cannot escape the requested mutation target.
+        config
+            .apply_registry_override(url)
+            .map_err(miette::Report::new)?;
+        config.scoped_registries.clear();
+    }
+    let policy = crate::commands::resolve_fetch_policy(&cwd);
+    let client = aube_registry::client::RegistryClient::from_config_with_policy(config, policy);
 
     let mut packument = client
         .fetch_packument_json_fresh(name)

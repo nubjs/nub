@@ -170,12 +170,11 @@ pub(crate) fn symlink_target_or_self(path: &Path) -> std::io::Result<PathBuf> {
 /// Lives here rather than in either command module so both sides pick up
 /// any future change (env-var support, `--prefix`, etc) without drifting.
 pub fn resolve_registry(flag: Option<&str>, scope: Option<&str>) -> miette::Result<String> {
+    let cwd = crate::dirs::project_root_or_cwd().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let config = NpmConfig::load_validated(&cwd).map_err(miette::Report::new)?;
     if let Some(r) = flag {
         return normalize_registry_url_pub(r).ok_or_else(|| miette!("invalid registry URL"));
     }
-    let cwd = crate::dirs::project_root_or_cwd().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let config = NpmConfig::load(&cwd);
-    config.validate_registry_urls().map_err(miette::Report::new)?;
     if let Some(scope) = scope
         && let Some(url) = config.scoped_registries.get(scope)
     {

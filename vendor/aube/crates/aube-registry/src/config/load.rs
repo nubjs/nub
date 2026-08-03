@@ -85,6 +85,19 @@ impl NpmConfig {
         Self::load_with_env(project_dir, &env)
     }
 
+    /// Load registry configuration and reject any malformed default or scoped
+    /// route before a caller can normalize or replace part of it.
+    ///
+    /// This is the production preflight seam for file-backed npm, Yarn, Bun,
+    /// global, and environment-derived registry configuration. Callers that
+    /// apply a CLI override must call this first, then validate and apply only
+    /// that override so it cannot mask an invalid source route.
+    pub fn load_validated(project_dir: &Path) -> Result<Self, crate::Error> {
+        let config = Self::load(project_dir);
+        config.validate_registry_urls()?;
+        Ok(config)
+    }
+
     /// Test-only loader that reads `project_dir/.npmrc` with a
     /// tempdir pinned as the user's `$HOME` and no env-var merge, so
     /// the developer's real `~/.npmrc` and `NPM_CONFIG_*` vars can't

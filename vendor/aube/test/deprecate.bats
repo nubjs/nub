@@ -30,7 +30,37 @@ teardown() {
 			test/registry/storage/is-odd/package.json \
 			test/registry/storage/is-number/package.json 2>/dev/null || true
 	fi
+	_stop_request_sentinel
 	_common_teardown
+}
+
+_start_request_sentinel() {
+	REQUEST_SENTINEL_PORT_FILE="$BATS_TEST_TMPDIR/registry-request-sentinel.port"
+	REQUEST_SENTINEL_HIT_FILE="$BATS_TEST_TMPDIR/registry-request-sentinel.hit"
+	rm -f "$REQUEST_SENTINEL_PORT_FILE" "$REQUEST_SENTINEL_HIT_FILE"
+	node -e 'const fs = require("fs"); const http = require("http"); const [portFile, hitFile] = process.argv.slice(1); const server = http.createServer((_req, res) => { fs.writeFileSync(hitFile, "hit"); res.statusCode = 500; res.end(); }); server.listen(0, "127.0.0.1", () => fs.writeFileSync(portFile, String(server.address().port)));' "$REQUEST_SENTINEL_PORT_FILE" "$REQUEST_SENTINEL_HIT_FILE" 3>&- &
+	REQUEST_SENTINEL_PID=$!
+
+	local tries=40
+	while [ "$tries" -gt 0 ]; do
+		if [ -s "$REQUEST_SENTINEL_PORT_FILE" ]; then
+			REQUEST_SENTINEL_URL="http://127.0.0.1:$(cat "$REQUEST_SENTINEL_PORT_FILE")/"
+			return 0
+		fi
+		sleep 0.05
+		tries=$((tries - 1))
+	done
+
+	echo "registry request sentinel failed to start" >&2
+	return 1
+}
+
+_stop_request_sentinel() {
+	if [ -n "${REQUEST_SENTINEL_PID:-}" ]; then
+		kill "$REQUEST_SENTINEL_PID" 2>/dev/null || true
+		wait "$REQUEST_SENTINEL_PID" 2>/dev/null || true
+		unset REQUEST_SENTINEL_PID REQUEST_SENTINEL_PORT_FILE REQUEST_SENTINEL_HIT_FILE REQUEST_SENTINEL_URL
+	fi
 }
 
 # Skip if no local registry — these tests need to PUT a packument back.
@@ -93,6 +123,16 @@ _deprecated_field() {
 
 	run _deprecated_field is-number 3.0.0
 	assert_output 'null'
+}
+
+@test "aube deprecate preflights malformed source config before a valid override request" {
+	printf '%s\n' 'registry=ftp://default.invalid/' >.npmrc
+	_start_request_sentinel
+
+	run aube deprecate --dry-run --registry="$REQUEST_SENTINEL_URL" 'is-number@3.0.0' 'noop'
+	assert_failure
+	assert_output --partial 'ERR_AUBE_INVALID_REGISTRY_URL'
+	[ ! -e "$REQUEST_SENTINEL_HIT_FILE" ]
 }
 
 @test "aube deprecate errors when no version matches the range" {

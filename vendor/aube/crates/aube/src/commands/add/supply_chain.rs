@@ -11,7 +11,7 @@ pub(super) async fn run_cli_name_gates(
 ) -> miette::Result<()> {
     let project_dir = supply_chain_project_dir(cwd);
     let manifest = crate::commands::load_manifest_or_default(&project_dir)?;
-    let registry_inputs = registry_bound_inputs_for_supply_chain(&project_dir, packages);
+    let registry_inputs = registry_bound_inputs_for_supply_chain(&project_dir, packages)?;
     let (
         advisory_check,
         low_download_threshold,
@@ -89,7 +89,7 @@ struct RegistryBoundSupplyChainInputs {
 fn registry_bound_inputs_for_supply_chain(
     cwd: &Path,
     packages: &[String],
-) -> RegistryBoundSupplyChainInputs {
+) -> miette::Result<RegistryBoundSupplyChainInputs> {
     let mut inputs = RegistryBoundSupplyChainInputs {
         exact_advisory_pairs: Vec::with_capacity(packages.len()),
         download_names: Vec::with_capacity(packages.len()),
@@ -101,7 +101,7 @@ fn registry_bound_inputs_for_supply_chain(
     // override) has no signal in the OSV `MAL-*` database or the
     // npmjs weekly-downloads API — skip those names so private
     // packages don't trip the gates on a public-registry collision.
-    let npm_config = aube_registry::config::NpmConfig::load(cwd);
+    let npm_config = crate::commands::load_npm_config(cwd)?;
     for raw in packages {
         let Ok(spec) = parse_pkg_spec(raw) else {
             // Parse failures get a richer diagnostic from
@@ -167,7 +167,7 @@ fn registry_bound_inputs_for_supply_chain(
     inputs.exact_advisory_pairs.dedup();
     inputs.download_names.sort();
     inputs.download_names.dedup();
-    inputs
+    Ok(inputs)
 }
 
 fn is_full_exact_version(range: &str) -> bool {
@@ -199,7 +199,8 @@ mod tests {
     #[test]
     fn registry_bound_inputs_use_versioned_osv_for_exact_versions() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let inputs = registry_bound_inputs_for_supply_chain(tmp.path(), &["nx@23.0.0".into()]);
+        let inputs = registry_bound_inputs_for_supply_chain(tmp.path(), &["nx@23.0.0".into()])
+            .expect("valid test config");
 
         assert_eq!(
             inputs.exact_advisory_pairs,
@@ -225,7 +226,8 @@ mod tests {
                 "react".into(),
                 "vite@latest".into(),
             ],
-        );
+        )
+        .expect("valid test config");
 
         assert!(
             inputs.exact_advisory_pairs.is_empty(),
@@ -256,14 +258,16 @@ mod tests {
         // (`axios@1.14.1`) still routes to the version-aware pre-check.
         let tmp = tempfile::tempdir().expect("tempdir");
 
-        let bare = registry_bound_inputs_for_supply_chain(tmp.path(), &["axios".into()]);
+        let bare = registry_bound_inputs_for_supply_chain(tmp.path(), &["axios".into()])
+            .expect("valid test config");
         assert!(
             bare.exact_advisory_pairs.is_empty(),
             "bare `axios` must not be pre-resolve OSV-blocked (issue #88)"
         );
         assert_eq!(bare.download_names, vec!["axios".to_string()]);
 
-        let pinned = registry_bound_inputs_for_supply_chain(tmp.path(), &["axios@1.14.1".into()]);
+        let pinned = registry_bound_inputs_for_supply_chain(tmp.path(), &["axios@1.14.1".into()])
+            .expect("valid test config");
         assert_eq!(
             pinned.exact_advisory_pairs,
             vec![("axios".to_string(), "1.14.1".to_string())],
@@ -286,7 +290,8 @@ mod tests {
     fn registry_bound_inputs_version_alias_checks_real_package() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let inputs =
-            registry_bound_inputs_for_supply_chain(tmp.path(), &["nx-stable@npm:nx@23.0.0".into()]);
+            registry_bound_inputs_for_supply_chain(tmp.path(), &["nx-stable@npm:nx@23.0.0".into()])
+                .expect("valid test config");
 
         assert_eq!(
             inputs.exact_advisory_pairs,
