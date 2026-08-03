@@ -437,7 +437,12 @@ fn bundle_inner(
     new_urls.reject_unsupported_workers()?;
 
     let sites = scan.take();
-    reject_unresolved(&sites, &output.warnings, opts.allow_dynamic_import)?;
+    reject_unresolved(
+        &sites,
+        &output.warnings,
+        opts.allow_dynamic_import,
+        uses_plug_n_play(entry_abs),
+    )?;
     let dynamic_import_sites = if opts.allow_dynamic_import {
         // Both `import()` shapes are excused by the flag and both are served by
         // the same runtime hook, so both are counted — omitting the variable-held
@@ -3981,10 +3986,23 @@ fn render_diagnostics(err: &rolldown_error::BatchedBuildDiagnostic) -> String {
 /// picked a UMD build), and an UNRESOLVED_IMPORT is a static specifier that
 /// resolved to nothing — neither is served by a runtime resolve hook, so neither
 /// is opted out of.
+/// Whether the entry sits in a Yarn Plug'n'Play project.
+///
+/// A `.pnp.cjs` with no `node_modules` beside it: dependencies live in zip
+/// archives and are resolved through that loader, so a directory walk finds
+/// nothing. Both halves are required — a project can carry a stale `.pnp.cjs`
+/// after switching linkers, and that one resolves normally.
+fn uses_plug_n_play(entry: &Path) -> bool {
+    entry
+        .ancestors()
+        .any(|dir| dir.join(".pnp.cjs").is_file() && !dir.join("node_modules").is_dir())
+}
+
 fn reject_unresolved(
     sites: &[DynamicSite],
     warnings: &[BuildDiagnostic],
     allow_dynamic: bool,
+    pnp: bool,
 ) -> Result<()> {
     let mut lines = Vec::new();
     let mut any_indirect = false;
@@ -4075,13 +4093,26 @@ fn reject_unresolved(
     } else {
         ""
     };
+    // Named first, because under Plug'n'Play EVERY dependency is unresolved and
+    // the other hints describe the wrong problem. The project runs perfectly under
+    // `yarn node`, so the author has no reason to suspect their install layout.
+    let pnp_hint = if pnp {
+        "\n\n\x20\x20This project uses Yarn's Plug'n'Play, which keeps its dependencies in zip\n\
+         \x20\x20archives and resolves them through .pnp.cjs rather than node_modules. Nub reads\n\
+         \x20\x20a real directory tree, so it finds nothing to bundle. Install with a\n\
+         \x20\x20node_modules linker — `yarn config set nodeLinker node-modules && yarn install`\n\
+         \x20\x20— and compile again."
+    } else {
+        ""
+    };
     bail!(
         "{} import{} could not be resolved at build time:\n{}\n\n\
          \x20\x20A compiled binary carries no node_modules, so an unresolved import fails at\n\
-         \x20\x20runtime on the machine you ship to.{}{}{}{}",
+         \x20\x20runtime on the machine you ship to.{}{}{}{}{}",
         lines.len(),
         if lines.len() == 1 { "" } else { "s" },
         lines.join("\n"),
+        pnp_hint,
         native_hint,
         dynamic_hint,
         variable_hint,
@@ -6507,7 +6538,7 @@ const pkg = require("./package.json");
     // scanner instead.
     #[test]
     fn rejection_names_the_site_the_fix_and_the_flag() {
-        let err = reject_unresolved(&[dynamic_site()], &[], false).expect_err("must fail");
+        let err = reject_unresolved(&[dynamic_site()], &[], false, false).expect_err("must fail");
         let msg = err.to_string();
         assert!(msg.contains("/p/src/plugins.ts:12:20"), "got: {msg}");
         assert!(msg.contains("import(pluginPath)"), "got: {msg}");
@@ -6525,7 +6556,7 @@ const pkg = require("./package.json");
     #[test]
     fn the_flag_excuses_only_the_computed_import() {
         assert!(
-            reject_unresolved(&[dynamic_site()], &[], true).is_ok(),
+            reject_unresolved(&[dynamic_site()], &[], true, false).is_ok(),
             "a permitted dynamic site must not fail the build"
         );
 
@@ -6537,7 +6568,7 @@ const pkg = require("./package.json");
             snippet: r#"require("./impl/format")"#.into(),
             resolves_to: Vec::new(),
         };
-        let err = reject_unresolved(&[dynamic_site(), indirect], &[], true)
+        let err = reject_unresolved(&[dynamic_site(), indirect], &[], true, false)
             .expect_err("an indirect require must still fail");
         let msg = err.to_string();
         assert!(msg.contains("umd.js:4:15"), "got: {msg}");
@@ -6570,8 +6601,8 @@ const pkg = require("./package.json");
             snippet: "import(pkg)".into(),
             resolves_to: vec!["@x/core-darwin".into(), "@x/core-linux".into()],
         };
-        let err =
-            reject_unresolved(std::slice::from_ref(&site), &[], false).expect_err("must fail");
+        let err = reject_unresolved(std::slice::from_ref(&site), &[], false, false)
+            .expect_err("must fail");
         let msg = err.to_string();
         assert!(msg.contains("/p/src/platform.ts:7:22"), "got: {msg}");
         assert!(msg.contains("import(pkg)"), "got: {msg}");
@@ -6581,7 +6612,7 @@ const pkg = require("./package.json");
         );
         assert!(msg.contains("--allow-dynamic-import"), "got: {msg}");
 
-        reject_unresolved(&[site], &[], true)
+        reject_unresolved(&[site], &[], true, false)
             .expect("the flag must excuse a variable specifier exactly as it does a computed one");
     }
 
@@ -7152,6 +7183,35 @@ after
                 "must NOT claim an ordinary specifier is a native addon: {ordinary}"
             );
         }
+    }
+
+    /// Plug'n'Play is only claimed when it is actually in effect.
+    ///
+    /// Under PnP every dependency comes back unresolved, so the ordinary hints
+    /// describe the wrong problem entirely — and the author has no reason to
+    /// suspect their install layout, because the same project runs under
+    /// `yarn node`. Both conditions are required: switching a project back to a
+    /// node_modules linker can leave `.pnp.cjs` behind, and that project resolves
+    /// normally, so keying on the file alone would misdirect on a working tree.
+    #[test]
+    fn plug_n_play_is_claimed_only_when_it_is_in_effect() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let entry = dir.path().join("src").join("app.mjs");
+        std::fs::create_dir_all(entry.parent().expect("a parent")).expect("creating src");
+
+        assert!(!uses_plug_n_play(&entry), "an ordinary project is not PnP");
+
+        std::fs::write(dir.path().join(".pnp.cjs"), "// loader").expect("writing .pnp.cjs");
+        assert!(
+            uses_plug_n_play(&entry),
+            "a .pnp.cjs above the entry with no node_modules is PnP"
+        );
+
+        std::fs::create_dir_all(dir.path().join("node_modules")).expect("creating node_modules");
+        assert!(
+            !uses_plug_n_play(&entry),
+            "a leftover .pnp.cjs beside a real node_modules resolves normally"
+        );
     }
 
     #[test]
