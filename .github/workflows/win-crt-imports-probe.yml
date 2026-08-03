@@ -1,0 +1,85 @@
+# Does `+crt-static` actually remove nub.exe's dependency on the Visual C++ Redistributable?
+#
+# The shipping bug (#107): Rust's *-pc-windows-msvc targets link the CRT dynamically, so the
+# released nub.exe imports VCRUNTIME140.dll / VCRUNTIME140_1.dll / MSVCP140.dll. None ship with
+# Windows — only the VC++ Redistributable installs them — so on a clean box nub.exe exits
+# 0xC0000135 with no output. Proven by controlled experiment on a clean Windows Server 2022:
+# missing redist -> 0xC0000135; after vc_redist.x64 -> `v0.6.0`, rc=0.
+#
+# ⛔ WHY AN IMPORT-TABLE DIFF RATHER THAN "RUN IT ON A CLEAN BOX": a `windows-latest` runner HAS the
+# redist, so a binary that runs there proves nothing about a clean machine. The failure mode is
+# precisely "imports a DLL that is not present", so the ABSENCE of that import IS the fix criterion
+# — and it is checkable on any Windows box, including one where the DLL exists.
+#
+# Builds BOTH ways in one job so the only variable is RUSTFLAGS. A one-armed run could not
+# distinguish "crt-static worked" from "this toolchain never emitted that import anyway".
+name: win-crt-imports-probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [sandbox/integration]
+    paths: ['.github/workflows/win-crt-imports-probe.yml']
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build BOTH arms (dynamic CRT = today's release, static CRT = the fix)
+        shell: bash
+        run: |
+          set -eux
+          # ⛔ STAGE INSIDE THE WORKSPACE, NOT /tmp. This step is Git Bash and the next is
+          # PowerShell: bash's `/tmp` is an MSYS mount with no drive letter, so PowerShell cannot
+          # open the same path. A workspace-relative path is the one spelling both shells agree on.
+          mkdir -p probe-bin
+          cargo build --release -p nub-cli --target x86_64-pc-windows-msvc
+          cp target/x86_64-pc-windows-msvc/release/nub.exe probe-bin/nub-dynamic.exe
+          RUSTFLAGS="-C target-feature=+crt-static" \
+            cargo build --release -p nub-cli --target x86_64-pc-windows-msvc
+          cp target/x86_64-pc-windows-msvc/release/nub.exe probe-bin/nub-static.exe
+          ls -l probe-bin/
+
+      - name: Diff the import tables
+        shell: pwsh
+        run: |
+          # dumpbin ships with the VS Build Tools already on the runner; locate it via vswhere
+          # rather than a hardcoded version path, which drifts with every image update.
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $dumpbin = Get-ChildItem -Path "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe |
+                     Where-Object { $_.FullName -match 'Hostx64\\x64' } | Select-Object -First 1
+          Write-Output "dumpbin: $($dumpbin.FullName)"
+
+          $report = @()
+          foreach ($arm in @(@{n='DYNAMIC (today)'; p='probe-bin\nub-dynamic.exe'},
+                             @{n='STATIC  (fix)  '; p='probe-bin\nub-static.exe'})) {
+            $p = Join-Path $env:GITHUB_WORKSPACE $arm.p
+            if (-not (Test-Path $p)) { throw "missing build artifact: $p" }
+            $out = & $dumpbin.FullName /dependents $p 2>&1 | Out-String
+            $vc = ([regex]::Matches($out, '(?i)(VCRUNTIME140[_0-9]*\.dll|MSVCP140[_0-9]*\.dll)') |
+                   ForEach-Object { $_.Value.ToUpper() } | Sort-Object -Unique) -join ', '
+            $size = (Get-Item $p).Length
+            Write-Output "=== $($arm.n)  size=$size"
+            Write-Output "    VC++ redist imports: $(if ($vc) { $vc } else { 'NONE' })"
+            $report += [pscustomobject]@{ arm=$arm.n; vc=$vc; size=$size }
+          }
+
+          $dyn = $report | Where-Object { $_.arm -match 'DYNAMIC' }
+          $st  = $report | Where-Object { $_.arm -match 'STATIC'  }
+
+          # The control: the dynamic arm MUST show the imports. If it does not, the probe is
+          # measuring nothing and a clean "NONE" from the static arm would be meaningless.
+          if (-not $dyn.vc) {
+            Write-Output "INCONCLUSIVE: the dynamic arm imports no VC++ runtime either, so this"
+            Write-Output "toolchain does not reproduce the shipping bug and the static arm proves nothing."
+            exit 1
+          }
+          if ($st.vc) {
+            Write-Output "FAIL: +crt-static did NOT remove the dependency ($($st.vc))."
+            exit 1
+          }
+          Write-Output "PASS: dynamic imports [$($dyn.vc)]; static imports NONE."
+          Write-Output "      +crt-static removes the VC++ Redistributable dependency."
