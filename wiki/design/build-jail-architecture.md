@@ -35,6 +35,44 @@ The constraints every candidate is judged against are the build jail's, not the 
 
 Before asking whether a different architecture would have avoided the defects, it is worth establishing which axis they were on. The answer decides the rest of the document.
 
+
+## ⛔ OPEN DEFECT — the per-package network grant does not reach the net gate on WINDOWS (2026-08-02)
+
+**Measured, with a cross-platform control.** `@apollo/rover@0.29.1`, same harness, same widest grant
+(state 53 `write.disk + network`):
+
+| | macOS | Windows |
+|---|---|---|
+| no-grant cell | fails `getaddrinfo ENOTFOUND rover.apollo.dev` — denial works | — |
+| **widest grant** | **succeeds, downloads** | **`nub build sandbox: blocked network access`** |
+| verdict | `MINIMUM`, state `network`, cost 3 | `BROKEN-EVEN-WITH-EVERYTHING` |
+
+`net_gate_shim.js` is a plain boolean — `if (POLICY.allow === true) return;`, no host list, loopback-only
+exemption — so the defect is UPSTREAM of the gate, in how a package's network capability is resolved
+into `POLICY.allow` on win32.
+
+**The distribution points at NAME MATCHING.** `build_jail_net_allowed` is an EXACT `binary_search_by`
+on the package name (`compiler/package_network.rs:46`), so any name transformation silently costs the
+grant. Accusation rates, fixed harness:
+
+| platform | scoped `@x/y` | unscoped |
+|---|---|---|
+| macOS (679 records) | **0.0%** (0 of 220) | 1.1% |
+| Windows (239 records) | **41.9%** (18 of 43) | 7.1% |
+
+A 6x skew on Windows against zero on macOS. Candidate: the store encodes a scope as `@apollo+rover`,
+so a path-derived name can never match a `/`-keyed catalog entry. NOT yet confirmed — the name is
+supposed to arrive via `spawn.package_name`, not from a path, so the transformation (if any) is
+somewhere between aube's spawn context and the lookup. Unscoped packages are also accused at 7.1%, so
+scope encoding cannot be the whole story.
+
+**Why it matters for the ship decision:** scoped packages are a large share of the ecosystem, and this
+is the failure mode the jail exists to avoid — breaking packages. It is Windows-only, so the catalog
+measured on macOS/Linux is unaffected.
+
+NEXT: a Windows CI probe that logs the exact `package_name` string reaching `build_jail_net_allowed`.
+
+
 ## Every defect but a handful lands on the read axis
 
 Counted across all three sibling ledgers, the filesystem **read** axis carries the overwhelming majority of both the adopted mechanisms and the open defects. The write axis produced two items, one of which is a package-manager linker bug reproducible with confinement entirely off. The network axis produced capability findings — per-host egress was surveyed on all three platforms and then withdrawn, leaving a per-package boolean — rather than compatibility breaks.
