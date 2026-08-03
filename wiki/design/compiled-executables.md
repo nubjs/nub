@@ -28,6 +28,8 @@ The extra cost of a package is its `package.json` open and parse. The relationsh
 
 Hence the rule: every module that can be bundled is bundled. A package that cannot be is ejected whole and ships **exactly as it sits on disk**, under `node_modules/` beside the bundle, at the path it already occupied.
 
+An application using express, helmet, morgan, winston, axios, lodash, uuid, ws, jsonwebtoken and bcryptjs installs 122 packages and compiles to **six files, with nothing ejected** — about 330 KB more than a program that only parses a schema. Dependency count is not what a compiled artifact pays for.
+
 Nothing is relocated, flattened, or rewritten. That is the point. A package left in place keeps everything its author relied on:
 
 - `__dirname` resolves where they expected.
