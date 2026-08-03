@@ -121,6 +121,47 @@ export const STATES = build();
 export const BOTTOM = 0;
 export const TOP = STATES.length - 1;
 
+/** The v2 catalog grant a state corresponds to, or `null` for the empty state — the catalog spells
+ *  "needs nothing" as NO ENTRY.
+ *
+ *  ⛔ ONE DEFINITION, because there are now two callers and they must never disagree: `search.mjs`
+ *  writes it into a fresh record, and `collate.mjs` BACKFILLS it for the ~2,500 records written
+ *  while `grantFor` was returning `undefined`. A second spelling of this mapping would let a
+ *  re-collated record and a freshly measured one describe the same state differently, which is
+ *  exactly the kind of divergence the catalog cannot detect.
+ *
+ *  Lives here rather than in `search.mjs` because it is a property of the STATE SPACE — a pure
+ *  function of `atoms` — and this module owns that space. */
+export function grantForState(state) {
+  if (!state || state.atoms.size === 0) return null;
+  const grant = {};
+
+  if (state.atoms.has('write.disk')) {
+    grant.write = 'disk';
+  } else {
+    const w = {};
+    for (const s of ['deps', 'project', 'userHome']) if (state.atoms.has(`write.${s}`)) w[s] = true;
+    if (Object.keys(w).length) grant.write = w;
+  }
+
+  // `read` carries only what `write` does not already imply at the same scope — the parser rejects
+  // a redundant read alongside `write: "disk"`.
+  if (grant.write !== 'disk') {
+    if (state.atoms.has('read.disk')) {
+      grant.read = 'disk';
+    } else {
+      const r = {};
+      for (const s of ['project', 'userHome']) {
+        if (state.atoms.has(`read.${s}`) && !(grant.write && grant.write[s])) r[s] = true;
+      }
+      if (Object.keys(r).length) grant.read = r;
+    }
+  }
+
+  if (state.atoms.has('network')) grant.network = true;
+  return grant;
+}
+
 const contains = (a, b) => [...b.atoms].every((x) => a.atoms.has(x));
 
 /** Prove the ordering is sound: if state j is strictly wider than state i, then

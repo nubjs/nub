@@ -16,6 +16,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// The state space, for reconstructing a grant a record never serialised — see the backfill below.
+import { STATES, grantForState } from './states.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (name, dflt) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : dflt);
@@ -65,6 +67,31 @@ for (const [root, full] of RUNS.flatMap((d) => walk(d).map((f) => [d, f]))) {
     // The platform is the top directory level, but the record's own provenance is the
     // authority — a file moved between directories must not silently change platform.
     if (PLATFORM_FILTER && rec.provenance?.platform !== PLATFORM_FILTER) continue;
+    // ⛔ BACKFILL A GRANT THAT WAS NEVER SERIALISED, rather than discarding the record.
+    //
+    // `grantFor` returned `undefined` for every non-empty state until b5d6898f82 (an `arr[0]` read
+    // of an object, left over from the retired array shape), so ~2,500 records across three
+    // platforms carry `state` — a human label — and no `grant`. Everything downstream keys on
+    // `grant`: `grantKey` bands on it, `capsKey` compares it, `unionGrant` widens off its axes. So
+    // without this the whole existing corpus collates into one `null` band and emits a catalog with
+    // no capabilities.
+    //
+    // The reconstruction is EXACT, not a guess. `STATES` is an exhaustive `read x write x network`
+    // product and each state's `label` is built deterministically from its cost atoms
+    // (`costAtoms.join(' + ')`), so a label names exactly one state, and `grantFor` maps that state
+    // to its grant. That is why these records need re-COLLATION and not re-measurement — hours of
+    // installs preserved.
+    //
+    // Only ever fills a MISSING grant; a record that has one is never touched.
+    if (!rec.grant && typeof rec.state === 'string' && rec.state !== '(nothing)') {
+      const st = STATES.find((s) => s.label === rec.state);
+      if (st) {
+        rec.grant = grantForState(st);
+        rec.grantBackfilled = true;
+      } else {
+        console.error(`  WARN ${f}: state "${rec.state}" matches no known state — grant not recovered`);
+      }
+    }
     records.push(rec);
   } catch (e) { console.error(`  SKIP ${f}: ${e.message}`); }
 }
