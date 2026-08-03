@@ -21,6 +21,27 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Build-free, ~1 minute: answers which .cmd quoting shape survives cmd.exe
+  # without waiting on a Windows Rust build. Candidate A is the shipped form and
+  # is expected to FAIL; if it passes, the reproduction is wrong and the other
+  # rows mean nothing.
+  cmdquote:
+    name: cmd.exe quoting candidates (windows)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+      - name: Which .cmd quoting survives?
+        shell: bash
+        run: node tests/node-gyp-shim/cmdquote.mjs
+
   probe:
     name: node-gyp shim (${{ matrix.os }})
     strategy:
