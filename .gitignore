@@ -152,3 +152,8 @@ internal
 
 # Maintainer-local fray worker norms (names private orchestration tooling).
 FRAY.md
+
+# Cross-built launcher templates staged beside the nub binary for a --platform
+# compile. Build artifacts, and large ones — a stray `git add -A` swept a 1 MB
+# musl launcher into a commit.
+/nub-launcher-*
