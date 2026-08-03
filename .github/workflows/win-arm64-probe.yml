@@ -1,0 +1,70 @@
+# Branch-scoped probe for win32-arm64, the last published triple with no
+# coverage. No pull request: it runs on pushes to the branch below.
+name: win32-arm64 probe
+
+on:
+  push:
+    branches: [compile-spike]
+    paths:
+      - 'tests/win-arm64-probe/**'
+      - '.github/workflows/win-arm64-probe.yml'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: win32-arm64 compile and run
+    runs-on: windows-11-arm
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+
+      # Asked first, because everything after it is meaningless on the wrong
+      # host. A mislabelled runner reports X64 here and the job stops.
+      - name: Confirm this is really an arm64 Windows host
+        shell: pwsh
+        run: |
+          $arch = $env:PROCESSOR_ARCHITECTURE
+          "runner architecture: $arch"
+          if ($arch -ne 'ARM64') { throw "expected ARM64, got $arch — this is not a Windows-on-ARM runner" }
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes tags; commit verified upstream
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: '24'
+
+      - name: Build nub and the launcher
+        shell: pwsh
+        run: |
+          cargo build -p nub-cli --release --features compile
+          Push-Location crates/nub-launcher
+          cargo build --release
+          Pop-Location
+
+      - name: Compile and run a win32-arm64 artifact
+        shell: pwsh
+        run: |
+          $probe = "tests/win-arm64-probe"
+          Set-Content -Path "$probe/.node-version" -Value "26.5.0" -NoNewline
+          '{ "name": "probe", "version": "1.0.0", "type": "module" }' | Set-Content "$probe/package.json"
+
+          # The control. A binary that prints nothing looks identical to one
+          # that works unless there is a known-good answer to compare against.
+          $control = (& node "$probe/app.mjs" | Select-Object -Last 1)
+          if ($control -ne 'ok:true') { throw "control failed on plain node: '$control'" }
+
+          $env:__NUB_LAUNCHER_TEMPLATE = "crates/nub-launcher/target/release/nub-launcher.exe"
+          & target/release/nub.exe compile "$probe/app.mjs" --out "$probe/probe.exe"
+          if ($LASTEXITCODE -ne 0) { throw "compile failed" }
+
+          Push-Location $env:TEMP
+          $out = (& "$env:GITHUB_WORKSPACE/$probe/probe.exe" | Select-Object -Last 1)
+          $rc = $LASTEXITCODE
+          Pop-Location
+
+          if ($rc -ne 0) { throw "artifact exited $rc" }
+          if ($out -ne $control) { throw "artifact printed '$out', control printed '$control'" }
+          "win32-arm64 ok — $out"
