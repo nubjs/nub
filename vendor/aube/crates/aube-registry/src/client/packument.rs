@@ -4,7 +4,7 @@ use super::{
     PACKUMENT_ACCEPT, PACKUMENT_FULL_ACCEPT, RegistryClient, force_full_packument,
     parse_full_response,
 };
-use crate::{Error, NetworkMode, Packument};
+use crate::{Error, NetworkMode, Packument, SafeReqwestDiagnostic};
 use std::path::{Path, PathBuf};
 
 /// `serde_json::from_value` sibling of `parse_full_response`'s error
@@ -317,11 +317,12 @@ impl RegistryClient {
                 }
                 Err(err) if !is_last => {
                     let wait = self.fetch_policy.backoff_for_attempt(attempt + 1);
+                    let error = SafeReqwestDiagnostic::from_reqwest(&err);
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts,
                         backoff_ms = wait.as_millis() as u64,
-                        error = %err,
+                        error = %error,
                         label,
                         code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSPORT,
                         "retrying HTTP request after transport error",
@@ -554,11 +555,12 @@ impl RegistryClient {
                 }
                 Err(err) if !is_last => {
                     let wait = self.fetch_policy.backoff_for_attempt(attempt + 1);
+                    let error = SafeReqwestDiagnostic::from_reqwest(&err);
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts,
                         backoff_ms = wait.as_millis() as u64,
-                        error = %err,
+                        error = %error,
                         label,
                         code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSPORT,
                         "retrying HTTP request after transport error",
@@ -683,11 +685,12 @@ impl RegistryClient {
                 }
                 Err(err) if !is_last => {
                     let wait = self.fetch_policy.backoff_for_attempt(attempt + 1);
+                    let error = SafeReqwestDiagnostic::from_reqwest(&err);
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts,
                         backoff_ms = wait.as_millis() as u64,
-                        error = %err,
+                        error = %error,
                         label,
                         code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSPORT,
                         "retrying HTTP request after transport error",
@@ -909,11 +912,12 @@ impl RegistryClient {
                 }
                 Err(err) if !is_last => {
                     let wait = self.fetch_policy.backoff_for_attempt(attempt + 1);
+                    let error = SafeReqwestDiagnostic::from_reqwest(&err);
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts,
                         backoff_ms = wait.as_millis() as u64,
-                        error = %err,
+                        error = %error,
                         label,
                         code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSPORT,
                         "retrying HTTP request after transport error",

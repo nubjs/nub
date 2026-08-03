@@ -61,6 +61,13 @@ const secondTarball = fs.readFileSync('stream-recovery-pkg-1.0.0-second.tgz');
 const traversalTarball = tarballWithEntry('package/../escaped', Buffer.from('unsafe'));
 const integrity = `sha512-${crypto.createHash('sha512').update(tarball).digest('base64')}`;
 const mode = process.env.STREAM_RECOVERY_MODE;
+const queryBearingMode = mode.startsWith('query-');
+const omitsIntegrity = new Set([
+  'path-traversal-then-reset',
+  'complete-import-then-reset',
+  'query-buffered-open-reset',
+  'query-slow',
+]);
 let tarballRequests = 0;
 
 const server = http.createServer((req, res) => {
@@ -76,8 +83,8 @@ const server = http.createServer((req, res) => {
           name: 'stream-recovery-pkg',
           version: '1.0.0',
           dist: {
-            tarball: `${base}/stream-recovery-pkg/-/stream-recovery-pkg-1.0.0.tgz${mode === 'query-reset' ? '?token=transport-secret' : ''}`,
-            ...(mode === 'path-traversal-then-reset' || mode === 'complete-import-then-reset' ? {} : { integrity }),
+            tarball: `${base}/stream-recovery-pkg/-/stream-recovery-pkg-1.0.0.tgz${queryBearingMode ? '?token=transport-secret#query-fragment' : ''}`,
+            ...(omitsIntegrity.has(mode) ? {} : { integrity }),
           },
         },
       },
@@ -88,6 +95,22 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && path === '/stream-recovery-pkg/-/stream-recovery-pkg-1.0.0.tgz') {
     tarballRequests += 1;
     res.setHeader('content-type', 'application/octet-stream');
+    if ((mode === 'query-stream-open-reset' || mode === 'query-buffered-open-reset') && tarballRequests === 1) {
+      // No response headers: exercise the initial send() retry path.
+      req.socket.destroy();
+      return;
+    }
+    if (mode === 'query-terminal') {
+      res.statusCode = 503;
+      res.end('upstream unavailable');
+      return;
+    }
+    if (mode === 'query-slow') {
+      res.setHeader('content-length', tarball.length);
+      res.write(tarball.subarray(0, Math.max(1, Math.floor(tarball.length / 2))));
+      setTimeout(() => res.end(tarball.subarray(Math.max(1, Math.floor(tarball.length / 2)))), 1_100);
+      return;
+    }
     if (mode === 'complete-import-then-reset' && tarballRequests === 1) {
       // The complete gzip+tar archive has marker=first. Its declared extra
       // byte keeps resp.chunk() pending until after the importer has finished.
@@ -1494,6 +1517,110 @@ JSON
 
 	requests="$(curl --fail --silent "$STREAM_RECOVERY_REGISTRY/metrics" | node -e 'process.stdin.on("data", d => console.log(JSON.parse(d).tarballRequests))')"
 	assert_equal "$requests" "3"
+}
+
+@test "aube install omits query credentials from streaming-open retry diagnostics" {
+	_start_stream_recovery_registry query-stream-open-reset
+	cat >package.json <<-EOF
+		{
+		  "name": "stream-query-open-fixture",
+		  "version": "1.0.0",
+		  "dependencies": { "stream-recovery-pkg": "1.0.0" }
+		}
+	EOF
+	cat >.npmrc <<-EOF
+		registry=$STREAM_RECOVERY_REGISTRY
+		fetch-retries=1
+		fetch-retry-mintimeout=1
+		fetch-retry-maxtimeout=1
+	EOF
+
+	run aube -v install --no-frozen-lockfile
+	assert_success
+	assert_output --partial "retrying HTTP request after transport error"
+	refute_output --partial "transport-secret"
+	refute_output --partial "?token="
+	refute_output --partial "#query-fragment"
+
+	requests="$(curl --fail --silent "$STREAM_RECOVERY_REGISTRY/metrics" | node -e 'process.stdin.on("data", d => console.log(JSON.parse(d).tarballRequests))')"
+	assert_equal "$requests" "2"
+}
+
+@test "aube install omits query credentials from buffered-send retry diagnostics" {
+	_start_stream_recovery_registry query-buffered-open-reset
+	cat >package.json <<-EOF
+		{
+		  "name": "stream-query-buffered-open-fixture",
+		  "version": "1.0.0",
+		  "dependencies": { "stream-recovery-pkg": "1.0.0" }
+		}
+	EOF
+	cat >.npmrc <<-EOF
+		registry=$STREAM_RECOVERY_REGISTRY
+		fetch-retries=1
+		fetch-retry-mintimeout=1
+		fetch-retry-maxtimeout=1
+	EOF
+
+	run aube -v install --no-frozen-lockfile
+	assert_success
+	assert_output --partial "retrying HTTP request after transport error"
+	refute_output --partial "transport-secret"
+	refute_output --partial "?token="
+	refute_output --partial "#query-fragment"
+
+	requests="$(curl --fail --silent "$STREAM_RECOVERY_REGISTRY/metrics" | node -e 'process.stdin.on("data", d => console.log(JSON.parse(d).tarballRequests))')"
+	assert_equal "$requests" "2"
+}
+
+@test "aube store add omits query credentials from slow tarball diagnostics" {
+	_start_stream_recovery_registry query-slow
+	cat >package.json <<-EOF
+		{
+		  "name": "stream-query-slow-fixture",
+		  "version": "1.0.0",
+		  "dependencies": { "stream-recovery-pkg": "1.0.0" }
+		}
+	EOF
+	cat >.npmrc <<-EOF
+		registry=$STREAM_RECOVERY_REGISTRY
+		fetchMinSpeedKiBps=999999
+	EOF
+
+	run aube -v store add stream-recovery-pkg@1.0.0
+	assert_success
+	assert_output --partial "slow tarball download fell below fetchMinSpeedKiBps"
+	refute_output --partial "transport-secret"
+	refute_output --partial "?token="
+	refute_output --partial "#query-fragment"
+
+	requests="$(curl --fail --silent "$STREAM_RECOVERY_REGISTRY/metrics" | node -e 'process.stdin.on("data", d => console.log(JSON.parse(d).tarballRequests))')"
+	assert_equal "$requests" "1"
+}
+
+@test "aube install omits query credentials from terminal tarball failures" {
+	_start_stream_recovery_registry query-terminal
+	cat >package.json <<-EOF
+		{
+		  "name": "stream-query-terminal-fixture",
+		  "version": "1.0.0",
+		  "dependencies": { "stream-recovery-pkg": "1.0.0" }
+		}
+	EOF
+	cat >.npmrc <<-EOF
+		registry=$STREAM_RECOVERY_REGISTRY
+		fetch-retries=0
+	EOF
+
+	run aube -v install --no-frozen-lockfile
+	assert_failure
+	assert_output --partial "error status (HTTP 503 Service Unavailable)"
+	refute_output --partial "transport-secret"
+	refute_output --partial "?token="
+	refute_output --partial "#query-fragment"
+
+	requests="$(curl --fail --silent "$STREAM_RECOVERY_REGISTRY/metrics" | node -e 'process.stdin.on("data", d => console.log(JSON.parse(d).tarballRequests))')"
+	assert_equal "$requests" "1"
 }
 
 @test "aube fetch falls back to buffered fetch after a midstream tarball read error" {

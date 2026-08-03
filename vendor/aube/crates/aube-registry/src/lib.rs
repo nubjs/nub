@@ -950,15 +950,10 @@ impl<'de> Deserialize<'de> for FundingArrayEntry {
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum Error {
-    // reqwest's own Display appends ` for url (<url>)` rendered via
-    // `url::Url`'s Display, which serializes embedded `user:pass@`
-    // userinfo and `?token=`/`?_auth=` query auth UNREDACTED. Registry
-    // URLs legitimately carry such auth (npmrc/config), so the raw
-    // Display would leak credentials into surfaced errors and logs.
-    // Render through `redact_http_error` to scrub the URL while keeping
-    // the (redacted) host for debuggability.
-    #[error("HTTP error: {}", redact_http_error(.0))]
-    Http(#[from] reqwest::Error),
+    // reqwest's Display serializes its attached URL verbatim. Preserve only
+    // typed error details plus an already-sanitized locator instead.
+    #[error("HTTP error: {0}")]
+    Http(#[from] SafeReqwestDiagnostic),
     #[error("package not found: {0}")]
     #[diagnostic(code(ERR_AUBE_PACKAGE_NOT_FOUND))]
     NotFound(String),
@@ -1024,16 +1019,127 @@ pub enum Error {
     InvalidName(String),
 }
 
-/// Render a [`reqwest::Error`] for display with any embedded registry
-/// URL credential-scrubbed.
-///
-/// reqwest's `Display` appends ` for url (<url>)` with the full URL —
-/// including `user:pass@` userinfo and `token`/`auth`/`api_key` query
-/// params — verbatim. When the error carries a URL we substitute its
-/// [`redact_url`](aube_util::url::redact_url) form for the raw rendering
-/// so credentials never reach an error message or log; the redacted host
-/// is preserved for debuggability. Errors with no attached URL render
-/// unchanged (reqwest's Display emits no URL in that case).
+/// Preserve a registry locator's host and path while stripping all query and
+/// fragment data. Registry URLs may carry credentials in either userinfo or
+/// arbitrary query parameters, neither of which belongs in diagnostics.
+pub(crate) fn tarball_display_url(url: &str) -> String {
+    let redacted = aube_util::url::redact_url(url);
+    let display_end = redacted.find(['?', '#']).unwrap_or(redacted.len());
+    redacted[..display_end].to_owned()
+}
+
+/// URL-free, typed description of a reqwest error for user-facing diagnostics
+/// and structured retry fields. Never retains or renders the raw request URL.
+#[derive(Debug, thiserror::Error)]
+#[error("{kind}{status}{locator}")]
+pub struct SafeReqwestDiagnostic {
+    kind: SafeReqwestErrorKind,
+    status: SafeReqwestStatus,
+    locator: SafeReqwestLocator,
+}
+
+#[derive(Debug)]
+enum SafeReqwestErrorKind {
+    Timeout,
+    Connect,
+    Request,
+    Body,
+    Decode,
+    Redirect,
+    Status,
+    Other,
+}
+
+impl std::fmt::Display for SafeReqwestErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Timeout => "request timed out",
+            Self::Connect => "connection failed",
+            Self::Request => "request failed",
+            Self::Body => "response body read failed",
+            Self::Decode => "response decode failed",
+            Self::Redirect => "redirect failed",
+            Self::Status => "request returned an error status",
+            Self::Other => "HTTP transport failed",
+        })
+    }
+}
+
+#[derive(Debug)]
+struct SafeReqwestStatus(Option<reqwest::StatusCode>);
+
+impl std::fmt::Display for SafeReqwestStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(status) => write!(f, " (HTTP {status})"),
+            None => Ok(()),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SafeReqwestLocator(Option<String>);
+
+impl std::fmt::Display for SafeReqwestLocator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(locator) => write!(f, " for {locator}"),
+            None => Ok(()),
+        }
+    }
+}
+
+impl SafeReqwestDiagnostic {
+    pub(crate) fn from_reqwest(error: &reqwest::Error) -> Self {
+        let kind = if error.is_timeout() {
+            SafeReqwestErrorKind::Timeout
+        } else if error.is_connect() {
+            SafeReqwestErrorKind::Connect
+        } else if error.is_request() {
+            SafeReqwestErrorKind::Request
+        } else if error.is_body() {
+            SafeReqwestErrorKind::Body
+        } else if error.is_decode() {
+            SafeReqwestErrorKind::Decode
+        } else if error.is_redirect() {
+            SafeReqwestErrorKind::Redirect
+        } else if error.is_status() {
+            SafeReqwestErrorKind::Status
+        } else {
+            SafeReqwestErrorKind::Other
+        };
+        Self {
+            kind,
+            status: SafeReqwestStatus(error.status()),
+            locator: SafeReqwestLocator(error.url().map(|url| tarball_display_url(url.as_str()))),
+        }
+    }
+
+    pub(crate) fn is_timeout(&self) -> bool {
+        matches!(self.kind, SafeReqwestErrorKind::Timeout)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_request(&self) -> bool {
+        matches!(
+            self.kind,
+            SafeReqwestErrorKind::Timeout
+                | SafeReqwestErrorKind::Connect
+                | SafeReqwestErrorKind::Request
+        )
+    }
+
+    pub(crate) fn status(&self) -> Option<reqwest::StatusCode> {
+        self.status.0
+    }
+}
+
+impl From<reqwest::Error> for SafeReqwestDiagnostic {
+    fn from(error: reqwest::Error) -> Self {
+        Self::from_reqwest(&error)
+    }
+}
+
 /// Render the locator clause of [`Error::Decode`], or nothing when the
 /// decode gave us neither an excerpt nor a path. Kept out of the
 /// `#[error]` format string so an absent locator doesn't leave a
@@ -1046,17 +1152,9 @@ fn render_locator(locator: &str) -> String {
     }
 }
 
-fn redact_http_error(e: &reqwest::Error) -> String {
-    match e.url() {
-        Some(url) => {
-            let raw = url.as_str();
-            let safe = aube_util::url::redact_url(raw);
-            // reqwest interpolates the URL via `url::Url`'s Display,
-            // which equals `Url::as_str()`, so a plain substring swap on
-            // the rendered message reliably replaces the leaked form.
-            e.to_string().replace(raw, &safe)
-        }
-        None => e.to_string(),
+impl From<reqwest::Error> for Error {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Http(error.into())
     }
 }
 
@@ -1137,12 +1235,9 @@ mod tests {
     }
 
     /// A registry URL carrying both `user:pass@` userinfo and a
-    /// `?token=` query param must never appear UNREDACTED in a surfaced
-    /// HTTP error — reqwest's raw Display leaks both, so `Error::Http`'s
-    /// rendering routes through `redact_http_error`. We build a real
-    /// `reqwest::Error` against an unreachable port (a connect failure
-    /// that reqwest tags with the request URL) and assert the rendered
-    /// message hides every credential while keeping the host.
+    /// `?token=` query param must never reach a surfaced HTTP error.
+    /// The typed diagnostic stores only kind, status, and a query-free
+    /// host/path locator; it never retains reqwest's raw URL.
     #[tokio::test]
     async fn http_error_display_redacts_url_credentials() {
         let url = "https://alice:s3cr3t@127.0.0.1:1/foo?token=abc123";
@@ -1156,7 +1251,7 @@ mod tests {
             "precondition: reqwest must tag the error with the request URL"
         );
 
-        let err = Error::Http(reqwest_err);
+        let err = Error::from(reqwest_err);
         let rendered = err.to_string();
 
         assert!(
@@ -1170,6 +1265,14 @@ mod tests {
         assert!(
             !rendered.contains("abc123"),
             "token query param leaked in error display: {rendered}"
+        );
+        assert!(
+            !rendered.contains("?token="),
+            "query parameter leaked in error display: {rendered}"
+        );
+        assert!(
+            rendered.contains("/foo"),
+            "safe path should remain for debuggability: {rendered}"
         );
         assert!(
             rendered.contains("127.0.0.1"),

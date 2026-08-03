@@ -125,7 +125,7 @@ pub(super) fn warn_slow_tarball(
     // speed (KiB/s) = bytes / 1024 / seconds = bytes * 1000 / elapsed_ms / 1024
     let kibps = ((len as u64).saturating_mul(1000)) / elapsed_ms / 1024;
     if kibps < threshold_kibps {
-        let safe_url = aube_util::url::redact_url(url);
+        let safe_url = crate::tarball_display_url(url);
         tracing::warn!(
             kibps,
             threshold_kibps,

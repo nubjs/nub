@@ -4,7 +4,7 @@ use super::body::{
 };
 use super::cache::cached_is_fresh;
 use super::{RegistryClient, encoded_name};
-use crate::{Error, NetworkMode};
+use crate::{Error, NetworkMode, SafeReqwestDiagnostic};
 
 impl RegistryClient {
     /// The registry URL a package is fetched (and cached) against. A pnpm
@@ -497,11 +497,12 @@ impl RegistryClient {
                                 timeout_retries += 1;
                             }
                             let wait = self.fetch_policy.backoff_for_attempt(attempt + 1);
+                            let error = err.to_string();
                             tracing::warn!(
                                 attempt = attempt + 1,
                                 max_attempts,
                                 backoff_ms = wait.as_millis() as u64,
-                                error = %err,
+                                error = %error,
                                 label,
                                 code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_BODY_READ,
                                 "retrying HTTP request after response body read error",
@@ -514,23 +515,24 @@ impl RegistryClient {
                 Err(err) if !is_last => {
                     if err.is_timeout() {
                         if timeout_retries >= TIMEOUT_RETRY_CAP {
-                            return Err(Error::Http(err));
+                            return Err(err.into());
                         }
                         timeout_retries += 1;
                     }
                     let wait = self.fetch_policy.backoff_for_attempt(attempt + 1);
+                    let error = SafeReqwestDiagnostic::from_reqwest(&err);
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts,
                         backoff_ms = wait.as_millis() as u64,
-                        error = %err,
+                        error = %error,
                         label,
                         code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSPORT,
                         "retrying HTTP request after transport error",
                     );
                     tokio::time::sleep(wait).await;
                 }
-                Err(err) => return Err(Error::Http(err)),
+                Err(err) => return Err(err.into()),
             }
         }
         unreachable!("retry loop exited without returning; max_attempts was {max_attempts}")
@@ -579,11 +581,12 @@ impl RegistryClient {
                                 timeout_retries += 1;
                             }
                             let wait = self.fetch_policy.backoff_for_attempt(attempt + 1);
+                            let error = err.to_string();
                             tracing::warn!(
                                 attempt = attempt + 1,
                                 max_attempts,
                                 backoff_ms = wait.as_millis() as u64,
-                                error = %err,
+                                error = %error,
                                 label,
                                 code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_BODY_READ,
                                 "retrying HTTP request after response body read error",
@@ -596,23 +599,24 @@ impl RegistryClient {
                 Err(err) if !is_last => {
                     if err.is_timeout() {
                         if timeout_retries >= TIMEOUT_RETRY_CAP {
-                            return Err(Error::Http(err));
+                            return Err(err.into());
                         }
                         timeout_retries += 1;
                     }
                     let wait = self.fetch_policy.backoff_for_attempt(attempt + 1);
+                    let error = SafeReqwestDiagnostic::from_reqwest(&err);
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts,
                         backoff_ms = wait.as_millis() as u64,
-                        error = %err,
+                        error = %error,
                         label,
                         code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSPORT,
                         "retrying HTTP request after transport error",
                     );
                     tokio::time::sleep(wait).await;
                 }
-                Err(err) => return Err(Error::Http(err)),
+                Err(err) => return Err(err.into()),
             }
         }
         unreachable!("retry loop exited without returning; max_attempts was {max_attempts}")

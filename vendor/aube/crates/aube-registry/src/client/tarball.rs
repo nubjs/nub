@@ -2,16 +2,7 @@ use super::RegistryClient;
 use super::body::{
     TIMEOUT_RETRY_CAP, check_body_cap, is_retriable_status, retry_after_from, warn_slow_tarball,
 };
-use crate::{Error, NetworkMode};
-
-/// Render a tarball locator for observability without carrying arbitrary
-/// query data into retry fields. The raw URL stays at the request/auth
-/// boundary; error rendering still uses the general credential redactor.
-fn tarball_display_url(url: &str) -> String {
-    let redacted = aube_util::url::redact_url(url);
-    let display_end = redacted.find(['?', '#']).unwrap_or(redacted.len());
-    redacted[..display_end].to_owned()
-}
+use crate::{Error, NetworkMode, SafeReqwestDiagnostic, tarball_display_url};
 
 fn tarball_label(url: &str) -> String {
     format!("tarball {}", tarball_display_url(url))
@@ -23,7 +14,7 @@ fn validate_tarball_url(client: &RegistryClient, url: &str) -> Result<(), Error>
     // cannot reach `file:///` (local file disclosure) or the
     // ssh / git transports inside reqwest. Belt-and-suspenders
     // against transport-layer regressions.
-    let safe_url = aube_util::url::redact_url(url);
+    let safe_url = tarball_display_url(url);
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| Error::Io(std::io::Error::other(format!("invalid tarball url: {e}"))))?;
     match parsed.scheme() {
@@ -181,23 +172,24 @@ impl RegistryClient {
                 Err(err) if !is_last => {
                     if err.is_timeout() {
                         if timeout_retries >= TIMEOUT_RETRY_CAP {
-                            return Err(Error::Http(err));
+                            return Err(err.into());
                         }
                         timeout_retries += 1;
                     }
                     let wait = self.fetch_policy.backoff_for_attempt(attempt + 1);
+                    let error = SafeReqwestDiagnostic::from_reqwest(&err);
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts,
                         backoff_ms = wait.as_millis() as u64,
-                        error = %err,
+                        error = %error,
                         label = label.as_str(),
                         code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSPORT,
                         "retrying HTTP request after transport error",
                     );
                     tokio::time::sleep(wait).await;
                 }
-                Err(err) => return Err(Error::Http(err)),
+                Err(err) => return Err(err.into()),
             }
         }
         // FetchPolicy::retries is `u32`, so `max_attempts =
