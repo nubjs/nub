@@ -2448,7 +2448,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // without spawning the scanner.
             let prior_lockfile = lockfile_pre_parse.as_ref().map(|(g, _)| g);
             let fresh_resolution =
-                super::add_supply_chain::lockfile_has_new_picks(&cwd, prior_lockfile, &graph);
+                super::add_supply_chain::lockfile_has_new_picks(&cwd, prior_lockfile, &graph)?;
             let osv_settings = resolve_osv_routing_settings(&cwd);
             // Fire the OSV gate as a concurrent task that overlaps the
             // tail of the in-flight tarball downloads (`fetch_handle`,
