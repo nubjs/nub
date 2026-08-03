@@ -59,7 +59,16 @@ fn run(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
     cmd.args(args)
         .current_dir(dir)
         .env("XDG_DATA_HOME", tmp("xdg-data"))
-        .env("XDG_CACHE_HOME", tmp("xdg-cache"));
+        .env("XDG_CACHE_HOME", tmp("xdg-cache"))
+        // Both of these make the gate return before it verifies anything, so an
+        // inherited one turns every assertion below into a silent no-op that
+        // still reports as a failure. `nub` sets `__NUB_DEPS_CHECKED` for its
+        // own children by design, so `cargo test` launched from inside any
+        // nub-spawned shell inherits it and these tests fail for a reason that
+        // has nothing to do with the code under test. Removed BEFORE `envs` is
+        // applied, so a case that deliberately sets either one still can.
+        .env_remove("__NUB_DEPS_CHECKED")
+        .env_remove("npm_lifecycle_event");
     for (k, v) in envs {
         cmd.env(k, v);
     }
