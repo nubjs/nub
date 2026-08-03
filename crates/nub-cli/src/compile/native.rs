@@ -685,9 +685,14 @@ impl NativeAddons {
         let mut files = BTreeMap::<String, (Vec<u8>, bool)>::new();
         let mut summaries = BTreeSet::new();
         for root in self.unbundled_roots() {
-            // The tree root the payload paths are relative to: the directory
-            // holding the `node_modules` this package was installed into, so a
-            // package lands at exactly the path Node will look for it at.
+            // Canonicalized so the anchor is in the same form as the dependency
+            // paths measured against it, which are canonicalized during the walk.
+            // Mixing the two forms makes every `strip_prefix` fail and every
+            // package nest instead of keeping its installed path. It agrees today
+            // on Unix because the bundler already hands back a resolved id;
+            // Windows canonicalizes to a `\\?\` verbatim prefix that a plain
+            // path never has, so the two would never match there.
+            let root = std::fs::canonicalize(&root).unwrap_or(root);
             let Some(anchor) = install_tree_root(&root) else {
                 continue;
             };
