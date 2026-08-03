@@ -68,13 +68,15 @@ fn find_project_root_with_home(start: &Path, home: Option<&Path>) -> Option<Path
     })
 }
 
-/// Resolve home dir for the find_project_root walk boundary. On Unix
-/// reads HOME. On Windows falls back to USERPROFILE since HOME is
-/// typically unset. Returns None if neither is set, which means the
-/// walk falls back to old unbounded behavior. Not ideal, but better
-/// than panicking, and CI runners always set one of them.
+/// Resolve home dir for the find_project_root walk boundary. On Unix reads
+/// HOME. On Windows falls back to USERPROFILE since HOME is typically unset.
+/// Canonicalizing an existing path keeps the comparison aligned with
+/// `current_dir()` on platforms where `/var` or a home symlink has a distinct
+/// physical spelling. Returns None if neither is set, which means the walk
+/// falls back to old unbounded behavior. Not ideal, but better than panicking,
+/// and CI runners always set one of them.
 fn home_stop_boundary() -> Option<PathBuf> {
-    aube_util::env::home_dir()
+    aube_util::env::home_dir().map(|home| std::fs::canonicalize(&home).unwrap_or(home))
 }
 
 /// Walk ancestors without selecting `$HOME` when the invocation started below
