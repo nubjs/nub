@@ -5604,13 +5604,36 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     node_args.push(file.to_string());
     node_args.extend(args.iter().cloned());
 
-    let mut cmd = std::process::Command::new(node.path.as_str());
+    // Watch assembles its own command instead of going through `spawn_node`, so
+    // it must put the loader in front of Node itself. Detection above has already
+    // stood nub's own cascade down; without this the watched process gets no
+    // environment at all, silently — measured, every variable `undefined`.
+    //
+    // The loader resolves once, at watcher startup, and Node's `--watch`
+    // supervisor re-execs the child inside it. Values therefore freeze across
+    // restarts, which is the trade-off this path already makes for every
+    // expansion-dependent var it injects.
+    let mut cmd = match env_owner
+        .as_ref()
+        .and_then(crate::env_owner::EnvOwner::spawn_target)
+    {
+        Some((loader, schema_dir)) => {
+            let mut cmd = std::process::Command::new(loader);
+            cmd.arg("run")
+                .arg("--path")
+                .arg(schema_dir)
+                .arg("--")
+                .arg(node.path.as_str());
+            cmd.env(crate::env_owner::WRAPPED_ENV, "1");
+            cmd
+        }
+        None => std::process::Command::new(node.path.as_str()),
+    };
     cmd.args(&node_args)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
     cmd.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
-    // Stamp the env-owner markers wherever the adapter is injected — without them
     let mut launcher_owned_env_keys = vec![crate::project_config::RUNTIME_CONFIG_ENV.to_string()];
     if nub_preload_token.is_some() {
         // Watch assembles NODE_OPTIONS directly instead of using AugmentationEnv,

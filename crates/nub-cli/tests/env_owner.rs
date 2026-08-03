@@ -231,6 +231,65 @@ fn a_workspace_member_points_the_loader_at_the_root_schema() {
 
 #[cfg(unix)]
 #[test]
+fn nub_watch_also_puts_the_loader_in_front_of_node() {
+    // `nub watch` assembles its own `node --watch` command instead of going
+    // through `spawn_node`, so it does not inherit the wrap — but detection has
+    // already stood nub's own cascade down by the time it spawns. That
+    // combination has now produced a silent, total loss of environment twice:
+    // every variable arrives `undefined`, with no diagnostic anywhere.
+    let dir = project(&[(".env.schema", "# ---\nA=1\n")]);
+    let tally = dir.path().join("tally");
+    install_stub_loader(dir.path(), &tally);
+
+    let mut child = Command::new(nub_binary())
+        .args(["watch", "probe.mjs"])
+        .current_dir(dir.path())
+        .env("PATH", which_node_dir())
+        .env_remove("NODE_OPTIONS")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn nub watch");
+
+    // The watcher never exits on its own, so read the first program run and kill.
+    let stdout = child.stdout.take().expect("piped stdout");
+    let first_line = std::thread::spawn(move || {
+        use std::io::BufRead;
+        std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+            .find(|line| line.contains("FROM_LOADER"))
+    });
+    let line = wait_for(first_line, std::time::Duration::from_secs(60));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let line = line.expect("nub watch printed no probe output within 60s");
+    assert!(
+        line.contains(r#""FROM_LOADER":"yes""#),
+        "nub watch must run Node behind the loader; got: {line}"
+    );
+}
+
+/// Join a reader thread with a deadline, so a hung watcher fails the test rather
+/// than the suite.
+#[cfg(unix)]
+fn wait_for<T: Send + 'static>(
+    handle: std::thread::JoinHandle<Option<T>>,
+    timeout: std::time::Duration,
+) -> Option<T> {
+    let deadline = std::time::Instant::now() + timeout;
+    while !handle.is_finished() {
+        if std::time::Instant::now() > deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    handle.join().ok().flatten()
+}
+
+#[cfg(unix)]
+#[test]
 fn the_node_command_reaches_the_loader_intact() {
     // nub's augmentation has to survive being handed through the loader, or
     // TypeScript and the module hooks quietly stop working behind a schema.
