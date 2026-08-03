@@ -58,6 +58,15 @@ teardown() {
 	assert_file_contains "$HOME/.npmrc" "//r.example.com/:_authToken=tok123"
 }
 
+@test "aube login hides configured registry userinfo query and fragment in output" {
+	AUBE_AUTH_TOKEN=login-token run aube login --registry='https://login-user:login-password@r.example.com/npm?token=prefix@login-query#login-fragment'
+	assert_success
+	assert_output --partial 'Logged in to https://***@r.example.com/npm'
+	for secret in login-user login-password login-query login-fragment '?token=' '#'; do
+		refute_output --partial "$secret"
+	done
+}
+
 @test "aube login writes scope mapping alongside token" {
 	AUBE_AUTH_TOKEN=scoped run aube login \
 		--registry=https://myorg.example.com/ \
