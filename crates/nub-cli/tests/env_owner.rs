@@ -380,8 +380,39 @@ fn a_schema_without_the_loader_keeps_loading_and_warns() {
         run.stderr
     );
     assert!(
-        run.stderr.contains("@env-spec"),
-        "the user must be told the schema was not applied; stderr was: {}",
+        run.stderr.contains("nub add -D varlock"),
+        "the user must be told the schema was not applied, and how to fix it — \
+         as a DEV dependency, which is what the loader's own docs prescribe; \
+         stderr was: {}",
+        run.stderr
+    );
+}
+
+#[test]
+fn a_project_using_a_rival_schema_tool_is_not_warned_at() {
+    // `dotenv-extended` claims this filename too. A project that declares it has
+    // a tool applying its schema already, so telling it the schema "was not
+    // applied" is false, and recommending another package is noise. The file
+    // sniff cannot settle this one: the schema here IS @env-spec shaped.
+    let dir = project(&[
+        (
+            "package.json",
+            r#"{"name":"f","version":"1.0.0","devDependencies":{"dotenv-extended":"^2.9.0"}}"#,
+        ),
+        (".env", "FROM_DOTENV=yes\n"),
+        (".env.schema", "# ---\nA=1\n"),
+    ]);
+    let run = run(dir.path());
+    assert!(
+        !run.stderr.contains("varlock"),
+        "a project that declares a rival schema tool must not be advertised at; \
+         stderr was: {}",
+        run.stderr
+    );
+    assert_eq!(
+        run.var("FROM_DOTENV").as_deref(),
+        Some("yes"),
+        "and nub must still load its own .env files. stderr: {}",
         run.stderr
     );
 }

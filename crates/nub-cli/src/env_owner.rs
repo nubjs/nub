@@ -94,18 +94,49 @@ impl EnvOwner {
 
     /// Diagnostic for a schema whose loader is not installed.
     ///
-    /// Gated on the file actually looking like `@env-spec`. Warning on the
-    /// filename alone told `dotenv-extended` projects their schema "was not
-    /// applied" while another tool was applying it correctly, and recommended a
-    /// package they had never asked for.
+    /// Two independent gates, because the filename is contested and a wrong
+    /// warning tells a project its config is broken when it is not:
+    ///
+    /// 1. the file must actually look like `@env-spec`, and
+    /// 2. no other tool that claims this filename may be a declared dependency.
+    ///
+    /// Warning on the filename alone told `dotenv-extended` projects their schema
+    /// "was not applied" while that tool was applying it correctly, and
+    /// recommended a package they had never asked for.
     pub(crate) fn missing_loader_warning(&self) -> Option<String> {
-        (!self.wrapped && self.cli.is_none() && self.schema_looks_like_env_spec()).then(|| {
+        let worth_saying = !self.wrapped
+            && self.cli.is_none()
+            && self.schema_looks_like_env_spec()
+            && !self.rival_schema_tool_declared();
+        worth_saying.then(|| {
             format!(
-                "nub: found an @env-spec {SCHEMA_FILE} but {LOADER_PACKAGE} is not installed, so \
-                 the schema was not applied.\n      nub loaded .env files as usual. To use the \
-                 schema: nub add {LOADER_PACKAGE}"
+                "nub: {SCHEMA_FILE} needs {LOADER_PACKAGE}, which isn't installed; loaded .env \
+                 files instead. Run `nub add -D {LOADER_PACKAGE}`."
             )
         })
+    }
+
+    /// Whether a package that also claims `.env.schema` is declared here.
+    ///
+    /// Deliberately a list of ONE. The bar is a package popular enough that its
+    /// users meeting this warning is likely — `dotenv-extended` (~44k weekly
+    /// downloads) has defaulted to this filename for its own incompatible format
+    /// since 2016, which is the whole reason the filename is contested. Adding
+    /// long-tail names would trade a real diagnostic for silence in projects that
+    /// genuinely want the schema applied.
+    fn rival_schema_tool_declared(&self) -> bool {
+        const RIVAL_PACKAGES: [&str; 1] = ["dotenv-extended"];
+
+        let Ok(text) = std::fs::read_to_string(self.root.join("package.json")) else {
+            return false;
+        };
+        let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return false;
+        };
+        ["dependencies", "devDependencies", "optionalDependencies"]
+            .iter()
+            .filter_map(|field| manifest.get(field).and_then(serde_json::Value::as_object))
+            .any(|deps| RIVAL_PACKAGES.iter().any(|rival| deps.contains_key(*rival)))
     }
 
     /// Whether the schema carries `@env-spec`'s own syntax: a `# ---` header
