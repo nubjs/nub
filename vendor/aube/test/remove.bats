@@ -171,3 +171,37 @@ EOF
 	run cat aube-lock.yaml
 	refute_output --partial 'is-even'
 }
+
+@test "aube recursive remove validates every selected config before mutation" {
+	cat >package.json <<-'JSON'
+		{ "name": "remove-preflight-root", "version": "1.0.0", "private": true }
+	JSON
+	cat >pnpm-workspace.yaml <<-'YAML'
+		packages:
+		  - packages/*
+	YAML
+	mkdir -p packages/a packages/b
+	for project in a b; do
+		cat >"packages/$project/package.json" <<-JSON
+			{
+			  "name": "remove-preflight-$project",
+			  "version": "1.0.0",
+			  "dependencies": { "is-odd": "3.0.1" },
+			  "pnpm": { "allowBuilds": { "is-odd": true } }
+			}
+		JSON
+		cp "packages/$project/package.json" "packages/$project/package.before.json"
+	done
+	printf '%s\n' '@blocked:registry=ftp://workspace-route.invalid/' >packages/b/.npmrc
+
+	run aube -r remove is-odd
+	assert_failure
+	assert_output --partial 'ERR_AUBE_INVALID_REGISTRY_URL'
+
+	# A later selected member's malformed config must stop the whole command
+	# before the earlier member loses either its dependency or its sidecar entry.
+	for project in a b; do
+		run cmp "packages/$project/package.before.json" "packages/$project/package.json"
+		assert_success
+	done
+}

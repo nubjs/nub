@@ -186,8 +186,9 @@ async fn run_filtered(
     filter: &aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<()> {
     let cwd = crate::dirs::cwd()?;
-    let (_root, matched) = super::select_workspace_packages(&cwd, filter, "remove")?;
-    let result = async {
+    let (workspace_root, matched) = super::select_workspace_packages(&cwd, filter, "remove")?;
+    preflight_selected_workspace_configs(&workspace_root, &matched)?;
+    let result: miette::Result<()> = async {
         for pkg in matched {
             // Match pnpm's recursive-remove semantics: silently skip
             // projects that don't declare any of the named packages,
@@ -216,6 +217,25 @@ async fn run_filtered(
     }
     .await;
     super::finish_filtered_workspace(&cwd, result)
+}
+
+/// Validate the shared workspace config and every selected member before any
+/// manifest/sidecar mutation or chained install fanout begins.
+fn preflight_selected_workspace_configs(
+    workspace_root: &std::path::Path,
+    matched: &[aube_workspace::selector::SelectedPackage],
+) -> miette::Result<()> {
+    // The chained installs resolve the shared workspace state from the root,
+    // even when the filter excludes that root.
+    super::load_npm_config(workspace_root)?;
+
+    for pkg in matched {
+        let project_root = crate::dirs::project_root_or_cwd_from(&pkg.dir);
+        if project_root != workspace_root {
+            super::load_npm_config(&project_root)?;
+        }
+    }
+    Ok(())
 }
 
 fn manifest_present_deps(
