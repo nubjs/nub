@@ -107,6 +107,42 @@ fn install_tree_root(package: &Path) -> Option<PathBuf> {
 
 /// Copy one package directory into the payload at `rel`, skipping the nested
 /// `node_modules` each package is materialised through on its own account.
+/// A payload path: relative, `/`-separated, whatever the host uses.
+fn payload_path(rel: &Path) -> String {
+    rel.to_string_lossy().replace('\\', "/")
+}
+
+/// Where a dependency has to sit for its dependent to find it.
+///
+/// Node resolves a bare specifier by walking up from the importer looking for
+/// `node_modules/<name>`, so a dependency is only reachable from its dependent
+/// when its path is `<some ancestor of the dependent>/node_modules/<name>`.
+///
+/// A flat install already satisfies that — `node_modules/detect-libc` is
+/// reachable from `node_modules/sharp` — so its packages keep the exact paths
+/// they occupy on disk, which is what makes `__dirname` and sibling lookups work.
+///
+/// An isolated install does not. There `node_modules/sharp` is a symlink and the
+/// real package sits at `node_modules/.store/sharp@0.35.3/node_modules/sharp`
+/// with its dependencies beside it, so the dependency's own path is reachable
+/// only from inside `.store/` — not from the symlink the bundle resolves through.
+/// Since the payload cannot carry a symlink (the launcher rejects one in its
+/// extraction as tampering), such a dependency is nested directly under its
+/// dependent, which resolves from anywhere the dependent ends up.
+fn placement_for(dependent: &str, dep_real: Option<&str>, name: &str) -> String {
+    let reachable = dep_real.is_some_and(|dep| {
+        let Some(base) = dep.strip_suffix(&format!("node_modules/{name}")) else {
+            return false;
+        };
+        let base = base.trim_end_matches('/');
+        base.is_empty() || dependent == base || dependent.starts_with(&format!("{base}/"))
+    });
+    match (reachable, dep_real) {
+        (true, Some(dep)) => dep.to_string(),
+        _ => format!("{dependent}/node_modules/{name}"),
+    }
+}
+
 /// Whether this tree holds an addon built against the target's own C library.
 ///
 /// Gates the libc check, which would otherwise be a regression rather than a fix.
@@ -375,16 +411,20 @@ impl NativeAddons {
         anchor: &Path,
         files: &mut BTreeMap<String, (Vec<u8>, bool)>,
     ) -> Result<()> {
-        let mut queue = vec![root.to_path_buf()];
+        let Ok(root_rel) = root.strip_prefix(anchor) else {
+            return Ok(());
+        };
+        // Each entry is a package's real directory paired with where it lands in
+        // the payload. The two diverge under an isolated install, where the real
+        // directory is inside `.store/` and the path Node reaches it by is a
+        // symlink — see `placement_for`.
+        let mut queue = vec![(root.to_path_buf(), payload_path(root_rel))];
         let mut seen = BTreeSet::new();
-        while let Some(dir) = queue.pop() {
-            if !seen.insert(dir.clone()) {
+        while let Some((dir, rel)) = queue.pop() {
+            if !seen.insert(rel.clone()) {
                 continue;
             }
-            let Ok(rel) = dir.strip_prefix(anchor) else {
-                continue;
-            };
-            copy_package_tree(&dir, rel, &self.target, files)?;
+            copy_package_tree(&dir, Path::new(&rel), &self.target, files)?;
 
             let Ok(text) = std::fs::read_to_string(dir.join("package.json")) else {
                 continue;
@@ -397,9 +437,18 @@ impl NativeAddons {
                     continue;
                 };
                 for name in deps.keys() {
-                    if let Some(next) = resolve_package_root(&dir.join("x"), name) {
-                        queue.push(next);
-                    }
+                    // Resolved from the package's REAL directory. Under an
+                    // isolated install a dependency lives beside its dependent
+                    // inside `.store/`, which is unreachable by walking up from
+                    // the symlink the dependent was found through.
+                    let Some(next) = std::fs::canonicalize(&dir)
+                        .ok()
+                        .and_then(|real| resolve_package_root(&real.join("x"), name))
+                    else {
+                        continue;
+                    };
+                    let real_rel = next.strip_prefix(anchor).ok().map(payload_path);
+                    queue.push((next, placement_for(&rel, real_rel.as_deref(), name)));
                 }
             }
         }
@@ -1904,6 +1953,64 @@ mod tests {
         assert!(
             !has_libc_match(unmarked.path(), &gnu_target),
             "an addon we cannot classify must not license dropping its neighbours"
+        );
+    }
+
+    /// A dependency lands where its dependent can actually resolve it.
+    ///
+    /// Two install shapes, and only one of them puts a dependency somewhere the
+    /// dependent reaches by walking up. Getting this wrong produced a binary that
+    /// compiled clean and died on `Cannot find module 'detect-libc'`, because
+    /// sharp shipped without the dependencies it was installed with.
+    #[test]
+    fn a_dependency_lands_where_its_dependent_can_resolve_it() {
+        // Flat install: already reachable, so the package keeps its own path.
+        assert_eq!(
+            placement_for(
+                "node_modules/sharp",
+                Some("node_modules/detect-libc"),
+                "detect-libc"
+            ),
+            "node_modules/detect-libc",
+            "a flat install is already correct — do not move it"
+        );
+
+        // Isolated install: the real package is inside .store/ with its
+        // dependencies beside it, reachable only from within .store/ and not from
+        // the symlink the bundle resolved through.
+        assert_eq!(
+            placement_for(
+                "node_modules/sharp",
+                Some("node_modules/.store/sharp@0.35.3/node_modules/detect-libc"),
+                "detect-libc"
+            ),
+            "node_modules/sharp/node_modules/detect-libc",
+            "unreachable through the symlink, so it nests under its dependent"
+        );
+
+        // Nested under a dependent that is itself nested, and the case where the
+        // dependency could not be located at all.
+        assert_eq!(
+            placement_for("node_modules/a/node_modules/b", None, "c"),
+            "node_modules/a/node_modules/b/node_modules/c"
+        );
+
+        // Reachable from a deeper dependent, because the base is an ancestor.
+        assert_eq!(
+            placement_for(
+                "node_modules/a/node_modules/b",
+                Some("node_modules/a/node_modules/c"),
+                "c"
+            ),
+            "node_modules/a/node_modules/c",
+            "an ancestor's node_modules is on the dependent's own lookup path"
+        );
+
+        // A sibling's private tree is NOT on the lookup path, so it must nest.
+        assert_eq!(
+            placement_for("node_modules/a", Some("node_modules/b/node_modules/c"), "c"),
+            "node_modules/a/node_modules/c",
+            "a sibling's nested copy is unreachable from here"
         );
     }
 
