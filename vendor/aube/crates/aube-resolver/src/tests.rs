@@ -17,7 +17,9 @@ fn no_match_help_renders_context() {
     let help = err.help().expect("help set").to_string();
     assert!(help.contains("importer: packages/app"));
     assert!(help.contains("chain: parent-pkg@1.2.3 > bisection"));
-    assert!(help.contains("original spec: `catalog:evens`"));
+    assert!(help.contains("original spec: `<invalid registry URL>`"));
+    assert!(help.contains("rewritten to `^9.9.9`"));
+    assert!(!help.contains("catalog:evens"));
     assert!(help.contains("available versions: 1.0.1, 1.0.0, 0.1.0"));
 }
 
