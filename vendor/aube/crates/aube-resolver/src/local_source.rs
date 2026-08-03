@@ -398,6 +398,14 @@ fn read_git_package_manifest(
     ))
 }
 
+/// A lazy HTTP-client factory failure is a local prerequisite error, not an
+/// indication that the hosted archive is unavailable. Retrying through `git`
+/// would hide the actionable configuration problem and can invoke credential
+/// helpers unnecessarily.
+fn codeload_fetch_failure_is_terminal(error: &aube_registry::Error) -> bool {
+    matches!(error, aube_registry::Error::HttpClientInitialization(_))
+}
+
 /// Turn a raw `GitSource` (committish parsed from the user's
 /// specifier, empty `resolved`) into a fully-resolved one by either
 /// fetching a hosted-tarball over HTTPS (github / gitlab / bitbucket
@@ -590,6 +598,9 @@ pub(crate) async fn resolve_git_source(
                         );
                     }
                 }
+            }
+            Err(e) if codeload_fetch_failure_is_terminal(&e) => {
+                return Err(Error::Registry(name.to_string(), e.to_string()));
             }
             Err(e) => {
                 // Codeload 404s on private repos (it doesn't accept
@@ -957,6 +968,33 @@ mod hosted_git_local_source_tests {
             }
             other => panic!("expected Git, got {other:?}"),
         }
+    }
+}
+#[cfg(test)]
+mod codeload_failure_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn client_initialization_failure_does_not_fall_back_to_git() {
+        let error = aube_registry::Error::HttpClientInitialization(Arc::new(
+            aube_registry::Error::Io(std::io::Error::other("test client factory failure")),
+        ));
+
+        assert!(
+            codeload_fetch_failure_is_terminal(&error),
+            "client initialization is a local prerequisite, never a clone fallback"
+        );
+    }
+
+    #[test]
+    fn ordinary_codeload_status_failure_still_falls_back_to_git() {
+        let error = aube_registry::Error::NotFound("codeload archive".to_string());
+
+        assert!(
+            !codeload_fetch_failure_is_terminal(&error),
+            "an unavailable archive must retain the git fallback"
+        );
     }
 }
 

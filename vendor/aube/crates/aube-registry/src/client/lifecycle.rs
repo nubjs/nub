@@ -158,6 +158,17 @@ impl RegistryClient {
         )
     }
 
+    #[cfg(test)]
+    pub(super) fn from_config_with_tarball_http_factory(
+        config: NpmConfig,
+        fetch_policy: FetchPolicy,
+        factory: impl FnOnce() -> Result<reqwest::Client, crate::Error> + Send + 'static,
+    ) -> Self {
+        let mut client = Self::from_config_with_policy(config, fetch_policy);
+        client.http_tarball = LazyHttpClient::new(factory);
+        client
+    }
+
     /// Return (and lazily insert) the per-name mutex from
     /// `packument_in_flight`. Held in a `Mutex<FxMap>`: the std lock
     /// is only held for the find-or-insert, not for the actual network
@@ -243,11 +254,13 @@ impl Default for RegistryClient {
 #[cfg(test)]
 mod tests {
     use super::RegistryClient;
-    use crate::config::NpmConfig;
+    use crate::config::{FetchPolicy, NpmConfig};
     use crate::{Error, Packument};
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn packument() -> Packument {
         Packument {
@@ -310,5 +323,69 @@ mod tests {
             assert!(source.to_string().contains("test HTTP factory failure"));
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn tarball_factory_failure_is_distinct_from_http_failure() {
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = Arc::clone(&calls);
+        let client = RegistryClient::from_config_with_tarball_http_factory(
+            NpmConfig::default(),
+            FetchPolicy {
+                retries: 0,
+                ..FetchPolicy::default()
+            },
+            move || {
+                factory_calls.fetch_add(1, Ordering::SeqCst);
+                Err(Error::Io(std::io::Error::other("test tarball factory failure")))
+            },
+        );
+
+        let error = client
+            .fetch_tarball_bytes(&format!("{}/archive.tgz", server.uri()))
+            .await
+            .expect_err("factory failure must surface before a request");
+        let Error::HttpClientInitialization(source) = error else {
+            panic!("expected retained tarball client factory error");
+        };
+        assert!(source.to_string().contains("test tarball factory failure"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "factory failure must not emit a tarball request"
+        );
+
+        Mock::given(method("GET"))
+            .and(path("/archive.tgz"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let client = RegistryClient::from_config_with_tarball_http_factory(
+            NpmConfig::default(),
+            FetchPolicy {
+                retries: 0,
+                ..FetchPolicy::default()
+            },
+            || reqwest::Client::builder().build().map_err(Into::into),
+        );
+
+        let error = client
+            .fetch_tarball_bytes(&format!("{}/archive.tgz", server.uri()))
+            .await
+            .expect_err("HTTP status must surface as an ordinary transport failure");
+        assert!(
+            matches!(&error, Error::Http(inner) if inner.status().map(|status| status.as_u16()) == Some(404)),
+            "expected ordinary HTTP status error, got {error:?}"
+        );
+        assert!(
+            !matches!(error, Error::HttpClientInitialization(_)),
+            "HTTP status must remain eligible for codeload fallback"
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "ordinary HTTP failure must issue the tarball request"
+        );
     }
 }
