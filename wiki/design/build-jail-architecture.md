@@ -584,6 +584,40 @@ binary, which produced the identical symptom — a green slice that measured not
 first changed nothing observable, and only an end-to-end probe that ran every stage in sequence and
 checked the artifact between them separated the two.
 
+## Why Windows measured 13x slower per package — it was walking 4.7x deeper
+
+The ascending-cost walk stops at the first passing state, so the number of cells a record carries is
+how much work that package actually cost: each cell is a full install. Counted across every `MINIMUM`
+record in the corpus at the time (failures excluded, since a failure always walks the whole ladder):
+
+| platform | records | mean cells walked | grants containing `disk` |
+|---|---|---|---|
+| linux-x64 | 194 | 4.00 | 0 (0%) |
+| darwin-arm64 | 78 | 5.67 | 1 (1%) |
+| **win32-x64** | **34** | **18.79** | **9 (26%)** |
+
+The histogram is where it shows: Linux effectively never exceeds 6 cells, while Windows had **8 of 34
+records at the full 55-cell walk**. Windows I/O is a few times slower than Linux on its own, but 4.7x
+the number of installs is what turns that into the measured 13.2 min/package against Linux's ~1.0-1.8.
+
+**One mechanism produced both the over-granting and the slowness, and it was in the HARNESS.** The
+path tokeniser hardcoded the POSIX cache root, so on Windows it emitted zero `$home/` and `$store/`
+tokens. `writePaths` are derived from paths that land in the throwaway `$HOME`, so with no such tokens
+none could ever be derived — and with no narrow write available, nothing below `write.disk` could
+satisfy the package. The walk then had to climb the entire ladder to get there.
+
+The signature is visible per record. `dprint@0.25.1` on Windows: `pathsLandingInThrowawayHome: 0`,
+`writePaths: []`, 53 cells walked, final grant `{"write": "disk"}`.
+
+⛔ **All 34 of those Windows records predate the fix, so this is a description of the defect, not of
+current behaviour.** The prediction it makes is sharp and cheap to falsify: post-fix Windows records
+should show nonzero `pathsLandingInThrowawayHome`, at least some derived `writePaths`, a mean cell
+count far below 18.79, and a correspondingly lower `disk` rate. If the cell count stays high once the
+tokens are present, the tokeniser was not the whole cause and the throughput question needs a fresh
+hypothesis. (An earlier note put the Windows `disk` rate at 41%; this sample of 34 gives 26%. Different
+samples, and the 34 are the ones with complete records — neither figure is a measurement of the
+post-fix world.)
+
 ## The two Windows home axes behave differently, and the asymmetry is load-bearing
 
 `%APPDATA%` is redirected into the jail's private home. `%LOCALAPPDATA%` is deliberately not. That
@@ -610,6 +644,7 @@ The `USERPROFILE` jail home IS persistent, which is why the two axes do not beha
 
 ## Changelog
 
+- 2026-08-03 — Quantified why Windows measured ~13x slower per package: it walked 4.7x more cells (18.79 vs Linux's 4.00), with 8 of 34 records hitting the full 55-state ladder. Same root cause as the Windows over-granting — the tokeniser emitted no `$home/` tokens, so no `writePaths` could be derived and nothing below `write.disk` could pass. Confirmed per record on `dprint@0.25.1`.
 - 2026-08-03 — Wrote down why `APPDATA` is redirected into the jail home and `LOCALAPPDATA` is not. The asymmetry reads as an oversight, and a starred root-cause task had been opened against it; the code records both the reason (the LowBox launch resolves its AppContainer profile dir from `LOCALAPPDATA`, so repointing it breaks process creation) and the measurement that kills the hypothesis (the OS already redirects that folder for a LowBox token, so the write succeeds into a per-launch container dir and never EPERMs).
 - 2026-08-03 — Corpus now publishes each record as it is measured rather than once per slice, and the mechanism table records why it replays onto origin instead of merging or forcing. The soft-vs-hard reset distinction is included because a hard reset silently deletes a record stranded by a failed push — found by testing the publisher against a local bare origin rather than in production.
 - 2026-08-03 — Added "An identifier is only as stable as the thing it is computed from": the record
