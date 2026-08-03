@@ -432,7 +432,17 @@ impl NativeAddons {
             let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
                 continue;
             };
-            for field in ["dependencies", "optionalDependencies"] {
+            // Peer dependencies are followed too. A peer is normally supplied by
+            // the application rather than installed under the package, so it is
+            // easy to read as somebody else's problem — but an ejected package
+            // runs from real files and resolves its peer by walking up, exactly
+            // like any other require. Left out, the package ships and fails at
+            // run time on a module the manifest named.
+            //
+            // Nothing needs to consult peerDependenciesMeta.optional: an optional
+            // peer that was not installed simply does not resolve, and one that
+            // was is indistinguishable from a required peer at run time.
+            for field in ["dependencies", "optionalDependencies", "peerDependencies"] {
                 let Some(deps) = manifest.get(field).and_then(|v| v.as_object()) else {
                     continue;
                 };

@@ -198,5 +198,43 @@ elif "$NUB" compile "$d/app.mjs" --out "$d/bin" >"$d/log" 2>&1; then
   else report isolated-install PASS "symlinked tree, $deps packages shipped"; fi
 else report isolated-install FAIL "compile failed"; fi
 
+# ----------------------------------------------------------- peer dependency
+# An ejected package that requires a PEER dependency at run time.
+#
+# A peer is normally supplied by the application rather than installed beneath
+# the package, which makes it easy to read as somebody else's problem. It is not:
+# an ejected package runs from real files and resolves its peer by walking up,
+# exactly like any other require. Left out of the walk, the package shipped and
+# the binary died on a module its own manifest named.
+d="$WORK/peer"; rm -rf "$d"; mkdir -p "$d/node_modules/peerpkg" "$d/node_modules/thepeer"; (
+  cd "$d" && npm init -y >/dev/null 2>&1 && printf '%s\n' "$NODE_PIN" > .node-version
+  # node-gyp-build as a dependency is what classifies peerpkg as unbundlable,
+  # which is the only way to reach the materialiser at all.
+  mkdir -p node_modules/node-gyp-build
+  cat > node_modules/node-gyp-build/package.json <<'EOF'
+{"name":"node-gyp-build","version":"1.0.0","main":"index.js"}
+EOF
+  printf 'module.exports = () => ({});\n' > node_modules/node-gyp-build/index.js
+  cat > node_modules/peerpkg/package.json <<'EOF'
+{"name":"peerpkg","version":"1.0.0","main":"index.js","dependencies":{"node-gyp-build":"*"},"peerDependencies":{"thepeer":"*"}}
+EOF
+  printf 'module.exports = () => require("thepeer")();\n' > node_modules/peerpkg/index.js
+  cat > node_modules/thepeer/package.json <<'EOF'
+{"name":"thepeer","version":"1.0.0","main":"index.js"}
+EOF
+  printf 'module.exports = () => "PEER-OK";\n' > node_modules/thepeer/index.js
+  cat > app.mjs <<'EOF'
+import p from "peerpkg";
+console.log("ok:" + p());
+EOF
+) >/dev/null 2>&1
+if "$NUB" compile "$d/app.mjs" --out "$d/bin" >"$d/log" 2>&1; then
+  out=$(run_detached "$d" "$d/bin")
+  app=$(payload_dir "$d")
+  if [ "$out" != "ok:PEER-OK" ]; then report peer-dependency FAIL "ran '$out', want ok:PEER-OK"
+  elif [ ! -d "$app/node_modules/thepeer" ]; then report peer-dependency FAIL "the peer did not ship"
+  else report peer-dependency PASS "peer shipped with its dependent"; fi
+else report peer-dependency FAIL "compile failed"; fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
