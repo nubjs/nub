@@ -74,6 +74,7 @@ pub mod vite_compat;
 pub use install_family::{
     CiFlags, InstallFlags, WorkspaceFilterFlags, run_ci, run_dlx_for_nubx, run_install,
 };
+pub use min_release_age::AgeGateFlags;
 pub use output::OutputFlags;
 
 use std::path::{Path, PathBuf};

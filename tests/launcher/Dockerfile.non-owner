@@ -13,9 +13,12 @@ FROM node:22-slim
 #    The fake native is mode 0o644 and root-owned; postinstall is NOT run.
 WORKDIR /opt/nub
 COPY fixture/ /opt/nub/
+# The launcher package keeps BOTH stubs (they are `bin`-field entries and npm chmods
+# them on install); the platform package now ships ONE binary, so there is no
+# nub-host/bin/nubx to mode.
 RUN chmod +x /opt/nub/node_modules/@nubjs/nub/bin/nub /opt/nub/node_modules/@nubjs/nub/bin/nubx \
  && (chmod +x /opt/nub/bin/nub /opt/nub/bin/nubx 2>/dev/null || true) \
- && chmod 0644 /opt/nub/node_modules/@nubjs/nub-host/bin/nub /opt/nub/node_modules/@nubjs/nub-host/bin/nubx \
+ && chmod 0644 /opt/nub/node_modules/@nubjs/nub-host/bin/nub \
  && chown -R root:root /opt/nub
 
 # 2. Drop to a non-root user (the `USER app` half of the canonical pattern).

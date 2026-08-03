@@ -221,7 +221,7 @@ fn install_truly_fresh_project_claims_nub_identity() {
         Some(&serde_json::json!({
             "name": "nub",
             "version": concat!("^", env!("CARGO_PKG_VERSION")),
-            "onFail": "warn"
+            "onFail": "ignore"
         })),
         "a virgin install stamps a devEngines.packageManager caret range: {manifest}"
     );
@@ -854,7 +854,7 @@ fn add_on_a_truly_fresh_project_claims_nub_identity() {
         Some(&serde_json::json!({
             "name": "nub",
             "version": concat!("^", env!("CARGO_PKG_VERSION")),
-            "onFail": "warn"
+            "onFail": "ignore"
         })),
         "a virgin add stamps a devEngines.packageManager caret range: {manifest}"
     );

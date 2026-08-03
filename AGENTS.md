@@ -4,7 +4,7 @@ Entry point for AI coding agents working in this repo, per the [`AGENTS.md` conv
 
 ## Skills work for EVERY agent, not just Claude (Codex included)
 
-Task playbooks ("skills") live as plain-markdown `SKILL.md` files under `.claude/skills/<name>/SKILL.md`, each with a frontmatter `description` naming when to use it. Claude Code auto-discovers and auto-triggers them; **Codex and other agents do not** — run `ls .claude/skills/` and read the matching `SKILL.md` before improvising. A skill's steps are authoritative over your default approach for that task. The highest-value ones:
+Task playbooks ("skills") live as plain-markdown `SKILL.md` files under `.claude/skills/<name>/SKILL.md`, each with a frontmatter `description` naming when to use it. **That is the one and only skills directory** — despite the Claude-specific name, every agent reads it. There is no mirror and no symlink: a second copy under `.agents/` drifted silently for weeks and is exactly what `.githooks/pre-push` now refuses. Claude Code auto-discovers and auto-triggers them; **Codex and other agents do not** — run `ls .claude/skills/` and read the matching `SKILL.md` before improvising. A skill's steps are authoritative over your default approach for that task. The highest-value ones:
 
 - **`gcloud-vm`** — provision/start/reach Google Cloud VMs (real Linux-kernel enforcement, real Windows/MSVC/AppContainer, a clean build box). You can CREATE a VM on demand, not just start the standing `nub-linux`/`nub-win`.
 - **`dev-loop`** / **`rust-build`** / **`worktree`** — build & test nub in a worktree: the fast-profile loop, the shared-target-dir contamination hazard, the one-command worktree setup.
@@ -14,6 +14,8 @@ Task playbooks ("skills") live as plain-markdown `SKILL.md` files under `.claude
 - **`prose-writing`** — required before writing any GitHub comment, doc, or release note. Also **`benchmarking`**, **`pm-perf-tracing`**, **`impact-analysis`**, **`aube-bump`**, **`git-archaeology`**, **`md-toc`**, **`soak`**.
 
 `.claude/skills/*` is this repo's own agent tooling; the "agent-agnostic, never overfit to Claude" rule governs copy that ships to *users'* agents, not these playbooks.
+
+Per-agent config is tracked for **every** agent, not just Claude: `.claude/settings.json` + `.claude/hooks/` (Claude Code), `.codex/config.toml` + `.codex/hooks.json` (Codex), and `.mcp.json` (the shared `chrome-devtools` MCP server). The two agents read different config files, so the `gh-comment-guard` hook script exists once per agent — `.githooks/pre-push` requires the copies stay byte-identical, and rejects a hook command that hardcodes an absolute home path. Codex sets no project-dir environment variable of its own (no `CODEX_PROJECT_DIR`, and `$CLAUDE_PROJECT_DIR` is Claude-only), so a Codex hook path must use `$(git rev-parse --show-toplevel)`.
 
 When present, `AGENTS.local.md` (gitignored, not in a clean checkout) adds maintainer-local orientation — orchestration workflow, dispatch policy, pointers into local-only directories. It is an optional overlay; this file is self-sufficient without it.
 
@@ -119,7 +121,7 @@ Neither family is the prohibited bare `@nub/*` scope, and neither is user-facing
 
 nub's package manager IS the vendored **aube** engine. Ground every aube claim here or in the code — never in memory.
 
-- **Embed, not subprocess.** `vendor/aube` is a path dependency of plain in-tree files (not a submodule). nub has its own CLI (clap dispatch + `pm_engine::ENGINE_VERBS`) and calls `aube::commands::<verb>::run(typed_opts)` in-process. aube's own `cli_main` and tool subcommands are dead under nub. All engine output is rebranded through `crates/nub-cli/src/pm_engine/present.rs` (`ERR_AUBE_*`→`ERR_NUB_*`, `aube`→`nub`, jdx URLs stripped).
+- **Embed, not subprocess.** `vendor/aube` is a path dependency of plain in-tree files (not a submodule). nub has its own CLI (clap dispatch + `pm_engine::ENGINE_VERBS`) and calls `aube::commands::<verb>::run(typed_opts)` in-process. aube's own `cli_main` and tool subcommands are dead under nub. All engine output is rebranded through `crates/nub-cli/src/pm_engine/present.rs` (`ERR_AUBE_*`→`ERR_NUB_*`, `WARN_AUBE_*`→`WARN_NUB_*`, `aube`→`nub`, jdx URLs stripped). Consequence when asserting on output: grepping a log or test stderr for the raw `WARN_AUBE_*`/`ERR_AUBE_*` spelling silently finds nothing under nub. Match `(AUBE|NUB)`.
 - **Fork vs upstream.** The vendored source originates from the fork `nubjs/aube`; upstream is `jdx/aube`. nub `main` is the source of truth. The `nubjs/aube` `nub-fork` branch is retained only as the upstream-PR staging area and historical record.
 - **Never upstream to `jdx/aube` without the maintainer's explicit, in-the-moment instruction** — and never offer, propose, or label something an "upstream candidate" anywhere (PR bodies, commit messages, reports). The mechanics below stay dormant until asked.
 - **When asked, contribution PRs target `jdx/aube`, never the fork.** A contribution PR is `jdx/aube:main ← nubjs/aube:<branch>`; a fork-internal `nubjs/aube ← nubjs/aube` PR upstreams nothing. Stacked PRs also base on `jdx/aube:main` (note the stack and which commit to review in the body; the diff auto-cleans once the parent merges). Create with `gh pr create --repo jdx/aube --base main --head nubjs:<branch>`.
@@ -204,6 +206,7 @@ Most wrong answers here trace to one habit: confirming that a thing EXISTS inste
 
 **Before trusting a search, filter, or probe, run it against a case whose answer you already know.** If it misses the known case, the instrument is broken — fix it before reading any conclusion off it. This costs seconds and is the only check that catches a false NEGATIVE.
 
+- **A passing test is not evidence until you have seen it fail for the right reason.** Three ways one passes while testing nothing, all observed in a single change: it asserts something is ABSENT on a platform that could never produce it; its PRECONDITION was silently already met (a test of "we bootstrap node-gyp" passed on a box that already had node-gyp on `PATH`, so the code never ran); or it asserts a non-zero exit that a DIFFERENT failure upstream produced. Before trusting a new test, break the thing it guards and watch it go red — and gate any absence assertion behind a positive control that proves the artifact appears when it is earned.
 - **Enumeration undercounts by default.** State the expected count BEFORE searching and reconcile against it. A suspiciously round or small result means the pattern is too narrow, not that the surface is small.
 - **Trace a symbol to its CONSUMERS before describing what it does.** Prose near a definition states intent; call sites state behavior. When they disagree, call sites win, and stale prose is worse than none.
 - **A filter that produces a surprising split is more likely broken than insightful.** Check a row you can independently classify before believing the partition.

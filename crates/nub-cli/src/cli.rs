@@ -569,8 +569,53 @@ pub enum Argv0 {
     PmShim(nub_core::pm::shim::ShimName),
 }
 
+/// The verb the launcher told us to be, captured out of `__NUB_ARGV0` once at
+/// startup and then erased from the environment (see [`capture_argv0_override`]).
+static ARGV0_OVERRIDE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Read `__NUB_ARGV0` into [`ARGV0_OVERRIDE`] and REMOVE it from the environment.
+///
+/// The platform packages ship ONE binary. `nub` and `nubx` are the same file, and
+/// the verb normally comes from argv[0]'s basename — but the launcher's healed sh
+/// trampoline `exec`s that file by its real path, and POSIX `sh` has no portable way
+/// to set argv[0] (`exec -a` is a bash/zsh-ism; dash, which is `/bin/sh` on Debian
+/// and Ubuntu, rejects it). So the launcher passes the verb in this variable instead.
+/// argv[0] remains the fallback and still carries every direct invocation — the
+/// installer's `~/.nub/bin/nubx` symlink, `nub pm shim` hardlinks, `nubx-dev`.
+///
+/// ERASING IT IS LOAD-BEARING, not hygiene: nub spawns Node, and a script under that
+/// Node may invoke `nub` again. An inherited `__NUB_ARGV0=nubx` would silently put
+/// that grandchild in exec mode. Removing it here means the variable survives exactly
+/// one process — the one the launcher aimed it at.
+///
+/// Captured into a `OnceLock` rather than re-read, because `Argv0::detect` runs more
+/// than once per process (invocation-boundary normalization, then dispatch) and the
+/// value is gone from the environment after this call.
+///
+/// # Safety
+///
+/// Mutates the process environment, which is sound only while nub is single-threaded.
+/// `main` calls this through [`normalize_invocation_environment`] as its first action.
+pub unsafe fn capture_argv0_override() {
+    ARGV0_OVERRIDE.get_or_init(|| {
+        let verb = env::var("__NUB_ARGV0").ok().filter(|v| !v.is_empty());
+        if verb.is_some() {
+            // SAFETY: upheld by this function's caller — no other thread exists yet.
+            unsafe { env::remove_var("__NUB_ARGV0") };
+        }
+        verb
+    });
+}
+
 impl Argv0 {
     pub fn detect() -> Self {
+        // The launcher-supplied verb wins over argv[0]: on the healed fast path the
+        // binary is exec'd by its real name (`bin/nub`) for BOTH verbs, so argv[0]
+        // cannot distinguish them. Absent the override — every direct invocation —
+        // argv[0]'s basename is still the signal.
+        if let Some(verb) = ARGV0_OVERRIDE.get().and_then(Option::as_deref) {
+            return Self::classify(verb);
+        }
         let argv0 = env::args_os().next().unwrap_or_default();
         let basename = PathBuf::from(&argv0)
             .file_stem()
@@ -608,6 +653,16 @@ impl Argv0 {
 /// environment back. A hidden internal re-entry belongs to its parent and is
 /// exempt for the same reason `node` is.
 pub fn normalize_invocation_environment() {
+    // UNCONDITIONALLY FIRST, before the early returns below: this both establishes the
+    // verb every later `Argv0::detect()` sees and erases `__NUB_ARGV0` so no child
+    // inherits it. Gating it behind the returns would leak the variable into the whole
+    // `node`-shim and internal-reentry subtree, and would leave the OnceLock unset on
+    // exactly the paths that re-enter nub.
+    //
+    // SAFETY: `main` calls this as its first action, before logging, config
+    // initialization, or any thread-capable subsystem. No other thread exists yet.
+    unsafe { capture_argv0_override() };
+
     let internal_reentry = env::args_os().nth(1).is_some_and(|arg| {
         (cfg!(unix) && arg == "__pdeath-watch") || arg == "__node-gyp-bootstrap"
     });
@@ -938,6 +993,12 @@ pub enum Command {
         #[arg(long = "no-check")]
         no_check: bool,
 
+        /// Per-invocation `minimumReleaseAge` overrides for the fetch path.
+        /// `nubx <just-published-tool>` is the common way to hit the age gate,
+        /// so the escape hatch belongs on this surface.
+        #[command(flatten)]
+        age_gate: crate::pm_engine::AgeGateFlags,
+
         /// Remaining arguments forwarded to the binary.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -1108,6 +1169,9 @@ pub enum Command {
 
         #[command(flatten)]
         output: crate::pm_engine::OutputFlags,
+
+        #[command(flatten)]
+        age_gate: crate::pm_engine::AgeGateFlags,
     },
 
     /// Clean install for CI: delete node_modules, install strictly from the
@@ -1152,6 +1216,9 @@ pub enum Command {
 
         #[command(flatten)]
         output: crate::pm_engine::OutputFlags,
+
+        #[command(flatten)]
+        age_gate: crate::pm_engine::AgeGateFlags,
     },
 }
 
@@ -1379,6 +1446,10 @@ fn install_to_add_args(rest: &[String]) -> Option<Vec<String>> {
             // them here prevents the space-separated value from looking like a pkg.
             "--loglevel",
             "--reporter",
+            // Same shape: `nub install --minimum-release-age 0` would otherwise
+            // read `0` as a package and route the whole command to `add`.
+            "--minimum-release-age",
+            "--minimum-release-age-exclude",
         ];
         let mut i = 0;
         while i < body.len() {
@@ -2108,6 +2179,10 @@ fn value_consuming_flags(subcommand: &str) -> &'static [&'static str] {
         // (repeatable, takes the package spec as a following token). They must be
         // listed so `nubx -p left-pad cowsay` binds `left-pad` to the package, not
         // the bin positional.
+        // The age-gate value flags take a following token, so `nubx
+        // --minimum-release-age 1d cowsay` must bind `1d` to the flag rather
+        // than read it as the bin. Both age-gate flags are value-taking; there
+        // is no boolean sibling, since nub ships no strictness flag.
         "nubx" => &[
             "--filter",
             "-F",
@@ -2116,6 +2191,8 @@ fn value_consuming_flags(subcommand: &str) -> &'static [&'static str] {
             "--package",
             "-p",
             "--cwd",
+            "--minimum-release-age",
+            "--minimum-release-age-exclude",
         ],
         "watch" => &["--cwd"],
         _ => &[],
@@ -2491,12 +2568,17 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             yes,
             ignore_existing,
             no_check,
+            age_gate,
             mut args,
         }) => {
             args.extend(suffix);
             if no_check {
                 crate::verify_deps::disable();
             }
+            // Only the DLX fallback below resolves from the registry, but the
+            // bag is inert on the local-bin path, so publish unconditionally
+            // rather than duplicating the call into each branch.
+            age_gate.apply();
             filter.extend(workspace);
             let recursive = recursive || parallel || include_workspace_root;
             let workspace_run = recursive || !filter.is_empty() || parallel;
@@ -2610,30 +2692,34 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             fail_if_no_match,
             include_workspace_root,
             output,
-        }) => crate::pm_engine::run_install(crate::pm_engine::InstallFlags {
-            frozen_lockfile,
-            no_frozen_lockfile,
-            prefer_frozen_lockfile,
-            prod,
-            dev,
-            ignore_scripts,
-            no_optional,
-            offline,
-            prefer_offline,
-            lockfile_only,
-            force,
-            node_linker,
-            registry,
-            dir,
-            filter: crate::pm_engine::WorkspaceFilterFlags {
-                filter,
-                filter_prod,
-                recursive,
-                fail_if_no_match,
-                include_workspace_root,
-            },
-            output,
-        }),
+            age_gate,
+        }) => {
+            age_gate.apply();
+            crate::pm_engine::run_install(crate::pm_engine::InstallFlags {
+                frozen_lockfile,
+                no_frozen_lockfile,
+                prefer_frozen_lockfile,
+                prod,
+                dev,
+                ignore_scripts,
+                no_optional,
+                offline,
+                prefer_offline,
+                lockfile_only,
+                force,
+                node_linker,
+                registry,
+                dir,
+                filter: crate::pm_engine::WorkspaceFilterFlags {
+                    filter,
+                    filter_prod,
+                    recursive,
+                    fail_if_no_match,
+                    include_workspace_root,
+                },
+                output,
+            })
+        }
         Some(Command::Ci {
             ignore_scripts,
             no_optional,
@@ -2645,20 +2731,24 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             fail_if_no_match,
             include_workspace_root,
             output,
-        }) => crate::pm_engine::run_ci(crate::pm_engine::CiFlags {
-            ignore_scripts,
-            no_optional,
-            registry,
-            dir,
-            filter: crate::pm_engine::WorkspaceFilterFlags {
-                filter,
-                filter_prod,
-                recursive,
-                fail_if_no_match,
-                include_workspace_root,
-            },
-            output,
-        }),
+            age_gate,
+        }) => {
+            age_gate.apply();
+            crate::pm_engine::run_ci(crate::pm_engine::CiFlags {
+                ignore_scripts,
+                no_optional,
+                registry,
+                dir,
+                filter: crate::pm_engine::WorkspaceFilterFlags {
+                    filter,
+                    filter_prod,
+                    recursive,
+                    fail_if_no_match,
+                    include_workspace_root,
+                },
+                output,
+            })
+        }
         // `node` is intercepted at the top of `dispatch_subcommand` (manual
         // sub-verb match in `run_node`) and never reaches clap here.
         Some(Command::Node { .. }) => unreachable!("`node` is handled before clap dispatch"),
@@ -6954,7 +7044,9 @@ fn perform_selfowned_upgrade(
     swap_dir(install_dir, "bin", &new_bin)?;
     let _ = std::fs::remove_dir_all(install_dir.join("runtime"));
 
-    // The release tarball ships `bin/nub` (and `bin/nubx`) at mode 0644 — the
+    // The release tarball ships `bin/nub` — one binary; there is no `bin/nubx` any
+    // more, and `install.sh` / this upgrade path both create that alias themselves as
+    // a symlink. It arrives at mode 0644 — the
     // upload-artifact → download-artifact round-trip in CI strips the executable
     // bit, so the published archive is non-executable. install.sh heals fresh
     // installs with its own `chmod +x`; the self-owned upgrade path must do the
@@ -8715,7 +8807,7 @@ fn run_pm_pin(arg: Option<&str>, cwd: &Path) -> Result<i32> {
     println!("pinned nub@{version}");
     println!("  package.json: packageManager = nub@{version}");
     println!(
-        "  package.json: devEngines.packageManager = {{ name: \"nub\", version: \"^{version}\", onFail: \"warn\" }}"
+        "  package.json: devEngines.packageManager = {{ name: \"nub\", version: \"^{version}\", onFail: \"ignore\" }}"
     );
     // A pin at a version other than the running nub is honored by the self-shim,
     // not eagerly: say what happens next, download nothing now.
@@ -10312,6 +10404,18 @@ mod tests {
             install_to_add_args(&args(&["install", "--loglevel=silent"])),
             None,
             "nub install --loglevel=silent stays on the native install path (equals form)"
+        );
+        // `--minimum-release-age` has the same shape: its MINUTES value in the
+        // space form would read as a package spec and misroute the install.
+        assert_eq!(
+            install_to_add_args(&args(&["install", "--minimum-release-age", "0"])),
+            None,
+            "nub install --minimum-release-age 0 stays on the native install path"
+        );
+        assert_eq!(
+            install_to_add_args(&args(&["install", "--minimum-release-age", "0", "react"])),
+            Some(args(&["add", "--minimum-release-age", "0", "react"])),
+            "--minimum-release-age 0 with a package routes to add, minutes not mis-forwarded"
         );
         // Output-control flags combined with a real package still route to add,
         // with the flag consumed as a flag (value NOT forwarded as a package).

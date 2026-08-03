@@ -243,7 +243,21 @@ fn write_package_blob(out_dir: &Path, compressed: &[u8]) -> Vec<String> {
     fallback_names
 }
 
+/// Emit the popularity corpus, and tell the crate whether what it got is a real
+/// DOWNLOAD-RANKED list or the degraded fallback.
+///
+/// The distinction is load-bearing, not cosmetic. The real file is ordered
+/// most-downloaded first, so a name's index IS its popularity rank. The fallback
+/// is `fallback_names`, which `write_package_blob` derives by iterating a
+/// `BTreeMap` — i.e. ALPHABETICALLY — and holds only `primer_top()` entries (100
+/// in dev, 2000 in release). Reporting an alphabetical position in a 100-name
+/// list as a "top-100,000 popularity rank" is a lie, and every consumer that
+/// reasons about relative popularity is wrong on it, so the similar-name gate
+/// gates itself on this flag instead.
 fn write_popular_names_blob(out_dir: &Path, source: &Path, fallback_names: &[String]) {
+    if source.is_file() {
+        println!("cargo:rustc-env=AUBE_POPULAR_NAMES_RANKED=1");
+    }
     let names = if source.is_file() {
         let input = std::fs::read(source).unwrap_or_else(|e| {
             panic!(

@@ -1,0 +1,15 @@
+[shell_environment_policy]
+inherit = "core"
+
+[shell_environment_policy.set]
+CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1"
+
+[mcp_servers.chrome-devtools]
+command = "npx"
+args = [
+    "-y",
+    "chrome-devtools-mcp@latest",
+]
+
+[mcp_servers.chrome-devtools.tools.evaluate_script]
+approval_mode = "approve"

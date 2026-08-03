@@ -55,6 +55,21 @@ Mirror `tests/sandbox-macos-writeconfine/` + `.github/workflows/sandbox-macos-wr
 
 **Keep CI lean — fast, deterministic core only:** unit tests + the enforcement/bypass smoke matrix, no network, no mega-fixture. Heavy or combinatorial runs are documented in `results.md` and reproduced on demand. CI capacity is shared; a 22-minute-per-push probe job is already a lot.
 
+## Test every candidate FIX in one build-free run, not one per push
+
+When the probe fails and you have several plausible repairs, do not guess-and-push: each loop costs a
+full build plus queue time. Write a job that tries **all** candidates at once against a stand-in, with
+no compile step — a `.cmd`/shell quoting question needs `cmd.exe` and a two-line stub, not the real
+binary. Minutes instead of half an hour, and the losing candidates are results you keep.
+
+Two rules that make the output trustworthy:
+
+- **Include the CURRENT broken form as a control.** It must fail. If it passes, the reproduction is
+  wrong and every other row is meaningless — say so in the output rather than reading the winners.
+- **A losing alternative is a result, not a job failure.** Exit non-zero only when the control passes
+  or when NO candidate works. Otherwise the job sits permanently red over a candidate you never
+  intended to ship, and readers learn to ignore it.
+
 ## Run and watch
 
 - Kick a run by pushing to the branch; list with `gh run list --workflow <wf>.yml --branch <branch>`.
