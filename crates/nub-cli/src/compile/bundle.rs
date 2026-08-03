@@ -521,6 +521,15 @@ fn bundle_inner(
     };
     let native_files = planned_native.files;
     let native_addons = planned_native.summaries;
+    // Reported AFTER tree-shaking so a package the program never actually reaches
+    // is not named. These bundled clean — a package that finds its addon through
+    // `node-gyp-build` or `bindings` never puts a `.node` in the import graph — so
+    // without this the build succeeds and the binary fails on the user's machine,
+    // which is precisely the failure bun ships (measured: silent build, runtime
+    // error naming the package's own fallback path rather than the real one).
+    if let Some(plugin) = &native_plugin {
+        warn_native_packages_were_bundled(&plugin.natively_resolved());
+    }
     // `files` is still chunks-only here — maps are merged in below.
     reject_invalid_chunks(&files)?;
     // Also while it is chunks-only, because reachability is a property of CODE
@@ -4084,6 +4093,34 @@ fn specifier_names_native_addon(snippet: &str) -> bool {
     snippet
         .split(['\'', '"', '`'])
         .any(|part| part.ends_with(".node"))
+}
+
+/// Warn that a package loading native code at run time was bundled anyway.
+///
+/// A warning rather than an error, deliberately: these builds succeed today, and
+/// failing them outright would break someone whose artifact happens to work
+/// because the package is also installed on the target. The honest middle is to
+/// say plainly what will happen and name the remedy, rather than ship a binary
+/// that dies later saying nothing useful.
+fn warn_native_packages_were_bundled(packages: &[String]) {
+    if packages.is_empty() {
+        return;
+    }
+    eprintln!(
+        "warning: {} bundled package{} load{} native code at run time:",
+        packages.len(),
+        if packages.len() == 1 { "" } else { "s" },
+        if packages.len() == 1 { "s" } else { "" }
+    );
+    for package in packages {
+        eprintln!("  {package}");
+    }
+    eprintln!(
+        "  A native addon cannot be inlined, and these packages reach theirs by \
+         computing\n  a path at run time — so nothing failed to resolve here, and \
+         the binary will fail\n  on the machine you ship to instead. Pass --external \
+         <package> to leave one to be\n  resolved there."
+    );
 }
 
 /// Name every `import()` that `--allow-dynamic-import` let through.

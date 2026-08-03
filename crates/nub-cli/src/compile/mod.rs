@@ -39,6 +39,7 @@ mod launcher;
 mod loaders;
 mod native;
 mod native_layout;
+mod unbundlable;
 
 pub use bundle::{BundleOptions, SourcemapMode};
 

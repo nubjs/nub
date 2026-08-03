@@ -35,7 +35,7 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Result, bail};
@@ -58,6 +58,26 @@ use super::native_layout::{DroppedEdge, IslandFile, Seed};
 /// machine's directory layout has nothing to do with the deploy machine's, and
 /// the app dir is content-hash-keyed, so the only base that is right on both is
 /// the chunk's own URL. `name` is already a nested, payload-relative island path.
+/// The root of the installed package containing `module`, if it is inside a
+/// `node_modules` tree.
+///
+/// Walks up to the directory immediately below the nearest `node_modules`,
+/// stepping once more for a scope directory so `@img/sharp-darwin-arm64` resolves
+/// to the package and not to `@img`.
+fn installed_package_root(module: &Path) -> Option<PathBuf> {
+    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
+    for component in module.components() {
+        parts.push(component.as_os_str());
+    }
+    let index = parts.iter().rposition(|part| *part == "node_modules")?;
+    let scoped = parts.get(index + 1)?.to_string_lossy().starts_with('@');
+    let end = index + if scoped { 3 } else { 2 };
+    if end > parts.len() {
+        return None;
+    }
+    Some(parts[..end].iter().collect())
+}
+
 fn addon_module(name: &str) -> String {
     format!(
         "const record = process[Symbol.for(\"nub.compile.bootstrap\")];\n\
@@ -90,6 +110,15 @@ pub struct NativeAddons {
     /// (measured 2026-07-30). Same problem and same fix as
     /// `FilePlugin::case_hints`.
     rejections: Mutex<BTreeSet<String>>,
+    /// Packages the manifest rules say load native code, keyed by package root so
+    /// each is judged once however many of its modules the graph pulls in.
+    ///
+    /// These are the DANGEROUS ones — a package that reaches its addon through
+    /// `node-gyp-build` or `bindings` has no `.node` anywhere in the import graph,
+    /// so it bundles clean and fails at run time inside a frozen binary. Nothing
+    /// else in this pipeline can see them: the seeds above are only populated by
+    /// an addon the bundler actually resolved.
+    classified: Mutex<BTreeMap<PathBuf, String>>,
 }
 
 impl NativeAddons {
@@ -99,6 +128,7 @@ impl NativeAddons {
             user_mapped,
             seeds: Mutex::new(BTreeMap::new()),
             rejections: Mutex::new(BTreeSet::new()),
+            classified: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -175,6 +205,50 @@ impl NativeAddons {
                 .collect(),
             summaries: summaries.into_iter().collect(),
         })
+    }
+
+    /// Record the owning package if its manifest says it loads native code.
+    ///
+    /// Runs for every resolved module, so the verdict is memoised per package
+    /// root — an uncached walk-and-read here would cost one manifest parse per
+    /// FILE rather than per package.
+    ///
+    /// Only packages under `node_modules` are considered. A path outside it is the
+    /// application's own source, where the author can see and fix whatever it
+    /// does; the value of this check is entirely in third-party code nobody is
+    /// going to read.
+    fn note_if_natively_resolved(&self, module: &Path) {
+        let Some(root) = installed_package_root(module) else {
+            return;
+        };
+        let Ok(mut seen) = self.classified.lock() else {
+            return;
+        };
+        if seen.contains_key(&root) {
+            return;
+        }
+        let Ok(text) = std::fs::read_to_string(root.join("package.json")) else {
+            return;
+        };
+        let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return;
+        };
+        if let Some(reason) = crate::compile::unbundlable::classify(&manifest) {
+            let name = manifest
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unnamed package)")
+                .to_string();
+            seen.insert(root, format!("{name} — {}", reason.describe()));
+        }
+    }
+
+    /// Every classified package, for the caller to report.
+    pub fn natively_resolved(&self) -> Vec<String> {
+        self.classified
+            .lock()
+            .map(|seen| seen.values().cloned().collect())
+            .unwrap_or_default()
     }
 
     fn claims(&self, id: &str) -> bool {
@@ -307,6 +381,10 @@ impl Plugin for NativeAddons {
         _ctx: SharedTransformPluginContext,
         args: &HookTransformArgs<'_>,
     ) -> impl std::future::Future<Output = HookTransformReturn> + Send {
+        // Every module reaches `transform`, where `load` stops at the first plugin
+        // to claim one — so this is the hook that can see the whole graph, and the
+        // packages worth warning about are exactly the ones no other hook notices.
+        self.note_if_natively_resolved(Path::new(clean_url(args.id)));
         // Real JavaScript only — a `text`/`json` module's "code" IS the file's
         // content, and blanking something inside it would corrupt user data.
         //
