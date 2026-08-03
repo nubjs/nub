@@ -1,0 +1,159 @@
+name: Verb dispatch (one-binary platform package)
+
+# Proves `nub` and `nubx` both dispatch correctly now that the platform packages ship
+# ONE binary and the verb travels in `__NUB_ARGV0` instead of a second, byte-identical
+# 45 MB copy named `nubx`.
+#
+# Why this needs REAL builds on TWO operating systems rather than the fake-native
+# harness in tests/launcher/ — the two platforms take different paths and only one of
+# them was previously covered at all:
+#
+#   Linux    first call goes through Node, which heals the on-PATH entry into an sh
+#            trampoline; every later call is sh -> exec and the trampoline is the only
+#            carrier of the verb. Also the dash leg: `exec -a` is unavailable there,
+#            which is the whole reason the verb moved into an env var.
+#   Windows  the heal is a NO-OP, so every call goes through the Node launcher and the
+#            verb rides on `opts.env`. Nothing exercised this before: until this change
+#            Windows got a correctly-named `nubx.exe` and needed no verb plumbing, and
+#            launcher.yml excludes Windows for exactly that (now stale) reason.
+#
+# Branch-scoped: no PR required, no interference with the shared runner pool on main.
+
+on:
+  push:
+    branches: [dedup-platform-binary]
+    paths:
+      - crates/nub-cli/**
+      - npm/nub/**
+      - tests/verb-dispatch/**
+      - .github/workflows/verb-dispatch.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    name: verb dispatch · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: 22
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          key: verb-dispatch-${{ matrix.os }}
+
+      # `fast` (not `release`): the probe asserts DISPATCH, which is independent of
+      # optimization level, and release's thin-LTO would roughly triple the job for
+      # nothing. Feature set is the default — `embed-runtime` changes the binary's size,
+      # not which verb it selects.
+      - name: Build nub
+        run: cargo build -p nub-cli --profile fast
+
+      - name: Verb dispatch probe
+        shell: bash
+        run: |
+          BIN="target/fast/nub"
+          [ "${{ matrix.os }}" = "windows-latest" ] && BIN="target/fast/nub.exe"
+          test -f "$BIN" || { echo "::error::no binary at $BIN"; ls -R target/fast | head -40; exit 1; }
+          node tests/verb-dispatch/probe.mjs "$BIN"
+
+      # Size is the whole point of the change: assert the packaged bin/ actually halved
+      # (see the release-artifact job below for the binary the VM timing run uses)
+      # and would clear cnpm/npmmirror's 83,886,080-byte unpacked cap.
+      - name: Packaged size
+        shell: bash
+        run: |
+          BIN="target/fast/nub"; EXT=""
+          [ "${{ matrix.os }}" = "windows-latest" ] && { BIN="target/fast/nub.exe"; EXT=".exe"; }
+          mkdir -p pkgprobe/bin && cp "$BIN" "pkgprobe/bin/nub$EXT"
+          one=$(wc -c < "pkgprobe/bin/nub$EXT")
+          echo "one binary : $one bytes"
+          echo "two (today): $((one * 2)) bytes"
+          echo "cnpm cap   : 83886080 bytes"
+          echo "NOTE: a fast-profile binary is larger than the shipped release build;"
+          echo "      this reports the RATIO, not the published size."
+
+  # A REAL MSVC release binary for the Windows VM timing run. Provisioning the VS C++
+  # workload + cmake + an -msvc rustup host on a VM costs far more than one CI dispatch,
+  # and a windows-gnu cross-compile is not the same artifact. Release (not `fast`)
+  # because the timing question is about the SHIPPED binary — fast carries debuginfo and
+  # is roughly 3x the size, which moves image-load time.
+  release-e2e:
+    name: release e2e + timing · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: 22
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          key: verb-dispatch-release-${{ matrix.os }}
+
+      # RELEASE, not `fast`: the question is about the shipped binary. A fast build
+      # carries debuginfo at roughly 3x the size, which moves image-load time and would
+      # make the absolute numbers meaningless.
+      - name: Build release
+        run: cargo build -p nub-cli --release
+
+      # The A/B baseline. Holding the BINARY fixed and swapping only launch.js is what
+      # isolates the launcher change; two different builds would confound it with codegen.
+      - name: Fetch the pre-change launch.js
+        shell: bash
+        run: |
+          git fetch --depth=1 origin main
+          git show origin/main:npm/nub/bin/launch.js > /tmp/launch-old.js
+          wc -l /tmp/launch-old.js
+
+      - name: Real global install + dispatch + A/B timing
+        shell: bash
+        run: |
+          BIN="target/release/nub"
+          [ "${{ matrix.os }}" = "windows-latest" ] && BIN="target/release/nub.exe"
+          node tests/verb-dispatch/win-e2e.mjs "$BIN" npm/nub /tmp/launch-old.js
+
+      # What each launcher mechanism is actually WORTH, measured before any of them is
+      # engineered. The headline question: npm's cmd-shim emits a DIRECT invocation in
+      # all three shims for a SHEBANG-LESS bin target (cmd-shim/lib/index.js:42), which
+      # would remove the ~58 ms Node boot Windows pays on every call today.
+      - name: Launcher latency variants
+        shell: bash
+        run: |
+          BIN="target/release/nub"
+          [ "${{ matrix.os }}" = "windows-latest" ] && BIN="target/release/nub.exe"
+          node tests/verb-dispatch/win-latency-variants.mjs "$BIN"
+
+      # Keep the binary retrievable so a VM run can reuse it without another build.
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p out/platform/bin out/launcher
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then cp target/release/nub.exe out/platform/bin/; \
+          else cp target/release/nub out/platform/bin/; fi
+          cp -r npm/nub/. out/launcher/
+          ls -l out/platform/bin
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: release-verbdispatch-${{ matrix.os }}
+          path: out
+          retention-days: 5

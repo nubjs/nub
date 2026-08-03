@@ -34,6 +34,24 @@ on the accusation — and when you fix a misleading diagnostic, it pays for itse
 
 ## Windows — all measured
 
+- **`for /f` runs its command through `cmd /c`, which STRIPS the outer quote pair** when the string
+  both starts and ends with a quote. So the natural spelling of a capture,
+  `` for /f "usebackq delims=" %%i in (`"%EXE%" arg "%DIR%"`) ``, degrades to
+  `C:\...\x.exe" arg "C:\...\dir` and dies with **"The filename, directory name, or volume label
+  syntax is incorrect"** — with or without spaces in the path. Fix: wrap the whole command in one
+  MORE quote pair (`` `""%EXE%" arg "%DIR%""` ``). Measured against a temp-file-redirect alternative,
+  which did *not* work.
+- **An undefined `%VAR%` expands to its own literal text**, so a missing variable is passed onward as
+  the string `%VAR%` rather than being empty — silently handing a bogus path downstream. Guard with
+  `if not defined VAR set "VAR=%CD%"`, under `setlocal` so the default does not leak to the caller.
+- **A `.cmd` on `PATH` is invisible to whole classes of CI.** In this repo `native-deps.yml` is the
+  only workflow touching node-gyp and it is ubuntu-only, so the Windows `.cmd` shim shipped broken and
+  unnoticed for as long as another code path kept it from ever running. Green Windows jobs are not
+  evidence for a Windows file nothing executes — check that some job actually runs it.
+- **Node aborts at startup inside nub's build jail on Windows**: `Assertion failed:
+  ncrypto::CSPRNG(nullptr, 0)`. Any jailed scenario whose script is `node` therefore cannot report on
+  what it meant to test; skip it with the reason printed rather than recording a pass or a fail.
+
 - **`spawnSync` cannot run `npm`/`npx`/`pnpm`.** They are `.cmd` shims: the bare name gives
   **ENOENT**, the `.cmd` spelling gives **EINVAL** (Node has refused to `CreateProcess` a batch file
   since CVE-2024-27980). `shell: true` works but is DEP0190 — args are concatenated rather than

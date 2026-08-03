@@ -25,9 +25,18 @@
 // polyglot 0/600. So the heal needs no lock: it is best-effort, atomic (write temp +
 // rename), verify-before-clobber, and a no-op on Windows.
 //
-// The native binary selects its verb from argv[0]'s basename (nub vs nubx); the
-// healed trampoline exec's bin/<verb> in the platform package (which ships both
-// names), so no argv0 override is needed past the heal.
+// VERB SELECTION. The platform package ships ONE binary, `bin/nub` — shipping a
+// byte-identical second copy under the name `nubx` doubled every platform package
+// (77-99 MiB) and put them over cnpm/npmmirror's 80 MiB sync cap, breaking installs
+// behind that mirror. So the verb travels in `__NUB_ARGV0`, which BOTH dispatch paths
+// set: the healed sh trampoline as a prefix assignment, and the Node spawn below via
+// `opts.env`. The Rust side reads it, then erases it so it survives exactly one
+// process (Argv0::capture_argv0_override in crates/nub-cli/src/cli.rs).
+//
+// argv[0]'s basename remains the FALLBACK, and still carries every direct invocation:
+// the curl installer's `~/.nub/bin/nubx` symlink, `nub pm shim` hardlinks, `nubx-dev`.
+// It cannot serve the healed path because POSIX `sh` has no portable argv[0] override
+// (`exec -a` is a bash/zsh-ism; dash — `/bin/sh` on Debian and Ubuntu — rejects it).
 const { spawn } = require("child_process");
 const os = require("os");
 const fs = require("fs");
@@ -44,7 +53,11 @@ function resolveBinary(verb) {
   try {
     return require.resolve(`${pkg}/bin/${verb}${ext}`);
   } catch {
-    // bin/nubx may be absent on an older platform package; fall back to bin/nub.
+    // Expected for `nubx` on any current platform package — only `bin/nub` ships now,
+    // and the verb rides in `__NUB_ARGV0` (see the header). The `<verb>` probe above
+    // is kept so a NEWER launcher still works against an OLDER platform package that
+    // does carry `bin/nubx`: a PM can pin the two to mismatched versions, and picking
+    // the verb-named file there costs nothing and stays correct.
     try {
       return require.resolve(`${pkg}/bin/nub${ext}`);
     } catch {
@@ -196,10 +209,19 @@ function healPathEntry(verb, nativePath) {
     // fallback (spawn native) instead of choking on sh-as-JS. So the heal is race-free
     // on symlink-to-node-shim PMs (npm/bun/yarn) too, the guarantee pnpm gets for free.
     // Measured: pure-sh heal ~6%/200 concurrent first-call failures; polyglot 0/600.
+    //
+    // Both branches carry the verb in `__NUB_ARGV0`. The platform package ships ONE
+    // binary, so `nativeReal` is `bin/nub` for BOTH verbs and its basename can no
+    // longer distinguish them — and POSIX `sh` cannot set argv[0] portably (`exec -a`
+    // is a bash/zsh-ism; dash, i.e. `/bin/sh` on Debian and Ubuntu, rejects it). The
+    // Rust side reads this var, then erases it so it survives exactly one process
+    // (Argv0::capture_argv0_override). Without it the healed `nubx` entry silently
+    // runs `nub` — exit 0, wrong command, which is why this is not optional.
+    const envAssign = `__NUB_ARGV0=${shq(verb)} `;
     const content =
       `#!/bin/sh\n` +
-      `":" //# nub launcher; exec ${shq(nativeReal)} "$@"\n` +
-      `var r=require("child_process").spawnSync(${JSON.stringify(nativeReal)},process.argv.slice(2),{stdio:"inherit"});process.exit(r.status==null?1:r.status)\n`;
+      `":" //# nub launcher; ${envAssign}exec ${shq(nativeReal)} "$@"\n` +
+      `var r=require("child_process").spawnSync(${JSON.stringify(nativeReal)},process.argv.slice(2),{stdio:"inherit",env:Object.assign({},process.env,{__NUB_ARGV0:${JSON.stringify(verb)}})});process.exit(r.status==null?1:r.status)\n`;
 
     for (const dir of (process.env.PATH || "").split(path.delimiter)) {
       if (!dir) continue;
@@ -239,9 +261,13 @@ module.exports = function launch(argv0Name) {
   const binPath = ensureExecutable(resolved, verb);
   // Self-heal the PATH entry on first POSIX call so later calls skip Node entirely.
   healPathEntry(verb, binPath);
-  // This call still runs through Node; spawn the native binary. argv0 basename of
-  // binPath is the verb (bin/nub or bin/nubx), so the Rust CLI dispatches correctly
-  // without an argv0 override. We use async `spawn` (not `spawnSync`) ONLY so this
+  // This call still runs through Node; spawn the native binary. The platform package
+  // ships ONE binary, so binPath's basename is `nub` for both verbs and cannot carry
+  // the mode — `__NUB_ARGV0` does, below. We set `argv0` too, but the env var is the
+  // load-bearing one: Node documents argv0 as affecting only the process TITLE on
+  // Windows, and Windows is precisely where this path runs on EVERY call (the heal is
+  // POSIX-only). The env var makes the two platforms agree instead of resting on
+  // per-OS argv0 semantics. We use async `spawn` (not `spawnSync`) ONLY so this
   // Node launcher can forward terminating signals to the native child: `spawnSync`
   // blocks the event loop, so a SIGTERM (docker stop on a `nub run` entrypoint whose
   // first-ever call hasn't been healed to the sh trampoline yet) would terminate
@@ -250,7 +276,10 @@ module.exports = function launch(argv0Name) {
   // status. (Subsequent calls skip Node entirely via the healed trampoline's `exec`,
   // where signals reach the binary directly.)
   const opts = { stdio: "inherit", windowsHide: true };
-  if (argv0Name) opts.argv0 = argv0Name; // belt-and-suspenders for the bin/nub fallback path
+  if (argv0Name) {
+    opts.argv0 = argv0Name;
+    opts.env = Object.assign({}, process.env, { __NUB_ARGV0: argv0Name });
+  }
   const child = spawn(binPath, process.argv.slice(2), opts);
   let forwarding = true;
   const forward = (sig) => {

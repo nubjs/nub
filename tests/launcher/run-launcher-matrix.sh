@@ -87,12 +87,26 @@ run_block() {
   case "$pn" in *9.9.9-ci*) ok "healed entry runs via node too (polyglot) ($style)";;
     *) no "polyglot-as-node ($style): $pn";; esac
 
-  # nubx-verb: nubx keeps its verb through the heal.
+  # nubx-verb: nubx keeps its verb through the heal, off ONE shipped binary.
+  # The platform package has no bin/nubx any more, so the healed entry must exec
+  # bin/nub and carry the verb in __NUB_ARGV0. Assert the trampoline's SHAPE...
   : > "$dest/node.log"
   local ox; ox=$(R "$BIN/nubx" foo)
-  case "$ox" in *nubx-mode*) ok "nubx verb dispatch ($style)";; *) no "nubx verb ($style): $ox";; esac
-  case "$(cat "$BIN/nubx")" in *nub-host/bin/nubx\'*) ok "nubx healed -> bin/nubx ($style)";;
-    *) no "nubx not healed ($style)";; esac
+  case "$ox" in *nubx-mode*) ok "nubx verb dispatch, first call ($style)";; *) no "nubx verb ($style): $ox";; esac
+  case "$(cat "$BIN/nubx")" in
+    *__NUB_ARGV0=\'nubx\'*nub-host/bin/nub\'*) ok "nubx healed -> bin/nub + __NUB_ARGV0 ($style)";;
+    *) no "nubx heal shape wrong ($style): $(sed -n 2p "$BIN/nubx")";;
+  esac
+  # ...and then that it still dispatches as nubx THROUGH that healed path. This second
+  # call is the one that regressed when the duplicate was simply deleted: the first
+  # call succeeds via the node fallback either way, and only call 2 exposes a
+  # trampoline that lost the verb (exit 0, silently running `nub`).
+  : > "$dest/node.log"
+  local ox2; ox2=$(R "$BIN/nubx" foo)
+  case "$ox2" in *nubx-mode*) ok "nubx verb survives the heal, second call ($style)";;
+    *) no "nubx verb LOST post-heal ($style): $ox2";; esac
+  if [ -s "$dest/node.log" ]; then no "node spawned post-heal for nubx ($style)"
+  else ok "zero node post-heal for nubx ($style)"; fi
 
   # ensure-chmod: the fake native lands 0o644 (no +x). Because the FIRST call already
   # ran successfully above, ensureExecutable must have recovered it. We own the file

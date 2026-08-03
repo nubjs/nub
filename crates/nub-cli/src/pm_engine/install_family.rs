@@ -1286,7 +1286,7 @@ fn stamp_if_virgin(session: &EngineSession, code: i32) {
 }
 
 /// Write `devEngines.packageManager = {name:"nub", version:"^<x.y.z>",
-/// onFail:"warn"}` into the project manifest of a VIRGIN install — the
+/// onFail:"ignore"}` into the project manifest of a VIRGIN install — the
 /// non-locking cross-tool PM signal (see the call-site comment). Best-effort: a
 /// successful install must not fail on a manifest the stamp can't reach (no
 /// `package.json` — nub never scaffolds one — or an unwritable file).
@@ -1336,7 +1336,7 @@ fn stamp_virgin_dev_engines(cwd: &Path) {
             // a virgin lockfile state — and clobbering it would impose nub's
             // brand over another PM's declaration (the symmetric brand boundary).
             dev.entry("packageManager").or_insert_with(
-                || serde_json::json!({ "name": "nub", "version": range, "onFail": "warn" }),
+                || serde_json::json!({ "name": "nub", "version": range, "onFail": "ignore" }),
             );
         }
     });
@@ -2237,7 +2237,7 @@ mod tests {
             Some(&serde_json::json!({
                 "name": "nub",
                 "version": format!("^{}", env!("CARGO_PKG_VERSION")),
-                "onFail": "warn"
+                "onFail": "ignore"
             })),
             "value must be the non-locking caret range on the running nub version"
         );

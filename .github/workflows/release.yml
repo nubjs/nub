@@ -856,14 +856,17 @@ jobs:
           MATRIX_PLATFORM: ${{ matrix.platform }}
         run: |
           # The runtime is EMBEDDED in the binary (staged + built above), so the
-          # platform package ships ONLY bin/ — no runtime/ sidecar. Both verbs are
-          # real binary copies (nub picks its verb from the argv[0] basename).
+          # platform package ships ONLY bin/ — no runtime/ sidecar. And ONE binary,
+          # not two: the launcher passes the verb in `__NUB_ARGV0` rather than relying
+          # on a separately-named `nubx` file (npm/nub/bin/launch.js,
+          # Argv0::capture_argv0_override). This is what keeps every platform package
+          # under cnpm/npmmirror's 80 MiB sync cap, and it halves the release archive
+          # too — the archive is tarred from THIS directory further down.
           PKG="npm/nub-$MATRIX_PLATFORM"
           EXE=""; [[ "$MATRIX_PLATFORM" == win32-* ]] && EXE=".exe"
           mkdir -p "$PKG/bin"
           if [[ "$MATRIX_PLATFORM" == win32-* ]]; then
             cp "target/$MATRIX_TARGET/release/nub.exe" "$PKG/bin/nub.exe"
-            cp "target/$MATRIX_TARGET/release/nub.exe" "$PKG/bin/nubx.exe"
             # Bundle the arch-appropriate busybox-w32 POSIX-sh sidecar next to
             # nub.exe (nub's Windows script shell — see vendor/busybox-w32/README.md
             # and crates/nub-cli/src/cli.rs resolve_bundled_busybox). Verify the
@@ -878,8 +881,7 @@ jobs:
             cp "$SRC" "$PKG/bin/busybox.exe"
           else
             cp "target/$MATRIX_TARGET/release/nub" "$PKG/bin/nub"
-            cp "target/$MATRIX_TARGET/release/nub" "$PKG/bin/nubx"
-            chmod +x "$PKG/bin/nub" "$PKG/bin/nubx"
+            chmod +x "$PKG/bin/nub"
           fi
           # The template ships NEXT TO nub under the exact name
           # compile::launcher::locate looks for — that sibling relationship is
@@ -933,7 +935,7 @@ jobs:
           BIN="nub-linux-x64/bin/nub"
           # The upload→download artifact round-trip strips the +x mode bit (binaries
           # arrive at 0644), so re-apply it before exec.
-          chmod +x "$BIN" nub-linux-x64/bin/nubx
+          chmod +x "$BIN"
           # The load-bearing assertion: if the binary links a glibc newer than
           # bookworm's 2.36, this exec fails with "GLIBC_2.xx not found" and the
           # job goes red — exactly the floor regression test-install can't see.

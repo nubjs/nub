@@ -35,9 +35,125 @@
 # core.hooksPath is .githooks, so this is active in every worktree with no
 # per-clone setup step.
 
+SKILLS_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+
+# ---------------------------------------------------------------------------
+# Skill-tree integrity. Runs FIRST, unconditionally, and never touches stdin.
+#
+# WHY THIS EXISTS: skills are the repo's agent tooling, and every way they break
+# is SILENT — no error, no missing-file message, just an agent that quietly no
+# longer knows how to do something. Three real failures motivate the checks:
+#
+#   1. A duplicate tree under .agents/skills drifted for weeks against
+#      .claude/skills, so agents reading it followed a model-tiering policy that
+#      had been reversed, and two skills existed there that Claude never saw.
+#   2. A directory symlink was considered as the anti-drift fix and rejected: git
+#      on Windows without core.symlinks writes it out as a text file, which turns
+#      "one shared tree" into "zero skills" with nothing on stderr.
+#   3. A per-skill entry in .git/info/exclude makes `git add` silently REFUSE a
+#      canonical skill, so it vanishes from the repo while still sitting on disk.
+#
+# Deliberately NOT gated on the pushed range: a bad tree usually arrives via a
+# merge or a checkout, not via your own edit. It costs a few milliseconds.
+#
+# Unlike the site gate below, this one has no infrastructure to fail on — it is
+# file tests and greps — so a failure here is always a real defect.
+#
+# Bypass: git push --no-verify
+# ---------------------------------------------------------------------------
+if [ -n "$SKILLS_ROOT" ] && [ -e "$SKILLS_ROOT/.claude/skills" ]; then
+  skills_bad=0
+
+  # A symlink here is the Windows-degradation trap; a non-directory is worse.
+  if [ -L "$SKILLS_ROOT/.claude/skills" ] || [ ! -d "$SKILLS_ROOT/.claude/skills" ]; then
+    echo "pre-push: .claude/skills must be a real directory, not a symlink or file." >&2
+    echo "          A symlink degrades to a plain text file on a Windows clone," >&2
+    echo "          silently leaving every agent with zero skills." >&2
+    skills_bad=1
+  fi
+
+  # No rival AGENT-PLAYBOOK tree. .claude/skills is the single source of truth.
+  # NOT checked: the repo-root skills/ directory, which is the published
+  # user-facing nub skill served at nubjs.com/skill.md — a different artifact
+  # with a different audience, not an agent playbook.
+  for rival in "$SKILLS_ROOT/.agents/skills" "$SKILLS_ROOT/.opencode/skills"; do
+    [ -d "$rival" ] || continue
+    if find "$rival" -name SKILL.md 2>/dev/null | grep -q .; then
+      echo "pre-push: a second agent-skill tree exists at ${rival#"$SKILLS_ROOT"/} — playbooks" >&2
+      echo "          must live only in .claude/skills. Two trees drift silently; that is" >&2
+      echo "          the bug this check exists to prevent. Move them in, delete the copy." >&2
+      skills_bad=1
+    fi
+  done
+
+  # Every skill directory needs a SKILL.md carrying name + description, or the
+  # harness will not register it — again, with no error shown to anyone.
+  for d in "$SKILLS_ROOT"/.claude/skills/*/; do
+    [ -d "$d" ] || continue
+    name=$(basename "$d")
+    if [ ! -f "$d/SKILL.md" ]; then
+      echo "pre-push: .claude/skills/$name has no SKILL.md — it will never register." >&2
+      skills_bad=1
+      continue
+    fi
+    for field in name description; do
+      if ! head -20 "$d/SKILL.md" | grep -q "^${field}:"; then
+        echo "pre-push: .claude/skills/$name/SKILL.md has no frontmatter \`${field}:\`" >&2
+        echo "          — without it the skill is invisible to every agent." >&2
+        skills_bad=1
+      fi
+    done
+  done
+
+  # A canonical skill that git refuses to track is the .git/info/exclude trap.
+  for d in "$SKILLS_ROOT"/.claude/skills/*/; do
+    [ -f "$d/SKILL.md" ] || continue
+    name=$(basename "$d")
+    case "$name" in nub|sandbox-pentest) continue ;; esac  # deliberately local-only
+    if git -C "$SKILLS_ROOT" check-ignore -q ".claude/skills/$name/SKILL.md" 2>/dev/null; then
+      echo "pre-push: .claude/skills/$name is git-IGNORED, so \`git add\` silently skips it." >&2
+      echo "          Remove its entry from .gitignore or .git/info/exclude." >&2
+      skills_bad=1
+    fi
+  done
+
+  # The gh-comment-guard exists once per agent (.claude/ for Claude Code, .codex/
+  # for Codex) because the two read different config files — there is no shared
+  # hook location. The SCRIPT, though, is agent-neutral: both runners pass a JSON
+  # payload with tool_input.command on stdin. Two copies with no sync is exactly
+  # how the skills tree drifted, so require them byte-identical.
+  claude_guard="$SKILLS_ROOT/.claude/hooks/gh-comment-guard.mjs"
+  codex_guard="$SKILLS_ROOT/.codex/hooks/gh-comment-guard.mjs"
+  if [ -f "$claude_guard" ] && [ -f "$codex_guard" ] && ! cmp -s "$claude_guard" "$codex_guard"; then
+    echo "pre-push: .claude/hooks/gh-comment-guard.mjs and .codex/hooks/gh-comment-guard.mjs" >&2
+    echo "          have DRIFTED. They are per-agent copies of one script and must match;" >&2
+    echo "          copy whichever is correct over the other." >&2
+    skills_bad=1
+  fi
+
+  # A hook command carrying someone's home directory works on exactly one machine
+  # and in no worktree. Codex sets NO project-dir env var (verified: the binary
+  # has neither CLAUDE_PROJECT_DIR nor CODEX_PROJECT_DIR), so the portable form
+  # is a command substitution — $(git rev-parse --show-toplevel).
+  if [ -f "$SKILLS_ROOT/.codex/hooks.json" ] && grep -q '"command".*/Users/\|"command".*/home/' "$SKILLS_ROOT/.codex/hooks.json"; then
+    echo "pre-push: .codex/hooks.json hardcodes an absolute home path — it will break in" >&2
+    echo "          every worktree and on every other machine. Use:" >&2
+    echo "          node \"\$(git rev-parse --show-toplevel)/.codex/hooks/gh-comment-guard.mjs\"" >&2
+    skills_bad=1
+  fi
+
+  if [ "$skills_bad" = 1 ]; then
+    echo >&2
+    echo "pre-push: AGENT TOOLING INTEGRITY CHECK FAILED — fix the above, or bypass" >&2
+    echo "          with: git push --no-verify" >&2
+    exit 1
+  fi
+fi
+
 [ "${NUB_SKIP_SITE_CHECK:-}" = "1" ] && exit 0
 
-ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+ROOT="$SKILLS_ROOT"
+[ -n "$ROOT" ] || exit 0
 [ -d "$ROOT/site" ] || exit 0
 
 # Decide whether the pushed range touches site/**. FAIL SAFE, matching the

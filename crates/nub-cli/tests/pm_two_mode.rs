@@ -98,7 +98,7 @@ fn use_nub_migrates_a_single_package_catalog_project_offline_and_idempotently() 
         "bare pm use nub writes no exact packageManager pin: {manifest}"
     );
     assert_eq!(manifest["devEngines"]["packageManager"]["name"], "nub");
-    assert_eq!(manifest["devEngines"]["packageManager"]["onFail"], "warn");
+    assert_eq!(manifest["devEngines"]["packageManager"]["onFail"], "ignore");
     assert_eq!(
         manifest["devEngines"]["packageManager"]["version"],
         format!("^{}", env!("CARGO_PKG_VERSION"))
@@ -540,7 +540,7 @@ fn pm_pin_locks_only_the_nub_identity_fields_offline() {
         m["devEngines"]["packageManager"]["version"],
         format!("^{running}")
     );
-    assert_eq!(m["devEngines"]["packageManager"]["onFail"], "warn");
+    assert_eq!(m["devEngines"]["packageManager"]["onFail"], "ignore");
     assert_eq!(
         m["pnpm"]["overrides"]["left-pad"], "1.3.0",
         "pin must not touch the pnpm.* config it does not migrate: {m}"

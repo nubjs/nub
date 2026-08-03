@@ -70,19 +70,24 @@ node -e '
 FAKE_SRC="$DEST/.fake-native"
 cat > "$FAKE_SRC" <<'F'
 #!/bin/sh
-case "${0##*/}" in
+verb="${__NUB_ARGV0:-${0##*/}}"
+case "$verb" in
   nubx*) echo "nubx-mode $*";;
   *)     echo "nub 9.9.9-ci $*";;
 esac
 F
+# ONE binary, matching the real platform package. The `__NUB_ARGV0`-before-argv[0]
+# precedence above mirrors Argv0::detect / capture_argv0_override, and the order is
+# load-bearing: on the healed fast path argv[0] is `nub` for BOTH verbs, so only the
+# env var separates them. A fixture that consulted argv[0] first would go green while
+# the real binary silently ran the wrong verb.
 cp "$FAKE_SRC" "$HOSTPKG/bin/nub"
-cp "$FAKE_SRC" "$HOSTPKG/bin/nubx"
 rm -f "$FAKE_SRC"
 # Land the fake native 0o644 (NO +x) — exactly how npm extracts a non-`bin`-field
 # file. ensureExecutable() must recover this at runtime (chmod in place, or stage a
 # copy when not owner). The heal/ensure code is what we're testing, so we do NOT
 # pre-chmod it here.
-chmod 0644 "$HOSTPKG/bin/nub" "$HOSTPKG/bin/nubx"
+chmod 0644 "$HOSTPKG/bin/nub"
 printf '{"name":"@nubjs/nub-host","version":"9.9.9","files":["bin"]}\n' \
   > "$HOSTPKG/package.json"
 
