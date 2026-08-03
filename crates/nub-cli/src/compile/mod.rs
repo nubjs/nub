@@ -875,11 +875,33 @@ fn build_node_blob(
     // The launcher verifies with this on every warm start; `sha` stays the cache
     // key. Both are over the same decompressed bytes.
     let b3 = blake3::hash(&bytes).to_hex().to_string();
-    eprintln!(
-        "Compressing Node ({:.0} MB) with zstd-19 …",
-        bytes.len() as f64 / 1_000_000.0
-    );
-    let blob = zstd::encode_all(&bytes[..], 19).context("zstd-19 compressing Node")?;
+    // Compressing a ~113 MB Node at zstd-19 takes ~20 s, and it was paid on every
+    // single compile even though the input never changes for a given Node and
+    // target. Keyed by the hash of the bytes being compressed, so a stale entry
+    // is not expressible: different bytes are a different key.
+    let cached = cache_root
+        .join("compile-node-blob")
+        .join(format!("{sha}.zst"));
+    let blob = match std::fs::read(&cached) {
+        Ok(blob) => blob,
+        Err(_) => {
+            eprintln!(
+                "Compressing Node ({:.0} MB) with zstd-19 …",
+                bytes.len() as f64 / 1_000_000.0
+            );
+            let blob = zstd::encode_all(&bytes[..], 19).context("zstd-19 compressing Node")?;
+            // Written through a temporary so a killed compile cannot leave a
+            // truncated blob behind for the next one to read as complete.
+            if let Some(dir) = cached.parent() {
+                let _ = std::fs::create_dir_all(dir);
+                let tmp = cached.with_extension(format!("zst.{}.tmp", std::process::id()));
+                if std::fs::write(&tmp, &blob).is_ok() && std::fs::rename(&tmp, &cached).is_err() {
+                    let _ = std::fs::remove_file(&tmp);
+                }
+            }
+            blob
+        }
+    };
     let license = zstd::encode_all(&license[..], 19).context("zstd-19 compressing Node LICENSE")?;
     Ok(EmbeddedNode {
         blob,
