@@ -36,47 +36,54 @@ The constraints every candidate is judged against are the build jail's, not the 
 Before asking whether a different architecture would have avoided the defects, it is worth establishing which axis they were on. The answer decides the rest of the document.
 
 
-## ⛔ OPEN DEFECT — the per-package network grant is INOPERATIVE on WINDOWS (2026-08-02)
+## ✅ RESOLVED — a v2 catalog override never fed the egress table (2026-08-02)
 
-**Measured, with a cross-platform control.** `@apollo/rover@0.29.1`, same harness, same widest grant
-(state 53 `write.disk + network`):
+**The defect was in nub, and it was not Windows-specific.**
+`catalog_override::package_network_allowed()` consulted only the **v1** catalog. A v2 override
+parses and loads fine (`active_v2()`), but v2 carries egress as a per-package CAPABILITY
+(`packages[<name>].default.network`) rather than a v1 `packageNetwork.full` table — so the function
+returned `None`, `build_jail_net_allowed` fell back to the COMPILED-IN table, and that table cannot
+name a package the override exists to test.
 
-| | macOS | Windows |
-|---|---|---|
-| no-grant cell | fails `getaddrinfo ENOTFOUND rover.apollo.dev` — denial works | — |
-| **widest grant** | **succeeds, downloads** | **`nub build sandbox: blocked network access`** |
-| verdict | `MINIMUM`, state `network`, cost 3 | `BROKEN-EVEN-WITH-EVERYTHING` |
+**Why it looked like a Windows platform defect.** macOS and Linux deny egress IN-KERNEL (Seatbelt /
+Landlock+seccomp) straight off the v2 capability and never reach that function. Windows has no
+per-process network filter, so its userland JS net gate is the table's ONLY consumer. A
+cross-platform override bug therefore surfaced on exactly one platform.
 
-**The variable is NETWORK NEED, and nothing else.** Windows accusation rate on the fixed harness,
-split by whether the package needs network (macOS `MINIMUM` state as ground truth):
+MEASURED before the fix — Windows accusation rate split by whether the package needs network
+(macOS `MINIMUM` state as ground truth):
 
 | | accused / total |
 |---|---|
-| **needs network**, scoped | **13/15 = 86.7%** |
-| **needs network**, unscoped | **2/3 = 66.7%** |
-| no network, scoped | **0/14 = 0.0%** |
-| no network, unscoped | 2/43 = 4.7% |
+| **needs network** | **15/18 = 83%** |
+| no network | 2/57 = 3.5% |
 
-A package that needs network is accused ~67-87% of the time; one that does not is accused ~0-5%. So
-the per-package network grant does not work on Windows at all.
+`@apollo/rover@0.29.1` at the WIDEST grant (`write.disk + network`) downloaded on macOS and logged
+`blocked network access to rover.apollo.dev` on Windows.
 
-⛔ **A SCOPE SKEW WAS THE FIRST READING AND IT WAS A CONFOUND.** Raw rates looked like scoped 41.9% vs
-unscoped 7.1% — a 6x skew that suggested the exact-match name lookup
-(`compiler/package_network.rs:46`) was missing on the store's `@scope+name` encoding. Splitting by
-BOTH variables killed it: scoped packages with no network need are accused **0%**. Scoped names simply
-correlate with network need (CLI tools that download a binary). Recorded because the wrong reading was
-specific, plausible, and would have sent the fix into the name-matching code.
+FIXED `e3cdc0e7f9` — the v2 branch derives the egress set from `default.network` plus any band's
+`network`, dropping version scoping deliberately (v2 resolves a version to exactly one grant via
+`Entry::grant_for`, while this table's matcher is name-scoped, so a name needing egress at ANY
+measured version must appear; over-granting is the accepted direction).
 
-`net_gate_shim.js` is a plain boolean — `if (POLICY.allow === true) return;`, no host list,
-loopback-only exemption — so the defect is UPSTREAM of the gate, in how a package's network capability
-is resolved into `POLICY.allow` on win32.
+PINNED `crates/nub-sandbox/tests/generated_catalog_round_trip.rs` — the first test comparing
+GENERATOR output against a CONSUMER. Every prior check asserted the hand-maintained compiled-in
+table, which is why the emission defects shipped unnoticed.
 
-**Why it matters for the ship decision:** this is the failure mode the jail exists to avoid — breaking
-packages — and it hits the single commonest reason an install script exists (downloading a prebuilt
-binary). Windows-only, so the catalog measured on macOS/Linux is unaffected.
+### ⛔ TWO WRONG DIAGNOSES ON THE WAY, both specific and plausible
 
-NEXT: a Windows CI probe that dumps the resolved `POLICY.allow` and the catalog entry the jail matched
-for a package known to carry a network grant.
+1. **A SCOPED-NAME SKEW.** Raw rates were scoped 41.9% vs unscoped 7.1% — a 6x skew pointing at the
+   exact-match lookup in `compiler/package_network.rs:46` missing the store's `@scope+name`
+   encoding. Killed by splitting on BOTH variables: scoped packages with no network need are accused
+   **0%**. Scope merely correlates with network need (CLI tools download binaries).
+2. **"THE HARNESS EMITS A SHAPE NOTHING READS."** Reading `parse_package_network` — which takes
+   `networkHosts[].fetchedBy` and `packageNetwork.full[]` only — suggested the harness's v2
+   capability was unread, and a v1 table was added to compensate. It worked, and it was a workaround
+   over this bug. **TWO PARSERS EXIST:** `catalog_v2::parse` takes the capability shape and
+   `catalog_override` tries it FIRST; `catalog::parse` is v1. Asserting a v2 document against the v1
+   parser fails with `` `networkHosts` must be an array ``, which reads as a generator defect and is
+   not one. Workaround reverted in `2a66aa3bff`.
+
 
 ## Every defect but a handful lands on the read axis
 
