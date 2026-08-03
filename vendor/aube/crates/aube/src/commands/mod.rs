@@ -141,7 +141,7 @@ pub(crate) use package_spec::{
     encode_package_name, resolve_version, split_name_spec, wanted_version,
 };
 pub(crate) use project_lock::take_install_project_lock;
-pub(crate) use project_lock::take_project_lock;
+pub use project_lock::{ProjectLock, take_project_lock};
 pub(crate) use script_settings::{configure_script_settings, configure_script_settings_for_cwd};
 pub use settings_context::load_global_config_yaml;
 pub(crate) use settings_context::{

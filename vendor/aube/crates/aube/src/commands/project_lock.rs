@@ -19,7 +19,7 @@ fn aube_no_lock_enabled(cwd: &std::path::Path) -> bool {
 /// The `_inner` field holds an erased `fslock::LockFile` (via `dyn Any`)
 /// so callers don't have to take a direct dep on `fslock` to name the
 /// type — the lock is released on drop regardless.
-pub(crate) struct ProjectLock {
+pub struct ProjectLock {
     project_dir: std::path::PathBuf,
     _inner: Option<Box<dyn Any + Send + Sync>>,
 }
@@ -40,7 +40,7 @@ impl ProjectLock {
 /// Returns a no-op guard when `AUBE_NO_LOCK` is active. Nested commands must
 /// pass the returned guard into the inner operation rather than attempting to
 /// acquire the same filesystem lock again.
-pub(crate) fn take_project_lock(cwd: &std::path::Path) -> miette::Result<ProjectLock> {
+pub fn take_project_lock(cwd: &std::path::Path) -> miette::Result<ProjectLock> {
     let project_dir = cwd
         .canonicalize()
         .or_else(|_| std::path::absolute(cwd))

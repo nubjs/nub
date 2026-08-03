@@ -56,23 +56,16 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
 }
 
 fn find_project_root_uncached(start: &Path) -> Option<PathBuf> {
-    // Walk up looking for package.json. Stops at $HOME so a stray
-    // `aube install` in an empty /tmp dir cannot climb out into the
-    // user's home dir and attach itself to a parent project. Real
-    // bug: in testing, running `aube install` from an empty /tmp
-    // path walked up to the user's home package.json and started
-    // writing into ~/node_modules with "Access denied" errors
-    // halfway through. Destructive, surprising, real.
-    let stop = home_stop_boundary();
-    for dir in start.ancestors() {
-        if dir.join("package.json").is_file() {
-            return Some(dir.to_path_buf());
-        }
-        if stop.as_deref() == Some(dir) {
-            return None;
-        }
-    }
-    None
+    let home = home_stop_boundary();
+    find_project_root_with_home(start, home.as_deref())
+}
+
+fn find_project_root_with_home(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    find_ancestor_before_home(start, home, |dir| {
+        dir.join("package.json")
+            .is_file()
+            .then(|| dir.to_path_buf())
+    })
 }
 
 /// Resolve home dir for the find_project_root walk boundary. On Unix
@@ -82,6 +75,28 @@ fn find_project_root_uncached(start: &Path) -> Option<PathBuf> {
 /// than panicking, and CI runners always set one of them.
 fn home_stop_boundary() -> Option<PathBuf> {
     aube_util::env::home_dir()
+}
+
+/// Walk ancestors without selecting `$HOME` when the invocation started below
+/// it. Starting at `$HOME` remains valid, but the walk never escapes above it.
+fn find_ancestor_before_home<T>(
+    start: &Path,
+    home: Option<&Path>,
+    mut find: impl FnMut(&Path) -> Option<T>,
+) -> Option<T> {
+    for dir in start.ancestors() {
+        let at_home = home.is_some_and(|home| home == dir);
+        if at_home && dir != start {
+            return None;
+        }
+        if let Some(found) = find(dir) {
+            return Some(found);
+        }
+        if at_home {
+            return None;
+        }
+    }
+    None
 }
 
 /// Shape-only check for a `package.json`'s `workspaces` field. Parses
@@ -127,12 +142,11 @@ pub fn find_workspace_root(start: &Path) -> Option<PathBuf> {
 }
 
 fn find_workspace_root_uncached(start: &Path) -> Option<PathBuf> {
-    // Same home-boundary story as find_project_root. Without it, an
-    // `aube install` from an empty scratch dir could climb into the
-    // user's home, find a parent workspace yaml or package.json with
-    // a workspaces field, and attach to that workspace. Cap the walk
-    // at $HOME so that never happens.
-    let stop = home_stop_boundary();
+    let home = home_stop_boundary();
+    find_workspace_root_with_home(start, home.as_deref())
+}
+
+fn find_workspace_root_with_home(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
     // Any `pnpm-workspace.yaml` is a hard workspace boundary, matching
     // pnpm: a file with no `packages:` list configures a single-package
     // workspace (just the root package) — it does not mean "ignore this
@@ -141,19 +155,13 @@ fn find_workspace_root_uncached(start: &Path) -> Option<PathBuf> {
     // outer root; per-member lockfile freshness (tracked in install
     // state) is what keeps repeat installs warm under
     // `sharedWorkspaceLockfile=false`.
-    for dir in start.ancestors() {
+    find_ancestor_before_home(start, home, |dir| {
         if aube_manifest::workspace::workspace_yaml_existing(dir).is_some() {
             return Some(dir.to_path_buf());
         }
         let pkg = dir.join("package.json");
-        if pkg.is_file() && package_json_has_workspaces(&pkg) {
-            return Some(dir.to_path_buf());
-        }
-        if stop.as_deref() == Some(dir) {
-            return None;
-        }
-    }
-    None
+        (pkg.is_file() && package_json_has_workspaces(&pkg)).then(|| dir.to_path_buf())
+    })
 }
 
 /// Walk upward from `start` looking for the nearest ancestor that
@@ -162,17 +170,14 @@ fn find_workspace_root_uncached(start: &Path) -> Option<PathBuf> {
 /// because it feeds callers that specifically need the yaml file path
 /// (catalog loader, settings loader).
 pub fn find_workspace_yaml_root(start: &Path) -> Option<PathBuf> {
-    // Cap the walk at $HOME for the same reason as find_project_root.
-    let stop = home_stop_boundary();
-    for dir in start.ancestors() {
-        if aube_manifest::workspace::workspace_yaml_existing(dir).is_some() {
-            return Some(dir.to_path_buf());
-        }
-        if stop.as_deref() == Some(dir) {
-            return None;
-        }
-    }
-    None
+    let home = home_stop_boundary();
+    find_workspace_yaml_root_with_home(start, home.as_deref())
+}
+
+fn find_workspace_yaml_root_with_home(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    find_ancestor_before_home(start, home, |dir| {
+        aube_manifest::workspace::workspace_yaml_existing(dir).map(|_| dir.to_path_buf())
+    })
 }
 
 /// Return the nearest project root at or above the cached cwd.
@@ -293,6 +298,44 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn home_markers_are_ignored_from_descendants_but_not_home_itself() {
+        let home = tempfile::tempdir().unwrap();
+        let child = home.path().join("scratch/nested");
+        write(&child.join(".keep"), "");
+        write(
+            &home.path().join("package.json"),
+            r#"{"name":"home","workspaces":["packages/*"]}"#,
+        );
+        write(
+            &home.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - 'packages/*'\n",
+        );
+
+        assert_eq!(find_project_root_with_home(&child, Some(home.path())), None);
+        assert_eq!(
+            find_workspace_root_with_home(&child, Some(home.path())),
+            None
+        );
+        assert_eq!(
+            find_workspace_yaml_root_with_home(&child, Some(home.path())),
+            None
+        );
+
+        assert_eq!(
+            find_project_root_with_home(home.path(), Some(home.path())),
+            Some(home.path().to_path_buf())
+        );
+        assert_eq!(
+            find_workspace_root_with_home(home.path(), Some(home.path())),
+            Some(home.path().to_path_buf())
+        );
+        assert_eq!(
+            find_workspace_yaml_root_with_home(home.path(), Some(home.path())),
+            Some(home.path().to_path_buf())
+        );
     }
 
     #[test]

@@ -1244,7 +1244,7 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     }
 
     super::min_release_age::arm();
-    let code = run_engine(&session, opts, yarn, &flags.output)?;
+    let code = run_engine(&session, opts, yarn, &flags.output, None)?;
     super::min_release_age::persist(&session.cwd, code == 0, &flags.output);
     // Vite symlink-GVS serving compat (#315): after a successful install, write
     // `node_modules/.modules.yaml` and (for Vite < 8.1) patch the ejected vite
@@ -1404,6 +1404,12 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
     let root = aube::embed::resolve_install_root(&session.cwd)
         .map_err(|error| anyhow::anyhow!("failed to resolve install root: {error}"))?;
 
+    // CI owns both the clean tree and the frozen installation. Acquire the
+    // root lock before any config-derived preflight, then hand this exact guard
+    // to the engine so it cannot try to acquire the same filesystem lock again.
+    let lock = aube::commands::take_project_lock(&root)
+        .map_err(|error| anyhow::anyhow!("failed to acquire project lock: {error}"))?;
+
     // Validate the raw file-backed registry table before any invocation or
     // project state changes. `load_validated` checks the default and every
     // scoped route (including Yarn/Bun/global sources); a later `--registry`
@@ -1420,9 +1426,6 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
             .install_overrides()
             .map_err(|_| anyhow::anyhow!("invalid registry URL"))?;
     }
-
-    // Clean only after every read-only preflight above has succeeded.
-    remove_node_modules(&root.join("node_modules"))?;
 
     // Config-derived knobs (ci is frozen by definition, so the dep-axis, the
     // yarn block-all-scripts opt-out, and the yarn `enableNetwork: false`
@@ -1487,7 +1490,11 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
             ));
         }
     }
-    let code = run_engine(&session, opts, yarn, &flags.output)?;
+
+    // Every read-only, config-derived preflight above ran under the root lock.
+    // Only now may CI remove the existing tree.
+    remove_node_modules(&root.join("node_modules"))?;
+    let code = run_engine(&session, opts, yarn, &flags.output, Some(&lock))?;
     crate::install_engine::record(&session.cwd, code);
     Ok(code)
 }
@@ -1660,6 +1667,7 @@ fn run_engine(
     opts: InstallOptions,
     yarn_gated: bool,
     output: &super::output::OutputFlags,
+    lock: Option<&aube::commands::ProjectLock>,
 ) -> Result<i32> {
     // The two halves of the install report bracket the engine: the resolved
     // layout prints ahead of the progress display, and the materialization
@@ -1671,7 +1679,12 @@ fn run_engine(
     // the progress/summary written during install) and drop it before the match
     // below, so a final error report still reaches the real stderr.
     let result = with_output(output, || {
-        let result = session.runtime.block_on(aube::commands::install::run(opts));
+        let result = match lock {
+            Some(lock) => session
+                .runtime
+                .block_on(aube::commands::install::run_with_project_lock(opts, lock)),
+            None => session.runtime.block_on(aube::commands::install::run(opts)),
+        };
         // Flush the diagnostics recorder (summary table, critical-path, etc.) so
         // that AUBE_DIAG_* env vars work end-to-end via `nub install`. aube's own
         // CLI entry flushes from lib.rs; the library path needs an explicit call.

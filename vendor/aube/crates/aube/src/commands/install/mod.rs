@@ -273,8 +273,7 @@ mod resolver_stream_capacity_tests {
         let client = std::sync::Arc::new(aube_registry::client::RegistryClient::new(
             "http://127.0.0.1:0",
         ));
-        let (_resolver, receiver) =
-            aube_resolver::Resolver::with_stream_capacity(client, capacity);
+        let (_resolver, receiver) = aube_resolver::Resolver::with_stream_capacity(client, capacity);
 
         assert_eq!(receiver.max_capacity(), RESOLVER_STREAM_CAPACITY_MAX);
     }
@@ -825,9 +824,9 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
 /// invocation-scoped: only the command that owns this project's lock can
 /// bypass acquisition. Concurrent installs for unrelated projects always
 /// acquire their own filesystem lock.
-pub(crate) async fn run_with_project_lock(
+pub async fn run_with_project_lock(
     mut opts: InstallOptions,
-    lock: &super::project_lock::ProjectLock,
+    lock: &super::ProjectLock,
 ) -> miette::Result<()> {
     let cwd = lock.project_dir().to_path_buf();
     super::load_npm_config(&cwd)?;
@@ -1652,9 +1651,8 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             } else {
                 Default::default()
             };
-            let fetch_client = std::sync::Arc::new(
-                make_client(&cwd_for_client)?.with_network_mode(network_mode),
-            );
+            let fetch_client =
+                std::sync::Arc::new(make_client(&cwd_for_client)?.with_network_mode(network_mode));
             let fetch_result = fetch_packages_with_root(
                 &graph.packages,
                 &store,

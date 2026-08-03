@@ -53,6 +53,37 @@ fn run_install(dir: &Path, args: &[&str]) -> (String, String, i32) {
     )
 }
 
+fn ci_command(dir: &Path, home: &Path, data: &Path, cache: &Path) -> Command {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut command = Command::new(nub_binary());
+    command
+        .args(["ci"])
+        .current_dir(dir)
+        .env_clear()
+        .env("PATH", path)
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env("XDG_DATA_HOME", data)
+        .env("XDG_CACHE_HOME", cache)
+        .env("NUB_SELF_SHIM", "0");
+    command
+}
+
+fn wait_for_exit(child: &mut std::process::Child, label: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if child.try_wait().expect("poll child").is_some() {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{label} did not finish before the project-lock timeout");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// Like [`run_install`], but with `CI=true` in the environment so the
 /// install hits nub's CI-aware frozen-mode auto-default.
 fn run_install_ci(dir: &Path, args: &[&str]) -> (String, String, i32) {
@@ -248,6 +279,142 @@ fn ci_validates_workspace_config_before_descendant_cleanup() {
         std::fs::read_to_string(&sentinel).unwrap(),
         "intact",
         "the malformed workspace config must fail before member node_modules cleanup"
+    );
+}
+
+/// `enableNetwork: false` makes the classic mirror prohibition a CI
+/// preflight. It must run before CI clears the tree.
+#[test]
+fn ci_rejects_offline_mirror_before_cleaning_node_modules() {
+    let dir = pm_tmpdir("ci-offline-mirror");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"ci-offline-mirror","version":"1.0.0","packageManager":"yarn@1.22.22"}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
+    std::fs::write(
+        dir.join(".yarnrc"),
+        "yarn-offline-mirror \"./npm-packages-offline-cache\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join(".yarnrc.yml"), "enableNetwork: false\n").unwrap();
+    let sentinel = dir.join("node_modules/keep-me");
+    std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+    std::fs::write(&sentinel, "intact").unwrap();
+
+    let (_, stderr, code) = run_install(&dir, &["ci"]);
+    assert_ne!(code, 0, "stderr={stderr}");
+    assert!(
+        stderr.contains("yarn-offline-mirror"),
+        "offline-mirror preflight must explain the refusal: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&sentinel).unwrap(),
+        "intact",
+        "offline mirror refusal must precede node_modules cleanup"
+    );
+}
+
+/// A package marker at `$HOME` must not turn a child scratch directory into a
+/// project or let CI delete the HOME-level tree.
+#[test]
+fn ci_from_home_descendant_never_selects_or_cleans_home() {
+    let home = pm_tmpdir("ci-home-boundary");
+    let child = home.join("scratch/nested");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::write(
+        home.join("package.json"),
+        r#"{"name":"home-marker","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let sentinel = home.join("node_modules/keep-me");
+    std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+    std::fs::write(&sentinel, "intact").unwrap();
+
+    let output = ci_command(
+        &child,
+        &home,
+        &home.join("xdg-data"),
+        &home.join("xdg-cache"),
+    )
+    .output()
+    .expect("spawn nub ci below HOME");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_ne!(output.status.code(), Some(0), "stderr={stderr}");
+    assert!(
+        stderr.contains("no package.json or workspace yaml"),
+        "CI must reject a HOME descendant without selecting HOME: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&sentinel).unwrap(),
+        "intact",
+        "CI must not clean HOME/node_modules from a descendant invocation"
+    );
+}
+
+/// The second CI process must observe the root-lock contention marker and then
+/// complete after the first lifecycle script releases that same lock.
+#[test]
+fn ci_reuses_one_root_lock_without_deadlocking() {
+    let dir = pm_tmpdir("ci-root-lock");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"ci-root-lock","version":"1.0.0","scripts":{"preinstall":"node -e \"require('fs').writeFileSync('ci-lock-entered', 'held'); setTimeout(() => {}, 3000)\""}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\nimporters:\n  .: {}\n",
+    )
+    .unwrap();
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let data = dir.join("xdg-data");
+    let cache = dir.join("xdg-cache");
+    let marker = dir.join("ci-lock-entered");
+
+    let mut first = ci_command(&dir, &home, &data, &cache)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn first nub ci");
+    let marker_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !marker.is_file() {
+        if let Some(status) = first.try_wait().expect("poll first nub ci") {
+            panic!("first nub ci exited before holding the lock: {status}");
+        }
+        if std::time::Instant::now() >= marker_deadline {
+            let _ = first.kill();
+            let _ = first.wait();
+            panic!("first nub ci never reached the lifecycle lock marker");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let mut second = ci_command(&dir, &home, &data, &cache)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn concurrent nub ci");
+    wait_for_exit(&mut second, "concurrent nub ci");
+    let second = second
+        .wait_with_output()
+        .expect("collect concurrent nub ci");
+    let first = first.wait_with_output().expect("collect first nub ci");
+    let first_stderr = String::from_utf8_lossy(&first.stderr);
+    let second_stderr = String::from_utf8_lossy(&second.stderr);
+
+    assert_eq!(first.status.code(), Some(0), "first stderr={first_stderr}");
+    assert_eq!(
+        second.status.code(),
+        Some(0),
+        "second stderr={second_stderr}"
+    );
+    assert!(
+        second_stderr.contains("Waiting for another nub process to finish in this project"),
+        "second CI must contend on the root lock before proceeding: {second_stderr}"
     );
 }
 
