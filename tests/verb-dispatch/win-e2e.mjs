@@ -178,10 +178,21 @@ if (!fs.existsSync(installedLaunch)) {
   // WRONG-ANSWER timing, not a comparable arm — nub is the honest comparison.
   const dNub = results["new/nub"].med - results["old/nub"].med;
   console.log(`  delta (nub, new - old): ${dNub >= 0 ? "+" : ""}${dNub.toFixed(1)} ms`);
-  const budget = Math.max(5, results["old/nub"].med * 0.10);
-  Math.abs(dNub) <= budget
-    ? ok(`launcher change costs nothing measurable on nub (|${dNub.toFixed(1)}| <= ${budget.toFixed(1)} ms)`)
-    : no(`launcher change moved nub by ${dNub.toFixed(1)} ms (budget ${budget.toFixed(1)})`);
+  // ONE-SIDED, and noise-aware. The property under test is "the change does not make nub
+  // SLOWER" — a large negative delta is not a failure. A two-sided budget failed a run where
+  // the new arm measured 19.3 ms FASTER, which is a bad test rather than a bad change: two
+  // earlier runs put this delta at +0.7 and +0.2 ms, and that run's `old` arm carried an IQR
+  // of 16.2. The budget also has to absorb the run's own spread, or a noisy runner produces a
+  // verdict about the launcher that is really a verdict about the runner.
+  const spread = results["old/nub"].iqr + results["new/nub"].iqr;
+  const budget = Math.max(5, results["old/nub"].med * 0.10, spread);
+  if (dNub <= budget) {
+    ok(`launcher change does not slow nub down (${dNub >= 0 ? "+" : ""}${dNub.toFixed(1)} ms <= ${budget.toFixed(1)} budget, spread ${spread.toFixed(1)})`);
+    // An unexplained speedup is almost always noise, so say so rather than bank it.
+    if (dNub < -budget) console.log(`     note: new measured ${Math.abs(dNub).toFixed(1)} ms FASTER than old — larger than the ${budget.toFixed(1)} ms budget, so treat as run noise, not a win`);
+  } else {
+    no(`launcher change made nub SLOWER by ${dNub.toFixed(1)} ms (budget ${budget.toFixed(1)}, spread ${spread.toFixed(1)})`);
+  }
 }
 
 try { fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch {}
