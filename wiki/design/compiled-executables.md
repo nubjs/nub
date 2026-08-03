@@ -137,6 +137,12 @@ Building for another platform is bounded by one fact: **an installed dependency 
 
 Both halves matter. Rejecting every foreign addon fails ordinary packages, since a package carrying a Windows prebuild beside a macOS one is perfectly healthy. Skipping every foreign addon ships a package with nothing loadable and defers the failure to the user's machine.
 
+The rule is about the whole dependency closure, not one package. Where `better-sqlite3` keeps every platform's prebuild in a single directory, a napi-rs package puts each platform in its own sidecar — so `@img/sharp-linux-arm64` contains only a Linux addon and is simply not the sidecar a macOS build uses. Judging each package alone made the failure exactly backwards: installing the target's sidecars, which is what a cross-build requires, then failed every build including one for the host.
+
+A sidecar that rules the target out is dropped whole rather than merely stripped of its addon, because most of one is the shared library beside the addon. `os`, `cpu` and `libc` are the same fields npm and pnpm read to decide whether to install an optional dependency, so the package states the answer itself: `@img/sharp-darwin-arm64` declares `os: ["darwin"]`, and the musl build adds `libc: ["musl"]`. Absent fields mean it runs anywhere. For sharp this is the difference between 52 MB and 38 MB.
+
+Getting the target's binaries installed in the first place is the package manager's job, and how depends on the project. Where pnpm or yarn is the incumbent, their `supportedArchitectures` setting installs them. A project using no other package manager has no equivalent yet.
+
 Verified by building on macOS and running the result on Linux and on Alpine. A package shipping prebuilts for eight platforms contributed only the ones matching each target, and the artifact ran there unmodified. The 122-package application above cross-compiles the same way and runs on a Debian image with no Node installed, and on Alpine.
 
 A glibc build and a musl build of the same addon are indistinguishable from the ELF header, which records machine and operating system but not which C library. Both therefore satisfy a platform check, both travel, and the loader picks whichever it finds first — on Alpine that was the glibc one, which cannot load. Nub tells them apart by the symbols they carry: a glibc build has versioned symbols such as `__cxa_finalize@GLIBC_2.17`, a musl build names `libc.musl-<arch>.so.1`. An addon carrying neither marker still travels, since refusing something merely unclassifiable would reject working packages.
@@ -162,7 +168,7 @@ $ cd /tmp && ./app
 ok
 ```
 
-`sharp` is the demanding case. Its addon lives in one package and the shared library it links against lives in another, so it only works if both are present at the paths they were installed to — which is what shipping packages in place provides.
+`sharp` is the demanding case. Its addon lives in one package and the shared library it links against lives in another, so it only works if both are present at the paths they were installed to — which is what shipping packages in place provides. Compiled on macOS for Linux, with the Linux sidecars installed, the artifact runs on a Debian image with no Node present.
 
 Two harnesses under `tests/compile-corpus/` do this continuously. One varies **which package** is compiled, across pure JavaScript, node-gyp, node-pre-gyp and napi-rs packages. The other varies **the shape of the tree** it sits in — a nested duplicate version, a scoped package, a symlinked workspace member, an isolated install, a peer dependency, and a package that reads a data file. The second axis is the one that finds path defects, because it inspects the payload rather than only running the artifact: a tree shape can produce a collision that no ordinary package would, and the binary still exits 0 printing the right answer.
 
