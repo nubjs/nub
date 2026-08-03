@@ -100,20 +100,20 @@ Building for another platform is bounded by one fact: **an installed dependency 
 
 Both halves matter. Rejecting every foreign addon fails ordinary packages, since a package carrying a Windows prebuild beside a macOS one is perfectly healthy. Skipping every foreign addon ships a package with nothing loadable and defers the failure to the user's machine.
 
-Verified by building on macOS and running the result on Linux. A package shipping prebuilts for
-eight platforms contributed the two matching an arm64 Linux target, and the artifact ran there
-unmodified.
+Verified by building on macOS and running the result on Linux and on Alpine. A package shipping prebuilts for eight platforms contributed only the ones matching each target, and the artifact ran there unmodified.
 
 A glibc build and a musl build of the same addon are indistinguishable from the ELF header, which records machine and operating system but not which C library. Both therefore satisfy a platform check, both travel, and the loader picks whichever it finds first — on Alpine that was the glibc one, which cannot load. Nub tells them apart by the symbols they carry: a glibc build has versioned symbols such as `__cxa_finalize@GLIBC_2.17`, a musl build names `libc.musl-<arch>.so.1`. An addon carrying neither marker still travels, since refusing something merely unclassifiable would reject working packages.
 
 ### System libraries on the target
 
-The binary carries its own Node, but Node and native addons link a few system libraries, and a minimal container image can lack them. When that happens Nub names the library and the package that provides it rather than passing through the loader's own message:
+The binary carries its own Node, but Node and native addons link a few system libraries, and a minimal container image can lack them:
 
 | target | typically needed |
 | --- | --- |
 | Debian, Ubuntu | `libatomic1` |
 | Alpine | `libgcc`, `libstdc++` |
+
+When Node itself cannot start for this reason, Nub names the missing library and the package that provides it rather than passing the loader's message through. An addon that fails the same way is reported by Node, which names the library but not the package to install — the failure happens inside a process Nub has already handed control to.
 
 ## Verification
 
