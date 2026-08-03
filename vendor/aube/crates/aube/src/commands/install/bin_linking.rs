@@ -694,6 +694,25 @@ fn link_bundled_bins(
     let Some(locked) = graph.get_package(dep_path) else {
         return Ok(());
     };
+    // ⛔ A BUNDLED DEP'S BIN IS NEEDED INSIDE THE BUNDLING PACKAGE, NOT ONLY IN THE CONSUMER'S.
+    //
+    // This linked into `bin_dir` alone — the `.bin` of whoever depends on this package. That is the
+    // wrong scope for the commonest use of a bundled dep: the bundling package's OWN lifecycle
+    // script invoking it. Such a script runs with cwd = the bundling package's directory, so PATH
+    // resolution walks up from there and never reaches the consumer's `.bin`.
+    //
+    // MEASURED on `@pulumi/kubernetes@0.21.1`, and it is why the install fails outright:
+    //   grpc@1.21.1 bundles node-pre-gyp and its install script is
+    //   `node-pre-gyp install --fallback-to-build`.
+    //   nub wrote  .store/@pulumi+pulumi@0.17.28/node_modules/.bin/node-pre-gyp   (the CONSUMER)
+    //   npm writes node_modules/grpc/node_modules/.bin/node-pre-gyp               (the BUNDLER)
+    //   -> `node-pre-gyp: not found`, rc=1. Reproduces with install.buildJail=false, so it is a
+    //   linker defect and not confinement — it was surfacing in the corpus as a jail failure.
+    //
+    // Additive on purpose. The consumer-scoped write stays: it is what the root-importer and
+    // workspace callers documented above rely on, and removing it would be a separate behavioural
+    // change with its own blast radius. A bundled dep is private to its bundler, so the new write
+    // can only ever ADD a name inside that package's own tree.
     for bundled in &locked.bundled_dependencies {
         let bundled_dir = pkg_dir.join("node_modules").join(bundled);
         let bundled_pkg_json_path = bundled_dir.join("package.json");
@@ -703,13 +722,16 @@ fn link_bundled_bins(
         let Ok(bundled_pkg_json) = serde_json::from_str::<serde_json::Value>(&content) else {
             continue;
         };
-        if let Some(bin) = bundled_pkg_json.get("bin") {
-            link_bin_entries(bin_dir, &bundled_dir, Some(bundled), bin, shim_opts)?;
-        } else if let Some(dir_bin) = bundled_pkg_json
-            .get("directories")
-            .and_then(|d| d.get("bin"))
-        {
-            link_dir_bins(bin_dir, &bundled_dir, dir_bin, shim_opts)?;
+        let own_bin_dir = pkg_dir.join("node_modules").join(".bin");
+        for target_bin_dir in [bin_dir, own_bin_dir.as_path()] {
+            if let Some(bin) = bundled_pkg_json.get("bin") {
+                link_bin_entries(target_bin_dir, &bundled_dir, Some(bundled), bin, shim_opts)?;
+            } else if let Some(dir_bin) = bundled_pkg_json
+                .get("directories")
+                .and_then(|d| d.get("bin"))
+            {
+                link_dir_bins(target_bin_dir, &bundled_dir, dir_bin, shim_opts)?;
+            }
         }
     }
     Ok(())
