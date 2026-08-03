@@ -193,10 +193,10 @@ That overhead is close to fixed, so hello-world is the worst case for it. The 12
 
 ### The first run is the expensive one
 
-Those figures are warm — the cache is already populated. The first run of an **embed** artifact also decompresses its Node and writes it to disk, which costs on the order of a second and dominates everything else about that run. `--smol` carries no Node, so its first run is close to its warm one.
+Those figures are warm — the cache is already populated. The first run of an **embed** artifact also decompresses its Node and writes it to disk, and then executes that freshly written file for the first time. On Linux the whole first run costs a few hundred milliseconds; on macOS it is closer to a second, because the system validates a newly written executable before running it. `--smol` carries no Node, so its first run is close to its warm one.
 
 That matters wherever the cache is not reused. A developer pays it once; continuous integration, containers and short-lived serverless instances start from an empty cache every time and pay it on every run. `--smol` is the shape for those, provided a compatible Node is present or can be provisioned.
 
-Roughly 90% of the cost is acquiring the Node, and it is several times what decompressing the same blob costs on its own — so most of it is not the decompression. It has not been attributed further: the measurement needs a quiet machine, and the phase has no finer breakdown yet.
+Decompressing and writing the Node accounts for about 150 ms of it. The rest is the first execution of that file, which is paid by whichever code runs it first — so moving work around inside the launcher does not reduce it.
 
 V8 startup snapshots do not help. An empty snapshot measured slower than no snapshot, because Node already applies its own built-in snapshot and the extra blob is another large file to read.
